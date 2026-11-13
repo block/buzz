@@ -4,6 +4,7 @@ import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 const _channel = 'channel-1';
 const _self = 'self';
@@ -209,6 +210,108 @@ void main() {
       });
     });
 
+    test('the bottom does not read mentions above it', () {
+      // Only a mention that showed is read. Reaching the bottom past one that
+      // never filled the screen leaves it unread.
+      final mention = _msg(
+        'm',
+        100,
+        tags: const [
+          ['p', _self],
+        ],
+      );
+      final broadcast = _msg(
+        'bc',
+        110,
+        parentId: 'root',
+        rootId: 'root',
+        tags: const [
+          ['broadcast', '1'],
+          ['p', _self],
+        ],
+      );
+      final b = _msg('b', 200);
+      expect(_marks(loaded: [mention, broadcast, b], visible: [b], bottom: b), {
+        'activity:$_channel': 200,
+      });
+    });
+
+    test('the newest message is read at the bottom even when not visible', () {
+      // A mention taller than the screen shows only its end at the bottom.
+      final mention = _msg(
+        'm',
+        200,
+        tags: const [
+          ['p', _self],
+        ],
+      );
+      expect(
+        _marks(
+          readState: _state(const {}, {'msg:forced': _channel}),
+          loaded: [_msg('a', 100), mention],
+          bottom: mention,
+        ),
+        {'activity:$_channel': 200, 'msg:m': 200},
+      );
+      final forced = _msg(
+        'forced',
+        200,
+        tags: const [
+          ['p', _self],
+        ],
+      );
+      expect(
+        _marks(
+          readState: _state(const {}, {'msg:forced': _channel}),
+          loaded: [forced],
+          bottom: forced,
+        ),
+        {'activity:$_channel': 200},
+      );
+    });
+
+    test('catch-up does not mark a mention away from the live bottom', () {
+      final mention = _msg(
+        'm',
+        100,
+        tags: const [
+          ['p', _self],
+        ],
+      );
+      final a = _msg('a', 150);
+      final b = _msg('b', 200);
+      expect(_marks(loaded: [mention, a, b], visible: [a], bottom: a), {
+        'msg:a': 150,
+      });
+    });
+
+    test('a flat timeline reads only its newest inline reply', () {
+      final reply = _msg(
+        'r',
+        120,
+        parentId: 'root',
+        rootId: 'root',
+        tags: const [
+          ['p', _self],
+        ],
+      );
+      final b = _msg('b', 200, parentId: 'root', rootId: 'root');
+      Map<String, int> marks(TimelineMessage bottom) => readingMarks(
+        readState: _state(),
+        channelId: _channel,
+        isDm: false,
+        currentPubkey: _self,
+        loaded: [reply, b],
+        visible: const [],
+        bottom: bottom,
+        flat: true,
+        now: 10000,
+      );
+      expect(marks(b), {'activity:$_channel': 200, 'msg:b': 200});
+      // A newer inline reply means the bottom is not live.
+      expect(marks(reply), isEmpty);
+    });
+
     test('away from the bottom, visible unread rows get message marks', () {
       final a = _msg('a', 100);
       final b = _msg('b', 200);
@@ -271,6 +374,21 @@ void main() {
       );
     });
 
+    test('in a DM, catch-up does not mark mentions above the bottom', () {
+      final mention = _msg(
+        'mention',
+        100,
+        tags: const [
+          ['p', _self],
+        ],
+      );
+      final b = _msg('b', 200);
+      expect(_marks(isDm: true, loaded: [mention, b], bottom: b), {
+        'activity:$_channel': 200,
+        'msg:b': 200,
+      });
+    });
+
     test('in a DM, catch-up does not read messages', () {
       final a = _msg('a', 100);
       final b = _msg('b', 200);
@@ -279,6 +397,53 @@ void main() {
         'msg:a': 100,
         'msg:b': 200,
       });
+    });
+  });
+
+  group('isReadableRow', () {
+    bool readable(double leading, double trailing) => isReadableRow(
+      ItemPosition(
+        index: 0,
+        itemLeadingEdge: leading,
+        itemTrailingEdge: trailing,
+      ),
+      start: 0.1,
+      end: 0.9,
+    );
+
+    test('reads a row inside the reading area', () {
+      expect(readable(0.2, 0.8), isTrue);
+      expect(readable(0.1, 0.9), isTrue);
+    });
+
+    test('reads a row that covers the whole reading area', () {
+      expect(readable(-0.5, 1.4), isTrue);
+      expect(readable(0.1, 1.4), isTrue);
+    });
+
+    test('does not read a row cut off at one edge', () {
+      expect(readable(0.05, 0.5), isFalse);
+      expect(readable(0.5, 0.95), isFalse);
+      expect(readable(0.5, 2), isFalse);
+      expect(readable(-1, 0.5), isFalse);
+    });
+
+    test('reads a linked row once any part is inside the reading area', () {
+      bool linked(double leading, double trailing) => isReadableRow(
+        ItemPosition(
+          index: 0,
+          itemLeadingEdge: leading,
+          itemTrailingEdge: trailing,
+        ),
+        start: 0.1,
+        end: 0.9,
+        linked: true,
+      );
+      expect(linked(0.35, 2), isTrue);
+      expect(linked(-1, 0.5), isTrue);
+      expect(linked(0.2, 0.8), isTrue);
+      expect(linked(-1, 0.1), isFalse);
+      expect(linked(0.9, 2), isFalse);
     });
   });
 
@@ -343,6 +508,31 @@ void main() {
       expect(
         _marks(loaded: [root, r1, r2], visible: [r1], threadRootId: 'root'),
         {'msg:r1': 100},
+      );
+    });
+
+    test('the tail reply is read at its end even when it never fits', () {
+      // A reply taller than the screen shows only its end at the tail, so it
+      // is never in [visible].
+      final mention = reply(
+        'r1',
+        100,
+        tags: const [
+          ['p', _self],
+        ],
+      );
+      expect(
+        _marks(loaded: [root, mention], bottom: mention, threadRootId: 'root'),
+        {'thread-activity:root': 100, 'msg:r1': 100},
+      );
+      // Away from the live tail it waits until it fills the screen.
+      expect(
+        _marks(
+          loaded: [root, mention, reply('r2', 200)],
+          bottom: mention,
+          threadRootId: 'root',
+        ),
+        isEmpty,
       );
     });
 

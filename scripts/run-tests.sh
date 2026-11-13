@@ -103,6 +103,12 @@ run_unit_tests() {
   run_test_step "buzz-pubsub connection tests" \
     cargo test -p buzz-pubsub --lib connection::tests:: -- --nocapture
 
+  # A retain past a full subscriber command queue (no Redis dialed;
+  # infra-free). Mirrors `just test-unit`.
+  run_test_step "buzz-pubsub full-queue retain test" \
+    cargo test -p buzz-pubsub --lib -- --exact --nocapture \
+      tests::queue_full_retain_does_not_wait_and_schedules_reconciliation
+
   run_test_step "buzz-voice tests" \
     cargo test -p buzz-voice --lib -- --nocapture
 
@@ -112,6 +118,12 @@ run_unit_tests() {
 
   run_test_step "buzz-cli tests" \
     cargo test -p buzz-cli -- --nocapture
+
+  run_test_step "buzz-ws-client tests" \
+    cargo test -p buzz-ws-client -- --nocapture
+
+  run_test_step "buzz-pairing-cli tests" \
+    cargo test -p buzz-pairing-cli -- --nocapture
 
   # buzz-sdk builder/validation unit tests: pure event-builder and input
   # validation, no infra. Mirrors the nextest path in `just test-unit` — the
@@ -298,6 +310,10 @@ run_unit_tests() {
       handlers::req::tests::concurrent_claims_and_stale_teardowns_keep_the_last_owner \
       handlers::req::tests::timeout_closed_is_emitted_before_a_replacement_can_claim \
       handlers::req::tests::revoke_then_replacement_keeps_replacement_whole \
+      handlers::req::tests::revoke_of_a_replaced_holder_spares_the_pending_replacement \
+      handlers::req::tests::superseded_or_closed_requests_cannot_claim \
+      connection::tests::close_fences_a_req_whose_handler_has_not_run \
+      connection::tests::only_the_newest_same_id_req_answers \
       handlers::req::tests::claims_after_connection_cleanup_are_refused \
       handlers::req::tests::dropped_terminal_frame_cancels_connection \
       handlers::req::tests::revoke_dropped_terminal_frame_cancels_connection \
@@ -326,6 +342,11 @@ run_unit_tests() {
       api::bridge::postgres_tests::moderation_read_audit_query_bearing_nip98_event_verifies \
       api::bridge::postgres_tests::moderation_read_restricted_no_query_still_verifies \
       connection::tests::aborting_lifecycle_owner_is_drop_safe \
+      connection::tests::missed_pongs_close_with_their_reason_and_count \
+      connection::tests::client_reply_to_a_jittered_restart_closes_as_shutdown \
+      connection::tests::client_close_racing_a_policy_disconnect_keeps_the_policy_reason \
+      connection::tests::server_close_reason_ranks_shutdown_policy_then_cancellation \
+      connection::tests::auth_timeout_after_a_rejected_auth_closes_as_auth_failed \
       connection::tests::shutdown_terminalizes_auth_stalled_on_database_before_late_success \
       connection::terminal_close_delivery_tests::upgrade_would_deny_line_without_auth_logs_absent_at_close \
       handlers::event::tests::observer_owner_cache_is_scoped_to_community \
@@ -520,6 +541,9 @@ run_unit_tests() {
 
   run_test_step "buzz-relay binary tests" \
     cargo test -p buzz-relay --bin buzz-relay -- --nocapture
+
+  run_test_step "buzz-relay public invite previews" \
+    cargo test -p buzz-relay --lib invite_preview -- --nocapture
 
   run_test_step "buzz-relay invitation token and cutoff contracts" \
     cargo test -p buzz-relay --lib invite_token:: -- --nocapture

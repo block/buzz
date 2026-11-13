@@ -299,6 +299,9 @@ pub struct Db {
     /// bounded-stale read semantics are a product decision, not an
     /// invariant, so the gate ships off.
     pub(crate) replica_read_max_age: Option<Duration>,
+    /// Interval at which [`Db::spawn_fence_probe`]'s probe commits
+    /// heartbeat tokens ([`DbConfig::replica_fence_probe_interval_ms`]).
+    pub(crate) fence_probe_interval: Duration,
     /// Whether the reader endpoint supports the Aurora PostgreSQL identity
     /// function ([`replica_fence::AURORA_IDENTITY_FN`]) — probed
     /// once per process on the first routed read (on a plain autocommit
@@ -700,6 +703,14 @@ pub struct DbConfig {
     /// than the staleness gate never routes anyway, so a larger budget
     /// would only misrepresent the config.
     pub replica_read_max_age_ms: u64,
+    /// Replica fence heartbeat interval in milliseconds (env
+    /// `BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS`). `0` selects
+    /// [`replica_fence::DEFAULT_PROBE_INTERVAL`]; other values are clamped
+    /// to [`replica_fence::MIN_PROBE_INTERVAL`]..=
+    /// [`replica_fence::MAX_PROBE_INTERVAL`]. Only used when a read pool is
+    /// configured. The bounded-read budget should be at least
+    /// [`replica_fence::min_read_budget`] of this interval.
+    pub replica_fence_probe_interval_ms: u64,
     /// Session `lock_timeout` in milliseconds for writer connections (env
     /// `BUZZ_DB_LOCK_TIMEOUT_MS`). `0` disables the timeout.
     pub lock_timeout_ms: u64,
@@ -735,6 +746,7 @@ impl Default for DbConfig {
             max_lifetime_secs: 300,
             idle_timeout_secs: 600,
             replica_read_max_age_ms: 0,
+            replica_fence_probe_interval_ms: 0,
             lock_timeout_ms: DEFAULT_LOCK_TIMEOUT_MS,
             idle_txn_timeout_ms: DEFAULT_IDLE_TXN_TIMEOUT_MS,
             statement_timeout_ms: DEFAULT_STATEMENT_TIMEOUT_MS,
@@ -818,6 +830,19 @@ impl Db {
             None => None,
         };
         let replica_read_max_age = read_budget_from_ms(config.replica_read_max_age_ms);
+        let fence_probe_interval =
+            replica_fence::probe_interval_from_ms(config.replica_fence_probe_interval_ms);
+        let min_read_budget = replica_fence::min_read_budget(fence_probe_interval);
+        if let Some(budget) = replica_read_max_age.filter(|b| *b < min_read_budget) {
+            tracing::warn!(
+                budget_ms = budget.as_millis() as u64,
+                probe_interval_ms = fence_probe_interval.as_millis() as u64,
+                recommended_min_ms = min_read_budget.as_millis() as u64,
+                "BUZZ_REPLICA_READ_MAX_AGE_MS cannot absorb one fence heartbeat that waits out \
+                 its lock timeout; bounded replica reads will spill to the writer whenever \
+                 a beat is late"
+            );
+        }
         let push_enqueue = config
             .push_enabled
             .then(|| push_enqueue::PushEnqueue::new(&pool));
@@ -830,6 +855,7 @@ impl Db {
             read_max_connections,
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age,
+            fence_probe_interval,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
             history_reads: history_reads::gate_for_read_pool(read_max_connections),
         })
@@ -843,6 +869,19 @@ impl Db {
     /// Additional writer pools, including the relay audit pool, must use this
     /// constructor so they inherit the timeout, floor-guard, and isolation
     /// policy installed by [`Db::new`].
+    ///
+    /// Two single-connection side pools deliberately do not, so serving-pool
+    /// saturation cannot delay their work. Neither inserts into `events`, so
+    /// neither needs the `buzz.created_at_floor` guard, and each installs
+    /// its own shorter timeouts so it fails fast instead of queueing:
+    /// - [`replica_fence::connect_probe_pool`]: the fence probe takes the
+    ///   floor lock itself (exclusive) and writes only `replica_heartbeat`.
+    /// - the push-enqueue pool (`push_enqueue::PushEnqueue::new`): it writes
+    ///   only `push_match_queue`, and is lazy so relay startup never depends
+    ///   on push.
+    ///
+    /// New pools follow the rule above unless they have a reason as specific
+    /// as these.
     pub async fn connect_writer_pool(config: &DbConfig) -> Result<PgPool> {
         use connection_observability::{
             classify_pool_outcome, record_milestone, DbConnectionStep, DbConnectionStepAttempt,
@@ -1061,21 +1100,19 @@ impl Db {
         options.options([("default_transaction_isolation", "read committed")])
     }
 
-    /// Upper bound on a reader connection's release check (see
-    /// [`Db::read_pool_options`]); matches sqlx's own close-on-drop bound.
-    const READER_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
+    /// Leave headroom inside SQLx's five-second whole-return deadline so this
+    /// check records the reason before SQLx cancels the release future.
+    const READER_RELEASE_TIMEOUT: Duration = Duration::from_secs(4);
 
     /// Reader pool options apart from connection lifetimes (see
     /// [`Db::connect_read_pool`]).
     ///
     /// Every checkout that goes back to the pool first passes a release
-    /// check bounded by [`Db::READER_RELEASE_TIMEOUT`]. sqlx's own release
-    /// ping has no timeout, so a socket whose reader stopped answering
-    /// without closing it (a failover, a partition) would otherwise hold its
-    /// slot until the kernel gives up on it; with every slot held that way,
-    /// the pool cannot dial the reader that replaced it. A check that times
-    /// out or errors closes the socket and frees the slot, and sqlx's floor
-    /// maintenance dials a replacement.
+    /// check bounded by [`Db::READER_RELEASE_TIMEOUT`]. A check that times
+    /// out or errors records the reason, closes the socket, and frees the
+    /// slot. SQLx bounds the whole return, including its subsequent ping,
+    /// so a reader that stops answering without closing cannot strand pool
+    /// capacity. Its floor maintenance dials a replacement.
     ///
     /// The check also closes, rather than returns, a connection still inside
     /// a transaction. sqlx rolls back a checkout dropped while its `BEGIN`
@@ -1087,12 +1124,6 @@ impl Db {
     /// (see [`Db::proved_reader`]) and reader sessions default to `READ
     /// COMMITTED` (see [`Db::reader_connect_options`]), so an isolation level
     /// other than the session default means a transaction is still open.
-    ///
-    /// Residual window: after the check passes, sqlx sends its own release
-    /// ping, which has no timeout. A reader that goes silent in that one
-    /// round trip strands that one slot until the socket fails. That is
-    /// bounded by the releases in flight at that instant, and later checkouts
-    /// of silent connections go through the proof timeout and this check.
     pub(crate) fn read_pool_options(max_connections: u32) -> PgPoolOptions {
         PgPoolOptions::new()
             .max_connections(max_connections)
@@ -1390,6 +1421,7 @@ impl Db {
             read_pool: None,
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age: None,
+            fence_probe_interval: replica_fence::DEFAULT_PROBE_INTERVAL,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
@@ -1414,6 +1446,7 @@ impl Db {
             read_pool: Some(read_pool),
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age: None,
+            fence_probe_interval: replica_fence::DEFAULT_PROBE_INTERVAL,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
@@ -1450,9 +1483,12 @@ impl Db {
             return Ok(false);
         }
         self.verify_replica_fence_at_boot().await?;
+        // The probe gets its own connection so serving-pool saturation
+        // cannot delay the beat (see `replica_fence::connect_probe_pool`).
         tokio::spawn(replica_fence::run_probe(
-            self.pool.clone(),
+            replica_fence::connect_probe_pool(&self.pool),
             std::sync::Arc::clone(&self.fence),
+            self.fence_probe_interval,
         ));
         Ok(true)
     }
@@ -1643,6 +1679,32 @@ impl Db {
                 false
             }
         }
+    }
+
+    /// Count one routed read the replica could have served that the writer
+    /// served instead (`buzz_db_reader_spill_total{path, reason}`).
+    ///
+    /// A subset of `buzz_db_route_decision{decision="writer"}` that leaves
+    /// out configuration (`disabled`) and splits its ambiguous `stale`
+    /// reason by cause. Reasons:
+    /// - `heartbeat_stale`: the newest heartbeat is older than the
+    ///   bounded-read budget (`BUZZ_REPLICA_READ_MAX_AGE_MS`) — the probe
+    ///   is late, not the replica;
+    /// - `heartbeat_missing`: no live heartbeat proof at all (the probe has
+    ///   not committed one, or none in [`replica_fence::FENCE_STALENESS`]);
+    /// - `fence_wall_behind`: the read's upper bound is newer than the
+    ///   newest fence wall;
+    /// - `replica_lag`: the serving session proved only an older entry than
+    ///   the read needs;
+    /// - `reader_acquire_timeout`, `reader_proof_timeout`,
+    ///   `reader_token_behind`, `reader_validation_error`: the reader
+    ///   session could not be checked out or could not prove the fence.
+    ///
+    /// History reads rejected on a saturated reader are not spills; they
+    /// stay `buzz_db_route_decision{decision="rejected"}`.
+    fn record_spill(path: &'static str, reason: &'static str) {
+        metrics::counter!("buzz_db_reader_spill_total", "path" => path, "reason" => reason)
+            .increment(1);
     }
 
     /// Record one route decision (Rev 2 observability): which path, where it
@@ -1898,23 +1960,27 @@ impl Db {
         // checkout; the connection-local observation still has to prove it.
         let Some(newest) = self.fence.newest() else {
             Self::record_route(path, "writer", "uninitialized");
+            Self::record_spill(path, "heartbeat_missing");
             return Ok(RouteDecision::Writer);
         };
         // Precheck helpers against the newest shared entry: if the newest
-        // cannot satisfy an arm, no proved (older-or-equal) entry can.
-        let bounded_precheck =
-            |budget: &Option<Duration>| -> std::result::Result<(), &'static str> {
-                match budget {
-                    Some(budget) if newest.committed_at.elapsed() <= *budget => Ok(()),
-                    Some(_) => Err("stale"),
-                    None => Err("disabled"),
-                }
-            };
-        let covered_precheck = |upper: &DateTime<Utc>| -> std::result::Result<(), &'static str> {
+        // cannot satisfy an arm, no proved (older-or-equal) entry can. Each
+        // failure carries its `buzz_db_route_decision` reason and, when the
+        // read is a spill rather than a configuration choice, its
+        // `buzz_db_reader_spill_total` reason.
+        type Precheck = std::result::Result<(), (&'static str, Option<&'static str>)>;
+        let bounded_precheck = |budget: &Option<Duration>| -> Precheck {
+            match budget {
+                Some(budget) if newest.committed_at.elapsed() <= *budget => Ok(()),
+                Some(_) => Err(("stale", Some("heartbeat_stale"))),
+                None => Err(("disabled", None)),
+            }
+        };
+        let covered_precheck = |upper: &DateTime<Utc>| -> Precheck {
             if *upper <= newest.fence_wall {
                 Ok(())
             } else {
-                Err("stale")
+                Err(("stale", Some("fence_wall_behind")))
             }
         };
         let precheck = match &predicate {
@@ -1922,13 +1988,20 @@ impl Db {
             RoutePredicate::Covered { upper, .. } => covered_precheck(upper),
             // No upper bound: the caller post-verifies served rows.
             RoutePredicate::CoveredPostVerified { .. } => Ok(()),
-            // Covered first (no budget dependence), else bounded.
+            // Covered first (no budget dependence), else bounded. With the
+            // bounded arm disabled the read still spilled for its wall.
             RoutePredicate::BoundedOrCovered { upper, .. } => {
-                covered_precheck(upper).or_else(|_| bounded_precheck(&self.replica_read_max_age))
+                covered_precheck(upper).or_else(|(_, covered_spill)| {
+                    bounded_precheck(&self.replica_read_max_age)
+                        .map_err(|(reason, spill)| (reason, spill.or(covered_spill)))
+                })
             }
         };
-        if let Err(reason) = precheck {
+        if let Err((reason, spill)) = precheck {
             Self::record_route(path, "writer", reason);
+            if let Some(spill) = spill {
+                Self::record_spill(path, spill);
+            }
             return Ok(RouteDecision::Writer);
         }
         let history = operation == observability::ReaderOperation::SubscriptionHistory;
@@ -1974,6 +2047,7 @@ impl Db {
                         // The session proves an older entry than the
                         // predicate needs (replication lag) — fail closed.
                         Self::record_route(path, "writer", "stale");
+                        Self::record_spill(path, "replica_lag");
                         Ok(RouteDecision::Writer)
                     }
                 }
@@ -1985,6 +2059,7 @@ impl Db {
             }
             Err(reason) => {
                 Self::record_route(path, "writer", reason);
+                Self::record_spill(path, reason);
                 Ok(RouteDecision::Writer)
             }
         }

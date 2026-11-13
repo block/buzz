@@ -279,8 +279,8 @@ where
         .await
         .expect("connect deletion executor pool");
     let mut tx = pool.begin().await.expect("begin deletion executor");
-    sqlx::query("SELECT pg_advisory_xact_lock(community_deletion_lock_key($1))")
-        .bind(community.as_uuid())
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(crate::deletion::community_deletion_lock_key(community))
         .execute(&mut *tx)
         .await
         .expect("hold exclusive deletion lock");
@@ -316,6 +316,87 @@ where
     }
     pool.close().await;
     result.unwrap().expect("sweep task")
+}
+
+/// Seed historical read fixtures through raw SQL on an unarmed test pool.
+/// Supported serving APIs reject these old timestamps; this represents data
+/// already in storage, while retaining admission, mentions and event follow-ups.
+#[cfg(test)] // Keep raw fixture SQL visibly test-only to the source-policy scan.
+pub(crate) async fn insert_historical_event(
+    pool: &sqlx::PgPool,
+    community: buzz_core::CommunityId,
+    event: &nostr::Event,
+    channel: uuid::Uuid,
+) {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await
+    .expect("admit historical fixture");
+    sqlx::query(
+        "INSERT INTO events (community_id,id,pubkey,created_at,kind,tags,content,sig,channel_id,d_tag) \
+         VALUES ($1,$2,$3,to_timestamp($4),$5,$6,$7,$8,$9,$10)",
+    )
+    .bind(community.as_uuid())
+    .bind(event.id.as_bytes().as_slice())
+    .bind(event.pubkey.to_bytes().as_slice())
+    .bind(event.created_at.as_secs() as f64)
+    .bind(i32::from(event.kind.as_u16()))
+    .bind(serde_json::to_value(&event.tags).expect("fixture tags"))
+    .bind(&event.content)
+    .bind(event.sig.serialize().as_slice())
+    .bind(channel)
+    .bind(crate::event::extract_d_tag(event))
+    .execute(tx.conn())
+    .await
+    .expect("insert historical fixture");
+    let created_at = chrono::DateTime::from_timestamp(event.created_at.as_secs() as i64, 0)
+        .expect("fixture created_at");
+    crate::store::event_follow_up::after_admitted_insert(
+        &mut tx,
+        event.id.as_bytes(),
+        created_at,
+        i32::from(event.kind.as_u16()),
+        Some(channel),
+    )
+    .await
+    .expect("fixture follow-ups");
+    crate::insert_mentions_in_transaction(&mut tx, event, Some(channel))
+        .await
+        .expect("fixture mentions");
+    tx.commit().await.expect("commit historical fixture");
+}
+
+/// [`insert_historical_event`] plus the thread metadata the serving writer
+/// records for it, through the same `insert_thread_metadata` store function
+/// (parent and root stubs, reply and descendant counters). For aged rows whose
+/// thread state a test reads or deletes through the production paths.
+#[cfg(test)]
+pub(crate) async fn insert_historical_event_with_thread_metadata(
+    pool: &sqlx::PgPool,
+    community: buzz_core::CommunityId,
+    event: &nostr::Event,
+    channel: uuid::Uuid,
+    meta: crate::event::ThreadMetadataParams<'_>,
+) {
+    insert_historical_event(pool, community, event, channel).await;
+    crate::thread::insert_thread_metadata(
+        pool,
+        community,
+        meta.event_id,
+        meta.event_created_at,
+        meta.channel_id,
+        meta.parent_event_id,
+        meta.parent_event_created_at,
+        meta.root_event_id,
+        meta.root_event_created_at,
+        meta.depth,
+        meta.broadcast,
+    )
+    .await
+    .expect("fixture thread metadata");
 }
 
 /// Move a community fixture into a deletion lifecycle state the way the
@@ -521,6 +602,7 @@ pub(crate) struct PausingProxy {
     pub(crate) port: u16,
     hold: tokio::sync::watch::Sender<ProxyHold>,
     next_session: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    held_sessions: tokio::sync::watch::Sender<std::collections::BTreeSet<u64>>,
 }
 
 /// Which proxy sessions hold their bytes.
@@ -549,6 +631,7 @@ impl PausingProxy {
             mut to: tokio::net::tcp::OwnedWriteHalf,
             mut hold: tokio::sync::watch::Receiver<ProxyHold>,
             session: u64,
+            held_sessions: tokio::sync::watch::Sender<std::collections::BTreeSet<u64>>,
         ) {
             let mut buf = [0u8; 8192];
             loop {
@@ -557,6 +640,9 @@ impl PausingProxy {
                 };
                 if n == 0 {
                     return;
+                }
+                if hold.borrow().holds(session) {
+                    held_sessions.send_if_modified(|sessions| sessions.insert(session));
                 }
                 if hold.wait_for(|hold| !hold.holds(session)).await.is_err() {
                     return;
@@ -575,6 +661,8 @@ impl PausingProxy {
         let accept_hold = hold.subscribe();
         let next_session = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let accept_next = next_session.clone();
+        let (held_sessions, _) = tokio::sync::watch::channel(Default::default());
+        let accept_held_sessions = held_sessions.clone();
         tokio::spawn(async move {
             while let Ok((client, _)) = listener.accept().await {
                 let session = accept_next.fetch_add(1, Ordering::SeqCst);
@@ -590,12 +678,14 @@ impl PausingProxy {
                     server_write,
                     accept_hold.clone(),
                     session,
+                    accept_held_sessions.clone(),
                 ));
                 tokio::spawn(pump(
                     server_read,
                     client_write,
                     accept_hold.clone(),
                     session,
+                    accept_held_sessions.clone(),
                 ));
             }
         });
@@ -603,7 +693,26 @@ impl PausingProxy {
             port,
             hold,
             next_session,
+            held_sessions,
         }
+    }
+
+    /// Resume all previously stalled test-proxy sessions.
+    pub(crate) fn resume_all(&self) {
+        self.hold.send_replace(ProxyHold::default());
+    }
+
+    /// Wait until traffic from at least `count` distinct sessions has hit a hold.
+    pub(crate) async fn wait_for_held_sessions(&self, count: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            self.held_sessions
+                .subscribe()
+                .wait_for(|sessions| sessions.len() >= count)
+                .await
+                .expect("proxy observations remain open");
+        })
+        .await
+        .expect("database traffic reached the proxy hold");
     }
 
     pub(crate) fn set_paused(&self, paused: bool) {

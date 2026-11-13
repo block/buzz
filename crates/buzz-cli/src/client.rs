@@ -12,6 +12,8 @@ use crate::error::CliError;
 
 /// NIP-FI assertion header (`docs/nips/NIP-FI.md` §Client-attached transport).
 const FEDERATED_IDENTITY_HEADER: &str = "Nostr-Federated-Identity";
+/// `User-Agent` sent on every WebSocket upgrade.
+const USER_AGENT: &str = concat!("buzz-cli/", env!("CARGO_PKG_VERSION"));
 
 /// Descriptor returned by the relay after a successful upload.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -704,10 +706,14 @@ impl BuzzClient {
         })
     }
 
-    /// The NIP-FI assertion as WebSocket upgrade headers (empty without an
-    /// evidence source).
+    /// The WebSocket upgrade headers: the CLI's `User-Agent`, and the NIP-FI
+    /// assertion when there is an evidence source.
     async fn upgrade_headers(&self) -> Result<buzz_ws_client::HeaderMap, CliError> {
         let mut headers = buzz_ws_client::HeaderMap::new();
+        headers.insert(
+            "user-agent",
+            buzz_ws_client::HeaderValue::from_static(USER_AGENT),
+        );
         if let Some(assertion) = self.evidence().await? {
             let mut value =
                 buzz_ws_client::HeaderValue::from_str(&format!("Bearer {assertion}"))
@@ -3620,26 +3626,28 @@ mod desktop_throttle_tests {
         (BuzzClient::new(relay.into(), credentials).unwrap(), signed)
     }
 
-    /// A desktop allowing one sign-in signature per 300 ms against a relay
-    /// that drops unsigned sockets after 200 ms: the throttle is waited out
-    /// between connections, so only the live challenge is signed, with a
-    /// fresh assertion on the reconnect after the old one expired.
+    /// A desktop that throttles the first sign-in signature: the throttle is
+    /// waited out between connections, so only the live challenge is signed,
+    /// with a fresh assertion on the reconnect after the old one expired.
+    ///
+    /// The throttle is decided by call count, not by time since the test
+    /// started: on a loaded runner the desktop setup alone could outlast a
+    /// wall-clock throttle window, leaving nothing to wait out. The relay's
+    /// sign-in deadline is long for the same reason; the client drops the
+    /// throttled socket itself.
     #[tokio::test]
     async fn a_throttled_sign_in_reconnects_with_fresh_evidence() {
         use super::ws_deadline_tests::deadline_relay;
         let keys = nostr::Keys::generate();
-        let (relay, conns, _, bearers) =
-            deadline_relay(std::time::Duration::from_millis(200)).await;
-        let last = std::sync::Mutex::new(std::time::Instant::now());
+        let (relay, conns, _, bearers) = deadline_relay(std::time::Duration::from_secs(5)).await;
+        let signs = AtomicUsize::new(0);
         let (c, signed) = desktop(&relay, &keys, || dp::assertion(40), move |_| {
-            let mut last = last.lock().unwrap();
-            if last.elapsed() < std::time::Duration::from_millis(300) {
+            if signs.fetch_add(1, Ordering::SeqCst) == 0 {
                 crate::cached_assertion::test_clock::advance(60);
                 return Some(
                     serde_json::json!({"result": "", "error": "rate_limited", "retry_after": 30}),
                 );
             }
-            *last = std::time::Instant::now();
             None
         })
         .await;
@@ -4094,6 +4102,20 @@ mod ws_deadline_tests {
     }
 
     pub(super) type Log = Arc<std::sync::Mutex<Vec<String>>>;
+
+    /// Every upgrade names the CLI and its version.
+    #[tokio::test]
+    async fn upgrade_headers_carry_the_cli_user_agent() {
+        let keys = Keys::generate();
+        let c = BuzzClient::new(
+            "http://127.0.0.1:1".into(),
+            Credentials::from_signer(Arc::new(keys.clone()), keys.public_key()),
+        )
+        .unwrap();
+        let headers = c.upgrade_headers().await.unwrap();
+        assert_eq!(headers.get("user-agent").unwrap(), super::USER_AGENT);
+        assert!(super::USER_AGENT.starts_with("buzz-cli/"));
+    }
 
     /// A sign-in signature that comes back after the relay's 5 s deadline
     /// reconnects and signs the new challenge, never the old one.

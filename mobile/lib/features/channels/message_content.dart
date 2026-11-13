@@ -1,8 +1,11 @@
 import 'message_reply_drag_target.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
+
 import 'dart:async';
+import 'dart:convert';
 import '../../shared/widgets/ios_media_carousel.dart';
 import '../../shared/widgets/message_attachment_corners.dart';
+
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -10,6 +13,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
@@ -38,11 +42,15 @@ import '../../shared/emoji/emoji_only.dart';
 import 'channel_ids_by_name_provider.dart';
 import 'local_send_bubble_surface.dart';
 import 'media_viewer_page.dart';
+import 'native_photo_zoom_preview.dart';
+import 'native_video_files.dart';
 import 'message_content/link_normalizer.dart';
 import 'message_content/markdown_escapes.dart';
+import 'message_content/markdown_tables.dart';
 import 'message_content/preview_text.dart';
 import 'message_media.dart';
 import 'message_content/bubble_segments.dart';
+import 'message_content/edited_marker.dart';
 import 'message_content/buzz_link_label.dart';
 import 'message_content/channel_token_pattern.dart';
 import 'message_mention_pill.dart';
@@ -54,6 +62,9 @@ import 'message_media_geometry.dart';
 import 'voice_note_attachment.dart';
 
 part 'message_content/media_carousel.dart';
+part 'message_content/mention_markdown.dart';
+part 'message_content/media_stack.dart';
+part 'message_content/media_stack_tuning.dart';
 part 'message_content/message_preview.dart';
 part 'message_content/bubble_shape.dart';
 part 'message_content/inline_components.dart';
@@ -110,6 +121,9 @@ class MessageContent extends HookConsumerWidget {
   /// Paint conversation text bubbles while keeping attachments on the page.
   final bool bubble;
 
+  /// Space reclaimed from an omitted sender avatar and its gutter.
+  final double additionalTextWidth;
+
   /// Distinguishes messages authored by the signed-in identity.
   final bool ownMessage;
 
@@ -158,6 +172,7 @@ class MessageContent extends HookConsumerWidget {
 
   /// Opens message-specific actions for an image in the full-screen viewer.
   final MediaViewerMoreAction? onMediaMore;
+  final NativePhotoActions? nativePhotoActions;
 
   final TextStyle? baseStyle;
 
@@ -172,6 +187,10 @@ class MessageContent extends HookConsumerWidget {
   /// it contains.
   final bool scaleEmojiOnly;
 
+  /// Marks the body as replaced by an edit, after its last line: inline after
+  /// prose, else on its own line after a closing block or trailing media.
+  final bool edited;
+
   /// Allows a multi-image carousel to reclaim leading space reserved by the
   /// surrounding message layout, while keeping its image count aligned with
   /// the message body.
@@ -185,6 +204,7 @@ class MessageContent extends HookConsumerWidget {
     super.key,
     required this.content,
     this.bubble = false,
+    this.additionalTextWidth = 0,
     this.ownMessage = false,
     this.trimTrailingSpacing = false,
     this.bubbleEnd = true,
@@ -199,10 +219,12 @@ class MessageContent extends HookConsumerWidget {
     this.onMentionTap,
     this.onMediaReply,
     this.onMediaMore,
+    this.nativePhotoActions,
     this.baseStyle,
     this.textAlign,
     this.maxLines,
     this.scaleEmojiOnly = false,
+    this.edited = false,
     this.mediaCarouselLeadingOverflow = 0,
     this.mediaCarouselTrailingOverflow = 0,
   });
@@ -301,13 +323,15 @@ class MessageContent extends HookConsumerWidget {
       content,
     ]);
     final trailingGallery = maxLines == null
-        ? extractTrailingImageGallery(normalizedContent, imetaByUrl)
+        ? extractTrailingImageGallery(
+            normalizedContent,
+            imetaByUrl,
+            includeVideos: bubble,
+          )
         : null;
     final galleryText = trailingGallery?.content ?? normalizedContent;
-    // gpt_markdown has no backslash escapes, so hold escaped characters as
-    // stand-ins that _MarkdownEscapeMd and the link builders restore.
     final markdownContent = useMemoized(
-      () => shieldMarkdownProseEscapes(galleryText),
+      () => separateMarkdownTables(escapeMarkdownLiterals(galleryText)),
       [galleryText],
     );
     final customEmoji = _mergeCustomEmoji(
@@ -345,40 +369,24 @@ class MessageContent extends HookConsumerWidget {
 
     final finalContent = useMemoized(() {
       // Replace spaces with non-breaking spaces inside known mention names
-      // so the gpt_markdown combined regex can match multi-word names
-      // even when caseSensitive is not preserved.
-      // Skip content inside backticks to avoid altering inline code.
-      final mentionParts = markdownContent.split('`');
-      final mentionBuf = StringBuffer();
-      for (var i = 0; i < mentionParts.length; i++) {
-        if (i.isOdd) {
-          mentionBuf.write('`${mentionParts[i]}`');
-        } else {
-          var segment = mentionParts[i];
-          for (final range in mentionOccurrences(
-            segment,
-            mentionBindings.keys,
-          ).reversed) {
-            segment = segment.replaceRange(
-              range.start,
-              range.end,
-              '@${_markdownMentionName(range.label)}',
-            );
-          }
-          mentionBuf.write(segment);
+      // so _MentionMd's pattern matches multi-word names as one token, in
+      // the authored case. Code, inline or fenced, is left as written.
+      return mapMarkdownProse(markdownContent, (segment) {
+        for (final range in mentionOccurrences(
+          segment,
+          mentionBindings.keys,
+        ).reversed) {
+          segment = segment.replaceRange(
+            range.start,
+            range.end,
+            '@${_markdownMentionName(segment.substring(range.start + 1, range.end))}',
+          );
         }
-      }
-      var result = mentionBuf.toString();
-
-      // Ensure channel links at the very start of content don't get
-      // swallowed by markdown processing.
-      if (RegExp(r'^#[A-Za-z0-9_]').hasMatch(result)) {
-        result = '\u200B$result';
-      }
-      return result;
+        return segment;
+      });
     }, [markdownContent, mentionPresentationKey]);
 
-    final inlineComponents = _useMessageInlineComponents(
+    final inlinePatterns = _useMessageInlinePatterns(
       content: content,
       finalContent: finalContent,
       mentionNames: resolvedMentionNames,
@@ -393,6 +401,17 @@ class MessageContent extends HookConsumerWidget {
       hasMediaMore: onMediaMore != null,
       onMentionTap: onMentionTap,
       onChannelTap: resolvedChannelTap,
+    );
+    final editedStyle = editedMarkerStyle(context, own: bubble && ownMessage);
+    // An authored slot is drawn as written; the marker takes its own line.
+    final markerSlot = edited && !finalContent.contains(editedSlot);
+    final components = useMemoized(
+      () => [
+        if (markerSlot) editedMarkerPattern(editedStyle),
+        ...inlinePatterns,
+        escapedSigilPattern,
+      ],
+      [inlinePatterns, editedStyle, markerSlot],
     );
 
     Widget renderMarkdown(String text) => KeyedSubtree(
@@ -415,30 +434,36 @@ class MessageContent extends HookConsumerWidget {
             : null,
         followLinkColor: false,
         // normalizeBareLinks() already turns bare URLs into Markdown links;
-        // gpt_markdown 1.2.0 autolinks by default, so both would run.
+        // gpt_markdown autolinks by default, so both would run.
         autolink: false,
+        // Desktop has no GitHub alerts: a `> [!NOTE]` quote stays a quote.
+        alertBuilder: (_, alert) => alert.asBlockQuote(),
         codeBuilder: (context, name, code, closed) => _MessageCodeBlock(
           name: name,
           code: code,
           bubble: bubble,
           ink: bubble && ownMessage ? ownTextColor : null,
         ),
-        linkBuilder: (context, linkText, shieldedUrl, linkStyle) {
-          final url = unshieldMarkdownEscapes(shieldedUrl);
-          return _buildLink(
-            context,
-            ref,
-            linkText,
-            url,
-            imetaByUrl[url],
-            linkStyle,
-            style,
-            resolvedChannelTap,
-            resolvedChannelNames,
+        // Same widget-shaped link as before: chips, media links and taps
+        // are handled in _buildLink, so the package's own tap is not used.
+        inlineLinkBuilder: (link) {
+          final url = unmaskInlinePatterns(link.url);
+          return link.asWidgetSpan(
+            _buildLink(
+              link.context,
+              ref,
+              TextSpan(children: link.labelSpans),
+              url,
+              imetaByUrl[url],
+              link.style,
+              style,
+              resolvedChannelTap,
+              resolvedChannelNames,
+            ),
           );
         },
-        imageBuilder: (context, shieldedUrl, _, _) {
-          final imageUrl = unshieldMarkdownEscapes(shieldedUrl);
+        imageBuilder: (context, maskedUrl, _, _) {
+          final imageUrl = unmaskInlinePatterns(maskedUrl);
           return _buildMedia(
             context,
             imageUrl,
@@ -449,12 +474,22 @@ class MessageContent extends HookConsumerWidget {
         },
         textAlign: textAlign ?? (bubble ? TextAlign.start : null),
         maxLines: maxLines,
-        inlineComponents: inlineComponents,
+        inlinePatterns: components,
       ),
     );
     final segments = bubble
         ? messageBubbleSegments(finalContent, imetaByUrl)
         : const <({String text, bool attachment})>[];
+    // Media that closes the body takes the marker after it instead.
+    final editedInBody =
+        edited &&
+        trailingGallery == null &&
+        (bubble
+            ? segments.isNotEmpty && !segments.last.attachment
+            : finalContent.trim().isNotEmpty);
+    Widget renderBody(String text, {required bool last}) => editedInBody && last
+        ? markedEditedBody(text, renderMarkdown, editedStyle, slot: markerSlot)
+        : renderMarkdown(text);
     final markdown = bubble
         ? Column(
             crossAxisAlignment: ownMessage
@@ -491,7 +526,8 @@ class MessageContent extends HookConsumerWidget {
                       constraints: BoxConstraints(
                         maxWidth:
                             MediaQuery.sizeOf(context).width *
-                            messageTextMaxWidthFraction,
+                                messageTextMaxWidthFraction +
+                            additionalTextWidth,
                       ),
                       child: MessageReplyDragTarget(
                         child: LocalSendBubbleSurface(
@@ -518,7 +554,10 @@ class MessageContent extends HookConsumerWidget {
                               ),
                               child: GptMarkdownTheme(
                                 gptThemeData: bubbleMarkdownTheme,
-                                child: renderMarkdown(segment.text),
+                                child: renderBody(
+                                  segment.text,
+                                  last: index == segments.length - 1,
+                                ),
                               ),
                             ),
                           ),
@@ -528,8 +567,12 @@ class MessageContent extends HookConsumerWidget {
                   ),
             ],
           )
-        : renderMarkdown(finalContent);
-    if (trailingGallery == null) return markdown;
+        : renderBody(finalContent, last: true);
+    if (trailingGallery == null) {
+      return edited && !editedInBody
+          ? withEditedMarkerBelow(markdown, end: ownMessage)
+          : markdown;
+    }
 
     return Column(
       crossAxisAlignment: ownMessage
@@ -537,6 +580,17 @@ class MessageContent extends HookConsumerWidget {
           : CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
+        if (bubble)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
+            child: Text(
+              '${trailingGallery.items.length} ${trailingGallery.items.any((item) => item.isVideo) ? 'attachments' : 'photos'}',
+              key: const ValueKey('message-media-stack-count'),
+              style: context.textTheme.labelSmall?.copyWith(
+                color: context.colors.onSurfaceVariant,
+              ),
+            ),
+          ),
         if (trailingGallery.content.trim().isNotEmpty) markdown,
         MessageReplyDragTarget(
           child: MessageAttachmentCorners(
@@ -544,19 +598,35 @@ class MessageContent extends HookConsumerWidget {
               start: bubbleStart && trailingGallery.content.trim().isEmpty,
               end: bubbleEnd,
             ),
-            child: _MessageImageCarousel(
-              key: ValueKey(
-                trailingGallery.items.map((item) => item.url).join('\u0000'),
-              ),
-              items: trailingGallery.items,
-              mirrored: ownMessage,
-              leadingOverflow: mediaCarouselLeadingOverflow,
-              trailingOverflow: mediaCarouselTrailingOverflow,
-              onReply: onMediaReply,
-              onMore: onMediaMore,
-            ),
+            child: bubble
+                ? _MessageImageStack(
+                    key: ValueKey(
+                      trailingGallery.items
+                          .map((item) => item.url)
+                          .join('\u0000'),
+                    ),
+                    items: trailingGallery.items,
+                    mirrored: ownMessage,
+                    nativeActions: nativePhotoActions,
+                    onReply: onMediaReply,
+                    onMore: onMediaMore,
+                  )
+                : _MessageImageCarousel(
+                    key: ValueKey(
+                      trailingGallery.items
+                          .map((item) => item.url)
+                          .join('\u0000'),
+                    ),
+                    items: trailingGallery.items,
+                    mirrored: ownMessage,
+                    leadingOverflow: mediaCarouselLeadingOverflow,
+                    trailingOverflow: mediaCarouselTrailingOverflow,
+                    onReply: onMediaReply,
+                    onMore: onMediaMore,
+                  ),
           ),
         ),
+        if (edited) const EditedMarkerBelow(),
       ],
     );
   }
@@ -695,12 +765,17 @@ class MessageContent extends HookConsumerWidget {
 
     // Mobile has no repo/PR/issue destination yet, so these chips have no tap
     // and no Open action, but a hold still copies or shares the link.
+    // The container keeps the chip's label its own node; without it, the
+    // non-interactive chip merges into the surrounding paragraph's label.
     if (buzzLink is EntityDeepLink) {
-      return _LinkLongPress(
-        url: url,
-        onOpen: null,
-        highlightColor: highlightColor,
-        child: renderedLink,
+      return Semantics(
+        container: true,
+        child: _LinkLongPress(
+          url: url,
+          onOpen: null,
+          highlightColor: highlightColor,
+          child: renderedLink,
+        ),
       );
     }
 
@@ -1054,82 +1129,3 @@ class _MessageCodeBlock extends HookWidget {
     );
   }
 }
-
-class _MentionMd extends InlineMd {
-  final Map<String, Set<String>> bindings;
-  final Map<String, String> displayLabels;
-  final Map<String, String> mentionNames;
-  final Map<String, String> mentionLabels;
-  final Set<String> agentMentionPubkeys;
-  final void Function(String pubkey)? onMentionTap;
-  late final RegExp _exp = _buildPrefixPattern(
-    prefix: '@',
-    knownNames: bindings.keys.map(_markdownMentionName),
-    genericTokenPattern: r'[A-Za-z0-9_][A-Za-z0-9_\u00A0-]*',
-  );
-
-  _MentionMd({
-    required this.bindings,
-    required this.displayLabels,
-    required this.mentionNames,
-    required this.mentionLabels,
-    required this.agentMentionPubkeys,
-    this.onMentionTap,
-  });
-
-  /// Excluded from link labels: this component renders a [WidgetSpan], and a
-  /// placeholder nested inside the link's own placeholder does not paint on
-  /// iOS — an authored `[@mention](url)` renders as nothing. Link resolution
-  /// wins over token detection inside a label.
-  @override
-  Set<MarkdownScope> get scopes => MarkdownComponent.allScopesExceptLinkLabel;
-
-  @override
-  RegExp get exp => _exp;
-
-  @override
-  InlineSpan span(
-    BuildContext context,
-    String text,
-    final GptMarkdownConfig config,
-  ) {
-    final raw = exp.firstMatch(text.trim())?.group(0);
-    if (raw == null) {
-      return TextSpan(text: text, style: config.style);
-    }
-
-    final name = raw.substring(1).replaceAll('\u00A0', ' ').toLowerCase();
-    final matches = bindings[name] ?? const <String>{};
-    final pubkey = matches.length == 1 ? matches.single : null;
-    if (bindings.containsKey(name) && matches.length != 1) {
-      return TextSpan(text: text, style: config.style);
-    }
-    final displayName = name.contains(RegExp(r'\([0-9a-f]{64}\)'))
-        ? displayLabels[name]
-        : mentionLabels[pubkey] ?? mentionNames[pubkey];
-
-    final isAgent =
-        pubkey != null && agentMentionPubkeys.contains(pubkey.toLowerCase());
-    final fullLabel = displayName ?? raw.substring(1);
-    final visibleLabel = fullLabel.replaceAllMapped(
-      RegExp(r'\(([0-9a-f]{64})\)'),
-      (m) => '(${m[1]!.substring(0, 8)}…${m[1]!.substring(60)})',
-    );
-    final pill = MessageMentionPill(
-      label: visibleLabel,
-      semanticsLabel: fullLabel,
-      isAgent: isAgent,
-      textStyle: config.style,
-    );
-
-    return WidgetSpan(
-      alignment: PlaceholderAlignment.baseline,
-      baseline: TextBaseline.alphabetic,
-      child: pubkey != null && onMentionTap != null
-          ? GestureDetector(onTap: () => onMentionTap!(pubkey), child: pill)
-          : pill,
-    );
-  }
-}
-
-String _markdownMentionName(String name) => name.replaceAll(' ', '\u00A0');

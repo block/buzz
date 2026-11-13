@@ -20,6 +20,7 @@ import 'package:buzz/shared/push/push_bootstrap.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:buzz/shared/push/push_lease_revocation_outbox.dart';
 import 'package:buzz/shared/push/push_relay_capability_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -102,7 +103,6 @@ void main() {
     await tester.pump();
     await tester.pump();
     expect(find.byType(HomePage), findsOneWidget);
-    expect(find.byType(Navigator), findsOneWidget);
     expect(tester.takeException(), isNull);
     final container = ProviderScope.containerOf(
       tester.element(find.byType(App)),
@@ -111,7 +111,10 @@ void main() {
       container.read(buzzPushSetupStatusProvider).error,
       isA<FormatException>(),
     );
-    final navigator = tester.state<NavigatorState>(find.byType(Navigator));
+    // The root navigator owns this route; Duo also keeps a detail navigator.
+    final navigator = tester.state<NavigatorState>(
+      find.byType(Navigator).first,
+    );
     unawaited(
       navigator.push(
         MaterialPageRoute<void>(
@@ -136,7 +139,7 @@ void main() {
     );
     expect(find.text('Open conversation'), findsOneWidget);
     expect(
-      tester.state<NavigatorState>(find.byType(Navigator)),
+      tester.state<NavigatorState>(find.byType(Navigator).first),
       same(navigator),
     );
 
@@ -158,8 +161,10 @@ void main() {
     (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       final semantics = tester.ensureSemantics();
-      await tester.binding.setSurfaceSize(const Size(390, 844));
-      addTearDown(() => tester.binding.setSurfaceSize(null));
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(390, 844);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetPhysicalSize);
       await tester.runAsync(() async {
         await (FontLoader(
           'Inter',
@@ -250,7 +255,9 @@ void main() {
       );
       await tester.pump();
       expect(find.text('Core app'), findsOneWidget);
-      final navigator = tester.state<NavigatorState>(find.byType(Navigator));
+      final navigator = tester.state<NavigatorState>(
+        find.byType(Navigator).first,
+      );
       unawaited(
         navigator.push(
           MaterialPageRoute<void>(
@@ -307,7 +314,7 @@ void main() {
       expect(find.text('Notification setup failed'), findsNothing);
       await _capture(tester, 'notification-setup-recovered');
       expect(
-        tester.state<NavigatorState>(find.byType(Navigator)),
+        tester.state<NavigatorState>(find.byType(Navigator).first),
         same(navigator),
       );
       await communities.removeCommunity(removals.first.id);
@@ -339,6 +346,13 @@ void main() {
   ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     SharedPreferences.setMockInitialValues({});
+    PackageInfo.setMockInitialValues(
+      appName: 'Buzz',
+      packageName: 'example.buzz',
+      version: '1.0.0',
+      buildNumber: '1',
+      buildSignature: '',
+    );
     const channel = MethodChannel('buzz/push');
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;

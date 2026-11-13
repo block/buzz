@@ -913,27 +913,27 @@ fn signed_event_at(keys: &nostr::Keys, content: &str, secs: u64) -> nostr::Event
         .expect("sign event")
 }
 
+// Routing tests intentionally model stored history and divergent replicas.
+// Raw fixture SQL keeps them independent of serving-time floor admission.
 async fn insert_top_level(pool: &PgPool, community: Uuid, channel: Uuid, ev: &nostr::Event) {
-    let ts = chrono::DateTime::from_timestamp(ev.created_at.as_secs() as i64, 0).expect("valid ts");
-    event::insert_event_with_thread_metadata(
+    crate::test_support::insert_historical_event(
         pool,
         CommunityId::from_uuid(community),
         ev,
-        Some(channel),
-        Some(event::ThreadMetadataParams {
-            event_id: ev.id.as_bytes(),
-            event_created_at: ts,
-            channel_id: channel,
-            parent_event_id: None,
-            parent_event_created_at: None,
-            root_event_id: None,
-            root_event_created_at: None,
-            depth: 0,
-            broadcast: true,
-        }),
+        channel,
     )
+    .await;
+    sqlx::query(
+        "INSERT INTO thread_metadata (community_id,event_id,event_created_at,channel_id,depth,broadcast) \
+         VALUES ($1,$2,to_timestamp($3),$4,0,true)",
+    )
+    .bind(community)
+    .bind(ev.id.as_bytes().as_slice())
+    .bind(ev.created_at.as_secs() as f64)
+    .bind(channel)
+    .execute(pool)
     .await
-    .expect("insert top-level event");
+    .expect("seed top-level metadata");
 }
 
 async fn insert_thread_reply(
@@ -943,29 +943,37 @@ async fn insert_thread_reply(
     root: &nostr::Event,
     reply: &nostr::Event,
 ) {
-    let reply_ts =
-        chrono::DateTime::from_timestamp(reply.created_at.as_secs() as i64, 0).expect("valid ts");
-    let root_ts =
-        chrono::DateTime::from_timestamp(root.created_at.as_secs() as i64, 0).expect("valid ts");
-    event::insert_event_with_thread_metadata(
+    crate::test_support::insert_historical_event(
         pool,
         CommunityId::from_uuid(community),
         reply,
-        Some(channel),
-        Some(event::ThreadMetadataParams {
-            event_id: reply.id.as_bytes(),
-            event_created_at: reply_ts,
-            channel_id: channel,
-            parent_event_id: Some(root.id.as_bytes()),
-            parent_event_created_at: Some(root_ts),
-            root_event_id: Some(root.id.as_bytes()),
-            root_event_created_at: Some(root_ts),
-            depth: 1,
-            broadcast: false,
-        }),
+        channel,
     )
+    .await;
+    sqlx::query(
+        "INSERT INTO thread_metadata \
+         (community_id,event_id,event_created_at,channel_id,parent_event_id,parent_event_created_at, \
+          root_event_id,root_event_created_at,depth,broadcast) \
+         VALUES ($1,$2,to_timestamp($3),$4,$5,to_timestamp($6),$5,to_timestamp($6),1,false)",
+    )
+    .bind(community)
+    .bind(reply.id.as_bytes().as_slice())
+    .bind(reply.created_at.as_secs() as f64)
+    .bind(channel)
+    .bind(root.id.as_bytes().as_slice())
+    .bind(root.created_at.as_secs() as f64)
+    .execute(pool)
     .await
-    .expect("insert reply");
+    .expect("seed reply metadata");
+    sqlx::query(
+        "UPDATE thread_metadata SET reply_count=reply_count+1,descendant_count=descendant_count+1, \
+         last_reply_at=now() WHERE community_id=$1 AND event_id=$2",
+    )
+    .bind(community)
+    .bind(root.id.as_bytes().as_slice())
+    .execute(pool)
+    .await
+    .expect("seed root counters");
 }
 
 /// Composite thread cursor: 8-byte BE seconds + raw event id.
@@ -1025,6 +1033,7 @@ async fn match_nothing_reads_take_no_connection() {
         ("empty authors", with(|q| q.authors = Some(vec![]))),
         ("empty ids", with(|q| q.ids = Some(vec![]))),
         ("empty #e", with(|q| q.e_tags = Some(vec![]))),
+        ("empty #a", with(|q| q.a_tags = Some(vec![]))),
     ];
     // Validation runs before the match-nothing check, so the error wins.
     let invalid = [
@@ -2590,6 +2599,66 @@ async fn lazy_reader_pool_still_spawns_fence_probe() {
         .await
         .expect("floor-guard verification must pass on the migrated writer");
     assert!(spawned, "a configured (lazy) reader must spawn the probe");
+}
+
+/// The fence probe must keep beating while every serving writer connection
+/// is checked out. On the serving pool its beat queued behind request
+/// traffic, so under load every pod's newest token aged past the
+/// bounded-read budget and reads spilled onto the saturated writer.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn fence_probe_beats_while_serving_writer_pool_is_exhausted() {
+    let (seed, scratch) = ScratchDb::migrated(&admin_url().await, "fence_own_pool").await;
+    seed.close().await;
+
+    let url = scratch.url().to_owned();
+    let db = Db::new(&DbConfig {
+        database_url: url.clone(),
+        read_database_url: Some(url),
+        max_connections: 1,
+        min_connections: 0,
+        acquire_timeout_secs: 1,
+        ..DbConfig::default()
+    })
+    .await
+    .expect("connect armed Db with one serving writer connection");
+    assert!(
+        db.spawn_fence_probe().await.expect("verification passes"),
+        "a configured reader must spawn the probe"
+    );
+
+    // Hold the serving writer pool's only connection for the whole test.
+    let mut held = db.pool.acquire().await.expect("hold serving connection");
+    let baseline = db.fence().newest().map(|entry| entry.token);
+
+    // Two beats strictly after the hold: one in flight when the hold began
+    // cannot satisfy this on its own.
+    let mut beats = 0;
+    let mut last = baseline;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while beats < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "probe stopped beating while the serving writer pool was exhausted"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let newest = db.fence().newest().map(|entry| entry.token);
+        if newest > last {
+            beats += 1;
+            last = newest;
+        }
+    }
+
+    // The beats come from the probe's own, identifiable session.
+    let probe_sessions: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_stat_activity \
+         WHERE datname = current_database() AND application_name = $1",
+    )
+    .bind(replica_fence::PROBE_APPLICATION_NAME)
+    .fetch_one(&mut *held)
+    .await
+    .expect("count probe sessions");
+    assert_eq!(probe_sessions, 1, "the probe holds exactly one connection");
 }
 
 /// Thread replies: head fetch reads the writer; a FULL cursor page is
@@ -4467,3 +4536,6 @@ async fn serving_write_guard_insert_indexes_mentions_in_event_transaction() {
         .await
         .expect("release serving-write lease"));
 }
+
+#[path = "tests/pool_release_postgres_tests.rs"]
+mod pool_release_postgres_tests;

@@ -117,8 +117,10 @@ class FallbackPairingQrScanner extends HookWidget {
                               controller: controller,
                               onDetect: handleDetection,
                             ),
-                            const IgnorePointer(
-                              child: _FallbackQrScannerViewfinder(),
+                            const Positioned.fill(
+                              child: IgnorePointer(
+                                child: _FallbackQrScannerViewfinder(),
+                              ),
                             ),
                           ],
                         ),
@@ -209,23 +211,37 @@ class _FallbackQrScannerViewfinder extends StatelessWidget {
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final size = math.min(
-          constraints.maxWidth - (Grid.xl * 2),
-          constraints.maxHeight - 240,
+        final topInset = MediaQuery.paddingOf(context).top;
+        final exposedHeight = math.max(
+          0.0,
+          constraints.maxHeight - topInset - _fallbackScannerSheetPeekHeight,
+        );
+        final center = Offset(
+          constraints.maxWidth / 2,
+          topInset + exposedHeight / 2,
+        );
+        final size = math.max(
+          0.0,
+          math.min(constraints.maxWidth - (Grid.xl * 2), exposedHeight - 240),
         );
 
         return Stack(
           fit: StackFit.expand,
           children: [
             CustomPaint(
+              key: const ValueKey('fallback-qr-scanner-mask'),
               painter: _FallbackQrScannerViewfinderPainter(
-                viewfinderSize: math.max(0, size),
+                viewfinderSize: size,
+                center: center,
               ),
             ),
             Align(
               alignment: Alignment.center,
               child: Transform.translate(
-                offset: Offset(0, (size / 2) + Grid.md),
+                offset: Offset(
+                  0,
+                  center.dy - constraints.maxHeight / 2 + (size / 2) + Grid.md,
+                ),
                 child: Text(
                   'Scan a QR code',
                   style: context.textTheme.bodyMedium?.copyWith(
@@ -243,14 +259,18 @@ class _FallbackQrScannerViewfinder extends StatelessWidget {
 }
 
 class _FallbackQrScannerViewfinderPainter extends CustomPainter {
-  const _FallbackQrScannerViewfinderPainter({required this.viewfinderSize});
+  const _FallbackQrScannerViewfinderPainter({
+    required this.viewfinderSize,
+    required this.center,
+  });
 
   final double viewfinderSize;
+  final Offset center;
 
   @override
   void paint(Canvas canvas, Size size) {
     final rect = Rect.fromCenter(
-      center: size.center(Offset.zero),
+      center: center,
       width: viewfinderSize,
       height: viewfinderSize,
     );
@@ -277,6 +297,7 @@ class _FallbackQrScannerViewfinderPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_FallbackQrScannerViewfinderPainter oldDelegate) {
-    return oldDelegate.viewfinderSize != viewfinderSize;
+    return oldDelegate.viewfinderSize != viewfinderSize ||
+        oldDelegate.center != center;
   }
 }

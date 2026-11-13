@@ -1,9 +1,36 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/features/channels/message_content.dart';
+
 import '../../helpers/widget_helpers.dart';
 
 void main() {
+  testWidgets('authored mention casing survives; bindings still resolve', (
+    tester,
+  ) async {
+    String? tapped;
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: MessageContent(
+          content: '@Helper and @ALICE',
+          mentionNames: {
+            'a' * 64: 'Helper',
+            'b' * 64: 'Helper',
+            'c' * 64: 'Alice',
+          },
+          onMentionTap: (key) => tapped = key,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    // Ambiguous plain namesake text keeps its authored casing.
+    expect(find.textContaining('@Helper', findRichText: true), findsOneWidget);
+    expect(find.textContaining('@helper', findRichText: true), findsNothing);
+    // A bound mention matches case-insensitively and still resolves.
+    await tester.tap(find.text('Alice'));
+    expect(tapped, 'c' * 64);
+  });
+
   for (final tagged in [false, true]) {
     testWidgets(
       'qualified chips preserve authority and narrow layout: $tagged',

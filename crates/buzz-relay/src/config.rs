@@ -127,6 +127,11 @@ pub struct Config {
     /// `0` (the default) disables bounded-staleness replica routing; see
     /// [`buzz_db::DbConfig::replica_read_max_age_ms`].
     pub replica_read_max_age_ms: u64,
+    /// Replica fence heartbeat interval in milliseconds
+    /// (`BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS`). Unset (`0`) selects the
+    /// default; set values must lie within the accepted range. See
+    /// [`buzz_db::DbConfig::replica_fence_probe_interval_ms`].
+    pub replica_fence_probe_interval_ms: u64,
 
     /// Upper bound, in milliseconds, of the per-connection random delay applied
     /// when sending the `1012 Service Restart` close frame during graceful
@@ -286,6 +291,13 @@ pub struct Config {
     /// skipped — a typo must not silently disable an operator.
     pub relay_operator_pubkeys: Vec<String>,
 
+    /// Serve multiple communities (default true). When false, only the
+    /// normalized `relay_url` authority serves ordinary traffic; existing extra
+    /// communities remain available to authenticated management and cleanup.
+    /// Canonical startup bootstrap is preserved. Changes require a restart.
+    /// Set via `BUZZ_MULTI_COMMUNITY_RELAY=true|false`.
+    pub multi_community_relay: bool,
+
     /// Configured operator-listener identities and their HTTP(S) delivery URLs.
     pub operator_listener_delivery_urls: HashMap<String, url::Url>,
 
@@ -326,6 +338,15 @@ pub struct Config {
     /// This does not control the separate `moderation_actions` audit trail.
     /// Set `BUZZ_AUDIT_ENABLED=false` for deployments that do not require it.
     pub audit_enabled: bool,
+
+    /// Which workflow runs may direct agents. With `owner` (owner-only agent
+    /// mentions), a workflow message carries `buzz:workflow-mention` tags only
+    /// if its run was started by the workflow's owner or by a timer and every
+    /// step of the definition is `send_message` or `delay`. Use `owner` when
+    /// people other than a workflow's owner can trigger it.
+    ///
+    /// Default: `any`. Set via `BUZZ_WORKFLOW_AGENT_MENTIONS=any|owner`.
+    pub workflow_agent_mentions: buzz_workflow::AgentMentions,
 
     /// Optional override for ephemeral channel TTL (in seconds).
     /// When set, any channel created with a TTL tag will use this value instead
@@ -624,6 +645,19 @@ fn parse_bool(name: &str, default: bool) -> Result<bool, ConfigError> {
     }
 }
 
+fn parse_workflow_agent_mentions() -> Result<buzz_workflow::AgentMentions, ConfigError> {
+    const NAME: &str = "BUZZ_WORKFLOW_AGENT_MENTIONS";
+    match std::env::var(NAME) {
+        Err(std::env::VarError::NotPresent) => Ok(buzz_workflow::AgentMentions::Any),
+        Err(error) => Err(ConfigError::InvalidValue(format!(
+            "{NAME} must be valid UTF-8: {error}"
+        ))),
+        Ok(value) => value
+            .parse()
+            .map_err(|error| ConfigError::InvalidValue(format!("{NAME}: {error}"))),
+    }
+}
+
 fn parse_optional_bool(name: &str) -> Result<bool, ConfigError> {
     parse_bool(name, false)
 }
@@ -708,6 +742,28 @@ impl Config {
             })?,
             Err(_) => 0,
         };
+
+        // Fence heartbeat interval: unset or empty selects the default. An
+        // out-of-range value fails startup rather than being clamped, so the
+        // deployed cadence is always the configured one.
+        let replica_fence_probe_interval_ms =
+            match std::env::var("BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS") {
+                Ok(raw) if !raw.trim().is_empty() => {
+                    let min = buzz_db::replica_fence::MIN_PROBE_INTERVAL.as_millis() as u64;
+                    let max = buzz_db::replica_fence::MAX_PROBE_INTERVAL.as_millis() as u64;
+                    raw.trim()
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|ms| (min..=max).contains(ms))
+                        .ok_or_else(|| {
+                            ConfigError::InvalidValue(format!(
+                                "BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS must be an integer \
+                                 between {min} and {max}"
+                            ))
+                        })?
+                }
+                _ => 0,
+            };
 
         // Drain jitter: 0 = off (default). Clamp oversized values so every
         // delayed close is initiated with ten seconds left in the relay's
@@ -884,6 +940,24 @@ impl Config {
             .map(|raw| parse_operator_api_origin(&raw))
             .transpose()?;
 
+        let multi_community_relay = match std::env::var("BUZZ_MULTI_COMMUNITY_RELAY") {
+            Ok(value) => value.parse::<bool>().map_err(|_| {
+                ConfigError::InvalidValue(
+                    "BUZZ_MULTI_COMMUNITY_RELAY must be true or false".to_string(),
+                )
+            })?,
+            Err(std::env::VarError::NotPresent) => true,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(ConfigError::InvalidValue(
+                    "BUZZ_MULTI_COMMUNITY_RELAY must be true or false".to_string(),
+                ))
+            }
+        };
+        if !multi_community_relay && crate::tenant::relay_url_authority(&relay_url).is_empty() {
+            return Err(ConfigError::InvalidValue(
+                "RELAY_URL must have a host when BUZZ_MULTI_COMMUNITY_RELAY=false".to_owned(),
+            ));
+        }
         let relay_operator_pubkeys = match std::env::var("RELAY_OPERATOR_PUBKEYS") {
             Ok(raw) => {
                 let mut pubkeys = Vec::new();
@@ -1239,6 +1313,7 @@ impl Config {
         let privacy_markdown = read_policy_markdown("BUZZ_PRIVACY_POLICY_MARKDOWN")?;
         let age_attestation_required = parse_optional_bool("BUZZ_AGE_ATTESTATION_REQUIRED")?;
         let audit_enabled = parse_bool("BUZZ_AUDIT_ENABLED", true)?;
+        let workflow_agent_mentions = parse_workflow_agent_mentions()?;
         let join_policy = if terms_markdown.is_none()
             && privacy_markdown.is_none()
             && !age_attestation_required
@@ -1453,6 +1528,7 @@ impl Config {
             database_url,
             read_database_url,
             replica_read_max_age_ms,
+            replica_fence_probe_interval_ms,
             drain_jitter_ms,
             redis_url,
             db_pool_size,
@@ -1489,6 +1565,7 @@ impl Config {
             relay_owner_pubkey,
             relay_operator_api_origin,
             relay_operator_pubkeys,
+            multi_community_relay,
             operator_listener_delivery_urls,
             storage_usage_delivery_url,
             allow_nip_oa_auth,
@@ -1499,6 +1576,7 @@ impl Config {
             media_max_concurrent_uploads_per_pubkey,
             media_uploads_per_minute,
             audit_enabled,
+            workflow_agent_mentions,
             ephemeral_ttl_override,
             git_repo_path,
             git_pack_cache_path,
@@ -1746,6 +1824,29 @@ mod tests {
         );
 
         assert!(found.is_empty(), "unrelated vars must not warn: {found:?}");
+    }
+
+    #[test]
+    fn multi_community_relay_is_strict_and_default_enabled() {
+        let _guards = env_guards();
+        std::env::remove_var("BUZZ_MULTI_COMMUNITY_RELAY");
+        assert!(Config::from_env().expect("unset").multi_community_relay);
+        for (value, expected) in [("false", false), ("true", true)] {
+            std::env::set_var("BUZZ_MULTI_COMMUNITY_RELAY", value);
+            let config = Config::from_env();
+            std::env::remove_var("BUZZ_MULTI_COMMUNITY_RELAY");
+            assert_eq!(
+                config.expect("valid policy").multi_community_relay,
+                expected
+            );
+        }
+        for value in ["", "FALSE", "1", "typo"] {
+            std::env::set_var("BUZZ_MULTI_COMMUNITY_RELAY", value);
+            let result = Config::from_env();
+            std::env::remove_var("BUZZ_MULTI_COMMUNITY_RELAY");
+            assert!(matches!(result, Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_MULTI_COMMUNITY_RELAY")));
+        }
     }
 
     #[test]
@@ -2486,6 +2587,44 @@ mod tests {
     }
 
     #[test]
+    fn replica_fence_probe_interval_defaults_and_rejects_out_of_range() {
+        let _guards = env_guards();
+        let previous = std::env::var_os("BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS");
+        let read = |value: Option<&str>| {
+            match value {
+                Some(value) => std::env::set_var("BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS", value),
+                None => std::env::remove_var("BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS"),
+            }
+            Config::from_env().map(|config| config.replica_fence_probe_interval_ms)
+        };
+
+        let unset = read(None);
+        let empty = read(Some(" "));
+        let set = read(Some("500"));
+        let rejected =
+            ["soon", "0", "299", "10001", "-400"].map(|value| (value, read(Some(value))));
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS", value);
+        } else {
+            std::env::remove_var("BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS");
+        }
+
+        assert_eq!(unset.expect("unset"), 0, "unset selects the default");
+        assert_eq!(empty.expect("empty"), 0, "empty selects the default");
+        assert_eq!(set.expect("set"), 500);
+        for (value, result) in rejected {
+            match result {
+                Err(ConfigError::InvalidValue(message)) => assert!(
+                    message.contains("BUZZ_REPLICA_FENCE_PROBE_INTERVAL_MS"),
+                    "{value}: {message}"
+                ),
+                other => panic!("{value} must fail startup, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn drain_jitter_defaults_off_and_rejects_junk() {
         let _guards = env_guards();
         let previous = std::env::var_os("BUZZ_DRAIN_JITTER_MS");
@@ -2551,6 +2690,32 @@ mod tests {
             std::env::set_var("BUZZ_AUDIT_ENABLED", value);
         } else {
             std::env::remove_var("BUZZ_AUDIT_ENABLED");
+        }
+    }
+
+    #[test]
+    fn workflow_agent_mentions_defaults_to_any_and_rejects_other_values() {
+        use buzz_workflow::AgentMentions;
+        const NAME: &str = "BUZZ_WORKFLOW_AGENT_MENTIONS";
+        let _guards = env_guards();
+        let previous = std::env::var_os(NAME);
+        std::env::remove_var(NAME);
+        assert_eq!(parse_workflow_agent_mentions().unwrap(), AgentMentions::Any);
+        std::env::set_var(NAME, "any");
+        assert_eq!(parse_workflow_agent_mentions().unwrap(), AgentMentions::Any);
+        std::env::set_var(NAME, "owner");
+        assert_eq!(
+            parse_workflow_agent_mentions().unwrap(),
+            AgentMentions::Owner
+        );
+        for invalid in ["true", "", "OWNER"] {
+            std::env::set_var(NAME, invalid);
+            assert!(parse_workflow_agent_mentions().is_err(), "{invalid:?}");
+        }
+        if let Some(value) = previous {
+            std::env::set_var(NAME, value);
+        } else {
+            std::env::remove_var(NAME);
         }
     }
 

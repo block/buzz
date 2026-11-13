@@ -1,4 +1,5 @@
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 
 import 'dart:async';
 import 'dart:math' show max;
@@ -19,6 +20,7 @@ import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/mentions/mention_tags.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/relay/thread_reference.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/utils/string_utils.dart';
 import '../../shared/widgets/sheet_action_section.dart';
@@ -33,9 +35,14 @@ import '../channels/channel_detail_page.dart';
 import '../channels/channel_identity_names_provider.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/channels_provider.dart';
+import '../channels/me/me_page.dart';
 import '../channels/dm_channel_labels.dart';
 import '../channels/message_content.dart';
 import '../../shared/read_state/read_state_format.dart';
+import '../../shared/reminders/remind_me_later_sheet.dart';
+import '../../shared/reminders/reminder_service.dart'
+    show ReminderTarget, reminderServiceProvider;
+import '../channels/thread_follows/thread_follows_provider.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
@@ -46,7 +53,7 @@ import 'feed_item.dart';
 import 'inbox_item.dart';
 import 'inbox_local_state_provider.dart';
 import 'inbox_read_state.dart';
-import 'reminders_provider.dart';
+import 'reminders_provider.dart' hide ReminderTarget;
 
 part 'activity_page/header_actions.dart';
 part 'activity_page/inbox_row.dart';
@@ -186,8 +193,6 @@ class ActivityPage extends HookConsumerWidget {
           (channelById[id]?.isDm ?? false) ||
           ref.read(channelsProvider.notifier).hiddenDmIds.contains(id),
     );
-    // A filtered DM row holds only part of its conversation, so the DM
-    // channel marker would also read events this view hides.
     final rowsArePartial =
         filter.value == InboxFilter.thread ||
         filter.value == InboxFilter.mention ||
@@ -215,16 +220,63 @@ class ActivityPage extends HookConsumerWidget {
       return null;
     }, [preloadPubkeysKey]);
 
+    // A filtered row holds only part of its conversation. Its synced thread
+    // or channel marker is one watermark, so advance it through every event
+    // that is now read (shown here, or already read) and stop just before the
+    // first unread event the filter hides. Shown events past that point get
+    // local per-message marks until the hidden one is read too.
+    void markPartialRowRead(
+      InboxItem item,
+      String channelId, {
+      required bool isDmRow,
+    }) {
+      final notifier = ref.read(readStateProvider.notifier);
+      final shown = {
+        for (final e in [item.item, ...item.groupItems]) e.id: e,
+      };
+      final rootId = isDmRow ? null : item.threadRootId;
+      bool inContext(FeedItem e) =>
+          e.channelId == channelId &&
+          (rootId == null ||
+              (isThreadReply(e.tags) &&
+                  threadReferenceOf(e.tags).rootId == rootId));
+      final events = {
+        for (final e in [
+          ...allItems.expand((i) => i.groupItems),
+          ...shown.values,
+        ])
+          if (inContext(e)) e.id: e,
+      }.values.toList()..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      int? cap;
+      for (final e in events) {
+        if (!shown.containsKey(e.id) &&
+            !isInboxEventRead(e, markerOf: markerOf)) {
+          cap = e.createdAt - 1;
+          break;
+        }
+        cap = e.createdAt;
+      }
+      if (cap != null) {
+        notifier.markContextRead(
+          rootId == null ? channelId : threadContextKey(rootId),
+          cap,
+        );
+      }
+      for (final e in shown.values) {
+        if (inContext(e) && cap != null && e.createdAt <= cap) continue;
+        notifier.markContextRead(msgContextKey(e.id), e.createdAt);
+      }
+    }
+
     void markItemRead(InboxItem item) {
       final notifier = ref.read(readStateProvider.notifier);
       ref
           .read(inboxLocalStateProvider.notifier)
           .clearUnread(groupedInboxItemIds(item));
       final isDmRow = item.conversationId.startsWith('dm:');
-      if (isDmRow && rowsArePartial) {
-        for (final e in {item.item, ...item.groupItems}) {
-          notifier.markContextRead(msgContextKey(e.id), e.createdAt);
-        }
+      final partialChannelId = rowsArePartial ? item.item.channelId : null;
+      if (partialChannelId != null) {
+        markPartialRowRead(item, partialChannelId, isDmRow: isDmRow);
         return;
       }
       // A DM row can group replies under several thread roots; its channel
@@ -331,16 +383,19 @@ class ActivityPage extends HookConsumerWidget {
           : thread.parentId;
 
       if (!context.mounted) return;
-      Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => ChannelDetailPage(
-            channel: resolvedChannel,
-            initialMessageId: target.id,
-            initialThreadRootId: threadRootId,
-            initialThreadRouteBehavior:
-                InitialThreadRouteBehavior.replaceCurrentRoute,
-          ),
+      openConversationPane(
+        context,
+        target.id,
+        (_) => ChannelDetailPage(
+          channel: resolvedChannel,
+          initialMessageId: target.id,
+          initialThreadRootId: threadRootId,
+          initialThreadRouteBehavior:
+              ConversationPaneScope.maybeOf(context) == null
+              ? InitialThreadRouteBehavior.replaceCurrentRoute
+              : InitialThreadRouteBehavior.push,
         ),
+        reopen: true,
       );
     }
 
@@ -353,15 +408,18 @@ class ActivityPage extends HookConsumerWidget {
         );
         return;
       }
-      Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => ChannelDetailPage(
-            channel: channel,
-            initialThreadRootId: draft.threadHeadId,
-            initialThreadRouteBehavior:
-                InitialThreadRouteBehavior.replaceCurrentRoute,
-          ),
+      openConversationPane(
+        context,
+        'draft:${draft.channelId}:${draft.threadHeadId}',
+        (_) => ChannelDetailPage(
+          channel: channel,
+          initialThreadRootId: draft.threadHeadId,
+          initialThreadRouteBehavior:
+              ConversationPaneScope.maybeOf(context) == null
+              ? InitialThreadRouteBehavior.replaceCurrentRoute
+              : InitialThreadRouteBehavior.push,
         ),
+        reopen: true,
       );
     }
 
@@ -382,12 +440,12 @@ class ActivityPage extends HookConsumerWidget {
         );
         return;
       }
-      Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => ChannelDetailPage(
-            channel: channel,
-            initialMessageId: target.eventId,
-          ),
+      openConversationPane(
+        context,
+        target.eventId,
+        (_) => ChannelDetailPage(
+          channel: channel,
+          initialMessageId: target.eventId,
         ),
       );
     }

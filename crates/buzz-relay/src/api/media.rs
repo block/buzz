@@ -4850,6 +4850,32 @@ mod tests {
                 0x42, 0x60, 0x82,
             ];
 
+            /// A valid all-black grayscale PNG of the given size.
+            fn blank_png(width: u32, height: u32) -> Vec<u8> {
+                use std::io::Write;
+                let chunk = |png: &mut Vec<u8>, kind: &[u8], data: &[u8]| {
+                    let mut crc = flate2::Crc::new();
+                    crc.update(kind);
+                    crc.update(data);
+                    png.extend((data.len() as u32).to_be_bytes());
+                    png.extend(kind);
+                    png.extend(data);
+                    png.extend(crc.sum().to_be_bytes());
+                };
+                let mut ihdr = [width.to_be_bytes(), height.to_be_bytes()].concat();
+                ihdr.extend([8, 0, 0, 0, 0]);
+                let mut pixels =
+                    flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+                pixels
+                    .write_all(&vec![0; (width as usize + 1) * height as usize])
+                    .expect("compress");
+                let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+                chunk(&mut png, b"IHDR", &ihdr);
+                chunk(&mut png, b"IDAT", &pixels.finish().expect("compress"));
+                chunk(&mut png, b"IEND", &[]);
+                png
+            }
+
             struct Fixture {
                 rt: tokio::runtime::Runtime,
                 state: Arc<AppState>,
@@ -4882,6 +4908,33 @@ mod tests {
                     };
                     fixture.delete_thumbs();
                     fixture
+                }
+
+                /// Switch to `bytes`, stored under their own hash with a sidecar
+                /// but without the upload route's validation or thumbnails.
+                fn with_blob(self, bytes: &[u8], ext: &str, mime: &str) -> Self {
+                    let sha = sha256_hex(bytes);
+                    self.rt.block_on(async {
+                        let tenant = crate::tenant::bind_community(&self.state.db, &self.host)
+                            .await
+                            .expect("bind community");
+                        let storage = &self.state.media_storage;
+                        storage
+                            .put(&format!("{sha}.{ext}"), bytes, mime)
+                            .await
+                            .expect("put blob");
+                        let meta = buzz_media::BlobMeta {
+                            ext: ext.into(),
+                            mime_type: mime.into(),
+                            size: bytes.len() as u64,
+                            ..Default::default()
+                        };
+                        storage
+                            .put_sidecar(&tenant, &sha, &meta)
+                            .await
+                            .expect("put sidecar");
+                    });
+                    Self { sha, ..self }
                 }
 
                 fn thumb_key(&self, ext: &str) -> String {
@@ -4953,7 +5006,8 @@ mod tests {
 
             /// Regeneration stays a 404 and writes nothing when the sidecar says the
             /// blob is not an image, the original is gone, the original exceeds
-            /// `max_image_bytes`, or every regeneration permit is taken.
+            /// `max_image_bytes` or 25 megapixels, or every regeneration permit
+            /// is taken.
             #[test]
             #[ignore = "requires Postgres and MinIO"]
             fn missing_thumbnail_is_not_regenerated_when_unsafe() {
@@ -4967,31 +5021,9 @@ mod tests {
                 };
 
                 // Not an image: a text blob under its own hash.
-                let f = Fixture::new(|_| {});
                 let text = format!("not an image {}", uuid::Uuid::new_v4()).into_bytes();
-                let sha = sha256_hex(&text);
-                let tenant =
-                    f.rt.block_on(crate::tenant::bind_community(&f.state.db, &f.host))
-                        .expect("bind community");
-                f.rt.block_on(async {
-                    let storage = &f.state.media_storage;
-                    storage
-                        .put(&format!("{sha}.txt"), &text, "text/plain")
-                        .await
-                        .expect("put text");
-                    let meta = buzz_media::BlobMeta {
-                        ext: "txt".into(),
-                        mime_type: "text/plain".into(),
-                        size: text.len() as u64,
-                        ..Default::default()
-                    };
-                    storage
-                        .put_sidecar(&tenant, &sha, &meta)
-                        .await
-                        .expect("put sidecar");
-                });
-                let text_fixture = Fixture { sha, ..f };
-                assert_absent(&text_fixture, "non-image");
+                let f = Fixture::new(|_| {}).with_blob(&text, "txt", "text/plain");
+                assert_absent(&f, "non-image");
 
                 // Original missing: sidecar still says image.
                 let f = Fixture::new(|_| {});
@@ -5002,6 +5034,11 @@ mod tests {
                 // Original over the size cap.
                 let f = Fixture::new(|c| c.media.max_image_bytes = PNG.len() as u64 - 1);
                 assert_absent(&f, "oversize");
+
+                // Original over the 25 MP pixel cap, within the byte cap.
+                let f =
+                    Fixture::new(|_| {}).with_blob(&blank_png(5_001, 5_000), "png", "image/png");
+                assert_absent(&f, "over 25 MP");
 
                 // No free permit, then a free one.
                 let f = Fixture::new(|_| {});

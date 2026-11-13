@@ -16,6 +16,35 @@ Widget _trackActiveThreadScrollPosition(
   },
 );
 
+/// Keeps a tail-following thread at its end while content there grows.
+///
+/// A sent reply's entrance transition grows its row over several frames, and
+/// media or typing rows can grow too. The one-shot tail correction can finish
+/// before that growth does, leaving the new content under the composer. Every
+/// growth reports new scroll metrics, so move a position that was at its old
+/// end to the new one while the reader follows the tail.
+void _followThreadTailOnMetricsChange(
+  ScrollMetricsNotification notification, {
+  required ScrollPosition? activePosition,
+  required Expando<double> previousMaxExtents,
+  required bool Function() followsTail,
+}) {
+  final position = Scrollable.maybeOf(notification.context)?.position;
+  if (position == null ||
+      !identical(position, activePosition) ||
+      !position.hasContentDimensions) {
+    return;
+  }
+  final maxExtent = position.maxScrollExtent;
+  final previousMaxExtent = previousMaxExtents[position];
+  previousMaxExtents[position] = maxExtent;
+  if (previousMaxExtent == null || maxExtent <= previousMaxExtent) return;
+  final wasAtEnd =
+      position.pixels >= previousMaxExtent - _threadTailScrollTolerance;
+  if (!wasAtEnd || !followsTail()) return;
+  position.jumpTo(maxExtent);
+}
+
 bool _jumpActiveThreadScrollToTail(
   ObjectRef<ScrollPosition?> activePosition,
   bool Function()? testOverride,

@@ -44,6 +44,18 @@ pub const OWNER_DELETION_ACKNOWLEDGEMENT_VERSION: i32 = 1;
 /// against replicas still holding the old key during a rolling deploy.
 pub const SCHEMA_DESTRUCTION_LOCK_KEY: i64 = 0x62757a7a64656c31;
 
+/// Name of one community's deletion advisory lock; lock it with
+/// `hashtextextended($1, 0)`.
+///
+/// Deletion takes the lock exclusively and community writers take it shared.
+/// The bytes must equal the SQL function
+/// `community_deletion_lock_key(uuid)` (`'buzz-community-deletion:' ||
+/// target::text`) for as long as any relay or database function still uses
+/// it, or deletion and writers stop excluding each other.
+pub fn community_deletion_lock_key(community: CommunityId) -> String {
+    format!("buzz-community-deletion:{}", community.as_uuid())
+}
+
 /// Control-plane tables that survive the community data purge.
 pub const CONTROL_PLANE_TABLES: &[&str] = &[
     "community_deletion_approvals",
@@ -1241,9 +1253,8 @@ impl DeletionStore {
             )));
         }
 
-        let required_objects_present: bool = sqlx::query_scalar(
-            "SELECT to_regprocedure('community_deletion_lock_key(uuid)') IS NOT NULL \
-                AND EXISTS (SELECT 1 FROM pg_trigger t \
+        let tombstone_trigger_present: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_trigger t \
                     JOIN pg_class c ON c.oid = t.tgrelid \
                     JOIN pg_proc p ON p.oid = t.tgfoid \
                     WHERE c.relname = 'communities' \
@@ -1252,9 +1263,9 @@ impl DeletionStore {
         )
         .fetch_one(&mut *conn)
         .await?;
-        if !required_objects_present {
+        if !tombstone_trigger_present {
             return Err(DbError::DeletionSafety(
-                "community deletion lock function or tombstone trigger is missing".to_string(),
+                "community tombstone trigger is missing".to_string(),
             ));
         }
         Ok(())
@@ -3370,8 +3381,8 @@ async fn lock_community_deletion(
 ) -> Result<()> {
     crate::observability::observe_advisory_lock(
         crate::observability::LockType::Deletion,
-        sqlx::query("SELECT pg_advisory_xact_lock(community_deletion_lock_key($1))")
-            .bind(community.as_uuid())
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(community_deletion_lock_key(community))
             .execute(&mut **tx),
     )
     .await?;
@@ -3423,10 +3434,10 @@ pub(crate) async fn lock_community_deletion_shared(
     let (_, isolation): ((), String) = crate::observability::observe_advisory_lock(
         crate::observability::LockType::Deletion,
         sqlx::query_as(
-            "SELECT pg_advisory_xact_lock_shared(community_deletion_lock_key($1)), \
+            "SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0)), \
              current_setting('transaction_isolation')",
         )
-        .bind(community.as_uuid())
+        .bind(community_deletion_lock_key(community))
         .fetch_one(&mut **tx),
     )
     .await?;
@@ -4650,11 +4661,12 @@ DROP FUNCTION enforce_community_write_fence();
 DROP FUNCTION assert_community_write_allowed(UUID);
 DROP FUNCTION community_write_allowed(UUID);
 DROP FUNCTION community_write_fence_excluded_table(NAME);
+DROP FUNCTION community_deletion_lock_key(UUID);
 
                 "#)
                 .execute(&db.pool)
                 .await
-                .expect("retire only universal fence objects");
+                .expect("retire universal fence objects and the lock-key function");
             }
             store
                 .validate_serving_catalog()
@@ -4689,6 +4701,14 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
                 .release_serving_write_lease(&lease)
                 .await
                 .expect("release lease");
+            db.bind_nip_fi_issuers_to_active(&[community], &["https://issuer.example".to_string()])
+                .await
+                .expect("bulk bind takes the shared deletion locks");
+            let mut deletion = db.pool.begin().await.expect("begin deletion");
+            lock_community_deletion(&mut deletion, community)
+                .await
+                .expect("exclusive deletion lock");
+            deletion.rollback().await.expect("release deletion lock");
             for state in ["quiescing", "fenced", "tombstone"] {
                 crate::test_support::set_deletion_state(&db.pool, *community.as_uuid(), state)
                     .await;
@@ -4719,6 +4739,27 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
                 Err(DbError::AccessDenied(_))
             ));
             crate::test_support::set_deletion_state(&db.pool, *community.as_uuid(), "active").await;
+        }
+    }
+
+    /// Mixed-version fleets lock through both the Rust key and the SQL
+    /// function until the function is dropped; they must name the same lock.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn community_deletion_lock_key_matches_the_sql_function() {
+        let (db, _) = store().await;
+        let mut communities = vec![Uuid::nil(), Uuid::max()];
+        communities.extend((0..64).map(|_| Uuid::new_v4()));
+        for id in communities {
+            let community = CommunityId::from_uuid(id);
+            let (rust_lock, sql_lock): (i64, i64) =
+                sqlx::query_as("SELECT hashtextextended($1, 0), community_deletion_lock_key($2)")
+                    .bind(community_deletion_lock_key(community))
+                    .bind(id)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("hash lock keys");
+            assert_eq!(rust_lock, sql_lock, "lock key drifted for {id}");
         }
     }
 
@@ -5043,9 +5084,9 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
                     "SELECT count(*) FROM pg_locks \
                      WHERE locktype = 'advisory' AND objsubid = 1 AND NOT granted \
                        AND ((classid::bigint << 32) | objid::bigint) \
-                           = community_deletion_lock_key($1)",
+                           = hashtextextended($1, 0)",
                 )
-                .bind(community.as_uuid())
+                .bind(community_deletion_lock_key(community))
                 .fetch_one(&db.pool)
                 .await
                 .expect("inspect community lock queue");
@@ -6899,8 +6940,8 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .expect("claim")
             .expect("won claim");
         let mut gate = db.pool.begin().await.expect("begin lock gate");
-        sqlx::query("SELECT pg_advisory_xact_lock(community_deletion_lock_key($1))")
-            .bind(request.community_id.as_uuid())
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(community_deletion_lock_key(request.community_id))
             .execute(&mut *gate)
             .await
             .expect("hold community lock");
@@ -7010,8 +7051,8 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .expect("won claim");
         store.begin_quiescing(&claim.lease).await.expect("quiesce");
         let mut gate = db.pool.begin().await.expect("begin lock gate");
-        sqlx::query("SELECT pg_advisory_xact_lock(community_deletion_lock_key($1))")
-            .bind(request.community_id.as_uuid())
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(community_deletion_lock_key(request.community_id))
             .execute(&mut *gate)
             .await
             .expect("hold community lock");
@@ -7294,13 +7335,12 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .expect("open writer transaction with community lock");
 
         let mut shared_contender = db.pool.begin().await.expect("begin shared contender");
-        let shared_taken: bool = sqlx::query_scalar(
-            "SELECT pg_try_advisory_xact_lock_shared(community_deletion_lock_key($1))",
-        )
-        .bind(community.as_uuid())
-        .fetch_one(&mut *shared_contender)
-        .await
-        .expect("try shared deletion lock");
+        let shared_taken: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock_shared(hashtextextended($1, 0))")
+                .bind(community_deletion_lock_key(community))
+                .fetch_one(&mut *shared_contender)
+                .await
+                .expect("try shared deletion lock");
         assert!(
             shared_taken,
             "compliant writer must allow another shared community deletion lock holder"
@@ -7312,8 +7352,8 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
 
         let mut deleter = db.pool.begin().await.expect("begin deletion contender");
         let exclusive_taken: bool =
-            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(community_deletion_lock_key($1))")
-                .bind(community.as_uuid())
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(community_deletion_lock_key(community))
                 .fetch_one(&mut *deleter)
                 .await
                 .expect("try deletion exclusive lock");
@@ -7813,8 +7853,8 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
             .expect("active community")
             .id;
         let mut fence_tx = db.pool.begin().await.expect("begin fence transaction");
-        sqlx::query("SELECT pg_advisory_xact_lock(community_deletion_lock_key($1))")
-            .bind(community.as_uuid())
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(community_deletion_lock_key(community))
             .execute(&mut *fence_tx)
             .await
             .expect("hold exclusive deletion lock");
@@ -8265,6 +8305,7 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
     #[ignore = "requires Postgres"]
     async fn manifest_key_chunks_bind_freeze_execution_and_cleanup() {
         let (db, store) = store().await;
+        crate::test_support::retire_foreign_key_delete_actions(&db.pool).await;
         let (request, inventory) = inventoried_request(&db, &store).await;
         store
             .approve(request.id, "approver", None)
@@ -8415,6 +8456,138 @@ DROP FUNCTION community_write_fence_excluded_table(NAME);
                 .await
                 .expect("progress after terminal cleanup"),
             (0, 0)
+        );
+    }
+
+    /// The whole-community purge is the only supported hard delete of channels,
+    /// personal-read accounts, and users. With every FK action retired, each
+    /// child must still be deleted explicitly (the quiesce barrier itself is
+    /// pinned by `begin_quiescing_waits_for_open_admitted_writer_note_update`).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn purge_removes_fk_children_explicitly_without_fk_actions() {
+        let (db, store) = store().await;
+        crate::test_support::retire_foreign_key_delete_actions(&db.pool).await;
+        let (request, inventory) = inventoried_request(&db, &store).await;
+        let community = request.community_id;
+        let owner = vec![7_u8; 32];
+        let agent = vec![8_u8; 32];
+        let channel = Uuid::new_v4();
+        let feedback_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO users (community_id, pubkey) VALUES ($1, $2)")
+            .bind(community.as_uuid())
+            .bind(&owner)
+            .execute(&db.pool)
+            .await
+            .expect("seed owner");
+        sqlx::query(
+            "INSERT INTO users (community_id, pubkey, agent_owner_pubkey) VALUES ($1, $2, $3)",
+        )
+        .bind(community.as_uuid())
+        .bind(&agent)
+        .bind(&owner)
+        .execute(&db.pool)
+        .await
+        .expect("seed agent owned by user");
+        sqlx::query(
+            "INSERT INTO channels (community_id, id, name, created_by) VALUES ($1, $2, 'purge', $3)",
+        )
+        .bind(community.as_uuid())
+        .bind(channel)
+        .bind(&owner)
+        .execute(&db.pool)
+        .await
+        .expect("seed channel");
+        sqlx::query("INSERT INTO personal_read_accounts (community_id, actor) VALUES ($1, $2)")
+            .bind(community.as_uuid())
+            .bind(&owner)
+            .execute(&db.pool)
+            .await
+            .expect("seed read account");
+        sqlx::query(
+            "INSERT INTO product_feedback \
+             (id, community_id, event_id, submitter_pubkey, body, event_created_at) \
+             VALUES ($1, $2, $3, $4, 'feedback survives', now())",
+        )
+        .bind(feedback_id)
+        .bind(community.as_uuid())
+        .bind(vec![9_u8; 32])
+        .bind(&owner)
+        .execute(&db.pool)
+        .await
+        .expect("seed operator feedback");
+
+        store
+            .approve(request.id, "approver", None)
+            .await
+            .expect("approve");
+        let claim = store
+            .claim_specific(request.id, "executor", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim")
+            .expect("won claim");
+        let mut writer = db
+            .begin_event_write_transaction(community)
+            .await
+            .expect("admit child seed");
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey) VALUES ($1, $2, $3)",
+        )
+        .bind(community.as_uuid())
+        .bind(channel)
+        .bind(&owner)
+        .execute(writer.conn())
+        .await
+        .expect("seed channel member");
+        sqlx::query(
+            "INSERT INTO personal_read_frontiers \
+             (community_id, actor, channel_id, through_timestamp) VALUES ($1, $2, $3, now())",
+        )
+        .bind(community.as_uuid())
+        .bind(&owner)
+        .bind(channel)
+        .execute(writer.conn())
+        .await
+        .expect("seed read frontier");
+        writer.commit().await.expect("commit seeded children");
+        store.begin_quiescing(&claim.lease).await.expect("quiesce");
+
+        let generation = store.fence(&claim.lease).await.expect("fence");
+        let token = LeaseToken {
+            fence_generation: Some(generation),
+            ..claim.lease
+        };
+        store
+            .freeze_destructive_storage_manifest(&token, &inventory.storage)
+            .await
+            .expect("freeze destructive storage");
+        store.mark_drained(&token).await.expect("drain");
+        store
+            .mark_bindings_removed(&token, serde_json::json!({"keys": 0}))
+            .await
+            .expect("bindings removed");
+        let deleted = store
+            .purge_postgres(&token)
+            .await
+            .expect("purge without FK actions");
+        for table in [
+            "channel_members",
+            "personal_read_frontiers",
+            "personal_read_accounts",
+            "channels",
+        ] {
+            assert_eq!(deleted.get(table), Some(&1), "{table} explicitly removed");
+        }
+        assert_eq!(deleted.get("users"), Some(&2), "owner and agent removed");
+        let provenance: Option<Uuid> =
+            sqlx::query_scalar("SELECT community_id FROM product_feedback WHERE id = $1")
+                .bind(feedback_id)
+                .fetch_one(&db.pool)
+                .await
+                .expect("feedback remains");
+        assert_eq!(
+            provenance, None,
+            "operator feedback loses tenant provenance"
         );
     }
 
