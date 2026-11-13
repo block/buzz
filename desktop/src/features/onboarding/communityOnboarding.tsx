@@ -15,6 +15,7 @@ export type CommunityOnboardingSource =
   | "deep-link-join";
 
 export type CommunityOnboardingStage =
+  | "invite-consent"
   | "claiming"
   | "connecting"
   | "profile"
@@ -61,6 +62,7 @@ export type CommunityOnboardingTransactionPatch = Partial<
   Pick<
     CommunityOnboardingTransaction,
     | "stage"
+    | "policyReceipt"
     | "relayUrl"
     | "communityId"
     | "previousCommunityId"
@@ -106,6 +108,7 @@ function isTransaction(
     typeof transaction.createdAt === "string" &&
     typeof transaction.updatedAt === "string" &&
     [
+      "invite-consent",
       "claiming",
       "connecting",
       "profile",
@@ -152,6 +155,12 @@ export function startCommunityOnboarding(
   now = new Date(),
 ): CommunityOnboardingTransaction {
   const relayUrl = canonicalRelayUrl(input.relayUrl);
+  // Anyone holding the invite code can mint a receipt from the public
+  // accept-policy endpoint, so a receipt arriving with an app handoff link
+  // proves nothing about consent. Link joins start without one — and drop any
+  // retained same-relay receipt — so only the native `invite-consent` stage
+  // can supply the receipt they claim with.
+  const trustsReceipt = input.source !== "deep-link-join";
   const existing = loadCommunityOnboardingTransaction(storage);
   if (existing?.relayUrl === relayUrl) {
     const updated = {
@@ -162,7 +171,9 @@ export function startCommunityOnboarding(
       communityName: input.communityName?.trim() || existing.communityName,
       token: input.token?.trim() || existing.token,
       reposDir: input.reposDir ?? existing.reposDir,
-      policyReceipt: input.policyReceipt ?? existing.policyReceipt,
+      policyReceipt: trustsReceipt
+        ? (input.policyReceipt ?? existing.policyReceipt)
+        : undefined,
       updatedAt: now.toISOString(),
       error: undefined,
       // A freshly opened link deserves fresh feedback — re-present the gate
@@ -184,7 +195,7 @@ export function startCommunityOnboarding(
     communityName: input.communityName?.trim() || deriveCommunityName(relayUrl),
     token: input.token?.trim() || undefined,
     reposDir: input.reposDir,
-    policyReceipt: input.policyReceipt,
+    policyReceipt: trustsReceipt ? input.policyReceipt : undefined,
     createdAt: timestamp,
     updatedAt: timestamp,
   };
