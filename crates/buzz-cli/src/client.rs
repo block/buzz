@@ -708,7 +708,7 @@ impl BuzzClient {
 
     /// The WebSocket upgrade headers: the CLI's `User-Agent`, and the NIP-FI
     /// assertion when there is an evidence source.
-    async fn upgrade_headers(&self) -> Result<buzz_ws_client::HeaderMap, CliError> {
+    pub(crate) async fn upgrade_headers(&self) -> Result<buzz_ws_client::HeaderMap, CliError> {
         let mut headers = buzz_ws_client::HeaderMap::new();
         headers.insert(
             "user-agent",
@@ -1355,6 +1355,20 @@ impl BuzzClient {
             }
         }
         result
+    }
+
+    /// WebSocket URL for this client's relay.
+    ///
+    /// Long-lived subscriptions (`buzz feed watch`) need to open their own
+    /// connection rather than going through the one-shot publish helper, so the
+    /// URL conversion is exposed instead of duplicated at the call site.
+    pub fn ws_url(&self) -> &str {
+        &self.ws_url
+    }
+
+    /// The NIP-OA authorization tag to include in AUTH events, when configured.
+    pub fn auth_tag(&self) -> Option<&Tag> {
+        self.credentials.auth_tag().map(|t| &t.tag)
     }
 
     /// Publish an ephemeral event via WebSocket with NIP-42 authentication.
