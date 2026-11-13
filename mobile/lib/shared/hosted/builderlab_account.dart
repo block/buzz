@@ -420,6 +420,16 @@ class BuilderlabAccountClient {
 
   Future<void> clearLocalSession() => _serial(_clear);
   Future<void> _clear() async {
+    // A session saved but not yet restored (an offline launch) still backs
+    // the push stops that follow, so read it before deleting it.
+    var signedOut = _credential;
+    if (signedOut == null) {
+      try {
+        signedOut = (await _readRecord())?.credential;
+      } on AccountFailure {
+        // Unreadable: there is no credential to keep.
+      }
+    }
     // Attempt both removals so one failure never leaves the other copy live.
     var failed = false;
     try {
@@ -433,15 +443,22 @@ class BuilderlabAccountClient {
       failed = true;
     }
     if (failed) {
+      // The record may already be gone, so an unrestored session's credential
+      // must survive for the retry's push stops.
+      if (_credential == null && signedOut != null) {
+        _signedOut = (
+          credential: signedOut,
+          until: DateTime.now().add(pushStopWindow),
+        );
+      }
       // The account stays signed in, so the extension gets its copy back.
       _unshared = _credential;
       _share();
       throw AccountFailure.storage;
     }
-    final credential = _credential;
-    if (credential != null) {
+    if (signedOut != null) {
       _signedOut = (
-        credential: credential,
+        credential: signedOut,
         until: DateTime.now().add(pushStopWindow),
       );
     }

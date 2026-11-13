@@ -47,8 +47,11 @@ void main() {
     late int assertionLifetime;
     late String Function(String relayUrl) tokenFor;
 
-    BuilderlabAccountClient organizationClient() => BuilderlabAccountClient(
+    BuilderlabAccountClient organizationClient({
+      Future<void> Function(String?)? onSessionChanged,
+    }) => BuilderlabAccountClient(
       accountOrigin: organization,
+      onSessionChanged: onSessionChanged,
       httpClient: MockClient((request) async {
         requests.add(request);
         expect(request.url.origin, organization.origin);
@@ -388,6 +391,37 @@ void main() {
         requests.map((request) => request.url.path),
         isNot(contains('/api/goose/v1/buzz/identity/assertions')),
       );
+    });
+
+    test('a push stop still gets an assertion after signing out a saved '
+        'session that was never restored, across a failed cleanup', () async {
+      // An offline launch keeps the saved session without adopting it.
+      await saveSession();
+      // The first cleanup deletes the record, then fails to unshare.
+      var unshareFails = true;
+      final account = organizationClient(
+        onSessionChanged: (_) async {
+          if (unshareFails) throw StateError('unshare failed');
+        },
+      );
+      final auth = relayAuth(account);
+      boundIdentity = {'pubkey_hex': keys.public};
+
+      await expectLater(
+        account.clearLocalSession(),
+        throwsA(AccountFailure.storage),
+      );
+      unshareFails = false;
+      await account.clearLocalSession();
+      expect(await account.restore(), isNull);
+      requests.clear();
+      tokenFor = (_) => 'push-stop-token';
+      expect(await auth.headers(relay, background: true), {
+        'Nostr-Federated-Identity': 'Bearer push-stop-token',
+      });
+      expect(requests.last.headers['X-BB-Session-Credential'], 'org-secret');
+      expect(await auth.headers(relay), isEmpty);
+      expect(account.account, isNull);
     });
 
     test('other relays never receive the organization assertion', () async {

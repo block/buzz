@@ -23,6 +23,7 @@ import 'hosted_join_policy.dart';
 
 part 'hosted_flow_identity_recovery.dart';
 part 'hosted_flow_backup_consent.dart';
+part 'hosted_flow_intent.dart';
 
 enum HostedFlowStage {
   idle,
@@ -1113,9 +1114,22 @@ class HostedFlow extends ChangeNotifier {
     });
   }
 
-  Future<void> leave({bool noCommunities = false}) async {
+  /// Ends the account session for a sign-out that also removes this device's
+  /// communities. Unlike [signOutAccount] it publishes no stage while it runs,
+  /// so hosted setup never covers the screen that asked, and a failure throws
+  /// to the caller instead of blocking the flow.
+  Future<void> endAccountSession() async {
+    _abandon();
+    await browser.cancel();
+    await browser.clearIntent();
+    await account.clearLocalSession();
+    if (!_disposed && stage != HostedFlowStage.idle) {
+      _set(HostedFlowStage.idle);
+    }
+  }
+
+  void _abandon({bool noCommunities = false}) {
     _nextGeneration();
-    final generation = _generation;
     _target = null;
     _importRequested = false;
     _pairedPubkey = null;
@@ -1124,6 +1138,11 @@ class HostedFlow extends ChangeNotifier {
     accountOnly = false;
     _clearCommunityBatch();
     noCommunitiesToAdd = noCommunities;
+  }
+
+  Future<void> leave({bool noCommunities = false}) async {
+    _abandon(noCommunities: noCommunities);
+    final generation = _generation;
     try {
       await browser.cancel();
       if (_disposed || generation != _generation) return;
@@ -1134,46 +1153,6 @@ class HostedFlow extends ChangeNotifier {
         _set(HostedFlowStage.blocked, HostedFlowProblem.retry);
       }
     }
-  }
-
-  static Map<String, String> _encode(BuzzDeepLink target) {
-    if (target is HostedCreateCommunity) {
-      return {'type': 'create', 'name': target.name};
-    }
-    if (target is NostrBindDeepLink) return {'type': 'bind', ...target.fields};
-    if (target is AddCommunityDeepLink) {
-      return {'type': 'add', 'relay': target.relayUrl, 'name': target.name};
-    }
-    final invite = target as InviteDeepLink;
-    return {
-      'type': 'invite',
-      'relay': invite.relayUrl,
-      'code': invite.code,
-      if (invite.policyReceipt != null) 'policy_receipt': invite.policyReceipt!,
-    };
-  }
-
-  static BuzzDeepLink? _decode(Map<String, String> intent) {
-    if (intent['type'] == 'create') {
-      final name = intent['name'];
-      return name != null && HostedCreateCommunity.validName(name)
-          ? HostedCreateCommunity(name)
-          : null;
-    }
-    final fields = Map<String, String>.of(intent)
-      ..remove('type')
-      ..remove('import_identity')
-      ..remove('paired_pubkey')
-      ..remove('paired_protection');
-    final host = switch (intent['type']) {
-      'bind' => 'nostr-bind',
-      'add' => 'add-community',
-      'invite' => 'join',
-      _ => '',
-    };
-    return parseBuzzDeepLink(
-      Uri(scheme: 'buzz', host: host, queryParameters: fields),
-    );
   }
 
   @override
