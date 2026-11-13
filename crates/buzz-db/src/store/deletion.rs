@@ -128,6 +128,37 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "workflows",
 ];
 
+/// Tenant tables that a later release's expand migration adds.
+///
+/// The catalog accepts each one present or absent; when present, the purge
+/// deletes its rows and verification proves it empty. Listing a table here in
+/// a release deployed before its migration keeps community deletion working
+/// before and after the migration, in a mixed fleet, and after a rollback to
+/// this release. The release that ships the table moves it to
+/// [`EXPECTED_SCOPED_TABLES`] and [`PURGE_SCOPED_TABLES`]. These tables have
+/// no foreign keys, so purge order does not matter.
+pub const PENDING_SCOPED_TABLES: &[&str] = &[
+    "identity_retirement_actions",
+    "identity_retirement_holds",
+    "identity_retirement_workflows",
+];
+
+/// Tenant tables an expand migration may add between a deletion's approval
+/// and its execution.
+///
+/// An approved catalog is otherwise exact: the executor rejects a frozen table
+/// that is gone and any table added after approval that is not listed here
+/// (`validate_approved_schema` in `buzz-deletion`). Each entry must be one
+/// this release purges and verifies, in [`EXPECTED_SCOPED_TABLES`] or
+/// [`PENDING_SCOPED_TABLES`]. A table stays here after it moves out of
+/// `PENDING_SCOPED_TABLES`, so a request approved before its migration still
+/// runs on the release that requires it.
+pub const APPROVAL_FORWARD_TABLES: &[&str] = &[
+    "identity_retirement_actions",
+    "identity_retirement_holds",
+    "identity_retirement_workflows",
+];
+
 /// Control-plane tables with community provenance that the tenant purge does
 /// not own. Keep this list separate from the expected tenant table manifest so
 /// catalog validation still detects newly introduced tenant tables.
@@ -2372,7 +2403,8 @@ impl DeletionStore {
         }
         // The order is child-before-parent/FK-safe, not alphabetical. Cascades
         // can make later units observe zero rows; each scoped WHERE stays idempotent.
-        for table in PURGE_SCOPED_TABLES {
+        let pending = live_pending_tables_on(&mut tx).await?;
+        for table in pending.iter().chain(PURGE_SCOPED_TABLES) {
             let sql = format!("DELETE FROM {table} WHERE community_id = $1");
             let affected = sqlx::query(AssertSqlSafe(sql))
                 .bind(token.community_id.as_uuid())
@@ -2478,8 +2510,10 @@ impl DeletionStore {
                 token.community_id
             )));
         }
+        let pending = live_pending_tables_on(&mut tx).await?;
         let scoped = EXPECTED_SCOPED_TABLES
             .iter()
+            .chain(&pending)
             .map(|table| (*table, format!("FROM {table} WHERE community_id = $1")));
         let relay_admin = RELAY_ADMIN_TABLES
             .iter()
@@ -3480,7 +3514,8 @@ async fn validate_catalog_on(conn: &mut PgConnection) -> Result<()> {
         .copied()
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
-    let live_tables = live_scoped_tables_on(conn).await?;
+    let mut live_tables = live_scoped_tables_on(conn).await?;
+    live_tables.retain(|table| !PENDING_SCOPED_TABLES.contains(&table.as_str()));
     if live_tables != expected {
         let missing = expected
             .difference(&live_tables)
@@ -3498,6 +3533,17 @@ async fn validate_catalog_on(conn: &mut PgConnection) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The [`PENDING_SCOPED_TABLES`] that exist. Call under the shared
+/// schema/destruction lock so the answer holds until the transaction ends.
+async fn live_pending_tables_on(conn: &mut PgConnection) -> Result<Vec<&'static str>> {
+    let live = live_scoped_tables_on(conn).await?;
+    Ok(PENDING_SCOPED_TABLES
+        .iter()
+        .copied()
+        .filter(|table| live.contains(*table))
+        .collect())
 }
 
 async fn live_scoped_tables_on(conn: &mut PgConnection) -> Result<BTreeSet<String>> {
@@ -3992,6 +4038,23 @@ fn bound_text(input: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every table an approval may gain is one this release purges and
+    /// verifies, and every pending table may be gained after approval.
+    #[test]
+    fn approval_forward_tables_are_purged_and_cover_pending_tables() {
+        for table in APPROVAL_FORWARD_TABLES {
+            assert!(
+                EXPECTED_SCOPED_TABLES.contains(table) || PENDING_SCOPED_TABLES.contains(table),
+                "{table} is not purged by this release"
+            );
+        }
+        for table in PENDING_SCOPED_TABLES {
+            assert!(APPROVAL_FORWARD_TABLES.contains(table), "{table}");
+            assert!(!EXPECTED_SCOPED_TABLES.contains(table), "{table}");
+            assert!(!PURGE_SCOPED_TABLES.contains(table), "{table}");
+        }
+    }
 
     #[test]
     fn scoped_table_exclusions_match_sql_during_transition() {
@@ -8810,6 +8873,146 @@ DROP FUNCTION community_deletion_lock_key(UUID);
         .fetch_one(&db.pool)
         .await
         .expect("count relay admin rows")
+    }
+
+    /// A deletion inventoried before a later release's expand migration and
+    /// executed after it: each pending table is accepted absent and present,
+    /// purged for the target community only, and proven empty, while a table
+    /// the release does not know still fails closed.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn pending_scoped_tables_are_optional_purged_and_verified() {
+        let (_, scratch) = scratch_desired_state_database("deletion_pending").await;
+        let db = Db::new(&DbConfig {
+            database_url: scratch.url().to_owned(),
+            max_connections: 5,
+            min_connections: 0,
+            ..DbConfig::default()
+        })
+        .await
+        .expect("connect scratch database");
+        let store = db.deletion_store();
+        store
+            .validate_catalog()
+            .await
+            .expect("pending tables absent");
+        let (request, inventory) = inventoried_request(&db, &store).await;
+        let community = *request.community_id.as_uuid();
+        let bystander = *db
+            .ensure_configured_community(&format!("bystander-{}.example", Uuid::new_v4().simple()))
+            .await
+            .expect("bystander community")
+            .id
+            .as_uuid();
+
+        // The expand migration lands after the request was inventoried.
+        for table in PENDING_SCOPED_TABLES {
+            sqlx::query(AssertSqlSafe(format!(
+                "CREATE TABLE {table} (community_id UUID NOT NULL)"
+            )))
+            .execute(&db.pool)
+            .await
+            .expect("create pending table");
+            for owner in [community, bystander] {
+                sqlx::query(AssertSqlSafe(format!(
+                    "INSERT INTO {table} (community_id) VALUES ($1)"
+                )))
+                .bind(owner)
+                .execute(&db.pool)
+                .await
+                .expect("seed pending table");
+            }
+        }
+        store
+            .validate_catalog()
+            .await
+            .expect("pending tables present");
+        sqlx::query("CREATE TABLE deletion_unknown_scoped (community_id UUID NOT NULL)")
+            .execute(&db.pool)
+            .await
+            .expect("create unknown table");
+        let error = store
+            .validate_catalog()
+            .await
+            .expect_err("an unknown tenant table fails closed");
+        assert!(
+            error
+                .to_string()
+                .contains("unknown=deletion_unknown_scoped"),
+            "{error}"
+        );
+        sqlx::query("DROP TABLE deletion_unknown_scoped")
+            .execute(&db.pool)
+            .await
+            .expect("drop unknown table");
+
+        store
+            .approve(request.id, "approver", None)
+            .await
+            .expect("approve");
+        let claim = store
+            .claim_specific(request.id, "executor", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim")
+            .expect("won claim");
+        store.begin_quiescing(&claim.lease).await.expect("quiesce");
+        let generation = store.fence(&claim.lease).await.expect("fence");
+        let token = LeaseToken {
+            fence_generation: Some(generation),
+            ..claim.lease
+        };
+        store
+            .freeze_destructive_storage_manifest(&token, &inventory.storage)
+            .await
+            .expect("freeze destructive storage");
+        store.mark_drained(&token).await.expect("drain");
+        store
+            .mark_bindings_removed(&token, serde_json::json!({"keys": 0}))
+            .await
+            .expect("bindings");
+        let deleted = store.purge_postgres(&token).await.expect("purge postgres");
+        for table in PENDING_SCOPED_TABLES {
+            assert_eq!(deleted.get(*table), Some(&1), "{table}");
+        }
+        store
+            .mark_cache_purged(&token, serde_json::json!({"keys": 0}))
+            .await
+            .expect("cache");
+
+        // Verification covers the pending tables too: a straggler fails it.
+        for table in PENDING_SCOPED_TABLES {
+            let insert = format!("INSERT INTO {table} (community_id) VALUES ($1)");
+            sqlx::query(AssertSqlSafe(insert))
+                .bind(community)
+                .execute(&db.pool)
+                .await
+                .expect("seed straggler");
+            let error = store
+                .verify_postgres_logically_deleted(&token)
+                .await
+                .expect_err("a straggler in a pending table fails verification");
+            assert!(error.to_string().contains(table), "{error}");
+            let delete = format!("DELETE FROM {table} WHERE community_id = $1");
+            sqlx::query(AssertSqlSafe(delete))
+                .bind(community)
+                .execute(&db.pool)
+                .await
+                .expect("remove straggler");
+        }
+        store
+            .verify_postgres_logically_deleted(&token)
+            .await
+            .expect("verify");
+        for table in PENDING_SCOPED_TABLES {
+            let kept: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
+                "SELECT count(*) FROM {table} WHERE community_id = $1"
+            )))
+            .bind(bystander)
+            .fetch_one(&db.pool)
+            .await
+            .expect("count bystander rows");
+            assert_eq!(kept, 1, "{table} keeps the bystander's row");
+        }
     }
 
     /// Report-backed staff actions FK `moderation_reports`, and outbox rows FK
