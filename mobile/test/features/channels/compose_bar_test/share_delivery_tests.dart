@@ -35,12 +35,16 @@ void shareDeliveryTests() {
       ProviderScope.containerOf(
         tester.element(find.byType(ComposeBar)),
       ).read(composerShareInboxProvider.notifier).deliver('channel-1', pending);
-      for (var i = 0; i < 4; i++) {
+      // The composer deletes the pending share once its files are copied.
+      final pendingDirectory = Directory('${shares.path}/${pending.id}');
+      for (var i = 0; i < 100 && pendingDirectory.existsSync(); i++) {
         await tester.runAsync(
-          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+          () => Future<void>.delayed(const Duration(milliseconds: 10)),
         );
         await tester.pump();
       }
+      expect(pendingDirectory.existsSync(), isFalse);
+      await tester.pump();
     }
 
     String? draftText() => ProviderScope.containerOf(
@@ -74,9 +78,6 @@ void shareDeliveryTests() {
     expect(draftText(), 'My draft\nhttps://example.org/a');
     expect(find.byTooltip('Remove attachment'), findsOneWidget);
     // The composer owns copies, so the app group's are removed.
-    await tester.runAsync(
-      () => Future<void>.delayed(const Duration(milliseconds: 20)),
-    );
     expect(shares.listSync(), isEmpty);
 
     await deliver(share('22222222-2222-4222-8222-222222222222', ['Fresh'], []));

@@ -967,6 +967,10 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                                   mentionPubkeys,
                                 );
                               }
+                              final donate = activeShareSuggestionDonor(ref);
+                              final displayName = resolvedChannel.displayLabel(
+                                currentPubkey: ref.read(myPubkeyProvider),
+                              );
                               await sendMessage.call(
                                 channelId: channel.id,
                                 content: content,
@@ -974,12 +978,9 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                                 channel: resolvedChannel,
                                 mediaTags: mediaTags,
                               );
-                              donateActiveShareSuggestion(
-                                ref,
+                              donate(
                                 channelId: channel.id,
-                                displayName: resolvedChannel.displayLabel(
-                                  currentPubkey: ref.read(myPubkeyProvider),
-                                ),
+                                displayName: displayName,
                                 recipientCount: resolvedChannel.memberCount - 1,
                               );
                             },

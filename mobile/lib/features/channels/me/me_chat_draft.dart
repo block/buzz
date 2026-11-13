@@ -120,6 +120,7 @@ class _MeChatDraft extends HookConsumerWidget {
       }
       busy.value = true;
       error.value = null;
+      final donate = activeShareSuggestionDonor(ref);
       try {
         final result = await _createMeChat(
           ref,
@@ -136,8 +137,7 @@ class _MeChatDraft extends HookConsumerWidget {
           initialMediaTags: mediaTags,
         );
         // The first message is a top-level send in the new Solo chat.
-        donateActiveShareSuggestion(
-          ref,
+        donate(
           channelId: result.id,
           displayName: result.name,
           recipientCount: 1,

@@ -40,23 +40,28 @@ Future<void> donateShareSuggestion({
 }
 
 /// Donates a conversation in the active community after a top-level send.
-void donateActiveShareSuggestion(
-  WidgetRef ref, {
-  required String channelId,
-  required String displayName,
-  required int recipientCount,
-}) {
-  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+typedef ShareSuggestionDonor =
+    void Function({
+      required String channelId,
+      required String displayName,
+      required int recipientCount,
+    });
+
+/// Reads the active community before a send starts, so the donation after it
+/// never touches a [WidgetRef] the awaited send may have outlived.
+ShareSuggestionDonor activeShareSuggestionDonor(WidgetRef ref) {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return _skipDonation;
   // Sending means the signed-in app already resolved its active community;
   // never start loading it just to donate.
   final community = ref.exists(activeCommunityProvider)
       ? ref.read(activeCommunityProvider).asData?.value
       : null;
-  if (community == null) {
-    debugPrint('share-suggestions: no active community after a send');
-    return;
-  }
-  unawaited(
+  if (community == null) return _skipDonation;
+  return ({
+    required channelId,
+    required displayName,
+    required recipientCount,
+  }) => unawaited(
     donateShareSuggestion(
       communityId: community.id,
       channelId: channelId,
@@ -65,3 +70,9 @@ void donateActiveShareSuggestion(
     ),
   );
 }
+
+void _skipDonation({
+  required String channelId,
+  required String displayName,
+  required int recipientCount,
+}) {}

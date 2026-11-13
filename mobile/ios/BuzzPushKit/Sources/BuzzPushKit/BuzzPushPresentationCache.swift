@@ -810,6 +810,13 @@ public enum BuzzPushPresentationIdentity {
     String(decoding: try! JSONEncoder().encode([communityID, channelID]), as: UTF8.self)
   }
 
+  /// Groups a conversation's notifications in Notification Center. It keeps
+  /// the hashed form notifications were already delivered under, so an
+  /// upgrade doesn't split a conversation into two groups.
+  public static func notificationThread(communityID: String, channelID: String) -> String {
+    scoped(namespace: "conversation", values: [communityID, channelID])
+  }
+
   public static func sender(communityID: String, pubkey: String) -> String {
     scoped(namespace: "sender", values: [communityID, pubkey.lowercased()])
   }

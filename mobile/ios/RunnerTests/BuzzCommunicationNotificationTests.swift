@@ -91,7 +91,7 @@ final class BuzzCommunicationNotificationTests: XCTestCase {
       title: displayName,
       body: "Hello Buzz",
       subtitle: "Community",
-      threadIdentifier: BuzzPushPresentationIdentity.conversation(
+      threadIdentifier: BuzzPushPresentationIdentity.notificationThread(
         communityID: communityID,
         channelID: channelID
       ),
