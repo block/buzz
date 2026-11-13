@@ -24,6 +24,7 @@ import { recoverLocalStorageQuotaOnStartup } from "@/shared/lib/localStorageQuot
 import { startLocalStorageSweep } from "@/shared/lib/localStorageSweep";
 import { initializeConversationDensityPreference } from "@/shared/lib/conversationDensityPreference";
 import { initializeFontSizePreference } from "@/shared/lib/fontSizePreference";
+import { initializeBackdropFilterSupport } from "@/shared/lib/backdropFilterSupport";
 
 type E2eWindow = Window & {
   __BUZZ_E2E__?: unknown;
@@ -138,6 +139,7 @@ async function bootstrap() {
   initializeFontSizePreference();
   startLocalStorageSweep();
   await installE2eBridgeIfConfigured();
+  void initializeBackdropFilterSupport();
   await migrateLegacyCommunityStorageBeforeRender();
   renderApp();
 }
