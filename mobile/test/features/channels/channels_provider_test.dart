@@ -1908,6 +1908,282 @@ void main() {
     expect(session.metadataPageRequestCount, initialDirectoryRequests);
   });
 
+  group('search directory load on a loaded list', () {
+    const channelC = '33333333-3333-4333-8333-333333333333';
+
+    Future<ProviderContainer> loaded(_FakeRelaySession session) async {
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      // Let the first load's detached unread catch-up finish.
+      await _settle();
+      return container;
+    }
+
+    List<String> listedIds(ProviderContainer container) => container
+        .read(channelsProvider)
+        .requireValue
+        .map((channel) => channel.id)
+        .toList();
+
+    test('reads only the directory and keeps joined channels', () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [
+          _meta(id: _channelA, name: 'general'),
+          _meta(id: _channelB, name: 'discoverable'),
+        ],
+      );
+      final container = await loaded(session);
+      final joined = container.read(channelsProvider).requireValue.single;
+      final memberships = session.membershipRequestCount;
+      final histories = session.historyFilters.length;
+      final batches = session.queryBatches.length;
+
+      session.metadata = [
+        _meta(id: _channelA, name: 'general'),
+        _meta(
+          id: _channelB,
+          name: 'discoverable',
+          visibility: 'private',
+          createdAt: 2,
+        ),
+        _meta(id: channelC, name: 'new-open'),
+      ];
+      await container
+          .read(channelsProvider.notifier)
+          .ensureDirectoryLoaded(maxAge: Duration.zero);
+
+      // No roster, member metadata, hidden-DM, Huddle or message reads.
+      expect(session.membershipRequestCount, memberships);
+      expect(session.historyFilters, hasLength(histories));
+      expect(session.queryBatches, hasLength(batches));
+      expect(session.directoryQueryFilters, isNotEmpty);
+      expect(listedIds(container), unorderedEquals([_channelA, channelC]));
+      final listed = container.read(channelsProvider).requireValue;
+      expect(listed.firstWhere((c) => c.id == _channelA), same(joined));
+      expect(listed.firstWhere((c) => c.id == channelC).isMember, isFalse);
+      expect(
+        container.read(channelDirectoryLoadStatusProvider).status,
+        ChannelDirectoryLoadStatus.loaded,
+      );
+    });
+
+    test('a membership refresh during the load is kept', () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [
+          _meta(id: _channelA, name: 'general'),
+          _meta(id: _channelB, name: 'discoverable'),
+          _meta(id: _channelD, name: 'joined-elsewhere'),
+        ],
+      );
+      final container = await loaded(session);
+
+      session.pauseNextDirectoryQuery();
+      final directory = container
+          .read(channelsProvider.notifier)
+          .ensureDirectoryLoaded(maxAge: Duration.zero);
+      await session.nextDirectoryQueryStarted;
+
+      // Joining on another device lands while the directory is in flight.
+      session.memberships = [
+        _membership(_channelA, myPk),
+        _membership(_channelD, myPk),
+      ];
+      await container.read(channelsProvider.notifier).refresh();
+      expect(
+        container.read(channelDirectoryLoadStatusProvider).status,
+        ChannelDirectoryLoadStatus.loading,
+      );
+
+      session.resumePausedDirectoryQuery();
+      await directory;
+      await _settle();
+
+      final listed = container.read(channelsProvider).requireValue;
+      expect(
+        listed.map((c) => c.id),
+        unorderedEquals([_channelA, _channelB, _channelD]),
+      );
+      expect(listed.firstWhere((c) => c.id == _channelD).isMember, isTrue);
+      expect(listed.firstWhere((c) => c.id == _channelB).isMember, isFalse);
+      expect(
+        container.read(channelDirectoryLoadStatusProvider).status,
+        ChannelDirectoryLoadStatus.loaded,
+      );
+    });
+
+    test(
+      'a refresh that merged the directory before it landed keeps it',
+      () async {
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [
+            _meta(id: _channelA, name: 'general'),
+            _meta(id: _channelB, name: 'discoverable'),
+          ],
+        );
+        final container = await loaded(session);
+
+        // The refresh merges the directory it has (none) and then waits for
+        // its latest messages while the search load completes.
+        final gate = Completer<void>();
+        session.latestBatchGate = gate;
+        final refresh = container.read(channelsProvider.notifier).refresh();
+        await _waitUntil(() => session.latestBatchGate == null);
+        await container
+            .read(channelsProvider.notifier)
+            .ensureDirectoryLoaded(maxAge: Duration.zero);
+        expect(listedIds(container), unorderedEquals([_channelA, _channelB]));
+
+        gate.complete();
+        await refresh;
+
+        expect(listedIds(container), unorderedEquals([_channelA, _channelB]));
+      },
+    );
+
+    test('a community switch discards the response', () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [
+          _meta(id: _channelA, name: 'general'),
+          _meta(id: _channelB, name: 'community-a-open'),
+        ],
+      );
+      final container = await loaded(session);
+      final communityB = channelDirectoryScope(
+        'https://community-b.example',
+        container.read(myPubkeyProvider),
+      );
+
+      session.pauseNextDirectoryQuery();
+      final directory = container
+          .read(channelsProvider.notifier)
+          .ensureDirectoryLoaded(maxAge: Duration.zero);
+      await session.nextDirectoryQueryStarted;
+
+      session.memberships = [_membership(_channelD, myPk)];
+      session.metadata = [_meta(id: _channelD, name: 'community-b-general')];
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: 'https://community-b.example');
+      await container.read(channelsProvider.future);
+
+      session.resumePausedDirectoryQuery();
+      await directory;
+      await _settle();
+
+      expect(listedIds(container), [_channelD]);
+      expect(
+        container.read(channelDirectoryLoadStatusProvider).scope,
+        isNot(communityB),
+      );
+    });
+
+    test(
+      'returning to a community during a discarded load loads again',
+      () async {
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [
+            _meta(id: _channelA, name: 'general'),
+            _meta(id: _channelB, name: 'community-a-open'),
+          ],
+        );
+        final container = await loaded(session);
+        final communityA = container.read(relayConfigProvider).baseUrl;
+
+        session.pauseNextDirectoryQuery();
+        final directory = container
+            .read(channelsProvider.notifier)
+            .ensureDirectoryLoaded(maxAge: Duration.zero);
+        await session.nextDirectoryQueryStarted;
+
+        container
+            .read(relayConfigProvider.notifier)
+            .update(baseUrl: 'https://community-b.example');
+        await container.read(channelsProvider.future);
+        container
+            .read(relayConfigProvider.notifier)
+            .update(baseUrl: communityA);
+        await container.read(channelsProvider.future);
+        await _settle();
+        final directoryQueries = session.directoryQueryFilters.length;
+        await container
+            .read(channelsProvider.notifier)
+            .ensureDirectoryLoaded(maxAge: Duration.zero);
+
+        expect(
+          session.directoryQueryFilters.length,
+          greaterThan(directoryQueries),
+        );
+        expect(
+          container.read(channelDirectoryLoadStatusProvider).status,
+          ChannelDirectoryLoadStatus.loaded,
+        );
+
+        // The old request ending later leaves the newer load's status alone.
+        session.resumePausedDirectoryQuery();
+        await directory;
+        await _settle();
+        expect(
+          container.read(channelDirectoryLoadStatusProvider).status,
+          ChannelDirectoryLoadStatus.loaded,
+        );
+      },
+    );
+
+    test(
+      'returning to a community after a discarded load loads again',
+      () async {
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [
+            _meta(id: _channelA, name: 'general'),
+            _meta(id: _channelB, name: 'community-a-open'),
+          ],
+        );
+        final container = await loaded(session);
+        final communityA = container.read(relayConfigProvider).baseUrl;
+
+        session.pauseNextDirectoryQuery();
+        final directory = container
+            .read(channelsProvider.notifier)
+            .ensureDirectoryLoaded(maxAge: Duration.zero);
+        await session.nextDirectoryQueryStarted;
+
+        container
+            .read(relayConfigProvider.notifier)
+            .update(baseUrl: 'https://community-b.example');
+        await container.read(channelsProvider.future);
+        session.resumePausedDirectoryQuery();
+        await directory;
+        await _settle();
+
+        container
+            .read(relayConfigProvider.notifier)
+            .update(baseUrl: communityA);
+        await container.read(channelsProvider.future);
+        await _settle();
+        final directoryQueries = session.directoryQueryFilters.length;
+        await container
+            .read(channelsProvider.notifier)
+            .ensureDirectoryLoaded(maxAge: Duration.zero);
+
+        expect(
+          session.directoryQueryFilters.length,
+          greaterThan(directoryQueries),
+        );
+        expect(
+          container.read(channelDirectoryLoadStatusProvider).status,
+          ChannelDirectoryLoadStatus.loaded,
+        );
+      },
+    );
+  });
+
   test('membership refresh does not refetch a loaded directory', () async {
     final session = _FakeRelaySession(
       memberships: [_membership(_channelA, myPk)],
@@ -3408,6 +3684,9 @@ class _FakeRelaySession extends RelaySessionNotifier {
 
   /// While set, member metadata reads wait for it to complete.
   Completer<void>? metadataGate;
+  // Holds the next latest-message batch, which a list refresh awaits after it
+  // has merged the directory.
+  Completer<void>? latestBatchGate;
   final List<List<NostrFilter>> queryBatches = [];
   Object? messageBatchError;
   Object? latestBatchError;
@@ -3430,6 +3709,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
   Completer<void>? _pausedSubscribe;
   Completer<void>? _subscribeStarted;
   Completer<void>? _pausedDirectory;
+  bool _pauseClaimed = false;
   Completer<void>? _directoryStarted;
   Completer<void>? _pausedHiddenDm;
   Completer<void>? _hiddenDmStarted;
@@ -3752,11 +4032,15 @@ class _FakeRelaySession extends RelaySessionNotifier {
       // active when the response is released.
       final directorySnapshot = List.of(metadata);
       final paused = _pausedDirectory;
-      if (paused != null) {
+      // Only the first query after the pause waits; a later one meanwhile
+      // (a new scope's load) answers at once.
+      if (paused != null && !_pauseClaimed) {
+        _pauseClaimed = true;
         _directoryStarted!.complete();
         await paused.future;
         _pausedDirectory = null;
         _directoryStarted = null;
+        _pauseClaimed = false;
       }
       if (directoryFailures > 0) {
         directoryFailures--;
@@ -3790,6 +4074,11 @@ class _FakeRelaySession extends RelaySessionNotifier {
     final isUnreadCatchUp =
         filters.isNotEmpty && filters.every((filter) => filter.since != null);
     if (!isUnreadCatchUp && latestBatchError != null) throw latestBatchError!;
+    if (!isUnreadCatchUp) {
+      final gate = latestBatchGate;
+      latestBatchGate = null;
+      await gate?.future;
+    }
     final messageSnapshot = List.of(recentMessages);
     if (isUnreadCatchUp) {
       // Claim the parked slot so the refresh that follows the switch can run

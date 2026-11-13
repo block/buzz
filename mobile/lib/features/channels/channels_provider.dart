@@ -227,7 +227,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _confirmedJoins.clear();
       // Retire any in-flight directory request: its response describes the
       // previous relay or identity and must not reach this scope's state.
-      _refreshCoordinator.retireInFlight();
+      _refreshCoordinator.retireScope();
     }
     final snapshot =
         (_hasLoaded ? state.value : null) ??
@@ -429,6 +429,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         _directoryMetasScope = fence.scope;
       }
     }
+    final directoryMetas = _directoryMetas;
 
     // Merge and dedupe by `d` tag. Kind:39000 is parameterized-replaceable,
     // but stale revisions from before the relay's d_tag backfill can linger.
@@ -579,14 +580,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       }
     }
 
-    channels.sort((left, right) {
-      final typeOrder =
-          (_channelTypeOrder[left.channelType] ?? 99) -
-          (_channelTypeOrder[right.channelType] ?? 99);
-      if (typeOrder != 0) return typeOrder;
-      // Case-insensitive to match desktop's `localeCompare` ordering.
-      return left.name.toLowerCase().compareTo(right.name.toLowerCase());
-    });
+    // A directory-only load that landed during the awaits above is newer.
+    if (!identical(directoryMetas, _directoryMetas)) {
+      _replaceDirectoryChannels(channels);
+    }
+    _sortChannels(channels);
 
     // Details are a separate cache. Invalidate changes that would otherwise
     // overwrite fresh Solo identity or archive state when opening a channel.
@@ -596,20 +594,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // after the await.
     fence.ensureCurrent();
 
-    final prevById = <String, Channel>{
-      for (final c in state.value ?? const <Channel>[]) c.id: c,
-    };
-    for (final channel in channels) {
-      final prev = prevById[channel.id];
-      if (prev == null ||
-          prev.isArchived != channel.isArchived ||
-          prev.channelType != channel.channelType ||
-          prev.visibility != channel.visibility ||
-          prev.createdBy != channel.createdBy ||
-          !listEquals(prev.labels, channel.labels)) {
-        ref.invalidate(channelDetailsProvider(channel.id));
-      }
-    }
+    final prevById = _invalidateChangedDetails(channels, state.value);
 
     // Layer live delivery onto the already-built snapshot without making EOSE
     // part of the provider's readiness path. Every refresh queues a generation;
@@ -1080,11 +1065,14 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
             fresh)) {
       return;
     }
-    await retryDirectory();
+    await retryDirectory(directoryOnly: true);
   }
 
   /// Retries channel discovery while retaining the current channel list.
-  Future<void> retryDirectory() async {
+  ///
+  /// With [directoryOnly], a list that has loaded its memberships reads only
+  /// the directory again; joined channels keep their entries.
+  Future<void> retryDirectory({bool directoryOnly = false}) async {
     final directoryStatus = ref.read(
       channelDirectoryLoadStatusProvider.notifier,
     );
@@ -1115,6 +1103,15 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     }
     if (!ref.mounted || generation != _buildGeneration) return;
     final previousChannels = state.value;
+    if (directoryOnly && _hasLoaded && previousChannels != null) {
+      // The list has its memberships, so only the directory is read again.
+      final saveSnapshot = _saveSnapshot;
+      final channels = await _loadDirectoryOnly(() => state.value);
+      if (channels == null) return;
+      state = AsyncData(channels);
+      saveSnapshot?.call(channels, _hiddenDmIds);
+      return;
+    }
     try {
       state = AsyncData(
         await _fetch(
