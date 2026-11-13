@@ -1,5 +1,7 @@
 import 'package:duo_kit/duo_kit.dart';
+
 import 'duo_toolbar.dart';
+
 import 'dart:math' show max;
 
 import 'package:flutter/material.dart';
@@ -312,6 +314,41 @@ class FrostedAppBar extends StatelessWidget {
         );
       }
       final offset = IosNavigationScrollScope.maybeOf(context);
+      // The bar reads the scroll offset itself, so scrolling rebuilds only
+      // the frame around it, not its native payload.
+      final nativeBar = IosNavigationBar(
+        centerTitleInPane: strip != null && !nativeLargeTitle,
+        titleInsets: nativeTitleInsets == EdgeInsets.zero
+            ? railInsets
+            : nativeTitleInsets,
+        alignCollapsedTitleToLeading: strip != null && nativeLargeTitle,
+        horizontalControls:
+            strip != null &&
+            ((leadingAction?.keepInHeaderOnDuo ?? false) ||
+                trailingActions.any((action) => action.keepInHeaderOnDuo)),
+        onReadyChanged: onNativeReadyChanged,
+        title: nativeTitle ?? (title is Text ? (title as Text).data ?? '' : ''),
+        subtitle: nativeSubtitle,
+        ephemeralLabel: nativeEphemeralLabel,
+        titleAvatar: nativeTitleAvatar,
+        titleAvatars: nativeTitleAvatars,
+        titleMaxWidth: nativeTitleMaxWidth,
+        titlePresenceColor: nativeTitlePresenceColor,
+        titleRefreshing: nativeTitleRefreshing,
+        onTitlePressed: onNativeTitlePressed,
+        largeTitle: nativeLargeTitle,
+        alwaysFrosted: alwaysFrosted || strip != null,
+        foregroundColor: iconColor,
+        leading: strip == null || (leadingAction?.keepInHeaderOnDuo ?? false)
+            ? leadingAction
+            : null,
+        onBack: strip == null ? onBack : null,
+        actions: strip == null
+            ? trailingActions
+            : trailingActions
+                  .where((action) => action.keepInHeaderOnDuo)
+                  .toList(),
+      );
       Widget buildNative(double scrollOffset) {
         // Scrolling tracks the finger directly; only the search focus change
         // uses the coordinated layout transition.
@@ -345,46 +382,7 @@ class FrostedAppBar extends StatelessWidget {
                   left: 0,
                   right: 0,
                   height: barHeight,
-                  child: IosNavigationBar(
-                    centerTitleInPane: strip != null && !nativeLargeTitle,
-                    titleInsets: nativeTitleInsets == EdgeInsets.zero
-                        ? railInsets
-                        : nativeTitleInsets,
-                    alignCollapsedTitleToLeading:
-                        strip != null && nativeLargeTitle,
-                    horizontalControls:
-                        strip != null &&
-                        ((leadingAction?.keepInHeaderOnDuo ?? false) ||
-                            trailingActions.any(
-                              (action) => action.keepInHeaderOnDuo,
-                            )),
-                    onReadyChanged: onNativeReadyChanged,
-                    title:
-                        nativeTitle ??
-                        (title is Text ? (title as Text).data ?? '' : ''),
-                    subtitle: nativeSubtitle,
-                    ephemeralLabel: nativeEphemeralLabel,
-                    titleAvatar: nativeTitleAvatar,
-                    titleAvatars: nativeTitleAvatars,
-                    titleMaxWidth: nativeTitleMaxWidth,
-                    titlePresenceColor: nativeTitlePresenceColor,
-                    titleRefreshing: nativeTitleRefreshing,
-                    onTitlePressed: onNativeTitlePressed,
-                    largeTitle: nativeLargeTitle,
-                    alwaysFrosted: alwaysFrosted || strip != null,
-                    foregroundColor: iconColor,
-                    leading:
-                        strip == null ||
-                            (leadingAction?.keepInHeaderOnDuo ?? false)
-                        ? leadingAction
-                        : null,
-                    onBack: strip == null ? onBack : null,
-                    actions: strip == null
-                        ? trailingActions
-                        : trailingActions
-                              .where((action) => action.keepInHeaderOnDuo)
-                              .toList(),
-                  ),
+                  child: nativeBar,
                 ),
                 if (bottom != null)
                   AnimatedPositioned(
