@@ -1,6 +1,59 @@
 part of '../channel_detail_page_test.dart';
 
 void swipeReplyTests() {
+  testWidgets(
+    'notification for a reply the open thread missed loads it in place',
+    (tester) async {
+      PendingDeepLinkNotifier.debugUriStreamOverride = const Stream.empty();
+      addTearDown(() {
+        PendingDeepLinkNotifier.debugUriStreamOverride = null;
+        pendingPushNotificationLink.value = null;
+      });
+      final root = _textMsg(
+        id: threadIdRoot,
+        pubkey: 'alice',
+        content: 'Thread head',
+      );
+      final missed = _textMsg(
+        id: threadIdA,
+        pubkey: 'alice',
+        content: 'Reply missed by the socket',
+        createdAt: 1001,
+        extraTags: [
+          ['e', threadIdRoot, '', 'reply'],
+        ],
+      );
+      final relay = _IdentityUpdateRelaySession()..membershipSnapshot = missed;
+      final messages = formatTimeline([root]);
+      await tester.pumpWidget(
+        _buildTestable(
+          signingPubkey: 'self',
+          messages: [root],
+          relaySessionNotifier: relay,
+          threadReplies: {threadIdRoot: []},
+          home: DeepLinkDispatcher(
+            child: ThreadDetailPage(
+              threadHead: messages.single,
+              allMessages: messages,
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      pendingPushNotificationLink.value = const MessageDeepLink(
+        channelId: _channelId,
+        messageId: threadIdA,
+        threadRootId: threadIdRoot,
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Reply missed by the socket'), findsOneWidget);
+    },
+  );
+
   // Solo agents answer at top level, so a Solo chat starts no threads.
   Channel soloChannel() => Channel(
     id: _channelId,
@@ -406,6 +459,8 @@ void swipeReplyTests() {
             as BoxDecoration;
     expect(highlight.color!.a, greaterThan(0));
     await tester.pumpAndSettle();
+    // Landing on an older reply exposes Latest, as a deep-link entry does.
+    expect(find.byTooltip('Jump to latest message'), findsOneWidget);
 
     // A reply below the head still opens its own branch on top.
     final swipe = await tester.startGesture(
