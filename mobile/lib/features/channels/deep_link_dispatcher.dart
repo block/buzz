@@ -404,10 +404,22 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
       ref
           .read(composerShareInboxProvider.notifier)
           .deliver(composeDraftKey(channel.id), _shares.remove(link)!);
-      // A page already showing the conversation keeps its composer, so the
-      // draft and its attachments stay with one owner.
+      // A page already open for the conversation keeps the draft and its
+      // attachments with one composer. Nothing covering it is closed, since
+      // that could discard another draft; its composer takes the share once
+      // the person goes back to it.
       final open = ref.read(openChannelRoutesProvider).latest(channel.id);
-      if (open != null && bringOpenChannelForward(open, navigator)) return;
+      if (open != null) {
+        if (!isOpenChannelShown(open, navigator)) {
+          ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+            const SnackBar(
+              content: Text('Go back to that conversation to finish sharing'),
+            ),
+            kind: ToastKind.generic,
+          );
+        }
+        return;
+      }
     }
     navigator.push(
       MaterialPageRoute<void>(

@@ -130,7 +130,7 @@ void main() {
     expect(share.files, ['${shares.path}/$_shareId/shot.png']);
   });
 
-  testWidgets('a share to a conversation already open returns to its page', (
+  testWidgets('a share to a conversation already open stays with its page', (
     tester,
   ) async {
     writeShare({
@@ -148,47 +148,20 @@ void main() {
       openPages: (navigator) => navigator
         ..push(MaterialPageRoute<void>(builder: (_) => const _OpenChannel()))
         ..push(
-          MaterialPageRoute<void>(builder: (_) => const Text('another page')),
-        ),
-    );
-
-    // One composer keeps owning the draft: no second page for the channel.
-    expect(find.text('channel-1 already open'), findsOneWidget);
-    expect(find.text('another page'), findsNothing);
-    expect(find.text('opened channel-1'), findsNothing);
-    expect(
-      container.read(composerShareInboxProvider)['channel-1']!.composerText,
-      'Look',
-    );
-  });
-
-  testWidgets('a share keeps a page that refuses to close', (tester) async {
-    writeShare({
-      'version': 1,
-      'target': shareConversationIdentifier(
-        communityId: _community.id,
-        channelId: _channel.id,
-      ),
-      'text': ['Look'],
-      'files': <String>[],
-    });
-
-    final container = await pumpDispatcher(
-      tester,
-      openPages: (navigator) => navigator
-        ..push(MaterialPageRoute<void>(builder: (_) => const _OpenChannel()))
-        ..push(
           MaterialPageRoute<void>(
-            builder: (_) =>
-                const PopScope(canPop: false, child: Text('busy page')),
+            builder: (_) => const Scaffold(body: Text('another page')),
           ),
         ),
     );
 
-    // The busy page stays, and the conversation's own composer still gets
-    // the share rather than a second page for it.
-    expect(find.text('busy page'), findsOneWidget);
+    // One composer keeps owning the draft: nothing covering it is closed and
+    // no second page for the channel opens.
+    expect(find.text('another page'), findsOneWidget);
     expect(find.text('opened channel-1'), findsNothing);
+    expect(
+      find.text('Go back to that conversation to finish sharing'),
+      findsOneWidget,
+    );
     expect(
       container.read(composerShareInboxProvider)['channel-1']!.composerText,
       'Look',

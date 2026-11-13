@@ -250,22 +250,7 @@ void shareDeliveryTests() {
     await tester.pumpAndSettle();
     expect(find.byTooltip('Remove attachment'), findsOneWidget);
 
-    // A thread inside the pane and a page over Home cover the conversation;
-    // the share returns to it the way Back would.
-    final composerContext = tester.element(find.byType(ComposeBar));
-    unawaited(
-      Navigator.of(composerContext).push(
-        MaterialPageRoute<void>(builder: (_) => const Text('thread page')),
-      ),
-    );
-    unawaited(
-      Navigator.of(composerContext, rootNavigator: true).push(
-        MaterialPageRoute<void>(builder: (_) => const Text('settings page')),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(find.text('settings page'), findsOneWidget);
-
+    // The conversation is on screen inside Home's pane.
     const second = '66666666-6666-4666-8666-666666666666';
     final secondShare = writeShare(second, const ['Look'], 'second.png');
     container
@@ -274,17 +259,82 @@ void shareDeliveryTests() {
     await waitForDeletion(secondShare);
     await tester.tap(find.text('Add'));
     await tester.pumpAndSettle();
-
-    // One composer owns the draft: both photos and the joined text are on
-    // screen, and no second page for the conversation was opened.
     expect(find.text('second page'), findsNothing);
-    expect(find.text('thread page'), findsNothing);
-    expect(find.text('settings page'), findsNothing);
     expect(find.byType(ComposeBar), findsOneWidget);
     expect(find.byTooltip('Remove attachment'), findsNWidgets(2));
     expect(
+      find.text('Go back to that conversation to finish sharing'),
+      findsNothing,
+    );
+
+    // A thread reply in progress covers the conversation. The share must not
+    // close it, so it waits for that conversation and says so.
+    unawaited(
+      Navigator.of(tester.element(find.byType(ComposeBar))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => Scaffold(
+            body: Align(
+              alignment: Alignment.bottomCenter,
+              child: ComposeBar(
+                key: const ValueKey('thread-composer'),
+                channelId: 'channel-1',
+                threadHeadId: 'thread-root',
+                onSend:
+                    (
+                      content,
+                      mentions, {
+                      mediaTags = const <List<String>>[],
+                    }) async {},
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await _expandComposer(tester);
+    await tester.enterText(find.byType(TextField), 'Thread reply');
+    await tester.pumpAndSettle();
+
+    const third = '77777777-7777-4777-8777-777777777777';
+    final thirdShare = writeShare(third, const ['More'], 'third.png');
+    container
+        .read(pendingDeepLinkProvider.notifier)
+        .open(Uri.parse('buzz://share?id=$third'));
+    for (
+      var i = 0;
+      i < 100 && container.read(pendingDeepLinkProvider) != null;
+      i++
+    ) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Go back to that conversation to finish sharing'),
+      findsOneWidget,
+    );
+    expect(find.text('Add to your draft?'), findsNothing);
+    expect(find.text('second page'), findsNothing);
+    expect(find.byKey(const ValueKey('thread-composer')), findsOneWidget);
+    expect(find.text('Thread reply'), findsOneWidget);
+    expect(thirdShare.existsSync(), isTrue);
+
+    // Back in the conversation, its composer asks about the share there.
+    Navigator.of(
+      tester.element(find.byKey(const ValueKey('thread-composer'))),
+    ).pop();
+    await waitForDeletion(thirdShare);
+    expect(find.text('Add to your draft?'), findsOneWidget);
+    await tester.tap(find.text('Add'));
+    await tester.pumpAndSettle();
+    expect(find.byType(ComposeBar), findsOneWidget);
+    expect(find.byTooltip('Remove attachment'), findsNWidgets(3));
+    expect(
       container.read(composeDraftsProvider.notifier).textFor('channel-1'),
-      'My draft\nLook',
+      'My draft\nLook\nMore',
     );
   });
 }

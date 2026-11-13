@@ -4,8 +4,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 /// The routes currently showing each channel's page, newest last.
 ///
-/// A share to a conversation that is already open returns to that page, so one
-/// composer owns the draft and its attachments.
+/// A share to a conversation that is already open goes to that page's
+/// composer, so one composer owns the draft and its attachments.
 class OpenChannelRoutes {
   final _routes = <String, List<Route<Object?>>>{};
 
@@ -28,34 +28,17 @@ class OpenChannelRoutes {
   }
 }
 
-/// Returns to [route] from [top]'s screen, as pressing Back would.
-///
-/// Walks out from [route]'s navigator through each navigator hosting it, then
-/// pops what covers each host, outermost first. It stops at a page that
-/// refuses to close, leaving [route] covered rather than discarding that
-/// page's work. Returns false, popping nothing, when [route] isn't shown
-/// under [top].
-bool bringOpenChannelForward(Route<Object?> route, NavigatorState top) {
-  final targets = <Route<Object?>>[];
-  Route<Object?>? target = route;
-  while (target != null) {
-    final navigator = target.navigator;
+/// Whether [route] is what [top] shows: current on its own navigator and on
+/// every navigator hosting it, up to [top].
+bool isOpenChannelShown(Route<Object?> route, NavigatorState top) {
+  Route<Object?>? shown = route;
+  while (shown != null && shown.isCurrent) {
+    final navigator = shown.navigator;
+    if (navigator == top) return true;
     if (navigator == null) return false;
-    targets.add(target);
-    if (navigator == top) break;
-    target = ModalRoute.of(navigator.context);
+    shown = ModalRoute.of(navigator.context);
   }
-  if (target == null) return false;
-  for (final target in targets.reversed) {
-    var refused = false;
-    target.navigator!.popUntil((covering) {
-      if (covering == target) return true;
-      refused = covering.popDisposition == RoutePopDisposition.doNotPop;
-      return refused;
-    });
-    if (refused) break;
-  }
-  return true;
+  return false;
 }
 
 final openChannelRoutesProvider = Provider<OpenChannelRoutes>(
