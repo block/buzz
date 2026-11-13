@@ -17,6 +17,14 @@ class ReadStateState {
   final int version;
   final int retentionFloor;
 
+  /// Whether the last read-state sync failed: the snapshot did not load or
+  /// an update was not published. Retries continue in the background.
+  final bool syncFailed;
+
+  /// Whether the relay refused read state for the rest of this session.
+  /// Retrying cannot help; signing in again or restarting can.
+  final bool syncUnsupported;
+
   /// Session-local forced-unread flags, keyed by the forced context id
   /// (a channel id from the channel tile, or a `msg:` key from the message
   /// actions sheet), each mapped to the channel it belongs to so channel
@@ -30,6 +38,8 @@ class ReadStateState {
     required this.version,
     this.forcedUnreadContexts = const {},
     this.retentionFloor = 0,
+    this.syncFailed = false,
+    this.syncUnsupported = false,
   });
 
   const ReadStateState.inert()
@@ -38,6 +48,8 @@ class ReadStateState {
       contexts = const {},
       version = 0,
       retentionFloor = 0,
+      syncFailed = false,
+      syncUnsupported = false,
       forcedUnreadContexts = const {};
 
   /// Channels that should surface as unread because of a forced-unread flag —
@@ -71,6 +83,8 @@ class ReadStateState {
       version: version + 1,
       retentionFloor: retentionFloor,
       forcedUnreadContexts: forcedUnreadContexts,
+      syncFailed: syncFailed,
+      syncUnsupported: syncUnsupported,
     );
   }
 }
@@ -121,6 +135,8 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       signedEventRelay: signedRelay,
       remoteEnabled: true,
       onChanged: () => _emitManagerState(manager),
+      isConnected: () =>
+          ref.read(relaySessionProvider).status == SessionStatus.connected,
     );
     _manager = manager;
     // Expiry is semantic even on an idle screen with no incoming events.
@@ -141,6 +157,8 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
           next == AppLifecycleState.detached ||
           next == AppLifecycleState.hidden) {
         unawaited(manager.flush());
+      } else if (next == AppLifecycleState.resumed) {
+        unawaited(manager.retrySync());
       }
     });
 
@@ -180,7 +198,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       );
       removed = removed || _forcedUnreadContexts.length != before;
     }
-    _manager?.markContextRead(contextId, unixTimestamp);
+    _currentManager?.markContextRead(contextId, unixTimestamp);
     if (removed) {
       _refreshForcedState();
     }
@@ -192,7 +210,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
   /// badges can surface message-level forces. Read markers are monotonic,
   /// so this is the only way to move a context back to unread.
   void markContextUnread(String contextId, {required String channelId}) {
-    if (_manager == null) return;
+    if (_currentManager == null) return;
     _forcedUnreadContexts[contextId] = channelId;
     _refreshForcedState();
   }
@@ -218,12 +236,25 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
   }
 
   void seedContextRead(String contextId, int unixTimestamp) {
-    _manager?.seedContextRead(contextId, unixTimestamp);
+    _currentManager?.seedContextRead(contextId, unixTimestamp);
   }
 
   /// Seed the first channel-list landing once, durably across restarts.
   void seedContextsRead(Map<String, int> contexts) {
-    _manager?.seedInitialContextsRead(contexts);
+    _currentManager?.seedInitialContextsRead(contexts);
+  }
+
+  /// Retry a failed read-state sync now.
+  Future<void> retrySync() async => _currentManager?.retrySync();
+
+  /// The manager for the current identity and community. A dependency change
+  /// retires the old manager before the rebuild that creates the next one, so
+  /// an action in that gap first runs the pending rebuild instead of being
+  /// dropped.
+  ReadStateManager? get _currentManager {
+    // Reading state runs a pending rebuild.
+    if (_manager == null) state.pubkey;
+    return _manager;
   }
 
   void _emitManagerState(ReadStateManager manager) {
@@ -250,6 +281,8 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       retentionFloor: readStateFloor(currentUnixSeconds()),
       contexts: manager.effectiveContexts,
       version: (previousVersion ?? 0) + 1,
+      syncFailed: manager.syncError != null,
+      syncUnsupported: manager.remoteUnsupported,
       forcedUnreadContexts: Map.unmodifiable(
         Map<String, String>.from(_forcedUnreadContexts),
       ),

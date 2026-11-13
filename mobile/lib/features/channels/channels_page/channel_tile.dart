@@ -11,10 +11,6 @@ class _ChannelTile extends ConsumerWidget {
   final String? currentPubkey;
   final VoidCallback onTap;
 
-  /// Called when the user requests to mark this channel read (from long-press
-  /// actions menu). Null for channels in built-in sections.
-  final VoidCallback? onMarkRead;
-
   /// The user-defined section this channel currently belongs to, or null.
   final String? sectionId;
 
@@ -26,7 +22,6 @@ class _ChannelTile extends ConsumerWidget {
     this.hasAttention = false,
     required this.onTap,
     this.isMuted = false,
-    this.onMarkRead,
     this.sectionId,
   });
 
@@ -187,7 +182,6 @@ class _ChannelTile extends ConsumerWidget {
       channel: channel,
       // Mark read also clears the dot: the channel mark reads every reply.
       isUnread: isUnread || hasAttention,
-      onMarkRead: onMarkRead,
       sectionId: sectionId,
     );
   }

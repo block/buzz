@@ -121,6 +121,27 @@ class ReadStateCrypto {
 
 enum _ApplyRemoteContextResult { unchanged, advanced }
 
+/// The relay refused a pending update for its timestamp, but the update is
+/// not old by this device's clock, so the device clock is off from the
+/// relay's. Signing a newer update would be refused the same way, so the
+/// exact update is kept for retry.
+class ReadStateClockSkewError implements Exception {
+  const ReadStateClockSkewError();
+
+  @override
+  String toString() =>
+      'ReadStateClockSkewError: the device clock differs from the relay clock';
+}
+
+/// The relay's accepted distance between an event's `created_at` and its own
+/// clock (`MAX_TIMESTAMP_DRIFT_SECS` in the relay's ingest).
+const readStateRelayTimestampWindowSeconds = 15 * 60;
+
+/// Backoff between snapshot retries after a failed sync: doubling from
+/// [_snapshotRetryBase], at most [_snapshotRetryMax].
+const _snapshotRetryBase = Duration(seconds: 5);
+const _snapshotRetryMax = Duration(minutes: 5);
+
 class ReadStateManager {
   final String pubkey;
   final String relayUrl;
@@ -131,6 +152,9 @@ class ReadStateManager {
   final SignedEventRelay? _signedEventRelay;
   final bool _remoteEnabled;
   final VoidCallback _onChanged;
+  // Whether the relay session is connected. A reconnect re-syncs on its own,
+  // so retries wait for one while disconnected.
+  final bool Function() _isConnected;
 
   late final Object _journalOwner;
   bool get _ownsJournal => _storage.ownsJournal(_journalKey, _journalOwner);
@@ -156,6 +180,8 @@ class ReadStateManager {
   final Map<String, int> _carriedOverrides = {};
 
   Timer? _debounceTimer;
+  Timer? _snapshotRetryTimer;
+  int _snapshotRetryAttempt = 0;
   void Function()? _unsubscribeLive;
   bool _initialized = false;
   bool _initialSeedComplete = false;
@@ -188,6 +214,7 @@ class ReadStateManager {
     required bool remoteEnabled,
     required VoidCallback onChanged,
     int Function()? now,
+    bool Function()? isConnected,
     required this.relayUrl,
   }) : _journalKey =
            '$pubkey:${Uri.encodeComponent(normalizeCommunityRelayUrl(relayUrl))}',
@@ -197,13 +224,18 @@ class ReadStateManager {
        _relaySession = relaySession,
        _signedEventRelay = signedEventRelay,
        _remoteEnabled = remoteEnabled,
-       _onChanged = onChanged {
+       _onChanged = onChanged,
+       _isConnected = isConnected ?? (() => true) {
     _journalOwner = _storage.claimJournal(_journalKey);
     _clientId = _storage.getOrCreateClientId(pubkey, relayUrl);
     _slotId = _storage.getOrCreateSlotId(pubkey, relayUrl);
     _slots.add(_slotId);
     _hydrateFromLocalStorage();
   }
+
+  /// Whether the relay refused read state for this session, so publishing
+  /// stays off until the next manager (restart, sign-in, community switch).
+  bool get remoteUnsupported => _remoteUnsupported;
 
   Map<String, int> get effectiveContexts => Map.unmodifiable(_effectiveState);
 
@@ -290,6 +322,38 @@ class ReadStateManager {
     await _publish();
   }
 
+  /// Retry now after a failed sync: the remote snapshot again if the last one
+  /// failed, else any unpublished state. Does nothing while in sync.
+  Future<void> retrySync() async {
+    if (_disposed ||
+        !_remoteEnabled ||
+        !_initialized ||
+        syncError == null ||
+        !_isConnected()) {
+      return;
+    }
+    if (!_lastSnapshotSucceeded) {
+      _snapshotRetryTimer?.cancel();
+      _snapshotRetryTimer = null;
+      return reinitializeRemote();
+    }
+    await flush();
+  }
+
+  void _scheduleSnapshotRetry() {
+    if (_disposed || _snapshotRetryTimer != null) return;
+    final seconds =
+        _snapshotRetryBase.inSeconds << min(_snapshotRetryAttempt, 6);
+    _snapshotRetryAttempt++;
+    _snapshotRetryTimer = Timer(
+      Duration(seconds: min(seconds, _snapshotRetryMax.inSeconds)),
+      () {
+        _snapshotRetryTimer = null;
+        unawaited(retrySync());
+      },
+    );
+  }
+
   /// Fetch and resubscribe after a reconnect. Passes run one at a time, so
   /// each replaces the previous live subscription instead of leaking one.
   /// Reconnects while a pass waits to start share that pass.
@@ -346,6 +410,8 @@ class ReadStateManager {
     final hadPendingPublish = _debounceTimer != null;
     _debounceTimer?.cancel();
     _debounceTimer = null;
+    _snapshotRetryTimer?.cancel();
+    _snapshotRetryTimer = null;
 
     if (flushPending &&
         hadPendingPublish &&
@@ -380,6 +446,9 @@ class ReadStateManager {
       final events = await _relaySession!.fetchReadStateSnapshot();
       if (_disposed || !_servesThisCommunity) return false;
       _lastSnapshotSucceeded = true;
+      _snapshotRetryAttempt = 0;
+      _snapshotRetryTimer?.cancel();
+      _snapshotRetryTimer = null;
       _mergeEvents(events);
       await _persistLocalState();
       _onChanged();
@@ -388,6 +457,8 @@ class ReadStateManager {
       _lastSnapshotSucceeded = false;
       syncError = error;
       debugPrint('[ReadStateManager] snapshot failed: $error');
+      _scheduleSnapshotRetry();
+      _onChanged();
       return false;
     }
   }
@@ -534,6 +605,7 @@ class ReadStateManager {
     final completer = Completer<void>();
     _publishCompleter = completer;
     _isPublishing = true;
+    final errorBefore = syncError;
     try {
       do {
         _publishAgain = false;
@@ -548,6 +620,7 @@ class ReadStateManager {
       if (_publishCompleter == completer) {
         _publishCompleter = null;
       }
+      if (!_disposed && !identical(errorBefore, syncError)) _onChanged();
     }
   }
 
@@ -603,7 +676,16 @@ class ReadStateManager {
       final checkConnection = _relaySession?.captureConnectionFence();
       var snapshot = <NostrEvent>[];
       if (_relaySession != null) {
-        final events = await _relaySession.fetchReadStateSnapshot();
+        final List<NostrEvent> events;
+        try {
+          events = await _relaySession.fetchReadStateSnapshot();
+        } catch (_) {
+          // Retry on the same backoff as a failed sync; the retry re-syncs
+          // and publishes the journaled marks.
+          _lastSnapshotSucceeded = false;
+          _scheduleSnapshotRetry();
+          rethrow;
+        }
         _lastSnapshotSucceeded = true;
         if (!_servesThisCommunity ||
             !_ownsJournal ||
@@ -705,7 +787,15 @@ class ReadStateManager {
           return;
         }
         checkConnection?.call();
-        await _relaySession.publish(entry.value);
+        try {
+          await _relaySession.publish(entry.value);
+        } on Exception catch (error) {
+          if (!_isTimestampRefusal(error)) rethrow;
+          await _recoverRefusedPending(entry.key, entry.value);
+          // Plan again from the refreshed state; the successor goes out then.
+          _publishAgain = true;
+          return;
+        }
         if (!_servesThisCommunity ||
             !_ownsJournal ||
             (_disposed && !allowDisposed)) {
@@ -792,6 +882,26 @@ class ReadStateManager {
         );
       }
     }
+  }
+
+  bool _isTimestampRefusal(Exception error) =>
+      error.toString().contains('timestamp too far from server time');
+
+  /// Retires [pending] after the relay refused it for its timestamp. The
+  /// outcome is known, the relay did not store it, so NIP-RS allows a
+  /// strictly newer successor in place of exact retry. Its marks were planned
+  /// from the journaled local state, which still holds them, so the next plan
+  /// reads a fresh snapshot and sends a successor, journaled before it is
+  /// sent, unless the relay already holds this update or an own update
+  /// covering it. An update that is not old by this device's clock means the
+  /// device clock is off, so it is kept for exact retry.
+  Future<void> _recoverRefusedPending(String slot, NostrEvent pending) async {
+    if (pending.createdAt >= _now() - readStateRelayTimestampWindowSeconds) {
+      throw const ReadStateClockSkewError();
+    }
+    if (identical(_pending[slot], pending)) _pending.remove(slot);
+    _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, pending.createdAt);
+    await _persistLocalState();
   }
 
   void _acknowledge(String slot, NostrEvent event) {
