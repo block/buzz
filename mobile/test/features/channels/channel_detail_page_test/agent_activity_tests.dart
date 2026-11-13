@@ -91,6 +91,25 @@ void agentActivityTests() {
     semantics.dispose();
   });
 
+  testWidgets('a link to a folded step opens its run', (tester) async {
+    await tester.pumpWidget(
+      _buildTestable(
+        signingPubkey: 'self',
+        users: users,
+        initialMessageId: 's2',
+        messages: [
+          _textMsg(id: 'ask', pubkey: 'self', content: 'Please look'),
+          step('s1', scout, 1001),
+          step('s2', helper, 1002),
+          step('s3', scout, 1003),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(row('s2'), findsOneWidget);
+    expect(find.byKey(const ValueKey('activity-collapse-s1')), findsOneWidget);
+  });
+
   testWidgets('thread steps fold until expanded', (tester) async {
     final head = formatTimeline([
       _textMsg(id: threadIdRoot, pubkey: 'self', content: 'Thread question'),

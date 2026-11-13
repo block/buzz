@@ -673,6 +673,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       channel.id,
       () => [for (final entry in timelineEntries) entry.message],
       loaded: timelineMessages,
+      reveal: initialMessageId,
       keys: [timelineMessages, personalChat],
     );
 

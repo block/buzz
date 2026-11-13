@@ -47,13 +47,15 @@ class ActivityTimeline {
 }
 
 /// The [ActivityTimeline] of [rows] in [channelId], recomputed when [keys]
-/// change. See [activityRuns] for [loaded] and [rootId].
+/// change. See [activityRuns] for [loaded] and [rootId]. The run holding
+/// [reveal], a linked message, starts open so the link lands on it.
 ActivityTimeline useActivityTimeline(
   WidgetRef ref,
   String channelId,
   List<TimelineMessage> Function() rows, {
   required List<TimelineMessage> loaded,
   String? rootId,
+  String? reveal,
   required List<Object?> keys,
 }) {
   final agents = ref.watch(agentMentionPubkeysProvider(channelId));
@@ -61,7 +63,7 @@ ActivityTimeline useActivityTimeline(
     () => activityRuns(rows(), loaded: loaded, rootId: rootId, agents: agents),
     [...keys, loaded, rootId, agents],
   );
-  return ActivityTimeline(runs, useState(<String>{}), channelId);
+  return ActivityTimeline(runs, useState({?reveal}), channelId);
 }
 
 /// One timeline item of an activity [run], so list indexes, deep links and
@@ -220,7 +222,14 @@ class _ActivityPreview extends ConsumerWidget {
                           child: Row(
                             children: [
                               if (run.participants.length > 1)
-                                Text('$speakerName: ', style: textStyle),
+                                Flexible(
+                                  child: Text(
+                                    '$speakerName: ',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: textStyle,
+                                  ),
+                                ),
                               Expanded(
                                 child: MessagePreview(
                                   content: latest.content,

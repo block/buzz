@@ -275,7 +275,8 @@ class ThreadDetailPage extends HookConsumerWidget {
       () => replies,
       loaded: allMsgs,
       rootId: threadHead.id,
-      keys: [replies],
+      reveal: initialMessageId,
+      keys: [allMsgs],
     );
     final liveHead =
         allMsgs.where((m) => m.id == threadHead.id).firstOrNull ?? threadHead;
