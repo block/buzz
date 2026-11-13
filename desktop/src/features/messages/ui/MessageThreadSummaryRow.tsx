@@ -16,6 +16,7 @@ import {
   THREAD_REPLY_LINE_WIDTH_REM,
   THREAD_REPLY_ROW_MARGIN_INLINE_REM,
 } from "@/features/messages/lib/threadTreeLayout";
+import { ThreadActivityPill } from "@/features/agents/activity/ThreadActivityPill";
 import { cn } from "@/shared/lib/cn";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
@@ -134,7 +135,7 @@ export function MessageThreadSummaryRow({
   );
 
   return (
-    <div className="relative pb-1 pt-0.5">
+    <div className="relative flex items-center gap-2 pb-1 pt-0.5">
       {showDepthGuides && depthGuideItems.length > 0 ? (
         <div
           aria-hidden={
@@ -302,6 +303,12 @@ export function MessageThreadSummaryRow({
           </div>
         </div>
       </button>
+      {/* Activity map entry point for threads where agents did file work.
+          Renders null without the channel provider or when this thread has
+          no resolved agent activity. Sibling of the summary button (not a
+          child): nested interactive elements are invalid and the two open
+          different surfaces. */}
+      <ThreadActivityPill threadRootId={message.id} />
     </div>
   );
 }
