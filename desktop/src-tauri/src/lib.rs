@@ -874,6 +874,7 @@ pub fn run() {
             archive::sync::start_archive_sync,
             archive::sync::stop_archive_sync,
             is_auto_update_supported,
+            new_app_installer_target,
             set_window_vibrancy,
             #[cfg(target_os = "macos")]
             tray_menu::clear_tray_agent_activity,

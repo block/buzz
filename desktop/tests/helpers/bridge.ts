@@ -400,6 +400,9 @@ type MockBridgeOptions = {
   /** Set to false to simulate a Linux .deb install where auto-update is not
    *  supported. Defaults to true. See e2eBridge mock.autoUpdateSupported. */
   autoUpdateSupported?: boolean;
+  /** Manifest key the deprecation banner resolves its installer link with.
+   *  Defaults to none. See e2eBridge mock.newAppInstallerTarget. */
+  newAppInstallerTarget?: string;
   /** Reject browser opener calls to exercise manual pairing fallback UI. */
   openerError?: string;
   /** Delay binding signatures so specs can exercise request supersession. */

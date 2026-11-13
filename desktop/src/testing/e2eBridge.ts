@@ -499,6 +499,9 @@ type E2eConfig = {
      *  Linux .deb install where Tauri's updater cannot swap the binary).
      *  Defaults to true for all existing tests. */
     autoUpdateSupported?: boolean;
+    /** Manifest key `new_app_installer_target` returns. Defaults to none, so
+     *  the deprecation banner never fetches the installer manifest. */
+    newAppInstallerTarget?: string;
     /** Reject `plugin:opener|open_url` to exercise browser-return fallback UI. */
     openerError?: string;
     /** Delay binding signatures so specs can exercise request supersession. */
@@ -14882,6 +14885,8 @@ export function maybeInstallE2eTauriMocks() {
         // Default true so all existing tests continue to use the auto-update
         // path. Set mock.autoUpdateSupported: false to simulate a .deb install.
         return activeConfig?.mock?.autoUpdateSupported !== false;
+      case "new_app_installer_target":
+        return activeConfig?.mock?.newAppInstallerTarget ?? null;
       case "relay_reconnect_hook":
         return null;
       case "relay_reconnect_hook_configured":

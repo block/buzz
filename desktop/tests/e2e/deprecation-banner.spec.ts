@@ -1,5 +1,6 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
+import { BUZZ_APP_DOWNLOADS_MANIFEST_URL } from "../../src/app/newAppInstaller";
 import { installMockBridge } from "../helpers/bridge";
 
 type OpenerWindow = Window & {
@@ -12,6 +13,20 @@ type OpenerWindow = Window & {
 const UPGRADE_GUIDE_URL =
   "https://github.com/block/buzz-app/blob/main/docs/upgrading.md";
 const WEBSITE_URL = "https://buzz.xyz";
+const ARM64_DMG_URL =
+  "https://github.com/block/buzz-app/releases/download/v1.0.0/Buzz_1.0.0_aarch64.dmg";
+// The feed is served as text/plain with open CORS; mirror both.
+const MANIFEST_RESPONSE = {
+  body: JSON.stringify({
+    schemaVersion: 1,
+    channel: "stable",
+    version: "1.0.0",
+    release: "v1.0.0",
+    downloads: { "macos-arm64": ARM64_DMG_URL },
+  }),
+  contentType: "text/plain; charset=utf-8",
+  headers: { "access-control-allow-origin": "*" },
+};
 
 // The main window cannot go below 900px wide, and Cmd+ zoom tops out at 1.5x,
 // which leaves the banner the room of a 600px window at default zoom.
@@ -54,6 +69,9 @@ test("deprecation banner: both links open externally and the row holds up when n
   const dismiss = banner.getByRole("button", { name: "Remind me later" });
   await expect(banner).toBeVisible();
   await expect(upgradeGuide).toHaveText("More info");
+  // The default mock reports no installer target, so the banner never asks
+  // for the manifest and the download button keeps the website link.
+  await expect(download).toHaveAttribute("data-download-source", "fallback");
   // The two actions carry the same classes, so neither outweighs the other
   // at rest or on hover in any theme. Only the download button has an icon.
   expect(await upgradeGuide.getAttribute("class")).toBe(
@@ -101,4 +119,62 @@ test("deprecation banner: both links open externally and the row holds up when n
 
   await dismiss.click();
   await expect(banner).toBeHidden();
+});
+
+test("deprecation banner: the download button opens this machine's installer once the manifest resolves", async ({
+  page,
+}) => {
+  await page.route(BUZZ_APP_DOWNLOADS_MANIFEST_URL, (route) =>
+    route.fulfill(MANIFEST_RESPONSE),
+  );
+  await installMockBridge(
+    page,
+    { newAppInstallerTarget: "macos-arm64" },
+    { seedDeprecationBannerDismissed: false },
+  );
+  await page.goto("/");
+
+  const download = page
+    .getByTestId("deprecation-banner")
+    .getByRole("button", { name: "Get the new app" });
+  await expect(download).toHaveAttribute("data-download-source", "installer");
+  await download.click();
+  expect(await openedUrls(page)).toEqual([ARM64_DMG_URL]);
+});
+
+test("deprecation banner: the download button opens the website while the manifest is still loading", async ({
+  page,
+}) => {
+  let releaseManifest = () => {};
+  const manifestReleased = new Promise<void>((resolve) => {
+    releaseManifest = resolve;
+  });
+  await page.route(BUZZ_APP_DOWNLOADS_MANIFEST_URL, async (route) => {
+    await manifestReleased;
+    await route.fulfill(MANIFEST_RESPONSE);
+  });
+  await installMockBridge(
+    page,
+    { newAppInstallerTarget: "macos-arm64" },
+    { seedDeprecationBannerDismissed: false },
+  );
+  const manifestRequested = page.waitForRequest(
+    BUZZ_APP_DOWNLOADS_MANIFEST_URL,
+  );
+  await page.goto("/");
+
+  const download = page
+    .getByTestId("deprecation-banner")
+    .getByRole("button", { name: "Get the new app" });
+  // The request is in flight and unanswered: the click does not wait for it.
+  await manifestRequested;
+  await download.click();
+  expect(await openedUrls(page)).toEqual([WEBSITE_URL]);
+  await expect(download).toHaveAttribute("data-download-source", "fallback");
+
+  // Once answered, the same button switches to the installer.
+  releaseManifest();
+  await expect(download).toHaveAttribute("data-download-source", "installer");
+  await download.click();
+  expect(await openedUrls(page)).toEqual([WEBSITE_URL, ARM64_DMG_URL]);
 });

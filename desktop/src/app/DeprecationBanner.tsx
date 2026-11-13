@@ -6,9 +6,16 @@ import {
   DEPRECATION_BANNER_STORAGE_KEY,
   shouldShowDeprecationBanner,
 } from "@/app/deprecationBannerVisibility";
+import {
+  BUZZ_APP_DOWNLOADS_MANIFEST_URL,
+  NEW_APP_MANIFEST_TIMEOUT_MS,
+  resolveInstallerUrl,
+} from "@/app/newAppInstaller";
+import { getNewAppInstallerTarget } from "@/shared/api/tauri";
 import { Button } from "@/shared/ui/button";
 
-const BUZZ_WEBSITE_URL = "https://buzz.xyz";
+// Opened until, and unless, the installer for this machine is resolved.
+const BUZZ_APP_FALLBACK_URL = "https://buzz.xyz";
 const BUZZ_APP_UPGRADE_GUIDE_URL =
   "https://github.com/block/buzz-app/blob/main/docs/upgrading.md";
 
@@ -23,10 +30,62 @@ function readDismissedAt(): string | null {
   }
 }
 
+/**
+ * Looks up the new app's installer for this machine. Rejects on any failure;
+ * resolves null when no installer is published for this platform.
+ */
+async function fetchInstallerUrl(signal: AbortSignal): Promise<string | null> {
+  const target = await getNewAppInstallerTarget();
+  if (!target) {
+    return null;
+  }
+  const response = await fetch(BUZZ_APP_DOWNLOADS_MANIFEST_URL, { signal });
+  if (!response.ok) {
+    throw new Error(`installer manifest responded ${response.status}`);
+  }
+  const url = resolveInstallerUrl(await response.json(), target);
+  if (!url) {
+    throw new Error(`installer manifest has no usable entry for ${target}`);
+  }
+  return url;
+}
+
 export function DeprecationBanner() {
   const [isVisible, setIsVisible] = React.useState(() =>
     shouldShowDeprecationBanner(readDismissedAt(), Date.now()),
   );
+  const [installerUrl, setInstallerUrl] = React.useState<string | null>(null);
+
+  // One attempt per mount. The click never waits on it: until it resolves,
+  // and whenever it fails, the button opens the fallback page.
+  React.useEffect(() => {
+    if (!isVisible) {
+      return;
+    }
+    let isCurrent = true;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(
+      () => controller.abort(new Error("installer manifest timed out")),
+      NEW_APP_MANIFEST_TIMEOUT_MS,
+    );
+    fetchInstallerUrl(controller.signal)
+      .then((url) => {
+        if (isCurrent) {
+          setInstallerUrl(url);
+        }
+      })
+      .catch((error: unknown) => {
+        if (isCurrent) {
+          console.warn("Could not resolve the new app installer:", error);
+        }
+      })
+      .finally(() => window.clearTimeout(timeout));
+    return () => {
+      isCurrent = false;
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [isVisible]);
 
   if (!isVisible) {
     return null;
@@ -76,9 +135,10 @@ export function DeprecationBanner() {
           </Button>
           <Button
             className={BANNER_ACTION_CLASS}
+            data-download-source={installerUrl ? "installer" : "fallback"}
             data-testid="deprecation-banner-download"
             onClick={() => {
-              void openUrl(BUZZ_WEBSITE_URL);
+              void openUrl(installerUrl ?? BUZZ_APP_FALLBACK_URL);
             }}
             size="sm"
             type="button"
