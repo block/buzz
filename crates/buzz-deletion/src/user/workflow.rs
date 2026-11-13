@@ -41,6 +41,18 @@ const RULES: &[Rule] = &[
         decide: after_purge_db,
     },
     Rule {
+        name: "purge_content",
+        community_scope: true,
+        allowed: &[Decision::Stage("purge_account")],
+        decide: |_| Ok(Decision::Stage("purge_account")),
+    },
+    Rule {
+        name: "purge_account",
+        community_scope: true,
+        allowed: &[Decision::Stage("purge_agents")],
+        decide: |_| Ok(Decision::Stage("purge_agents")),
+    },
+    Rule {
         name: "purge_agents",
         community_scope: true,
         allowed: &[Decision::CommunityComplete],
@@ -203,7 +215,14 @@ impl Progress {
                     .find(|(id, _)| !self.completed_communities.contains(id))
                 {
                     Some((id, _)) => Ok(Some(Step {
-                        name: COMMUNITY_INITIAL_STAGE,
+                        name: if row.metadata_json["inputs"]["target"]
+                            .as_str()
+                            .is_some_and(|target| target.starts_with("demo:"))
+                        {
+                            COMMUNITY_INITIAL_STAGE
+                        } else {
+                            "purge_content"
+                        },
                         community: Some(*id),
                     })),
                     None => self.apply(inventory, row, Decision::RequestComplete),
@@ -229,5 +248,32 @@ mod tests {
             assert_eq!(parse_stage(rule.name).unwrap(), rule.name);
         }
         assert!(parse_stage("unregistered_stage").is_err());
+    }
+
+    #[test]
+    fn account_cleanup_keeps_real_requests_on_the_unfinished_handler_path() {
+        let now = chrono::Utc::now();
+        let mut stage = EntityStage {
+            id: Uuid::new_v4(),
+            request_id: Uuid::new_v4(),
+            target_community_id: Some(Uuid::new_v4()),
+            stage: "purge_content".into(),
+            status: "completed".into(),
+            is_current: true,
+            started_at: Some(now),
+            finished_at: Some(now),
+            last_error: None,
+            updated_at: now,
+            metadata_json: serde_json::json!({"inputs":{"target":"ab".repeat(32)}, "result":{"has_agents":false, "account_erasure_complete":false}}),
+        };
+        assert_eq!(decision(&stage).unwrap(), Decision::Stage("purge_account"));
+        stage.stage = "purge_account".into();
+        assert_eq!(decision(&stage).unwrap(), Decision::Stage("purge_agents"));
+        // Demo routing still consumes its simulated branch result.
+        stage.stage = "purge_db".into();
+        stage.metadata_json["inputs"]["target"] = "demo:account".into();
+        assert_eq!(decision(&stage).unwrap(), Decision::CommunityComplete);
+        stage.metadata_json["result"]["has_agents"] = true.into();
+        assert_eq!(decision(&stage).unwrap(), Decision::Stage("purge_agents"));
     }
 }

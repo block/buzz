@@ -1,11 +1,22 @@
 //! User-specific submission and inventory preparation over the shared deletion tables.
 use crate::Db;
 use sqlx::PgPool;
+/// Bounded cleanup of one human's community account records.
+pub mod account_batches;
 mod discovery;
 mod inventory;
 mod requests;
 pub use discovery::normalize_user_deletion_pubkey;
 pub use inventory::UserDeletionInventory;
+
+/// Select whether a cleanup handler reports or applies its operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMode {
+    /// Report operations without changing source data.
+    ReadOnly,
+    /// Apply the reported operations.
+    Delete,
+}
 
 const MAX_COMMUNITIES: usize = 1000;
 

@@ -33,6 +33,10 @@ async fn fixture() -> (EntityDeletionStore, Uuid, sqlx::PgPool) {
 
 fn options() -> RunOptions {
     RunOptions {
+        db: None,
+        delete: false,
+        batch_size: 100,
+        max_items: 100_000,
         next_step: false,
         fail_stage: None,
         stage_delay: Duration::ZERO,
