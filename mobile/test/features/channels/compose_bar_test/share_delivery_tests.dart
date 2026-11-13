@@ -322,7 +322,27 @@ void shareDeliveryTests() {
     expect(find.text('Thread reply'), findsOneWidget);
     expect(thirdShare.existsSync(), isTrue);
 
-    // Back in the conversation, its composer asks about the share there.
+    // A second share for the covered conversation waits behind the first.
+    const fourth = '88888888-8888-4888-8888-888888888888';
+    final fourthShare = writeShare(fourth, const ['Again'], 'fourth.png');
+    container
+        .read(pendingDeepLinkProvider.notifier)
+        .open(Uri.parse('buzz://share?id=$fourth'));
+    for (
+      var i = 0;
+      i < 100 && container.read(pendingDeepLinkProvider) != null;
+      i++
+    ) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+    expect(thirdShare.existsSync(), isTrue);
+    expect(fourthShare.existsSync(), isTrue);
+
+    // Back in the conversation, its composer asks about each share in turn.
     Navigator.of(
       tester.element(find.byKey(const ValueKey('thread-composer'))),
     ).pop();
@@ -330,11 +350,15 @@ void shareDeliveryTests() {
     expect(find.text('Add to your draft?'), findsOneWidget);
     await tester.tap(find.text('Add'));
     await tester.pumpAndSettle();
+    await waitForDeletion(fourthShare);
+    expect(find.text('Add to your draft?'), findsOneWidget);
+    await tester.tap(find.text('Add'));
+    await tester.pumpAndSettle();
     expect(find.byType(ComposeBar), findsOneWidget);
-    expect(find.byTooltip('Remove attachment'), findsNWidgets(3));
+    expect(find.byTooltip('Remove attachment'), findsNWidgets(4));
     expect(
       container.read(composeDraftsProvider.notifier).textFor('channel-1'),
-      'My draft\nLook\nMore',
+      'My draft\nLook\nMore\nAgain',
     );
   });
 }

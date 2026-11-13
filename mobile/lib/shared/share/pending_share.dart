@@ -122,32 +122,39 @@ Future<void> deletePendingShare(
   if (await directory.exists()) await directory.delete(recursive: true);
 }
 
-/// Shares waiting for a composer to open, keyed by compose draft key.
+/// Shares waiting for a composer to open, keyed by compose draft key, oldest
+/// first.
 ///
 /// The dispatcher delivers a share here and then opens its conversation; that
-/// conversation's composer takes it and adds the items to its draft.
-class ComposerShareInbox extends Notifier<Map<String, PendingShare>> {
+/// conversation's composer takes each in turn and adds the items to its draft.
+/// Shares queue rather than replace each other, since a conversation covered
+/// by another page takes its shares only once it is back on screen.
+class ComposerShareInbox extends Notifier<Map<String, List<PendingShare>>> {
   @override
-  Map<String, PendingShare> build() => const {};
+  Map<String, List<PendingShare>> build() => const {};
 
   void deliver(String draftKey, PendingShare share) {
-    final replaced = state[draftKey];
-    if (replaced != null && replaced.id != share.id) {
-      // A newer share for the same composer wins; drop the older copies.
-      unawaited(deletePendingShare(replaced.id));
-    }
-    state = {...state, draftKey: share};
+    final waiting = state[draftKey] ?? const <PendingShare>[];
+    if (waiting.any((queued) => queued.id == share.id)) return;
+    state = {
+      ...state,
+      draftKey: [...waiting, share],
+    };
   }
 
-  /// Removes and returns the share waiting for [draftKey], if any.
+  /// Removes and returns the oldest share waiting for [draftKey], if any.
   PendingShare? take(String draftKey) {
-    final share = state[draftKey];
-    if (share != null) state = {...state}..remove(draftKey);
-    return share;
+    final waiting = state[draftKey];
+    if (waiting == null || waiting.isEmpty) return null;
+    final rest = waiting.sublist(1);
+    state = {...state}
+      ..remove(draftKey)
+      ..addAll({if (rest.isNotEmpty) draftKey: rest});
+    return waiting.first;
   }
 }
 
 final composerShareInboxProvider =
-    NotifierProvider<ComposerShareInbox, Map<String, PendingShare>>(
+    NotifierProvider<ComposerShareInbox, Map<String, List<PendingShare>>>(
       ComposerShareInbox.new,
     );

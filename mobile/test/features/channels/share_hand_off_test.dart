@@ -125,7 +125,9 @@ void main() {
 
     expect(find.text('opened channel-1'), findsOneWidget);
     expect(container.read(pendingDeepLinkProvider), isNull);
-    final share = container.read(composerShareInboxProvider)['channel-1']!;
+    final share = container
+        .read(composerShareInboxProvider)['channel-1']!
+        .single;
     expect(share.composerText, 'https://example.org/a\nLook');
     expect(share.files, ['${shares.path}/$_shareId/shot.png']);
   });
@@ -163,7 +165,10 @@ void main() {
       findsOneWidget,
     );
     expect(
-      container.read(composerShareInboxProvider)['channel-1']!.composerText,
+      container
+          .read(composerShareInboxProvider)['channel-1']!
+          .single
+          .composerText,
       'Look',
     );
   });

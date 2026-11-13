@@ -14,28 +14,35 @@ void _useComposerShareDelivery({
   required ValueNotifier<String?> uploadError,
 }) {
   final waiting = ref.watch(
-    composerShareInboxProvider.select((shares) => shares[draftKey]),
+    composerShareInboxProvider.select((shares) => shares[draftKey]?.first.id),
   );
+  final delivering = useRef(false);
   useEffect(() {
-    if (waiting == null) return null;
+    if (waiting == null || delivering.value) return null;
     // Runs after the draft lifecycle restores this composer's saved text.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!context.mounted) return;
-      final share = ref
-          .read(composerShareInboxProvider.notifier)
-          .take(draftKey);
-      if (share == null) return;
-      unawaited(
-        _deliverShare(
-          context,
-          share,
-          controller,
-          attachments,
-          draftRevision,
-          voiceNote,
-          uploadError,
-        ),
-      );
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!context.mounted || delivering.value) return;
+      // One share at a time, so each gets its own Add or Replace answer.
+      delivering.value = true;
+      try {
+        while (context.mounted) {
+          final share = ref
+              .read(composerShareInboxProvider.notifier)
+              .take(draftKey);
+          if (share == null) break;
+          await _deliverShare(
+            context,
+            share,
+            controller,
+            attachments,
+            draftRevision,
+            voiceNote,
+            uploadError,
+          );
+        }
+      } finally {
+        delivering.value = false;
+      }
     });
     return null;
   }, [waiting, draftKey]);
