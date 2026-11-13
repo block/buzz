@@ -78,12 +78,6 @@ class HomePage extends HookConsumerWidget {
         ? 375.0
         : null;
     final showWorkspaceNavigation = wide || conversations.selectedId == null;
-    final route = ModalRoute.of(context);
-    final coveringProgress = useAnimation(
-      route?.secondaryAnimation ?? kAlwaysDismissedAnimation,
-    );
-    final nativeControlsVisible =
-        (route?.isCurrent ?? true) && coveringProgress == 0;
 
     final communitySurfaceProgress = useState(0.0);
     final filter = useState('All');
@@ -166,83 +160,85 @@ class HomePage extends HookConsumerWidget {
           (label: 'Settings', symbol: 'gearshape', onPressed: openSettings),
         ];
         return [
-          if (defaultTargetPlatform == TargetPlatform.iOS &&
-              !nativeControlsVisible)
-            const SizedBox(width: 44, height: 44)
-          else
-            Stack(
-              alignment: Alignment.center,
-              children: [
-                defaultTargetPlatform == TargetPlatform.iOS
-                    ? IosGlassNavigationButton(
-                        icon: IosGlassNavigationIcon.bell,
-                        semanticLabel: inboxLabel,
-                        width: 44,
-                        height: 44,
-                        controlSize: 44,
-                        foregroundColor: context.colors.onSurface,
-                        onPressed: openInbox,
-                      )
-                    : IconButton.filledTonal(
-                        tooltip: inboxLabel,
-                        style: IconButton.styleFrom(
-                          backgroundColor:
-                              context.colors.surfaceContainerHighest,
-                          foregroundColor: context.colors.onSurface,
-                          minimumSize: const Size.square(48),
-                        ),
-                        icon: const Icon(BuzzIcons.bell),
-                        onPressed: openInbox,
-                      ),
-                Positioned.fill(
-                  child: IgnorePointer(
-                    child: ExcludeSemantics(
-                      child: Center(
-                        child: AnimatedOpacity(
-                          opacity: hasUnreadInbox ? 1 : 0,
-                          duration: reducedMotion
-                              ? Duration.zero
-                              : const Duration(milliseconds: 150),
-                          curve: Curves.easeOut,
-                          child: SizedBox.square(
-                            key: const Key('home-inbox-badge'),
-                            dimension: 24,
-                            child: Stack(
-                              clipBehavior: Clip.none,
-                              children: [
-                                Positioned(
-                                  top: 0,
-                                  right: 2,
-                                  child: Container(
-                                    key: const Key('home-inbox-dot'),
-                                    width: 10,
-                                    height: 10,
-                                    decoration: BoxDecoration(
-                                      shape: BoxShape.circle,
-                                      color: context.colors.primary,
-                                      border: Border.all(
-                                        color:
-                                            defaultTargetPlatform ==
-                                                TargetPlatform.android
-                                            ? context
-                                                  .colors
-                                                  .surfaceContainerHighest
-                                            : context.controlSurface,
-                                        width: 2,
+          _NativeControlsGate(
+            builder: (_, nativeControlsVisible) =>
+                defaultTargetPlatform == TargetPlatform.iOS &&
+                    !nativeControlsVisible
+                ? const SizedBox(width: 44, height: 44)
+                : Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      defaultTargetPlatform == TargetPlatform.iOS
+                          ? IosGlassNavigationButton(
+                              icon: IosGlassNavigationIcon.bell,
+                              semanticLabel: inboxLabel,
+                              width: 44,
+                              height: 44,
+                              controlSize: 44,
+                              foregroundColor: context.colors.onSurface,
+                              onPressed: openInbox,
+                            )
+                          : IconButton.filledTonal(
+                              tooltip: inboxLabel,
+                              style: IconButton.styleFrom(
+                                backgroundColor:
+                                    context.colors.surfaceContainerHighest,
+                                foregroundColor: context.colors.onSurface,
+                                minimumSize: const Size.square(48),
+                              ),
+                              icon: const Icon(BuzzIcons.bell),
+                              onPressed: openInbox,
+                            ),
+                      Positioned.fill(
+                        child: IgnorePointer(
+                          child: ExcludeSemantics(
+                            child: Center(
+                              child: AnimatedOpacity(
+                                opacity: hasUnreadInbox ? 1 : 0,
+                                duration: reducedMotion
+                                    ? Duration.zero
+                                    : const Duration(milliseconds: 150),
+                                curve: Curves.easeOut,
+                                child: SizedBox.square(
+                                  key: const Key('home-inbox-badge'),
+                                  dimension: 24,
+                                  child: Stack(
+                                    clipBehavior: Clip.none,
+                                    children: [
+                                      Positioned(
+                                        top: 0,
+                                        right: 2,
+                                        child: Container(
+                                          key: const Key('home-inbox-dot'),
+                                          width: 10,
+                                          height: 10,
+                                          decoration: BoxDecoration(
+                                            shape: BoxShape.circle,
+                                            color: context.colors.primary,
+                                            border: Border.all(
+                                              color:
+                                                  defaultTargetPlatform ==
+                                                      TargetPlatform.android
+                                                  ? context
+                                                        .colors
+                                                        .surfaceContainerHighest
+                                                  : context.controlSurface,
+                                              width: 2,
+                                            ),
+                                          ),
+                                        ),
                                       ),
-                                    ),
+                                    ],
                                   ),
                                 ),
-                              ],
+                              ),
                             ),
                           ),
                         ),
                       ),
-                    ),
+                    ],
                   ),
-                ),
-              ],
-            ),
+          ),
           const SizedBox(width: Grid.xs),
           SizedBox(
             key: avatarKey,
@@ -330,41 +326,43 @@ class HomePage extends HookConsumerWidget {
       ],
     );
     return DuoWorkspaceScaffold(
-      navigationBuilder: (context, placement) =>
-          wide ||
-              !showWorkspaceNavigation ||
-              !nativeControlsVisible ||
-              communitySurfaceProgress.value != 0
-          ? const SizedBox.shrink()
-          : Transform.translate(
-              offset: Offset(
-                IosNavigationMetrics.of(context).railCenter(
-                      MediaQuery.sizeOf(context),
-                      strip!.rect.center.dx,
-                    ) -
-                    strip.rect.center.dx,
-                0,
-              ),
-              child: SafeArea(
-                bottom: false,
-                child: Padding(
-                  // Match the compact composer's safe-area gutter and its
-                  // downward resting offset in _ComposerDockFrame.
-                  padding: EdgeInsets.only(
-                    bottom:
-                        (MediaQuery.viewPaddingOf(context).bottom +
-                                Grid.xxs -
-                                Grid.twelve -
-                                Grid.quarter)
-                            .clamp(0.0, double.infinity),
-                  ),
-                  child: Align(
-                    alignment: Alignment.bottomCenter,
-                    child: navigationBar(Axis.vertical),
+      navigationBuilder: (context, placement) => _NativeControlsGate(
+        builder: (_, nativeControlsVisible) =>
+            wide ||
+                !showWorkspaceNavigation ||
+                !nativeControlsVisible ||
+                communitySurfaceProgress.value != 0
+            ? const SizedBox.shrink()
+            : Transform.translate(
+                offset: Offset(
+                  IosNavigationMetrics.of(context).railCenter(
+                        MediaQuery.sizeOf(context),
+                        strip!.rect.center.dx,
+                      ) -
+                      strip.rect.center.dx,
+                  0,
+                ),
+                child: SafeArea(
+                  bottom: false,
+                  child: Padding(
+                    // Match the compact composer's safe-area gutter and its
+                    // downward resting offset in _ComposerDockFrame.
+                    padding: EdgeInsets.only(
+                      bottom:
+                          (MediaQuery.viewPaddingOf(context).bottom +
+                                  Grid.xxs -
+                                  Grid.twelve -
+                                  Grid.quarter)
+                              .clamp(0.0, double.infinity),
+                    ),
+                    child: Align(
+                      alignment: Alignment.bottomCenter,
+                      child: navigationBar(Axis.vertical),
+                    ),
                   ),
                 ),
               ),
-            ),
+      ),
       body: Scaffold(
         resizeToAvoidBottomInset: false,
         extendBody: true,
@@ -373,11 +371,13 @@ class HomePage extends HookConsumerWidget {
                 padding: EdgeInsets.only(bottom: bottom),
                 child: SizedBox(
                   height: mobileTabBarHeight,
-                  child:
-                      (defaultTargetPlatform != TargetPlatform.iOS ||
-                          nativeControlsVisible)
-                      ? Center(child: navigationBar(Axis.horizontal))
-                      : null,
+                  child: _NativeControlsGate(
+                    builder: (_, nativeControlsVisible) =>
+                        (defaultTargetPlatform != TargetPlatform.iOS ||
+                            nativeControlsVisible)
+                        ? Center(child: navigationBar(Axis.horizontal))
+                        : const SizedBox.shrink(),
+                  ),
                 ),
               )
             : null,
@@ -470,16 +470,22 @@ class HomePage extends HookConsumerWidget {
                                     ),
                                   ),
                                 ),
-                                if (nativeControlsVisible)
-                                  Positioned(
-                                    left: insets.left,
-                                    right: insets.right,
-                                    bottom: mobileTabBarBottom(paneContext),
-                                    height: mobileTabBarHeight,
-                                    child: Center(
-                                      child: navigationBar(Axis.horizontal),
-                                    ),
+                                Positioned(
+                                  left: insets.left,
+                                  right: insets.right,
+                                  bottom: mobileTabBarBottom(paneContext),
+                                  height: mobileTabBarHeight,
+                                  child: _NativeControlsGate(
+                                    builder: (_, nativeControlsVisible) =>
+                                        nativeControlsVisible
+                                        ? Center(
+                                            child: navigationBar(
+                                              Axis.horizontal,
+                                            ),
+                                          )
+                                        : const SizedBox.shrink(),
                                   ),
+                                ),
                               ],
                             );
                           },
@@ -503,6 +509,30 @@ class HomePage extends HookConsumerWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Builds [builder] with whether Home's native controls may show: Home is the
+/// current route and nothing is covering it.
+///
+/// Only this leaf depends on Home's route, so a route or sheet opening above
+/// Home rebuilds these controls and not the channel inventory.
+class _NativeControlsGate extends HookWidget {
+  const _NativeControlsGate({required this.builder});
+
+  final Widget Function(BuildContext context, bool nativeControlsVisible)
+  builder;
+
+  @override
+  Widget build(BuildContext context) {
+    final route = ModalRoute.of(context);
+    final coveringProgress = useAnimation(
+      route?.secondaryAnimation ?? kAlwaysDismissedAnimation,
+    );
+    return builder(
+      context,
+      (route?.isCurrent ?? true) && coveringProgress == 0,
     );
   }
 }

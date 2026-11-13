@@ -43,7 +43,7 @@ double _barContentHeight(
       : scaledTitleHeight;
   final accessibleHeight = Grid.xxs + effectiveTitleHeight + Grid.xxs;
   final strip =
-      DuoToolbarScope.maybeOf(context)?.strip ?? FoldGeometry.of(context).strip;
+      DuoToolbarScope.maybeStripOf(context) ?? FoldGeometry.of(context).strip;
   final minimumHeight =
       defaultTargetPlatform == TargetPlatform.iOS &&
           strip != null &&
@@ -72,8 +72,9 @@ double frostedAppBarLowerTitleHeight(
 // Duo has no top status inset in the content panes. Reserve breathing room
 // around the native 44-point controls instead of collapsing the header to them.
 double _nativeCompactHeight(BuildContext context, [double titleHeight = 0]) {
-  final scope = DuoToolbarScope.maybeOf(context);
-  final strip = scope == null ? FoldGeometry.of(context).strip : scope.strip;
+  final strip = context.getInheritedWidgetOfExactType<DuoToolbarScope>() == null
+      ? FoldGeometry.of(context).strip
+      : DuoToolbarScope.maybeStripOf(context);
   final height = IosNavigationMetrics.of(context).compactHeight;
   return strip == null
       ? max(height, titleHeight)

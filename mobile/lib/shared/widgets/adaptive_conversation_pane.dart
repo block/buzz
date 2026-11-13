@@ -102,14 +102,15 @@ class ConversationPaneController extends ChangeNotifier {
 
 class ConversationPaneScope
     extends InheritedNotifier<ConversationPaneController> {
-  const ConversationPaneScope({
+  ConversationPaneScope({
     required ConversationPaneController controller,
-    required super.child,
-    this.active = true,
+    required Widget child,
+    bool active = true,
     super.key,
-  }) : super(notifier: controller);
-
-  final bool active;
+  }) : super(
+         notifier: controller,
+         child: _ConversationPaneActive(active: active, child: child),
+       );
 
   /// Only the selected page owns the pane's implicit root navigation.
   /// Imperatively pushed pages retain ordinary Back navigation.
@@ -121,19 +122,27 @@ class ConversationPaneScope
         settings.key == controller!.selectionKey;
   }
 
+  /// Depends only on [active], which flips whenever a route covers the pane,
+  /// so readers of [maybeOf] (rows, the list) don't rebuild with it.
   static bool isActiveOf(BuildContext context) =>
       context
-          .dependOnInheritedWidgetOfExactType<ConversationPaneScope>()
+          .dependOnInheritedWidgetOfExactType<_ConversationPaneActive>()
           ?.active ??
       true;
-
-  @override
-  bool updateShouldNotify(ConversationPaneScope oldWidget) =>
-      active != oldWidget.active || super.updateShouldNotify(oldWidget);
 
   static ConversationPaneController? maybeOf(BuildContext context) => context
       .dependOnInheritedWidgetOfExactType<ConversationPaneScope>()
       ?.notifier;
+}
+
+class _ConversationPaneActive extends InheritedWidget {
+  const _ConversationPaneActive({required this.active, required super.child});
+
+  final bool active;
+
+  @override
+  bool updateShouldNotify(_ConversationPaneActive oldWidget) =>
+      active != oldWidget.active;
 }
 
 /// Keeps both the list and its detail navigator mounted across compact/regular
