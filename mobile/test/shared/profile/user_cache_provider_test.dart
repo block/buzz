@@ -393,6 +393,38 @@ void main() {
     },
   );
 
+  test('a preload never asks again for profiles already on the wire', () async {
+    final firstBatch = Completer<List<NostrEvent>>();
+    final session = _RecordingProfileSession(
+      results: [
+        firstBatch.future,
+        Future.value([
+          _profileEvent(id: 'c', pubkey: 'c', createdAt: 1, name: 'C'),
+        ]),
+      ],
+    );
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => session)],
+    );
+    addTearDown(container.dispose);
+    final cache = container.read(userCacheProvider.notifier);
+    final first = cache.preload(['a', 'b']);
+    await Future<void>.delayed(const Duration(milliseconds: 60));
+    expect(session.requestCount, 1);
+
+    // b is on the wire; only c is new.
+    final again = cache.preload(['b']);
+    final more = cache.preload(['b', 'c']);
+    firstBatch.complete([
+      _profileEvent(id: 'a', pubkey: 'a', createdAt: 1, name: 'A'),
+      _profileEvent(id: 'b', pubkey: 'b', createdAt: 1, name: 'B'),
+    ]);
+    expect(await Future.wait([first, again, more]), everyElement(isTrue));
+    expect(session.requestCount, 2);
+    expect(session.requestedFilter?.authors, ['c']);
+    expect(cache.state.keys, containsAll(['a', 'b', 'c']));
+  });
+
   test(
     'refresh verifies real OA batch while allowing main-isolate timers',
     () async {
