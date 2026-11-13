@@ -2733,8 +2733,9 @@ steps:
         assert!(runs.is_empty(), "a held owner's workflow must not fire");
     }
 
-    /// A run cancelled while a step executes stops before its next step and
-    /// stays cancelled with its stop evidence recorded.
+    /// A run cancelled while a step executes stops before its next step,
+    /// stays cancelled with its stop evidence recorded, and keeps the results
+    /// of the steps that already ran.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn executor_stops_a_run_cancelled_between_steps() {
@@ -2743,7 +2744,7 @@ steps:
         let member = nostr::Keys::generate().public_key().to_bytes().to_vec();
         let (community, channel_id) = setup_channel(&db, &creator, &member).await;
         let (def, def_json) = schema::parse_yaml(
-            "name: cancel\ntrigger:\n  on: webhook\nsteps:\n  - id: wait\n    action: delay\n    duration: 1s\n  - id: after\n    action: send_message\n    text: 'must not send'\n",
+            "name: cancel\ntrigger:\n  on: webhook\nsteps:\n  - id: sent\n    action: send_message\n    text: 'completed action'\n  - id: after\n    action: send_message\n    text: 'must not send'\n",
         )
         .expect("parse");
         let workflow_id = db
@@ -2769,30 +2770,87 @@ steps:
             .expect("create run");
         let engine = Arc::new(WorkflowEngine::new(db.clone(), WorkflowConfig::default()));
 
-        let task = {
-            let engine = engine.clone();
-            tokio::spawn(async move {
-                executor::execute_run(
-                    &engine,
-                    community,
-                    run_id,
-                    &def,
-                    &executor::TriggerContext::default(),
-                )
-                .await
-            })
-        };
-        // Cancel while the delay step runs, as retirement does.
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        sqlx::query("UPDATE workflow_runs SET status = 'cancelled' WHERE id = $1")
-            .bind(run_id)
-            .execute(db.pool())
-            .await
-            .expect("cancel run");
-
-        let (err, progress) = task.await.expect("join").expect_err("run must stop");
+        // Retire the owner through the real store while the first action is
+        // completing, then return its event id: the run is cancelled between
+        // steps with no timing dependence.
+        struct RetiringSink {
+            db: Db,
+            owner: [u8; 32],
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        impl ActionSink for RetiringSink {
+            fn send_message(
+                &self,
+                community_id: CommunityId,
+                _channel_id: &str,
+                _text: &str,
+                _authored_text: &str,
+                _may_direct_agents: bool,
+                _author_pubkey: &str,
+                _reply_to: Option<&str>,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<SentMessage, ActionSinkError>>
+                        + Send
+                        + '_,
+                >,
+            > {
+                Box::pin(async move {
+                    assert_eq!(
+                        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                        0,
+                        "no second side effect after retirement",
+                    );
+                    let inventory = self
+                        .db
+                        .admin_identity_inventory(community_id, &self.owner)
+                        .await
+                        .expect("preview owner");
+                    self.db
+                        .apply_identity_retirement(
+                            &buzz_db::identity_retirement::RetirementRequest {
+                                community: community_id,
+                                request_id: Uuid::new_v4(),
+                                operation:
+                                    buzz_db::identity_retirement::RetirementOperation::Archive,
+                                target: self.owner,
+                                actor: [7; 32],
+                                payload: buzz_db::identity_retirement::RetirementPayload {
+                                    reason: None,
+                                    replaced_by: None,
+                                    inventory_version: inventory.inventory_version,
+                                },
+                            },
+                        )
+                        .await
+                        .expect("retire during completed action");
+                    Ok(SentMessage {
+                        event_id: "ab".repeat(32),
+                        agent_mentions_withheld: false,
+                    })
+                })
+            }
+        }
+        let sink = Arc::new(RetiringSink {
+            db: db.clone(),
+            owner: creator.as_slice().try_into().unwrap(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        engine.set_action_sink(sink.clone());
+        let (err, progress) = executor::execute_run(
+            &engine,
+            community,
+            run_id,
+            &def,
+            &executor::TriggerContext::default(),
+        )
+        .await
+        .expect_err("run must stop");
+        assert_eq!(sink.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(matches!(err, WorkflowError::RunCancelled), "{err:?}");
         assert_eq!(progress.step_index, 1, "stops before the second step");
+        assert_eq!(progress.trace[0]["output"]["event_id"], "ab".repeat(32));
+        let expected_trace = serde_json::Value::Array(progress.trace.clone());
 
         engine
             .finalize_run(community, run_id, Err((err, progress)), None)
@@ -2803,6 +2861,19 @@ steps:
             .expect("get run");
         assert_eq!(run.status, buzz_db::workflow::RunStatus::Cancelled);
         assert!(run.completed_at.is_some(), "stop evidence recorded");
+        assert_eq!(
+            run.error_code.as_deref(),
+            Some(buzz_db::identity_retirement::RETIRED_RUN_ERROR_CODE)
+        );
+        assert_eq!(
+            run.error_message.as_deref(),
+            Some("workflow owner identity retired")
+        );
+        assert_eq!(
+            (run.current_step, run.execution_trace),
+            (1, expected_trace),
+            "terminal cancellation must retain completed action results",
+        );
     }
 
     /// Every run records what caused it: the signer of the triggering message,

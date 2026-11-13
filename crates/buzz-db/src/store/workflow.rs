@@ -1063,9 +1063,12 @@ pub struct WorkflowRunFailure<'a> {
 /// column AFTER `SET status = ?` had already changed it, so the condition was
 /// always false. We now check the bind parameter directly.
 ///
-/// A `cancelled` run is final: any later write leaves it unchanged (keeping
-/// the cancelling reason), stamps `completed_at` if unset (the writer has
-/// stopped acting on the run) and returns [`DbError::RunCancelled`].
+/// A `cancelled` run is final: any later write keeps its status and the
+/// cancelling reason, stamps `completed_at` if unset (the writer has stopped
+/// acting on the run) and returns [`DbError::RunCancelled`]. A terminal write
+/// (the executor's final progress) also records `current_step` and the
+/// execution trace, so results of steps that already ran survive; a `Running`
+/// stamp leaves them unchanged.
 pub async fn update_workflow_run(
     pool: &PgPool,
     community_id: CommunityId,
@@ -1092,13 +1095,23 @@ pub async fn update_workflow_run(
     .ok_or_else(|| DbError::NotFound(format!("workflow_run {id}")))?;
     if current == "cancelled" {
         // A cancelled run never leaves `cancelled`. The executor writing to it
-        // has stopped acting on it, so stamp that as the run's stop evidence.
+        // has stopped acting on it, so stamp that as the run's stop evidence,
+        // and keep its final progress so completed steps' outputs survive.
+        let terminal = matches!(
+            status,
+            RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled
+        );
         sqlx::query(
-            "UPDATE workflow_runs SET completed_at = COALESCE(completed_at, NOW()) \
+            "UPDATE workflow_runs SET completed_at = COALESCE(completed_at, NOW()), \
+             current_step = CASE WHEN $3 THEN $4 ELSE current_step END, \
+             execution_trace = CASE WHEN $3 THEN $5 ELSE execution_trace END \
              WHERE community_id = $1 AND id = $2",
         )
         .bind(community_id.as_uuid())
         .bind(id)
+        .bind(terminal)
+        .bind(current_step)
+        .bind(trace)
         .execute(tx.conn())
         .await?;
         tx.commit().await?;
