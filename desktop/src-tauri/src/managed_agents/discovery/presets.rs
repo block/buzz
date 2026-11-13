@@ -225,6 +225,15 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         underlying_cli_install_hint: None,
         underlying_cli_install_instructions_url: None,
     },
+    PresetHarness {
+        id: "pfterminal",
+        label: "PFTerminal",
+        command: "pfterminal-acp",
+        args: &[],
+        install_instructions_url: "https://github.com/agtico/PfTerminal",
+        install_hint: "Buzz talks to PFTerminal through the pfterminal-acp adapter, which ships with PFTerminal and relies on the codex-acp bridge. Install PFTerminal, then install the bridge with `npm install -g @agentclientprotocol/codex-acp`, so the pfterminal-acp command is on your PATH.",
+        underlying_cli: Some("pfterminal"),
+    },
 ];
 
 /// Return preset definitions for the spawn/readiness registry.
