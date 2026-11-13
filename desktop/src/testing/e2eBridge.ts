@@ -34,6 +34,11 @@ import { getAudioMediaLoadSchedulerSnapshot } from "@/features/messages/lib/audi
 import { mockSearchHitMatches } from "./e2eBridgeSearch.ts";
 import { selectMockHistory } from "./e2eBridgeHistory.ts";
 import {
+  handleMockInstallerCancel,
+  handleMockInstallerDownload,
+  installMockInstallerDownloadControls,
+} from "./e2eBridgeInstallerDownload.ts";
+import {
   createMockSubscription,
   hasMockSubscription,
 } from "./e2eBridgeSubscriptions.ts";
@@ -11559,6 +11564,7 @@ export function maybeInstallE2eTauriMocks() {
     (window as Window & { isTauri?: boolean }).isTauri = true;
   }
   mockWindows(config.mock?.windowLabel ?? "main");
+  installMockInstallerDownloadControls();
   window.__BUZZ_E2E_COMMANDS__ = [];
   window.__BUZZ_E2E_COMMAND_PAYLOADS__ = [];
   window.__BUZZ_E2E_COMMAND_LOG__ = [];
@@ -14887,6 +14893,12 @@ export function maybeInstallE2eTauriMocks() {
         return activeConfig?.mock?.autoUpdateSupported !== false;
       case "new_app_installer_target":
         return activeConfig?.mock?.newAppInstallerTarget ?? null;
+      case "download_new_app_installer":
+        return handleMockInstallerDownload(payload);
+      case "cancel_new_app_installer_download":
+        return handleMockInstallerCancel();
+      case "reveal_new_app_installer":
+        return null;
       case "relay_reconnect_hook":
         return null;
       case "relay_reconnect_hook_configured":

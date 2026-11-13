@@ -118,8 +118,45 @@ test("rejects every manifest or entry that is not a buzz-app release asset", () 
       withDownload(`${RELEASE}/Buzz_1.0.0_x64_unsigned.exe?name=Buzz.dmg`),
       "macos-arm64",
     ],
+    ["query", withDownload(`${RELEASE}/Buzz.dmg?download=1`), "macos-arm64"],
+    ["empty query", withDownload(`${RELEASE}/Buzz.dmg?`), "macos-arm64"],
+    ["fragment", withDownload(`${RELEASE}/Buzz.dmg#top`), "macos-arm64"],
+    [
+      "no tag segment",
+      withDownload(
+        "https://github.com/block/buzz-app/releases/download/Buzz.dmg",
+      ),
+      "macos-arm64",
+    ],
+    [
+      "extension with nothing before it",
+      withDownload(`${RELEASE}/.dmg`),
+      "macos-arm64",
+    ],
+    ["hidden file", withDownload(`${RELEASE}/.Buzz.dmg`), "macos-arm64"],
+    [
+      "encoded separator in the file name",
+      withDownload(`${RELEASE}/..%2FBuzz.dmg`),
+      "macos-arm64",
+    ],
+    [
+      "space in the file name",
+      withDownload(`${RELEASE}/Buzz%20App.dmg`),
+      "macos-arm64",
+    ],
+    [
+      "file name too long",
+      withDownload(`${RELEASE}/${"a".repeat(128)}.dmg`),
+      "macos-arm64",
+    ],
   ];
   for (const [name, input, target] of cases) {
     assert.equal(resolveInstallerUrl(input, target), null, name);
   }
+});
+
+test("accepts a tag that holds slashes", () => {
+  const url =
+    "https://github.com/block/buzz-app/releases/download/desktop/v1.0.0/Buzz.dmg";
+  assert.equal(resolveInstallerUrl(withDownload(url), "macos-arm64"), url);
 });

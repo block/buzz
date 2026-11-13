@@ -4,6 +4,8 @@ export const BUZZ_APP_DOWNLOADS_MANIFEST_URL =
 export const BUZZ_APP_DOWNLOAD_PATH_PREFIX =
   "/block/buzz-app/releases/download/";
 export const NEW_APP_MANIFEST_TIMEOUT_MS = 5_000;
+/** Opened in the browser when this machine's installer is not resolved. */
+export const BUZZ_APP_WEBSITE_URL = "https://buzz.xyz";
 
 const BUZZ_APP_DOWNLOAD_ORIGIN = "https://github.com";
 
@@ -16,6 +18,12 @@ const INSTALLER_EXTENSION_BY_TARGET: Record<string, string> = {
   "linux-deb": ".deb",
 };
 
+/**
+ * The backend saves the installer under the URL's last path segment, so that
+ * segment must be a plain file name: letters, digits and `._+-` only.
+ */
+const INSTALLER_FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -23,7 +31,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /**
  * Returns the installer URL the manifest lists for `target`, or null when the
  * manifest or the entry is anything other than a stable-channel release asset
- * of block/buzz-app with the file type that target installs.
+ * of block/buzz-app with the file type that target installs. The backend
+ * applies the same URL rules again before it downloads anything.
  */
 export function resolveInstallerUrl(
   manifest: unknown,
@@ -59,7 +68,19 @@ export function resolveInstallerUrl(
     url.username !== "" ||
     url.password !== "" ||
     !url.pathname.startsWith(BUZZ_APP_DOWNLOAD_PATH_PREFIX) ||
-    !url.pathname.endsWith(INSTALLER_EXTENSION_BY_TARGET[target])
+    !url.pathname.endsWith(INSTALLER_EXTENSION_BY_TARGET[target]) ||
+    /[?#]/.test(url.href)
+  ) {
+    return null;
+  }
+  // `<tag>/<file name>`; a tag may hold slashes, the file name may not.
+  const assetPath = url.pathname.slice(BUZZ_APP_DOWNLOAD_PATH_PREFIX.length);
+  const separator = assetPath.lastIndexOf("/");
+  const fileName = assetPath.slice(separator + 1);
+  if (
+    separator < 1 ||
+    !INSTALLER_FILE_NAME.test(fileName) ||
+    fileName === INSTALLER_EXTENSION_BY_TARGET[target]
   ) {
     return null;
   }

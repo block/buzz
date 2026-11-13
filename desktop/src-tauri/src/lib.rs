@@ -225,6 +225,7 @@ pub fn run() {
         })
         .manage(build_app_state())
         .manage(ClipboardState::new())
+        .manage(InstallerDownloads::default())
         .manage(PendingCommunityDeepLinks::default())
         .manage(PendingNavigationDeepLinks::default())
         .manage(PendingEntityDeepLinks::default())
@@ -875,6 +876,9 @@ pub fn run() {
             archive::sync::stop_archive_sync,
             is_auto_update_supported,
             new_app_installer_target,
+            download_new_app_installer,
+            cancel_new_app_installer_download,
+            reveal_new_app_installer,
             set_window_vibrancy,
             #[cfg(target_os = "macos")]
             tray_menu::clear_tray_agent_activity,
@@ -931,6 +935,8 @@ pub fn run() {
         } if label == "main" => {
             // Keep the webview alive so Buzz can be reopened from its tray menu.
             api.prevent_close();
+            // A hidden window cannot show the installer download's dialog.
+            app_handle.state::<InstallerDownloads>().cancel();
             if let Some(window) = app_handle.get_webview_window("main") {
                 if let Err(error) = window.hide() {
                     eprintln!("buzz-desktop: failed to hide main window: {error}");
@@ -960,6 +966,12 @@ pub fn run() {
                 }
             }
         }
+        // The main webview is gone, and with it the installer download's dialog.
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::Destroyed,
+            ..
+        } if label == "main" => app_handle.state::<InstallerDownloads>().cancel(),
         RunEvent::ExitRequested { code, .. } => {
             if is_restart_request(code) {
                 restart_requested.store(true, Ordering::SeqCst);

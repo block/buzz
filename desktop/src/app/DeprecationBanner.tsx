@@ -1,11 +1,12 @@
 import * as React from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { ExternalLink, Sparkles, X } from "lucide-react";
+import { Sparkles, X } from "lucide-react";
 
 import {
   DEPRECATION_BANNER_STORAGE_KEY,
   shouldShowDeprecationBanner,
 } from "@/app/deprecationBannerVisibility";
+import { NewAppDownloadButton } from "@/app/NewAppDownloadButton";
 import {
   BUZZ_APP_DOWNLOADS_MANIFEST_URL,
   NEW_APP_MANIFEST_TIMEOUT_MS,
@@ -14,13 +15,11 @@ import {
 import { getNewAppInstallerTarget } from "@/shared/api/tauri";
 import { Button } from "@/shared/ui/button";
 
-// Opened until, and unless, the installer for this machine is resolved.
-const BUZZ_APP_FALLBACK_URL = "https://buzz.xyz";
 const BUZZ_APP_UPGRADE_GUIDE_URL =
   "https://github.com/block/buzz-app/blob/main/docs/upgrading.md";
 
-// Both banner actions share one look; only the download button adds an icon.
-const BANNER_ACTION_CLASS = "h-7 shrink-0 gap-1.5";
+// Both banner actions share one look: text only, no icon.
+const BANNER_ACTION_CLASS = "h-7 shrink-0";
 
 function readDismissedAt(): string | null {
   try {
@@ -57,7 +56,7 @@ export function DeprecationBanner() {
   const [installerUrl, setInstallerUrl] = React.useState<string | null>(null);
 
   // One attempt per mount. The click never waits on it: until it resolves,
-  // and whenever it fails, the button opens the fallback page.
+  // and whenever it fails, the button opens the website instead.
   React.useEffect(() => {
     if (!isVisible) {
       return;
@@ -133,20 +132,10 @@ export function DeprecationBanner() {
           >
             More info
           </Button>
-          <Button
+          <NewAppDownloadButton
             className={BANNER_ACTION_CLASS}
-            data-download-source={installerUrl ? "installer" : "fallback"}
-            data-testid="deprecation-banner-download"
-            onClick={() => {
-              void openUrl(installerUrl ?? BUZZ_APP_FALLBACK_URL);
-            }}
-            size="sm"
-            type="button"
-            variant="outline"
-          >
-            Get the new app
-            <ExternalLink aria-hidden className="size-3.5" />
-          </Button>
+            installerUrl={installerUrl}
+          />
         </div>
       </div>
       <Button
