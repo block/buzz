@@ -59,18 +59,20 @@ export function DeprecationBanner() {
           one whenever you get a chance.
         </p>
         <div className="flex shrink-0 items-center gap-2">
+          {/* The outline variant's own border is too faint to see on the
+              banner tint, so this one uses a stronger border color. */}
           <Button
-            className="h-7 shrink-0 gap-1.5"
+            aria-label="More info about upgrading, opens in your browser"
+            className="h-7 shrink-0 border-foreground/70"
             data-testid="deprecation-banner-upgrade-guide"
             onClick={() => {
               void openUrl(BUZZ_APP_UPGRADE_GUIDE_URL);
             }}
             size="sm"
             type="button"
-            variant="ghost"
+            variant="outline"
           >
-            How to upgrade
-            <ExternalLink aria-hidden className="size-3.5" />
+            More info
           </Button>
           <Button
             className="h-7 shrink-0 gap-1.5"

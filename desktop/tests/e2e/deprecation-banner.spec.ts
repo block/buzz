@@ -44,10 +44,16 @@ test("deprecation banner: both links open externally and the row holds up when n
 
   const banner = page.getByTestId("deprecation-banner");
   const message = banner.getByTestId("deprecation-banner-message");
-  const upgradeGuide = banner.getByRole("button", { name: "How to upgrade" });
+  // "More info" alone says little out of context, so the accessible name adds
+  // the topic and that the link leaves the app.
+  const upgradeGuide = banner.getByRole("button", {
+    exact: true,
+    name: "More info about upgrading, opens in your browser",
+  });
   const download = banner.getByRole("button", { name: "Get the new app" });
   const dismiss = banner.getByRole("button", { name: "Remind me later" });
   await expect(banner).toBeVisible();
+  await expect(upgradeGuide).toHaveText("More info");
 
   // Pointer and keyboard both reach the opener, each with its own link.
   await upgradeGuide.click();
