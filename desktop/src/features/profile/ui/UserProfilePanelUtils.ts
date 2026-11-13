@@ -126,15 +126,18 @@ export function deriveProfileChannels(
   channels: Channel[] | undefined,
 ): ProfileChannelLink[] {
   const links = new Map<string, ProfileChannelLink>();
-  const channelsByName = new Map(
-    channels?.map((channel) => [channel.name, channel]) ?? [],
+  const channelsById = new Map(
+    channels?.map((channel) => [channel.id, channel]) ?? [],
   );
 
-  relayAgent?.channels.forEach((name, index) => {
-    const channel = channelsByName.get(name);
-    const id = relayAgent.channelIds[index] ?? channel?.id ?? name;
-    links.set(id, { id, name });
-  });
+  // The relay directory reports where an agent has the bot role by channel
+  // id only, so names come from the viewer's channel list.
+  for (const id of relayAgent?.channelIds ?? []) {
+    const channel = channelsById.get(id);
+    if (channel) {
+      links.set(id, { id, name: channel.name });
+    }
+  }
 
   if (managedAgent && channels) {
     for (const channel of channels) {
