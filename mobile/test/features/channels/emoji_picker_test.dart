@@ -858,9 +858,16 @@ void main() {
             }),
             throwsA(isA<PlatformException>()),
           );
-          await Future<void>.delayed(const Duration(milliseconds: 50));
-          expect(mediaClient.requests, hasLength(4));
-          // An emoji already saved on disk does not wait for a slot.
+          // Each load checks the disk cache first, so wait for the four to
+          // reach the network rather than for a fixed time.
+          final deadline = DateTime.now().add(const Duration(seconds: 10));
+          while (mediaClient.requests.length < 4) {
+            if (DateTime.now().isAfter(deadline)) fail('loads never started');
+            await Future<void>.delayed(const Duration(milliseconds: 10));
+          }
+          // An emoji already saved on disk does not wait for a slot. Its own
+          // disk round trips also give the queued load time to start, were
+          // it not waiting for a slot.
           await diskCache.write(
             'https://example.test/saved.png',
             _pngBytes,
