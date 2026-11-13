@@ -640,8 +640,7 @@ class _SectionChevron extends StatelessWidget {
 
 bool _usesNativeSectionMenu(BuildContext context) =>
     defaultTargetPlatform == TargetPlatform.iOS &&
-    (DuoToolbarScope.maybeOf(context)?.strip ??
-            FoldGeometry.of(context).strip) !=
+    (DuoToolbarScope.maybeStripOf(context) ?? FoldGeometry.of(context).strip) !=
         null;
 
 class _SectionOptionsButton extends StatelessWidget {
