@@ -102,6 +102,35 @@ final class NativeMessageImageLoaderTests: XCTestCase {
   }
 }
 
+final class NativeMessageImageLoaderDecodeTests: XCTestCase {
+  /// A 1x1 GIF with one frame per delay, in centiseconds.
+  private func gif(_ delays: [Int]) -> Data {
+    var bytes: [UInt8] = Array("GIF89a".utf8)
+    bytes += [1, 0, 1, 0, 0x80, 0, 0] // 1x1, two-colour global table
+    bytes += [0, 0, 0, 0xff, 0xff, 0xff]
+    for delay in delays {
+      bytes += [0x21, 0xf9, 4, 0, UInt8(delay & 0xff), UInt8(delay >> 8), 0, 0] // frame delay
+      bytes += [0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0] // 1x1 image
+      bytes += [2, 2, 0x44, 1, 0] // one pixel
+    }
+    bytes.append(0x3b)
+    return Data(bytes)
+  }
+
+  func testShowsFramesOfTenMillisecondsOrLessForOneHundred() throws {
+    // Browsers and the Flutter timeline show 0 and 1 cs frames for 100 ms;
+    // longer frames keep their own delay.
+    let image = try XCTUnwrap(NativeMessageImageLoader.decode(gif([0, 1, 2, 5])))
+    XCTAssertEqual(image.images?.count, 4)
+    XCTAssertEqual(image.duration, 0.1 + 0.1 + 0.02 + 0.05, accuracy: 0.001)
+  }
+
+  func testStillImageIsNotAnimated() throws {
+    let image = try XCTUnwrap(NativeMessageImageLoader.decode(gif([5])))
+    XCTAssertNil(image.images)
+  }
+}
+
 private final class MessageImageProtocol: URLProtocol {
   static var start: ((MessageImageProtocol) -> Void)?
   override class func canInit(with request: URLRequest) -> Bool { true }
