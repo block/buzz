@@ -1351,45 +1351,69 @@ void main() {
       );
     });
 
-    testWidgets('a failed send does not overwrite a new draft', (tester) async {
-      final delivery = Completer<void>();
-      await tester.pumpWidget(
-        _buildComposeBar(
-          uploadService: _testUploadService(nostr.Keys.generate().nsec),
-          onSend:
-              (content, mentionPubkeys, {mediaTags = const <List<String>>[]}) =>
-                  delivery.future,
-        ),
-      );
+    for (final recovered in [false, true]) {
+      testWidgets('a failed send does not overwrite a new draft '
+          '${recovered ? 'recovered from elsewhere' : 'typed during it'}', (
+        tester,
+      ) async {
+        final delivery = Completer<void>();
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) => delivery.future,
+          ),
+        );
 
-      await _expandComposer(tester);
-      await tester.enterText(find.byType(TextField), 'first draft');
-      await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
-      for (var i = 0; i < 20; i++) {
-        await tester.pump(const Duration(milliseconds: 20));
-        if (tester
-            .widget<TextField>(find.byType(TextField))
-            .controller!
-            .text
-            .isEmpty) {
-          break;
+        await _expandComposer(tester);
+        await tester.enterText(find.byType(TextField), 'first draft');
+        await tester.pumpAndSettle();
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+        for (var i = 0; i < 20; i++) {
+          await tester.pump(const Duration(milliseconds: 20));
+          if (tester
+              .widget<TextField>(find.byType(TextField))
+              .controller!
+              .text
+              .isEmpty) {
+            break;
+          }
         }
-      }
-      expect(
-        tester.widget<TextField>(find.byType(TextField)).controller!.text,
-        '',
-      );
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          '',
+        );
 
-      await tester.enterText(find.byType(TextField), 'new draft');
-      delivery.completeError(StateError('relay rejected'));
-      await tester.pumpAndSettle();
+        if (recovered) {
+          // Such as an unsent notification reply for this conversation.
+          final container = ProviderScope.containerOf(
+            tester.element(find.byType(ComposeBar)),
+          );
+          container
+              .read(composeDraftsProvider.notifier)
+              .append(
+                config: container.read(relayConfigProvider),
+                key: composeDraftKey('channel-1'),
+                channelId: 'channel-1',
+                text: 'new draft',
+              );
+          await tester.pump();
+        } else {
+          await tester.enterText(find.byType(TextField), 'new draft');
+        }
+        delivery.completeError(StateError('relay rejected'));
+        await tester.pumpAndSettle();
 
-      expect(
-        tester.widget<TextField>(find.byType(TextField)).controller!.text,
-        'new draft',
-      );
-    });
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          'new draft',
+        );
+      });
+    }
 
     testWidgets('smoothly resizes the text field when a new line is added', (
       tester,

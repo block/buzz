@@ -188,6 +188,8 @@ void _useComposeDraftLifecycle({
       final saved = ref.read(composeDraftsProvider.notifier).draftFor(draftKey);
       if (saved == null || saved.text == lastPersistedText) return;
       lastPersistedText = saved.text;
+      // A send or upload in flight must not restore over it.
+      draftRevision.value += 1;
       controller.text = saved.text;
     });
 
