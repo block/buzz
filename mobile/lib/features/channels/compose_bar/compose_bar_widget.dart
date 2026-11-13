@@ -326,7 +326,6 @@ class ComposeBar extends HookConsumerWidget {
     final isModifyingText = useRef(false);
     final lastObservedEditingValue = useRef(controller.value);
 
-    // Typed member names the send resolves, selection or not.
     List<MentionCandidate> memberMentionCandidates() => _typedMemberCandidates(
       membersAsync: membersAsync,
       sessionStatus: sessionStatus,
