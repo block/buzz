@@ -32,6 +32,10 @@ pub mod rate_limit;
 /// OAuth scope parsing and enforcement.
 pub mod scope;
 
+/// How far a signed event's `created_at` may differ from server time, in
+/// either direction, for NIP-42 AUTH and NIP-98 HTTP Auth.
+pub const TIMESTAMP_TOLERANCE_SECS: u64 = 120;
+
 pub use access::{check_read_access, check_write_access, require_scope, ChannelAccessChecker};
 pub use error::AuthError;
 pub use nip42::{generate_challenge, verify_nip42_event};

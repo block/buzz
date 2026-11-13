@@ -2,6 +2,15 @@
 
 use crate::error::MediaError;
 
+/// How far a client clock may be off, in either direction, for a kind-24242
+/// proof's `created_at` (future bound, and Strict's age bound) and its
+/// `expiration` (a slow client's proof is not already expired).
+const MEDIA_CLOCK_SKEW_SECS: u64 = 120;
+/// Strict mode: `expiration` may be at most this far past `created_at`.
+const STRICT_MAX_LIFETIME_SECS: u64 = 60;
+/// Permissive mode: the pre-NIP-FI one-hour age allowance.
+const PERMISSIVE_MAX_AGE_SECS: u64 = 3600;
+
 /// Blossom kind:24242 verbs Buzz currently accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlossomVerb {
@@ -187,31 +196,37 @@ pub fn verify_blossom_auth_event_for_verb(
     }
     let now = nostr::Timestamp::now().as_secs();
 
-    // 4b. Expiration must be strictly in the future
-    if exp_value <= now {
+    // 4b. Expiration must not have passed, allowing for a client clock up to
+    //     MEDIA_CLOCK_SKEW_SECS slow.
+    if exp_value <= now.saturating_sub(MEDIA_CLOCK_SKEW_SECS) {
         return Err(MediaError::TokenExpired);
     }
 
     // 5. created_at freshness bounds.
     //
+    //   Both modes:
+    //     created_at <= now + 120s        — bounded future skew
+    //
     //   Strict  (NIP-FI active modes):
-    //     created_at <= now + 5s          — bounded future skew
-    //     now - created_at <= 60s         — 60-second replay window
+    //     now - created_at <= 120s        — replay window
     //     expiration <= created_at + 60s  — token cannot outlive its window
     //
     //   Permissive (Off mode):
-    //     created_at <= now + 5s          — future skew only
     //     now - created_at <= 3600s       — 1-hour replay window (pre-NIP-FI)
     //     expiration window not enforced
     let created = auth_event.created_at.as_secs();
-    if created > now + 5 {
+    if created > now + MEDIA_CLOCK_SKEW_SECS {
         return Err(MediaError::TimestampOutOfWindow);
     }
-    let max_age = if strict { 60u64 } else { 3600u64 };
+    let max_age = if strict {
+        MEDIA_CLOCK_SKEW_SECS
+    } else {
+        PERMISSIVE_MAX_AGE_SECS
+    };
     if now > created + max_age {
         return Err(MediaError::TimestampOutOfWindow);
     }
-    if strict && exp_value > created + 60 {
+    if strict && exp_value > created + STRICT_MAX_LIFETIME_SECS {
         // expiration tag must satisfy expiration <= created_at + 60s
         return Err(MediaError::TimestampOutOfWindow);
     }
@@ -1753,9 +1768,10 @@ mod tests {
         let body = b"hello world";
         let sha256 = hex::encode(sha2::Sha256::digest(body));
         let server = "relay.example";
-        // Token expired in the past — simulates a proof that was valid at admit
-        // time but whose expiry passed during a slow body transfer.
-        let past = Timestamp::now().as_secs().saturating_sub(10);
+        // Token expired in the past, beyond the clock-skew allowance — simulates
+        // a proof that was valid at admit time but whose expiry passed during a
+        // slow body transfer.
+        let past = Timestamp::now().as_secs().saturating_sub(130);
         let exp_str = past.to_string();
         let tags = vec![
             Tag::parse(["t", "upload"]).unwrap(),
@@ -1868,5 +1884,100 @@ mod tests {
             .is_ok(),
             "Permissive must use last-wins expiration: valueless-first must not cause expiry rejection"
         );
+    }
+
+    // ── Clock skew: ±120 s client clocks ─────────────────────────────────────
+
+    fn upload_proof_at(created_offset: i64, lifetime: u64) -> (nostr::Event, String) {
+        let keys = Keys::generate();
+        let sha256 = "a".repeat(64);
+        let created = Timestamp::now()
+            .as_secs()
+            .saturating_add_signed(created_offset);
+        let exp_str = (created + lifetime).to_string();
+        let tags = vec![
+            Tag::parse(["t", "upload"]).unwrap(),
+            Tag::parse(["x", &sha256]).unwrap(),
+            Tag::parse(["expiration", &exp_str]).unwrap(),
+            Tag::parse(["server", "relay.example"]).unwrap(),
+        ];
+        let event = EventBuilder::new(Kind::from(24242), "Upload buzz-media")
+            .tags(tags)
+            .custom_created_at(Timestamp::from(created))
+            .sign_with_keys(&keys)
+            .unwrap();
+        (event, sha256)
+    }
+
+    fn verify_upload(
+        event: &nostr::Event,
+        sha256: &str,
+        mode: BlossomStrictness,
+    ) -> Result<(), MediaError> {
+        verify_blossom_upload_auth(event, sha256, Some("relay.example"), mode)
+    }
+
+    #[test]
+    fn test_both_modes_accept_client_120s_fast_or_slow() {
+        // One second of slack on the slow side for the wall clock ticking.
+        for mode in [BlossomStrictness::Strict, BlossomStrictness::Permissive] {
+            for offset in [120, -119] {
+                let (event, sha256) = upload_proof_at(offset, 60);
+                assert!(
+                    verify_upload(&event, &sha256, mode).is_ok(),
+                    "{mode:?} must accept a proof from a clock {offset}s off"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_both_modes_reject_proof_more_than_120s_in_future() {
+        for mode in [BlossomStrictness::Strict, BlossomStrictness::Permissive] {
+            let (event, sha256) = upload_proof_at(122, 60);
+            assert!(
+                matches!(
+                    verify_upload(&event, &sha256, mode),
+                    Err(MediaError::TimestampOutOfWindow)
+                ),
+                "{mode:?} must reject created_at > now + 120s"
+            );
+        }
+    }
+
+    #[test]
+    fn test_both_modes_reject_expiration_more_than_120s_past() {
+        for mode in [BlossomStrictness::Strict, BlossomStrictness::Permissive] {
+            let (event, sha256) = upload_proof_at(-181, 60);
+            assert!(
+                matches!(
+                    verify_upload(&event, &sha256, mode),
+                    Err(MediaError::TokenExpired)
+                ),
+                "{mode:?} must reject expiration <= now - 120s"
+            );
+        }
+    }
+
+    #[test]
+    fn test_strict_rejects_proof_older_than_120s() {
+        let (event, sha256) = upload_proof_at(-121, 3600);
+        assert!(matches!(
+            verify_upload(&event, &sha256, BlossomStrictness::Strict),
+            Err(MediaError::TimestampOutOfWindow)
+        ));
+    }
+
+    #[test]
+    fn test_permissive_keeps_hour_age_and_no_lifetime_cap() {
+        // Older than 120 s but inside 3600 s, with a lifetime past Strict's
+        // 60 s cap: still accepted in Permissive mode.
+        let (event, sha256) = upload_proof_at(-1800, 7200);
+        assert!(verify_upload(&event, &sha256, BlossomStrictness::Permissive).is_ok());
+        let (event, sha256) = upload_proof_at(-3601, 7200);
+        assert!(matches!(
+            verify_upload(&event, &sha256, BlossomStrictness::Permissive),
+            Err(MediaError::TimestampOutOfWindow)
+        ));
     }
 }

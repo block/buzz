@@ -1,6 +1,6 @@
-//! The one cached NIP-FI assertion an evidence link holds for its relay,
-//! shared by the headless adapter session and the Buzz desktop link: one
-//! `exp` parser and one refresh rule.
+//! The one cached NIP-FI assertion the headless adapter session holds for its
+//! relay: one `exp` parser and one refresh rule. The Buzz desktop link keeps
+//! no copy; the desktop app's cache is the only owner of its assertions.
 
 use tokio::sync::Mutex;
 
@@ -23,22 +23,40 @@ impl CachedAssertion {
     {
         let mut cached = self.0.lock().await;
         if let Some((assertion, refresh)) = cached.as_ref() {
-            if unix_now() < *refresh {
+            if monotonic_now() < *refresh {
                 return Ok(assertion.clone());
             }
         }
+        let request_start = monotonic_now();
         let assertion = fetch.await?;
         let refresh = match assertion.as_deref() {
-            Some(jws) => refresh_at(
-                unix_now(),
-                jws_exp(jws).ok_or_else(|| {
+            Some(jws) => {
+                let claims = jws_claims(jws).ok_or_else(|| {
                     CliError::Auth("the evidence source returned an unreadable assertion".into())
-                })?,
-            ),
+                })?;
+                let receipt = monotonic_now();
+                let deadline = local_deadline(request_start, receipt, unix_now(), claims);
+                refresh_at(receipt, deadline)
+            }
             None => u64::MAX,
         };
         *cached = Some((assertion.clone(), refresh));
         Ok(assertion)
+    }
+}
+
+/// The local monotonic deadline of an assertion fetched between
+/// `request_start` and `receipt` (monotonic seconds), with the wall clock at
+/// `wall_at_receipt`: the issuer's lifetime counted from before the request
+/// was sent, capped by `exp` against the local wall clock. The first term
+/// keeps a skewed local clock from stretching the token; the second keeps a
+/// short session-capped token from outliving its `exp`. A zero budget gives
+/// `receipt`, so the assertion is fetched again on the next call.
+fn local_deadline(request_start: u64, receipt: u64, wall_at_receipt: u64, claims: Claims) -> u64 {
+    let by_exp = receipt + claims.exp.saturating_sub(wall_at_receipt);
+    match claims.iat {
+        Some(iat) => by_exp.min(request_start + claims.exp.saturating_sub(iat)),
+        None => by_exp,
     }
 }
 
@@ -58,6 +76,18 @@ pub(crate) fn refresh_at(now: u64, exp: u64) -> u64 {
 /// JSON-object payload with an integer `exp`. The relay verifies the
 /// signature; the CLI only refuses output it could not present or refresh.
 pub(crate) fn jws_exp(token: &str) -> Option<u64> {
+    jws_claims(token).map(|c| c.exp)
+}
+
+/// The `exp` and, when present, `iat` claims of an assertion.
+#[derive(Clone, Copy)]
+struct Claims {
+    exp: u64,
+    iat: Option<u64>,
+}
+
+/// [`jws_exp`]'s structural check, also returning `iat`.
+fn jws_claims(token: &str) -> Option<Claims> {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     let mut segments = token.split('.');
     let (Some(header), Some(payload), Some(signature), None) = (
@@ -75,7 +105,24 @@ pub(crate) fn jws_exp(token: &str) -> Option<u64> {
         return None;
     }
     json(header)?.get("alg")?.as_str()?;
-    json(payload)?.get("exp")?.as_u64()
+    let payload = json(payload)?;
+    Some(Claims {
+        exp: payload.get("exp")?.as_u64()?,
+        iat: payload.get("iat").and_then(serde_json::Value::as_u64),
+    })
+}
+
+/// Whole seconds on a monotonic clock, for local deadlines a wall-clock
+/// change cannot move.
+fn monotonic_now() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let now = START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_secs();
+    #[cfg(test)]
+    let now = now + test_clock::SKEW.with(std::cell::Cell::get);
+    now
 }
 
 pub(crate) fn unix_now() -> u64 {
@@ -111,6 +158,30 @@ mod tests {
         assert_eq!(refresh_at(1_000, 1_040), 1_010, "short-lived: the margin");
         assert_eq!(refresh_at(1_000, 1_020), 1_010, "margin past: half-life");
         assert_eq!(refresh_at(1_000, 1_001), 1_000);
+    }
+
+    #[test]
+    fn the_deadline_counts_the_lifetime_from_the_request_start() {
+        let claims = |iat, exp| Claims {
+            exp,
+            iat: Some(iat),
+        };
+        // Issuer clock: iat 10_000, exp 10_180. The reply took 20 s.
+        // A local clock 120 s slow would read 180 + 120 s left by `exp`;
+        // the lifetime from the request start caps it.
+        assert_eq!(local_deadline(0, 20, 9_900, claims(10_000, 10_180)), 180);
+        // A local clock 120 s fast: `exp` leaves 40 s past receipt, the tighter bound.
+        assert_eq!(local_deadline(0, 20, 10_140, claims(10_000, 10_180)), 60);
+        // A short session-capped token: `exp` 30 s after `iat`.
+        assert_eq!(local_deadline(0, 20, 10_000, claims(10_000, 10_030)), 30);
+        // Already past `exp` locally: no budget, fetched again next call.
+        assert_eq!(local_deadline(0, 20, 10_200, claims(10_000, 10_180)), 20);
+        // Without `iat`, only `exp` bounds it.
+        let no_iat = Claims {
+            exp: 10_180,
+            iat: None,
+        };
+        assert_eq!(local_deadline(0, 20, 10_000, no_iat), 200);
     }
 
     #[test]

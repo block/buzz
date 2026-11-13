@@ -13,6 +13,7 @@ import '../storage/secure_storage.dart';
 
 import 'hosted_environment.dart';
 import 'bounded_http_response.dart';
+import 'clock_hint.dart';
 import '../relay/relay_session.dart';
 import 'account_identity_store.dart';
 
@@ -86,6 +87,11 @@ class BuilderlabAccountClient {
   /// Remote-agent registry routes, shared with desktop.
   /// Safe request diagnostics: no headers, credentials, bodies or user data.
   ({String path, int status})? lastRejectedRequest;
+
+  /// From the last refusal (403): how many minutes the local clock looked off
+  /// from the server's `Date`, when far enough to explain it. See
+  /// [clockHintMinutes].
+  int? lastRefusalClockHint;
 
   static const _beekeeperRoutes = {
     '/v3/beekeeper/get-model-catalog',
@@ -502,7 +508,13 @@ class BuilderlabAccountClient {
         );
       }
       if (response.statusCode == 401) throw AccountFailure.signedOut;
-      if (response.statusCode == 403) throw AccountFailure.denied;
+      if (response.statusCode == 403) {
+        lastRefusalClockHint = clockHintMinutes(
+          response.headers['date'],
+          DateTime.now(),
+        );
+        throw AccountFailure.denied;
+      }
       if (const {400, 404, 409, 422}.contains(response.statusCode)) {
         lastRejectedRequest = (path: path, status: response.statusCode);
         throw AccountFailure.rejected;

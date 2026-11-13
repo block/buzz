@@ -15,7 +15,7 @@
 //! 1. Parse JSON into a `nostr::Event`
 //! 2. Verify `kind == 27235` (`Kind::HttpAuth`)
 //! 3. Verify Schnorr signature via `buzz_core::verify_event`
-//! 4. Verify `created_at` within ±60 seconds of server time
+//! 4. Verify `created_at` within ±120 seconds of server time
 //! 5. Verify `["u", <url>]` tag matches `expected_url` (normalised: case-insensitive
 //!    scheme/host, trailing slash stripped)
 //! 6. Verify `["method", <method>]` tag matches `expected_method` (case-insensitive)
@@ -29,7 +29,7 @@ use url::Url;
 
 use crate::error::AuthError;
 
-const TIMESTAMP_TOLERANCE_SECS: u64 = 60;
+use crate::TIMESTAMP_TOLERANCE_SECS;
 
 /// Verify a NIP-98 HTTP Auth event (kind:27235).
 ///
@@ -74,7 +74,7 @@ pub fn verify_nip98_event(
     buzz_core::verify_event(&event)
         .map_err(|_| AuthError::Nip98Invalid("invalid Schnorr signature".to_string()))?;
 
-    // 4. Verify created_at within ±60 seconds of now.
+    // 4. Verify created_at within ±TIMESTAMP_TOLERANCE_SECS of now.
     let now = Timestamp::now().as_secs();
     let event_ts = event.created_at.as_secs();
     let delta = now.abs_diff(event_ts);
@@ -291,13 +291,36 @@ mod tests {
         assert!(matches!(result, Err(AuthError::Nip98Invalid(_))));
     }
 
+    fn nip98_event_at(keys: &Keys, offset_secs: i64) -> String {
+        let ts = Timestamp::now()
+            .as_secs()
+            .saturating_add_signed(offset_secs);
+        make_nip98_event(keys, TEST_URL, TEST_METHOD, None, Some(Timestamp::from(ts)))
+    }
+
+    #[test]
+    fn timestamp_within_tolerance_accepted() {
+        // A clock 120 s fast, or ~120 s slow (one second of slack for the
+        // wall clock ticking between signing and verifying).
+        let keys = Keys::generate();
+        for offset in [120, -119] {
+            let json = nip98_event_at(&keys, offset);
+            let result = verify_nip98_event(&json, TEST_URL, TEST_METHOD, None);
+            assert!(result.is_ok(), "offset {offset}s: {:?}", result.err());
+        }
+    }
+
     #[test]
     fn expired_timestamp_rejected() {
         let keys = Keys::generate();
-        let old_ts = Timestamp::from(Timestamp::now().as_secs().saturating_sub(120));
-        let json = make_nip98_event(&keys, TEST_URL, TEST_METHOD, None, Some(old_ts));
-        let result = verify_nip98_event(&json, TEST_URL, TEST_METHOD, None);
-        assert!(matches!(result, Err(AuthError::Nip98Invalid(_))));
+        for offset in [-121, 122] {
+            let json = nip98_event_at(&keys, offset);
+            let result = verify_nip98_event(&json, TEST_URL, TEST_METHOD, None);
+            assert!(
+                matches!(result, Err(AuthError::Nip98Invalid(_))),
+                "offset {offset}s should be rejected"
+            );
+        }
     }
 
     #[test]

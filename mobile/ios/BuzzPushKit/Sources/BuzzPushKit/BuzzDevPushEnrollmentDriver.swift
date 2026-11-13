@@ -338,6 +338,10 @@ public final class BuzzDevPushEnrollmentDriver {
   private let appAttest: BuzzDevAppAttesting
   private let now: () -> Date
   private let lifetimeSeconds: Int64
+  /// How far this phone's clock may run ahead of the gateway's. Every new grant's window
+  /// starts this far in the past, so a fast clock neither signs a `not_before` the gateway
+  /// has not reached nor an `expires_at` beyond its maximum lifetime.
+  static let clockSkewAllowanceSeconds: Int64 = 120
   private let installationIdBytes: () throws -> Data
 
   /// Creates a driver backed by Apple's App Attest service and persists the
@@ -506,7 +510,10 @@ public final class BuzzDevPushEnrollmentDriver {
       return handle == uuid.uuidString.lowercased()
     }
 
-    let (renewedExpiration, expiresOverflow) = nowSeconds.addingReportingOverflow(lifetimeSeconds)
+    // A fresh request's window, from one time base. A resumed journal keeps the
+    // expiry it already attested.
+    let (renewedExpiration, expiresOverflow) = (nowSeconds - Self.clockSkewAllowanceSeconds)
+      .addingReportingOverflow(lifetimeSeconds)
     guard !expiresOverflow else {
       throw BuzzDevPushEnrollmentError.invalidGatewayURL
     }
@@ -676,7 +683,8 @@ public final class BuzzDevPushEnrollmentDriver {
     else {
       throw BuzzDevPushEnrollmentError.invalidResponse(route: "pending enrollment endpoint")
     }
-    let nowSeconds = Int64(now().timeIntervalSince1970)
+    // Each delegation signs a fresh challenge, so its start is never journaled.
+    let notBefore = Int64(now().timeIntervalSince1970) - Self.clockSkewAllowanceSeconds
     let relayPubkey = pending.relayPubkey
     let installation: UUID
     if let handle = pending.gatewayInstallationHandle,
@@ -788,7 +796,7 @@ public final class BuzzDevPushEnrollmentDriver {
       endpointEpoch: Self.endpointEpoch,
       generation: generation,
       relayPubkey: relayPubkey,
-      notBefore: nowSeconds,
+      notBefore: notBefore,
       expiresAt: pending.expiresAt
     )
     guard let appAttestKeyId = pending.keyId else {
@@ -803,7 +811,7 @@ public final class BuzzDevPushEnrollmentDriver {
       installationHandle: installation,
       relayPubkey: relayPubkey,
       generation: generation,
-      notBefore: nowSeconds,
+      notBefore: notBefore,
       expiresAt: pending.expiresAt,
       assertion: assertion
     )
