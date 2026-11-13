@@ -1333,6 +1333,64 @@ void main() {
     },
   );
 
+  test(
+    'a catch-up retry after a socket replacement does not cover the new connection',
+    () {
+      fakeAsync((async) {
+        SharedPreferences.setMockInitialValues({});
+        late final SharedPreferences prefs;
+        SharedPreferences.getInstance().then((value) => prefs = value);
+        async.flushMicrotasks();
+        final keychain = nostr.Keys.generate();
+        final crypto = ReadStateCrypto.tryCreate(
+          nsec: keychain.nsec,
+          pubkey: keychain.public,
+        )!;
+        final gate = Completer<void>();
+        final relay = _FakeRelaySession()
+          ..readyOnSubscribe = false
+          ..fetchGate = gate.future;
+        final manager = ReadStateManager(
+          pubkey: keychain.public,
+          relayUrl: _relayUrl,
+          prefs: prefs,
+          crypto: crypto,
+          relaySession: relay,
+          signedEventRelay: _FakeSignedEventRelay(),
+          remoteEnabled: true,
+          onChanged: () {},
+        );
+
+        // Readiness times out and the launch snapshot is held. A's late
+        // readiness starts a catch-up that fails and waits to retry.
+        var initialized = false;
+        manager.initialize().then((_) => initialized = true);
+        async.flushMicrotasks();
+        relay.fetchGate = null;
+        relay.failNextFetch = true;
+        relay.liveOnStatus!(RelaySubscriptionStatus.ready);
+        async.flushMicrotasks();
+        expect(relay.fetchCount, 2);
+
+        // The socket is replaced with no status callback, and the retry runs
+        // before B's stream is live, so it does not cover B.
+        relay.connection++;
+        var reinitialized = false;
+        manager.reinitializeRemote().then((_) => reinitialized = true);
+        async.elapse(const Duration(seconds: 2));
+        expect(relay.fetchCount, 3);
+
+        gate.complete();
+        async.flushMicrotasks();
+        expect(initialized && reinitialized, isTrue);
+        expect(relay.fetchCount, 4);
+        expect(relay.subscribeCount, 2);
+
+        manager.dispose();
+      });
+    },
+  );
+
   test('a connect during a failed initialize syncs again', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();

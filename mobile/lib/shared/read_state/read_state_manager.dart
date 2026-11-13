@@ -177,8 +177,11 @@ class ReadStateManager {
   // was not live while the last snapshot ran (readiness timed out) or was
   // interrupted after it (a retryable CLOSED); its next readiness then fetches
   // a catch-up snapshot.
+  // [_liveReadyFence] is the connection fence captured at the stream's
+  // readiness: a socket replacement drops the stream without a status
+  // callback, so readiness counts only while that connection holds.
   int _liveGeneration = 0;
-  bool _liveReady = false;
+  void Function()? _liveReadyFence;
   bool _liveCatchUpNeeded = false;
   bool _catchUpRunning = false;
   bool _catchUpAgain = false;
@@ -394,7 +397,7 @@ class ReadStateManager {
   Future<bool> _fetchAndMerge() async {
     // A snapshot started while the stream was live covers everything after it
     // on that connection; a reconnect reopens the stream with no replay.
-    final fence = _liveReady ? _relaySession!.captureConnectionFence() : null;
+    final fence = _liveReadyNow ? _liveReadyFence : null;
     if (fence != null) _inFlightLiveFence = fence;
     try {
       // Snapshot transport validates completeness and fences retired sessions.
@@ -484,7 +487,7 @@ class ReadStateManager {
   Future<bool> _startLiveSubscription() async {
     try {
       final generation = ++_liveGeneration;
-      _liveReady = false;
+      _liveReadyFence = null;
       _liveCatchUpNeeded = false;
       // This stream's re-sync fetches its own snapshot; end the old backoff.
       _wakeCatchUp();
@@ -509,7 +512,7 @@ class ReadStateManager {
       _unsubscribeLive = unsub;
       // Returned on the readiness timeout or a retryable CLOSED: the snapshot
       // about to run may finish before the stream is live.
-      if (!_liveReady) _liveCatchUpNeeded = true;
+      if (!_liveReadyNow) _liveCatchUpNeeded = true;
       debugPrint('[ReadStateManager] live subscription established');
       return true;
     } catch (e) {
@@ -525,6 +528,8 @@ class ReadStateManager {
       _connectionHeld(_coveringFence) ||
       (_catchUpRunning && _connectionHeld(_inFlightLiveFence));
 
+  bool get _liveReadyNow => _connectionHeld(_liveReadyFence);
+
   static bool _connectionHeld(void Function()? checkConnection) {
     if (checkConnection == null) return false;
     try {
@@ -538,11 +543,11 @@ class ReadStateManager {
   void _onLiveStatus(int generation, RelaySubscriptionStatus status) {
     if (_disposed || generation != _liveGeneration) return;
     if (status == RelaySubscriptionStatus.retrying) {
-      _liveReady = false;
+      _liveReadyFence = null;
       _liveCatchUpNeeded = true;
       return;
     }
-    _liveReady = true;
+    _liveReadyFence = _relaySession!.captureConnectionFence();
     if (!_liveCatchUpNeeded) return;
     _liveCatchUpNeeded = false;
     unawaited(_runCatchUp());
