@@ -90,6 +90,7 @@ extension _UnreadSnapshot on ChannelsNotifier {
         readAt: json['readAt'] as int?,
         muted: json['muted'] as bool,
         follows: json['follows'] as int,
+        verify: json['verify'] as bool,
       );
       final events = [
         for (final event in json['events'] as List<dynamic>)
@@ -119,6 +120,7 @@ extension _UnreadSnapshot on ChannelsNotifier {
             'readAt': cursor.readAt,
             'muted': cursor.muted,
             'follows': cursor.follows,
+            'verify': cursor.verify,
             'events': [
               for (final event
                   in _observedUnreadEventsByChannel[channelId]?.values ??
@@ -171,13 +173,15 @@ extension UnreadThreadFollows on ChannelsNotifier {
   /// Call after following or unfollowing a thread in [channelId]. That changes
   /// which of its replies count as unread, so its next catch-up reads its whole
   /// window and replaces what it found before. Other channels' cursors adopt
-  /// the new followed threads, so they stay deltas. Saved at once, so a
+  /// the new followed threads, so they stay deltas, unless an earlier change
+  /// left them waiting for a full window. Saved at once, so a
   /// relaunch before the next catch-up starts from the same place.
   void noteThreadFollowChanged(String channelId) {
     final follows = _followsFingerprint(_followedRootIds());
     _unreadCaughtUpByChannel.updateAll(
-      (id, cursor) =>
-          cursor.withFollows(id == channelId ? _staleFollows : follows),
+      (id, cursor) => id == channelId || cursor.follows == _staleFollows
+          ? cursor.withFollows(_staleFollows)
+          : cursor.withFollows(follows),
     );
     _saveUnreadSnapshot?.call();
   }

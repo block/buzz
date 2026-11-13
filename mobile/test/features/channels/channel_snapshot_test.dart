@@ -160,68 +160,68 @@ void main() {
     },
   );
 
-  test(
-    'following a thread in session recovers its older replies, then and after '
-    'a restart',
-    () async {
-      SharedPreferences.setMockInitialValues({});
-      final prefs = await SharedPreferences.getInstance();
-      final root = 'b' * 64;
-      final reply = NostrEvent(
-        id: 'in-session-reply',
-        pubkey: 'alice',
-        createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000 - 7200,
-        kind: EventKind.streamMessage,
-        tags: [
-          ['h', 'alpha'],
-          ['e', root, '', 'root'],
-          ['e', root, '', 'reply'],
-        ],
-        content: 'reply',
-        sig: 'sig',
-      );
-      Iterable<String> activity(ProviderContainer container) => container
-          .read(channelsProvider.notifier)
-          .observedThreadReplies(container.read(channelsProvider).requireValue)
-          .map((e) => e.id);
-      final firstSession = _SnapshotSession(['alpha'])
-        ..unreadMessages.add(reply);
-      final first = _container(prefs, firstSession);
-      addTearDown(first.dispose);
-      await first.read(channelsProvider.future);
-      await _settle();
-      expect(activity(first), isEmpty);
+  test('following threads in session recovers their older replies, then and '
+      'after a restart', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final root = 'b' * 64;
+    final reply = NostrEvent(
+      id: 'in-session-reply',
+      pubkey: 'alice',
+      createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000 - 7200,
+      kind: EventKind.streamMessage,
+      tags: [
+        ['h', 'alpha'],
+        ['e', root, '', 'root'],
+        ['e', root, '', 'reply'],
+      ],
+      content: 'reply',
+      sig: 'sig',
+    );
+    Iterable<String> activity(ProviderContainer container) => container
+        .read(channelsProvider.notifier)
+        .observedThreadReplies(container.read(channelsProvider).requireValue)
+        .map((e) => e.id);
+    final firstSession = _SnapshotSession(['alpha', 'beta'])
+      ..unreadMessages.add(reply);
+    final first = _container(prefs, firstSession);
+    addTearDown(first.dispose);
+    await first.read(channelsProvider.future);
+    await _settle();
+    expect(activity(first), isEmpty);
 
-      // As the Follow thread action does.
-      first.read(threadFollowsProvider.notifier).followThread(root);
-      first.read(channelsProvider.notifier).noteThreadFollowChanged('alpha');
-      firstSession.unreadFilters.clear();
-      await first.read(channelsProvider.notifier).refresh();
-      await first.read(channelsProvider.notifier).waitForUnreadCatchUp();
-      expect(
-        firstSession.unreadFilters
-            .where((f) => f.ids == null)
-            .map((f) => f.since),
-        everyElement(0),
-      );
-      expect(activity(first), ['in-session-reply']);
-      first.dispose();
+    // As the Follow thread action does.
+    first.read(threadFollowsProvider.notifier).followThread(root);
+    first.read(channelsProvider.notifier).noteThreadFollowChanged('alpha');
+    // A second follow elsewhere before the catch-up keeps alpha's reset.
+    first.read(threadFollowsProvider.notifier).followThread('c' * 64);
+    first.read(channelsProvider.notifier).noteThreadFollowChanged('beta');
+    firstSession.unreadFilters.clear();
+    await first.read(channelsProvider.notifier).refresh();
+    await first.read(channelsProvider.notifier).waitForUnreadCatchUp();
+    expect(
+      firstSession.unreadFilters
+          .where((f) => f.ids == null)
+          .map((f) => f.since),
+      everyElement(0),
+    );
+    expect(activity(first), ['in-session-reply']);
+    first.dispose();
 
-      final secondSession = _SnapshotSession(['alpha'])
-        ..unreadMessages.add(reply);
-      final second = _container(prefs, secondSession);
-      addTearDown(second.dispose);
-      await second.read(channelsProvider.future);
-      await _settle();
-      expect(
-        secondSession.unreadFilters
-            .where((f) => f.ids == null)
-            .map((f) => f.since),
-        everyElement(greaterThan(0)),
-      );
-      expect(activity(second), ['in-session-reply']);
-    },
-  );
+    final secondSession = _SnapshotSession(['alpha', 'beta'])
+      ..unreadMessages.add(reply);
+    final second = _container(prefs, secondSession);
+    addTearDown(second.dispose);
+    await second.read(channelsProvider.future);
+    await _settle();
+    expect(
+      secondSession.unreadFilters
+          .where((f) => f.ids == null)
+          .map((f) => f.since),
+      everyElement(greaterThan(0)),
+    );
+    expect(activity(second), ['in-session-reply']);
+  });
   test(
     'a cold start restores unread state and asks only for newer messages',
     () async {

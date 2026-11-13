@@ -61,6 +61,7 @@ void _restoredLaunchCases() {
       _SnapshotSession(['alpha'])..unreadMessages.add(old),
       mutes: _StoredMutes(),
     );
+    addTearDown(first.dispose);
     await loaded(first);
     expect(unread(first), {'alpha'});
     first.dispose();
@@ -73,7 +74,12 @@ void _restoredLaunchCases() {
         channels: {'alpha': ChannelMuteEntry(muted: true, updatedAt: 1)},
       ),
     );
-    final secondSession = _SnapshotSession(['alpha'])..unreadMessages.add(old);
+    final secondSession = _SnapshotSession(['alpha'])
+      ..unreadMessages.add(old)
+      ..unreadMessages.addAll([
+        for (var i = 0; i < 1000; i++)
+          message('new-quiet-$i', now() - 1200 + i, quiet: true),
+      ]);
     final second = _container(prefs, secondSession, mutes: _StoredMutes());
     await loaded(second);
     // The cursor notices the mute change and requests the full window.
@@ -87,7 +93,8 @@ void _restoredLaunchCases() {
     await discardUnreadOnly(prefs);
     final fresh = _container(
       prefs,
-      _SnapshotSession(['alpha'])..unreadMessages.add(old),
+      _SnapshotSession(['alpha'])
+        ..unreadMessages.addAll(secondSession.unreadMessages),
       mutes: _StoredMutes(),
     );
     addTearDown(fresh.dispose);
@@ -209,83 +216,141 @@ void _restoredLaunchCases() {
     );
   });
 
-  for (final scoped in [true, false]) {
-    test('capped offline deletions do not resurrect a saved mention'
-        '${scoped ? '' : ' (NIP-09 without h)'}', () async {
-      SharedPreferences.setMockInitialValues({});
-      final prefs = await SharedPreferences.getInstance();
-      final at = now();
-      final first = _container(
-        prefs,
-        _SnapshotSession(['alpha'])
-          ..unreadMessages.add(
-            message('deleted-mention', at - 7200, mention: true),
-          ),
-      );
-      await loaded(first);
-      expect(unread(first), {'alpha'});
-      first.dispose();
+  for (final busyWindow in [false, true]) {
+    for (final scoped in [true, false]) {
+      test(
+        'capped offline deletions do not resurrect a saved mention'
+        '${scoped ? '' : ' (NIP-09 without h)'}'
+        '${busyWindow ? ' (full message page)' : ' (another one deleted)'}',
+        () async {
+          SharedPreferences.setMockInitialValues({});
+          final prefs = await SharedPreferences.getInstance();
+          final at = now();
+          final kept = message('kept-mention', at - 7300, mention: true);
+          final first = _container(
+            prefs,
+            _SnapshotSession(['alpha'])
+              ..unreadMessages.addAll([
+                kept,
+                message('deleted-mention', at - 7200, mention: true),
+                if (!busyWindow)
+                  message('also-deleted-mention', at - 7100, mention: true),
+              ]),
+          );
+          addTearDown(first.dispose);
+          await loaded(first);
+          expect(unread(first), {'alpha'});
+          first.dispose();
 
-      NostrEvent deletion(String id, String target, int time) => NostrEvent(
-        id: id,
-        pubkey: 'alice',
-        createdAt: time,
-        kind: EventKind.deletion,
-        tags: [
-          if (scoped) ['h', 'alpha'],
-          ['e', target],
-        ],
-        content: '',
-        sig: 'sig',
-      );
-      final history = [
-        deletion('offline-deletion', 'deleted-mention', at - 1500),
-        // Newer reaction removals fill the same deletion-kind filter's cap.
-        for (var i = 0; i < 1000; i++)
-          deletion('reaction-deletion-$i', 'reaction-$i', at - 1000 + i),
-      ];
-      final secondSession = _SnapshotSession(['alpha'])
-        ..unreadMessages.addAll(history);
-      final second = _container(prefs, secondSession);
-      addTearDown(second.dispose);
-      await loaded(second);
-      List<int?> since() => [
-        for (final filter in secondSession.unreadFilters)
-          if (filter.ids == null && filter.kinds.contains(EventKind.deletion))
-            filter.since,
-      ];
-      // A delta, whose full deletion page can't say the mention is still
-      // there. It stays until the full window answers rather than flickering.
-      expect(since().single, greaterThan(0));
-      expect(unread(second), {'alpha'});
-      // The retry reads the whole window, which no longer has the mention.
-      secondSession.unreadFilters.clear();
-      await second.read(channelsProvider.notifier).refresh();
-      await second.read(channelsProvider.notifier).waitForUnreadCatchUp();
-      expect(since(), [0]);
-      final cachedUnread = unread(second);
-      // That pass ignores its own full deletion page, so the next is a delta.
-      secondSession.unreadFilters.clear();
-      await second.read(channelsProvider.notifier).refresh();
-      await second.read(channelsProvider.notifier).waitForUnreadCatchUp();
-      expect(since().single, greaterThan(0));
-      second.dispose();
+          NostrEvent deletion(String id, String target, int time) => NostrEvent(
+            id: id,
+            pubkey: 'alice',
+            createdAt: time,
+            kind: EventKind.deletion,
+            tags: [
+              if (scoped) ['h', 'alpha'],
+              ['e', target],
+            ],
+            content: '',
+            sig: 'sig',
+          );
+          final history = [
+            kept,
+            // A full page of newer messages that earn nothing, so no window
+            // reaches back to the saved mention.
+            if (busyWindow)
+              for (var i = 0; i < 1000; i++)
+                message('unfollowed-$i', at - 1200 + i, root: 'e' * 64),
+            deletion('offline-deletion', 'deleted-mention', at - 1500),
+            // Newer reaction removals fill the deletion filter's cap; without
+            // the busy window, one of them deletes the other saved mention.
+            for (var i = 0; i < 1000; i++)
+              deletion(
+                'reaction-deletion-$i',
+                !busyWindow && i == 999
+                    ? 'also-deleted-mention'
+                    : 'reaction-$i',
+                at - 1000 + i,
+              ),
+          ];
+          var session = _SnapshotSession(['alpha'])
+            ..unreadMessages.addAll(history);
+          var launch = _container(prefs, session);
+          addTearDown(launch.dispose);
+          await loaded(launch);
+          List<int?> since() => [
+            for (final filter in session.unreadFilters)
+              if (filter.ids == null &&
+                  filter.kinds.contains(EventKind.deletion))
+                filter.since,
+          ];
+          Iterable<String> checkedById() => [
+            for (final filter in session.unreadFilters) ...?filter.ids,
+          ];
+          Iterable<String> observed() =>
+              launch
+                  .read(channelsProvider.notifier)
+                  .observedUnreadEventsByChannel['alpha']
+                  ?.keys ??
+              const [];
+          Future<void> catchUpAgain() async {
+            session.unreadFilters.clear();
+            await launch.read(channelsProvider.notifier).refresh();
+            await launch.read(channelsProvider.notifier).waitForUnreadCatchUp();
+          }
 
-      await discardUnreadOnly(prefs);
-      final fresh = _container(
-        prefs,
-        _SnapshotSession(['alpha'])..unreadMessages.addAll(history),
+          // A delta whose full deletion page can't say the mention is still
+          // there. It stays until it is checked rather than flickering.
+          expect(since().single, greaterThan(0));
+          expect(observed(), contains('deleted-mention'));
+          // Killed before the retry, and relaunched once the burst is too old
+          // for the delta to see: the saved cursor still asks to check by ID.
+          launch.dispose();
+          session = _SnapshotSession(['alpha'])
+            ..unreadMessages.addAll(
+              history.where((event) => event.kind != EventKind.deletion),
+            );
+          launch = _container(prefs, session);
+          addTearDown(launch.dispose);
+          await loaded(launch);
+          expect(
+            checkedById(),
+            containsAll(['kept-mention', 'deleted-mention']),
+          );
+          expect(observed(), ['kept-mention']);
+          // Something was deleted, so the channel reads its window once (a
+          // returned tombstone already made the relaunch do so), then it is
+          // back to deltas, and the surviving mention stays.
+          expect(since().single, busyWindow ? greaterThan(0) : 0);
+          await catchUpAgain();
+          expect(since().single, busyWindow ? 0 : greaterThan(0));
+          for (var pass = 0; pass < 2; pass++) {
+            await catchUpAgain();
+            expect(since().single, greaterThan(0));
+            expect(checkedById(), isEmpty);
+          }
+          expect(observed(), ['kept-mention']);
+          launch.dispose();
+
+          await discardUnreadOnly(prefs);
+          final fresh = _container(
+            prefs,
+            _SnapshotSession(['alpha'])..unreadMessages.addAll(history),
+          );
+          addTearDown(fresh.dispose);
+          await loaded(fresh);
+          // A launch without saved state agrees the mention is gone.
+          expect(
+            fresh
+                    .read(channelsProvider.notifier)
+                    .observedUnreadEventsByChannel['alpha']
+                    ?.keys ??
+                const <String>[],
+            isNot(contains('deleted-mention')),
+          );
+        },
       );
-      addTearDown(fresh.dispose);
-      await loaded(fresh);
-      expect(unread(fresh), isEmpty);
-      expect(
-        cachedUnread,
-        unread(fresh),
-        reason:
-            'A deletion outside the newest 1000 tombstones must not leave an absent old mention unread.',
-      );
-    });
+    }
   }
 
   test(
