@@ -3,9 +3,10 @@ import 'dart:convert';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
+import 'package:buzz/shared/http/app_http_client.dart';
 
 final relayInformationClientProvider = Provider<http.Client>((ref) {
-  final client = http.Client();
+  final client = newAppHttpClient();
   ref.onDispose(client.close);
   return client;
 });
@@ -24,27 +25,35 @@ final relayAuthorProvider = FutureProvider.autoDispose.family<String?, String>((
     },
   );
   final client = ref.watch(relayInformationClientProvider);
-  final response = await client
-      .send(
-        http.Request('GET', uri)..headers['Accept'] = 'application/nostr+json',
-      )
-      .timeout(const Duration(seconds: 3));
-  final chunks = StreamIterator(
-    response.stream.timeout(const Duration(seconds: 3)),
-  );
+  // Completed on every exit, so a dropped, refused or timed-out response
+  // stops downloading on a shared session instead of staying in flight.
+  final abort = Completer<void>();
   final bytes = <int>[];
   try {
+    final response = await client
+        .send(
+          http.AbortableRequest('GET', uri, abortTrigger: abort.future)
+            ..headers['Accept'] = 'application/nostr+json',
+        )
+        .timeout(const Duration(seconds: 3));
     if (response.statusCode != 200) return null;
-    await (() async {
-      while (await chunks.moveNext()) {
-        if (bytes.length + chunks.current.length > 256 * 1024) {
-          throw const FormatException('Relay information exceeds size limit');
+    final chunks = StreamIterator(
+      response.stream.timeout(const Duration(seconds: 3)),
+    );
+    try {
+      await (() async {
+        while (await chunks.moveNext()) {
+          if (bytes.length + chunks.current.length > 256 * 1024) {
+            throw const FormatException('Relay information exceeds size limit');
+          }
+          bytes.addAll(chunks.current);
         }
-        bytes.addAll(chunks.current);
-      }
-    })().timeout(const Duration(seconds: 3));
+      })().timeout(const Duration(seconds: 3));
+    } finally {
+      await chunks.cancel();
+    }
   } finally {
-    await chunks.cancel();
+    if (!abort.isCompleted) abort.complete();
   }
   final info = jsonDecode(utf8.decode(bytes));
   final author = info is Map ? info['self'] : null;

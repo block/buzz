@@ -1,6 +1,6 @@
 part of '../message_content.dart';
 
-class _MentionMd extends InlineMd {
+class _MentionMd {
   final Map<String, Set<String>> bindings;
   final Map<String, String> displayLabels;
   final Map<String, String> mentionNames;
@@ -26,28 +26,24 @@ class _MentionMd extends InlineMd {
   /// placeholder nested inside the link's own placeholder does not paint on
   /// iOS — an authored `[@mention](url)` renders as nothing. Link resolution
   /// wins over token detection inside a label.
-  @override
-  Set<MarkdownScope> get scopes => MarkdownComponent.allScopesExceptLinkLabel;
+  late final InlinePattern pattern = InlinePattern(
+    pattern: _exp,
+    builder: (context, match, style) => span(context, match[0]!, style),
+  );
 
-  @override
   RegExp get exp => _exp;
 
-  @override
-  InlineSpan span(
-    BuildContext context,
-    String text,
-    final GptMarkdownConfig config,
-  ) {
+  InlineSpan span(BuildContext context, String text, TextStyle style) {
     final raw = exp.firstMatch(text.trim())?.group(0);
     if (raw == null) {
-      return TextSpan(text: text, style: config.style);
+      return TextSpan(text: text, style: style);
     }
 
     final name = raw.substring(1).replaceAll('\u00A0', ' ').toLowerCase();
     final matches = bindings[name] ?? const <String>{};
     final pubkey = matches.length == 1 ? matches.single : null;
     if (bindings.containsKey(name) && matches.length != 1) {
-      return TextSpan(text: text, style: config.style);
+      return TextSpan(text: text, style: style);
     }
     final displayName = name.contains(RegExp(r'\([0-9a-f]{64}\)'))
         ? displayLabels[name]
@@ -64,7 +60,7 @@ class _MentionMd extends InlineMd {
       label: visibleLabel,
       semanticsLabel: fullLabel,
       isAgent: isAgent,
-      textStyle: config.style,
+      textStyle: style,
     );
 
     return WidgetSpan(

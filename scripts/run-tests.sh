@@ -457,6 +457,12 @@ run_unit_tests() {
   run_test_step "buzz-relay Git object-store and conformance-probe tests" \
     cargo test -p buzz-relay --lib api::git::store:: -- --nocapture
 
+  run_test_step "buzz-relay Git push publish-decision tests" \
+    cargo test -p buzz-relay --lib api::git::cas_publish::tests:: -- --nocapture
+
+  run_test_step "buzz-relay Git push track C tests" \
+    cargo test -p buzz-relay --lib api::git::transport::track_c_tests:: -- --nocapture
+
   run_test_step "buzz-relay NIP-FI upgrade tests" \
     cargo test -p buzz-relay --lib nip_fi_upgrade:: -- --nocapture
 

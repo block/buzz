@@ -1,0 +1,5 @@
+name = "gitpointer"
+defaultTargets = ["GitPointer"]
+
+[[lean_lib]]
+name = "GitPointer"

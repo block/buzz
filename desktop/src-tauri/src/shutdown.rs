@@ -21,6 +21,9 @@ pub(crate) fn shut_down_app(app: &tauri::AppHandle, shutdown_done: &std::sync::a
         prevent_sleep::release(&app.state::<AppState>().prevent_sleep);
         crate::observed_unread::flush(app);
         crate::channel_head_cache::flush(app);
+        if let Some(downloads) = app.try_state::<crate::commands::InstallerDownloads>() {
+            downloads.abort_for_shutdown();
+        }
         app.state::<crate::terminal_runtime::TerminalSessions>()
             .shutdown_all();
         if let Err(error) = shutdown_managed_agents(app) {
@@ -44,6 +47,10 @@ pub(crate) fn install_signal_handler(
             .shutdown_started
             .store(true, Ordering::SeqCst);
         if !shutdown_done.swap(true, Ordering::SeqCst) {
+            // This path ends in `exit`, so the download never cleans up itself.
+            if let Some(downloads) = app.try_state::<crate::commands::InstallerDownloads>() {
+                downloads.abort_for_shutdown();
+            }
             app.state::<crate::terminal_runtime::TerminalSessions>()
                 .shutdown_all();
             let _ = shutdown_managed_agents(&app);

@@ -4,6 +4,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:buzz/shared/http/app_http_client.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/auth/auth.dart';

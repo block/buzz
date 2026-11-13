@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "@/app/App";
+import { NewAppInstallerDownloadHost } from "@/app/NewAppInstallerDownloadHost";
 import { RootErrorBoundary } from "@/app/RootErrorBoundary";
 import { NostrBindConsentDialog } from "@/features/profile/ui/NostrBindConsentDialog";
 import "@fontsource-variable/inter/opsz.css";
@@ -97,6 +98,11 @@ function renderApp() {
                     <UpdaterProvider>
                       <App />
                       <NostrBindConsentDialog />
+                      {/* The huddle window never shows the banner, and a
+                          second host would cancel the main window's download. */}
+                      {huddleWindowChannelId() === null ? (
+                        <NewAppInstallerDownloadHost />
+                      ) : null}
                     </UpdaterProvider>
                     <Toaster />
                   </PoofBurstProvider>
