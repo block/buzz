@@ -845,17 +845,6 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     );
   }
 
-  static Channel _advanceLastMessageAt(Channel channel, int? createdAt) {
-    if (createdAt == null) return channel;
-    final at = DateTime.fromMillisecondsSinceEpoch(
-      createdAt * 1000,
-      isUtc: true,
-    );
-    final current = channel.lastMessageAt;
-    if (current != null && !at.isAfter(current)) return channel;
-    return channel.copyWith(lastMessageAt: at);
-  }
-
   void _handleLiveEvent(NostrEvent event) {
     if (_noteChannelChange(event) &&
         event.kind == EventKind.nip29EditMetadata) {
@@ -1123,7 +1112,12 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     final previousChannels = state.value;
     try {
       state = AsyncData(
-        await _fetch(subscribeLive: true, fetchDirectory: true),
+        await _fetch(
+          subscribeLive: true,
+          // Live subscriptions keep a loaded list's latest-message times.
+          fetchLastMessage: previousChannels == null,
+          fetchDirectory: true,
+        ),
       );
     } on _StaleChannelRefresh {
       // A community or identity switch retired this request. Its response
