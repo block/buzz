@@ -9,6 +9,7 @@ mod error;
 mod federated_identity;
 mod help_tree;
 mod links;
+mod private_key;
 mod validate;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
@@ -98,6 +99,8 @@ where
 {
     let matches = build_command().try_get_matches_from(args)?;
     let mut cli = Cli::from_arg_matches(&matches)?;
+    cli.private_key_from_argv =
+        matches.value_source("private_key") == Some(clap::parser::ValueSource::CommandLine);
     if matches.value_source("format") == Some(clap::parser::ValueSource::DefaultValue) {
         cli.format = env_output_format(std::env::var_os("BUZZ_OUTPUT_FORMAT").as_deref());
     }
@@ -144,6 +147,10 @@ Configuration (flags override env vars):
     an assertion, the adapter mints it, and the CLI sends it on every request.
   BUZZ_OUTPUT_FORMAT Default --format; unknown values fall back to json  [optional]
 
+Identity secrets: prefer BUZZ_PRIVATE_KEY, --private-key-file, or
+--private-key-stdin. Passing --private-key on argv is deprecated (shell
+history / process listings).
+
 The 'pack' subcommand runs locally and does not require a relay connection.
 
 Exit codes: 0=ok  1=bad input  2=relay/network error  3=auth error  4=other  5=write conflict
@@ -159,9 +166,22 @@ struct Cli {
     #[arg(long, global = true, env = "BUZZ_RELAY_URL")]
     relay: Option<String>,
 
-    /// Nostr private key (hex or nsec). This is the CLI's identity.
+    /// Nostr private key (hex or nsec). Prefer `BUZZ_PRIVATE_KEY`,
+    /// `--private-key-file`, or `--private-key-stdin` — passing the secret on
+    /// argv leaks into shell history and `ps` (deprecated).
     #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
     private_key: Option<String>,
+
+    #[arg(skip)]
+    private_key_from_argv: bool,
+
+    /// Read the Nostr private key from a file (mode 0600 recommended).
+    #[arg(long, value_name = "PATH")]
+    private_key_file: Option<std::path::PathBuf>,
+
+    /// Read the Nostr private key from stdin (trim surrounding whitespace).
+    #[arg(long, default_value_t = false)]
+    private_key_stdin: bool,
 
     /// NIP-OA auth tag JSON (owner attestation). Injected into every signed event.
     #[arg(long, env = "BUZZ_AUTH_TAG", hide_env_values = true)]
@@ -2651,18 +2671,28 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         };
     }
 
-    // Credential chain: the first link that applies to this relay is the
-    // identity (see `credentials`).
+    // Listing pairings is local: it needs no relay or key source.
+    if let Cmd::Auth(AuthCmd::Desktop(DesktopAuthCmd::List)) = cli.command {
+        return list_pairings(&cli.format).await;
+    }
+
+    // Desktop pairing binds the configured relay before reading a credential.
+    let private_key = if matches!(cli.command, Cmd::Auth(_)) {
+        cli.private_key
+    } else {
+        private_key::resolve_private_key(private_key::PrivateKeyInputs {
+            private_key: cli.private_key,
+            private_key_file: cli.private_key_file,
+            private_key_stdin: cli.private_key_stdin,
+            private_key_from_argv: cli.private_key_from_argv,
+        })?
+    };
     let settings = credentials::Settings {
-        private_key: cli.private_key,
+        private_key,
         auth_tag: cli.auth_tag,
         ..Default::default()
     }
     .with_env_evidence();
-    // Listing pairings is local: it needs no relay and runs no discovery.
-    if let Cmd::Auth(AuthCmd::Desktop(DesktopAuthCmd::List)) = cli.command {
-        return list_pairings(&cli.format).await;
-    }
     let explicit_key = settings.private_key.is_some();
     let relay = match cli.relay {
         Some(relay) => Some(relay_url(&relay)),
