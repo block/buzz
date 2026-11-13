@@ -318,6 +318,46 @@ void main() {
           isNull,
         ); // Web binding has never promised mobile backup.
         expect(f.flow.stage, HostedFlowStage.browserReturned);
+
+        // A returning account may already have a saved key from an interrupted
+        // setup. No adoption occurs, so the bind-only gate must ask for consent.
+        await f.flow.signOutAccount();
+        f.subject = 'returning-owner';
+        f.bound = null;
+        await f.store.create(f.secondKeys.nsec);
+        await f.flow.account.exchange(
+          code: 'synthetic-code',
+          verifier: 'v' * 43,
+        );
+        debugDefaultTargetPlatformOverride = null;
+        await f.restart(tester);
+        f.requests.clear();
+        openBindLink();
+        await f.settle(tester);
+        expect(find.text('Link your identity?'), findsOneWidget);
+        expect(find.textContaining('No backup is uploaded'), findsOneWidget);
+        expect(find.text(fullNpub(f.secondKeys.public)!), findsOneWidget);
+        expect((await f.store.read())!.backup, isNull);
+        expect(f.bound, isNull);
+        expect(f.sent('/verify'), isEmpty);
+        await f.tap(tester, 'Cancel setup');
+        expect((await f.store.read())!.pubkey, f.secondKeys.public);
+        expect(f.bound, isNull);
+        expect(f.sent('/verify'), isEmpty);
+
+        // Cancellation and restart retain the key, but never retain approval.
+        await f.restart(tester);
+        openBindLink();
+        await f.settle(tester);
+        expect(find.text('Link your identity?'), findsOneWidget);
+        expect(f.sent('/verify'), isEmpty);
+        await f.tap(tester, 'Link and continue');
+        expect(f.bound, f.secondKeys.public);
+        expect(f.sent('/verify'), hasLength(1));
+        expect(f.sent('/enrollment'), isEmpty);
+        expect(f.sent('/nsec-backups'), isEmpty);
+        expect((await f.store.read())!.backup, isNull);
+        expect(f.flow.stage, HostedFlowStage.browserReturned);
       } finally {
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump();
