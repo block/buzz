@@ -108,6 +108,7 @@ void main() {
 
   test('restored profiles revalidate with since their last check', () async {
     const bob = 'b0b';
+    const carol = 'ca401';
     // First launch: both load in full and record when they were checked.
     final before = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final first = _ProfileSession([
@@ -115,6 +116,7 @@ void main() {
     ]);
     final launch1 = cacheScope(first);
     await launch1.read(userCacheProvider.notifier).preload(const [_alice]);
+    final after = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     expect(first.filters.single.since, isNull);
     launch1.dispose();
     await pumpEventQueue();
@@ -145,16 +147,19 @@ void main() {
     final launch2 = cacheScope(second);
     final cache2 = launch2.read(userCacheProvider.notifier);
     expect(await cache2.preload(const [_alice, bob]), isTrue);
-    await Future<void>.delayed(const Duration(milliseconds: 80));
+    await _until(() => second.requests == 2);
     final full = second.filters.singleWhere((f) => f.since == null);
     final changed = second.filters.singleWhere((f) => f.since != null);
     expect(full.authors, [bob]);
     expect(changed.authors, [_alice]);
-    expect(changed.since, inInclusiveRange(before - 3600, before - 3599 + 5));
+    expect(changed.since, inInclusiveRange(before - 3600, after - 3600));
     expect(cache2.state[_alice]?.displayName, 'Alice');
+    // A later lookup doesn't re-ask: awaiting an uncached profile drains the
+    // batch Alice would have joined.
     cache2.get(_alice);
-    await Future<void>.delayed(const Duration(milliseconds: 80));
-    expect(second.requests, 2);
+    expect(await cache2.preload(const [carol]), isTrue);
+    expect(second.requests, 3);
+    expect(second.filters.last.authors, [carol]);
     launch2.dispose();
     await pumpEventQueue();
     // The profile that had no check time gets one stored.
@@ -181,8 +186,9 @@ void main() {
     final launch3 = cacheScope(third);
     final cache3 = launch3.read(userCacheProvider.notifier);
     expect(await cache3.preload(const [_alice, bob]), isTrue);
-    await Future<void>.delayed(const Duration(milliseconds: 80));
-    expect(third.filters.single.since, isNotNull);
+    // Awaiting an uncached profile drains the revalidation before it.
+    expect(await cache3.preload(const [carol]), isTrue);
+    expect(third.filters.where((f) => f.since != null), hasLength(1));
     launch3.dispose();
     await pumpEventQueue();
     expect(prefs.getString(key), stored);
@@ -210,6 +216,16 @@ void main() {
     expect(storage.read('me', _relay), isEmpty);
     expect(prefs.getString(ProfileSnapshotStorage.key('me', _relay)), isNull);
   });
+}
+
+/// Waits on state rather than a fixed sleep.
+Future<void> _until(bool Function() done) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 5));
+  while (!done()) {
+    if (DateTime.now().isAfter(deadline)) fail('condition never held');
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+  }
+  await pumpEventQueue();
 }
 
 NostrEvent _profile(String id, int createdAt, String name) => NostrEvent(

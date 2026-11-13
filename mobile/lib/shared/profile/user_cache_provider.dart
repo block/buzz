@@ -85,6 +85,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     if (storage == null || pubkey == null) return {};
     final relay = config.baseUrl;
     final token = storage.capture(pubkey, relay);
+    final generation = _generation;
     _snapshotWriter = () {
       final profiles = [
         for (final MapEntry(:key, value: order) in _profileEventOrders.entries)
@@ -95,14 +96,20 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
               eventId: order.eventId,
             ),
       ];
-      _storedCheckedAt
-        ..clear()
-        ..addAll(_checkedAt);
+      final checkedAt = Map<String, int>.of(_checkedAt);
       storage
-          .write(token, profiles, checkedAt: _checkedAt)
+          .write(token, profiles, checkedAt: checkedAt)
           .then(
             (saved) {
-              if (!saved) debugPrint('[UserCache] snapshot was not saved');
+              if (!saved) {
+                debugPrint('[UserCache] snapshot was not saved');
+                return;
+              }
+              // A rebuilt scope restores its own stored check times.
+              if (!_isCurrent(generation)) return;
+              _storedCheckedAt
+                ..clear()
+                ..addAll(checkedAt);
             },
             onError: (Object error, StackTrace stack) {
               debugPrint('[UserCache] snapshot write failed: $error');
