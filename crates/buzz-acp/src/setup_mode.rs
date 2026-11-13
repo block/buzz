@@ -355,8 +355,13 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
     tracing::info!("setup-mode: connected and subscribed to membership notifications");
 
     let rest_client = relay.rest_client();
-    let mut author_gate_ctx =
-        crate::InboundAuthorGate::connect(&rest_client, &pubkey_hex, "setup startup").await;
+    let mut author_gate_ctx = crate::InboundAuthorGate::connect(
+        &rest_client,
+        &pubkey_hex,
+        "setup startup",
+        config.strict_allowlist,
+    )
+    .await;
 
     // Resolve owner for author-gate (same priority as normal mode).
     let startup_owner = crate::resolve_agent_owner(&config);
@@ -820,7 +825,8 @@ mod tests {
         let relay_hex = relay_keys.public_key().to_hex();
         let (rest_client, server) =
             crate::author_gate_tests::nip11_server(serde_json::json!({ "self": relay_hex })).await;
-        let mut gate = InboundAuthorGate::connect(&rest_client, &agent, "setup nudge test").await;
+        let mut gate =
+            InboundAuthorGate::connect(&rest_client, &agent, "setup nudge test", false).await;
         let owner_cache = OwnerCache::new(Some(workflow_owner.clone()));
         let channel_info = crate::pool::ChannelInfoResolver::new(
             std::collections::HashMap::from([(
@@ -926,7 +932,8 @@ mod tests {
             crate::author_gate_tests::nip11_server(serde_json::json!({})).await;
         let (query_rest, query_server) =
             crate::author_gate_tests::nip11_server(original_response).await;
-        let mut gate = InboundAuthorGate::connect(&gate_rest, &agent, "setup edit test").await;
+        let mut gate =
+            InboundAuthorGate::connect(&gate_rest, &agent, "setup edit test", false).await;
         let channel_info = crate::pool::ChannelInfoResolver::new(
             std::collections::HashMap::from([(
                 channel_id,
