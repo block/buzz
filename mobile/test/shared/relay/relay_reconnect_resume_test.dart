@@ -176,6 +176,33 @@ void main() {
     });
   });
 
+  group('background work through RelaySessionNotifier', () {
+    test('reconnects a paused session and reports when it can publish, '
+        'or that it could not in time', () async {
+      final h = await _Harness.start();
+      h.sockets.last.connectSuccessfully();
+      h.session.onAppPaused();
+      h.session.debugPauseNow();
+      final socketsBefore = h.sockets.length;
+
+      final ready = h.session.connectForBackgroundWork(
+        timeout: const Duration(seconds: 5),
+      );
+      await h.settle();
+      expect(h.sockets.length, socketsBefore + 1);
+      h.sockets.last.connectSuccessfully();
+      expect(await ready, isTrue);
+
+      h.session.debugPauseNow();
+      expect(
+        await h.session.connectForBackgroundWork(
+          timeout: const Duration(milliseconds: 300),
+        ),
+        isFalse,
+      );
+    });
+  });
+
   group('resume cursor through RelaySessionNotifier', () {
     test('replays from the last frame received before the loss, not the '
         'original filter or the moment the loss is noticed, and only for '
