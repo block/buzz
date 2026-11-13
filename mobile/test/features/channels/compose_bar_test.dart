@@ -2345,6 +2345,14 @@ void main() {
         }
         expect(sent, isEmpty);
         expect(popover(), findsOneWidget);
+        controller.value = controller.value.copyWith(
+          composing: const TextRange(start: 3, end: 5),
+        );
+        await tester.pump();
+        await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+        await tester.pump();
+        expect(controller.text, 'hi @a', reason: 'Tab during composition');
+        expect(sent, isEmpty);
         await tester.pump(mentionSearchDebounce * 2);
       });
 

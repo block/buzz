@@ -11,7 +11,9 @@ KeyEventResult _handleComposerHardwareKey(
   required VoidCallback? acceptSuggestion,
   required Future<void> Function() send,
 }) {
-  if (event is KeyUpEvent) return KeyEventResult.ignored;
+  if (event is KeyUpEvent || !controller.value.composing.isCollapsed) {
+    return KeyEventResult.ignored;
+  }
   final keyboard = HardwareKeyboard.instance;
   final key = event.logicalKey;
   if (key == LogicalKeyboardKey.tab &&
@@ -25,13 +27,11 @@ KeyEventResult _handleComposerHardwareKey(
   }
   final isEnter =
       key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.numpadEnter;
-  // A composing IME owns Enter: it commits the candidate text.
   if (!isEnter ||
       keyboard.isShiftPressed ||
       keyboard.isControlPressed ||
       keyboard.isAltPressed ||
-      keyboard.isMetaPressed ||
-      !controller.value.composing.isCollapsed) {
+      keyboard.isMetaPressed) {
     return KeyEventResult.ignored;
   }
   // Android IMEs can emit Enter KeyEvents without a physical scan code.
