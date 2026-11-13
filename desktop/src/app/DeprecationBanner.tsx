@@ -8,10 +8,12 @@ import {
 } from "@/app/deprecationBannerVisibility";
 import { Button } from "@/shared/ui/button";
 
-const BUZZ_APP_RELEASES_URL =
-  "https://github.com/block/buzz-app/releases/latest";
+const BUZZ_WEBSITE_URL = "https://buzz.xyz";
 const BUZZ_APP_UPGRADE_GUIDE_URL =
   "https://github.com/block/buzz-app/blob/main/docs/upgrading.md";
+
+// Both banner actions share one look; only the download button adds an icon.
+const BANNER_ACTION_CLASS = "h-7 shrink-0 gap-1.5";
 
 function readDismissedAt(): string | null {
   try {
@@ -59,11 +61,9 @@ export function DeprecationBanner() {
           one whenever you get a chance.
         </p>
         <div className="flex shrink-0 items-center gap-2">
-          {/* The outline variant's own border is too faint to see on the
-              banner tint, so this one uses a stronger border color. */}
           <Button
             aria-label="More info about upgrading, opens in your browser"
-            className="h-7 shrink-0 border-foreground/70"
+            className={BANNER_ACTION_CLASS}
             data-testid="deprecation-banner-upgrade-guide"
             onClick={() => {
               void openUrl(BUZZ_APP_UPGRADE_GUIDE_URL);
@@ -75,10 +75,10 @@ export function DeprecationBanner() {
             More info
           </Button>
           <Button
-            className="h-7 shrink-0 gap-1.5"
+            className={BANNER_ACTION_CLASS}
             data-testid="deprecation-banner-download"
             onClick={() => {
-              void openUrl(BUZZ_APP_RELEASES_URL);
+              void openUrl(BUZZ_WEBSITE_URL);
             }}
             size="sm"
             type="button"

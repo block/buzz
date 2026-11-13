@@ -11,7 +11,7 @@ type OpenerWindow = Window & {
 
 const UPGRADE_GUIDE_URL =
   "https://github.com/block/buzz-app/blob/main/docs/upgrading.md";
-const RELEASES_URL = "https://github.com/block/buzz-app/releases/latest";
+const WEBSITE_URL = "https://buzz.xyz";
 
 // The main window cannot go below 900px wide, and Cmd+ zoom tops out at 1.5x,
 // which leaves the banner the room of a 600px window at default zoom.
@@ -54,12 +54,18 @@ test("deprecation banner: both links open externally and the row holds up when n
   const dismiss = banner.getByRole("button", { name: "Remind me later" });
   await expect(banner).toBeVisible();
   await expect(upgradeGuide).toHaveText("More info");
+  // The two actions carry the same classes, so neither outweighs the other
+  // at rest or on hover in any theme. Only the download button has an icon.
+  expect(await upgradeGuide.getAttribute("class")).toBe(
+    await download.getAttribute("class"),
+  );
+  await expect(upgradeGuide.locator("svg")).toHaveCount(0);
 
   // Pointer and keyboard both reach the opener, each with its own link.
   await upgradeGuide.click();
   await download.focus();
   await page.keyboard.press("Enter");
-  expect(await openedUrls(page)).toEqual([UPGRADE_GUIDE_URL, RELEASES_URL]);
+  expect(await openedUrls(page)).toEqual([UPGRADE_GUIDE_URL, WEBSITE_URL]);
 
   for (const width of [MIN_WINDOW_WIDTH, MIN_WIDTH_AT_MAX_ZOOM]) {
     await page.setViewportSize({ width, height: 650 });
