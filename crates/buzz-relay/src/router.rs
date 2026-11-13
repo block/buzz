@@ -648,12 +648,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             crate::single_community::admit_request,
         ))
         .layer(middleware::from_fn(track_metrics))
+        // CORS sits inside the HTTP trace layer so rejected preflights still
+        // produce a span/log line instead of vanishing silently (#3636).
+        .layer(build_cors_layer(&state.config.cors_origins))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             crate::access::http_access_log,
         ))
         .layer(http_trace_layer())
-        .layer(build_cors_layer(&state.config.cors_origins))
         // Outside all rejection-producing layers, including the API body limit.
         .layer(middleware::from_fn(api::operator::no_store_policy_response))
 }
@@ -1263,6 +1265,10 @@ async fn mesh_status_handler(State(state): State<Arc<AppState>>) -> impl IntoRes
 }
 
 /// Build a CORS layer from the configured origins list.
+///
+/// Rejected origins are logged at `warn` with the received `Origin` and the
+/// configured allowlist — silent CORS failures are otherwise very hard to
+/// diagnose on self-hosted relays (#3636).
 fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
     if cors_origins.is_empty() {
         return CorsLayer::permissive();
@@ -1282,10 +1288,35 @@ fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
         return CorsLayer::new();
     }
 
+    let allowed_display: Vec<String> = origins
+        .iter()
+        .map(|o| String::from_utf8_lossy(o.as_bytes()).into_owned())
+        .collect();
+    let allowed: std::collections::HashSet<axum::http::HeaderValue> = origins.into_iter().collect();
+
     CorsLayer::new()
-        .allow_origin(AllowOrigin::list(origins))
+        .allow_origin(AllowOrigin::predicate(move |origin, _parts| {
+            cors_origin_is_allowed(origin, &allowed, &allowed_display)
+        }))
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any)
+}
+
+/// Returns whether `origin` is in the allowlist, logging a warning on reject.
+fn cors_origin_is_allowed(
+    origin: &axum::http::HeaderValue,
+    allowed: &std::collections::HashSet<axum::http::HeaderValue>,
+    allowed_display: &[String],
+) -> bool {
+    if allowed.contains(origin) {
+        return true;
+    }
+    tracing::warn!(
+        origin = %String::from_utf8_lossy(origin.as_bytes()),
+        allowed = ?allowed_display,
+        "CORS rejected origin — not in BUZZ_CORS_ORIGINS"
+    );
+    false
 }
 
 #[cfg(test)]
@@ -1404,6 +1435,29 @@ mod tests {
         assert!(should_serve_spa("/", true));
         assert!(should_serve_spa("/repos/example", true));
         assert!(!should_serve_spa("/arbitrary", true));
+    }
+
+    #[test]
+    fn cors_origin_allowlist_accepts_configured_origins_only() {
+        let allowed: std::collections::HashSet<axum::http::HeaderValue> =
+            ["https://buzz.example.com", "http://tauri.localhost"]
+                .into_iter()
+                .map(|o| o.parse().unwrap())
+                .collect();
+        let display: Vec<String> = allowed
+            .iter()
+            .map(|o: &axum::http::HeaderValue| String::from_utf8_lossy(o.as_bytes()).into_owned())
+            .collect();
+        assert!(cors_origin_is_allowed(
+            &"http://tauri.localhost".parse().unwrap(),
+            &allowed,
+            &display
+        ));
+        assert!(!cors_origin_is_allowed(
+            &"https://evil.example".parse().unwrap(),
+            &allowed,
+            &display
+        ));
     }
 
     /// Relay state serving both bundles: the admin SPA on `admin.example` and
