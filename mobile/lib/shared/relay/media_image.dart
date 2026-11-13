@@ -332,22 +332,48 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   }
 
   /// [url]'s encoded bytes for a native surface that decodes them itself,
-  /// such as the iOS emoji picker: from [diskCache] when saved there, else
-  /// downloaded with the same client, auth and failure cooldown as an image
-  /// load, and saved once they decode. Completing [cancel] aborts the
-  /// download without a cooldown.
+  /// such as the iOS emoji picker. Joins the same shared download as image
+  /// loads of [url], so it reads [diskCache] first and saves downloaded bytes
+  /// once they decode. Saved bytes that fail to decode are removed, so the
+  /// next request downloads them again. Completing [cancel] leaves the
+  /// download, which stops once no load is waiting for it.
   Future<Uint8List> loadEncodedBytes({required Future<void> cancel}) async {
-    final cache = diskCache;
-    final hit = await cache?.read(url);
-    if (hit != null) {
-      if (hit.isStale) _scheduleRefresh(cache!);
-      return hit.bytes;
+    final fetchKey = (url, auth, isThumbnailFallback);
+    final fetch = _inFlight[fetchKey] ??= _SharedFetch(
+      _loadBytes,
+      onFinished: (fetch) {
+        if (_inFlight[fetchKey] == fetch) _inFlight.remove(fetchKey);
+      },
+    );
+    fetch.join();
+    var cancelled = false;
+    var left = false;
+    void leave() {
+      if (left) return;
+      left = true;
+      fetch.leave();
     }
-    final bytes = await _fetchBytes(cancel);
-    if (cache != null) {
+
+    unawaited(
+      cancel.then((_) {
+        cancelled = true;
+        leave();
+      }),
+    );
+    final Uint8List bytes;
+    try {
+      bytes = await fetch.bytes;
+    } finally {
+      leave();
+    }
+    if (cancelled) throw StateError('Media bytes load cancelled');
+    try {
       await _checkDecodes(bytes);
-      unawaited(cache.write(url, bytes, immutable: _isContentAddressed));
+    } on Object {
+      fetch.settle(decoded: false);
+      rethrow;
     }
+    fetch.settle(decoded: true);
     return bytes;
   }
 
