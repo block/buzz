@@ -507,6 +507,7 @@ impl LockedMemberSnapshot {
             &mut self.tx,
             created_at,
             Some(channel_id),
+            &event.id,
         )
         .await?;
         sqlx::query(superseded_with_mentions_sql!(

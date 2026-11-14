@@ -46,6 +46,9 @@ macro_rules! superseded_with_mentions_sql {
 mod runtime;
 mod store;
 
+/// Durable scheduled-message records and dispatch claims.
+pub use store::scheduled;
+
 /// Concurrency caps whose limit can change at runtime.
 pub mod concurrency_gate;
 

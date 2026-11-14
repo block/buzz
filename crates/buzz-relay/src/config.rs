@@ -183,6 +183,8 @@ pub struct Config {
     /// Whether REST API requests must present a valid token. Independent of
     /// WebSocket protocol auth, which is *always* required by REQ/EVENT/COUNT.
     pub require_auth_token: bool,
+    /// Enable scheduled delivery only after the reservation-aware fleet rollout.
+    pub scheduled_messages_enabled: bool,
     /// Opt-in private accessory API; disabled until explicitly deployed.
     pub buzz_v1_enabled: bool,
     /// Opt-in NIP-CL compact membership projection; dark by default.
@@ -1543,6 +1545,8 @@ impl Config {
             client_ip_header,
             auth,
             require_auth_token,
+            scheduled_messages_enabled: std::env::var("BUZZ_SCHEDULED_MESSAGES")
+                .is_ok_and(|v| v == "on"),
             buzz_v1_enabled,
             membership_snapshot_enabled: std::env::var("BUZZ_MEMBERSHIP_SNAPSHOT_ENABLED")
                 .is_ok_and(|v| v == "true"),

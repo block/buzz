@@ -2572,6 +2572,35 @@ pub async fn ingest_event(
     event: Event,
     auth: IngestAuth,
 ) -> Result<IngestResult, IngestError> {
+    ingest_event_with_due_time(state, tenant, event, auth, None).await
+}
+
+/// Only a locked, admitted queue claim can authorize a late signed timestamp.
+/// Future timestamps and every other ingest/auth check remain unchanged.
+pub(crate) async fn ingest_scheduled(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    claim: &mut buzz_db::scheduled::ScheduledDispatch,
+    auth: IngestAuth,
+) -> Result<IngestResult, IngestError> {
+    let event: Event = serde_json::from_value(claim.message.event.clone())
+        .map_err(|_| IngestError::Rejected("invalid scheduled event".into()))?;
+    if claim.community() != tenant.community()
+        || event.kind.as_u16() != 9
+        || claim.message.send_at > chrono::Utc::now().timestamp()
+    {
+        return Err(IngestError::Rejected("invalid scheduled claim".into()));
+    }
+    ingest_event_with_due_time(state, tenant, event, auth, Some(claim)).await
+}
+
+async fn ingest_event_with_due_time(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    event: Event,
+    auth: IngestAuth,
+    scheduled: Option<&mut buzz_db::scheduled::ScheduledDispatch>,
+) -> Result<IngestResult, IngestError> {
     // Captured before `event` moves into the inner fn: the stored-events
     // counter below is emitted at this shared seam so WebSocket and HTTP
     // transports are counted identically.
@@ -2587,7 +2616,7 @@ pub async fn ingest_event(
         "ingest_event_exited_without_trace",
     );
 
-    let result = ingest_event_inner(state, &tracer, tenant, event, auth).await;
+    let result = ingest_event_inner(state, &tracer, tenant, event, auth, scheduled).await;
 
     // Fleet-wide stored counter: kind + author_type only, no community tag
     // (see the cardinality rationale on buzz_events_received_total —
@@ -2687,6 +2716,7 @@ async fn ingest_event_inner(
     tenant: &TenantContext,
     event: Event,
     auth: IngestAuth,
+    scheduled: Option<&mut buzz_db::scheduled::ScheduledDispatch>,
 ) -> Result<IngestResult, IngestError> {
     let event_id_hex = event.id.to_hex();
     let kind_u32 = event_kind_u32(&event);
@@ -2781,7 +2811,9 @@ async fn ingest_event_inner(
     const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes
     let now = chrono::Utc::now().timestamp();
     let event_ts = event.created_at.as_secs() as i64;
-    if (event_ts - now).abs() > MAX_TIMESTAMP_DRIFT_SECS {
+    if event_ts > now + MAX_TIMESTAMP_DRIFT_SECS
+        || (scheduled.is_none() && event_ts < now - MAX_TIMESTAMP_DRIFT_SECS)
+    {
         return Err(IngestError::Rejected(
             "invalid: event timestamp too far from server time".into(),
         ));
@@ -3878,6 +3910,18 @@ async fn ingest_event_inner(
             buzz_db::ChannelHeadWriteStatus::Inserted => (stored_event, true),
             buzz_db::ChannelHeadWriteStatus::Duplicate => (stored_event, false),
         }
+    } else if let Some(claim) = scheduled {
+        claim
+            .persist(
+                &state.db,
+                &event,
+                channel_id,
+                thread_meta.as_ref().map(|m| m.as_params()),
+            )
+            .await
+            .map_err(|error| {
+                IngestError::Internal(format!("scheduled persistence: {}", error.kind()))
+            })?
     } else {
         let thread_params = thread_meta.as_ref().map(|m| m.as_params());
         match state
@@ -6852,7 +6896,7 @@ mod postgres_tests {
         let tracer: Arc<dyn buzz_conformance::Tracer> = Arc::new(VecTracer::default());
 
         // ── Submit through the real ingest path ───────────────────────────────
-        let result = ingest_event_inner(&state, &tracer, &tenant, event, auth).await;
+        let result = ingest_event_inner(&state, &tracer, &tenant, event, auth, None).await;
 
         // The canvas-specific guard must fire before the h-tag check.
         // created_at = relay_now + 600 is 300 s above the canvas ceiling, so
@@ -7194,7 +7238,7 @@ mod postgres_tests {
                 auth_method: HttpAuthMethod::Nip98,
             };
             let tracer: Arc<dyn buzz_conformance::Tracer> = Arc::new(VecTracer::default());
-            ingest_event_inner(&self.state, &tracer, &self.tenant, event, auth)
+            ingest_event_inner(&self.state, &tracer, &self.tenant, event, auth, None)
                 .await
                 .map(|_| ())
         }
@@ -7494,13 +7538,13 @@ mod postgres_tests {
                 .membership_cache
                 .seed_member(member_key.clone(), true);
             let control =
-                ingest_event_inner(&healthy, &tracer, &tenant, post("control"), auth()).await;
+                ingest_event_inner(&healthy, &tracer, &tenant, post("control"), auth(), None).await;
 
             // Only the channel lookup fails: the post must be denied and not stored.
             failing.membership_cache.seed_member(member_key, true);
             let event = post("lookup fails");
             let event_id = event.id.to_bytes().to_vec();
-            let denied = ingest_event_inner(&failing, &tracer, &tenant, event, auth()).await;
+            let denied = ingest_event_inner(&failing, &tracer, &tenant, event, auth(), None).await;
             let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE id = $1")
                 .bind(&event_id)
                 .fetch_one(&admin)
@@ -7703,7 +7747,7 @@ mod postgres_tests {
             .expect("sign first canvas");
         let first_id_hex = first.id.to_hex();
 
-        ingest_event_inner(&state, &tracer, &tenant, first, make_auth(&author))
+        ingest_event_inner(&state, &tracer, &tenant, first, make_auth(&author), None)
             .await
             .expect("first canvas write must succeed");
 
@@ -7717,7 +7761,7 @@ mod postgres_tests {
             .sign_with_keys(&author)
             .expect("sign second canvas");
 
-        ingest_event_inner(&state, &tracer, &tenant, second, make_auth(&author))
+        ingest_event_inner(&state, &tracer, &tenant, second, make_auth(&author), None)
             .await
             .expect("second canvas write must succeed");
 
@@ -7736,7 +7780,9 @@ mod postgres_tests {
         let stale_id_bytes = stale.id.as_bytes().to_vec();
 
         let err =
-            match ingest_event_inner(&state, &tracer, &tenant, stale, make_auth(&author)).await {
+            match ingest_event_inner(&state, &tracer, &tenant, stale, make_auth(&author), None)
+                .await
+            {
                 Ok(_) => panic!("stale precondition must be rejected, but ingest returned Ok"),
                 Err(e) => e,
             };
@@ -7767,7 +7813,7 @@ mod postgres_tests {
                 .sign_with_keys(&author)
                 .expect("sign untagged canvas");
 
-        ingest_event_inner(&state, &tracer, &tenant, untagged, make_auth(&author))
+        ingest_event_inner(&state, &tracer, &tenant, untagged, make_auth(&author), None)
             .await
             .expect("untagged canvas write must append unconditionally");
     }
@@ -7841,7 +7887,7 @@ mod postgres_tests {
             global.clone(),
             in_scope.clone(),
         ] {
-            ingest_event_inner(&state, &tracer, &tenant, event, author_auth())
+            ingest_event_inner(&state, &tracer, &tenant, event, author_auth(), None)
                 .await
                 .expect("store message");
         }
@@ -7858,6 +7904,7 @@ mod postgres_tests {
             &tenant,
             delete(&deleted.id.to_hex(), &author),
             author_auth(),
+            None,
         )
         .await
         .expect("soft-delete message");
@@ -7878,8 +7925,15 @@ mod postgres_tests {
                 global.id.to_hex(),
             ] {
                 let auth = scoped_auth(keys, channels[1]);
-                match ingest_event_inner(&state, &tracer, &tenant, delete(&target, keys), auth)
-                    .await
+                match ingest_event_inner(
+                    &state,
+                    &tracer,
+                    &tenant,
+                    delete(&target, keys),
+                    auth,
+                    None,
+                )
+                .await
                 {
                     Err(IngestError::Rejected(msg)) => assert_eq!(
                         msg, "invalid: deletion target not found or not deletable by you",
@@ -7909,6 +7963,7 @@ mod postgres_tests {
                 &tenant,
                 redact(&target),
                 scoped_auth(&author, channels[1]),
+                None,
             )
             .await
             {
@@ -7927,14 +7982,22 @@ mod postgres_tests {
             &tenant,
             delete(&in_scope.id.to_hex(), &author),
             scoped_auth(&author, channels[0]),
+            None,
         )
         .await
         .expect("in-scope token deletes the author's message");
         // Re-deleting a soft-deleted message stores the deletion in its channel.
         let redeletion = delete(&deleted.id.to_hex(), &author);
-        ingest_event_inner(&state, &tracer, &tenant, redeletion.clone(), author_auth())
-            .await
-            .expect("author re-deletes a soft-deleted message");
+        ingest_event_inner(
+            &state,
+            &tracer,
+            &tenant,
+            redeletion.clone(),
+            author_auth(),
+            None,
+        )
+        .await
+        .expect("author re-deletes a soft-deleted message");
         let stored = state
             .db
             .get_event_by_id(community, redeletion.id.as_bytes())
@@ -8104,7 +8167,7 @@ mod postgres_tests {
                     scopes: vec![Scope::MessagesWrite],
                     auth_method: HttpAuthMethod::Nip98,
                 };
-                ingest_event_inner(&state, &tracer, &tenant, event, auth)
+                ingest_event_inner(&state, &tracer, &tenant, event, auth, None)
                     .await
                     .expect("store target");
             }
@@ -8142,7 +8205,7 @@ mod postgres_tests {
             event: Event,
             auth: IngestAuth,
         ) -> Result<IngestResult, IngestError> {
-            ingest_event_inner(&self.state, &self.tracer, &self.tenant, event, auth).await
+            ingest_event_inner(&self.state, &self.tracer, &self.tenant, event, auth, None).await
         }
     }
 
