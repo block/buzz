@@ -1687,7 +1687,10 @@ fn count_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
 }
 
 // Preserve the public event-store deletion API after the focused extraction.
-pub(crate) use super::event_deletion::soft_delete_event_and_update_thread_in_tx;
+pub(crate) use super::event_deletion::{
+    is_nip_rs_event, remove_coordinate_versions_in_tx, soft_delete_event_and_update_thread_in_tx,
+    CoordinateRemoval,
+};
 pub use super::event_deletion::{
     soft_delete_by_coordinate, soft_delete_event_and_update_thread, DeletionTarget,
 };
@@ -2605,7 +2608,7 @@ impl Db {
     ///
     /// Counts route on the BOUNDED arm only, never covered: the covered
     /// arm bounds insert-completeness but not deletion visibility (soft
-    /// deletes are UPDATEs outside the floor guard), and a count has no
+    /// deletes are UPDATEs outside the floor check), and a count has no
     /// downstream per-row re-filter to absorb extra rows — a silently
     /// inflated number for up to `FENCE_STALENESS` is a different product
     /// statement than a page briefly showing a deleted row. `Bounded` ties

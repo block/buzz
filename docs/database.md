@@ -76,9 +76,9 @@ transaction that owns the write:
 Dropping or narrowing an existing trigger or function is welcome. Follow the
 retirement sequence below.
 
-**No exception for the community write fence.** A new table MUST NOT get a
-fence trigger, including by calling the existing helper
-`attach_community_write_fence`. Writers of a new tenant-owned table MUST be
+**No exception for the community write fence.** Migration 0090 dropped the
+universal fence triggers and their helper functions; a new table MUST NOT bring
+a fence trigger back. Writers of a new tenant-owned table MUST be
 fenced in the application instead, by community admission. New serving work,
 including fleet sweeps (one community at a time), is admitted by
 `DeletionStore::guard_transaction`, which takes the shared community deletion
@@ -93,32 +93,22 @@ a write that finishes under an already-admitted serving lease
 complete while the community is `quiescing`. Keep it.
 
 Helpers that take `&mut AdmittedTx` reject a raw transaction at compile time,
-but crate code can still bypass the type, so the fence triggers remain the
-database backstop until they are dropped (ARCHITECTURE.md § *Supported Writer
-Contract*). A table without a trigger has no database backstop. Every serving
-writer of a fenced table already goes through admission. The remaining
-fence-retirement work drops the fence triggers and functions, and MUST also
-update ARCHITECTURE.md § *Dual enforcement*.
+but crate code can still bypass the type, and no table has a database fence
+backstop (ARCHITECTURE.md § *Supported Writer Contract*). Every serving writer
+of a tenant table goes through admission.
 
 **New tenant-owned tables use application admission.** Startup and deletion validation
 no longer require a fence on any table; they pass with every universal fence
 object dropped (`migration_schema_fence_objects_are_optional_for_serving_and_deletion`
-in `crates/buzz-db/src/store/deletion.rs`). Two things still matter:
+in `crates/buzz-db/src/store/deletion.rs`). Deletion's catalog check is an
+exact set: a `community_id` table missing from `EXPECTED_SCOPED_TABLES` fails it
+(`community deletion catalog drift (missing=…, unknown=…)`), and deletion fails
+closed for every community, not only the new table's. Listing the table is
+enough to pass.
 
-- Deletion's catalog check is an exact set. A `community_id` table missing from
-  `EXPECTED_SCOPED_TABLES`, fenced or not, fails it
-  (`community deletion catalog drift (missing=…, unknown=…)`), and deletion
-  fails closed for every community, not only the new table's. Listing the
-  table is enough to pass.
-- Desired-state bootstraps install only the legacy fences explicitly listed
-  under `schema/triggers/`. They do not discover and fence new tables.
-  Keep those existing backstops until their own retirement is verified;
-  new tables receive no fence in either schema path.
-
-The blanket desired-state fence attachment has been removed. A feature may
-add a tenant-owned `community_id` table when it follows the checklist below.
-Do not add a trigger, or an entry in
-`community_write_fence_excluded_table` for a table the community owns.
+A feature may add a tenant-owned `community_id` table when it follows the
+checklist below. Do not add a trigger, or an entry in `EXCLUDED_SCOPED_TABLES`
+(`crates/buzz-db/src/store/deletion.rs`) for a table the community owns.
 
 #### Checklist: adding a tenant-owned `community_id` table
 
@@ -127,8 +117,7 @@ All in the same PR:
 - [ ] Every writer of the table goes through community admission
       (`begin_community_write_transaction` or another constructor that returns
       `AdmittedTx`). Nothing writes the table outside it.
-- [ ] No fence trigger: no `attach_community_write_fence` call in the
-      migration and no `schema/triggers/` file.
+- [ ] No fence trigger in the migration or under `schema/triggers/`.
 - [ ] The table in `EXPECTED_SCOPED_TABLES` (`crates/buzz-db/src/store/deletion.rs`).
 - [ ] The table in `PURGE_SCOPED_TABLES` in the same file, ordered child
       before parent. A table missing here keeps its rows after the purge, and
@@ -148,11 +137,10 @@ whose rows must stay writable while that community is being deleted, is not
 owned by that community and is not fenced. The existing ones (the deletion
 control plane, `product_feedback`, `rate_limit_violations`, and
 `operator_listener_outbox`) predate this rule and are listed in
-`community_write_fence_excluded_table`. A new one MUST name its column
-something other than `community_id`, as
-`relay_admin_actions.report_community_id` does, so the catalog does not treat
-the table as scoped. Adding a case to the exclusion function would widen an
-existing function, which Rule 1 forbids. Renaming the
+`EXCLUDED_SCOPED_TABLES`. A new one MUST name its column something other than
+`community_id`, as `relay_admin_actions.report_community_id` does, so the
+catalog does not treat the table as scoped. Do not grow the exclusion list for
+a new table. Renaming the
 column also removes the table from every automatic deletion surface, so rows
 that name a deleted community survive deletion and no check fails, unless the
 PR follows this checklist. All in the same PR:
@@ -233,9 +221,10 @@ holding a write-blocking lock. Scans that do not block writes, such as
   before taking the lock races with deletion.
 - A repair script that writes a channel-bearing `events` row older than the
   floor (inserting one, moving `created_at` backward, or setting `channel_id`
-  on an old row) is outside the replica-floor proof: an
-  operator session does not set `buzz.created_at_floor`, so the commit-time
-  floor guard lets it through (`migrations/0021`). Its PR MUST document a
+  on an old row) is outside the replica-floor proof: only the relay's
+  app-side floor check (`replica_fence::guard_event_created_at_floor`)
+  enforces the floor, and an operator session runs none of it, so nothing
+  in the database stops the write. Its PR MUST document a
   reviewed procedure that keeps replica routing closed from before the first
   batch until its WAL has replayed on every replica.
 - A script MUST NOT disable triggers or set `session_replication_role`.
@@ -296,8 +285,8 @@ Every migration MUST be safe for the currently deployed release to read and
 write against.
 
 The relay has no general schema-version compatibility check. It verifies only
-specific catalog surfaces, such as the deletion serving fence and the replica
-floor guard, so the ordering below is the main protection. When
+specific catalog surfaces, such as the deletion serving fence, so the ordering
+below is the main protection. When
 `BUZZ_AUTO_MIGRATE` is on, an older binary refuses a database that has
 migrations it does not know (sqlx `VersionMissing`), so `helm rollback` with
 auto-migration on fails at startup, and so does any old pod that restarts
