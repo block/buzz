@@ -406,6 +406,34 @@ void main() {
     expect(phone.threadFollows[keyK], (follow: true, at: 0));
   });
 
+  test('I4: an overlapping import is not settled by an unsaved one', () async {
+    final phone = await device();
+    final gate = Completer<void>();
+    store.holdJournal = (_) => gate.future;
+    final first = phone.importLegacyFollows({keyK: true});
+    final second = phone.importLegacyFollows({keyK: true});
+    await pumpEventQueue();
+    // The first import's save, still held, then fails.
+    store.holdJournal = null;
+    store.failJournal = true;
+    gate.complete();
+    expect(await first, isEmpty);
+    expect(await second, isEmpty);
+    expect(phone.threadFollows.containsKey(keyK), isFalse);
+    store.failJournal = false;
+    expect(await phone.importLegacyFollows({keyK: true}), {keyK});
+  });
+
+  test('I4: an exhausted reservation leaves no import residue', () async {
+    final phone = await device();
+    clock = 4294967295;
+    expect(await phone.setThreadFollow(channel, 'b' * 64, true), isTrue);
+    expect(await phone.importLegacyFollows({keyK: true}), isEmpty);
+    expect(phone.threadFollows.containsKey(keyK), isFalse);
+    expect(await phone.importLegacyFollows({keyK: true}), isEmpty);
+    expect(phone.threadFollows.containsKey(keyK), isFalse);
+  });
+
   test('I5: capacity pruning keeps a settled explicit unfollow', () async {
     final first = await device();
     first.dispose(flushPending: false);
@@ -576,8 +604,8 @@ class _GatedStore extends InMemorySharedPreferencesStore {
   @override
   Future<bool> setValue(String valueType, String key, Object value) async {
     if (key.contains('buzz.nip-rs.journal')) {
-      if (failJournal) return false;
       if (holdJournal?.call(value as String) case final gate?) await gate;
+      if (failJournal) return false;
     }
     return super.setValue(valueType, key, value);
   }

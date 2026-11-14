@@ -95,55 +95,59 @@ extension ReadStateFollows on ReadStateManager {
   Future<Set<String>> importLegacyFollows(Map<String, bool> choices) async {
     if (_disposed || threadFollowsIncomplete) return const {};
     final merged = threadFollows;
-    final settled = <String>{};
-    final added = <String>[];
+    final candidates = <String>{};
+    final imported = <String, int>{};
     final previousReserved = _lastReserved;
     void revert() {
-      added.forEach(_ownFollows.remove);
-      added.forEach(_followEdits.remove);
-    }
-
-    try {
-      for (final MapEntry(:key, value: follow) in choices.entries) {
-        if (!isValidThreadFollowKey(key)) continue;
-        settled.add(key);
-        if (merged.containsKey(key) || _ownFollows.containsKey(key)) continue;
-        _ownFollows[key] = {'follow': follow, 'at': 0};
-        _followEdits[key] = _reserve();
-        added.add(key);
-      }
-    } on StateError catch (error) {
-      revert();
-      _lastReserved = previousReserved;
-      syncError = error;
-      return const {};
-    }
-    if (added.isEmpty) return settled;
-    if (!_packFollows()) {
-      revert();
-      _lastReserved = previousReserved;
-      return const {};
-    }
-    final imported = {for (final key in added) key: _followEdits[key]!};
-    _onChanged();
-    // Settled, so the caller may retire the legacy source, only once the
-    // imported edits are journaled.
-    try {
-      await _persistLocalState();
-    } catch (error) {
-      // Undo only imports no newer tap has replaced.
       for (final MapEntry(:key, value: generation) in imported.entries) {
+        // Undo only imports no newer tap has replaced.
         if (_followEdits[key] != generation) continue;
         _ownFollows.remove(key);
         _followEdits.remove(key);
       }
+    }
+
+    for (final MapEntry(:key, value: follow) in choices.entries) {
+      if (!isValidThreadFollowKey(key)) continue;
+      candidates.add(key);
+      if (merged.containsKey(key) || _ownFollows.containsKey(key)) continue;
+      final int generation;
+      try {
+        generation = _reserve();
+      } on StateError catch (error) {
+        revert();
+        _lastReserved = previousReserved;
+        syncError = error;
+        return const {};
+      }
+      _ownFollows[key] = {'follow': follow, 'at': 0};
+      _followEdits[key] = imported[key] = generation;
+    }
+    if (imported.isNotEmpty && !_packFollows()) {
+      revert();
+      _lastReserved = previousReserved;
+      return const {};
+    }
+    if (imported.isNotEmpty) _onChanged();
+    // A key is settled, so the caller may retire its legacy source, only once
+    // a journal write covering it has succeeded, whether this import's or an
+    // earlier tap's or import's still being saved. The save queue is serial.
+    try {
+      await _persistLocalState();
+    } catch (error) {
+      revert();
       syncError = error;
       if (!_disposed) _onChanged();
       return const {};
     }
     if (_disposed) return const {};
-    _schedulePublish();
-    return settled;
+    if (imported.isNotEmpty) _schedulePublish();
+    // An earlier tentative entry may have been reverted while saving.
+    final present = threadFollows;
+    return {
+      for (final key in candidates)
+        if (present.containsKey(key)) key,
+    };
   }
 
   /// Re-place own follow entries. Before spilling into more slots, drops own
