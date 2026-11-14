@@ -190,6 +190,7 @@ class MePage extends HookConsumerWidget {
           final pane = ConversationPaneScope.maybeOf(context);
           final selected = pane?.selectedId == channel.id;
           return DecoratedBox(
+            key: ValueKey(channel.id),
             decoration: BoxDecoration(
               color: selected ? context.colors.primaryContainer : null,
               borderRadius: BorderRadius.circular(Radii.md),
