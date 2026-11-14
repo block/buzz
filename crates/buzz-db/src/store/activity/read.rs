@@ -26,6 +26,7 @@ const MENTION_COUNTS: &str = r#"mc AS (
     ) m
     JOIN channel_members cm ON cm.community_id = $1 AND cm.channel_id = m.channel_id
         AND cm.pubkey = $2 AND cm.removed_at IS NULL
+    JOIN channels c ON c.community_id = $1 AND c.id = m.channel_id AND c.deleted_at IS NULL
     JOIN events e ON e.community_id = $1 AND e.created_at = m.event_created_at
         AND e.id = m.event_id
     LEFT JOIN personal_read_frontiers f ON f.community_id = $1 AND f.actor = $2
@@ -443,8 +444,11 @@ impl Db {
         if first && !matches!(query.select, Select::Ids { .. }) {
             page.totals = Some(totals(&mut tx, &binds, &conversations).await?);
         }
-        if let Some((_, since)) = since {
+        if let Some((seq, since)) = since {
             page.removed = removed(&mut tx, community, &actor_bytes, since).await?;
+            page.removed.extend(
+                removed_threads(&mut tx, community, &actor_bytes, seq, snapshot.now).await?,
+            );
         }
         tx.commit().await?;
         Ok(page)
@@ -580,6 +584,41 @@ async fn removed(
             Ok(Removed {
                 kind,
                 id: row.try_get::<Uuid, _>("id")?.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Threads the person's own change since `seq` took off the list: a state set
+/// back to `default`, or a flag cleared, on a thread they are not otherwise
+/// part of. A thread that only aged out is not reported.
+async fn removed_threads(
+    conn: &mut PgConnection,
+    community: CommunityId,
+    actor: &[u8; 32],
+    seq: i64,
+    now: DateTime<Utc>,
+) -> Result<Vec<Removed>> {
+    let rows = sqlx::query(
+        "SELECT encode(f.root_id, 'hex') AS id FROM personal_read_frontiers f
+         WHERE f.community_id = $1 AND f.actor = $2 AND f.seq > $3 AND f.root_id <> ''::bytea
+            AND NOT (f.state <> 'default' OR f.marked_unread
+                OR COALESCE(f.engaged_at >= $4::timestamptz - make_interval(secs => $5), false))
+         ORDER BY f.seq LIMIT $6",
+    )
+    .bind(community.as_uuid())
+    .bind(actor.as_slice())
+    .bind(seq)
+    .bind(now)
+    .bind(HORIZON_SECONDS as f64)
+    .bind(MAX_SINCE_ROWS as i64)
+    .fetch_all(&mut *conn)
+    .await?;
+    rows.iter()
+        .map(|row| {
+            Ok(Removed {
+                kind: RowKind::Thread,
+                id: row.try_get("id")?,
             })
         })
         .collect()
