@@ -5,7 +5,8 @@ use buzz_sdk::kind::{
 use nostr::{EventBuilder, Kind, Tag};
 use serde::Deserialize;
 
-use crate::client::{normalize_write_response, BuzzClient};
+use crate::client::{normalize_events, normalize_write_response, BuzzClient};
+use crate::commands::event_output::format_events;
 use crate::error::CliError;
 use crate::validate::{parse_event_id, validate_hex64};
 
@@ -69,13 +70,19 @@ pub async fn cmd_set_contact_list(
 }
 
 /// Get a single event by ID via POST /query.
-pub async fn cmd_get_event(client: &BuzzClient, event_id: &str) -> Result<(), CliError> {
+pub async fn cmd_get_event(
+    client: &BuzzClient,
+    event_id: &str,
+    format: &crate::OutputFormat,
+) -> Result<(), CliError> {
     validate_hex64(event_id)?;
     let filter = serde_json::json!({
         "ids": [event_id]
     });
     let resp = client.query(&filter).await?;
-    println!("{resp}");
+    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
+    let normalized = normalize_events(&events);
+    println!("{}", format_events(&normalized, format));
     Ok(())
 }
 
@@ -86,6 +93,7 @@ pub async fn cmd_get_user_notes(
     limit: Option<u32>,
     before: Option<i64>,
     before_id: Option<&str>,
+    format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     validate_hex64(pubkey)?;
     if let Some(bid) = before_id {
@@ -107,12 +115,18 @@ pub async fn cmd_get_user_notes(
     }
 
     let resp = client.query(&filter).await?;
-    println!("{resp}");
+    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
+    let normalized = normalize_events(&events);
+    println!("{}", format_events(&normalized, format));
     Ok(())
 }
 
 /// Get a user's contact list (kind:3) by pubkey.
-pub async fn cmd_get_contact_list(client: &BuzzClient, pubkey: &str) -> Result<(), CliError> {
+pub async fn cmd_get_contact_list(
+    client: &BuzzClient,
+    pubkey: &str,
+    format: &crate::OutputFormat,
+) -> Result<(), CliError> {
     validate_hex64(pubkey)?;
     let filter = serde_json::json!({
         "kinds": [3],
@@ -120,7 +134,9 @@ pub async fn cmd_get_contact_list(client: &BuzzClient, pubkey: &str) -> Result<(
         "limit": 1
     });
     let resp = client.query(&filter).await?;
-    println!("{resp}");
+    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
+    let normalized = normalize_events(&events);
+    println!("{}", format_events(&normalized, format));
     Ok(())
 }
 
@@ -186,6 +202,7 @@ pub async fn cmd_get_list(
     pubkey: &str,
     kind: u32,
     d_tag: Option<&str>,
+    format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     validate_hex64(pubkey)?;
     validate_social_list_kind(kind)?;
@@ -204,25 +221,31 @@ pub async fn cmd_get_list(
         filter["#d"] = serde_json::json!([d]);
     }
     let resp = client.query(&filter).await?;
-    println!("{resp}");
+    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
+    let normalized = normalize_events(&events);
+    println!("{}", format_events(&normalized, format));
     Ok(())
 }
 
-pub async fn dispatch(cmd: crate::SocialCmd, client: &BuzzClient) -> Result<(), CliError> {
+pub async fn dispatch(
+    cmd: crate::SocialCmd,
+    client: &BuzzClient,
+    format: &crate::OutputFormat,
+) -> Result<(), CliError> {
     use crate::SocialCmd;
     match cmd {
         SocialCmd::PublishNote { content, reply_to } => {
             cmd_publish_note(client, &content, reply_to.as_deref()).await
         }
         SocialCmd::SetContactList { contacts } => cmd_set_contact_list(client, &contacts).await,
-        SocialCmd::GetEvent { event } => cmd_get_event(client, &event).await,
+        SocialCmd::GetEvent { event } => cmd_get_event(client, &event, format).await,
         SocialCmd::GetUserNotes {
             pubkey,
             limit,
             before,
             before_id,
-        } => cmd_get_user_notes(client, &pubkey, limit, before, before_id.as_deref()).await,
-        SocialCmd::GetContactList { pubkey } => cmd_get_contact_list(client, &pubkey).await,
+        } => cmd_get_user_notes(client, &pubkey, limit, before, before_id.as_deref(), format).await,
+        SocialCmd::GetContactList { pubkey } => cmd_get_contact_list(client, &pubkey, format).await,
         SocialCmd::SetList {
             kind,
             tags,
@@ -232,7 +255,7 @@ pub async fn dispatch(cmd: crate::SocialCmd, client: &BuzzClient) -> Result<(), 
             pubkey,
             kind,
             d_tag,
-        } => cmd_get_list(client, &pubkey, kind, d_tag.as_deref()).await,
+        } => cmd_get_list(client, &pubkey, kind, d_tag.as_deref(), format).await,
     }
 }
 

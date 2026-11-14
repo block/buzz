@@ -2690,7 +2690,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Users(sub) => commands::users::dispatch(sub, &client, &cli.format).await,
         Cmd::Workflows(sub) => commands::workflows::dispatch(sub, &client).await,
         Cmd::Feed(sub) => commands::feed::dispatch(sub, &client, &cli.format).await,
-        Cmd::Social(sub) => commands::social::dispatch(sub, &client).await,
+        Cmd::Social(sub) => commands::social::dispatch(sub, &client, &cli.format).await,
         Cmd::Notes(sub) => commands::notes::dispatch(sub, &client).await,
         Cmd::Repos(sub) => commands::repos::dispatch(sub, &client).await,
         Cmd::Projects(sub) => commands::projects::dispatch(sub, &client).await,
