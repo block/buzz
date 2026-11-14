@@ -15,6 +15,7 @@ import '../../helpers/fake_relay.dart';
 const _channel = '11111111-1111-4111-8111-111111111111';
 const _added = '22222222-2222-4222-8222-222222222222';
 const _third = '33333333-3333-4333-8333-333333333333';
+const _fourth = '55555555-5555-4555-8555-555555555555';
 const _dm = '44444444-4444-4444-8444-444444444444';
 
 void main() {
@@ -628,6 +629,13 @@ void main() {
         expect(channels.read().requireValue.single.name, 'general');
         expect(membershipReads(), 1);
 
+        // Control Center, Notification Center or a system alert passes
+        // through inactive without leaving the foreground: not a resume.
+        lifecycle(AppLifecycleState.inactive);
+        lifecycle(AppLifecycleState.resumed);
+        settle();
+        expect(membershipReads(), 1);
+
         // Backgrounded while the session is still connected through its
         // grace period: nothing is read until the app returns.
         async.elapse(const Duration(seconds: 58));
@@ -741,6 +749,31 @@ void main() {
         expect(names(), unorderedEquals(['general', 'added', 'third']));
         async.elapse(const Duration(minutes: 10));
         expect(membershipReads(), 7);
+
+        // The retry comes due while Control Center is open. That is still the
+        // foreground and no resume follows it, so the retry is not left to one.
+        lifecycle(AppLifecycleState.inactive);
+        lifecycle(AppLifecycleState.hidden);
+        lifecycle(AppLifecycleState.paused);
+        async.elapse(const Duration(seconds: 1));
+        addChannel(_fourth, 'fourth');
+        failNextMembershipRead();
+        lifecycle(AppLifecycleState.hidden);
+        lifecycle(AppLifecycleState.inactive);
+        lifecycle(AppLifecycleState.resumed);
+        settle();
+        expect(membershipReads(), 8);
+        lifecycle(AppLifecycleState.inactive);
+        async.elapse(const Duration(seconds: 7));
+        lifecycle(AppLifecycleState.resumed);
+        settle();
+        expect(membershipReads(), 9);
+        expect(
+          names(),
+          unorderedEquals(['general', 'added', 'third', 'fourth']),
+        );
+        async.elapse(const Duration(minutes: 10));
+        expect(membershipReads(), 9);
 
         // The connection drops and a message lands in a quiet channel. The
         // unread catch-up after the reconnect fails, and is retried until the

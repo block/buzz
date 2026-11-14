@@ -140,6 +140,26 @@ void main() {
     ]);
   });
 
+  test('a relay that never ends pagination fails within the budget', () async {
+    final template = registration(fakeAgent).toJson();
+    var pages = 0;
+    await expectLater(
+      loadOwnedAgentDirectory(fakeOwner.public, (filter) async {
+        pages++;
+        // Fresh ids on every page; the loop must stop on its own budget.
+        return [
+          for (var i = 0; i < 100; i++)
+            NostrEvent.fromJson({
+              ...template,
+              'id': (pages * 1000 + i).toRadixString(16).padLeft(64, '0'),
+            }),
+        ];
+      }),
+      throwsStateError,
+    );
+    expect(pages, ownedAgentDirectoryPageBudget);
+  });
+
   test('forged runtime metadata cannot mark an agent as hosted', () async {
     final forged = NostrEvent.fromJson({
       ...registration(fakeAgent).toJson(),

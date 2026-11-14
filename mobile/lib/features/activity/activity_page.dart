@@ -1,4 +1,5 @@
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 
 import 'dart:async';
 import 'dart:math' show max;
@@ -19,6 +20,7 @@ import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/mentions/mention_tags.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/relay/thread_reference.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/utils/string_utils.dart';
 import '../../shared/widgets/sheet_action_section.dart';
@@ -33,6 +35,7 @@ import '../channels/channel_detail_page.dart';
 import '../channels/channel_identity_names_provider.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/channels_provider.dart';
+import '../channels/me/me_page.dart';
 import '../channels/dm_channel_labels.dart';
 import '../channels/message_content.dart';
 import '../../shared/read_state/read_state_format.dart';
@@ -380,16 +383,19 @@ class ActivityPage extends HookConsumerWidget {
           : thread.parentId;
 
       if (!context.mounted) return;
-      Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => ChannelDetailPage(
-            channel: resolvedChannel,
-            initialMessageId: target.id,
-            initialThreadRootId: threadRootId,
-            initialThreadRouteBehavior:
-                InitialThreadRouteBehavior.replaceCurrentRoute,
-          ),
+      openConversationPane(
+        context,
+        target.id,
+        (_) => ChannelDetailPage(
+          channel: resolvedChannel,
+          initialMessageId: target.id,
+          initialThreadRootId: threadRootId,
+          initialThreadRouteBehavior:
+              ConversationPaneScope.maybeOf(context) == null
+              ? InitialThreadRouteBehavior.replaceCurrentRoute
+              : InitialThreadRouteBehavior.push,
         ),
+        reopen: true,
       );
     }
 
@@ -402,15 +408,18 @@ class ActivityPage extends HookConsumerWidget {
         );
         return;
       }
-      Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => ChannelDetailPage(
-            channel: channel,
-            initialThreadRootId: draft.threadHeadId,
-            initialThreadRouteBehavior:
-                InitialThreadRouteBehavior.replaceCurrentRoute,
-          ),
+      openConversationPane(
+        context,
+        'draft:${draft.channelId}:${draft.threadHeadId}',
+        (_) => ChannelDetailPage(
+          channel: channel,
+          initialThreadRootId: draft.threadHeadId,
+          initialThreadRouteBehavior:
+              ConversationPaneScope.maybeOf(context) == null
+              ? InitialThreadRouteBehavior.replaceCurrentRoute
+              : InitialThreadRouteBehavior.push,
         ),
+        reopen: true,
       );
     }
 
@@ -431,12 +440,12 @@ class ActivityPage extends HookConsumerWidget {
         );
         return;
       }
-      Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => ChannelDetailPage(
-            channel: channel,
-            initialMessageId: target.eventId,
-          ),
+      openConversationPane(
+        context,
+        target.eventId,
+        (_) => ChannelDetailPage(
+          channel: channel,
+          initialMessageId: target.eventId,
         ),
       );
     }

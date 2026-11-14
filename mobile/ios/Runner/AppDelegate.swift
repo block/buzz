@@ -34,6 +34,7 @@ import os.log
   private var communityKeyboardObserver: NSObjectProtocol?
   private var hapticsChannel: FlutterMethodChannel?
   private var appGroupChannel: FlutterMethodChannel?
+  private var shareSuggestions: ShareSuggestions?
   private var qrScannerChannel: FlutterMethodChannel?
   private var inlinePhotoPickerSupportChannel: FlutterMethodChannel?
   private var ageSignalChannel: FlutterMethodChannel?
@@ -43,6 +44,7 @@ import os.log
   private var ageSignalRequestID: UUID?
   private var ageSignalResult: FlutterResult?
   private var concentricSheetSurfaceChannel: FlutterMethodChannel?
+  private var nativePhotoZoomCoordinator: NativePhotoZoomCoordinator?
   private var nativeAttachmentPopoverCoordinator: NativeAttachmentPopoverCoordinator?
   private var nativeEmojiPickerCoordinator: NativeEmojiPickerCoordinator?
   private var nativeCreateChannelSheetCoordinator: NativeCreateChannelSheetCoordinator?
@@ -90,6 +92,13 @@ import os.log
       }
     }
     identityFilePlugin = IdentityFilePlugin(messenger: messenger)
+    HomeScreenShortcuts.shared.attach(messenger: messenger)
+    shareSuggestions = ShareSuggestions { [weak self] in
+      self?.appGroupIdentifier.flatMap {
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0)
+      }
+    }
+    shareSuggestions?.attach(messenger: messenger)
     browserAuthBridge = BuzzBrowserAuthBridge(messenger: messenger)
     hostedHpkeChannel = FlutterMethodChannel(name: "buzz/hosted_hpke", binaryMessenger: messenger)
     hostedHpkeChannel?.setMethodCallHandler { call, result in
@@ -140,17 +149,19 @@ import os.log
       binaryMessenger: messenger
     )
     appGroupChannel?.setMethodCallHandler { [weak self] call, result in
-      guard call.method == "cachesDirectory" else {
-        result(FlutterMethodNotImplemented)
-        return
+      let container = self?.appGroupIdentifier.flatMap {
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0)
       }
-      // Caches the app's extensions can read too. The OS may purge it.
-      let caches = self?.appGroupIdentifier
-        .flatMap {
-          FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0)
-        }?
-        .appendingPathComponent("Library/Caches", isDirectory: true)
-      result(caches?.path)
+      switch call.method {
+      case "cachesDirectory":
+        // Caches the app's extensions can read too. The OS may purge it.
+        result(container?.appendingPathComponent("Library/Caches", isDirectory: true).path)
+      case "pendingSharesDirectory":
+        // Where the share extension leaves items for the app to pick up.
+        result(container?.appendingPathComponent("PendingShares", isDirectory: true).path)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
     }
     hapticsChannel = FlutterMethodChannel(
       name: "buzz/haptics",
@@ -297,6 +308,13 @@ import os.log
       messenger: messenger,
       parentViewController: engineBridge.pluginRegistry.registrar(
         forPlugin: "BuzzNativeMessagePresentation"
+      )?.viewController
+    )
+
+    nativePhotoZoomCoordinator = NativePhotoZoomCoordinator(
+      messenger: messenger,
+      parentViewController: engineBridge.pluginRegistry.registrar(
+        forPlugin: "BuzzNativePhotoZoom"
       )?.viewController
     )
 
@@ -458,7 +476,75 @@ import os.log
     result: @escaping FlutterResult
   ) {
     switch call.method {
+    case "cameraCutoutFrame":
+      #if canImport(UIKit, _version: 9127.0.85)
+      if #available(iOS 27.1, *),
+         let scene = UIApplication.shared.connectedScenes
+           .compactMap({ $0 as? UIWindowScene })
+           .first(where: { $0.activationState == .foregroundActive }),
+         let window = scene.windows.first(where: { $0.isKeyWindow }) {
+        if window.reservedRegions(kind: .division).contains(where: { $0.isActive }) {
+          result(nil)
+          return
+        }
+        let bounds = window.bounds
+        // Closed Duo displays may omit Flutter display features. UIKit still
+        // owns the physical occlusion; remove its interactive clearance.
+        for region in window.reservedRegions(kind: .occlusion) where region.isActive {
+          let rect = region.frame.inset(by: region.margins)
+          let isCamera = abs(rect.width - rect.height) < 1
+            && rect.minX > 0 && rect.minY > 0
+            && rect.maxX < bounds.width && rect.maxY < bounds.height
+            && rect.width < bounds.width / 4
+          guard rect.width > 0, rect.height > 0, isCamera else { continue }
+          let values: [Double] = [
+            Double(rect.minX), Double(rect.minY), Double(rect.width),
+            Double(rect.height), Double(bounds.width), Double(bounds.height)
+          ]
+          result(values)
+          return
+        }
+      }
+      #endif
+      result(nil)
+    case "previewRotationQuarterTurns":
+      // The plugin reads connectedScenes.first, which can be the inactive
+      // cover scene on Duo. Resolve the angle against the visible preview host.
+      if #available(iOS 17.0, *),
+         let scene = UIApplication.shared.connectedScenes
+           .compactMap({ $0 as? UIWindowScene })
+           .first(where: { $0.activationState == .foregroundActive }),
+         let window = scene.windows.first(where: { $0.isKeyWindow }),
+         let camera = AVCaptureDevice.DiscoverySession(
+           deviceTypes: [.builtInTripleCamera, .builtInDualCamera, .builtInWideAngleCamera],
+           mediaType: .video, position: .back
+         ).devices.first {
+        let coordinator = AVCaptureDevice.RotationCoordinator(device: camera, previewLayer: window.layer)
+        let angle = coordinator.videoRotationAngleForHorizonLevelPreview
+        let orientation = call.arguments as? String
+        let legacyAngle: CGFloat
+        switch orientation {
+        case "landscapeLeft": legacyAngle = 180
+        case "landscapeRight": legacyAngle = 0
+        case "portraitDown": legacyAngle = 270
+        default: legacyAngle = 90
+        }
+        result(Int(((angle - legacyAngle) / 90).rounded()))
+        return
+      }
+      result(0)
     case "usesDynamicIslandQrScannerPortal":
+      #if canImport(UIKit, _version: 9127.0.85)
+      if #available(iOS 27.1, *),
+         let scene = UIApplication.shared.connectedScenes
+           .compactMap({ $0 as? UIWindowScene })
+           .first(where: { $0.activationState == .foregroundActive }),
+         let window = scene.windows.first(where: { $0.isKeyWindow }),
+         window.reservedRegions(kind: .division).contains(where: { $0.isActive }) {
+        result(false)
+        return
+      }
+      #endif
       result(
         UIDevice.current.userInterfaceIdiom == .phone
           && usesDynamicIslandQrScannerPortal(

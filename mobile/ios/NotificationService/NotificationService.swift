@@ -11,13 +11,7 @@ final class NotificationService: UNNotificationServiceExtension {
   private var restrictedFallbackContent: UNMutableNotificationContent?
   private lazy var interactionCleanup = BuzzInteractionCleanupRetry(
     containerURL: ageRestrictionContainerURL, deletion: interactionDeletionDeadline)
-  private lazy var communicationPresenter = BuzzCommunicationNotificationPresenter(
-    donate: { interaction, completion in interaction.donate(completion: completion) },
-    deleteAllInteractions: { [cleanup = interactionCleanup] completion in
-      cleanup.request(completion: completion)
-    },
-    updateContent: { content, intent in try content.updating(from: intent) }
-  )
+  private let communicationPresenter = BuzzCommunicationNotificationPresenter()
   private let interactionDeletionDeadline = BuzzInteractionDeletionDeadline(
     timeout: 5,
     deleteAllInteractions: { completion in
@@ -191,20 +185,9 @@ final class NotificationService: UNNotificationServiceExtension {
           content.userInfo = userInfo
         }
         self.bestAttemptContent = content
-        self.communicationPresenter.present(
-          ordinaryContent: content,
-          resolution: resolution,
-          isStillAllowed: { [weak self] in
-            guard let self else { return false }
-            return self.isCurrent(scope) && self.resolver?.isStillAuthorized() == true
-              && !self.isAgeRestricted()
-          },
-          onDeletionFailure: { error in
-            NSLog("Notification cleanup retry failed: %@", String(describing: error))
-          }
-        ) { [weak self] specializedContent in
-          self?.finish(specializedContent)
-        }
+        // finish re-checks scope, authorization and age restriction.
+        self.finish(
+          self.communicationPresenter.present(ordinaryContent: content, resolution: resolution))
         return
       }
       self.finish(content)
@@ -248,10 +231,6 @@ final class NotificationService: UNNotificationServiceExtension {
     appGroupIdentifier.flatMap {
       FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0)
     }
-  }
-
-  private func isAgeRestricted() -> Bool {
-    BuzzAgeRestrictionSession.isRestricted(containerURL: ageRestrictionContainerURL)
   }
 
   private static func restrictedFallback(

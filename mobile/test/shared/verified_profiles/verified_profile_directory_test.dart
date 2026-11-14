@@ -158,8 +158,7 @@ void main() {
       expect(h.profiles[subjectA]?.checked, isTrue);
       h.container.read(verifiedProfilesProvider.notifier).track([subjectB]);
       h.settle();
-      // Rebatching unchecks and rechecks A; every publish rebuilds the map,
-      // but each head is validated once.
+      // Every publish rebuilds the map, but each head is validated once.
       expect(h.profiles[subjectA]?.checked, isTrue);
       expect(h.profiles[subjectB]?.checked, isTrue);
       expect(parses..sort(), [subjectA, subjectB]);
@@ -200,6 +199,122 @@ void main() {
     h.start(subjects);
     final sizes = [for (final f in h.dFilters) (f['#d'] as List).length];
     expect(sizes..sort(), [2, 128]);
+  });
+
+  journey('a newly tracked subject is read alone; checked ones stay checked', (
+    h,
+  ) {
+    h.relay.seed([
+      signedProjection(profileTags(subjectA)),
+      signedProjection(profileTags(subjectB, name: 'Bob', username: 'bob')),
+    ]);
+    h.start([subjectA]);
+    expect(h.profiles[subjectA]?.checked, isTrue);
+    final before = h.dFilters.length;
+    final notifier = h.container.read(verifiedProfilesProvider.notifier);
+    notifier.track([subjectB]);
+    // A is never unchecked while B's batch opens.
+    expect(h.profiles[subjectA]?.checked, isTrue);
+    h.settle();
+    expect(
+      [for (final f in h.dFilters.skip(before)) f['#d']],
+      [
+        [subjectB],
+      ],
+    );
+    expect(h.profiles[subjectA]?.checked, isTrue);
+    expect(h.profiles[subjectB]?.checked, isTrue);
+  });
+
+  journey('past four small batches, the smallest merge until one is full', (h) {
+    String key(int i) => i.toRadixString(16).padLeft(64, '0');
+    final notifier = h.container.read(verifiedProfilesProvider.notifier);
+    h.start([for (var i = 0; i < 64; i++) key(i)]);
+    for (var group = 1; group < 4; group++) {
+      notifier.track([for (var i = 0; i < 64; i++) key(group * 64 + i)]);
+      h.settle();
+    }
+    final before = h.dFilters.length;
+    expect(before, 4, reason: 'four partial batches of 64');
+    notifier.track([key(256)]);
+    h.settle();
+    // Two of the 64s fill one batch with the newcomer; the other two stay.
+    final reads = [
+      for (final f in h.dFilters.skip(before)) (f['#d'] as List).cast<String>(),
+    ];
+    expect([for (final r in reads) r.length], [128, 1]);
+    expect(reads.expand((r) => r), contains(key(256)));
+  });
+
+  journey('a large addition past four small batches still retires one', (h) {
+    String key(int i) => i.toRadixString(16).padLeft(64, '0');
+    final notifier = h.container.read(verifiedProfilesProvider.notifier);
+    h.start([key(0)]);
+    for (var i = 1; i < 4; i++) {
+      notifier.track([key(i)]);
+      h.settle();
+    }
+    final before = h.dFilters.length;
+    notifier.track([for (var i = 4; i < 133; i++) key(i)]);
+    h.settle();
+    // 129 newcomers would leave a fifth partial; one single folds in.
+    expect(
+      [for (final f in h.dFilters.skip(before)) (f['#d'] as List).length],
+      [128, 2],
+    );
+  });
+
+  journey('eviction re-reads only the batch that lost a subject', (h) {
+    String key(int i) => i.toRadixString(16).padLeft(64, '0');
+    h.start([for (var i = 0; i < 1024; i++) key(i)]);
+    final before = h.dFilters.length;
+    expect(before, 8);
+    h.container.read(verifiedProfilesProvider.notifier).track([key(1024)]);
+    h.settle();
+    expect(
+      [for (final f in h.dFilters.skip(before)) f['#d']],
+      [
+        [for (var i = 1; i < 128; i++) key(i), key(1024)],
+      ],
+    );
+  });
+
+  journey('a subject evicted and tracked again before the sync is re-read', (
+    h,
+  ) {
+    String key(int i) => i.toRadixString(16).padLeft(64, '0');
+    h.relay.seed([signedProjection(profileTags(subjectA))]);
+    h.start([subjectA]);
+    final notifier = h.container.read(verifiedProfilesProvider.notifier);
+    notifier.track([for (var i = 0; i < 1023; i++) key(i)]);
+    h.settle();
+    expect(h.profiles[subjectA]?.checked, isTrue);
+    // A is evicted, then tracked again, which evicts key(0) in another batch.
+    notifier
+      ..track([key(1023)])
+      ..track([subjectA]);
+    h.settle();
+    expect(h.profiles[subjectA]?.checked, isTrue);
+  });
+
+  journey('a re-tracked subject keeps its name when the head cache trims', (h) {
+    String key(int i) => i.toRadixString(16).padLeft(64, '0');
+    h.relay.seed([signedProjection(profileTags(subjectA))]);
+    h.start([subjectA]);
+    final notifier = h.container.read(verifiedProfilesProvider.notifier);
+    // Each round evicts A, may trim its cached head, then tracks it again
+    // before the sync; past 4,096 cached heads only a re-read restores it.
+    for (var round = 0; round < 6; round++) {
+      final subjects = [for (var i = 0; i < 1023; i++) key(round * 1023 + i)];
+      h.relay.seed([
+        for (final s in subjects) signedProjection(profileTags(s)),
+      ]);
+      notifier
+        ..track(subjects)
+        ..track([subjectA]);
+      h.settle();
+      expect(h.profiles[subjectA]?.displayName, 'Ada Lovelace');
+    }
   });
 
   journey('a large roster keeps the 1,024 most recently tracked subjects', (h) {

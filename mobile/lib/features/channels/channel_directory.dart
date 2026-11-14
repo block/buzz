@@ -97,6 +97,7 @@ Future<List<NostrEvent>> _fetchChannelMemberships(
   RelaySessionNotifier session,
   String pubkey, {
   void Function()? ensureCurrent,
+  bool strong = false,
 }) => _fetchPaginatedChannelEvents(
   session,
   kind: 39002,
@@ -105,6 +106,7 @@ Future<List<NostrEvent>> _fetchChannelMemberships(
   },
   operation: 'Channel memberships',
   ensureCurrent: ensureCurrent,
+  strong: strong,
 );
 
 Future<List<NostrEvent>> _fetchChannelDirectoryMetas(
@@ -134,8 +136,40 @@ class _StaleChannelRefresh implements Exception {
 /// This token is captured once at the start of every ordinary, directory, and
 /// reconnect refresh. It is re-checked after each relay await, so an older
 /// request cannot regain ownership by reaching subscription setup last.
-class _ChannelRefreshFence {
+/// What a directory load checks before each write: the scope it serves.
+abstract interface class _DirectoryLoadFence {
+  /// Relay-and-identity scope that started the load.
+  String get scope;
+
+  /// Throws [_StaleChannelRefresh] once the load must write nothing.
+  void ensureCurrent();
+}
+
+/// Fences a directory-only load to its scope alone.
+///
+/// Unlike [_ChannelRefreshFence] it holds no refresh generation: a directory
+/// read does not depend on memberships, so it neither retires an in-flight
+/// list refresh nor is retired by one. A community or identity switch, or
+/// disposal, still retires it, so its response never reaches another scope.
+class _DirectoryOnlyFence implements _DirectoryLoadFence {
+  @override
+  final String scope;
+
+  final _ChannelRefreshCoordinator _coordinator;
+
+  _DirectoryOnlyFence(this._coordinator, this.scope);
+
+  @override
+  void ensureCurrent() {
+    if (!_coordinator.isMounted() || scope != _coordinator.currentScope()) {
+      throw const _StaleChannelRefresh();
+    }
+  }
+}
+
+class _ChannelRefreshFence implements _DirectoryLoadFence {
   /// Relay-and-identity scope that started the refresh.
+  @override
   final String scope;
 
   final _ChannelRefreshCoordinator _coordinator;
@@ -153,6 +187,7 @@ class _ChannelRefreshFence {
   ///
   /// Call after every await and immediately before every write to metadata,
   /// cache, load status, subscriptions or provider state.
+  @override
   void ensureCurrent() {
     if (!isCurrent) throw const _StaleChannelRefresh();
   }
@@ -388,6 +423,16 @@ class _ChannelRefreshCoordinator {
   /// Generation of the most recently issued or retired request.
   int get generation => _generation;
 
+  // Directory loads are ordered among themselves: only the newest one writes
+  // the directory or its status. A directory-only load is not retired by a
+  // list refresh, so [beginRefresh] must leave its loading status alone.
+  int _directoryGeneration = 0;
+  int? _directoryOnlyGeneration;
+
+  /// Starts a directory-only load for the active scope.
+  _DirectoryOnlyFence beginDirectoryOnly() =>
+      _DirectoryOnlyFence(this, currentScope());
+
   _ChannelRefreshCoordinator({
     required this.isMounted,
     required this.currentScope,
@@ -414,6 +459,16 @@ class _ChannelRefreshCoordinator {
   /// wire cannot be written into the new scope.
   void retireInFlight() => _generation++;
 
+  /// Retires every in-flight request, directory-only loads included, for a
+  /// relay or identity change. A directory-only load survives ordinary list
+  /// refreshes, but not a scope change: its loading status must not look
+  /// owned when the user returns to the old scope.
+  void retireScope() {
+    _generation++;
+    _directoryGeneration++;
+    _directoryOnlyGeneration = null;
+  }
+
   /// Starts a fenced refresh without issuing the directory query.
   ///
   /// Used by callers that must carry the scope across later awaits even when
@@ -431,7 +486,8 @@ class _ChannelRefreshCoordinator {
     fence.ensureCurrent();
     if (!fetchesDirectory) {
       final status = loadStatus();
-      if (status.isLoading(scope)) {
+      if (status.isLoading(scope) &&
+          _directoryOnlyGeneration != _directoryGeneration) {
         // This refresh takes ownership of the shared generation, so the
         // in-flight directory response will be discarded. Mark it idle, not
         // error: nothing failed, so a caller may load it again, and search
@@ -454,18 +510,25 @@ class _ChannelRefreshCoordinator {
   /// Fetches the directory under [fence], or throws if the fence is retired.
   ///
   /// Returns null when the request failed inside the current scope, which means
-  /// "retain the cached discovery". The fence is re-checked after the await and
-  /// before every write, on both the success and the failure path.
+  /// "retain the cached discovery", or when a newer directory load started,
+  /// which then owns the directory and its status. The fence is re-checked
+  /// after the await and before every write, on both the success and the
+  /// failure path.
   Future<List<NostrEvent>?> loadDirectory(
     RelaySessionNotifier session,
-    _ChannelRefreshFence fence,
+    _DirectoryLoadFence fence,
   ) async {
+    final directoryGeneration = ++_directoryGeneration;
+    _directoryOnlyGeneration = fence is _DirectoryOnlyFence
+        ? directoryGeneration
+        : null;
     loadStatus().markLoading(fence.scope);
     final List<NostrEvent> metas;
     try {
       metas = await _fetchChannelDirectoryMetas(session);
     } catch (error, stackTrace) {
       fence.ensureCurrent();
+      if (directoryGeneration != _directoryGeneration) return null;
       loadStatus().markError(fence.scope);
       debugPrint(
         '[ChannelsNotifier] channel directory refresh failed; retaining '
@@ -474,6 +537,7 @@ class _ChannelRefreshCoordinator {
       return null;
     }
     fence.ensureCurrent();
+    if (directoryGeneration != _directoryGeneration) return null;
     loadStatus().markLoaded(fence.scope);
     return metas;
   }
@@ -485,6 +549,7 @@ Future<List<NostrEvent>> _fetchPaginatedChannelEvents(
   required String operation,
   Map<String, List<String>> tags = const {},
   void Function()? ensureCurrent,
+  bool strong = false,
 }) async {
   final events = <NostrEvent>[];
   final seenEventIds = <String>{};
@@ -498,7 +563,12 @@ Future<List<NostrEvent>> _fetchPaginatedChannelEvents(
         tags: tags,
         limit: _channelDirectoryPageSize,
         until: until,
-        extensions: {'before_id': ?beforeId},
+        extensions: {
+          'before_id': ?beforeId,
+          // Reads the relay's writer pool, so it sees this client's own
+          // just-accepted writes that replicas may not have yet.
+          if (strong) 'consistency': 'strong',
+        },
       ),
     ]);
     ensureCurrent?.call();
@@ -585,6 +655,7 @@ extension _ObservedUnreadRecording on ChannelsNotifier {
         highPriority: isHighPriority,
         channelType: channel.channelType,
         isThreadedReply: isThreadedReply,
+        threadReply: isThreadedReply && !channel.isDm ? event : null,
       ),
       _unreadCatchUpLimit,
     );
@@ -596,3 +667,116 @@ extension _ObservedUnreadRecording on ChannelsNotifier {
     return true;
   }
 }
+
+/// Activity projection of the channel unread registry.
+extension ObservedThreadActivity on ChannelsNotifier {
+  /// The same eligible replies that supply channel attention dots. Consumers
+  /// watch [channelsProvider] for changes; this does not fetch extra history.
+  Iterable<NostrEvent> observedThreadReplies(Iterable<Channel> channels) sync* {
+    for (final channel in channels) {
+      if (!channel.isMember || channel.isArchived || channel.isDm) continue;
+      for (final observed
+          in _observedUnreadEventsByChannel[channel.id]?.values ??
+              const <ObservedUnreadEvent>[]) {
+        if (observed.threadReply case final reply?) yield reply;
+      }
+    }
+  }
+}
+
+/// Directory-only loads and the list edits they share with full refreshes.
+///
+/// Lives in this part file because `channels_provider.dart` sits against the
+/// repository-wide 1200-line file ceiling enforced by `just file-size-check`.
+extension _ChannelsNotifierDirectory on ChannelsNotifier {
+  /// Downloads only the open-channel directory and merges it into the list
+  /// [current] returns once it lands, for a list that already has its
+  /// memberships. Joined channels keep their entries; live updates keep them
+  /// current. Returns null when nothing should be written: the load failed
+  /// (its status says so), a newer directory load replaced it, the scope
+  /// changed, or there is no list to merge into.
+  Future<List<Channel>?> _loadDirectoryOnly(
+    List<Channel>? Function() current,
+  ) async {
+    final fence = _refreshCoordinator.beginDirectoryOnly();
+    try {
+      final metas = await _refreshCoordinator.loadDirectory(
+        _lifecycleRef.read(relaySessionProvider.notifier),
+        fence,
+      );
+      if (metas == null) return null;
+      _directoryMetas = metas;
+      _directoryMetasScope = fence.scope;
+    } on _StaleChannelRefresh {
+      return null;
+    }
+    final previous = current();
+    if (previous == null) return null;
+    final channels = [...previous];
+    _replaceDirectoryChannels(channels);
+    _sortChannels(channels);
+    _invalidateChangedDetails(channels, previous);
+    return channels;
+  }
+
+  /// Rebuilds every channel in [channels] the user is not a member of from
+  /// [_directoryMetas], with a full refresh's visibility rules: the latest
+  /// revision of each open, non-DM channel. Joined channels are untouched.
+  void _replaceDirectoryChannels(List<Channel> channels) {
+    final previous = {
+      for (final channel in channels)
+        if (!channel.isMember) channel.id: channel,
+    };
+    channels.removeWhere((channel) => !channel.isMember);
+    final memberIds = {for (final channel in channels) channel.id};
+    for (final event in _latestChannelEvents(_directoryMetas, kind: 39000)) {
+      final data = ChannelData.fromEvent(event);
+      if (memberIds.contains(data.id) ||
+          data.visibility == 'private' ||
+          data.channelType == 'dm') {
+        continue;
+      }
+      final channel = _channelFromMeta(event, data, isMember: false);
+      final lastMessageAt = previous[data.id]?.lastMessageAt;
+      channels.add(
+        lastMessageAt == null
+            ? channel
+            : channel.copyWith(lastMessageAt: lastMessageAt),
+      );
+    }
+  }
+
+  /// Invalidates the details of channels whose identity or archive state
+  /// changed from [previous], so opening one does not show stale Solo or
+  /// archive state. Returns [previous] by id.
+  Map<String, Channel> _invalidateChangedDetails(
+    List<Channel> channels,
+    List<Channel>? previous,
+  ) {
+    final prevById = <String, Channel>{
+      for (final c in previous ?? const <Channel>[]) c.id: c,
+    };
+    for (final channel in channels) {
+      final prev = prevById[channel.id];
+      if (prev == null ||
+          prev.isArchived != channel.isArchived ||
+          prev.channelType != channel.channelType ||
+          prev.visibility != channel.visibility ||
+          prev.createdBy != channel.createdBy ||
+          !listEquals(prev.labels, channel.labels)) {
+        _lifecycleRef.invalidate(channelDetailsProvider(channel.id));
+      }
+    }
+    return prevById;
+  }
+}
+
+/// Orders the list by channel type, then case-insensitively by name to match
+/// desktop's `localeCompare` ordering.
+void _sortChannels(List<Channel> channels) => channels.sort((left, right) {
+  final typeOrder =
+      (_channelTypeOrder[left.channelType] ?? 99) -
+      (_channelTypeOrder[right.channelType] ?? 99);
+  if (typeOrder != 0) return typeOrder;
+  return left.name.toLowerCase().compareTo(right.name.toLowerCase());
+});

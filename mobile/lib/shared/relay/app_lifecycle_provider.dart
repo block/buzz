@@ -53,3 +53,26 @@ final appLifecycleProvider =
     NotifierProvider<AppLifecycleNotifier, AppLifecycleState>(
       AppLifecycleNotifier.new,
     );
+
+/// Whether the app is in the foreground. Unlike [appLifecycleProvider], it
+/// ignores `inactive`: pulling down Control Center or Notification Center, a
+/// system alert or a glance at the app switcher passes through `inactive` and
+/// back to `resumed` without leaving the foreground, and is not a resume.
+class AppForegroundNotifier extends Notifier<bool> {
+  @override
+  bool build() {
+    ref.listen(appLifecycleProvider, (_, next) {
+      if (next != AppLifecycleState.inactive) {
+        state = next == AppLifecycleState.resumed;
+      }
+    });
+    return switch (ref.read(appLifecycleProvider)) {
+      AppLifecycleState.resumed || AppLifecycleState.inactive => true,
+      _ => false,
+    };
+  }
+}
+
+final appForegroundProvider = NotifierProvider<AppForegroundNotifier, bool>(
+  AppForegroundNotifier.new,
+);

@@ -3,6 +3,13 @@ use super::*;
 use crate::test_support::PausingProxy;
 use sqlx::{pool::PoolConnection, ConnectOptions, Postgres};
 
+/// Production pool budgets are sized for a warm relay pod, not for a test
+/// lane whose first wave dials cold through [`PausingProxy`] while every other
+/// worker clones its database. `connect_writer_pool` and `connect_with` dial
+/// eagerly under `acquire_timeout`, so the budget must cover a loaded first
+/// connection (the lane budget #9273 chose), not only a steady-state checkout.
+const TEST_LANE_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
+
 async fn writer_pool(max: u32, min: u32) -> (PgPool, PausingProxy, ScratchDb) {
     let scratch = ScratchDb::create(&crate::test_support::database_url(), "release").await;
     let options: sqlx::postgres::PgConnectOptions = scratch.url().parse().unwrap();
@@ -16,6 +23,7 @@ async fn writer_pool(max: u32, min: u32) -> (PgPool, PausingProxy, ScratchDb) {
         database_url: proxied,
         max_connections: max,
         min_connections: min,
+        acquire_timeout_secs: TEST_LANE_ACQUIRE_TIMEOUT.as_secs(),
         ..DbConfig::default()
     })
     .await
@@ -187,6 +195,7 @@ async fn silence_after_release_hook_does_not_strand_sqlx_ping() {
     let first = std::sync::atomic::AtomicBool::new(true);
     let pool = Db::read_pool_options(1)
         .min_connections(0)
+        .acquire_timeout(TEST_LANE_ACQUIRE_TIMEOUT)
         .after_release(move |conn, _| {
             let proxy = hook_proxy.clone();
             let stall = first.swap(false, std::sync::atomic::Ordering::SeqCst);

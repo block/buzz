@@ -48,6 +48,27 @@ fn event(kind: u16, secs: u64, tags: Vec<Tag>) -> nostr::Event {
         .expect("signed event")
 }
 
+/// Seed `event` as a row already in storage. The serving writers reject a
+/// channel event older than the `created_at` floor, and these tests pin
+/// months far in the past; the deletion paths under test still run for real.
+async fn seed(db: &Db, community: CommunityId, event: &nostr::Event, channel: Uuid) {
+    crate::test_support::insert_historical_event(&db.pool, community, event, channel).await;
+}
+
+/// [`seed`] for a reply or root that also carries thread metadata.
+async fn seed_with_thread(
+    db: &Db,
+    community: CommunityId,
+    event: &nostr::Event,
+    channel: Uuid,
+    meta: ThreadMetadataParams<'_>,
+) {
+    crate::test_support::insert_historical_event_with_thread_metadata(
+        &db.pool, community, event, channel, meta,
+    )
+    .await;
+}
+
 fn timestamp(event: &nostr::Event) -> DateTime<Utc> {
     DateTime::from_timestamp(event.created_at.as_secs() as i64, 0).expect("timestamp")
 }
@@ -84,15 +105,12 @@ async fn known_targets_across_months_are_exact_and_tenant_scoped() {
     let jan = event(7, JAN, vec![]);
     let may = event(7, MAY, vec![]);
     for ev in [&jan, &may] {
-        db.insert_event(community, ev, Some(channel))
-            .await
-            .expect("insert");
-        db.insert_event(other, ev, Some(other_channel))
-            .await
-            .expect("other copy");
+        seed(&db, community, ev, channel).await;
+        seed(&db, other, ev, other_channel).await;
     }
     // Deliberately older than both targets: e-target deletion has no inferred
-    // causal chronology, and the deletion's month is not a target key.
+    // chronology, and the deletion's month is not a target key. It is stored
+    // without a channel, since a channel event this old is below the floor.
     let deletion = event(5, JAN - 86_400, vec![]);
     let missing = event(7, JAN + 1, vec![]);
     let wrong = DeletionTarget {
@@ -103,7 +121,7 @@ async fn known_targets_across_months_are_exact_and_tenant_scoped() {
         .insert_deletion_event(
             community,
             &deletion,
-            Some(channel),
+            None,
             None,
             &[wrong, target(&missing), target(&jan), target(&may)],
         )
@@ -119,7 +137,7 @@ async fn known_targets_across_months_are_exact_and_tenant_scoped() {
         db.insert_deletion_event(
             community,
             &deletion,
-            Some(channel),
+            None,
             None,
             &[target(&jan), target(&may)]
         )
@@ -150,9 +168,7 @@ async fn retention_free_contract() {
     let (other, other_channel) = tenant(&db.pool).await;
     let slot = format!("read-state:{}", "b".repeat(32));
     let marker = event(45011, JAN, vec![]);
-    db.insert_event(community, &marker, Some(channel))
-        .await
-        .expect("undeletable marker");
+    seed(&db, community, &marker, channel).await;
     for (kind, d, extra) in [
         (30078, slot.as_str(), ["t", "read-state"]),
         (
@@ -169,9 +185,9 @@ async fn retention_free_contract() {
             ];
             let ev = event(kind, secs, tags);
             for (tenant, ch) in [(community, channel), (other, other_channel)] {
-                db.replace_parameterized_event(tenant, &ev, d, Some(ch))
-                    .await
-                    .expect("retention-free insert");
+                // Each event has its own author, so nothing is superseded and
+                // storing it is the whole replacement.
+                seed(&db, tenant, &ev, ch).await;
                 assert_eq!(counts(&db, tenant, ev.id.as_bytes()).await, (1, 1, 1));
             }
             let deletion = event(5, JAN - 1, vec![]);
@@ -254,11 +270,12 @@ async fn migration_schema_known_target_retention_free_purge_cleans_mentions() {
 async fn known_target_batch_rollback_then_replay_repairs_and_counts_once() {
     let (db, community, channel) = fixture().await;
     let root = event(9, JAN, vec![]);
-    db.insert_event_with_thread_metadata(
+    seed_with_thread(
+        &db,
         community,
         &root,
-        Some(channel),
-        Some(ThreadMetadataParams {
+        channel,
+        ThreadMetadataParams {
             event_id: root.id.as_bytes(),
             event_created_at: timestamp(&root),
             channel_id: channel,
@@ -268,16 +285,16 @@ async fn known_target_batch_rollback_then_replay_repairs_and_counts_once() {
             root_event_created_at: None,
             depth: 0,
             broadcast: false,
-        }),
+        },
     )
-    .await
-    .expect("root");
+    .await;
     let reply = event(9, MAY, vec![]);
-    db.insert_event_with_thread_metadata(
+    seed_with_thread(
+        &db,
         community,
         &reply,
-        Some(channel),
-        Some(ThreadMetadataParams {
+        channel,
+        ThreadMetadataParams {
             event_id: reply.id.as_bytes(),
             event_created_at: timestamp(&reply),
             channel_id: channel,
@@ -287,10 +304,9 @@ async fn known_target_batch_rollback_then_replay_repairs_and_counts_once() {
             root_event_created_at: Some(timestamp(&root)),
             depth: 1,
             broadcast: false,
-        }),
+        },
     )
-    .await
-    .expect("reply");
+    .await;
     let counter = || async {
         sqlx::query_as::<_, (i32, i32)>("SELECT reply_count, descendant_count FROM thread_metadata WHERE community_id=$1 AND event_id=$2")
             .bind(community.as_uuid()).bind(root.id.as_bytes().as_slice())
@@ -300,20 +316,20 @@ async fn known_target_batch_rollback_then_replay_repairs_and_counts_once() {
     // A forbidden removal marker makes the second target fail after the first
     // was mutated. No test-only triggers or copied deletion implementation.
     let marker = event(45011, JAN, vec![]);
-    db.insert_event(community, &marker, Some(channel))
-        .await
-        .expect("marker");
+    seed(&db, community, &marker, channel).await;
     let reply_target = DeletionTarget {
         parent_event_id: Some(root.id.as_bytes()),
         root_event_id: Some(root.id.as_bytes()),
         ..target(&reply)
     };
+    // Stored without a channel on this attempt: a channel event this old is
+    // below the floor, which would fail the write before the targets run.
     let deletion = event(5, MAY + 1, vec![]);
     assert!(db
         .insert_deletion_event(
             community,
             &deletion,
-            Some(channel),
+            None,
             None,
             &[reply_target, target(&marker)]
         )
@@ -324,9 +340,7 @@ async fn known_target_batch_rollback_then_replay_repairs_and_counts_once() {
     assert_eq!(counter().await, (1, 1));
     // Emulate a historical torn write, then concurrently replay it from two
     // independent connections: exactly one transition decrements counters.
-    db.insert_event(community, &deletion, Some(channel))
-        .await
-        .expect("torn deletion");
+    seed(&db, community, &deletion, channel).await;
     let concurrent = Db::from_pool(
         PgPool::connect(&crate::test_support::database_url())
             .await
@@ -394,9 +408,7 @@ async fn production_known_target_statements_prune_to_one_month() {
             Tag::parse(["t", "read-state"]).expect("t"),
         ],
     );
-    db.replace_parameterized_event(community, &ev, &slot, Some(channel))
-        .await
-        .expect("insert");
+    seed(&db, community, &ev, channel).await;
     let deletion = event(5, MAY, vec![]);
     db.insert_deletion_event(community, &deletion, None, None, &[target(&ev)])
         .await
@@ -482,9 +494,7 @@ async fn production_known_target_deletion_locks_one_partition() {
             Tag::parse(["t", "read-state"]).expect("t"),
         ],
     );
-    db.replace_parameterized_event(community, &ev, &slot, Some(channel))
-        .await
-        .expect("insert");
+    seed(&db, community, &ev, channel).await;
     // The assertion is only meaningful if other partitions exist to be locked.
     let partitions: i64 =
         sqlx::query_scalar("SELECT count(*) FROM pg_inherits WHERE inhparent = 'events'::regclass")
@@ -534,9 +544,7 @@ async fn production_known_target_deletion_locks_one_partition() {
 async fn known_canvas_target_uses_canonical_replacement_lock() {
     let (db, community, channel) = fixture().await;
     let canvas = event(KIND_CANVAS as u16, JAN, vec![]);
-    db.insert_event(community, &canvas, Some(channel))
-        .await
-        .expect("canvas");
+    seed(&db, community, &canvas, channel).await;
     // The fixture's single connection identifies the backend that will delete.
     let deleter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&db.pool)
@@ -560,15 +568,10 @@ async fn known_canvas_target_uses_canonical_replacement_lock() {
     let delete_db = Db::from_pool(db.pool.clone());
     let id = canvas.id.to_bytes();
     let delete = tokio::spawn(async move {
+        // No channel: a channel event this old is below the floor.
         let deletion = event(5, MAY, vec![]);
         delete_db
-            .insert_deletion_event(
-                community,
-                &deletion,
-                Some(channel),
-                None,
-                &[target(&canvas)],
-            )
+            .insert_deletion_event(community, &deletion, None, None, &[target(&canvas)])
             .await
     });
     // Observe an actual advisory-lock wait, not merely a task that hasn't yet

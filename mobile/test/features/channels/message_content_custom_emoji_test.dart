@@ -63,6 +63,11 @@ void main() {
     await tester.pumpWidget(_testable('Say :wave: now'));
 
     expect(find.byType(CustomEmojiImage), findsOneWidget);
+
+    // An escaped shortcode is text, without its backslash.
+    await tester.pumpWidget(_testable(r'Say \:wave: now'));
+    expect(find.byType(CustomEmojiImage), findsNothing);
+    expect(find.text('Say :wave: now', findRichText: true), findsOneWidget);
   });
 
   testWidgets('message wiring excludes unrelated emoji from the regex', (
@@ -70,11 +75,9 @@ void main() {
   ) async {
     await tester.pumpWidget(_testable('**hello** :unknown:'));
     final markdown = tester.widget<GptMarkdown>(find.byType(GptMarkdown));
-    final component = markdown.inlineComponents!
-        .whereType<CustomEmojiMd>()
-        .single;
-    expect(component.exp.hasMatch(':unused_2499:'), isFalse);
-    expect(component.exp.hasMatch(':wave:'), isFalse);
+    final component = markdown.inlinePatterns![1];
+    expect(component.pattern.hasMatch(':unused_2499:'), isFalse);
+    expect(component.pattern.hasMatch(':wave:'), isFalse);
     expect(find.byType(CustomEmojiImage), findsNothing);
     final text = tester
         .widgetList<RichText>(find.byType(RichText))
@@ -102,11 +105,9 @@ void main() {
     expect(image.shortcode, 'wave');
     expect(image.url, 'https://example.com/event-wave.png');
     final markdown = tester.widget<GptMarkdown>(find.byType(GptMarkdown));
-    final component = markdown.inlineComponents!
-        .whereType<CustomEmojiMd>()
-        .single;
-    expect(component.exp.hasMatch(':unused_2499:'), isFalse);
-    expect(component.exp.hasMatch(':wave:'), isTrue);
+    final component = markdown.inlinePatterns![1];
+    expect(component.pattern.hasMatch(':unused_2499:'), isFalse);
+    expect(component.pattern.hasMatch(':wave:'), isTrue);
   });
 
   testWidgets('content edits rebuild the scoped matcher', (tester) async {
@@ -125,10 +126,8 @@ void main() {
       'unused_2499',
     );
     final markdown = tester.widget<GptMarkdown>(find.byType(GptMarkdown));
-    final component = markdown.inlineComponents!
-        .whereType<CustomEmojiMd>()
-        .single;
-    expect(component.exp.hasMatch(':wave:'), isFalse);
+    final component = markdown.inlinePatterns![1];
+    expect(component.pattern.hasMatch(':wave:'), isFalse);
 
     await tester.pumpWidget(_testable('edited :unknown:'));
     expect(find.byType(CustomEmojiImage), findsNothing);

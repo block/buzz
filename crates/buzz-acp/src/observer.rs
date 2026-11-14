@@ -15,7 +15,15 @@ use std::{
 use serde::Serialize;
 use tokio::sync::broadcast;
 
+#[cfg(test)]
+mod packing_tests;
+#[cfg(test)]
+mod perf_tests;
+#[cfg(test)]
+mod tests;
+
 const OBSERVER_BUFFER_CAP: usize = 1_000;
+const OBSERVER_REPLAY_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 /// Best-effort metadata attached to observer events.
 #[derive(Clone, Debug, Default)]
@@ -37,9 +45,17 @@ pub struct ObserverHandle {
 }
 
 struct ObserverInner {
+    // Fit events before either buffer retains them. Tokio rounds 1,000 slots
+    // up to 1,024, so the per-event cap bounds live JSON below 64 MiB.
     tx: broadcast::Sender<ObserverEvent>,
-    buffer: Mutex<VecDeque<ObserverEvent>>,
+    buffer: Mutex<ReplayBuffer>,
     seq: AtomicU64,
+}
+
+#[derive(Default)]
+struct ReplayBuffer {
+    events: VecDeque<(usize, Arc<ObserverEvent>)>,
+    bytes: usize,
 }
 
 fn new_observer_handle() -> ObserverHandle {
@@ -47,7 +63,7 @@ fn new_observer_handle() -> ObserverHandle {
     ObserverHandle {
         inner: Arc::new(ObserverInner {
             tx,
-            buffer: Mutex::new(VecDeque::with_capacity(OBSERVER_BUFFER_CAP)),
+            buffer: Mutex::new(ReplayBuffer::default()),
             seq: AtomicU64::new(1),
         }),
     }
@@ -89,18 +105,24 @@ impl ObserverHandle {
         self.inner.tx.subscribe()
     }
 
-    /// Return the current replay buffer.
+    /// Return the newest events within the 1,000-event and 4 MiB JSON budgets.
     pub fn snapshot(&self) -> Vec<ObserverEvent> {
-        match self.inner.buffer.lock() {
-            Ok(buffer) => buffer.iter().cloned().collect(),
+        // Pin the replay window under the lock, then copy JSON after releasing it.
+        let events: Vec<_> = match self.inner.buffer.lock() {
+            Ok(buffer) => buffer
+                .events
+                .iter()
+                .map(|(_, event)| event.clone())
+                .collect(),
             Err(error) => {
                 tracing::warn!(target: "observer", "observer replay buffer lock poisoned: {error}");
                 Vec::new()
             }
-        }
+        };
+        events.into_iter().map(|event| (*event).clone()).collect()
     }
 
-    /// Emit a local observer event.
+    /// Emit a local observer event, fitting telemetry before retaining it.
     pub fn emit(
         &self,
         kind: impl Into<String>,
@@ -108,9 +130,9 @@ impl ObserverHandle {
         context: &ObserverContext,
         payload: serde_json::Value,
     ) {
-        let event = ObserverEvent {
-            seq: self.inner.seq.fetch_add(1, Ordering::Relaxed),
-            timestamp: chrono::Utc::now().to_rfc3339(),
+        let mut event = ObserverEvent {
+            seq: self.inner.seq.load(Ordering::Relaxed),
+            timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, false),
             kind: kind.into(),
             agent_index,
             channel_id: context.channel_id.clone(),
@@ -120,17 +142,49 @@ impl ObserverHandle {
             payload,
         };
 
-        match self.inner.buffer.lock() {
-            Ok(mut buffer) => {
-                if buffer.len() >= OBSERVER_BUFFER_CAP {
-                    buffer.pop_front();
-                }
-                buffer.push_back(event.clone());
-            }
+        // Fit and copy before locking so large inputs do not stall other
+        // emitters. Fixed timestamp precision keeps metadata width stable;
+        // account for the final publication metadata below without a JSON walk.
+        let prepared_metadata_bytes = event.seq.to_string().len() + event.timestamp.len();
+        let mut bytes = super::fit_observer_event_to_budget(&mut event);
+        let prepared_within_budget = bytes <= super::OBSERVER_MAX_PLAINTEXT_LEN;
+        let mut replay = event.clone();
+        let mut buffer = match self.inner.buffer.lock() {
+            Ok(buffer) => buffer,
             Err(error) => {
                 tracing::warn!(target: "observer", "observer replay buffer lock poisoned: {error}");
+                return;
             }
+        };
+        // Assign both fields with publication: desktop sorts by timestamp,
+        // and the publisher deduplicates snapshots by sequence high-water mark.
+        event.seq = self.inner.seq.fetch_add(1, Ordering::Relaxed);
+        event.timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, false);
+        bytes =
+            bytes - prepared_metadata_bytes + event.seq.to_string().len() + event.timestamp.len();
+        if prepared_within_budget && bytes > super::OBSERVER_MAX_PLAINTEXT_LEN {
+            // A sequence-width boundary can grow a frame prepared just below
+            // the cap. Only an already-bounded frame can need this final fit.
+            bytes = super::fit_observer_event_to_budget(&mut event);
+            replay = event.clone();
         }
+        if bytes > super::OBSERVER_MAX_PLAINTEXT_LEN {
+            tracing::warn!(target: "observer", seq = event.seq, bytes, dropped = 1,
+                "observer envelope exceeds byte budget; dropped event");
+            return;
+        }
+        replay.seq = event.seq;
+        replay.timestamp.clone_from(&event.timestamp);
+        while buffer.events.len() >= OBSERVER_BUFFER_CAP
+            || buffer.bytes + bytes > OBSERVER_REPLAY_MAX_BYTES
+        {
+            let Some((old_bytes, _)) = buffer.events.pop_front() else {
+                break;
+            };
+            buffer.bytes -= old_bytes;
+        }
+        buffer.bytes += bytes;
+        buffer.events.push_back((bytes, Arc::new(replay)));
 
         let _ = self.inner.tx.send(event);
     }

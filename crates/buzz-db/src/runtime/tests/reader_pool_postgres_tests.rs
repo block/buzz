@@ -516,3 +516,91 @@ async fn stalled_reader_sessions_release_their_slots_for_new_connections() {
     drop(_guard);
     read_pool.close().await;
 }
+
+/// Reads that spill to the writer are counted by cause, so a late fence
+/// heartbeat is distinguishable from a busy or lagging reader, while the
+/// legacy `buzz_db_route_decision` reasons stay as they were.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn reader_spills_are_counted_by_cause() {
+    let (mut db, _scratch) = same_db_reader("spill_cause", 2).await;
+    db.set_replica_read_max_age_for_tests(Some(Duration::from_secs(1)));
+    let query = EventQuery::for_community(CommunityId::from_uuid(Uuid::new_v4()));
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+
+    // Counters drained since the last step: (route decisions, spills).
+    let step = || {
+        let mut routes = std::collections::HashMap::new();
+        let mut spills = std::collections::HashMap::new();
+        for ((name, decision, reason), n) in drain_counters(&snapshotter) {
+            // Drained counters linger at zero.
+            if n == 0 {
+                continue;
+            }
+            match name.as_str() {
+                "buzz_db_route_decision" => {
+                    routes.insert((decision, reason), n);
+                }
+                "buzz_db_reader_spill_total" => {
+                    spills.insert(reason, n);
+                }
+                _ => {}
+            }
+        }
+        (routes, spills)
+    };
+    let writer = |reason: &str| ("writer".to_owned(), reason.to_owned());
+
+    // A fresh heartbeat: the replica serves the read, nothing spills.
+    db.fence().force_open_for_tests(chrono::Utc::now());
+    db.count_events_routed("spill_cause", &query)
+        .await
+        .expect("replica read");
+    let (_, spills) = step();
+    assert!(
+        spills.is_empty(),
+        "a served read is not a spill: {spills:?}"
+    );
+
+    // Older than the 1s budget but inside the staleness gate: the probe is
+    // late, the replica is fine.
+    db.fence()
+        .force_open_for_tests_at(chrono::Utc::now(), Instant::now() - Duration::from_secs(2));
+    db.count_events_routed("spill_cause", &query)
+        .await
+        .expect("writer answers a late-heartbeat read");
+    let (routes, spills) = step();
+    assert_eq!(routes.get(&writer("stale")), Some(&1), "{routes:?}");
+    assert_eq!(
+        spills,
+        [("heartbeat_stale".to_owned(), 1)].into(),
+        "a late heartbeat must be its own spill reason"
+    );
+
+    // Past the staleness gate: no live heartbeat proof at all.
+    db.fence().force_open_for_tests_at(
+        chrono::Utc::now(),
+        Instant::now() - replica_fence::FENCE_STALENESS - Duration::from_secs(1),
+    );
+    db.count_events_routed("spill_cause", &query)
+        .await
+        .expect("writer answers a missing-heartbeat read");
+    let (routes, spills) = step();
+    assert_eq!(routes.get(&writer("uninitialized")), Some(&1), "{routes:?}");
+    assert_eq!(spills, [("heartbeat_missing".to_owned(), 1)].into());
+
+    // A disabled bounded arm is configuration, not a spill.
+    db.set_replica_read_max_age_for_tests(None);
+    db.fence().force_open_for_tests(chrono::Utc::now());
+    db.count_events_routed("spill_cause", &query)
+        .await
+        .expect("writer answers with routing disabled");
+    let (routes, spills) = step();
+    assert_eq!(routes.get(&writer("disabled")), Some(&1), "{routes:?}");
+    assert!(
+        spills.is_empty(),
+        "disabled routing is not a spill: {spills:?}"
+    );
+}

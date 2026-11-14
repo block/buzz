@@ -130,22 +130,20 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
         AppListCard(
           horizontalPadding: 0,
           children: [
-            if (!member.isBot) ...[
-              if (member.role != 'admin')
-                AppListRow(
-                  icon: BuzzIcons.shieldCheck,
-                  title: 'Make channel admin',
-                  onTap: busy.value ? null : () => perform(role: 'admin'),
-                ),
-              if (member.role == 'admin' || member.role == 'guest')
-                AppListRow(
-                  icon: BuzzIcons.user,
-                  title: member.role == 'guest'
-                      ? 'Make member'
-                      : 'Change to member',
-                  onTap: busy.value ? null : () => perform(role: 'member'),
-                ),
-            ],
+            if (member.role != 'admin')
+              AppListRow(
+                icon: BuzzIcons.shieldCheck,
+                title: 'Make channel admin',
+                onTap: busy.value ? null : () => perform(role: 'admin'),
+              ),
+            if (member.role == 'admin' || member.role == 'guest')
+              AppListRow(
+                icon: BuzzIcons.user,
+                title: member.role == 'guest'
+                    ? 'Make member'
+                    : 'Change to member',
+                onTap: busy.value ? null : () => perform(role: 'member'),
+              ),
             AppListRow(
               icon: BuzzIcons.userMinus,
               title: 'Remove from channel',

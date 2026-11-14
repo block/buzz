@@ -459,10 +459,6 @@ struct ConnEntry {
     grace_limit: u8,
     /// Lifecycle control used by `disconnect_nip_fi` for the denial transition.
     community_control: CommunityConnectionControl,
-    /// Set when this node lost a live event the connection should have
-    /// received (see [`ConnectionManager::fence_live_delivery`]). Written only
-    /// under the map's write guard, so it is a plain `bool`.
-    live_fenced: bool,
 }
 
 /// Community-scoped lifecycle registry shared by every long-lived socket type.
@@ -890,7 +886,6 @@ impl ConnectionManager {
                 admitted: AtomicBool::new(false),
                 grace_limit,
                 community_control,
-                live_fenced: false,
             },
         );
         // Insert-then-check pairs with drain_all's store-then-iterate: either
@@ -1031,20 +1026,6 @@ impl ConnectionManager {
         self.connections
             .get(&conn_id)
             .and_then(|entry| entry.authenticated_pubkey.read().ok()?.clone())
-    }
-
-    /// Stop live fan-out to a connection that lost a live event, until it
-    /// closes. A client resumes from the newest event it received; delivering
-    /// newer events after the loss would move that cursor past the lost one.
-    /// One-way: the connection must close for its client to recover.
-    ///
-    /// The fence takes the entry's write guard, and the live send path checks
-    /// it and queues its frame under one read guard. So a send already past
-    /// the check finishes before the fence lands, and no send starts after it.
-    pub(crate) fn fence_live_delivery(&self, conn_id: Uuid) {
-        if let Some(mut entry) = self.connections.get_mut(&conn_id) {
-            entry.live_fenced = true;
-        }
     }
 
     /// Cancel a single connection by ID. A no-op if the connection is not
@@ -1348,53 +1329,39 @@ impl ConnectionManager {
     /// Sends an already-serialized UTF-8 text payload to the given connection.
     ///
     /// The shared `Bytes` payload is cloned into the outbound WS message without
-    /// copying the frame body. Callers must only pass valid UTF-8 bytes. This is
-    /// the live fan-out send path: a fenced connection (see
-    /// [`Self::fence_live_delivery`]) gets nothing.
+    /// copying the frame body. Callers must only pass valid UTF-8 bytes.
     pub fn send_to_text_bytes(&self, conn_id: Uuid, msg: Arc<Bytes>) -> bool {
-        // Check the fence and queue the frame under one read guard, so a
-        // concurrent `fence_live_delivery` lands either before the check or
-        // after the frame is queued.
-        let Some(entry) = self.connections.get(&conn_id) else {
-            return false;
-        };
-        // A fenced connection is closing so its client can replay from before
-        // a loss; the close accounts for this frame too.
-        if entry.live_fenced {
-            return true;
-        }
         let text = WsUtf8Bytes::try_from(Bytes::clone(msg.as_ref()))
             .expect("relay fan-out frames are serialized UTF-8 JSON");
-        Self::try_send_to_entry(conn_id, entry.value(), WsMessage::Text(text))
+        self.try_send_ws_message(conn_id, WsMessage::Text(text))
     }
 
     fn try_send_ws_message(&self, conn_id: Uuid, msg: WsMessage) -> bool {
-        self.connections
-            .get(&conn_id)
-            .is_some_and(|entry| Self::try_send_to_entry(conn_id, entry.value(), msg))
-    }
-
-    fn try_send_to_entry(conn_id: Uuid, conn: &ConnEntry, msg: WsMessage) -> bool {
-        match conn.tx.try_send(msg) {
-            Ok(_) => {
-                conn.backpressure_count.store(0, Ordering::Relaxed);
-                true
-            }
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                let count = conn.backpressure_count.fetch_add(1, Ordering::Relaxed) + 1;
-                if count >= conn.grace_limit {
-                    tracing::warn!(conn_id = %conn_id, count, "fan-out: sustained backpressure — cancelling slow client");
-                    metrics::counter!("buzz_ws_backpressure_disconnects_total").increment(1);
-                    conn.cancel.cancel();
-                } else {
-                    tracing::warn!(conn_id = %conn_id, count, grace = conn.grace_limit, "fan-out: send buffer full — grace {count}/{}", conn.grace_limit);
+        if let Some(entry) = self.connections.get(&conn_id) {
+            let conn = entry.value();
+            match conn.tx.try_send(msg) {
+                Ok(_) => {
+                    conn.backpressure_count.store(0, Ordering::Relaxed);
+                    true
                 }
-                false
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    let count = conn.backpressure_count.fetch_add(1, Ordering::Relaxed) + 1;
+                    if count >= conn.grace_limit {
+                        tracing::warn!(conn_id = %conn_id, count, "fan-out: sustained backpressure — cancelling slow client");
+                        metrics::counter!("buzz_ws_backpressure_disconnects_total").increment(1);
+                        conn.cancel.cancel();
+                    } else {
+                        tracing::warn!(conn_id = %conn_id, count, grace = conn.grace_limit, "fan-out: send buffer full — grace {count}/{}", conn.grace_limit);
+                    }
+                    false
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::debug!(conn_id = %conn_id, "fan-out: send channel closed");
+                    false
+                }
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                tracing::debug!(conn_id = %conn_id, "fan-out: send channel closed");
-                false
-            }
+        } else {
+            false
         }
     }
 }
@@ -1621,6 +1588,11 @@ pub struct AppState {
     /// first-write-wins and set during auth before an agent's first event,
     /// so a short TTL only bounds staleness for the rare backfill race.
     pub author_type_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), bool>>,
+    /// Confirmed agent owners for the DM write gate. Key: (community_id,
+    /// agent pubkey bytes). Value: `users.agent_owner_pubkey`. Absence is
+    /// never cached, because another process may link the owner later.
+    #[allow(clippy::type_complexity)]
+    pub agent_owner_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), Vec<u8>>>,
     /// Community lifecycle answers for socket admission and the ephemeral
     /// write fence, served for
     /// [`crate::community_active::COMMUNITY_ACTIVE_MAX_AGE`] after their read's
@@ -1933,6 +1905,12 @@ impl AppState {
                     .build(),
             ),
             author_type_cache: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(10_000)
+                    .time_to_live(std::time::Duration::from_secs(300))
+                    .build(),
+            ),
+            agent_owner_cache: Arc::new(
                 moka::sync::Cache::builder()
                     .max_capacity(10_000)
                     .time_to_live(std::time::Duration::from_secs(300))
@@ -3799,8 +3777,10 @@ pub(crate) mod tests {
                     .await
             }
             HeldAuditLock::CommunityDeletion => {
-                sqlx::query("SELECT pg_advisory_lock(community_deletion_lock_key($1))")
-                    .bind(community_id)
+                sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+                    .bind(buzz_db::deletion::community_deletion_lock_key(
+                        buzz_core::CommunityId::from_uuid(community_id),
+                    ))
                     .execute(&mut *holder)
                     .await
             }
@@ -3854,8 +3834,10 @@ pub(crate) mod tests {
                     .await
             }
             HeldAuditLock::CommunityDeletion => {
-                sqlx::query("SELECT pg_advisory_unlock(community_deletion_lock_key($1))")
-                    .bind(community_id)
+                sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+                    .bind(buzz_db::deletion::community_deletion_lock_key(
+                        buzz_core::CommunityId::from_uuid(community_id),
+                    ))
                     .execute(&mut *holder)
                     .await
             }

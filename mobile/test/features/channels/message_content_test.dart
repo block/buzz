@@ -26,6 +26,7 @@ import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/message_long_press_region.dart';
+import 'package:buzz/features/channels/message_content/edited_marker.dart';
 import 'package:buzz/features/channels/media_viewer_page.dart';
 import 'package:buzz/features/channels/voice_note_attachment.dart';
 import 'package:buzz/features/channels/voice_note_waveform.dart';
@@ -41,6 +42,7 @@ import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 
 part 'message_content_bubble_cases.dart';
 part 'message_carousel_preview_cases.dart';
+part 'message_stack_cases.dart';
 
 Widget _testable(
   Widget child, {
@@ -460,7 +462,9 @@ class _TestChannelsNotifier extends ChannelsNotifier {
 
 void main() {
   carouselPreviewTests();
+  stackJourneyTests();
   bubbleContentTests();
+  editedMarkerTests();
   test('wide voice-note waveforms distribute bars across their full width', () {
     const width = 320.0;
     const sampleCount = 48;
@@ -542,6 +546,12 @@ void main() {
 
       for (final (content, shown) in [
         (r'plain \# \* \_ \\ end', r'plain # * _ \ end'),
+        // Escaped mention and channel sigils stay text, not pills.
+        (r'hi \@Alice there', 'hi @Alice there'),
+        (r'hi \#general there', 'hi #general there'),
+        // Authored stand-in characters stay themselves and don't stop
+        // escapes.
+        ('\uE0A0\uE0A1 \uE0A0 \\@Alice', '\uE0A0\uE0A1 \uE0A0 @Alice'),
         (r'**bold \#x** \[not math\](y)', '[not math](y)'),
         (r'[\#buzz-mobile](https://example.com/x)', '#buzz-mobile'),
         (
@@ -562,10 +572,10 @@ void main() {
         ('> ```sh\n> x\n\n```\necho \\#g\n```', r'echo \#g'),
         // A quoted fence ends with its quote, so later prose is parsed.
         ('> ```sh\n> echo x\n\nplain \\#text', 'plain #text'),
-        // Known limitation: gpt_markdown's raw-text fallback for this
-        // unclaimed strike skips inline components, so the stand-in shows.
-        // Its fullwidth form still reads as #.
-        ('~~a\nb \\#c~~', '\uFF03c'),
+        // An unclosed run ends with its paragraph, so later code stays code.
+        ('x ``` y\n- ``` p ```\n- q ``` \\[r\\] ``` s', r'\[r\]'),
+        // A strike that spans a line break still decodes its escapes.
+        ('~~a\nb \\#c~~', 'b #c'),
         // A bare link's trailing backslash stays outside the link.
         (r'see https://example.com/a\', 'see '),
         (r'in buzz://channel/9f18f3c6-b5e5-453d-b36d-65487913be0b.\', r'.\'),
@@ -581,7 +591,14 @@ void main() {
       ]) {
         for (final bubble in [false, true]) {
           await tester.pumpWidget(
-            _testable(MessageContent(content: content, bubble: bubble)),
+            _testable(
+              MessageContent(
+                content: content,
+                bubble: bubble,
+                mentionNames: const {'pk1': 'Alice'},
+                channelNames: const {'general': 'general-id'},
+              ),
+            ),
           );
           final reason = '$content (bubble: $bubble) showed ${visible()}';
           if (shown != null) {
@@ -592,7 +609,7 @@ void main() {
             );
           }
           // No stand-in or leaked link syntax reaches text or semantics.
-          if (content.contains('\u2060') || shown == '\uFF03c') continue;
+          if (content.contains('\u2060')) continue;
           expect(
             find.textContaining(
               RegExp('\u2060|\\]\\(http'),
@@ -611,6 +628,37 @@ void main() {
       // Gallery labels drop their escapes too.
       expect(find.bySemanticsLabel(RegExp(r'shot #1')), findsWidgets);
       semantics.dispose();
+    });
+
+    testWidgets('a quote opening with an alert marker stays a quote', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _testable(const MessageContent(content: '> [!NOTE]\n> Builds run.')),
+      );
+      expect(find.textContaining('[!NOTE]', findRichText: true), findsWidgets);
+    });
+
+    testWidgets('a table typed under its caption renders as a table', (
+      tester,
+    ) async {
+      Finder pipes() => find.textContaining('|', findRichText: true);
+      for (final (content, table) in [
+        ('**Sizes:**\n| Folder | Size |\n|---|---|\n| `~/a` | 9 GB |', true),
+        ('Sizes:\n\n| Folder | Size |\n|---|---|\n| a | 9 GB |', true),
+        // As in GFM, a delimiter row with a different cell count does not
+        // open a table.
+        ('Sizes:\n| Folder | Size | Note |\n|---|---|\n| a | 9 GB |', false),
+        ('```\nSizes:\n| Folder | Size |\n|---|---|\n```', false),
+      ]) {
+        await tester.pumpWidget(_testable(MessageContent(content: content)));
+        expect(pipes(), table ? findsNothing : findsWidgets, reason: content);
+        expect(
+          find.textContaining('Folder', findRichText: true),
+          findsWidgets,
+          reason: content,
+        );
+      }
     });
 
     testWidgets('forwards text alignment to markdown rendering', (
@@ -643,30 +691,47 @@ void main() {
         nsec: nostr.Keys.generate().nsec,
       );
 
-      await tester.pumpWidget(
-        _testable(
-          const MessageContent(content: '[report.pdf]($url)'),
-          overrides: [
-            mediaGetAuthServiceProvider.overrideWithValue(auth),
-            openDownloadedFileProvider.overrideWithValue((
-              url,
-              headers,
-              filename,
-            ) async {
-              openedUrl = url;
-              openedHeaders = headers;
-              openedFilename = filename;
-            }),
-          ],
-        ),
-      );
+      // An inline link, reference links, whose definitions must keep their
+      // destination as written, and destinations holding text a mention or
+      // channel pattern would match.
+      for (final (content, url) in [
+        ('[report.pdf]($url)', url),
+        ('See [report.pdf]\n\n[report.pdf]: $url', url),
+        ('See [report.pdf][r]\n\n[r]: $url "Report"', url),
+        ('[report.pdf]($url?u=@Alice)', '$url?u=@Alice'),
+        ('[report.pdf]($url?c=#general)', '$url?c=#general'),
+        ('See <$url?u=@Alice> or [report.pdf]($url?u=@Alice)', '$url?u=@Alice'),
+      ]) {
+        openedUrl = null;
+        await tester.pumpWidget(
+          _testable(
+            MessageContent(
+              content: content,
+              mentionNames: const {'pk1': 'Alice'},
+              channelNames: const {'general': 'general-id'},
+            ),
+            overrides: [
+              mediaGetAuthServiceProvider.overrideWithValue(auth),
+              openDownloadedFileProvider.overrideWithValue((
+                url,
+                headers,
+                filename,
+              ) async {
+                openedUrl = url;
+                openedHeaders = headers;
+                openedFilename = filename;
+              }),
+            ],
+          ),
+        );
 
-      await tester.tap(find.text('report.pdf'));
-      await tester.pump();
+        await tester.tap(find.text('report.pdf'));
+        await tester.pump();
 
-      expect(openedUrl, url);
-      expect(openedFilename, 'report.pdf');
-      expect(openedHeaders?['Authorization'], startsWith('Nostr '));
+        expect(openedUrl, url, reason: content);
+        expect(openedFilename, 'report.pdf');
+        expect(openedHeaders?['Authorization'], startsWith('Nostr '));
+      }
     });
 
     testWidgets('a link nothing can open offers only copy and share', (
@@ -3129,6 +3194,28 @@ Photos
         expect(_allRichText(tester), isNot(contains('Lopez Lopez')));
       });
 
+      testWidgets('leaves mentions in code and stray backticks as written', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content:
+                  '~~~\n@Kenny Lopez ran it\n~~~\n\n'
+                  'stray ` tick then **bold** and @Kenny Lopez',
+              mentionNames: {'pk1': 'Kenny Lopez'},
+            ),
+          ),
+        );
+
+        final text = _allRichText(tester);
+        // The fence keeps the author's space, not the chip's NBSP.
+        expect(text, contains('@Kenny Lopez ran it'));
+        expect(text, contains('stray ` tick then bold and '));
+        // Only the prose mention becomes a chip.
+        expect(find.text('Kenny Lopez'), findsOneWidget);
+      });
+
       testWidgets('renders unknown @mention as-is', (tester) async {
         await tester.pumpWidget(
           _testable(
@@ -3222,6 +3309,29 @@ Photos
         expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
         expect(find.text('general'), findsOneWidget);
         expect(find.text('#general'), findsNothing);
+      });
+
+      testWidgets('a channel that opens the message is a link, not a heading', (
+        tester,
+      ) async {
+        String? tappedId;
+        await tester.pumpWidget(
+          _testable(
+            MessageContent(
+              content: '#general is busy',
+              channelNames: const {'general': 'ch-id-1'},
+              onChannelTap: (id) => tappedId = id,
+            ),
+          ),
+        );
+
+        expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
+        expect(
+          find.textContaining('is busy', findRichText: true),
+          findsWidgets,
+        );
+        await tester.tap(find.text('general'));
+        expect(tappedId, 'ch-id-1');
       });
 
       testWidgets('channel tap callback fires', (tester) async {

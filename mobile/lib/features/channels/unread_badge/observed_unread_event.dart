@@ -1,4 +1,5 @@
 import '../../../shared/read_state/read_state_format.dart';
+import '../../../shared/relay/nostr_models.dart';
 
 class ObservedUnreadEvent {
   final String id;
@@ -11,6 +12,10 @@ class ObservedUnreadEvent {
   /// `activity:<channel>` reads this event (see `readByChannelCatchUp`).
   final bool channelCatchUp;
 
+  /// Reply payload for Activity's existing thread rows. Retained in the same
+  /// bounded registry as its unread evidence, so eviction and deletion agree.
+  final NostrEvent? threadReply;
+
   const ObservedUnreadEvent({
     required this.id,
     required this.createdAt,
@@ -19,6 +24,7 @@ class ObservedUnreadEvent {
     required this.countsTowardBadge,
     required this.countsTowardAppBadge,
     this.channelCatchUp = false,
+    this.threadReply,
   });
 }
 
@@ -29,6 +35,7 @@ ObservedUnreadEvent makeObservedUnreadEvent({
   required bool highPriority,
   required String? channelType,
   required bool isThreadedReply,
+  NostrEvent? threadReply,
 }) {
   final isDm = channelType == 'dm';
   return ObservedUnreadEvent(
@@ -43,6 +50,7 @@ ObservedUnreadEvent makeObservedUnreadEvent({
       isReply: isThreadedReply,
       highPriority: highPriority,
     ),
+    threadReply: threadReply,
   );
 }
 

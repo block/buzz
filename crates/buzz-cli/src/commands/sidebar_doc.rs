@@ -6,6 +6,12 @@
 //! last-writer-wins registers `[v, dev, value]` under `meta`, plus the
 //! projected legacy fields that meta-less clients (mobile) read and write.
 //! A [`Codec`] describes one document's shape, legacy import and projection.
+//!
+//! Like desktop, decoding drops any key or register its shape does not know,
+//! and the republished snapshot omits it. Buzz Desktop (`block/buzz-app`,
+//! `validate_sidebar_payload`) refuses to sign a document with unknown keys,
+//! so a new field needs a new `meta.v`; [`decode`] refuses an unknown
+//! `meta.v`, and the commands then neither read nor overwrite the head.
 
 use std::collections::BTreeMap;
 

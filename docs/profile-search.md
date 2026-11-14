@@ -59,9 +59,10 @@ Ties go by relevance of the query to the names alone (not the whole
 profile, as in NIP-50), then newest first, then pubkey, so pages do not
 overlap. Profile content that is not a JSON object, or a name field that
 is not a string, never matches. Content that PostgreSQL cannot read as `jsonb`
-(for example a `\u0000` escape or very deep nesting) has no names, so it
-never matches and never makes the search fail
-(`schema/functions/profile_name_fields.sql`).
+(for example a `\u0000` escape), and content with more than 4096 `[` and `{`,
+which bounds how deeply it can nest, has no names, so it never matches and
+never makes the search fail (`PROFILE_NAME_FIELDS` in
+`crates/buzz-search/src/query.rs`).
 
 ## Deployment
 

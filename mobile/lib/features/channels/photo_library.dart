@@ -6,12 +6,12 @@ import 'package:photo_manager/photo_manager.dart';
 const _recentPhotoCount = 30;
 const _photoPermissionRequest = PermissionRequestOption(
   androidPermission: AndroidPermission(
-    type: RequestType.image,
+    type: RequestType.common,
     mediaLocation: false,
   ),
 );
 
-/// A recent photo exposed to Buzz's compact in-composer gallery.
+/// A recent photo or video exposed to Buzz's compact in-composer gallery.
 @immutable
 class RecentPhoto {
   /// The platform photo-library identifier.
@@ -20,13 +20,20 @@ class RecentPhoto {
   /// Thumbnail bytes sized for the compact picker grid.
   final Uint8List thumbnailBytes;
 
+  /// Whether this library asset is a video.
+  final bool isVideo;
+
   /// Creates a recent photo value.
-  const RecentPhoto({required this.id, required this.thumbnailBytes});
+  const RecentPhoto({
+    required this.id,
+    required this.thumbnailBytes,
+    this.isVideo = false,
+  });
 }
 
-/// Reads recent photos and resolves selected library assets to uploadable files.
+/// Reads recent photos/videos and resolves selected assets to uploadable files.
 abstract interface class PhotoLibrary {
-  /// Requests access when needed and returns the newest visible photos.
+  /// Requests access when needed and returns the newest visible photos/videos.
   Future<List<RecentPhoto>> loadRecentPhotos();
 
   /// Resolves selected photos in the supplied selection order.
@@ -64,7 +71,7 @@ class DevicePhotoLibrary implements PhotoLibrary {
     final assets = await PhotoManager.getAssetListPaged(
       page: 0,
       pageCount: _recentPhotoCount,
-      type: RequestType.image,
+      type: RequestType.common,
       filterOption: FilterOptionGroup(
         imageOption: const FilterOption(needTitle: true),
         orders: const [
@@ -85,7 +92,11 @@ class DevicePhotoLibrary implements PhotoLibrary {
       quality: 84,
     );
     if (bytes == null || bytes.isEmpty) return null;
-    return RecentPhoto(id: asset.id, thumbnailBytes: bytes);
+    return RecentPhoto(
+      id: asset.id,
+      thumbnailBytes: bytes,
+      isVideo: asset.type == AssetType.video,
+    );
   }
 
   @override

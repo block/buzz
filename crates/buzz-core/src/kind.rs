@@ -843,6 +843,18 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_PROJECT,
 ];
 
+/// Metric label for an event kind: the decimal kind when it is registered in
+/// [`ALL_KINDS`], otherwise `"other"`.
+///
+/// The registry bounds the label set, so the label is safe on metrics whose
+/// kind comes from client events.
+pub fn registered_kind_label(kind: i32) -> String {
+    match u32::try_from(kind) {
+        Ok(kind) if ALL_KINDS.contains(&kind) => kind.to_string(),
+        _ => "other".to_owned(),
+    }
+}
+
 /// Returns `true` if `kind` is in the ephemeral range (20000–29999).
 pub const fn is_ephemeral(kind: u32) -> bool {
     kind >= EPHEMERAL_KIND_MIN && kind <= EPHEMERAL_KIND_MAX
@@ -992,6 +1004,18 @@ mod tests {
         for &k in ALL_KINDS {
             assert!(seen.insert(k), "duplicate kind value: {k}");
         }
+    }
+
+    #[test]
+    fn registered_kind_label_bounds_unregistered_kinds() {
+        assert_eq!(
+            registered_kind_label(KIND_NIP43_MEMBERSHIP_LIST as i32),
+            "13534"
+        );
+        assert_eq!(registered_kind_label(KIND_PROFILE as i32), "0");
+        assert!(!ALL_KINDS.contains(&30999));
+        assert_eq!(registered_kind_label(30999), "other");
+        assert_eq!(registered_kind_label(-1), "other");
     }
 
     #[test]
