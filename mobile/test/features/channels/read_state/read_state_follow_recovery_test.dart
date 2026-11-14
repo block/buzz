@@ -30,14 +30,15 @@ void main() {
     clock = 1800000000;
   });
 
-  Future<ReadStateManager> device() async {
+  Future<ReadStateManager> device({SignedEventRelay? signer}) async {
     final manager = ReadStateManager(
       pubkey: keys.public,
       relayUrl: 'https://phone.example',
       prefs: prefs,
       crypto: crypto,
       relaySession: relay,
-      signedEventRelay: SignedEventRelay(session: relay, nsec: keys.nsec),
+      signedEventRelay:
+          signer ?? SignedEventRelay(session: relay, nsec: keys.nsec),
       remoteEnabled: true,
       onChanged: () {},
       now: () => clock,
@@ -73,12 +74,12 @@ void main() {
   test('W1: an unfollow at a rolled-back clock survives restoring an older '
       'journal', () async {
     final phone = await device();
-    phone.setThreadFollow(channel, 'a' * 64, true);
+    await phone.setThreadFollow(channel, 'a' * 64, true);
     await phone.flush();
     final clean = backup();
 
     clock -= 3600;
-    phone.setThreadFollow(channel, 'a' * 64, false);
+    await phone.setThreadFollow(channel, 'a' * 64, false);
     await phone.flush();
     phone.dispose(flushPending: false);
 
@@ -98,13 +99,13 @@ void main() {
       'and OK', () async {
     final phone = await device();
     final gate = relay.hold = Completer();
-    phone.setThreadFollow(channel, 'a' * 64, true);
+    await phone.setThreadFollow(channel, 'a' * 64, true);
     final sending = phone.flush();
     await relay.held.future;
     final p = relay.inFlight!;
 
     // Same action second, while P is in flight.
-    phone.setThreadFollow(channel, 'a' * 64, false);
+    await phone.setThreadFollow(channel, 'a' * 64, false);
     relay.deliver(p); // Echo before the OK.
     expect(phone.threadFollows[keyK]!.follow, isFalse);
     gate.complete();
@@ -130,11 +131,11 @@ void main() {
       'outcome is unknown', () async {
     final phone = await device();
     final gate = relay.hold = Completer();
-    phone.setThreadFollow(channel, 'a' * 64, true);
+    await phone.setThreadFollow(channel, 'a' * 64, true);
     final sending = phone.flush();
     await relay.held.future;
     final p = relay.inFlight!;
-    phone.setThreadFollow(channel, 'b' * 64, true);
+    await phone.setThreadFollow(channel, 'b' * 64, true);
     relay.dropNext = true; // P times out unseen by the relay.
     gate.complete();
     await sending;
@@ -150,10 +151,98 @@ void main() {
     expect(relayHead().choices.keys, unorderedEquals([keyK, keyB]));
   });
 
+  test('a tap whose journal write fails is refused and reverted', () async {
+    final phone = await device();
+    expect(await phone.setThreadFollow(channel, 'a' * 64, true), isTrue);
+    // Another writer claims the journal, so this one's save fails.
+    await device();
+    expect(await phone.setThreadFollow(channel, 'a' * 64, false), isFalse);
+    expect(phone.threadFollows[keyK]!.follow, isTrue);
+    expect(phone.syncError, isNotNull);
+  });
+
+  test('a reservation past uint32 is refused, not wrapped', () async {
+    final phone = await device();
+    clock = 4294967295;
+    expect(await phone.setThreadFollow(channel, 'a' * 64, true), isTrue);
+    expect(await phone.setThreadFollow(channel, 'b' * 64, true), isFalse);
+    expect(phone.threadFollows.containsKey(keyB), isFalse);
+    expect(phone.syncError, isA<StateError>());
+  });
+
+  test('no omission through a slot spill: every captured edit reaches a '
+      'slot', () async {
+    final phone = await device();
+    final first = [for (var i = 0; i < 200; i++) i.toRadixString(16)];
+    for (final id in first) {
+      await phone.setThreadFollow(channel, id.padLeft(64, '0'), true);
+    }
+    final gate = relay.hold = Completer();
+    final sending = phone.flush();
+    await relay.held.future;
+    // While the first packet is in flight, enough taps to spill a slot.
+    final more = [for (var i = 200; i < 500; i++) i.toRadixString(16)];
+    for (final id in more) {
+      await phone.setThreadFollow(channel, id.padLeft(64, '0'), false);
+    }
+    gate.complete();
+    await sending;
+    await phone.flush();
+    expect(phone.syncError, isNull);
+    final follows = relay.follows();
+    expect(follows.length, greaterThan(1));
+    final keys = {
+      for (final event in follows)
+        ...decodeThreadFollowsBlob(crypto.decrypt(event.content))!.choices.keys,
+    };
+    expect(keys, {
+      for (final id in [...first, ...more])
+        threadFollowKey(channel, id.padLeft(64, '0')),
+    });
+  });
+
+  test(
+    'an unknown send outcome is retried with the exact signed bytes',
+    () async {
+      final phone = await device();
+      await phone.setThreadFollow(channel, 'a' * 64, true);
+      relay.dropNext = true;
+      await phone.flush();
+      expect(phone.syncError, isNotNull);
+      final attempt = relay.attempts.single;
+      clock += 30;
+      await phone.setThreadFollow(channel, 'b' * 64, true);
+      await phone.flush();
+      expect(relay.attempts[1].toJson(), attempt.toJson());
+      expect(relay.attempts.length, 3); // Then the successor with both.
+      expect(relayHead().choices.keys, unorderedEquals([keyK, keyB]));
+    },
+  );
+
+  test(
+    'a writer retired while signing neither sends nor loses the edit',
+    () async {
+      final signGate = Completer<void>();
+      final signing = Completer<void>();
+      final phone = await device(
+        signer: _GatedSigner(relay, keys.nsec, signGate, signing),
+      );
+      await phone.setThreadFollow(channel, 'a' * 64, true);
+      final sending = phone.flush();
+      await signing.future;
+      final replacement = await device(); // Retires [phone].
+      signGate.complete();
+      await sending;
+      expect(relay.follows(), isEmpty);
+      await replacement.flush();
+      expect(relayHead().choices[keyK]!.follow, isTrue);
+    },
+  );
+
   test('own heads at the same second: the lower event ID wins in either '
       'arrival order', () async {
     final phone = await device();
-    phone.setThreadFollow(channel, 'a' * 64, true);
+    await phone.setThreadFollow(channel, 'a' * 64, true);
     await phone.flush();
     final own = relay.follows().single;
     final clientId = relayHead().clientId;
@@ -200,6 +289,7 @@ class _HoldingRelay extends RelaySessionNotifier {
   Completer<void> held = Completer();
   NostrEvent? inFlight;
   bool dropNext = false;
+  final attempts = <NostrEvent>[];
 
   void deliver(NostrEvent event) {
     for (final onEvent in List.of(_live)) {
@@ -239,6 +329,7 @@ class _HoldingRelay extends RelaySessionNotifier {
       held = Completer();
       await gate.future;
     }
+    if (threadFollowsSlotOf(event) != null) attempts.add(event);
     if (dropNext) {
       dropNext = false;
       throw TimeoutException('relay timeout');
@@ -252,5 +343,39 @@ class _HoldingRelay extends RelaySessionNotifier {
     }
     deliver(event);
     return event;
+  }
+}
+
+/// Signs only after [gate] opens, completing [signing] once a follow packet
+/// reaches it.
+class _GatedSigner extends SignedEventRelay {
+  final Completer<void> gate;
+  final Completer<void> signing;
+  _GatedSigner(
+    RelaySessionNotifier session,
+    String nsec,
+    this.gate,
+    this.signing,
+  ) : super(session: session, nsec: nsec);
+
+  @override
+  Future<NostrEvent> submit({
+    required int kind,
+    required String content,
+    required List<List<String>> tags,
+    int? createdAt,
+    FutureOr<void> Function(NostrEvent event)? onSigned,
+  }) async {
+    if (tags.any((tag) => tag.first == 't' && tag[1] == threadFollowsTag)) {
+      if (!signing.isCompleted) signing.complete();
+      await gate.future;
+    }
+    return super.submit(
+      kind: kind,
+      content: content,
+      tags: tags,
+      createdAt: createdAt,
+      onSigned: onSigned,
+    );
   }
 }

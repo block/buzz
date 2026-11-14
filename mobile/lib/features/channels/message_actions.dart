@@ -649,13 +649,13 @@ class _FollowThreadTile extends ConsumerWidget {
     return ListTile(
       leading: Icon(following ? BuzzIcons.bellOff : BuzzIcons.bellRing),
       title: Text(following ? 'Unfollow thread' : 'Follow thread'),
-      onTap: () {
+      onTap: () async {
         if (!_selectMessageAction(context)) return;
         final messenger = ScaffoldMessenger.maybeOf(context);
         final notifier = ref.read(threadFollowsProvider.notifier);
-        final saved = following
+        final saved = await (following
             ? notifier.unfollowThread(channelId, rootId)
-            : notifier.followThread(channelId, rootId);
+            : notifier.followThread(channelId, rootId));
         if (!saved) {
           messenger?.showFeedbackSnackBar(
             const SnackBar(content: Text('Couldn’t save that. Try again.')),

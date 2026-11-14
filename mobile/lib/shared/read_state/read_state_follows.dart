@@ -28,16 +28,20 @@ extension ReadStateFollows on ReadStateManager {
       !_followsLoaded || _unreadableFollowSlots.isNotEmpty;
 
   /// Record an explicit follow or unfollow in this installation's own slot.
-  /// Returns false, leaving state unchanged, when the slots are full.
-  bool setThreadFollow(String channelId, String rootId, bool follow) {
+  /// The choice shows at once but is accepted only once journaled: resolves
+  /// false, leaving the previous choice, when the slots are full, no later
+  /// timestamp can be reserved, or the journal write fails.
+  Future<bool> setThreadFollow(
+    String channelId,
+    String rootId,
+    bool follow,
+  ) async {
     final key = threadFollowKey(channelId, rootId);
     if (_disposed || !isValidThreadFollowKey(key)) return false;
     final previous = _ownFollows[key];
     final previousEdit = _followEdits[key];
     final previousReserved = _lastReserved;
-    _ownFollows[key] = {...?previous, 'follow': follow, 'at': _now()};
-    _followEdits[key] = _reserve();
-    if (!_packFollows()) {
+    void revert() {
       if (previous == null) {
         _ownFollows.remove(key);
       } else {
@@ -48,11 +52,34 @@ extension ReadStateFollows on ReadStateManager {
       } else {
         _followEdits[key] = previousEdit;
       }
+    }
+
+    final int generation;
+    try {
+      generation = _reserve();
+    } on StateError catch (error) {
+      syncError = error;
+      _onChanged();
+      return false;
+    }
+    _ownFollows[key] = {...?previous, 'follow': follow, 'at': _now()};
+    _followEdits[key] = generation;
+    if (!_packFollows()) {
+      revert();
       _lastReserved = previousReserved;
       return false;
     }
-    _persistLocalState();
     _onChanged();
+    try {
+      await _persistLocalState();
+    } catch (error) {
+      // Undo only this tap; a newer tap on the key owns it now.
+      if (_followEdits[key] == generation) revert();
+      syncError = error;
+      if (!_disposed) _onChanged();
+      return false;
+    }
+    if (_disposed) return false;
     _schedulePublish();
     return true;
   }

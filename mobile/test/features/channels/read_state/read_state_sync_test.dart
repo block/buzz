@@ -207,7 +207,7 @@ void main() {
     test('a follow on one device reaches the other', () async {
       final phone = await device('phone');
       final desktop = await device('desktop');
-      expect(phone.setThreadFollow(channel, root, true), isTrue);
+      expect(await phone.setThreadFollow(channel, root, true), isTrue);
       await sync(phone, desktop);
 
       expect(desktop.threadFollows[threadFollowKey(channel, root)], (

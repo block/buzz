@@ -283,8 +283,9 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
 
   /// Record an explicit follow or unfollow; see [ReadStateManager]. Returns
   /// false when it could not be recorded.
-  bool setThreadFollow(String channelId, String rootId, bool follow) =>
-      _manager?.setThreadFollow(channelId, rootId, follow) ?? false;
+  Future<bool> setThreadFollow(String channelId, String rootId, bool follow) =>
+      _manager?.setThreadFollow(channelId, rootId, follow) ??
+      Future.value(false);
 
   /// See [ReadStateManager.importLegacyFollows].
   Set<String> importLegacyFollows(Map<String, bool> choices) =>

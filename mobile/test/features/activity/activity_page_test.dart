@@ -1625,7 +1625,11 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
   }
 
   @override
-  bool setThreadFollow(String channelId, String rootId, bool follow) {
+  Future<bool> setThreadFollow(
+    String channelId,
+    String rootId,
+    bool follow,
+  ) async {
     state = ReadStateState(
       isReady: state.isReady,
       pubkey: state.pubkey,

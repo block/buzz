@@ -194,10 +194,15 @@ class ReadStateManager {
   // strictly later one, so a wall-clock rollback cannot reuse a version.
   int _lastReserved = 0;
 
-  int _reserve() => _lastReserved = max(
-    max(_now(), _maxFetchedCreatedAt + 1),
-    _lastReserved + 1,
-  );
+  /// Reserves the next timestamp. `created_at` is uint32 on the wire, so a
+  /// reservation past it fails rather than wrapping or reusing one.
+  int _reserve() {
+    final next = max(max(_now(), _maxFetchedCreatedAt + 1), _lastReserved + 1);
+    if (next > 4294967295) {
+      throw StateError('No later read-state timestamp can be reserved');
+    }
+    return _lastReserved = next;
+  }
 
   Timer? _debounceTimer;
   void Function()? _unsubscribeLive;

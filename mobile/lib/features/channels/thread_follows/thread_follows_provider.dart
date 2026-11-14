@@ -76,13 +76,13 @@ class ThreadFollowsNotifier extends Notifier<ThreadFollowsState> {
     );
   }
 
-  bool followThread(String channelId, String rootId) =>
+  Future<bool> followThread(String channelId, String rootId) =>
       _set(channelId, rootId, true);
 
-  bool unfollowThread(String channelId, String rootId) =>
+  Future<bool> unfollowThread(String channelId, String rootId) =>
       _set(channelId, rootId, false);
 
-  bool _set(String channelId, String rootId, bool follow) {
+  Future<bool> _set(String channelId, String rootId, bool follow) async {
     if (rootId.isEmpty) return false;
     return ref
         .read(readStateProvider.notifier)
