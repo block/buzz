@@ -162,6 +162,7 @@ class ReadStateManager {
   // Channels whose synced clear failed. Their error outlives unrelated
   // successful syncs until the clear lands or the override ends.
   final Set<String> _failedClears = {};
+
   Object? get _standingError {
     _failedClears.retainAll(activeChannelOverrides);
     return _failedClears.isEmpty
@@ -192,8 +193,7 @@ class ReadStateManager {
   final Map<String, Map<String, ThreadFollowChoice>> _remoteFollows = {};
   final Set<String> _unreadableFollowSlots = {};
   bool _followsLoaded = false;
-  // Whether this writer has durably saved a complete recovery. Never reset,
-  // so a later reconnect failure does not close the follow gate.
+  // Whether this writer durably saved a complete recovery; never reset.
   bool _followsRecovered = false;
   // Pending own follow edits not yet covered by an accepted own head, by key:
   // the reservation (generation) of the edit. Their entries are in

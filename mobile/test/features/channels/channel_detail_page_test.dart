@@ -3732,6 +3732,51 @@ void main() {
       expect(readState.state.isForcedUnread('msg:old'), isFalse);
     });
 
+    testWidgets('a failed channel clear is reported once while it stands', (
+      tester,
+    ) async {
+      const notice = 'Couldn’t sync reading this channel. Try again.';
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+          forcedUnreadContexts: {_channelId: _channelId},
+        ),
+      )..failClear = true;
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'msg1',
+              pubkey: 'alice',
+              content: 'Latest',
+              createdAt: 1200,
+            ),
+          ],
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pump();
+      expect(readState.clearedForcedContexts, contains(_channelId));
+      expect(find.text(notice), findsOneWidget);
+
+      // Later dwells retry and fail again; the standing failure is not
+      // reported again.
+      tester
+          .state<ScaffoldMessengerState>(find.byType(ScaffoldMessenger).first)
+          .removeCurrentSnackBar();
+      await tester.pumpAndSettle();
+      readState.markContextRead('other', 1);
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pumpAndSettle();
+      expect(readState.clearedForcedContexts.length, greaterThan(1));
+      expect(find.text(notice), findsNothing);
+    });
+
     testWidgets('a catch-up with no frontier progress still clears its marks', (
       tester,
     ) async {
@@ -21487,9 +21532,23 @@ class _SynchronousReadStateNotifier extends ReadStateNotifier {
     state = _initialState;
   }
 
+  /// Whether a synced channel clear fails, as when the primary is full.
+  bool failClear = false;
+
   @override
   bool clearForcedUnread(String contextId) {
     clearedForcedContexts.add(contextId);
+    if (failClear && contextId == _channelId) {
+      state = ReadStateState(
+        isReady: state.isReady,
+        pubkey: state.pubkey,
+        contexts: state.contexts,
+        version: state.version + 1,
+        forcedUnreadContexts: state.forcedUnreadContexts,
+        failedClears: {contextId},
+      );
+      return false;
+    }
     state = ReadStateState(
       isReady: state.isReady,
       pubkey: state.pubkey,

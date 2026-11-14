@@ -34,6 +34,9 @@ class ReadStateState {
   /// null once a sync succeeds.
   final Object? syncError;
 
+  /// Channels whose synced clear failed and still stands.
+  final Set<String> failedClears;
+
   const ReadStateState({
     required this.isReady,
     required this.pubkey,
@@ -44,6 +47,7 @@ class ReadStateState {
     this.threadFollows = const {},
     this.threadFollowsIncomplete = true,
     this.syncError,
+    this.failedClears = const {},
   });
 
   const ReadStateState.inert()
@@ -55,7 +59,8 @@ class ReadStateState {
       forcedUnreadContexts = const {},
       threadFollows = const {},
       threadFollowsIncomplete = true,
-      syncError = null;
+      syncError = null,
+      failedClears = const {};
 
   /// Channels that should surface as unread because of a forced-unread flag —
   /// either forced directly, or containing a forced message.
@@ -91,6 +96,7 @@ class ReadStateState {
       threadFollows: threadFollows,
       threadFollowsIncomplete: threadFollowsIncomplete,
       syncError: syncError,
+      failedClears: failedClears,
     );
   }
 }
@@ -379,6 +385,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       threadFollows: Map.unmodifiable(manager.threadFollows),
       threadFollowsIncomplete: manager.threadFollowsIncomplete,
       syncError: manager.syncError,
+      failedClears: manager.failedClears,
     );
   }
 }

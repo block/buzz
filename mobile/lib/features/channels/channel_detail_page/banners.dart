@@ -295,3 +295,19 @@ class _ForumSkeletonCard extends StatelessWidget {
     );
   }
 }
+
+/// A failed synced clear keeps the channel unread; say so once per failure.
+void _listenFailedClear(WidgetRef ref, BuildContext context, String channelId) {
+  ref.listen(
+    readStateProvider.select((s) => s.failedClears.contains(channelId)),
+    (previous, failed) {
+      if (!failed || previous == true) return;
+      ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+        const SnackBar(
+          content: Text('Couldn’t sync reading this channel. Try again.'),
+        ),
+        kind: ToastKind.error,
+      );
+    },
+  );
+}

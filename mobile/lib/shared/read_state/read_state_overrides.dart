@@ -2,6 +2,10 @@ part of 'read_state_manager.dart';
 
 /// Synced whole-channel override actions and their primary-slot plan.
 extension ReadStateOverrides on ReadStateManager {
+  /// Channels whose synced clear failed and still stands.
+  Set<String> get failedClears =>
+      Set.unmodifiable(_failedClears.intersection(activeChannelOverrides));
+
   /// Synchronized whole-channel mark unread (NIP-RS Actions). Returns false,
   /// leaving state unchanged, when the action must fail visibly: no complete
   /// load, an exhausted counter, or a primary that cannot fit the group.

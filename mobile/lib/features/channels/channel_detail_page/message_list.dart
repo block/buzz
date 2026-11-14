@@ -686,6 +686,8 @@ class _MessageList extends HookConsumerWidget {
       }
     }
 
+    _listenFailedClear(ref, context, channelId);
+
     useReadingDwell(
       positions: itemPositionsListener.itemPositions,
       active: readingActive,
