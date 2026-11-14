@@ -3729,6 +3729,45 @@ void main() {
       expect(readState.state.isForcedUnread('msg:old'), isTrue);
     });
 
+    testWidgets('displaying a message ends its device-local mark unread', (
+      tester,
+    ) async {
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+          forcedUnreadContexts: {
+            'msg:shown': _channelId,
+            'msg:old': _channelId,
+          },
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'shown',
+              pubkey: 'alice',
+              content: 'Marked unread elsewhere',
+              createdAt: 1200,
+            ),
+          ],
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      // The displayed row goes back to read; one not displayed keeps its mark.
+      expect(readState.clearedForcedContexts, contains('msg:shown'));
+      expect(readState.state.isForcedUnread('msg:shown'), isFalse);
+      expect(readState.state.isForcedUnread('msg:old'), isTrue);
+      expect(readState.markedContexts, {_channelId: 1200});
+    });
+
     testWidgets('opening a DM reads the whole DM', (tester) async {
       final readState = _SynchronousReadStateNotifier(
         const ReadStateState(

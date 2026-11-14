@@ -607,6 +607,7 @@ class _MessageList extends HookConsumerWidget {
       ],
     );
 
+    final clearDisplayedForces = useDisplayClearsForcedUnread(ref);
     void readVisibleRows() {
       final readState = ref.read(readStateProvider);
       final viewportHeight = timelineViewportHeight.value;
@@ -651,8 +652,10 @@ class _MessageList extends HookConsumerWidget {
             (position) =>
                 position.index == 0 && position.itemLeadingEdge >= bottomEdge,
           );
+      // Displaying a row ends its device-local unread before it is read.
+      clearDisplayedForces(visible);
       final marks = readingMarks(
-        readState: readState,
+        readState: ref.read(readStateProvider),
         channelId: channelId,
         isDm: isDm,
         currentPubkey: currentPubkey,

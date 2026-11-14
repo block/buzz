@@ -729,6 +729,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       );
       return null;
     }, [hasFetchedReplies, replies.length, settleGeometry, headHeight.value]);
+    final clearDisplayedForces = useDisplayClearsForcedUnread(ref);
     void readVisibleReplies() {
       final readState = ref.read(readStateProvider);
       if (!context.mounted ||
@@ -778,8 +779,10 @@ class ThreadDetailPage extends HookConsumerWidget {
       final isDm =
           ref.read(channelsProvider.notifier).channelById(channelId)?.isDm ??
           false;
+      // Displaying a row ends its device-local unread before it is read.
+      clearDisplayedForces(visible);
       final marks = readingMarks(
-        readState: readState,
+        readState: ref.read(readStateProvider),
         channelId: channelId,
         isDm: isDm,
         currentPubkey: currentPubkey,

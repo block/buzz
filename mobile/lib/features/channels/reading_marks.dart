@@ -2,6 +2,7 @@ import 'huddle_timeline.dart';
 import 'dart:async';
 
 import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
@@ -115,6 +116,28 @@ Map<String, int> readingMarks({
 
   visible.forEach(markMessage);
   return marks;
+}
+
+/// Ends device-local message unreads whose rows are displayed (NIP-RS
+/// Clearing (a)). Call the result with each dwell's readable rows. A row
+/// already shown at the previous dwell, as when it was marked unread in
+/// place, keeps its mark until it is displayed again.
+void Function(Iterable<TimelineMessage> visible) useDisplayClearsForcedUnread(
+  WidgetRef ref,
+) {
+  final previous = useRef<Set<String>>(const {});
+  return (visible) {
+    final readState = ref.read(readStateProvider);
+    final notifier = ref.read(readStateProvider.notifier);
+    for (final message in visible) {
+      final key = msgContextKey(message.id);
+      if (!previous.value.contains(message.id) &&
+          readState.isForcedUnread(key)) {
+        notifier.clearForcedUnread(key);
+      }
+    }
+    previous.value = {for (final message in visible) message.id};
+  };
 }
 
 /// Whether a row at [position] counts as read: it lies inside the reading

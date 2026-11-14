@@ -1,6 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:buzz/features/activity/feed_item.dart';
+import 'package:buzz/features/activity/inbox_item.dart';
+import 'package:buzz/features/activity/inbox_read_state.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -140,6 +143,40 @@ void main() {
         .single
         .contexts;
     expect(own.keys.where((key) => key.startsWith('ov_')), isEmpty);
+  });
+
+  test('an Inbox mark unread goes stale once a peer reads past it', () async {
+    final phone = await device('phone');
+    final desktop = await device('desktop');
+    final row = buildInboxItems([
+      FeedItem(
+        id: 'b' * 64,
+        kind: 9,
+        pubkey: 'alice',
+        content: 'hi',
+        createdAt: clock - 100,
+        channelId: channel,
+        channelName: '',
+        tags: const [],
+        category: 'mention',
+      ),
+    ]).single;
+    phone.markContextRead(channel, clock - 100);
+    int? marker(String context) => phone.getEffectiveTimestamp(context);
+    // Marked unread on the phone, at the frontier the row was read at.
+    final overrides = {row.id: inboxItemReadAt(row, markerOf: marker)};
+    bool done() => isInboxItemDone(
+      row,
+      markerOf: marker,
+      localUnreadOverrides: overrides,
+      localDoneSet: const {},
+    );
+    expect(done(), isFalse);
+
+    desktop.markContextRead(channel, clock - 10, explicit: true);
+    await sync(desktop, phone);
+
+    expect(done(), isTrue);
   });
 
   test('a first explicit message read publishes only its frontier', () async {
