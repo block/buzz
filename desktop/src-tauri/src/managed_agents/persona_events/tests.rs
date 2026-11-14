@@ -940,8 +940,9 @@ mod flush_barrier {
     };
     use nostr::JsonUtil;
 
-    /// Stub relay: `POST /events` rejects kind:5 with HTTP 500, accepts
-    /// everything else. Returns the HTTP base URL.
+    /// Stub relay: `POST /events` rejects kind:5 with HTTP 500 and, like relay
+    /// ingest, rejects a `created_at` more than 900s from now with HTTP 400;
+    /// accepts everything else. Returns the HTTP base URL.
     async fn spawn_stub_relay() -> String {
         use axum::{http::StatusCode, routing::post, Router};
 
@@ -951,6 +952,13 @@ mod flush_barrier {
                 let event: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
                 if event.get("kind").and_then(serde_json::Value::as_u64) == Some(5) {
                     return (StatusCode::INTERNAL_SERVER_ERROR, String::new());
+                }
+                let created_at = event
+                    .get("created_at")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or_default();
+                if (created_at - nostr::Timestamp::now().as_secs() as i64).abs() > 900 {
+                    return (StatusCode::BAD_REQUEST, String::new());
                 }
                 (
                     StatusCode::OK,
@@ -1098,5 +1106,43 @@ mod flush_barrier {
             !row(KIND_PERSONA, "unrelated").pending_sync,
             "unrelated row marked synced"
         );
+    }
+
+    /// A row left pending longer than the relay's ±900s window must still
+    /// publish: replaying its frozen `created_at` is rejected on every sweep.
+    #[tokio::test]
+    async fn stale_pending_row_publishes_with_fresh_timestamp() {
+        let keys = nostr::Keys::generate();
+        let pubkey = keys.public_key().to_hex();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("retention.db");
+        let signed_at = nostr::Timestamp::now().as_secs() as i64 - 3600;
+
+        {
+            let conn = open_retention_db(&db_path).expect("open db");
+            retain_signed(
+                &conn,
+                &keys,
+                KIND_PERSONA,
+                "stale",
+                EventBuilder::new(Kind::Custom(KIND_PERSONA as u16), "{}")
+                    .tags(vec![Tag::parse(["d", "stale"]).unwrap()])
+                    .custom_created_at(nostr::Timestamp::from(signed_at as u64)),
+                signed_at,
+            );
+        }
+
+        let state = build_app_state();
+        *state.keys.lock().unwrap() = keys;
+        *state.relay_url_override.lock().unwrap() = Some(spawn_stub_relay().await);
+
+        let flushed = flush_pending_events(&db_path, &state).await.expect("flush");
+        assert_eq!(flushed, 1, "stale row publishes");
+
+        let conn = open_retention_db(&db_path).expect("reopen db");
+        let row = get_retained_event(&conn, KIND_PERSONA, &pubkey, "stale")
+            .unwrap()
+            .unwrap();
+        assert!(!row.pending_sync, "stale row marked synced");
     }
 }
