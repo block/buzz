@@ -845,7 +845,9 @@ async fn apply_people(
     .execute(&mut *conn)
     .await?;
     // `seq` is left alone: a `since` read finds these rows through the shared
-    // row this same transaction updates. A post clears a manual unread.
+    // row this same transaction updates. A manual unread is left alone: this
+    // write runs after its message committed and cannot tell whether the flag
+    // was set before or after it. Only `mark_through` clears it.
     sqlx::query(
         "INSERT INTO personal_read_frontiers AS f (community_id, actor, channel_id, root_id, \
             through_timestamp, through_message_id, engaged_at) \
@@ -858,7 +860,6 @@ async fn apply_people(
                     > COALESCE(f.through_timestamp, '-infinity') \
                 THEN EXCLUDED.through_message_id ELSE f.through_message_id END, \
             through_timestamp = GREATEST(f.through_timestamp, EXCLUDED.through_timestamp), \
-            marked_unread = f.marked_unread AND EXCLUDED.through_timestamp IS NULL, \
             engaged_at = EXCLUDED.engaged_at",
     )
     .bind(community.as_uuid())

@@ -157,6 +157,9 @@ in the 30 seconds before the marker are sent again).
   of a thread's reply count;
 - joining or leaving a channel. `removed` names the conversation; drop its
   thread and mention rows with it (they carry `channel_id`).
+- a thread your own change took off the list (a state set back to `default`
+  or a flag cleared on a thread you are not otherwise part of). `removed`
+  names the thread.
 
 It does not report a deletion that changes only a count, or a row whose only
 change is that it aged out. `reset: true` means the marker is older than 30
@@ -201,7 +204,8 @@ The two keep independent read positions.
 - **`set_state`** sets `default`, `following` or `muted`.
 
 Posting a message moves your own read position to it, in the thread and, for a
-top-level or broadcast message, in the channel. No intent is needed.
+top-level or broadcast message, in the channel. No intent is needed. It does not
+clear a manual unread; only `mark_through` does.
 
 The response is `{"outcomes":[...],"rows":[...]}`. Each intent commits on its
 own and returns `applied`, `blocked` (missing or forbidden, deliberately the

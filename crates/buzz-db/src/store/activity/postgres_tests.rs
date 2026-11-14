@@ -294,7 +294,11 @@ async fn conversation_unread_follows_read_intents() {
     };
     assert_eq!(f.intent(flag).await, IntentOutcome::Applied);
     assert!(f.conversation().await.unread);
-    assert_eq!(f.mark_through(None, &mine).await, IntentOutcome::Applied);
+    // My own later post moves my position but leaves the flag: its write runs
+    // after the post committed and cannot tell which came first.
+    let again = f.post(&f.me, "mine again", 35).await;
+    assert!(f.conversation().await.unread);
+    assert_eq!(f.mark_through(None, &again).await, IntentOutcome::Applied);
     assert!(!f.conversation().await.unread);
 
     // Muted is never unread; back to default it is again.
@@ -422,6 +426,35 @@ async fn activity_threads_and_mentions_follow_the_thread_position() {
     let followed = f.row(&theirs.id.to_hex()).await;
     assert_eq!((followed.unread, followed.state), (true, "following"));
 
+    // Unfollowing takes it off the list, and a `since` read says so.
+    let marker = f.list().await.marker.expect("marker");
+    let unfollow = ReadIntent::SetState {
+        target: f.target(Some(&theirs)),
+        state: ReadState::Default,
+    };
+    assert_eq!(f.intent(unfollow).await, IntentOutcome::Applied);
+    let page = f
+        .read(&Query {
+            select: Select::Since(marker),
+            ..all()
+        })
+        .await;
+    assert_eq!(
+        page.removed,
+        [Removed {
+            kind: RowKind::Thread,
+            id: theirs.id.to_hex()
+        }]
+    );
+    assert!(page.rows.iter().all(|row| row.id != theirs.id.to_hex()));
+    // A flagged thread is listed, and rebuilt when its shared row is missing.
+    f.forget().await;
+    let flag = ReadIntent::MarkUnread {
+        target: f.target(Some(&theirs)),
+    };
+    assert_eq!(f.intent(flag).await, IntentOutcome::Applied);
+    assert!(f.row(&theirs.id.to_hex()).await.unread);
+
     // A mention at the top level counts on the channel.
     let shout = f.event(&f.other, 9, "hey you", 60, vec![f.tag_me()]);
     f.store(&shout, f.channel, None).await;
@@ -436,6 +469,19 @@ async fn activity_threads_and_mentions_follow_the_thread_position() {
         .rows
         .iter()
         .all(|row| row.id != shout.id.to_hex()));
+
+    // A deleted channel's mentions leave the totals with its rows.
+    let last = f.event(&f.other, 9, "still there?", 70, vec![f.tag_me()]);
+    f.store(&last, f.channel, None).await;
+    assert_eq!(f.list().await.totals.expect("totals").mention.unread, 1);
+    assert!(f
+        .db
+        .soft_delete_channel(f.community, f.channel)
+        .await
+        .expect("delete channel"));
+    let page = f.list().await;
+    assert_eq!(page.totals.expect("totals").mention.unread, 0);
+    assert!(page.rows.iter().all(|row| row.channel_id != f.channel));
 }
 
 /// Marking is bound to the timeline the anchor is in.
