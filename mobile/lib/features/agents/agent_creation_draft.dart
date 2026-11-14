@@ -6,13 +6,14 @@ import 'package:http/http.dart' as http;
 
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/hosted/hosted_environment.dart';
+import '../../shared/http/app_http_client.dart';
 import '../../shared/utils/bounded_fetch.dart';
 import 'agent_avatar_picker.dart';
 
 /// Creates the HTTP client that fetches a card's `agent.json`; overridden in
 /// tests.
 final agentCardClientProvider = Provider<http.Client Function()>(
-  (ref) => http.Client.new,
+  (ref) => newAppHttpClient,
 );
 
 /// Largest `agent.json` accepted, far above any real card.

@@ -23,6 +23,8 @@ import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/me/me_page.dart';
+import 'package:buzz/features/home/home_page.dart';
+import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -96,11 +98,13 @@ class FakeChannels extends ChannelsNotifier {
 class LabeledChannels extends ChannelsNotifier {
   @override
   Future<List<Channel>> build() async => [
-    for (final (id, name, owner, member) in [
-      ('filed', 'Filed labeled chat', 'owner', true),
-      ('loose', 'Unfiled labeled chat', 'owner', true),
-      ('shared', 'Someone else chat', 'other', true),
-      ('hidden', 'Inaccessible labeled chat', 'owner', false),
+    for (final (id, name, owner, member, archived) in [
+      ('filed', 'Filed labeled chat', 'owner', true, false),
+      ('loose', 'Unfiled labeled chat', 'owner', true, false),
+      ('shared', 'Someone else chat', 'other', true, false),
+      ('agent-created', 'Agent-created chat', 'agent', true, false),
+      ('hidden', 'Inaccessible labeled chat', 'owner', false, false),
+      ('archived', 'Archived labeled chat', 'other', true, true),
     ])
       Channel(
         id: id,
@@ -113,6 +117,7 @@ class LabeledChannels extends ChannelsNotifier {
         createdAt: DateTime(2026),
         memberCount: 2,
         isMember: member,
+        archivedAt: archived ? DateTime(2026) : null,
       ),
   ];
 }
@@ -148,8 +153,10 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Filed labeled chat'), findsOneWidget);
     expect(find.text('Unfiled labeled chat'), findsOneWidget);
-    expect(find.text('Someone else chat'), findsNothing);
+    expect(find.text('Someone else chat'), findsOneWidget);
+    expect(find.text('Agent-created chat'), findsOneWidget);
     expect(find.text('Inaccessible labeled chat'), findsNothing);
+    expect(find.text('Archived labeled chat'), findsNothing);
     expect(find.text('A place to work with your agents'), findsNothing);
   });
 
@@ -827,4 +834,79 @@ void main() {
     expect(find.text('Try again'), findsOneWidget);
     expect(find.text('A place to work with your agents'), findsNothing);
   });
+
+  for (final failed in [true, false]) {
+    testWidgets('shared Solo chats stay listed while preferences '
+        '${failed ? 'fail' : 'load'}', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final pending = StreamController<MeGroups>();
+      addTearDown(() => unawaited(pending.close()));
+      await tester.pumpWidget(
+        ProviderScope(
+          retry: (_, _) => null,
+          overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            myPubkeyProvider.overrideWithValue('viewer'),
+            channelsProvider.overrideWith(_SharedAndOrdinary.new),
+            meGroupsProvider.overrideWith(
+              (ref) => failed
+                  ? Stream<MeGroups>.error(StateError('offline'))
+                  : pending.stream,
+            ),
+            defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
+            meAssistantsProvider.overrideWith((ref) async => []),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: HomePage(
+              settingsPageBuilder: (_) => const SizedBox(),
+              onAgents: (_) {},
+              defaultAgentBuilder: (_) => const SizedBox(),
+              openBestieConversation: (_, _, _) async {},
+              mePageBuilder: (_, chat, workspace) => MePage(
+                sliver: true,
+                newChatAction: chat,
+                newWorkspaceAction: workspace,
+              ),
+            ),
+          ),
+        ),
+      );
+      for (var i = 0; i < 10; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      expect(find.text('Normal team conversation'), findsOneWidget);
+      expect(find.text('Shared Solo conversation'), findsOneWidget);
+      expect(
+        find.text('Couldn’t load your chats and projects.'),
+        failed ? findsOneWidget : findsNothing,
+      );
+      expect(
+        find.byType(BuzzLoadingIndicator),
+        failed ? findsNothing : findsOneWidget,
+      );
+      expect(find.text('No chats yet'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
+}
+
+class _SharedAndOrdinary extends ChannelsNotifier {
+  @override
+  Future<List<Channel>> build() async => [
+    for (final shared in [false, true])
+      Channel(
+        id: shared ? 'shared' : 'ordinary',
+        name: shared ? 'Shared Solo conversation' : 'Normal team conversation',
+        channelType: 'stream',
+        visibility: 'private',
+        labels: shared ? const ['buzz.solo'] : const [],
+        description: '',
+        createdBy: 'other',
+        createdAt: DateTime(2026),
+        memberCount: 2,
+        isMember: true,
+      ),
+  ];
 }

@@ -575,14 +575,16 @@ pub async fn lock_member_snapshot(
     // this key before INSERT; migration 0032 then takes the membership key in
     // the INSERT trigger. Taking both in that order avoids mixed-version
     // duplicate heads without introducing a lock-order inversion.
+    let members_kind = buzz_core::kind::KIND_NIP29_GROUP_MEMBERS as i32;
     let replacement_lock = crate::replaceable::event_replacement_lock_key(
         community_id,
-        39002,
+        members_kind,
         relay_pubkey,
         Some(channel_id.as_bytes()),
     );
-    crate::observability::observe_advisory_lock(
+    crate::observability::observe_event_lock(
         crate::observability::LockType::Replacement,
+        members_kind,
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(replacement_lock)
             .execute(tx.conn()),

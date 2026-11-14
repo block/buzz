@@ -624,7 +624,11 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _rotateDeletionProofTargets(missingIds);
 
   /// Snapshots cached overlay replies covered by a query for this outer root.
-  Set<String> cachedThreadReplyIds(String rootId) {
+  Set<String> cachedThreadReplyIds(String rootId) =>
+      _cachedThreadReplyIdsByRoot(only: rootId)[rootId] ?? <String>{};
+
+  /// Snapshots cached overlay replies for every outer root, or only [only].
+  Map<String, Set<String>> _cachedThreadReplyIdsByRoot({String? only}) {
     final deletedIds = {
       for (final event in [
         ..._windowStore.liveAux,
@@ -636,15 +640,21 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
           for (final tag in event.tags)
             if (tag.length > 1 && tag[0] == 'e') tag[1],
     };
-    return {
-      for (final entry in _localReplyRoots.entries)
-        if (entry.value == rootId && !deletedIds.contains(entry.key)) entry.key,
-      for (final event in _cachedThreadEvents)
-        if (event.threadReference.parentId != null &&
-            event.threadReference.rootId == rootId &&
-            !deletedIds.contains(event.id))
-          event.id,
-    };
+    final byRoot = <String, Set<String>>{};
+    void add(String root, String id) {
+      if ((only == null || root == only) && !deletedIds.contains(id)) {
+        (byRoot[root] ??= <String>{}).add(id);
+      }
+    }
+
+    for (final entry in _localReplyRoots.entries) {
+      add(entry.value, entry.key);
+    }
+    for (final event in _cachedThreadEvents) {
+      final thread = event.threadReference;
+      if (thread.parentId != null) add(thread.rootId!, event.id);
+    }
+    return byRoot;
   }
 
   /// Applies explicit deletion evidence fetched for cached replies.

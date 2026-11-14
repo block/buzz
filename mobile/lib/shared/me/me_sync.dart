@@ -124,8 +124,8 @@ final meGroupsProvider = StreamProvider<MeGroups>((ref) {
     }
   }
 
-  ref.listen(appLifecycleProvider, (_, next) {
-    if (next != AppLifecycleState.resumed) return;
+  ref.listen(appForegroundProvider, (_, foreground) {
+    if (!foreground) return;
     // Recover an interrupted reader by resubscribing instead of asking the user.
     // Before reconnecting, leave recovery to the reconnect listener above.
     if (subscriptionClosed || syncFailed) {

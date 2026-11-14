@@ -12,8 +12,9 @@
 //!
 //! - `refs: BTreeMap` — sorted ref names at serialization.
 //! - `packs: Vec<String>` — sorted by `canonical_bytes()` before writing.
-//! - Struct field order: `version`, `head`, `refs`, `packs`, `parent`
-//!   (matches declaration; serde emits in this order).
+//! - Struct field order: `version`, `head`, `refs`, `packs`, `parent`,
+//!   `published_at` (matches declaration; serde emits in this order, and
+//!   omits `published_at` when absent).
 //! - `serde_json::to_vec` — no whitespace.
 //!
 //! Round-trip + byte-stability are pinned in unit tests.
@@ -68,6 +69,29 @@ pub struct Manifest {
     /// reads literally as `parent = pointer.digest`. Writers must strip any
     /// `manifests/` prefix before assigning. Enforced by `validate()`.
     pub parent: Option<String>,
+    /// Unix seconds at which a push published this manifest, strictly greater
+    /// than the parent's. The derived kind:30618 carries it as `created_at`,
+    /// so readers that pick the newest event follow the manifest chain rather
+    /// than the order in which relay instances happened to stamp events.
+    /// `None` for the shared announce-time seed and for manifests written
+    /// before the field existed; omitted from canonical JSON in that case so
+    /// those manifests keep their bytes and digests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_at: Option<u64>,
+}
+
+/// The `published_at` for a manifest superseding `parent`: `now`, advanced
+/// past the parent's own `published_at` when the clock has not moved on (two
+/// pushes in one second) or runs behind the instance that wrote the parent.
+///
+/// An unstamped parent (the announce-time seed, or a manifest written before
+/// the field existed) had its kind:30618 stamped at or before `now`, possibly
+/// in this same second, so the successor takes `now + 1` to sort after it.
+pub fn next_published_at(parent: &Manifest, now: u64) -> u64 {
+    match parent.published_at {
+        Some(previous) => now.max(previous.saturating_add(1)),
+        None => now.saturating_add(1),
+    }
 }
 
 /// Errors from manifest (de)serialization or validation.
@@ -296,6 +320,7 @@ mod tests {
             refs,
             packs: vec![pack_key('c'), pack_key('d')],
             parent: Some("ee".repeat(32)),
+            published_at: None,
         }
     }
 
@@ -371,6 +396,7 @@ mod tests {
             refs: BTreeMap::new(),
             packs: Vec::new(),
             parent: None,
+            published_at: None,
         };
         m.validate().expect("empty manifest is the announce-seed");
         // Canonical bytes must be deterministic + stable so all empty manifests
@@ -567,6 +593,7 @@ mod tests {
             refs,
             packs: vec![pack_key('1')],
             parent: None,
+            published_at: None,
         };
         let bytes = m.canonical_bytes().unwrap();
         let s = std::str::from_utf8(&bytes).unwrap();
@@ -577,5 +604,45 @@ mod tests {
                 pack_key('1')
             )
         );
+    }
+
+    #[test]
+    fn published_at_serializes_last_and_round_trips() {
+        let mut m = sample();
+        m.parent = None;
+        m.refs.clear();
+        m.packs.clear();
+        m.published_at = Some(1_700_000_000);
+        let bytes = m.canonical_bytes().unwrap();
+        assert_eq!(
+            std::str::from_utf8(&bytes).unwrap(),
+            r#"{"version":1,"head":"refs/heads/main","refs":{},"packs":[],"parent":null,"published_at":1700000000}"#
+        );
+        assert_eq!(Manifest::from_bytes(&bytes).unwrap(), m);
+    }
+
+    #[test]
+    fn manifests_without_published_at_still_parse() {
+        let legacy =
+            br#"{"version":1,"head":"refs/heads/main","refs":{},"packs":[],"parent":null}"#;
+        let m = Manifest::from_bytes(legacy).unwrap();
+        assert_eq!(m.published_at, None);
+        assert_eq!(m.canonical_bytes().unwrap(), legacy.to_vec());
+    }
+
+    #[test]
+    fn next_published_at_strictly_follows_the_parent() {
+        let mut parent = sample();
+        parent.published_at = None;
+        assert_eq!(next_published_at(&parent, 100), 101);
+
+        parent.published_at = Some(90);
+        assert_eq!(next_published_at(&parent, 100), 100);
+        // Same second as the parent.
+        parent.published_at = Some(100);
+        assert_eq!(next_published_at(&parent, 100), 101);
+        // The parent's instance clock ran ahead of ours.
+        parent.published_at = Some(105);
+        assert_eq!(next_published_at(&parent, 100), 106);
     }
 }

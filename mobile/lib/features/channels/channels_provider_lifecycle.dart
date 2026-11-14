@@ -248,10 +248,9 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     if (!_lifecycleRef.mounted) return;
     _noteReopenedSubscriptions();
     // Resume and reconnect read the list anyway, so a read that comes due
-    // in the background or offline is left to them.
-    if (_lifecycleRef.read(appLifecycleProvider) != AppLifecycleState.resumed) {
-      return;
-    }
+    // in the background or offline is left to them. Control Center and the
+    // like stay in the foreground and end in no resume, so they don't wait.
+    if (!_lifecycleRef.read(appForegroundProvider)) return;
     // A retry can come due inside the gap after the read it retries.
     if (_listReadGap != null) {
       _listReadDueAfterGap = true;

@@ -83,6 +83,7 @@ class HostedJourneyFixture {
   bool denyAssertion = false;
   bool refuseUpgrade = false;
   String subject = 'journey-owner';
+  String? accountEmail = 'owner@example.com';
 
   /// An organization realm, as an internal build's BUZZ_BUILDERLAB_URL and
   /// BUZZ_BUILDERLAB_RELAYS configure. Enable before [mount].
@@ -158,6 +159,7 @@ class HostedJourneyFixture {
       if (expiredSession) return http.Response('{}', 401);
       result = {
         'subject': subject,
+        'email': accountEmail,
         'expires_at': expiry,
         'account_status': needsAccountSetup
             ? 'ACCOUNT_STATUS_NEEDS_DETAILS'
