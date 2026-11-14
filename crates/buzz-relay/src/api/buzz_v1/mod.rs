@@ -16,7 +16,7 @@ pub const BASE_PATH: &str = "/buzz/v1";
 /// Narrow versioned router; unknown accessory paths never return SPA HTML.
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/me/sidebar", get(handlers::sidebar))
+        .route("/me/activity", get(handlers::activity))
         .route("/me/read-state", post(handlers::write))
         .fallback(|| async { auth::Error::new(axum::http::StatusCode::NOT_FOUND, "not_found") })
         .with_state(state)

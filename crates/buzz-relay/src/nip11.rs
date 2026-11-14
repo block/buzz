@@ -100,13 +100,14 @@ pub struct BuzzV1Descriptor {
     pub version: u32,
     /// Relay-relative API prefix; callers retain the requesting origin.
     pub base_path: String,
-    /// Author-time unread horizon; does not expire messages or frontiers.
+    /// How far back mentions are listed and counted; does not expire
+    /// messages or read positions.
     pub retention_seconds: u32,
-    /// Maximum joined channels per sidebar page.
-    pub max_channels: usize,
+    /// Maximum rows per activity page.
+    pub max_rows: usize,
     /// Maximum independent write intents per request.
     pub max_intents: usize,
-    /// Message kinds that count as unread and as latest activity. Clients
+    /// Message kinds that count as activity and can be unread. Clients
     /// classify live arrivals with this set instead of keeping a copy.
     pub eligible_kinds: [i32; 4],
 }
@@ -487,12 +488,12 @@ pub(crate) async fn nip11_document(
             }
         }
         if state.config.buzz_v1_enabled {
-            use buzz_db::personal_read::{ELIGIBLE_KINDS, MAX_CHANNELS, MAX_INTENTS};
+            use buzz_db::personal_read::{ELIGIBLE_KINDS, MAX_INTENTS};
             info.buzz_v1 = Some(BuzzV1Descriptor {
-                version: 1,
+                version: 2,
                 base_path: crate::api::buzz_v1::BASE_PATH.to_owned(),
                 retention_seconds: state.config.buzz_v1_retention_seconds,
-                max_channels: MAX_CHANNELS,
+                max_rows: buzz_db::activity::MAX_LIMIT,
                 max_intents: MAX_INTENTS,
                 eligible_kinds: ELIGIBLE_KINDS,
             });

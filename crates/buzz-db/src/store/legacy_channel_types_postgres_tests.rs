@@ -122,20 +122,26 @@ async fn reads_that_name_no_channel_leave_out_a_type_added_later() {
     assert_eq!(listed, expected, "get_accessible_channels");
 
     let mut joined: Vec<Uuid> = db
-        .personal_read_sidebar(
+        .activity(
             community,
             &reader.public_key(),
             crate::store::personal_read::DEFAULT_RETENTION_SECONDS,
-            20,
-            None,
+            &crate::store::activity::Query {
+                kinds: crate::store::activity::RowKind::ALL.to_vec(),
+                unread_only: false,
+                select: crate::store::activity::Select::Page {
+                    before: None,
+                    limit: crate::store::activity::MAX_LIMIT,
+                },
+            },
         )
         .await
-        .expect("sidebar")
-        .channels
+        .expect("activity")
+        .rows
         .into_iter()
-        .map(|channel| channel.channel_id)
+        .map(|row| row.channel_id)
         .collect();
     joined.sort();
     legacy.sort();
-    assert_eq!(joined, legacy, "sidebar roster");
+    assert_eq!(joined, legacy, "activity roster");
 }
