@@ -391,6 +391,35 @@ pub async fn is_member_in_transaction(
     Ok(cnt > 0)
 }
 
+/// The active members of `channel_id` on a caller-owned transaction when it
+/// is a DM, or `None` for any other channel type or a missing channel.
+pub async fn dm_members_in_transaction(
+    tx: &mut AdmittedTx,
+    channel_id: Uuid,
+) -> Result<Option<Vec<Vec<u8>>>> {
+    let community_id = tx.community();
+    let channel_type: Option<String> = sqlx::query_scalar(
+        "SELECT channel_type::text FROM channels \
+         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_optional(tx.conn())
+    .await?;
+    if channel_type.as_deref() != Some("dm") {
+        return Ok(None);
+    }
+    let members: Vec<Vec<u8>> = sqlx::query_scalar(
+        "SELECT pubkey FROM channel_members \
+         WHERE community_id = $1 AND channel_id = $2 AND removed_at IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_all(tx.conn())
+    .await?;
+    Ok(Some(members))
+}
+
 /// Read a pubkey's active channel role on a caller-owned transaction, or
 /// `None` when it is not an active member.
 pub async fn active_role_in_transaction(
