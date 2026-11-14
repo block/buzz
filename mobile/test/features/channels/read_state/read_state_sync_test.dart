@@ -247,11 +247,11 @@ void main() {
       await sync(desktop, phone);
 
       // Already synced: settled without writing.
-      expect(phone.importLegacyFollows({key: true}), {key});
+      expect(await phone.importLegacyFollows({key: true}), {key});
       expect(phone.threadFollows[key]!.follow, isFalse);
 
       final other = threadFollowKey(channel, 'e' * 64);
-      expect(phone.importLegacyFollows({other: true}), {other});
+      expect(await phone.importLegacyFollows({other: true}), {other});
       expect(phone.threadFollows[other], (follow: true, at: 0));
     });
 
@@ -847,6 +847,15 @@ class _MemoryRelay extends RelaySessionNotifier {
       retained[d] = event;
     }
     deliver(event);
-    return event;
+    // What `RelaySessionNotifier._handleOk` returns: the ID only.
+    return NostrEvent(
+      id: event.id,
+      pubkey: '',
+      createdAt: 0,
+      kind: 0,
+      tags: [],
+      content: '',
+      sig: '',
+    );
   }
 }

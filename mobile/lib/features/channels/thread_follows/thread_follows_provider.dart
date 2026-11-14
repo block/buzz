@@ -101,7 +101,7 @@ class ThreadFollowsNotifier extends Notifier<ThreadFollowsState> {
 
   /// Imports resolved pre-sync follows once, at `at = 0`; unresolved ones
   /// stay stored and are retried as their channels become known.
-  void _importLegacy() {
+  Future<void> _importLegacy() async {
     final pubkey = _pubkey;
     if (!ref.mounted || pubkey == null || _legacy.isEmpty) return;
     if (ref.read(readStateProvider).threadFollowsIncomplete) return;
@@ -111,12 +111,13 @@ class ThreadFollowsNotifier extends Notifier<ThreadFollowsState> {
           threadFollowKey(channelId, entry.rootId): true,
     };
     if (choices.isEmpty) return;
-    final settled = ref
-        .read(readStateProvider.notifier)
-        .importLegacyFollows(choices)
-        .map(threadFollowRoot)
-        .toSet();
-    if (settled.isEmpty) return;
+    final settled =
+        (await ref
+                .read(readStateProvider.notifier)
+                .importLegacyFollows(choices))
+            .map(threadFollowRoot)
+            .toSet();
+    if (settled.isEmpty || !ref.mounted) return;
     _legacy = [
       for (final entry in _legacy)
         if (!settled.contains(entry.rootId)) entry,

@@ -288,8 +288,8 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       Future.value(false);
 
   /// See [ReadStateManager.importLegacyFollows].
-  Set<String> importLegacyFollows(Map<String, bool> choices) =>
-      _manager?.importLegacyFollows(choices) ?? const {};
+  Future<Set<String>> importLegacyFollows(Map<String, bool> choices) =>
+      _manager?.importLegacyFollows(choices) ?? Future.value(const {});
 
   /// The newest merged frontier covering a `msg:` context, without the
   /// retention floor: the floor moves with the clock, not with reading.

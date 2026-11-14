@@ -754,12 +754,14 @@ class ReadStateManager {
           ),
         );
       }
+      // Each follow candidate is frozen in one synchronous step: plaintext,
+      // captured edit generations, basis head and reservation together. Only
+      // then is the reservation journaled, before anything is signed.
       final followPlanned = _canPublishFollows
           ? _plannedFollowSlots()
           : const <String, String>{};
       final followCaptures = <String, Map<String, int>>{};
       final followBases = <String, String?>{};
-      await _persistLocalState();
       for (final MapEntry(key: slot, value: plaintext)
           in followPlanned.entries) {
         final coordinate = '$threadFollowsDTagPrefix$slot';
@@ -785,6 +787,7 @@ class ReadStateManager {
           content: _crypto.encrypt(plaintext),
         );
       }
+      await _persistLocalState();
       // Check replay and successor prefixes before sending. Not a reservation:
       // another device can still grow the remote snapshot concurrently.
       _checkSnapshotCapacity(snapshot, _pending.values);
@@ -793,6 +796,10 @@ class ReadStateManager {
         ...prepared.values,
       ]);
       for (final entry in _pending.entries.toList()) {
+        if (entry.key.startsWith(threadFollowsDTagPrefix) &&
+            !_canPublishFollows) {
+          continue; // Held with its edits; the pass reports why below.
+        }
         if (_relaySession == null) {
           throw StateError('No relay for pending retry');
         }
@@ -870,7 +877,7 @@ class ReadStateManager {
           return;
         }
         checkConnection?.call();
-        final signed = await signedEventRelay.submit(
+        final accepted = await signedEventRelay.submit(
           kind: event.kind,
           content: event.content,
           tags: event.tags,
@@ -901,7 +908,13 @@ class ReadStateManager {
             (_disposed && !allowDisposed)) {
           return;
         }
-        _acknowledge(coordinate, signed);
+        // The OK result is a placeholder carrying only the event ID; resolve
+        // it against the exact signed packet retained in onSigned. An echo
+        // may already have resolved it, or a successor replaced it.
+        if (_pending[coordinate] case final retained?
+            when retained.id == accepted.id) {
+          _acknowledge(coordinate, retained);
+        }
         await _persistLocalState();
       }
       if (!_canPublishFollows && _ownFollows.isNotEmpty) {
@@ -950,12 +963,12 @@ class ReadStateManager {
     if (slot.startsWith(threadFollowsDTagPrefix)) {
       // An OK is evidence about this exact packet only. A later packet or a
       // newer head may already have replaced it.
-      final blob = decodeThreadFollowsBlob(_crypto.decrypt(event.content));
-      if (blob == null) throw StateError('Invalid pending thread follow event');
       final index = _followSlots.indexOf(
         slot.substring(threadFollowsDTagPrefix.length),
       );
       if (_pending[slot]?.id != event.id || index < 0) return;
+      final blob = decodeThreadFollowsBlob(_crypto.decrypt(event.content));
+      if (blob == null) throw StateError('Invalid pending thread follow event');
       _applyOwnFollowHead(index, event, blob);
       _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
       return;
@@ -1047,6 +1060,7 @@ class ReadStateManager {
         (journal['reserved'] as int?) ?? 0,
         ..._followEdits.values,
         for (final event in _pending.values) event.createdAt,
+        for (final slot in _followSlots) ?_followHeads[slot]?.createdAt,
       ].reduce(max);
     } else {
       final stored = _storage.read(pubkey, relayUrl);

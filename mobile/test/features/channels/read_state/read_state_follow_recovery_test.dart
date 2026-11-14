@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:buzz/shared/read_state/read_state_manager.dart';
 import 'package:buzz/shared/read_state/thread_follows_format.dart';
@@ -6,6 +7,7 @@ import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 
 /// The shared follow-recovery witnesses
 /// (`PLANS/READ_STATE_FOLLOW_SYNC_RULES_2026_11_14.md` §8), against the real
@@ -19,10 +21,12 @@ void main() {
   late ReadStateCrypto crypto;
   late _HoldingRelay relay;
   late SharedPreferences prefs;
+  late _GatedStore store;
   var clock = 1800000000;
 
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
+    SharedPreferencesStorePlatform.instance = store = _GatedStore();
     prefs = await SharedPreferences.getInstance();
     keys = nostr.Keys.generate();
     crypto = ReadStateCrypto.tryCreate(nsec: keys.nsec, pubkey: keys.public)!;
@@ -67,6 +71,13 @@ void main() {
       }
     }
   }
+
+  String journalKey() => prefs.getKeys().singleWhere(
+    (key) => key.startsWith('buzz.nip-rs.journal'),
+  );
+
+  Map<String, dynamic> journal() =>
+      jsonDecode(prefs.getString(journalKey())!) as Map<String, dynamic>;
 
   ThreadFollowsBlob relayHead() =>
       decodeThreadFollowsBlob(crypto.decrypt(relay.follows().single.content))!;
@@ -239,6 +250,197 @@ void main() {
     },
   );
 
+  // Holds each journal write of the flush in turn, including the one that
+  // persists the frozen candidate's reservation before signing.
+  for (var write = 1; write <= 6; write++) {
+    test('C1: a tap during flush journal write $write is not acknowledged by '
+        'an earlier payload', () async {
+      final phone = await device();
+      await phone.setThreadFollow(channel, 'a' * 64, true);
+      final gate = Completer<void>();
+      final held = Completer<void>();
+      var seen = 0;
+      store.holdJournal = (_) {
+        if (++seen != write) return null;
+        held.complete();
+        return gate.future;
+      };
+      final sending = phone.flush();
+      await Future.any([held.future, sending]);
+      store.holdJournal = null;
+      final unfollowing = phone.setThreadFollow(channel, 'a' * 64, false);
+      gate.complete();
+      await sending;
+      expect(await unfollowing, isTrue);
+      await phone.flush();
+      await phone.flush();
+      expect(phone.threadFollows[keyK]!.follow, isFalse);
+      expect(relayHead().choices[keyK]!.follow, isFalse);
+
+      phone.dispose(flushPending: false);
+      await prefs.clear();
+      final fresh = await device();
+      expect(fresh.threadFollows[keyK]!.follow, isFalse);
+    });
+  }
+
+  test('C2: a backup taken in the send delay after the first tap knows its '
+      'own slot', () async {
+    final phone = await device();
+    await phone.setThreadFollow(channel, 'a' * 64, true);
+    expect(journal()['followSlots'], hasLength(1));
+    final early = backup();
+    await phone.flush();
+    clock -= 10;
+    await phone.setThreadFollow(channel, 'a' * 64, false);
+    await phone.flush();
+    phone.dispose(flushPending: false);
+
+    await restore(early);
+    final restored = await device();
+    await restored.flush();
+    expect(restored.threadFollows[keyK], (follow: false, at: clock));
+    expect(relay.follows(), hasLength(1));
+    expect(relayHead().choices[keyK]!.follow, isFalse);
+    restored.dispose(flushPending: false);
+    await prefs.clear();
+    final fresh = await device();
+    expect(fresh.threadFollows[keyK]!.follow, isFalse);
+  });
+
+  for (final echo in _Echo.values) {
+    test('I1: a real OK placeholder resolves the retained packet '
+        '(${echo.name})', () async {
+      relay.echo = echo;
+      final phone = await device();
+      await phone.setThreadFollow(channel, 'a' * 64, true);
+      await phone.flush();
+      await pumpEventQueue();
+      expect(phone.syncError, isNull);
+      expect(journal()['followPending'], isEmpty);
+      expect(journal()['followEdits'], isEmpty);
+      await phone.flush();
+      expect(relay.attempts, hasLength(1));
+      expect(relayHead().choices[keyK]!.follow, isTrue);
+    });
+  }
+
+  test('I2: an accepted own head past the drift window floors the next '
+      'reservation', () async {
+    final phone = await device();
+    await phone.setThreadFollow(channel, 'a' * 64, true);
+    await phone.flush();
+    final own = relay.follows().single;
+    final ahead = NostrEvent(
+      id: '1' * 64,
+      pubkey: keys.public,
+      createdAt: clock + 1000,
+      kind: EventKind.readState,
+      tags: own.tags,
+      content: crypto.encrypt(
+        ThreadFollowsBlob(
+          clientId: relayHead().clientId,
+          entries: {
+            keyK: {'follow': true, 'at': clock},
+          },
+        ).encode(),
+      ),
+      sig: 'sig',
+    );
+    relay.deliver(ahead);
+    await phone.setThreadFollow(channel, 'a' * 64, false);
+    expect(
+      (journal()['followEdits'] as Map)[keyK],
+      greaterThan(ahead.createdAt),
+    );
+    // The relay fake keeps the newer event, so the unfollow must outrank it.
+    relay.retained[own.tags.first[1]] = ahead;
+    await phone.flush();
+    expect(relay.follows().single.createdAt, greaterThan(ahead.createdAt));
+    expect(relayHead().choices[keyK]!.follow, isFalse);
+  });
+
+  test('I3: an unreadable own head holds a retained retry and refuses taps; '
+      'frontiers still publish', () async {
+    final phone = await device();
+    await phone.setThreadFollow(channel, 'a' * 64, true);
+    relay.dropNext = true;
+    await phone.flush();
+    final pending = Map.of(journal()['followPending'] as Map);
+    expect(pending, hasLength(1));
+    final coordinate = pending.keys.single as String;
+    relay.retained[coordinate] = NostrEvent(
+      id: '2' * 64,
+      pubkey: keys.public,
+      createdAt: clock + 5,
+      kind: EventKind.readState,
+      tags: [
+        ['d', coordinate],
+        ['t', threadFollowsTag],
+      ],
+      content: crypto.encrypt('{"v":2}'),
+      sig: 'sig',
+    );
+    await phone.reinitializeRemote();
+    relay.attempts.clear();
+    phone.markContextRead(channel, clock - 100);
+    await phone.flush();
+    expect(relay.attempts, isEmpty);
+    expect(phone.syncError, isNotNull);
+    expect(journal()['followPending'], pending);
+    expect(journal()['followEdits'], contains(keyK));
+    expect(await phone.setThreadFollow(channel, 'b' * 64, true), isFalse);
+    expect(
+      relay.retained.keys.where((d) => d.startsWith('read-state:')),
+      isNotEmpty,
+    );
+  });
+
+  test('I4: a legacy import is not settled until it is journaled', () async {
+    final phone = await device();
+    store.failJournal = true;
+    expect(await phone.importLegacyFollows({keyK: true}), isEmpty);
+    expect(phone.threadFollows.containsKey(keyK), isFalse);
+    store.failJournal = false;
+    expect(await phone.importLegacyFollows({keyK: true}), {keyK});
+    expect(phone.threadFollows[keyK], (follow: true, at: 0));
+  });
+
+  test('I5: capacity pruning keeps a settled explicit unfollow', () async {
+    final first = await device();
+    first.dispose(flushPending: false);
+    // A journal at the slot ceiling: settled own follows a peer outranks,
+    // and one settled own unfollow the peer also outranks.
+    final keyU = threadFollowKey(channel, 'c' * 64);
+    final many = [
+      for (var i = 0; i < 7000; i++)
+        threadFollowKey(channel, i.toRadixString(16).padLeft(64, '0')),
+    ];
+    final saved = journal();
+    saved['ownFollows'] = {
+      for (final key in many) key: {'follow': true, 'at': 1},
+      keyU: {'follow': false, 'at': 1},
+    };
+    saved['followHeads'] = {
+      'f' * 32: {
+        'createdAt': 10,
+        'id': '3' * 64,
+        'threads': {
+          for (final key in [...many, keyU]) key: {'follow': true, 'at': 2},
+        },
+      },
+    };
+    await prefs.setString(journalKey(), jsonEncode(saved));
+    final phone = await device();
+    expect(await phone.setThreadFollow(channel, 'd' * 64, true), isTrue);
+    await phone.flush();
+    final own = {
+      for (final event in relay.follows())
+        ...decodeThreadFollowsBlob(crypto.decrypt(event.content))!.choices,
+    };
+    expect(own[keyU], (follow: false, at: 1));
+  });
+
   test('own heads at the same second: the lower event ID wins in either '
       'arrival order', () async {
     final phone = await device();
@@ -289,6 +491,7 @@ class _HoldingRelay extends RelaySessionNotifier {
   Completer<void> held = Completer();
   NostrEvent? inFlight;
   bool dropNext = false;
+  _Echo echo = _Echo.beforeOk;
   final attempts = <NostrEvent>[];
 
   void deliver(NostrEvent event) {
@@ -341,8 +544,42 @@ class _HoldingRelay extends RelaySessionNotifier {
         event.createdAt == head.createdAt && event.id.compareTo(head.id) < 0) {
       retained[d] = event;
     }
-    deliver(event);
-    return event;
+    switch (echo) {
+      case _Echo.beforeOk:
+        deliver(event);
+      case _Echo.afterOk:
+        Timer.run(() => deliver(event));
+      case _Echo.none:
+        break;
+    }
+    // What `RelaySessionNotifier._handleOk` returns: the ID only.
+    return NostrEvent(
+      id: event.id,
+      pubkey: '',
+      createdAt: 0,
+      kind: 0,
+      tags: [],
+      content: '',
+      sig: '',
+    );
+  }
+}
+
+enum _Echo { beforeOk, afterOk, none }
+
+/// Can hold a matching journal write, or fail every journal write.
+class _GatedStore extends InMemorySharedPreferencesStore {
+  _GatedStore() : super.empty();
+  Future<void>? Function(String encoded)? holdJournal;
+  bool failJournal = false;
+
+  @override
+  Future<bool> setValue(String valueType, String key, Object value) async {
+    if (key.contains('buzz.nip-rs.journal')) {
+      if (failJournal) return false;
+      if (holdJournal?.call(value as String) case final gate?) await gate;
+    }
+    return super.setValue(valueType, key, value);
   }
 }
 

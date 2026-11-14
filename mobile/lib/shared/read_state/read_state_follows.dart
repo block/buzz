@@ -38,6 +38,11 @@ extension ReadStateFollows on ReadStateManager {
   ) async {
     final key = threadFollowKey(channelId, rootId);
     if (_disposed || !isValidThreadFollowKey(key)) return false;
+    if (_followSlots.any(_unreadableFollowSlots.contains)) {
+      syncError = StateError('Unreadable thread follow coordinate');
+      _onChanged();
+      return false;
+    }
     final previous = _ownFollows[key];
     final previousEdit = _followEdits[key];
     final previousReserved = _lastReserved;
@@ -87,27 +92,56 @@ extension ReadStateFollows on ReadStateManager {
   /// Import pre-sync local choices at `at = 0`, only for keys with no synced
   /// entry and only after a complete merge. Returns the keys now settled
   /// (imported, or already synced) so the caller can retire them.
-  Set<String> importLegacyFollows(Map<String, bool> choices) {
+  Future<Set<String>> importLegacyFollows(Map<String, bool> choices) async {
     if (_disposed || threadFollowsIncomplete) return const {};
     final merged = threadFollows;
     final settled = <String>{};
     final added = <String>[];
-    for (final MapEntry(:key, value: follow) in choices.entries) {
-      if (!isValidThreadFollowKey(key)) continue;
-      settled.add(key);
-      if (merged.containsKey(key) || _ownFollows.containsKey(key)) continue;
-      _ownFollows[key] = {'follow': follow, 'at': 0};
-      _followEdits[key] = _reserve();
-      added.add(key);
+    final previousReserved = _lastReserved;
+    void revert() {
+      added.forEach(_ownFollows.remove);
+      added.forEach(_followEdits.remove);
+    }
+
+    try {
+      for (final MapEntry(:key, value: follow) in choices.entries) {
+        if (!isValidThreadFollowKey(key)) continue;
+        settled.add(key);
+        if (merged.containsKey(key) || _ownFollows.containsKey(key)) continue;
+        _ownFollows[key] = {'follow': follow, 'at': 0};
+        _followEdits[key] = _reserve();
+        added.add(key);
+      }
+    } on StateError catch (error) {
+      revert();
+      _lastReserved = previousReserved;
+      syncError = error;
+      return const {};
     }
     if (added.isEmpty) return settled;
     if (!_packFollows()) {
-      added.forEach(_ownFollows.remove);
-      added.forEach(_followEdits.remove);
+      revert();
+      _lastReserved = previousReserved;
       return const {};
     }
-    _persistLocalState();
+    final imported = {for (final key in added) key: _followEdits[key]!};
     _onChanged();
+    // Settled, so the caller may retire the legacy source, only once the
+    // imported edits are journaled.
+    try {
+      await _persistLocalState();
+    } catch (error) {
+      // Undo only imports no newer tap has replaced.
+      for (final MapEntry(:key, value: generation) in imported.entries) {
+        if (_followEdits[key] != generation) continue;
+        _ownFollows.remove(key);
+        _followEdits.remove(key);
+      }
+      syncError = error;
+      if (!_disposed) _onChanged();
+      return const {};
+    }
+    if (_disposed) return const {};
     _schedulePublish();
     return settled;
   }
@@ -121,9 +155,18 @@ extension ReadStateFollows on ReadStateManager {
       previous: _followPlacement,
       extras: [for (final slot in _followSlots) _followExtra[slot] ?? const {}],
     );
-    try {
-      _followPlacement = pack();
+    // Owned slot IDs exist before an edit placed in them is journaled, so a
+    // restored journal recognizes its own heads.
+    bool placed(List<Set<String>> placement) {
+      _followPlacement = placement;
+      while (_followSlots.length < placement.length) {
+        _followSlots.add(generateReadStateSlotId());
+      }
       return true;
+    }
+
+    try {
+      return placed(pack());
     } on StateError {
       final merged = threadFollows;
       final own = ThreadFollowsBlob(
@@ -132,14 +175,16 @@ extension ReadStateFollows on ReadStateManager {
       ).choices;
       final dropped = {
         for (final MapEntry(:key, :value) in own.entries)
-          // Pending edits, captured or not, are never dropped to make room.
-          if (merged[key] != value && !_followEdits.containsKey(key))
+          // Pending edits, captured or not, and explicit unfollows are never
+          // dropped to make room.
+          if (merged[key] != value &&
+              value.follow &&
+              !_followEdits.containsKey(key))
             key: _ownFollows[key]!,
       };
       dropped.keys.forEach(_ownFollows.remove);
       try {
-        _followPlacement = pack();
-        return true;
+        return placed(pack());
       } on StateError {
         _ownFollows.addAll(dropped);
         return false;
@@ -206,6 +251,12 @@ extension ReadStateFollows on ReadStateManager {
   /// generations it captured, and only while they are still current.
   void _resolveFollowPacket(String coordinate, NostrEvent event) {
     if (_pending[coordinate]?.id != event.id) return;
+    // A newer unreadable head may not contain this packet's edits: hold them.
+    if (_unreadableFollowSlots.contains(
+      coordinate.substring(threadFollowsDTagPrefix.length),
+    )) {
+      return;
+    }
     final captured = _followCaptured.remove(coordinate) ?? const {};
     for (final MapEntry(:key, value: generation) in captured.entries) {
       if (_followEdits[key] == generation) _followEdits.remove(key);
@@ -229,6 +280,9 @@ extension ReadStateFollows on ReadStateManager {
     final head = _followHeads[slot];
     if (head != null && !_outranksFollowHead(event, head)) return;
     _followHeads[slot] = (createdAt: event.createdAt, id: event.id);
+    // Every later reservation must outrank the accepted head, even one dated
+    // past the plausibility window.
+    _lastReserved = max(_lastReserved, event.createdAt);
     while (_followPlacement.length <= index) {
       _followPlacement.add({});
     }
