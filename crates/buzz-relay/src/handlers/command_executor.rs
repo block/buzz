@@ -524,7 +524,8 @@ async fn handle_dm_open(
 
     // 3. Execute. With history, open the DM of these people, bring it up to
     //    date and add any named agents it does not hold yet; without, the DM of
-    //    exactly these members. Each agent that joins needs its policy.
+    //    exactly these members. Each agent that joins needs its policy. Only
+    //    agents join a reopened DM: someone who left is not added back.
     let all_refs: Vec<&[u8]> = all_bytes.iter().map(|b| b.as_slice()).collect();
     let policy = agent_add_policy(&self_bytes);
     let (channel, was_created) = state
@@ -538,33 +539,11 @@ async fn handle_dm_open(
         )
         .await
         .map_err(dm_write_error)?;
-    let (target, added) = if was_created || !include_history {
-        (channel.id, Vec::new())
+    let added = if was_created || !include_history {
+        Vec::new()
     } else {
-        match state
-            .db
-            .grow_dm(
-                tenant.community(),
-                channel.id,
-                &self_bytes,
-                &all_refs,
-                &policy,
-            )
-            .await
-            .map_err(dm_write_error)?
-        {
-            DmGrowth::Grown { added } => (channel.id, added),
-            // A DM of these people already exists: they meet there.
-            DmGrowth::Existing(other) => {
-                let added = grow_existing(tenant, state, other, &self_bytes, &all_bytes).await?;
-                (other, added)
-            }
-            DmGrowth::PeopleStartNewDm => {
-                return Err(IngestError::Internal(
-                    "error: reopening a DM changed its people".into(),
-                ))
-            }
-        }
+        let named_agents: Vec<Vec<u8>> = agents.into_keys().collect();
+        grow_with_agents(tenant, state, channel.id, &self_bytes, &named_agents).await?
     };
 
     // Finalize the idempotency record after the separate mutation succeeds.
@@ -574,23 +553,14 @@ async fn handle_dm_open(
 
     // 4. Side effects (post-commit, best-effort)
     if was_created {
-        announce_dm_created(tenant, state, target, &self_bytes, &all_bytes).await;
+        announce_dm_created(tenant, state, channel.id, &self_bytes, &all_bytes).await;
     } else {
         // Re-open of an existing DM cleared the caller's hidden_at; refresh
         // their NIP-DV snapshot so the DM reappears in the sidebar.
-        if target != channel.id {
-            if let Err(e) = state
-                .db
-                .unhide_dm(tenant.community(), target, &self_bytes)
-                .await
-            {
-                warn!("DM re-open: unhide failed: {e}");
-            }
-        }
         if let Err(e) = publish_dm_visibility_snapshot(tenant, state, &self_bytes).await {
             warn!("DM re-open: visibility snapshot failed: {e}");
         }
-        announce_dm_additions(tenant, state, target, &self_bytes, &added).await;
+        announce_dm_additions(tenant, state, channel.id, &self_bytes, &added).await;
     }
 
     // 5. Return response
@@ -600,26 +570,24 @@ async fn handle_dm_open(
         message: format!(
             "response:{}",
             serde_json::json!({
-                "channel_id": target.to_string(),
+                "channel_id": channel.id.to_string(),
                 "created": was_created,
             })
         ),
     })
 }
 
-/// Add `pubkeys` to `channel_id`, an existing DM that [`grow_dm`] named as the
-/// DM of these people. Its people are all among its members, so only agents
-/// join and it cannot turn out to be another DM.
-///
-/// [`grow_dm`]: buzz_db::dm::grow_dm
-async fn grow_existing(
+/// Bring the existing DM `channel_id` up to date and add `agents` to it in
+/// place. Only people joining change which DM it is, so it cannot turn out to
+/// be another one.
+async fn grow_with_agents(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     channel_id: Uuid,
     actor: &[u8],
-    pubkeys: &[Vec<u8>],
+    agents: &[Vec<u8>],
 ) -> Result<Vec<Vec<u8>>, IngestError> {
-    let refs: Vec<&[u8]> = pubkeys.iter().map(Vec::as_slice).collect();
+    let refs: Vec<&[u8]> = agents.iter().map(Vec::as_slice).collect();
     let policy = agent_add_policy(actor);
     match state
         .db
@@ -759,7 +727,11 @@ async fn handle_dm_add_member(
         Some(DmGrowth::Grown { added }) => (channel_id, false, added, false, Vec::new()),
         // These people already have a DM: the agents join them there.
         Some(DmGrowth::Existing(other)) => {
-            let added = grow_existing(tenant, state, other, &self_bytes, &additions).await?;
+            let agents: Vec<Vec<u8>> = dm_agents(tenant, state, &additions)
+                .await?
+                .into_keys()
+                .collect();
+            let added = grow_with_agents(tenant, state, other, &self_bytes, &agents).await?;
             (other, false, added, true, Vec::new())
         }
         // Start a new DM of everyone (no history); this DM is untouched. A DM

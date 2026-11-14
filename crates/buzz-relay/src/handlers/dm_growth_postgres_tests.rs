@@ -930,37 +930,87 @@ async fn reopening_a_dm_ignores_the_policy_of_agents_already_in_it() {
     );
 }
 
-/// Concurrent opens of the same people, each naming another agent, meet in
-/// one DM, and every agent joins it: one that loses the race to create the DM
-/// still adds its agent.
-/// Mutation: report a lost race as created → that open skips adding its
-/// agent → RED.
+/// An open that loses the race to create a DM still adds the agents it named:
+/// the DM it tried to make is committed by another writer while its insert
+/// waits, so its insert fails on the identity and it reopens that DM.
+/// Mutation: report a lost race as created → the open skips adding X → RED.
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn concurrent_opens_all_add_their_agents() {
+async fn an_open_that_loses_the_race_still_adds_its_agents() {
     let state = state().await;
     let tenant = community(&state, "dm-open-race").await;
-    let (a, b) = (Keys::generate(), Keys::generate());
-    let agents: Vec<Keys> = (0..6).map(|_| Keys::generate()).collect();
-    for agent in &agents {
-        make_agent(&state, &tenant, agent, &a, "anyone").await;
-    }
+    let (a, b, x) = (Keys::generate(), Keys::generate(), Keys::generate());
+    make_agent(&state, &tenant, &x, &a, "anyone").await;
+    let (a_pk, b_pk) = (a.public_key().to_bytes(), b.public_key().to_bytes());
 
-    let named: Vec<[&Keys; 2]> = agents.iter().map(|agent| [&b, agent]).collect();
-    let opened = futures::future::join_all(
-        named
-            .iter()
-            .map(|others| open_with_history(&state, &tenant, &a, others)),
+    // Make A and B's DM in a transaction left open, so the open's insert of
+    // the same identity waits on it.
+    let mut rival = state.db.pool().begin().await.expect("begin");
+    let rival_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO channels \
+             (id, community_id, name, channel_type, visibility, created_by, participant_hash) \
+         VALUES ($1, $2, 'DM', 'dm', 'private', $3, $4)",
     )
-    .await;
-
-    let dm = *opened[0].as_ref().expect("open");
-    for result in &opened {
-        assert_eq!(*result.as_ref().expect("open"), dm);
+    .bind(rival_id)
+    .bind(tenant.community().as_uuid())
+    .bind(a_pk.as_slice())
+    .bind(buzz_db::dm::compute_participant_hash(&[a_pk.as_slice(), b_pk.as_slice()]).as_slice())
+    .execute(&mut *rival)
+    .await
+    .expect("rival DM");
+    for pk in [&a_pk, &b_pk] {
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by) \
+             VALUES ($1, $2, $3, 'member', $4)",
+        )
+        .bind(tenant.community().as_uuid())
+        .bind(rival_id)
+        .bind(pk.as_slice())
+        .bind(a_pk.as_slice())
+        .execute(&mut *rival)
+        .await
+        .expect("rival member");
     }
-    let mut everyone: Vec<&Keys> = vec![&a, &b];
-    everyone.extend(&agents);
-    assert_eq!(members(&state, &tenant, dm).await, set_of(&everyone));
+
+    let opening = tokio::spawn({
+        let (state, tenant, a, b, x) = (
+            state.clone(),
+            tenant.clone(),
+            a.clone(),
+            b.clone(),
+            x.clone(),
+        );
+        async move { open_with_history(&state, &tenant, &a, &[&b, &x]).await }
+    });
+    wait_until_blocked_by(&mut rival).await;
+    rival.commit().await.expect("rival commits");
+
+    assert_eq!(opening.await.expect("task").expect("open"), rival_id);
+    assert_eq!(
+        members(&state, &tenant, rival_id).await,
+        set_of(&[&a, &b, &x])
+    );
+}
+
+/// Wait until another session is waiting on a lock `holder` holds.
+async fn wait_until_blocked_by(holder: &mut sqlx::PgConnection) {
+    for _ in 0..200 {
+        let blocked: i64 = sqlx::query_scalar(
+            // pg_locks, unlike pg_stat_activity, is not frozen for the rest
+            // of the holder's transaction.
+            "SELECT count(*) FROM pg_locks \
+             WHERE NOT granted AND pg_backend_pid() = ANY(pg_blocking_pids(pid))",
+        )
+        .fetch_one(&mut *holder)
+        .await
+        .expect("blocked sessions");
+        if blocked > 0 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("no session waited on the held lock");
 }
 
 /// Reopening a DM identified by all its members with the tag moves it to its
@@ -1074,8 +1124,9 @@ async fn a_new_dm_from_a_dm_holds_its_current_members() {
     );
     let dm = open(&state, &tenant, &a, &[&b, &c]).await.expect("open");
 
-    // Hold the DM's membership lock while the add reads its members, then
-    // let C leave and release it.
+    // Hold the DM's membership lock until the add waits on it, then let C
+    // leave and release it. If the add did not take this lock, it would never
+    // wait, and the test fails rather than passing.
     let mut lock = state.db.pool().begin().await.expect("begin");
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!(
@@ -1089,7 +1140,7 @@ async fn a_new_dm_from_a_dm_holds_its_current_members() {
         let (state, tenant, a, d) = (state.clone(), tenant.clone(), a.clone(), d.clone());
         async move { add(&state, &tenant, &a, dm, &[&d], false).await }
     });
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    wait_until_blocked_by(&mut lock).await;
     sqlx::query(
         "UPDATE channel_members SET removed_at = NOW() \
          WHERE channel_id = $1 AND pubkey = $2",
@@ -1153,5 +1204,158 @@ async fn an_agent_can_open_a_dm_with_nine_people() {
     rejected(
         open(&state, &tenant, &agent, &ten).await,
         "at most 9 people",
+    );
+}
+
+/// Removing an agent from a DM identified by all its members (from before
+/// agents were told apart) leaves it its people's DM, whether its owner removes
+/// it or it leaves, unless they already have another DM.
+/// Mutation: give the identity up on every removal → B gets a new DM → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn removing_an_agent_moves_an_old_dm_to_its_people() {
+    let state = state().await;
+    let tenant = community(&state, "dm-legacy-remove-agent").await;
+    let (a, b, c, d, x) = (
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+    );
+    make_agent(&state, &tenant, &x, &a, "anyone").await;
+    let removed = open(&state, &tenant, &a, &[&b, &x]).await.expect("open");
+    let left = open(&state, &tenant, &a, &[&c, &x]).await.expect("open");
+    let peoples = open(&state, &tenant, &a, &[&d]).await.expect("people");
+    let shadowed = open(&state, &tenant, &a, &[&d, &x]).await.expect("open");
+
+    let remove = |dm: Uuid| {
+        vec![
+            vec!["h".to_string(), dm.to_string()],
+            vec!["p".into(), hex(&x)],
+        ]
+    };
+    for dm in [removed, shadowed] {
+        let result = submit(&state, &tenant, &a, 9001, remove(dm))
+            .await
+            .expect("remove");
+        assert!(result.accepted, "{}", result.message);
+    }
+    let result = submit(
+        &state,
+        &tenant,
+        &x,
+        9022,
+        vec![vec!["h".into(), left.to_string()]],
+    )
+    .await
+    .expect("leave");
+    assert!(result.accepted, "{}", result.message);
+
+    for (person, dm) in [(&b, removed), (&c, left), (&d, peoples)] {
+        assert_eq!(
+            open_with_history(&state, &tenant, person, &[&a])
+                .await
+                .expect("reopen"),
+            dm
+        );
+    }
+    assert_ne!(
+        open(&state, &tenant, &a, &[&d, &x]).await.expect("reopen"),
+        shadowed,
+        "a DM that could not take its people's identity gives its own up"
+    );
+}
+
+/// A tagged add that lands in the DM its people already have checks agents
+/// against that DM: one already in it needs no permission.
+/// Mutation: check policies before finding the other DM → the add is refused
+/// → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn agents_are_checked_against_the_dm_they_join() {
+    let state = state().await;
+    let tenant = community(&state, "dm-existing-policy").await;
+    let (a, b, c, x) = (
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+    );
+    make_agent(&state, &tenant, &x, &b, "owner_only").await;
+    let trio = open(&state, &tenant, &a, &[&b, &c]).await.expect("trio");
+    add(&state, &tenant, &b, trio, &[&x], true)
+        .await
+        .expect("owner adds");
+    let pair = open(&state, &tenant, &a, &[&b]).await.expect("pair");
+
+    assert_eq!(
+        add(&state, &tenant, &a, pair, &[&c, &x], true)
+            .await
+            .expect("add"),
+        (trio, false)
+    );
+    assert_eq!(members(&state, &tenant, pair).await, set_of(&[&a, &b]));
+}
+
+/// A DM someone left keeps their history, so an agent joining it, even as the
+/// only other member, needs its add policy.
+/// Mutation: exempt any DM of the actor and one agent → the agent joins → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn an_agent_needs_its_policy_to_join_a_dm_someone_left() {
+    let state = state().await;
+    let tenant = community(&state, "dm-left-policy").await;
+    let (a, b, x) = (Keys::generate(), Keys::generate(), Keys::generate());
+    make_agent(&state, &tenant, &x, &b, "owner_only").await;
+    let dm = open(&state, &tenant, &a, &[&b]).await.expect("open");
+    let result = submit(
+        &state,
+        &tenant,
+        &b,
+        9022,
+        vec![vec!["h".into(), dm.to_string()]],
+    )
+    .await
+    .expect("leave");
+    assert!(result.accepted, "{}", result.message);
+
+    rejected(
+        add(&state, &tenant, &a, dm, &[&x], true).await,
+        "policy:owner_only",
+    );
+    assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a]));
+}
+
+/// A new DM starts only from a live, unarchived DM, checked under its lock.
+/// Mutation: skip the check when starting a new DM → the archived DM forks →
+/// RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_new_dm_cannot_start_from_an_archived_dm() {
+    let state = state().await;
+    let tenant = community(&state, "dm-fork-archived").await;
+    let (a, b, c) = (Keys::generate(), Keys::generate(), Keys::generate());
+    let dm = open(&state, &tenant, &a, &[&b]).await.expect("open");
+    sqlx::query("UPDATE channels SET archived_at = NOW() WHERE id = $1")
+        .bind(dm)
+        .execute(state.db.pool())
+        .await
+        .expect("archive");
+
+    let c_pk = c.public_key().to_bytes();
+    let result = state
+        .db
+        .fork_dm(
+            tenant.community(),
+            dm,
+            &a.public_key().to_bytes(),
+            &[c_pk.as_slice()],
+            &|_: &str, _: &[u8]| Ok(()),
+        )
+        .await;
+    assert!(
+        matches!(&result, Err(buzz_db::DbError::AccessDenied(m)) if m.contains("archived")),
+        "{result:?}"
     );
 }

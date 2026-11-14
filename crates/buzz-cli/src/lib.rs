@@ -1343,7 +1343,8 @@ pub enum DmsCmd {
     },
     /// Open a new direct message with one or more users
     Open {
-        /// User pubkey(s) to DM (64-char hex, 1-8)
+        /// User pubkey(s) to DM (64-char hex). A DM holds at most 9 people,
+        /// you included; agents do not count.
         #[arg(long = "pubkey")]
         pubkeys: Vec<String>,
     },
@@ -1357,7 +1358,7 @@ pub enum DmsCmd {
         pubkey: String,
         /// Add them to this DM with its history, instead of starting a new DM
         /// of everyone. A person added to a DM of one person and their agents
-        /// always starts a new DM.
+        /// always starts a new DM. Agents cannot use this.
         #[arg(long)]
         include_history: bool,
     },

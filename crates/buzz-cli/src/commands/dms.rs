@@ -73,8 +73,10 @@ async fn list_dms(client: &BuzzClient, limit: u32) -> Result<Vec<serde_json::Val
 
 /// Open a DM with one or more users — sign and submit a kind:41010 event with a d-tag.
 pub async fn cmd_open_dm(client: &BuzzClient, pubkeys: &[String]) -> Result<(), CliError> {
-    if pubkeys.is_empty() || pubkeys.len() > 8 {
-        return Err(CliError::Usage("--pubkey: must provide 1-8 pubkeys".into()));
+    if pubkeys.is_empty() {
+        return Err(CliError::Usage(
+            "--pubkey: must provide at least 1 pubkey".into(),
+        ));
     }
     for pk in pubkeys {
         validate_hex64(pk)?;

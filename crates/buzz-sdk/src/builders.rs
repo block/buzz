@@ -1981,9 +1981,11 @@ pub fn build_workflow_approval(
 
 /// Build a DM open event (kind 41010).
 ///
-/// `pubkeys` must be 1–8 hex-encoded pubkeys to include in the DM conversation.
-/// The relay finds or makes the DM of exactly these members. To find the DM of
-/// the named people instead, use [`build_dm_open_with_history`].
+/// `pubkeys` are the hex-encoded pubkeys of everyone else in the DM, at least
+/// one. The relay finds or makes the DM of exactly these members, and refuses
+/// a DM of more than nine people, the caller included; agents do not count.
+/// To find the DM of the named people instead, use
+/// [`build_dm_open_with_history`].
 ///
 /// The relay answers kind 41010 and kind 41011 with
 /// `response:{"channel_id":"<uuid>","created":<bool>}`, where `created` is
@@ -1996,15 +1998,16 @@ pub fn build_dm_open(pubkeys: &[&str]) -> Result<EventBuilder, SdkError> {
 ///
 /// The relay finds the DM of the named people, whatever agents it holds, adds
 /// any named agents it lacks, so they see its history, and makes the DM if
-/// there is none. `pubkeys` is as for [`build_dm_open`].
+/// there is none. `pubkeys` is as for [`build_dm_open`]. Only people may send
+/// the tag: the relay refuses it from an agent.
 pub fn build_dm_open_with_history(pubkeys: &[&str]) -> Result<EventBuilder, SdkError> {
     dm_open(pubkeys, true)
 }
 
 fn dm_open(pubkeys: &[&str], include_history: bool) -> Result<EventBuilder, SdkError> {
-    if pubkeys.is_empty() || pubkeys.len() > 8 {
+    if pubkeys.is_empty() {
         return Err(SdkError::InvalidInput(
-            "dm open requires 1-8 pubkeys".into(),
+            "dm open requires at least 1 pubkey".into(),
         ));
     }
     let mut tags = Vec::with_capacity(pubkeys.len());
@@ -2022,7 +2025,8 @@ fn dm_open(pubkeys: &[&str], include_history: bool) -> Result<EventBuilder, SdkE
 ///
 /// With `include_history`, the member joins this DM and sees its history,
 /// unless a person is joining a DM of at most one person and their agents.
-/// Otherwise adding anyone starts a new DM of everyone.
+/// Otherwise adding anyone starts a new DM of everyone. Only people may send
+/// the history tag: the relay refuses it from an agent.
 pub fn build_dm_add_member(
     channel_id: Uuid,
     pubkey: &str,
@@ -5150,9 +5154,7 @@ mod tests {
 
     #[test]
     fn dm_open_with_history_validates_like_dm_open() {
-        let pk = "a".repeat(64);
-        let nine: Vec<&str> = vec![pk.as_str(); 9];
-        for pubkeys in [&[][..], &nine[..], &["bad-hex"][..]] {
+        for pubkeys in [&[][..], &["bad-hex"][..]] {
             let err = build_dm_open_with_history(pubkeys).unwrap_err();
             assert!(matches!(err, SdkError::InvalidInput(_)));
         }
@@ -5165,11 +5167,16 @@ mod tests {
     }
 
     #[test]
-    fn dm_open_rejects_over_8_pubkeys() {
+    fn dm_open_leaves_the_people_limit_to_the_relay() {
+        // Agents do not count toward the relay's nine-person limit, and an
+        // agent caller is not one of the nine, so the SDK caps nothing.
         let pk = "a".repeat(64);
-        let pks: Vec<&str> = vec![pk.as_str(); 9];
-        let err = build_dm_open(&pks).unwrap_err();
-        assert!(matches!(err, SdkError::InvalidInput(_)));
+        let pks: Vec<&str> = vec![pk.as_str(); 12];
+        let ev = sign(build_dm_open(&pks).unwrap());
+        assert_eq!(
+            ev.tags.iter().filter(|t| t.as_slice()[0] == "p").count(),
+            12
+        );
     }
 
     #[test]
