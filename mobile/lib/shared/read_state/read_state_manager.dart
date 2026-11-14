@@ -192,6 +192,9 @@ class ReadStateManager {
   final Map<String, Map<String, ThreadFollowChoice>> _remoteFollows = {};
   final Set<String> _unreadableFollowSlots = {};
   bool _followsLoaded = false;
+  // Whether this writer has durably saved a complete recovery. Never reset,
+  // so a later reconnect failure does not close the follow gate.
+  bool _followsRecovered = false;
   // Pending own follow edits not yet covered by an accepted own head, by key:
   // the reservation (generation) of the edit. Their entries are in
   // [_ownFollows], which is the accepted heads plus these edits.
@@ -482,6 +485,7 @@ class ReadStateManager {
       _mergeEvents(events);
       _followsLoaded = true;
       await _persistLocalState();
+      _followsRecovered = true;
       _onChanged();
       return true;
     } catch (error) {
@@ -688,6 +692,7 @@ class ReadStateManager {
       }
       final checkConnection = _relaySession?.captureConnectionFence();
       var snapshot = <NostrEvent>[];
+      var recovered = false;
       if (_relaySession != null) {
         final events = await _relaySession.fetchReadStateSnapshot();
         _lastSnapshotSucceeded = true;
@@ -699,7 +704,7 @@ class ReadStateManager {
         checkConnection?.call();
         snapshot = events;
         _mergeEvents(events);
-        _followsLoaded = true;
+        _followsLoaded = recovered = true;
         if (events.any(
           (event) =>
               hasValidReadStateTags(event) &&
@@ -732,6 +737,7 @@ class ReadStateManager {
         _slots.add(generateReadStateSlotId());
       }
       await _persistLocalState();
+      if (recovered) _followsRecovered = true;
       final planned = [
         for (final blob in _placement) Map<String, int>.of(blob),
       ];

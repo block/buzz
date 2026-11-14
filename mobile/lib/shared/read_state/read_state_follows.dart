@@ -28,9 +28,9 @@ extension ReadStateFollows on ReadStateManager {
       !_followsLoaded || _unreadableFollowSlots.isNotEmpty;
 
   /// Whether follow and unfollow taps are accepted: this writer has
-  /// completed a recovery of its own state and every owned follow head is
+  /// durably saved a complete recovery of its own state and every owned follow head is
   /// readable. Each new writer starts not ready, whatever its journal holds.
-  bool get threadFollowsReady => _canPublishFollows;
+  bool get threadFollowsReady => _followsRecovered && _canPublishFollows;
 
   /// Record an explicit follow or unfollow in this installation's own slot.
   /// The choice shows at once but is accepted only once journaled: resolves

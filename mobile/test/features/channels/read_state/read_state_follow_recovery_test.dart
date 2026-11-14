@@ -421,6 +421,27 @@ void main() {
     expect(phone.threadFollows[keyB]!.follow, isTrue);
   });
 
+  test('startup gate: stays shut until the recovery save succeeds', () async {
+    relay.offline = true;
+    final phone = await device();
+    relay.offline = false;
+    final gate = Completer<void>();
+    store.holdJournal = (_) => gate.future;
+    final recovery = phone.reinitializeRemote();
+    await pumpEventQueue();
+    // The snapshot is merged, but its save is held.
+    expect(await phone.setThreadFollow(channel, 'a' * 64, true), isFalse);
+    store.holdJournal = null;
+    store.failJournal = true;
+    gate.complete();
+    await recovery;
+    expect(await phone.setThreadFollow(channel, 'a' * 64, true), isFalse);
+    expect(phone.threadFollows.containsKey(keyK), isFalse);
+    store.failJournal = false;
+    await phone.reinitializeRemote();
+    expect(await phone.setThreadFollow(channel, 'a' * 64, true), isTrue);
+  });
+
   test('startup gate: reads and channel mark unread are not gated', () async {
     relay.offline = true;
     final offline = await device();
