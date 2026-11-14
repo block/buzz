@@ -3706,6 +3706,10 @@ pub(crate) fn initial_members(event: &Event) -> anyhow::Result<Vec<Vec<u8>>> {
         .iter()
         .filter(|tag| tag.kind().to_string() == "p")
     {
+        let parts = tag.as_slice();
+        if parts.len() != 2 && !(parts.len() == 4 && parts[2].is_empty() && parts[3] == "admin") {
+            anyhow::bail!("initial p tags must name a member or an explicit admin");
+        }
         let member = tag
             .content()
             .and_then(|value| hex::decode(value).ok())
@@ -3722,6 +3726,22 @@ pub(crate) fn initial_members(event: &Event) -> anyhow::Result<Vec<Vec<u8>>> {
         anyhow::bail!("initial members need an h tag");
     }
     Ok(members)
+}
+
+/// Initial admins from an already validated kind:9007. The creator stays owner.
+pub(crate) fn initial_admins(event: &Event) -> anyhow::Result<Vec<Vec<u8>>> {
+    let members = initial_members(event)?;
+    let mut admins = Vec::new();
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.len() == 4 && parts[0] == "p" && parts[3] == "admin" {
+            let member = hex::decode(&parts[1])?;
+            if members.contains(&member) && !admins.contains(&member) {
+                admins.push(member);
+            }
+        }
+    }
+    Ok(admins)
 }
 
 /// Extract channel UUID from `h` tag (NIP-29 group ID).
@@ -4929,12 +4949,57 @@ pub async fn publish_nipia_unarchived(
 mod tests {
     use super::*;
 
+    #[test]
+    fn initial_admins_are_explicit_members_and_never_replace_the_creator() {
+        let creator = nostr::Keys::generate();
+        let first = nostr::Keys::generate().public_key().to_hex();
+        let second = nostr::Keys::generate().public_key().to_hex();
+        let ordinary = nostr::Keys::generate().public_key().to_hex();
+        let event = create_with(
+            &creator,
+            vec![
+                tag("h", &Uuid::new_v4().to_string()),
+                vec!["p".into(), first.to_uppercase(), "".into(), "admin".into()],
+                vec!["p".into(), second.clone(), "".into(), "admin".into()],
+                tag("p", &ordinary),
+                vec![
+                    "p".into(),
+                    creator.public_key().to_hex(),
+                    "".into(),
+                    "admin".into(),
+                ],
+                tag("p", &first),
+            ],
+        );
+        assert_eq!(initial_members(&event).unwrap().len(), 3);
+        assert_eq!(
+            initial_admins(&event).unwrap(),
+            vec![hex::decode(first).unwrap(), hex::decode(second).unwrap()]
+        );
+        for extra in [
+            vec!["p".into(), ordinary.clone(), "admin".into()],
+            vec!["p".into(), ordinary.clone(), "".into(), "owner".into()],
+            vec!["p".into(), ordinary.clone(), "relay".into(), "admin".into()],
+            vec![
+                "p".into(),
+                ordinary.clone(),
+                "".into(),
+                "admin".into(),
+                "extra".into(),
+            ],
+        ] {
+            let invalid = create_with(&creator, vec![tag("h", &Uuid::new_v4().to_string()), extra]);
+            assert!(initial_members(&invalid).is_err());
+        }
+    }
+
     fn create_with(creator: &nostr::Keys, tags: Vec<Vec<String>>) -> Event {
         nostr::EventBuilder::new(nostr::Kind::Custom(9007), "")
             .tags(
                 tags.into_iter()
                     .map(|tag| nostr::Tag::parse(tag).expect("tag")),
             )
+            .allow_self_tagging()
             .sign_with_keys(creator)
             .expect("sign")
     }

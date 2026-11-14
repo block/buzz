@@ -370,6 +370,7 @@ async fn channel_created_unlisted_is_never_listed() {
                 labels: &[],
                 unlisted: true,
                 members: &[],
+                admins: &[],
             },
             &event,
         )

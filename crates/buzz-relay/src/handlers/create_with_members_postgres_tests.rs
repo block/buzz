@@ -60,6 +60,105 @@ async fn roles(
     roles
 }
 
+/// All initial admin roles exist when creation returns. A resend confirms the
+/// create without restoring roles or membership changed afterward.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn creation_grants_explicit_admins_atomically_and_resends_preserve_demotions() {
+    use buzz_db::channel::MemberRole;
+    let state = state().await;
+    let tenant = community(&state, "create-admins").await;
+    let creator = Keys::generate();
+    let first = Keys::generate();
+    let second = Keys::generate();
+    let ordinary = Keys::generate();
+    let id = Uuid::new_v4();
+    let event = EventBuilder::new(Kind::Custom(9007), "")
+        .tags([
+            Tag::parse(["h", &id.to_string()]).unwrap(),
+            Tag::parse(["name", "Start"]).unwrap(),
+            Tag::parse(["visibility", "private"]).unwrap(),
+            Tag::parse(["p", &first.public_key().to_hex(), "", "admin"]).unwrap(),
+            Tag::parse(["p", &second.public_key().to_hex(), "", "admin"]).unwrap(),
+            Tag::parse(["p", &ordinary.public_key().to_hex()]).unwrap(),
+        ])
+        .sign_with_keys(&creator)
+        .unwrap();
+    assert!(
+        ingest(&state, &tenant, event.clone(), &creator)
+            .await
+            .unwrap()
+            .accepted
+    );
+    for (member, role) in [
+        (&creator, "owner"),
+        (&first, "admin"),
+        (&second, "admin"),
+        (&ordinary, "member"),
+    ] {
+        assert_eq!(
+            state
+                .db
+                .get_member_role(tenant.community(), id, &member.public_key().to_bytes())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(role)
+        );
+    }
+    let admins = group_state_tags(&state, &tenant, id, 39001).await;
+    for agent in [&first, &second] {
+        assert!(admins.contains(&vec![
+            "p".into(),
+            agent.public_key().to_hex(),
+            "admin".into()
+        ]));
+        let rename = EventBuilder::new(Kind::Custom(9002), "")
+            .tags([
+                Tag::parse(["h", &id.to_string()]).unwrap(),
+                Tag::parse(["name", &format!("Progress {}", agent.public_key().to_hex())]).unwrap(),
+            ])
+            .sign_with_keys(agent)
+            .unwrap();
+        assert!(
+            ingest(&state, &tenant, rename, agent)
+                .await
+                .unwrap()
+                .accepted
+        );
+    }
+    let creator_bytes = creator.public_key().to_bytes();
+    state
+        .db
+        .add_member(
+            tenant.community(),
+            id,
+            &first.public_key().to_bytes(),
+            MemberRole::Member,
+            Some(&creator_bytes),
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .remove_member(
+            tenant.community(),
+            id,
+            &second.public_key().to_bytes(),
+            &creator_bytes,
+        )
+        .await
+        .unwrap();
+    let before = roles(&state, &tenant, id).await;
+    assert!(
+        ingest(&state, &tenant, event, &creator)
+            .await
+            .unwrap()
+            .accepted
+    );
+    assert_eq!(roles(&state, &tenant, id).await, before);
+}
+
 /// The `p` tags join in the create's transaction, the roster lists them, and
 /// each gets the "joined" notice a kind:9000 would post.
 /// Mutation: drop `members` from the create → no agent membership → RED.

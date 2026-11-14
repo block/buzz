@@ -2657,6 +2657,7 @@ struct ChannelCreateRequest {
     labels: Vec<String>,
     unlisted: bool,
     members: Vec<Vec<u8>>,
+    admins: Vec<Vec<u8>>,
 }
 
 async fn validate_event_imeta(
@@ -3448,6 +3449,8 @@ async fn ingest_event_inner(
         if let Some(client_uuid) = channel_id {
             let members = super::side_effects::initial_members(&event)
                 .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+            let admins = super::side_effects::initial_admins(&event)
+                .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
             channel_create = Some(ChannelCreateRequest {
                 channel_id: client_uuid,
                 name: create_name.unwrap_or_default(),
@@ -3464,6 +3467,7 @@ async fn ingest_event_inner(
                 labels,
                 unlisted,
                 members,
+                admins,
             });
         } else {
             // The channel is created in the same commit as its event, so a
@@ -3725,6 +3729,7 @@ async fn ingest_event_inner(
             labels: &create.labels,
             unlisted: create.unlisted,
             members: &create.members,
+            admins: &create.admins,
         };
         match state
             .db

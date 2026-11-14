@@ -259,6 +259,8 @@ impl RelayInfo {
             "nip-ar".to_string(),
             // NIP-CL: identity tags, labels and system channels.
             "nip-cl".to_string(),
+            // Kind 9007 can assign admin roles to initial members atomically.
+            "buzz-initial-channel-admins".to_string(),
             // Bridge `/query` search accepts `search_sort: "newest"`.
             "buzz-search-sort".to_string(),
             // kind:9002 `unlisted` (NOSTR.md, Unlisted channels). A relay
@@ -832,6 +834,7 @@ mod tests {
         );
         let extensions = info.supported_extensions.expect("extensions");
         assert!(extensions.contains(&"nip-cl".to_string()));
+        assert!(extensions.contains(&"buzz-initial-channel-admins".to_string()));
         assert!(extensions.contains(&"buzz-search-sort".to_string()));
         assert!(extensions.contains(&"buzz-unlisted-channels".to_string()));
     }

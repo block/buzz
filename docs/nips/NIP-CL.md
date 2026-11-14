@@ -89,7 +89,22 @@ until the channel next changes, for example on an edit or a membership
 change. A client MUST treat a missing tag as unknown. A missing `P` does not
 mean that a key did not create the channel.
 
+## Initial members and roles
+
+A relay advertising `buzz-initial-channel-admins` in NIP-11
+`supported_extensions` accepts kind:9007 initial members as either
+`["p", <pubkey>]` (ordinary membership) or
+`["p", <pubkey>, "", "admin"]`. Other role hints are rejected. The creator
+remains owner, including when also named by a `p` tag. Existing third-party
+agent-add policies and the 32-member limit apply to both forms.
+
+The channel, initial roles, and create event commit in one transaction. An
+exact resend confirms the existing create without reapplying roles, so it
+cannot undo a later demotion or removal. Clients must check the extension
+before relying on initial admin roles; older relays may ignore role hints.
+
 ## Channel labels
+
 
 A label groups channels across channel types, for example `workspace` or
 `agent-config`. Labels have no meaning to the relay.
