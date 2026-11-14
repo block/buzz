@@ -104,8 +104,11 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
   /// Monotonic seconds, for local deadlines a wall-clock change cannot move.
   private let uptime: () -> TimeInterval
   private let lock = NSLock()
-  /// Each assertion with its local deadline on [uptime]; see [localDeadline].
-  private var cached: [String: (token: String, deadline: TimeInterval)] = [:]
+  /// Each assertion with when it arrived, on [uptime] and the wall clock, and how long it
+  /// may be reused; see [reusable].
+  private var cached:
+    [String: (token: String, uptime: TimeInterval, wall: Date, budget: TimeInterval)] =
+      [:]
   private var refused: [String: Date] = [:]
   /// Hosted credential and key pairs the account is already bound to.
   private var bound: Set<String> = []
@@ -136,6 +139,15 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
   ) -> TimeInterval {
     let byExp = receipt + max(0, TimeInterval(exp) - wallAtReceipt.timeIntervalSince1970)
     return min(byExp, requestStart + TimeInterval(max(0, exp - iat)))
+  }
+
+  /// Whether an assertion received at `receipt` (uptime) and `wall` is still within its reuse
+  /// `budget`. Uptime stops while the phone sleeps, so the wall clock bounds it too; a wall
+  /// clock set back counts as no time passed.
+  static func reusable(
+    receipt: TimeInterval, wall: Date, budget: TimeInterval, uptime: TimeInterval, now: Date
+  ) -> Bool {
+    max(uptime - receipt, now.timeIntervalSince(wall)) < budget
   }
 
   /// The `iat` claim of a compact JWS, or nil when it has none or it is unreadable.
@@ -213,7 +225,10 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
     }
     let cacheKey = "\(organization.origin)|\(relay)|\(pubkey)|\(organization.credential)"
     lock.lock()
-    if let entry = cached[cacheKey], entry.deadline - uptime() > Self.reuseMargin {
+    if let entry = cached[cacheKey],
+      Self.reusable(
+        receipt: entry.uptime, wall: entry.wall, budget: entry.budget, uptime: uptime(), now: now())
+    {
       lock.unlock()
       completion(BuzzRelayAssertion(header: "Bearer \(entry.token)", organization: organization))
       return
@@ -347,7 +362,7 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
         return
       }
       lock.lock()
-      cached[cacheKey] = (token, deadline)
+      cached[cacheKey] = (token, receipt, now(), deadline - receipt - Self.reuseMargin)
       lock.unlock()
       completion(BuzzRelayAssertion(header: "Bearer \(token)", organization: organization))
     }

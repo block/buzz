@@ -139,7 +139,7 @@ class HostedRelayAuth extends ChangeNotifier {
   final _cached =
       <
         ({String relay, String pubkey}),
-        ({String token, Duration refreshAt, BuilderlabAccount account})
+        ({String token, CachedReceipt receipt, BuilderlabAccount account})
       >{};
   // Per account client, so a stalled issuer never delays an unrelated one.
   // Waiters share account restoration, but only a recorded issuance for their
@@ -210,7 +210,7 @@ class HostedRelayAuth extends ChangeNotifier {
         )];
     if (cached == null ||
         !identical(cached.account, client.account) ||
-        cached.refreshAt <= _elapsed()) {
+        !cached.receipt.usable(_elapsed(), _now())) {
       return null;
     }
     return {'Nostr-Federated-Identity': 'Bearer ${cached.token}'};
@@ -315,7 +315,7 @@ class HostedRelayAuth extends ChangeNotifier {
           : _cached[(relay: relay, pubkey: pubkey)];
       if (cached != null &&
           identical(cached.account, client.account) &&
-          cached.refreshAt > _elapsed()) {
+          cached.receipt.usable(_elapsed(), _now())) {
         return {'Nostr-Federated-Identity': 'Bearer ${cached.token}'};
       }
       final pending = _pending[client];
@@ -454,11 +454,13 @@ class HostedRelayAuth extends ChangeNotifier {
       // A background caller may be removing this community: it must not clear
       // recovery, back up a discarded key or seed the shared cache.
       if (background) return token;
-      _cached.removeWhere((_, entry) => entry.refreshAt <= receipt);
+      final wall = _now();
+      _cached.removeWhere((_, entry) => !entry.receipt.usable(receipt, wall));
+      final refreshAt =
+          deadline - Duration(seconds: remaining > 60 ? 30 : remaining ~/ 2);
       _cached[(relay: relay, pubkey: pubkey)] = (
         token: token,
-        refreshAt:
-            deadline - Duration(seconds: remaining > 60 ? 30 : remaining ~/ 2),
+        receipt: CachedReceipt(receipt, wall, refreshAt - receipt),
         account: session,
       );
       if (_clockHint != null &&
@@ -621,6 +623,25 @@ class HostedRelayHttpClient extends http.BaseClient {
 
   @override
   void close() => _inner.close();
+}
+
+/// When a cached assertion arrived, on the monotonic and the wall clock, and
+/// how long it may be reused.
+@visibleForTesting
+class CachedReceipt {
+  const CachedReceipt(this.monotonic, this.wall, this.budget);
+  final Duration monotonic;
+  final DateTime wall;
+  final Duration budget;
+
+  /// Still reusable at [now] and [wallNow]. The monotonic clock stops while
+  /// the device sleeps, so the wall clock bounds it too; a wall clock set
+  /// back counts as no time passed.
+  bool usable(Duration now, DateTime wallNow) {
+    final byWall = wallNow.difference(wall);
+    final elapsed = now - monotonic;
+    return (byWall > elapsed ? byWall : elapsed) < budget;
+  }
 }
 
 /// The local monotonic deadline of an assertion requested at [requestStart]

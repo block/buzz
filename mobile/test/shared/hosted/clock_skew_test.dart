@@ -16,5 +16,10 @@ void main() {
     expect(deadline(9880), start + const Duration(seconds: 180));
     // Fast: only the 60 s `exp` leaves.
     expect(deadline(10120), start + const Duration(seconds: 60));
+    // A sleep: the wall clock jumps 1 hour, the monotonic clock doesn't.
+    final wall = DateTime.utc(2026);
+    final at = CachedReceipt(start, wall, const Duration(seconds: 30));
+    expect(at.usable(start, wall), isTrue);
+    expect(at.usable(start, wall.add(const Duration(hours: 1))), isFalse);
   });
 }

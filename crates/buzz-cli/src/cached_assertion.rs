@@ -19,7 +19,28 @@ pub(crate) type Fetched = Option<(String, u64)>;
 
 /// An evidence link's current assertion, or its answer that it has none.
 #[derive(Default)]
-pub(crate) struct CachedAssertion(Mutex<Option<(Option<String>, u64)>>);
+pub(crate) struct CachedAssertion(Mutex<Option<(Option<String>, Receipt)>>);
+
+/// When a cached answer arrived, on both clocks, and how long it may be
+/// reused (monotonic seconds).
+#[derive(Clone, Copy)]
+struct Receipt {
+    monotonic: u64,
+    wall: u64,
+    budget: u64,
+}
+
+impl Receipt {
+    /// Still reusable at `monotonic` and `wall`. The monotonic clock stops
+    /// while the computer sleeps, so the wall clock bounds it too; a wall
+    /// clock set back counts as no time passed.
+    fn usable(self, monotonic: u64, wall: u64) -> bool {
+        let elapsed = monotonic
+            .saturating_sub(self.monotonic)
+            .max(wall.saturating_sub(self.wall));
+        elapsed < self.budget
+    }
+}
 
 impl CachedAssertion {
     /// The cached answer until its refresh point, else `fetch`'s. A fetched
@@ -33,15 +54,20 @@ impl CachedAssertion {
         Fut: std::future::Future<Output = Result<Fetched, CliError>>,
     {
         let mut cached = self.0.lock().await;
-        if let Some((assertion, refresh)) = cached.as_ref() {
-            if monotonic_now() < *refresh {
+        if let Some((assertion, receipt)) = cached.as_ref() {
+            if receipt.usable(monotonic_now(), unix_now()) {
                 return Ok(assertion.clone());
             }
         }
         *cached = None;
         for _ in 0..ACQUIRE_ATTEMPTS {
             let Some((jws, request_start)) = fetch().await? else {
-                *cached = Some((None, u64::MAX));
+                let forever = Receipt {
+                    monotonic: 0,
+                    wall: 0,
+                    budget: u64::MAX,
+                };
+                *cached = Some((None, forever));
                 return Ok(None);
             };
             let claims = jws_claims(&jws)
@@ -49,10 +75,16 @@ impl CachedAssertion {
                 .ok_or_else(|| {
                     CliError::Auth("the evidence source returned an unreadable assertion".into())
                 })?;
-            let receipt = monotonic_now();
-            let deadline = local_deadline(request_start, receipt, unix_now(), claims);
+            let (receipt, wall) = (monotonic_now(), unix_now());
+            let deadline = local_deadline(request_start, receipt, wall, claims);
             if deadline > receipt {
-                *cached = Some((Some(jws.clone()), refresh_at(receipt, deadline)));
+                let budget = refresh_at(receipt, deadline) - receipt;
+                let at = Receipt {
+                    monotonic: receipt,
+                    wall,
+                    budget,
+                };
+                *cached = Some((Some(jws.clone()), at));
                 return Ok(Some(jws));
             }
         }
@@ -195,6 +227,13 @@ mod tests {
         assert_eq!(local_deadline(0, 20, 9_900, claims(10_000, 10_180)), 180);
         // A local clock 120 s fast: `exp` leaves 40 s past receipt, the tighter bound.
         assert_eq!(local_deadline(0, 20, 10_140, claims(10_000, 10_180)), 60);
+        // A sleep: the wall clock jumps 1 hour, the monotonic clock doesn't.
+        let at = Receipt {
+            monotonic: 20,
+            wall: 10_140,
+            budget: 20,
+        };
+        assert!(at.usable(20, 10_140) && !at.usable(20, 10_140 + 3_600));
     }
 
     #[test]
