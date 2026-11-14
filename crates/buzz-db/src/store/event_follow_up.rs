@@ -40,8 +40,8 @@ const SQLSTATE_LOCK_NOT_AVAILABLE: &str = "55P03";
 ///
 /// Call only when the INSERT affected a row, after releasing any savepoint
 /// that may roll it back. `created_at` must be the signed timestamp bound by
-/// the INSERT, not receipt time. Stages push work for after commit and records
-/// TTL work.
+/// the INSERT, not receipt time. Stages push work for after commit, records
+/// TTL work, and tells the channel's activity row an event exists.
 pub(crate) async fn after_admitted_insert(
     tx: &mut AdmittedTx,
     event_id: &[u8],
@@ -51,6 +51,7 @@ pub(crate) async fn after_admitted_insert(
 ) -> Result<()> {
     tx.record_push_event(event_id, created_at, kind);
     tx.record_channel_event(channel_id, kind);
+    crate::store::activity::seen(tx, created_at, channel_id);
     Ok(())
 }
 

@@ -6,14 +6,14 @@ use uuid::Uuid;
 
 use crate::{observability, AdmittedTx, Db, Result};
 
-pub(super) fn event_id(value: &str) -> Option<Vec<u8>> {
+pub(crate) fn event_id(value: &str) -> Option<Vec<u8>> {
     if value.len() != 64 || value.bytes().any(|b| !b.is_ascii_hexdigit()) {
         return None;
     }
     hex::decode(value).ok()
 }
 
-pub(super) async fn deadlines(conn: &mut PgConnection) -> Result<()> {
+pub(crate) async fn deadlines(conn: &mut PgConnection) -> Result<()> {
     sqlx::query("SET LOCAL statement_timeout = '2000ms'")
         .execute(&mut *conn)
         .await?;
@@ -23,30 +23,26 @@ pub(super) async fn deadlines(conn: &mut PgConnection) -> Result<()> {
     Ok(())
 }
 
-/// Start the account if this is the actor's first read intent, then serialize
-/// private frontier writes, never shared conversation rows.
+/// Take the person's account row, starting the account if this is their
+/// first personal write, and return the next value of their change counter.
+/// Holding the row serializes the person's own writes, never shared
+/// conversation rows, so counter order is commit order.
 pub(super) async fn lock_account(
     tx: &mut AdmittedTx,
     community: CommunityId,
     actor: &[u8],
-) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO personal_read_accounts (community_id,actor,started_at) VALUES ($1,$2,now())
-        ON CONFLICT (community_id,actor) DO UPDATE SET started_at=now()
-        WHERE personal_read_accounts.started_at IS NULL",
-    )
-    .bind(community.as_uuid())
-    .bind(actor)
-    .execute(tx.conn())
-    .await?;
-    sqlx::query(
-        "SELECT actor FROM personal_read_accounts WHERE community_id=$1 AND actor=$2 FOR UPDATE",
+) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "INSERT INTO personal_read_accounts AS a (community_id,actor,started_at,seq)
+         VALUES ($1,$2,now(),1)
+         ON CONFLICT (community_id,actor) DO UPDATE
+         SET started_at=COALESCE(a.started_at, now()), seq=a.seq+1
+         RETURNING seq",
     )
     .bind(community.as_uuid())
     .bind(actor)
     .fetch_one(tx.conn())
-    .await?;
-    Ok(())
+    .await?)
 }
 
 /// Resource access is independent of roster membership. Do not row-lock shared
@@ -86,6 +82,8 @@ struct Message {
     id: Vec<u8>,
     received_at: DateTime<Utc>,
     root: Option<Vec<u8>>,
+    /// A depth-1 reply broadcast to the channel: part of both timelines.
+    broadcast: bool,
 }
 
 /// A channel event and its canonical ancestry. `kinds` bounds the lookup: an
@@ -98,7 +96,8 @@ async fn message(
     kinds: Option<&[i32]>,
 ) -> Result<Option<Message>> {
     let row = sqlx::query(
-        "SELECT e.id, e.received_at, e.tags, tm.root_event_id
+        "SELECT e.id, e.received_at, e.tags, tm.root_event_id,
+             COALESCE(tm.depth = 1 AND tm.broadcast, false) AS broadcast
          FROM events e LEFT JOIN thread_metadata tm ON tm.community_id=e.community_id
              AND tm.event_created_at=e.created_at AND tm.event_id=e.id AND tm.channel_id=e.channel_id
          WHERE e.community_id=$1 AND e.channel_id=$2 AND e.id=$3
@@ -123,6 +122,7 @@ async fn message(
             id,
             received_at,
             root,
+            broadcast: row.try_get("broadcast")?,
         })
     })
     .transpose()
@@ -158,28 +158,55 @@ pub(super) async fn valid_target(
     Ok(Some(root))
 }
 
-/// Advance a monotone frontier. The anchor ID follows the greatest arrival;
-/// an equal arrival keeps the existing anchor.
-async fn frontier(
+/// What an applied intent does to the context's row.
+enum Change<'a> {
+    Through(&'a Message),
+    Unread,
+    State(ReadState),
+}
+
+/// Write the person's row for a context, stamped with their counter. A read
+/// position only advances: the anchor follows the greatest arrival, and an
+/// equal arrival keeps the existing anchor.
+async fn write(
     tx: &mut AdmittedTx,
     community: CommunityId,
     actor: &[u8],
     target: &ReadTarget,
     root: &[u8],
-    msg: &Message,
+    seq: i64,
+    change: Change<'_>,
 ) -> Result<()> {
+    let (through, unread, state) = match change {
+        Change::Through(msg) => (Some(msg), Some(false), None),
+        Change::Unread => (None, Some(true), None),
+        Change::State(state) => (None, None, Some(state.as_str())),
+    };
     sqlx::query(
-        "INSERT INTO personal_read_frontiers
-         (community_id, actor, channel_id, root_id, through_timestamp, through_message_id)
-         VALUES ($1,$2,$3,$4,$5,$6)
+        "INSERT INTO personal_read_frontiers AS f
+         (community_id, actor, channel_id, root_id, through_timestamp, through_message_id,
+            marked_unread, state, seq)
+         VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7,false),COALESCE($8,'default'),$9)
          ON CONFLICT (community_id, actor, channel_id, root_id) DO UPDATE
-         SET through_timestamp=GREATEST(personal_read_frontiers.through_timestamp, EXCLUDED.through_timestamp),
-            through_message_id=CASE
-                WHEN EXCLUDED.through_timestamp > personal_read_frontiers.through_timestamp
-                THEN EXCLUDED.through_message_id ELSE personal_read_frontiers.through_message_id END",
-    ).bind(community.as_uuid()).bind(actor).bind(target.channel_id).bind(root)
-        .bind(msg.received_at).bind(&msg.id)
-        .execute(tx.conn()).await?;
+         SET through_message_id=CASE
+                WHEN EXCLUDED.through_timestamp > COALESCE(f.through_timestamp,'-infinity')
+                THEN EXCLUDED.through_message_id ELSE f.through_message_id END,
+            through_timestamp=GREATEST(f.through_timestamp, EXCLUDED.through_timestamp),
+            marked_unread=COALESCE($7, f.marked_unread),
+            state=COALESCE($8, f.state),
+            seq=EXCLUDED.seq",
+    )
+    .bind(community.as_uuid())
+    .bind(actor)
+    .bind(target.channel_id)
+    .bind(root)
+    .bind(through.map(|msg| msg.received_at))
+    .bind(through.map(|msg| msg.id.as_slice()))
+    .bind(unread)
+    .bind(state)
+    .bind(seq)
+    .execute(tx.conn())
+    .await?;
     Ok(())
 }
 
@@ -187,16 +214,21 @@ pub(super) async fn apply(
     tx: &mut AdmittedTx,
     community: CommunityId,
     actor: &[u8],
+    seq: i64,
     intent: &ReadIntent,
 ) -> Result<IntentOutcome> {
+    let target = intent.target();
+    if let ReadIntent::MarkThrough { message_id, .. } = intent {
+        if event_id(message_id).is_none() {
+            return Ok(IntentOutcome::Invalid);
+        }
+    }
+    let Some(root) = valid_target(tx.conn(), community, actor, target).await? else {
+        return Ok(IntentOutcome::Blocked);
+    };
     match intent {
-        ReadIntent::MarkThrough { target, message_id } => {
-            let Some(id) = event_id(message_id) else {
-                return Ok(IntentOutcome::Invalid);
-            };
-            let Some(root) = valid_target(tx.conn(), community, actor, target).await? else {
-                return Ok(IntentOutcome::Blocked);
-            };
+        ReadIntent::MarkThrough { message_id, .. } => {
+            let id = event_id(message_id).unwrap_or_default();
             let Some(msg) = message(
                 tx.conn(),
                 community,
@@ -208,13 +240,40 @@ pub(super) async fn apply(
             else {
                 return Ok(IntentOutcome::Blocked);
             };
+            // A channel is marked through a message of its own timeline: a
+            // top-level message or a broadcast reply. A thread through its
+            // root or one of its replies.
             let is_reply = msg.root.as_ref().is_some_and(|r| r != &msg.id);
-            if (root.is_empty() && is_reply)
+            if (root.is_empty() && is_reply && !msg.broadcast)
                 || (!root.is_empty() && msg.id != root && msg.root.as_ref() != Some(&root))
             {
                 return Ok(IntentOutcome::Blocked);
             }
-            frontier(tx, community, actor, target, &root, &msg).await?;
+            write(
+                tx,
+                community,
+                actor,
+                target,
+                &root,
+                seq,
+                Change::Through(&msg),
+            )
+            .await?;
+        }
+        ReadIntent::MarkUnread { .. } => {
+            write(tx, community, actor, target, &root, seq, Change::Unread).await?;
+        }
+        ReadIntent::SetState { state, .. } => {
+            write(
+                tx,
+                community,
+                actor,
+                target,
+                &root,
+                seq,
+                Change::State(*state),
+            )
+            .await?;
         }
     }
     Ok(IntentOutcome::Applied)
@@ -222,8 +281,8 @@ pub(super) async fn apply(
 
 impl Db {
     /// Apply one independent intent. Blocked/invalid intents roll back *all*
-    /// private account changes. Retrying after an
-    /// ambiguous commit is safe because only fixed max operands are used.
+    /// private account changes, the counter included. Retrying after an
+    /// ambiguous commit is safe because only fixed operands are used.
     pub async fn apply_personal_read_intent(
         &self,
         community: CommunityId,
@@ -238,8 +297,8 @@ impl Db {
         .await?;
         deadlines(tx.conn()).await?;
         let actor = actor.to_bytes();
-        lock_account(&mut tx, community, &actor).await?;
-        let outcome = apply(&mut tx, community, &actor, intent).await?;
+        let seq = lock_account(&mut tx, community, &actor).await?;
+        let outcome = apply(&mut tx, community, &actor, seq, intent).await?;
         match outcome {
             IntentOutcome::Applied => tx.commit().await?,
             IntentOutcome::Blocked | IntentOutcome::Invalid => tx.rollback().await?,

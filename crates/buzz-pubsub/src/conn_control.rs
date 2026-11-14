@@ -138,6 +138,19 @@ pub enum ConnControl {
         #[serde(default)]
         unowned_only: bool,
     },
+    /// Send `frame` to every live socket authenticated as `pubkey` in the
+    /// carrying community: a person's updated activity rows, after they
+    /// changed their read state from another device. Best effort; a client
+    /// that misses it catches up with a `since` read.
+    PersonalActivity {
+        /// The person's pubkey bytes.
+        pubkey: Vec<u8>,
+        /// The complete WebSocket text frame.
+        frame: String,
+        /// The publishing process, which already delivered to its own
+        /// sockets and skips its own publish.
+        origin: u64,
+    },
 }
 
 /// A connection-control command received from a community-scoped Redis channel.

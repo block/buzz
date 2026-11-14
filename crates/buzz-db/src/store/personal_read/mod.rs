@@ -1,27 +1,12 @@
-//! Private, signer-owned accessory read progress, separate from NIP-RS events.
+//! Private, signer-owned read state, separate from NIP-RS events: a read
+//! position, a state and a manual unread flag per conversation and thread.
 //!
-//! A frontier is the relay arrival time of the message a context was read
-//! through; the unread horizon alone uses author time. Only fixed context
-//! intents advance frontiers, never a query scan cap.
+//! A read position is the relay arrival time of the message a context was
+//! read through. Only fixed intents and the person's own posts move it.
+//! `crate::store::activity` reads these rows into the activity list.
 
 mod model;
-mod participation;
-mod projection;
 mod writes;
 
 pub use model::*;
-
-#[cfg(test)]
-mod postgres_tests;
-
-#[cfg(test)]
-mod participation_postgres_tests;
-
-#[cfg(test)]
-mod projection_postgres_tests;
-
-#[cfg(test)]
-mod threads_postgres_tests;
-
-#[cfg(test)]
-mod arrival_postgres_tests;
+pub(crate) use writes::deadlines;

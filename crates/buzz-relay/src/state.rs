@@ -1094,6 +1094,36 @@ impl ConnectionManager {
         closed
     }
 
+    /// Send a text frame to every socket admitted as `pubkey` in `community`.
+    /// A socket still mid-admission gets nothing. Best effort: a socket whose
+    /// buffer is full misses it. A process with no such socket does no scan.
+    pub fn send_to_pubkey(&self, community: CommunityId, pubkey: &[u8], frame: &str) -> usize {
+        if !self.has_admitted_connection(community, pubkey) {
+            return 0;
+        }
+        let mut sent = 0usize;
+        for entry in self.connections.iter() {
+            if entry.community_id != community || !entry.admitted.load(Ordering::Acquire) {
+                continue;
+            }
+            let principal = entry
+                .authenticated_pubkey
+                .read()
+                .is_ok_and(|key| key.as_deref() == Some(pubkey));
+            if !principal {
+                continue;
+            }
+            if entry
+                .tx
+                .try_send(WsMessage::Text(frame.to_owned().into()))
+                .is_ok()
+            {
+                sent += 1;
+            }
+        }
+        sent
+    }
+
     /// Close all live connections admitted under NIP-FI `issuer` whose proven
     /// pubkey or recorded agent owner equals `pubkey`, **across all
     /// communities**.
@@ -2509,6 +2539,26 @@ impl AppState {
         closed
     }
 
+    /// Send a person's updated activity rows to their live sockets on every
+    /// pod. Best effort and never awaited: a client that misses the frame
+    /// catches up with a `since` read.
+    pub fn push_personal_activity(&self, tenant: &TenantContext, pubkey: &[u8], frame: String) {
+        self.conn_manager
+            .send_to_pubkey(tenant.community(), pubkey, &frame);
+        let pubsub = Arc::clone(&self.pubsub);
+        let tenant = tenant.clone();
+        let command = ConnControl::PersonalActivity {
+            pubkey: pubkey.to_vec(),
+            frame,
+            origin: process_origin(),
+        };
+        tokio::spawn(async move {
+            if let Err(e) = pubsub.publish_conn_control(&tenant, &command).await {
+                tracing::debug!("Failed to publish personal activity: {e}");
+            }
+        });
+    }
+
     /// Disconnect a community locally and publish the command to every relay pod.
     ///
     /// Publication is awaited so the archive API can distinguish durable state
@@ -2589,6 +2639,16 @@ impl AppState {
                             &reason,
                             unowned_only,
                         );
+                    }
+                    ConnControl::PersonalActivity {
+                        pubkey,
+                        frame,
+                        origin,
+                    } => {
+                        if origin != process_origin() {
+                            self.conn_manager
+                                .send_to_pubkey(scoped.community_id, &pubkey, &frame);
+                        }
                     }
                 },
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -3128,6 +3188,13 @@ impl std::fmt::Debug for AppState {
     }
 }
 
+/// A random id for this process, so it can skip its own cross-pod publishes
+/// that it already applied locally.
+fn process_origin() -> u64 {
+    static ORIGIN: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *ORIGIN.get_or_init(rand::random)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -3199,6 +3266,58 @@ pub(crate) mod tests {
             crate::state::CommunityConnectionControl::new(cancel.clone()),
         );
         (mgr, conn_id, rx, ctrl_rx, cancel, bp)
+    }
+
+    /// A personal frame reaches only sockets admitted as that person in that
+    /// community: not one still mid-admission, another person, or another
+    /// community's socket for the same key.
+    #[test]
+    fn send_to_pubkey_reaches_only_admitted_sockets_of_that_person_and_community() {
+        let mgr = ConnectionManager::new();
+        let key = vec![0xabu8; 32];
+        let home = buzz_core::tenant::CommunityId::from_uuid(Uuid::from_u128(1));
+        let elsewhere = buzz_core::tenant::CommunityId::from_uuid(Uuid::from_u128(2));
+        let register = |community, pubkey: &[u8], admitted: bool| {
+            let conn_id = Uuid::new_v4();
+            let (tx, rx) = mpsc::channel(8);
+            let cancel = CancellationToken::new();
+            mgr.register(
+                conn_id,
+                tx,
+                mpsc::channel(8).0,
+                mpsc::channel(1).0,
+                None,
+                cancel.clone(),
+                community,
+                Arc::new(AtomicU8::new(0)),
+                Arc::new(Mutex::new(HashMap::new())),
+                3,
+                CommunityConnectionControl::new(cancel),
+            );
+            mgr.set_authenticated_pubkey(conn_id, pubkey.to_vec());
+            if admitted {
+                mgr.mark_admitted(conn_id);
+            }
+            rx
+        };
+        assert_eq!(mgr.send_to_pubkey(home, &key, "early"), 0);
+        let mut mine = register(home, &key, true);
+        let mut second = register(home, &key, true);
+        let mut pending = register(home, &key, false);
+        let mut other_person = register(home, &[0xcdu8; 32], true);
+        let mut other_community = register(elsewhere, &key, true);
+
+        assert_eq!(mgr.send_to_pubkey(home, &key, "frame"), 2);
+
+        for rx in [&mut mine, &mut second] {
+            match rx.try_recv() {
+                Ok(WsMessage::Text(text)) => assert_eq!(text.as_str(), "frame"),
+                other => panic!("expected the frame, got {other:?}"),
+            }
+        }
+        for rx in [&mut pending, &mut other_person, &mut other_community] {
+            assert!(rx.try_recv().is_err(), "frame reached the wrong socket");
+        }
     }
 
     // ── NIP-FI S4 disconnect/deny witnesses ──

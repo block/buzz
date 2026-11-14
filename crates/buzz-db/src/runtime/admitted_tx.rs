@@ -1,6 +1,6 @@
 //! Community-admitted write transactions.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use buzz_core::CommunityId;
 use chrono::{DateTime, Utc};
@@ -75,9 +75,29 @@ pub struct AdmittedTx {
     community: CommunityId,
     /// Channels whose TTL deadline [`AdmittedTx::commit`] refreshes.
     ttl_refresh_channels: BTreeSet<Uuid>,
+    /// Activity rows [`AdmittedTx::commit`] hands off once committed.
+    activity: BTreeMap<Uuid, crate::store::activity::Staged>,
+    /// Arrival facts of events inserted on this transaction, for the mention
+    /// rows written after them.
+    arrivals: Vec<Arrival>,
+    /// The pool this transaction came from, for that hand-off.
+    pool: sqlx::PgPool,
     push_enqueue: Option<super::push_enqueue::PushEnqueue>,
     push_events: Vec<StagedPushEvent>,
 }
+
+/// When an event inserted on this transaction arrived, and its thread root
+/// when it is a reply.
+#[derive(Clone, Copy)]
+pub(crate) struct Arrival {
+    pub(crate) event_id: [u8; 32],
+    pub(crate) received_at: DateTime<Utc>,
+    pub(crate) root: Option<[u8; 32]>,
+}
+
+/// Most arrivals remembered per transaction; a mention insert past it reads
+/// the event row instead.
+const MAX_ARRIVALS: usize = 64;
 
 struct StagedPushEvent {
     event_id: Vec<u8>,
@@ -96,6 +116,9 @@ impl AdmittedTx {
             tx,
             community,
             ttl_refresh_channels: BTreeSet::new(),
+            activity: BTreeMap::new(),
+            arrivals: Vec::new(),
+            pool: store.pool().clone(),
             push_enqueue: None,
             push_events: Vec::new(),
         })
@@ -115,6 +138,9 @@ impl AdmittedTx {
             tx,
             community: lease.community_id,
             ttl_refresh_channels: BTreeSet::new(),
+            activity: BTreeMap::new(),
+            arrivals: Vec::new(),
+            pool: store.pool().clone(),
             push_enqueue: None,
             push_events: Vec::new(),
         })
@@ -168,11 +194,36 @@ impl AdmittedTx {
         }
     }
 
+    /// What this transaction contributes to `channel`'s activity rows.
+    pub(crate) fn channel_activity(
+        &mut self,
+        channel: Uuid,
+    ) -> &mut crate::store::activity::Staged {
+        self.activity.entry(channel).or_default()
+    }
+
+    /// Remember when an event inserted on this transaction arrived.
+    pub(crate) fn record_arrival(&mut self, arrival: Arrival) {
+        if self.arrivals.len() < MAX_ARRIVALS {
+            self.arrivals.push(arrival);
+        }
+    }
+
+    /// The arrival recorded for `event_id` on this transaction, if any.
+    pub(crate) fn arrival(&self, event_id: &[u8; 32]) -> Option<Arrival> {
+        self.arrivals
+            .iter()
+            .rev()
+            .find(|arrival| &arrival.event_id == event_id)
+            .copied()
+    }
+
     /// Commit the transaction. This is the only commit path for admitted
     /// writes.
     ///
     /// Refreshes the TTL of every channel that received an event first, as
-    /// the last statement before COMMIT.
+    /// the last statement before COMMIT. Activity rows are handed off only
+    /// after the commit, so no message waits on another message's row.
     pub async fn commit(mut self) -> Result<()> {
         if !self.ttl_refresh_channels.is_empty() {
             crate::store::event_follow_up::refresh_channel_ttls(
@@ -183,6 +234,9 @@ impl AdmittedTx {
             .await?;
         }
         self.tx.commit().await?;
+        if !self.activity.is_empty() {
+            crate::store::activity::submit(&self.pool, self.community, self.activity);
+        }
         if let Some(producer) = self.push_enqueue {
             for event in self.push_events {
                 producer.submit(self.community, event.event_id, event.created_at);

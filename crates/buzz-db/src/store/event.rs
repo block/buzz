@@ -539,6 +539,7 @@ async fn insert_event_on(
             channel_id,
         )
         .await?;
+        crate::store::activity::stage(tx, event, created_at, received_at, channel_id, None);
     }
 
     Ok((
@@ -2099,6 +2100,14 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
             channel_id,
         )
         .await?;
+        crate::store::activity::stage(
+            tx,
+            event,
+            created_at,
+            received_at,
+            channel_id,
+            thread_meta.as_ref(),
+        );
 
         if let Some(ref meta) = thread_meta {
             // The metadata rows below (the reply's and the parent and root

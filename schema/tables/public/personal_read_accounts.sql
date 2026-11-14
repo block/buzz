@@ -8,5 +8,9 @@ CREATE TABLE personal_read_accounts (
     community_id UUID NOT NULL,
     actor BYTEA NOT NULL CHECK (octet_length(actor) = 32),
     started_at TIMESTAMPTZ,
+    -- Per-actor change counter. Each personal write the actor makes takes this
+    -- row, increments seq and stamps the frontier row it changed, so seq
+    -- order is commit order. It is the personal half of the activity marker.
+    seq BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (community_id, actor)
 );
