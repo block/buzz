@@ -291,37 +291,18 @@ mod tests {
         assert!(matches!(result, Err(AuthError::Nip98Invalid(_))));
     }
 
-    const SERVER_NOW: u64 = 1_800_000_000;
-
-    fn nip98_event_at(keys: &Keys, offset_secs: i64) -> String {
-        let ts = SERVER_NOW.saturating_add_signed(offset_secs);
-        make_nip98_event(keys, TEST_URL, TEST_METHOD, None, Some(Timestamp::from(ts)))
-    }
-
-    fn verify_at_server_now(json: &str) -> Result<nostr::PublicKey, AuthError> {
-        crate::test_clock::pinned(SERVER_NOW, || {
-            verify_nip98_event(json, TEST_URL, TEST_METHOD, None)
-        })
-    }
-
     #[test]
-    fn timestamp_within_tolerance_accepted() {
+    fn timestamp_tolerance_is_120s_either_way() {
         let keys = Keys::generate();
-        for offset in [120, -120] {
-            let result = verify_at_server_now(&nip98_event_at(&keys, offset));
-            assert!(result.is_ok(), "offset {offset}s: {:?}", result.err());
-        }
-    }
-
-    #[test]
-    fn expired_timestamp_rejected() {
-        let keys = Keys::generate();
-        for offset in [-121, 121] {
-            let result = verify_at_server_now(&nip98_event_at(&keys, offset));
-            assert!(
-                matches!(result, Err(AuthError::Nip98Invalid(_))),
-                "offset {offset}s should be rejected"
-            );
+        let now = 1_800_000_000u64;
+        for (offset, ok) in [(120, true), (-120, true), (121, false), (-121, false)] {
+            let ts = Timestamp::from(now.saturating_add_signed(offset));
+            let json = make_nip98_event(&keys, TEST_URL, TEST_METHOD, None, Some(ts));
+            let result = crate::test_clock::pinned(now, || {
+                verify_nip98_event(&json, TEST_URL, TEST_METHOD, None)
+            });
+            assert_eq!(result.is_ok(), ok, "offset {offset}s");
+            assert!(ok || matches!(result, Err(AuthError::Nip98Invalid(_))));
         }
     }
 

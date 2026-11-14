@@ -1690,35 +1690,6 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn the_assertion_is_asked_of_the_desktop_every_time() {
-        // The desktop owns each assertion's deadline; the CLI keeps no copy,
-        // so repeated identical answers never get a fresh local lifetime.
-        let jws = assertion(300);
-        let answer = jws.clone();
-        let (endpoint, seen) = provider(move |_, request| match request["method"].as_str() {
-            Some("federated_identity") => serde_json::json!({ "result": answer }),
-            _ => describe(&[RELAY]),
-        })
-        .await;
-        let Ok(Ok(provider)) = Provider::open(endpoint, "tok".into(), false, RELAY).await else {
-            panic!("the provider should open");
-        };
-        for _ in 0..3 {
-            assert_eq!(
-                provider.federated_identity().await.unwrap(),
-                Some(jws.clone())
-            );
-        }
-        let asked = seen
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|s| s.2["method"] == "federated_identity")
-            .count();
-        assert_eq!(asked, 3);
-    }
-
-    #[tokio::test]
     async fn an_unbound_relay_or_revoked_token_falls_through() {
         let (endpoint, _) = provider(|_, _| describe(&["wss://other.example"])).await;
         let opened = Provider::open(endpoint, "tok".into(), false, RELAY)

@@ -933,6 +933,7 @@ void main() {
         findsOneWidget,
       );
       expect(f.sent('/identity/assertions'), hasLength(beforeWrongAccount));
+      expect(find.textContaining("device's clock"), findsNothing);
       expect(f.bound, isNull);
       expect(await f.store.read(), isNull);
       expect((await f.storage.loadAll()).single.nsec, community.nsec);

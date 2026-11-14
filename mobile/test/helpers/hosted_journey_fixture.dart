@@ -180,13 +180,9 @@ class HostedJourneyFixture {
       await beforeAssertionReturn?.call();
       if (expiredSession) return http.Response('{}', 401);
       if (denyAssertion) {
-        return http.Response(
-          '{}',
-          403,
-          headers: {
-            if (denialDate case final date?) 'date': HttpDate.format(date),
-          },
-        );
+        final date = denialDate;
+        final headers = {if (date != null) 'date': HttpDate.format(date)};
+        return http.Response('{}', 403, headers: headers);
       }
       final body = jsonDecode(request.body) as Map;
       if (bound != null && body['nostr_pubkey'] != bound) {

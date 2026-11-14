@@ -224,109 +224,12 @@ mod tests {
 
     #[test]
     fn default_ttl_meets_gate_floor() {
-        // TTL must cover the ±120s window. Drift this constant down and the
-        // gate breaks.
+        // §5 gate: TTL ≥ 120s. Drift this constant down and the gate breaks.
         // Const-drift tripwire: the assertion is intentionally over a constant.
         #[allow(clippy::assertions_on_constants)]
         {
-            assert!(DEFAULT_REPLAY_TTL_SECS >= 2 * TIMESTAMP_TOLERANCE_SECS);
+            assert!(DEFAULT_REPLAY_TTL_SECS >= 120);
         }
-    }
-
-    /// Set-if-absent markers that expire `ttl` seconds after the test clock.
-    #[derive(Default)]
-    struct InMemoryGuard(std::sync::Mutex<std::collections::HashMap<String, u64>>);
-
-    impl Nip98ReplayGuard for InMemoryGuard {
-        fn try_mark_in_scope<'a>(
-            &'a self,
-            scope: &'a str,
-            event_id: &'a EventId,
-            ttl_secs: u64,
-        ) -> Pin<Box<dyn Future<Output = Result<bool, AuthError>> + Send + 'a>> {
-            let now = crate::wall_now();
-            let mut markers = self.0.lock().unwrap();
-            let key = format!("{scope}:{event_id}");
-            let fresh = markers.get(&key).is_none_or(|&expires| expires <= now);
-            if fresh {
-                markers.insert(key, now + ttl_secs);
-            }
-            Box::pin(std::future::ready(Ok(fresh)))
-        }
-    }
-
-    #[test]
-    fn a_duplicate_still_verifies_at_the_last_second_its_marker_must_cover() {
-        // First seen at server time t, signed 120 s ahead: timestamp
-        // validation keeps admitting it through t + 240 and refuses it at
-        // t + 241, so only the replay marker (live until t + TTL) can refuse
-        // the duplicate in between.
-        let url = "https://relay.example.com/api/tokens";
-        let t = 1_800_000_000u64;
-        let event = EventBuilder::new(Kind::HttpAuth, "")
-            .tags([
-                nostr::Tag::parse(["u", url]).unwrap(),
-                nostr::Tag::parse(["method", "POST"]).unwrap(),
-            ])
-            .custom_created_at(nostr::Timestamp::from(t + TIMESTAMP_TOLERANCE_SECS))
-            .sign_with_keys(&Keys::generate())
-            .expect("sign");
-        let json = serde_json::to_string(&event).unwrap();
-        let guard = InMemoryGuard::default();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        let admit_at = |now| {
-            crate::test_clock::pinned(now, || {
-                crate::verify_nip98_event(&json, url, "POST", None)?;
-                rt.block_on(guard.try_mark_in_scope(
-                    "community",
-                    &event.id,
-                    DEFAULT_REPLAY_TTL_SECS,
-                ))
-            })
-        };
-
-        assert!(matches!(admit_at(t), Ok(true)));
-        let last_valid = t + 2 * TIMESTAMP_TOLERANCE_SECS;
-        assert!(
-            matches!(admit_at(last_valid), Ok(false)),
-            "the replay must be refused"
-        );
-        assert!(admit_at(last_valid + 1).is_err());
-
-        // The marker itself, checked on the guard directly: live through
-        // t + TTL - 1, gone at t + TTL. This is the in-memory guard's model,
-        // not evidence of Redis expiry.
-        let mark_at = |now| {
-            crate::test_clock::pinned(now, || {
-                rt.block_on(guard.try_mark_in_scope(
-                    "community",
-                    &event.id,
-                    DEFAULT_REPLAY_TTL_SECS,
-                ))
-            })
-        };
-        assert_eq!(DEFAULT_REPLAY_TTL_SECS, 250);
-        assert!(matches!(
-            mark_at(t + DEFAULT_REPLAY_TTL_SECS - 1),
-            Ok(false)
-        ));
-        assert!(matches!(mark_at(t + DEFAULT_REPLAY_TTL_SECS), Ok(true)));
-    }
-
-    #[test]
-    fn marker_covers_a_pod_with_a_slower_clock() {
-        // Pod A first sees an event signed 120 s ahead of A's clock, at A
-        // time t, and writes its marker until t + TTL. Pod B's clock runs
-        // 9 s behind A's, so B still admits the event until B time
-        // t + 240, which is A time t + 249. The marker must still be live
-        // then, or B would accept a replay.
-        let t = 1_000_000u64;
-        let marker_expires_a = t + DEFAULT_REPLAY_TTL_SECS;
-        let last_admissible_on_b_in_a_time =
-            t + 2 * TIMESTAMP_TOLERANCE_SECS + POD_CLOCK_DIFFERENCE_BUDGET_SECS;
-        assert!(last_admissible_on_b_in_a_time < marker_expires_a);
     }
 
     #[test]

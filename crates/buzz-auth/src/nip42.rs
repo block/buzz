@@ -140,49 +140,20 @@ mod tests {
         ));
     }
 
-    const SERVER_NOW: u64 = 1_800_000_000;
-
-    fn auth_event_at(keys: &Keys, challenge: &str, offset_secs: i64) -> Event {
-        let url = RelayUrl::parse(TEST_RELAY).unwrap();
-        let ts = SERVER_NOW.saturating_add_signed(offset_secs);
-        EventBuilder::auth(challenge, url)
-            .custom_created_at(Timestamp::from(ts))
-            .sign_with_keys(keys)
-            .expect("sign")
-    }
-
-    fn verify_at_server_now(event: &Event, challenge: &str) -> Result<(), AuthError> {
-        crate::test_clock::pinned(SERVER_NOW, || {
-            verify_nip42_event(event, challenge, TEST_RELAY)
-        })
-    }
-
     #[test]
-    fn timestamp_within_tolerance_accepted() {
-        let keys = Keys::generate();
-        let challenge = generate_challenge();
-        for offset in [120, -120] {
-            let event = auth_event_at(&keys, &challenge, offset);
-            assert!(
-                verify_at_server_now(&event, &challenge).is_ok(),
-                "offset {offset}s should be accepted"
-            );
-        }
-    }
-
-    #[test]
-    fn expired_event_rejected() {
-        let keys = Keys::generate();
-        let challenge = generate_challenge();
-        for offset in [-121, 121] {
-            let event = auth_event_at(&keys, &challenge, offset);
-            assert!(
-                matches!(
-                    verify_at_server_now(&event, &challenge),
-                    Err(AuthError::EventExpired)
-                ),
-                "offset {offset}s should be rejected"
-            );
+    fn timestamp_tolerance_is_120s_either_way() {
+        let (keys, challenge) = (Keys::generate(), generate_challenge());
+        let now = 1_800_000_000u64;
+        for (offset, ok) in [(120, true), (-120, true), (121, false), (-121, false)] {
+            let event = EventBuilder::auth(&challenge, RelayUrl::parse(TEST_RELAY).unwrap())
+                .custom_created_at(Timestamp::from(now.saturating_add_signed(offset)))
+                .sign_with_keys(&keys)
+                .expect("sign");
+            let result = crate::test_clock::pinned(now, || {
+                verify_nip42_event(&event, &challenge, TEST_RELAY)
+            });
+            assert_eq!(result.is_ok(), ok, "offset {offset}s");
+            assert!(ok || matches!(result, Err(AuthError::EventExpired)));
         }
     }
 

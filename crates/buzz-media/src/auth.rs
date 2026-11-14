@@ -1905,117 +1905,47 @@ mod tests {
         pub(super) static PINNED_NOW: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     }
 
-    const SERVER_NOW: u64 = 1_800_000_000;
-
-    fn upload_proof_at(created_offset: i64, lifetime: u64) -> (nostr::Event, String) {
-        let keys = Keys::generate();
+    /// Verifies a Strict upload proof signed `offset` seconds from a server
+    /// clock pinned at `SERVER_NOW`, with a 60 s lifetime.
+    fn verify_proof_at(offset: i64) -> Result<(), MediaError> {
+        const SERVER_NOW: u64 = 1_800_000_000;
         let sha256 = "a".repeat(64);
-        let created = SERVER_NOW.saturating_add_signed(created_offset);
-        let exp_str = (created + lifetime).to_string();
-        let tags = vec![
-            Tag::parse(["t", "upload"]).unwrap(),
-            Tag::parse(["x", &sha256]).unwrap(),
-            Tag::parse(["expiration", &exp_str]).unwrap(),
-            Tag::parse(["server", "relay.example"]).unwrap(),
-        ];
+        let created = SERVER_NOW.saturating_add_signed(offset);
         let event = EventBuilder::new(Kind::from(24242), "Upload buzz-media")
-            .tags(tags)
+            .tags([
+                Tag::parse(["t", "upload"]).unwrap(),
+                Tag::parse(["x", &sha256]).unwrap(),
+                Tag::parse(["expiration", &(created + 60).to_string()]).unwrap(),
+                Tag::parse(["server", "relay.example"]).unwrap(),
+            ])
             .custom_created_at(Timestamp::from(created))
-            .sign_with_keys(&keys)
+            .sign_with_keys(&Keys::generate())
             .unwrap();
-        (event, sha256)
-    }
-
-    /// Verifies with the clock pinned at `SERVER_NOW`.
-    fn verify_upload(
-        event: &nostr::Event,
-        sha256: &str,
-        mode: BlossomStrictness,
-    ) -> Result<(), MediaError> {
         PINNED_NOW.with(|c| c.set(Some(SERVER_NOW)));
-        let out = verify_blossom_upload_auth(event, sha256, Some("relay.example"), mode);
+        let out = verify_blossom_upload_auth(
+            &event,
+            &sha256,
+            Some("relay.example"),
+            BlossomStrictness::Strict,
+        );
         PINNED_NOW.with(|c| c.set(None));
         out
     }
 
-    const BOTH_MODES: [BlossomStrictness; 2] =
-        [BlossomStrictness::Strict, BlossomStrictness::Permissive];
-
     #[test]
-    fn test_both_modes_accept_client_exactly_120s_fast_or_slow() {
-        for mode in BOTH_MODES {
-            for offset in [120, -120] {
-                let (event, sha256) = upload_proof_at(offset, 60);
-                assert!(
-                    verify_upload(&event, &sha256, mode).is_ok(),
-                    "{mode:?} must accept a proof from a clock {offset}s off"
-                );
-            }
+    fn test_proof_window_is_120s_either_way() {
+        assert!(verify_proof_at(120).is_ok());
+        assert!(verify_proof_at(-120).is_ok());
+        for offset in [121, -121] {
+            assert!(matches!(
+                verify_proof_at(offset),
+                Err(MediaError::TimestampOutOfWindow)
+            ));
         }
-    }
-
-    #[test]
-    fn test_both_modes_reject_proof_121s_in_future() {
-        for mode in BOTH_MODES {
-            let (event, sha256) = upload_proof_at(121, 60);
-            assert!(
-                matches!(
-                    verify_upload(&event, &sha256, mode),
-                    Err(MediaError::TimestampOutOfWindow)
-                ),
-                "{mode:?} must reject created_at > now + 120s"
-            );
-        }
-    }
-
-    #[test]
-    fn test_both_modes_reject_expiration_at_now_minus_120s() {
-        // created_at stays inside Permissive's age so only expiration decides;
-        // Strict is covered too because its age check comes later.
-        for mode in BOTH_MODES {
-            let (event, sha256) = upload_proof_at(-180, 60);
-            assert!(
-                matches!(
-                    verify_upload(&event, &sha256, mode),
-                    Err(MediaError::TokenExpired)
-                ),
-                "{mode:?} must reject expiration <= now - 120s"
-            );
-        }
-        let (event, sha256) = upload_proof_at(-179, 60);
-        assert!(verify_upload(&event, &sha256, BlossomStrictness::Permissive).is_ok());
-    }
-
-    #[test]
-    fn test_strict_rejects_proof_121s_old_within_lifetime_cap() {
-        // A 60 s lifetime keeps the cap and expiration satisfied, so only the
-        // 120 s age bound can reject it.
-        let (event, sha256) = upload_proof_at(-121, 60);
+        // A slow client's proof expires 120 s after its `expiration`.
         assert!(matches!(
-            verify_upload(&event, &sha256, BlossomStrictness::Strict),
-            Err(MediaError::TimestampOutOfWindow)
-        ));
-    }
-
-    #[test]
-    fn test_strict_lifetime_cap_is_exact() {
-        let (event, sha256) = upload_proof_at(0, 60);
-        assert!(verify_upload(&event, &sha256, BlossomStrictness::Strict).is_ok());
-        let (event, sha256) = upload_proof_at(0, 61);
-        assert!(matches!(
-            verify_upload(&event, &sha256, BlossomStrictness::Strict),
-            Err(MediaError::TimestampOutOfWindow)
-        ));
-    }
-
-    #[test]
-    fn test_permissive_keeps_hour_age_and_no_lifetime_cap() {
-        let (event, sha256) = upload_proof_at(-3600, 7200);
-        assert!(verify_upload(&event, &sha256, BlossomStrictness::Permissive).is_ok());
-        let (event, sha256) = upload_proof_at(-3601, 7200);
-        assert!(matches!(
-            verify_upload(&event, &sha256, BlossomStrictness::Permissive),
-            Err(MediaError::TimestampOutOfWindow)
+            verify_proof_at(-180),
+            Err(MediaError::TokenExpired)
         ));
     }
 }

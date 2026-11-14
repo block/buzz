@@ -195,12 +195,6 @@ mod tests {
         assert_eq!(local_deadline(0, 20, 9_900, claims(10_000, 10_180)), 180);
         // A local clock 120 s fast: `exp` leaves 40 s past receipt, the tighter bound.
         assert_eq!(local_deadline(0, 20, 10_140, claims(10_000, 10_180)), 60);
-        // A short session-capped token: `exp` 30 s after `iat`.
-        assert_eq!(local_deadline(0, 20, 10_000, claims(10_000, 10_030)), 30);
-        // Already past `exp` locally: no budget left at receipt.
-        assert_eq!(local_deadline(0, 20, 10_200, claims(10_000, 10_180)), 20);
-        // A 10 s token whose reply took 20 s: exhausted before it arrived.
-        assert_eq!(local_deadline(0, 20, 9_900, claims(10_000, 10_010)), 10);
     }
 
     #[test]

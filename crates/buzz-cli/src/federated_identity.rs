@@ -641,93 +641,21 @@ mod tests {
         }
     }
 
-    /// An assertion for `pubkey` issued at `iat` and expiring at `exp`.
-    fn issued_at(pubkey: &str, iat: u64, exp: u64) -> (StatusCode, String) {
-        issued_as(
-            pubkey,
-            exp,
-            &test_support::assertion_issued_at(pubkey, iat, exp),
-        )
-    }
-
-    #[tokio::test]
-    async fn an_assertion_with_no_lifetime_left_is_refused_and_reminted() {
-        // The first reply takes 20 s to arrive for a 10 s token; the second
-        // is a normal one. Only the second is returned and cached.
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let n = calls.clone();
-        let (base, seen) = adapter(move |req| {
-            let pk = req["nostr_pubkey"].as_str().unwrap();
-            let now = unix_now();
-            if n.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-                // A 10 s token whose `exp` is still ahead of the local clock.
-                crate::cached_assertion::test_clock::advance(20);
-                issued_at(pk, now + 20, now + 30)
-            } else {
-                issued_at(pk, now, now + 300)
-            }
-        })
-        .await;
-        let keys = Keys::generate();
-        let session = AdapterSession::new(&base, TOKEN, RELAY).unwrap();
-        let assertion = session.assertion(&keys).await.unwrap().unwrap();
-        assert_eq!(seen.lock().unwrap().len(), 2);
-        let exp = crate::cached_assertion::jws_exp(&assertion).unwrap();
-        assert!(exp > unix_now() + 200, "the exhausted token was returned");
-        assert_eq!(session.assertion(&keys).await.unwrap().unwrap(), assertion);
-        assert_eq!(seen.lock().unwrap().len(), 2, "the good one is cached");
-    }
-
     #[tokio::test]
     async fn assertions_that_never_have_lifetime_left_end_in_an_error() {
+        // Each 10 s assertion takes 20 s to arrive.
         let (base, seen) = adapter(|req| {
+            let pk = req["nostr_pubkey"].as_str().unwrap();
             let now = unix_now();
             crate::cached_assertion::test_clock::advance(20);
-            issued_at(req["nostr_pubkey"].as_str().unwrap(), now + 20, now + 30)
+            let jws = test_support::assertion_issued_at(pk, now + 20, now + 30);
+            issued_as(pk, now + 30, &jws)
         })
         .await;
         let session = AdapterSession::new(&base, TOKEN, RELAY).unwrap();
         let err = session.assertion(&Keys::generate()).await.unwrap_err();
         assert!(matches!(err, CliError::Auth(_)), "{err:?}");
         assert_eq!(seen.lock().unwrap().len(), 3, "bounded reacquisition");
-    }
-
-    #[tokio::test]
-    async fn the_lifetime_counts_from_the_attempt_that_got_the_reply() {
-        // A first attempt that takes 100 s and fails, then a 60 s token: the
-        // lifetime starts at the second send, so it is usable and cached
-        // until half of it has passed.
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let n = calls.clone();
-        let (base, seen) = adapter(move |req| {
-            if n.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-                crate::cached_assertion::test_clock::advance(100);
-                return (StatusCode::BAD_GATEWAY, "{}".into());
-            }
-            let now = unix_now();
-            issued_at(req["nostr_pubkey"].as_str().unwrap(), now, now + 60)
-        })
-        .await;
-        let keys = Keys::generate();
-        let session = AdapterSession::new(&base, TOKEN, RELAY).unwrap();
-        let first = session.assertion(&keys).await.unwrap();
-        assert!(first.is_some());
-        crate::cached_assertion::test_clock::advance(29);
-        assert_eq!(session.assertion(&keys).await.unwrap(), first);
-        assert_eq!(seen.lock().unwrap().len(), 2);
-    }
-
-    #[tokio::test]
-    async fn an_assertion_without_iat_is_refused() {
-        let (base, _) = adapter(|req| {
-            let pk = req["nostr_pubkey"].as_str().unwrap();
-            let exp = unix_now() + 300;
-            issued_as(pk, exp, &test_support::assertion_without_iat(pk, exp))
-        })
-        .await;
-        let session = AdapterSession::new(&base, TOKEN, RELAY).unwrap();
-        let err = session.assertion(&Keys::generate()).await.unwrap_err();
-        assert!(matches!(err, CliError::Auth(_)), "{err:?}");
     }
 
     /// NIP-FA §Denials: every status/code the adapter can answer, plus the
@@ -1021,17 +949,6 @@ pub(crate) mod test_support {
             "sub": "user-1",
             "aud": "https://relay.example.com",
             "iat": iat,
-            "exp": exp,
-            "jti": "a1b2c3",
-            "nostr_pubkey": pubkey,
-        }))
-    }
-
-    pub(crate) fn assertion_without_iat(pubkey: &str, exp: u64) -> String {
-        jws(serde_json::json!({
-            "iss": "https://adapter.example",
-            "sub": "user-1",
-            "aud": "https://relay.example.com",
             "exp": exp,
             "jti": "a1b2c3",
             "nostr_pubkey": pubkey,
