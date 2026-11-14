@@ -1346,7 +1346,9 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       ("refused", 401, [:]),
       ("other key", 200, ["assertion": "a.b.c", "nostr_pubkey": String(repeating: "f", count: 64),
         "expires_at": Self.now + 300]),
-      ("expired", 200, ["assertion": "a.b.c", "nostr_pubkey": Self.ownPubkey, "expires_at": Self.now - 1]),
+      // Readable, with an `iat`, but no lifetime left.
+      ("expired", 200, ["assertion": "e30.\(Data(#"{"iat":\#(Self.now - 301)}"#.utf8).base64EncodedString().replacingOccurrences(of: "=", with: "")).c2ln",
+        "nostr_pubkey": Self.ownPubkey, "expires_at": Self.now - 1]),
       ("header injection", 200, ["assertion": "a.b\r\nX: y", "nostr_pubkey": Self.ownPubkey,
         "expires_at": Self.now + 300]),
     ]
