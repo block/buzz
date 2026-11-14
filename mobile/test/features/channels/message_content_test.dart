@@ -74,6 +74,51 @@ Widget _testable(
   );
 }
 
+/// Answers connectivity queries, which tables' scroll views trigger.
+void _mockConnectivity(WidgetTester tester) {
+  const connectivity = MethodChannel(
+    'dev.fluttercommunity.plus/connectivity_status',
+  );
+  final messenger = tester.binding.defaultBinaryMessenger;
+  messenger.setMockMethodCallHandler(connectivity, (_) async => null);
+  addTearDown(() => messenger.setMockMethodCallHandler(connectivity, null));
+}
+
+/// The RGBA pixels of the [RepaintBoundary] at [key], at a pixel ratio of 1.
+Future<({int width, Uint8List bytes})> _capturePixels(
+  WidgetTester tester,
+  GlobalKey key,
+) async => (await tester.runAsync(() async {
+  final boundary =
+      key.currentContext!.findRenderObject()! as RenderRepaintBoundary;
+  final image = await boundary.toImage(pixelRatio: 1);
+  final data = (await image.toByteData(format: ui.ImageByteFormat.rawRgba))!;
+  final width = image.width;
+  image.dispose();
+  return (width: width, bytes: Uint8List.fromList(data.buffer.asUint8List()));
+}))!;
+
+/// How many pixels differ between [before] and [after], counting only
+/// columns that pass [where].
+int _changedPixels(
+  ({int width, Uint8List bytes}) before,
+  ({int width, Uint8List bytes}) after, {
+  bool Function(int x)? where,
+}) {
+  expect(after.bytes.length, before.bytes.length);
+  var changed = 0;
+  for (var i = 0; i < before.bytes.length; i += 4) {
+    if (where != null && !where((i ~/ 4) % before.width)) continue;
+    for (var c = 0; c < 4; c++) {
+      if (before.bytes[i + c] != after.bytes[i + c]) {
+        changed++;
+        break;
+      }
+    }
+  }
+  return changed;
+}
+
 void _setSurfaceSize(WidgetTester tester, Size size) {
   tester.view.devicePixelRatio = 1.0;
   tester.view.physicalSize = size;
@@ -947,19 +992,7 @@ void main() {
     testWidgets(
       'a pressed link in a scrolled table tints only inside the table',
       (tester) async {
-        const connectivity = MethodChannel(
-          'dev.fluttercommunity.plus/connectivity_status',
-        );
-        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-          connectivity,
-          (_) async => null,
-        );
-        addTearDown(
-          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-            connectivity,
-            null,
-          ),
-        );
+        _mockConnectivity(tester);
         _setSurfaceSize(tester, const Size(400, 300));
         addTearDown(tester.view.reset);
         final capture = GlobalKey();
@@ -984,33 +1017,63 @@ void main() {
           ),
         );
         final point = paragraph.localToGlobal(const Offset(10, 10));
-        final sampleY = point.dy.toInt();
-        Future<List<int>> pixel() async => (await tester.runAsync(() async {
-          final boundary =
-              capture.currentContext!.findRenderObject()!
-                  as RenderRepaintBoundary;
-          final image = await boundary.toImage(pixelRatio: 1);
-          final bytes = (await image.toByteData(
-            format: ui.ImageByteFormat.rawRgba,
-          ))!;
-          final offset = (sampleY * image.width + 330) * 4;
-          final rgba = bytes.buffer.asUint8List().sublist(offset, offset + 4);
-          image.dispose();
-          return rgba;
-        }))!;
-        final before = await pixel();
+        final before = await _capturePixels(tester, capture);
         final press = await tester.startGesture(point);
         await tester.pump();
-        final after = await pixel();
+        final after = await _capturePixels(tester, capture);
         await press.cancel();
         await tester.pump();
         expect(
-          after,
-          before,
-          reason: 'The pixel is 30px beyond the table viewport',
+          _changedPixels(before, after, where: (x) => x < 300),
+          greaterThan(0),
+          reason: 'The link is tinted inside the table viewport',
+        );
+        expect(
+          _changedPixels(before, after, where: (x) => x >= 300),
+          0,
+          reason: 'Nothing is tinted beyond the table viewport',
         );
       },
     );
+
+    for (final (name, content, bubble) in [
+      ('inline code', 'See [`report`](https://example.com) now', false),
+      (
+        'inline code in a bubble',
+        'See [`report`](https://example.com) now',
+        true,
+      ),
+      (
+        'a table header',
+        '| [report](https://example.com) |\n| --- |\n| a value |',
+        false,
+      ),
+    ]) {
+      testWidgets('a pressed link in $name shows its tint', (tester) async {
+        _mockConnectivity(tester);
+        final capture = GlobalKey();
+        await tester.pumpWidget(
+          _testable(
+            RepaintBoundary(
+              key: capture,
+              child: Align(
+                alignment: Alignment.topLeft,
+                child: MessageContent(content: content, bubble: bubble),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final before = await _capturePixels(tester, capture);
+        final press = await tester.startGesture(textCenter(tester, 'report'));
+        await tester.pump();
+        final after = await _capturePixels(tester, capture);
+        await press.cancel();
+        await tester.pump();
+        // A tint hidden under the background changes only a few edge pixels.
+        expect(_changedPixels(before, after), greaterThan(100));
+      });
+    }
 
     testWidgets('a second finger does not restart a link hold', (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;

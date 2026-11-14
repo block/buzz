@@ -314,10 +314,12 @@ void _showLinkActions(
   );
 }
 
-/// Tints the [pressed] link's text behind [child], so a press marks the link
+/// Tints the [pressed] link's text over [child], so a press marks the link
 /// the way [_LinkLongPress] does for chips.
 ///
-/// Paint-only: a press repaints this box and rebuilds no markdown.
+/// The translucent tint paints on top so backgrounds inside [child], such as
+/// inline code or a table header, can't hide it. Paint-only: a press repaints
+/// this box and rebuilds no markdown.
 class _LinkPressHighlight extends SingleChildRenderObjectWidget {
   const _LinkPressHighlight({required this.pressed, required super.child});
 
@@ -362,6 +364,7 @@ class _RenderLinkPressHighlight extends RenderProxyBox {
 
   @override
   void paint(PaintingContext context, Offset offset) {
+    super.paint(context, offset);
     final link = _pressed.value;
     final color = link?.highlightColor;
     final root = child;
@@ -396,7 +399,6 @@ class _RenderLinkPressHighlight extends RenderProxyBox {
 
       visit(root);
     }
-    super.paint(context, offset);
   }
 
   /// The part of [paragraph] that is visible, in this box's coordinates: its
