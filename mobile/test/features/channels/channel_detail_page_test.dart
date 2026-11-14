@@ -82,6 +82,7 @@ import 'package:buzz/features/channels/thread_detail_page.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/channels/small_avatar.dart';
@@ -3412,7 +3413,7 @@ void main() {
 
       await tester.pump(const Duration(milliseconds: 300));
 
-      expect(readState.markedContexts, {'activity:$_channelId': 1200});
+      expect(readState.markedContexts, {_channelId: 1200});
       expect(tester.takeException(), isNull);
     });
 
@@ -3470,10 +3471,7 @@ void main() {
       );
       // Only its end shows at the bottom, so it neither fits nor fills the
       // screen; being the newest message reads it.
-      expect(readState.markedContexts, {
-        'activity:$_channelId': 1100,
-        'msg:tall': 1100,
-      });
+      expect(readState.markedContexts, {_channelId: 1100});
       expect(tester.takeException(), isNull);
     });
 
@@ -3689,7 +3687,7 @@ void main() {
 
       await tester.pump(const Duration(milliseconds: 300));
 
-      expect(readState.markedContexts, {'activity:$_channelId': 1200});
+      expect(readState.markedContexts, {_channelId: 1200});
       expect(tester.takeException(), isNull);
     });
 
@@ -3727,7 +3725,7 @@ void main() {
       expect(readState.clearedForcedContexts, [_channelId]);
       // The channel mark does not move, and a message the reader marked
       // unread stays unread.
-      expect(readState.markedContexts, {'activity:$_channelId': 1200});
+      expect(readState.markedContexts, {_channelId: 1200});
       expect(readState.state.isForcedUnread('msg:old'), isTrue);
     });
 
@@ -3967,7 +3965,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       await tester.pump(const Duration(milliseconds: 300));
-      expect(readState.markedContexts, {'activity:$_channelId': 1000});
+      expect(readState.markedContexts, {_channelId: 1000});
       readState.markedContexts.clear();
 
       Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
@@ -3989,7 +3987,7 @@ void main() {
       // mark too, as in `buzz-app`: the thread mark reads a reply only while
       // its root is loaded. The covered channel page does not read meanwhile.
       expect(readState.markedContexts, {
-        'thread-activity:$threadIdRoot': 1102,
+        threadContextKey(threadIdRoot): 1102,
         'msg:reply0': 1100,
         'msg:reply1': 1101,
         'msg:reply2': 1102,
@@ -4043,7 +4041,7 @@ void main() {
 
       expect(find.byType(ThreadDetailPage), findsOneWidget);
       expect(readState.markedContexts['msg:$threadIdRoot'], 1000);
-      expect(readState.markedContexts['thread-activity:$threadIdRoot'], 1100);
+      expect(readState.markedContexts[threadContextKey(threadIdRoot)], 1100);
     });
 
     testWidgets('a thread with no replies reads its head', (tester) async {
@@ -4327,8 +4325,9 @@ void main() {
           context: messageListElement,
           direction: ScrollDirection.reverse,
         ).dispatch(messageListElement);
-        // Settling can already complete the read dwell; record the whole jump.
-        readState.markedContexts.clear();
+        // Settling can already complete the read dwell, and the opening
+        // catch-up covers every row; record the whole jump.
+        readState.forgetMarks();
         tester
             .widget<ScrollablePositionedList>(messageList)
             .itemScrollController!
@@ -4564,7 +4563,7 @@ void main() {
             .getTopLeft(find.byKey(const ValueKey('thread-composer-dock')))
             .dy;
         final marked = readState.markedContexts.keys.toSet();
-        expect(marked, isNot(contains('thread-activity:$threadIdRoot')));
+        expect(marked, isNot(contains(threadContextKey(threadIdRoot))));
         var hiddenRows = 0;
         for (var i = 0; i < 40; i++) {
           final row = find.byKey(ValueKey('thread-message-group-reply$i'));
@@ -21285,12 +21284,19 @@ class _SynchronousReadStateNotifier extends ReadStateNotifier {
     String contextId,
     int unixTimestamp, {
     bool clearForcedMessages = false,
+    bool explicit = false,
   }) {
     markedContexts[contextId] = unixTimestamp;
     state = state.copyWithContext(contextId, unixTimestamp);
   }
 
   final List<String> clearedForcedContexts = [];
+
+  /// Forgets every mark so far, such as the catch-up on opening.
+  void forgetMarks() {
+    markedContexts.clear();
+    state = _initialState;
+  }
 
   @override
   void clearForcedUnread(String contextId) {

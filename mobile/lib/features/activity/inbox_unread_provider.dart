@@ -15,7 +15,8 @@ final inboxHasUnreadProvider = Provider<bool>((ref) {
     (item) => !isInboxItemDone(
       item,
       markerOf: readState.effectiveTimestamp,
-      localUnreadOverrides: localState.unreadIds,
+      rawMarkerOf: (contextId) => readState.contexts[contextId],
+      localUnreadOverrides: localState.unreadBaselines,
       localDoneSet: localState.doneIds,
     ),
   );

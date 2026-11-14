@@ -59,7 +59,9 @@ void main() {
     InboxLocalState state() => container.read(inboxLocalStateProvider);
 
     expect(state().doneIds, {'approval-a', 'approval-b'});
-    container.read(inboxLocalStateProvider.notifier).markUnread(['approval-a']);
+    container.read(inboxLocalStateProvider.notifier).markUnread([
+      'approval-a',
+    ], baseline: 0);
     config.switchTo('https://relay-b.example');
     expect(state().doneIds, {'approval-a', 'approval-b'});
     config.switchTo('https://relay-a.example');

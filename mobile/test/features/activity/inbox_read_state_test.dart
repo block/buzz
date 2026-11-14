@@ -144,7 +144,7 @@ void main() {
       expect(done({'thread-activity:$threadIdInboxRoot1': 50}), isTrue);
     });
 
-    test('a local unread override always wins', () {
+    test('a local unread override wins until a read passes its baseline', () {
       final row = buildInboxItems([
         item(id: threadIdInboxA, createdAt: 50),
       ]).single;
@@ -152,10 +152,20 @@ void main() {
         isInboxItemDone(
           row,
           markerOf: markers({'ch1': 99}),
-          localUnreadOverrides: const {threadIdInboxA},
+          localUnreadOverrides: const {threadIdInboxA: 99},
           localDoneSet: const {},
         ),
         isFalse,
+      );
+      // Another device read past it: the stale force no longer holds.
+      expect(
+        isInboxItemDone(
+          row,
+          markerOf: markers({'ch1': 120}),
+          localUnreadOverrides: const {threadIdInboxA: 99},
+          localDoneSet: const {},
+        ),
+        isTrue,
       );
     });
 

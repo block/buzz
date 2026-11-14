@@ -18,10 +18,10 @@ const readingDwell = Duration(milliseconds: 300);
 /// The read marks to write after a reading dwell, following `buzz-app`'s
 /// rules (its `docs/unread.md`):
 ///
-/// - When the newest message is at the bottom, a channel writes
-///   `activity:<channel>` and a thread writes `thread-activity:<root>`. These
-///   catch-up marks read ordinary messages and that thread's replies. They do
-///   not read mentions, broadcasts or DMs.
+/// - When the newest message is at the bottom (a catch-up), a channel
+///   advances its own frontier to the newest top-level message reached, and
+///   a thread advances `thread:<root>` to the newest reply. Everything at or
+///   below the frontier is read, mentions, broadcasts and DMs included.
 /// - Unlike `buzz-app`, the newest message itself is read at the live bottom,
 ///   in a thread too, so one taller than the screen is read at its end.
 ///   Mentions above it are read only on their own, never by reaching the
@@ -32,8 +32,8 @@ const readingDwell = Duration(milliseconds: 300);
 ///   thread only while the root is loaded, so `buzz-app` keeps reply marks.
 ///   Unlike `buzz-app`, the message a link opened is readable once any part
 ///   of it shows, since a phone often cannot fit a long one.
-/// - Automatic reading never writes the channel mark. Only an explicit
-///   Mark read does that.
+/// - Apart from a catch-up, automatic reading never writes the channel
+///   mark. `msg:` marks stay on this device.
 ///
 /// [loaded] is every message loaded for the channel or thread, including
 /// replies. [visible] is the messages readable for the whole dwell; see
@@ -102,6 +102,7 @@ Map<String, int> readingMarks({
     final catchUp = _catchUpMark(
       channelId: channelId,
       bottom: liveBottom,
+      loaded: loaded,
       threadRootId: threadRootId,
       markerOf: markerOf,
       now: now ?? DateTime.now().millisecondsSinceEpoch ~/ 1000,
@@ -154,24 +155,37 @@ bool _showsNewest({
 MapEntry<String, int>? _catchUpMark({
   required String channelId,
   required TimelineMessage bottom,
+  required Iterable<TimelineMessage> loaded,
   required String? threadRootId,
   required int? Function(String contextId) markerOf,
   required int now,
 }) {
+  // The channel frontier covers top-level messages only (NIP-RS Write
+  // Discipline), so a flat timeline whose bottom is a reply reads up to the
+  // newest top-level message at or before it.
+  var reached = bottom.createdAt;
+  if (threadRootId == null && _isThreadReply(bottom)) {
+    int? topLevel;
+    for (final message in loaded) {
+      if (_isThreadReply(message) || message.createdAt > reached) continue;
+      if (topLevel == null || message.createdAt > topLevel) {
+        topLevel = message.createdAt;
+      }
+    }
+    if (topLevel == null) return null;
+    reached = topLevel;
+  }
   // Never read beyond the last rendered message: a message between that
   // row and a hidden lifecycle event may still arrive out of order.
-  final cut = bottom.createdAt < now ? bottom.createdAt : now;
-  final key = threadRootId != null
-      ? threadActivityContextKey(threadRootId)
-      : activityContextKey(channelId);
-  final covered = maxReadAt([
-    markerOf(key),
-    markerOf(channelId),
-    if (threadRootId != null) markerOf(threadContextKey(threadRootId)),
-  ]);
+  final cut = reached < now ? reached : now;
+  final key = threadRootId != null ? threadContextKey(threadRootId) : channelId;
+  final covered = markerOf(key);
   if (covered != null && covered >= cut) return null;
   return MapEntry(key, cut);
 }
+
+bool _isThreadReply(TimelineMessage message) =>
+    message.parentId != null && !_isBroadcast(message);
 
 String? _threadRootOf(TimelineMessage message) =>
     message.parentId == null ? null : message.rootId ?? message.parentId;

@@ -156,7 +156,8 @@ class ActivityPage extends HookConsumerWidget {
     bool isDone(InboxItem item) => isInboxItemDone(
       item,
       markerOf: markerOf,
-      localUnreadOverrides: localState.unreadIds,
+      rawMarkerOf: (contextId) => readState.contexts[contextId],
+      localUnreadOverrides: localState.unreadBaselines,
       localDoneSet: localState.doneIds,
     );
 
@@ -260,11 +261,16 @@ class ActivityPage extends HookConsumerWidget {
         notifier.markContextRead(
           rootId == null ? channelId : threadContextKey(rootId),
           cap,
+          explicit: true,
         );
       }
       for (final e in shown.values) {
         if (inContext(e) && cap != null && e.createdAt <= cap) continue;
-        notifier.markContextRead(msgContextKey(e.id), e.createdAt);
+        notifier.markContextRead(
+          msgContextKey(e.id),
+          e.createdAt,
+          explicit: true,
+        );
       }
     }
 
@@ -308,9 +314,16 @@ class ActivityPage extends HookConsumerWidget {
     }
 
     void markItemUnread(InboxItem item) {
+      final readState = ref.read(readStateProvider);
       ref
           .read(inboxLocalStateProvider.notifier)
-          .markUnread(groupedInboxItemIds(item));
+          .markUnread(
+            groupedInboxItemIds(item),
+            baseline: inboxItemReadAt(
+              item,
+              markerOf: (contextId) => readState.contexts[contextId],
+            ),
+          );
     }
 
     Future<void> openItem(InboxItem item) async {

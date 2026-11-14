@@ -1,3 +1,4 @@
+import 'package:buzz/shared/read_state/thread_follows_format.dart';
 import 'package:buzz/shared/widgets/sheet_action_section.dart';
 import 'package:buzz/shared/widgets/app_list_card.dart';
 import 'dart:ui' as ui;
@@ -97,6 +98,7 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
     String contextId,
     int unixTimestamp, {
     bool clearForcedMessages = false,
+    bool explicit = false,
   }) {
     markedRead[contextId] = unixTimestamp;
     var forced = {
@@ -113,9 +115,31 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
   }
 
   @override
-  void markContextUnread(String contextId, {required String channelId}) {
+  bool markContextUnread(
+    String contextId, {
+    required String channelId,
+    String? threadRootId,
+  }) {
     markedUnread.add(contextId);
     state = _withForced({...state.forcedUnreadContexts, contextId: channelId});
+    return true;
+  }
+
+  @override
+  bool setThreadFollow(String channelId, String rootId, bool follow) {
+    state = ReadStateState(
+      isReady: state.isReady,
+      pubkey: state.pubkey,
+      contexts: state.contexts,
+      version: state.version + 1,
+      forcedUnreadContexts: state.forcedUnreadContexts,
+      threadFollows: {
+        ...state.threadFollows,
+        threadFollowKey(channelId, rootId): (follow: follow, at: 1),
+      },
+      threadFollowsIncomplete: false,
+    );
+    return true;
   }
 
   ReadStateState _withForced(Map<String, String> forced) => ReadStateState(

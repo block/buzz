@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 
@@ -14,11 +15,11 @@ const threadContextPrefix = 'thread:';
 String msgContextKey(String messageId) => '$msgContextPrefix$messageId';
 String threadContextKey(String rootId) => '$threadContextPrefix$rootId';
 
-/// Catch-up marks, written by the web and desktop app (`buzz-app`) when the
-/// reader reaches the bottom of a channel or thread. `activity:<channel>`
-/// reads ordinary top-level messages up to its time; `thread-activity:<root>`
-/// reads that thread's replies. Neither reads mentions, broadcasts or DMs
-/// in the channel, so neither is a channel marker.
+/// Legacy catch-up marks. Catch-up now advances the channel or `thread:`
+/// frontier, so these are only read, never written: older installations may
+/// still write them. `activity:<channel>` reads ordinary top-level messages
+/// up to its time; `thread-activity:<root>` reads that thread's replies.
+/// Neither reads mentions, broadcasts or DMs in the channel.
 String activityContextKey(String channelId) => 'activity:$channelId';
 String threadActivityContextKey(String rootId) => 'thread-activity:$rootId';
 
@@ -51,11 +52,9 @@ Map<String, int> pruneStaleContexts(
       entry.key: entry.value,
 };
 
-/// Whether [contextId] belongs to the web app's manual-unread overrides
-/// (`ov_s:`, `ov_c:`, `ov_b:`) or their escaped frontiers (`esc:`). This app
-/// does not read overrides. It does not take them from other slots, but it
-/// carries the ones already in its own slot unchanged: NIP-RS forbids
-/// dropping them, and an old version of this app copied them there.
+/// Whether [contextId] is a manual-unread override counter (`ov_s:`,
+/// `ov_c:`, `ov_b:`) or an escaped frontier (`esc:`). Counters are handled
+/// as whole groups, never as frontiers.
 bool isOverrideContext(String contextId) =>
     contextId.startsWith('ov_') || contextId.startsWith('esc:');
 
@@ -98,6 +97,57 @@ Map<String, Map<String, int>> _overrideGroups(Map<String, int> contexts) {
   };
 }
 
+/// Whether an override group for [target] is synchronized state. Only
+/// whole-channel groups are: a `msg:` or `thread:` group, or any other
+/// prefixed context, is ignored on read and never published.
+bool isChannelOverrideTarget(String target) => !target.contains(':');
+
+/// One merged manual-unread register: set counter, clear counter, baseline.
+typedef OverrideRegister = ({int s, int c, int b});
+
+/// The channel override registers carried by [contexts], from groups that
+/// are complete and travel with their frontier. A tombstone reads as
+/// `(0, C, 0)`.
+Map<String, OverrideRegister> channelOverrideRegisters(
+  Map<String, int> contexts,
+) {
+  final groups = completeOverrideGroups(contexts);
+  return {
+    for (final target in _overrideGroups(groups).keys)
+      if (isChannelOverrideTarget(target))
+        target: (
+          s: groups['ov_s:$target'] ?? 0,
+          c: groups['ov_c:$target'] ?? 0,
+          b: groups['ov_b:$target'] ?? 0,
+        ),
+  };
+}
+
+/// NIP-RS's register merge: componentwise `max()`.
+OverrideRegister mergeOverrideRegisters(
+  OverrideRegister a,
+  OverrideRegister b,
+) => (s: max(a.s, b.s), c: max(a.c, b.c), b: max(a.b, b.b));
+
+/// NIP-RS's Liveness Predicate against the merged frontier [frontier].
+bool isOverrideActive(OverrideRegister register, int frontier) =>
+    register.s > 0 && frontier <= register.b && register.s > register.c;
+
+/// The canonical wire keys of [registers]: a live group publishes all three
+/// counters, a dead one only its tombstone floor `ov_c: = max(S, C)`.
+Map<String, int> canonicalOverrideEntries(
+  Map<String, OverrideRegister> registers,
+  int Function(String target) frontierOf,
+) => {
+  for (final MapEntry(key: target, value: r) in registers.entries)
+    if (isOverrideActive(r, frontierOf(target))) ...{
+      'ov_s:$target': r.s,
+      'ov_c:$target': r.c,
+      'ov_b:$target': r.b,
+    } else
+      'ov_c:$target': max(r.s, r.c),
+};
+
 /// The override keys of [contexts] that this app may carry. NIP-RS accepts
 /// an override group only whole (see [_isOverrideShape]), and a group must
 /// travel with its frontier, found in [contexts] or [frontiers]. Any other
@@ -122,13 +172,6 @@ Map<String, int> completeOverrideGroups(
   }
   return kept;
 }
-
-/// The frontier keys that must travel with the override groups in
-/// [contexts] (NIP-RS's co-location rule).
-Set<String> overrideGroupFrontierKeys(Map<String, int> contexts) => {
-  for (final target in _overrideGroups(contexts).keys)
-    overrideFrontierKey(target),
-};
 
 int? maxReadAt(Iterable<int?> markers) {
   int? latest;

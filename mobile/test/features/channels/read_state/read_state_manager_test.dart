@@ -512,115 +512,125 @@ void main() {
     );
   });
 
-  test('carries its own override keys and takes none from others', () async {
-    SharedPreferences.setMockInitialValues({});
-    final prefs = await SharedPreferences.getInstance();
-    final keychain = nostr.Keys.generate();
-    final crypto = ReadStateCrypto.tryCreate(
-      nsec: keychain.nsec,
-      pubkey: keychain.public,
-    )!;
-    final storage = ReadStateStorage(prefs);
-    final clientId = storage.getOrCreateClientId(keychain.public, _relayUrl);
-    final slotId = storage.getOrCreateSlotId(keychain.public, _relayUrl);
-    const ownGroup = {
-      'ov_s:channel-1': 2,
-      'ov_c:channel-1': 1,
-      'ov_b:channel-1': 90,
-    };
-    final oldMessage = 'msg:${'d' * 64}';
-    final oldMessageGroup = {'ov_c:$oldMessage': 96};
-    final session = _FakeRelaySession()
-      ..historyEvents = [
-        _readStateEvent(
-          pubkey: keychain.public,
-          crypto: crypto,
-          clientId: clientId,
-          slotId: slotId,
-          // `ov_s:channel-9` alone is a partial group, rejected whole.
-          contexts: {
-            'channel-1': 90,
-            ...ownGroup,
-            'ov_s:channel-9': 3,
-            // Older than the local save horizon, so saving prunes it unless
-            // its group protects it.
-            oldMessage: 95,
-            ...oldMessageGroup,
-          },
-          createdAt: 100,
-        ),
-        _readStateEvent(
-          pubkey: keychain.public,
-          crypto: crypto,
-          clientId: 'web-client',
-          slotId: 'web-slot',
-          contexts: {'ov_c:channel-2': 4, 'esc:ov_x': 5, 'channel-2': 80},
-          createdAt: 100,
-        ),
-      ];
-    final relay = _FakeSignedEventRelay();
-    final manager = ReadStateManager(
-      pubkey: keychain.public,
-      relayUrl: _relayUrl,
-      prefs: prefs,
-      crypto: crypto,
-      relaySession: session,
-      signedEventRelay: relay,
-      remoteEnabled: true,
-      onChanged: () {},
-      now: () => 2000,
-    );
+  test(
+    'carries merged channel override groups and drops message groups',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final storage = ReadStateStorage(prefs);
+      final clientId = storage.getOrCreateClientId(keychain.public, _relayUrl);
+      final slotId = storage.getOrCreateSlotId(keychain.public, _relayUrl);
+      const ownGroup = {
+        'ov_s:channel-1': 2,
+        'ov_c:channel-1': 1,
+        'ov_b:channel-1': 90,
+      };
+      final oldMessage = 'msg:${'d' * 64}';
+      final oldMessageGroup = {'ov_c:$oldMessage': 96};
+      final session = _FakeRelaySession()
+        ..historyEvents = [
+          _readStateEvent(
+            pubkey: keychain.public,
+            crypto: crypto,
+            clientId: clientId,
+            slotId: slotId,
+            // `ov_s:channel-9` alone is a partial group, rejected whole.
+            contexts: {
+              'channel-1': 90,
+              ...ownGroup,
+              'ov_s:channel-9': 3,
+              // Older than the local save horizon, so saving prunes it unless
+              // its group protects it.
+              oldMessage: 95,
+              ...oldMessageGroup,
+            },
+            createdAt: 100,
+          ),
+          _readStateEvent(
+            pubkey: keychain.public,
+            crypto: crypto,
+            clientId: 'web-client',
+            slotId: 'web-slot',
+            contexts: {'ov_c:channel-2': 4, 'esc:ov_x': 5, 'channel-2': 80},
+            createdAt: 100,
+          ),
+        ];
+      final relay = _FakeSignedEventRelay();
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: session,
+        signedEventRelay: relay,
+        remoteEnabled: true,
+        onChanged: () {},
+        now: () => 2000,
+      );
 
-    await manager.initialize();
-    // Local message feedback never schedules wire writes. A frontier advance
-    // triggers publication and must preserve complete own override groups.
-    for (var index = 0; index < 1400; index++) {
-      manager.markContextRead('msg:${index.toString().padLeft(64, '0')}', 200);
-    }
-    manager.markContextRead('channel-3', 200);
-    await manager.flush();
+      await manager.initialize();
+      // Local message feedback never schedules wire writes. A frontier advance
+      // triggers publication and must preserve complete own override groups.
+      for (var index = 0; index < 1400; index++) {
+        manager.markContextRead(
+          'msg:${index.toString().padLeft(64, '0')}',
+          200,
+        );
+      }
+      manager.markContextRead('channel-3', 200);
+      await manager.flush();
 
-    final published = decodeReadStateBlob(
-      crypto.decrypt(relay.contents.last),
-    )!.contexts;
-    expect(published, containsPair('ov_s:channel-1', 2));
-    expect(published, containsPair('ov_c:channel-1', 1));
-    expect(published, containsPair('ov_b:channel-1', 90));
-    // The group's frontier travels with it.
-    expect(published, containsPair('channel-1', 90));
-    expect(published, isNot(contains('ov_s:channel-9')));
-    expect(published, isNot(contains('ov_c:channel-2')));
-    expect(published, isNot(contains('esc:ov_x')));
-    expect(manager.getEffectiveTimestamp('ov_s:channel-1'), isNull);
-    manager.dispose(flushPending: false);
+      final published = decodeReadStateBlob(
+        crypto.decrypt(relay.contents.last),
+      )!.contexts;
+      expect(published, containsPair('ov_s:channel-1', 2));
+      expect(published, containsPair('ov_c:channel-1', 1));
+      expect(published, containsPair('ov_b:channel-1', 90));
+      // The group's frontier travels with it.
+      expect(published, containsPair('channel-1', 90));
+      expect(published, isNot(contains('ov_s:channel-9')));
+      // A peer's channel tombstone is merged and carried with its frontier.
+      expect(published, containsPair('ov_c:channel-2', 4));
+      expect(published, containsPair('channel-2', 80));
+      expect(published, isNot(contains('esc:ov_x')));
+      // Message groups are not synced state: never carried.
+      expect(published, isNot(contains('ov_c:$oldMessage')));
+      expect(manager.getEffectiveTimestamp('ov_s:channel-1'), isNull);
+      manager.dispose(flushPending: false);
 
-    // A restart without the relay still carries the group.
-    final restartedRelay = _FakeSignedEventRelay();
-    final restarted = ReadStateManager(
-      pubkey: keychain.public,
-      relayUrl: _relayUrl,
-      prefs: prefs,
-      crypto: crypto,
-      relaySession: null,
-      signedEventRelay: restartedRelay,
-      remoteEnabled: true,
-      onChanged: () {},
-      now: () => 2000,
-    );
-    restarted.markContextRead('channel-3', 300);
-    await restarted.flush();
-    final republished = decodeReadStateBlob(
-      crypto.decrypt(restartedRelay.contents.last),
-    )!.contexts;
-    for (final entry in ownGroup.entries) {
-      expect(republished, containsPair(entry.key, entry.value));
-    }
-    expect(republished, containsPair('channel-1', 90));
-    expect(republished, containsPair(oldMessage, 95));
-    expect(republished, containsPair('ov_c:$oldMessage', 96));
-    expect(republished, isNot(contains('ov_s:channel-9')));
-    expect(republished, isNot(contains('ov_c:channel-2')));
-  });
+      // A restart without the relay still carries the group.
+      final restartedRelay = _FakeSignedEventRelay();
+      final restarted = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: null,
+        signedEventRelay: restartedRelay,
+        remoteEnabled: true,
+        onChanged: () {},
+        now: () => 2000,
+      );
+      restarted.markContextRead('channel-3', 300);
+      await restarted.flush();
+      final republished = decodeReadStateBlob(
+        crypto.decrypt(restartedRelay.contents.last),
+      )!.contexts;
+      for (final entry in ownGroup.entries) {
+        expect(republished, containsPair(entry.key, entry.value));
+      }
+      expect(republished, containsPair('channel-1', 90));
+      expect(republished, containsPair(oldMessage, 95));
+      expect(republished, isNot(contains('ov_c:$oldMessage')));
+      expect(republished, isNot(contains('ov_s:channel-9')));
+      expect(republished, containsPair('ov_c:channel-2', 4));
+    },
+  );
 
   test('rejects own-slot override groups that are malformed or have no '
       'frontier', () async {

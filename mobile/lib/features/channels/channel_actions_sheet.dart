@@ -175,9 +175,21 @@ class ChannelActionsSheet extends HookConsumerWidget {
                             );
                       }
                     } else {
-                      ref
+                      final marked = ref
                           .read(readStateProvider.notifier)
                           .markContextUnread(channel.id, channelId: channel.id);
+                      if (!marked) {
+                        ScaffoldMessenger.maybeOf(
+                          context,
+                        )?.showFeedbackSnackBar(
+                          const SnackBar(
+                            content: Text(
+                              'Couldn’t mark this channel unread. Try again.',
+                            ),
+                          ),
+                          kind: ToastKind.error,
+                        );
+                      }
                     }
                   },
                 ),

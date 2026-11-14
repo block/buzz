@@ -13,7 +13,10 @@ import 'read_state_format.dart';
 import 'read_state_storage.dart';
 import 'read_state_packing.dart';
 import 'read_state_time.dart';
+import 'thread_follows_format.dart';
 import '../theme/community_theme_preference.dart';
+
+part 'read_state_follows.dart';
 
 class ReadStateCrypto {
   final Uint8List conversationKey;
@@ -151,9 +154,22 @@ class ReadStateManager {
   // snapshot clears [syncError] only on this evidence.
   bool _lastSnapshotSucceeded = false;
   final int Function() _now;
-  // Override keys already in this device's own slot, carried unchanged.
-  // See [isOverrideContext].
-  final Map<String, int> _carriedOverrides = {};
+  // Merged whole-channel override registers, from this installation and its
+  // peers. The primary carries all of them (NIP-RS, Buzz profile).
+  final Map<String, OverrideRegister> _overrides = {};
+
+  // Synced thread follow choices. [_ownFollows] is this installation's own
+  // entries (raw, so unknown fields are carried), placed into
+  // [_followSlots] by [_followPlacement]. [_remoteFollows] is every follow
+  // coordinate observed, by slot.
+  final List<String> _followSlots = [];
+  List<Set<String>> _followPlacement = [];
+  final Map<String, Map<String, Object?>> _ownFollows = {};
+  Map<String, Object?> _ownFollowExtra = {};
+  final Map<String, String> _followPublished = {};
+  final Map<String, Map<String, ThreadFollowChoice>> _remoteFollows = {};
+  final Set<String> _unreadableFollowSlots = {};
+  bool _followsLoaded = false;
 
   Timer? _debounceTimer;
   void Function()? _unsubscribeLive;
@@ -233,7 +249,8 @@ class ReadStateManager {
     }
     if (_localContexts.isNotEmpty ||
         _pending.isNotEmpty ||
-        _carriedOverrides.isNotEmpty) {
+        _overrides.isNotEmpty ||
+        _ownFollows.isNotEmpty) {
       _schedulePublish();
     }
 
@@ -243,16 +260,136 @@ class ReadStateManager {
     );
   }
 
-  void markContextRead(String contextId, int unixTimestamp) {
+  /// Advance a context's frontier. A `msg:` frontier is published only for
+  /// an [explicit] mark read; passive reading keeps it on this device. A
+  /// channel read also clears that channel's live override group.
+  void markContextRead(
+    String contextId,
+    int unixTimestamp, {
+    bool explicit = false,
+  }) {
     if (_disposed || isOverrideContext(contextId) || unixTimestamp < 0) return;
-    if (_advanceContext(
+    final publishable = explicit || !contextId.startsWith(msgContextPrefix);
+    final advanced = _advanceContext(
       contextId,
       unixTimestamp,
-      publishable: !contextId.startsWith(msgContextPrefix),
-    )) {
+      publishable: publishable,
+    );
+    final cleared = _clearChannelOverride(contextId);
+    if (advanced || cleared) {
       _persistLocalState();
       _onChanged();
-      if (!contextId.startsWith(msgContextPrefix)) _schedulePublish();
+      if (publishable || cleared) _schedulePublish();
+    }
+  }
+
+  /// The channels whose synced manual unread is live.
+  Set<String> get activeChannelOverrides => {
+    for (final MapEntry(key: channelId, value: register) in _overrides.entries)
+      if (isOverrideActive(register, _frontierOf(channelId))) channelId,
+  };
+
+  /// Whether the last full-state load succeeded, as override actions need.
+  bool get _hasFullState => _lastSnapshotSucceeded;
+
+  int _frontierOf(String contextId) => _effectiveState[contextId] ?? 0;
+
+  /// Synchronized whole-channel mark unread (NIP-RS Actions). Returns false,
+  /// leaving state unchanged, when the action must fail visibly: no complete
+  /// load, an exhausted counter, or a primary that cannot fit the group.
+  bool markChannelUnread(String channelId) {
+    if (_disposed || !_hasFullState || !isChannelOverrideTarget(channelId)) {
+      return false;
+    }
+    final previous = _overrides[channelId];
+    final register = previous ?? (s: 0, c: 0, b: 0);
+    final top = max(register.s, register.c);
+    if (top == 4294967295) return false;
+    // The group travels with its frontier; a channel never read keeps the
+    // retention floor as both.
+    final previousFrontier = _effectiveState[channelId];
+    final frontier = max(previousFrontier ?? 0, readStateFloor(_now()));
+    _effectiveState[channelId] = frontier;
+    _overrides[channelId] = (s: top + 1, c: register.c, b: frontier);
+    if (!_primaryFits()) {
+      if (previous == null) {
+        _overrides.remove(channelId);
+      } else {
+        _overrides[channelId] = previous;
+      }
+      if (previousFrontier == null) {
+        _effectiveState.remove(channelId);
+      } else {
+        _effectiveState[channelId] = previousFrontier;
+      }
+      return false;
+    }
+    _persistLocalState();
+    _onChanged();
+    _schedulePublish();
+    return true;
+  }
+
+  /// Ends a live channel override without moving its frontier: reaching the
+  /// bottom of a channel with nothing new to read.
+  void clearChannelOverride(String channelId) {
+    if (_disposed || !_clearChannelOverride(channelId)) return;
+    _persistLocalState();
+    _onChanged();
+    _schedulePublish();
+  }
+
+  /// Ends a live channel override with a clear-counter increment, even when
+  /// no frontier moved. Returns whether a clear was recorded.
+  bool _clearChannelOverride(String channelId) {
+    final register = _overrides[channelId];
+    if (register == null ||
+        !_hasFullState ||
+        !isOverrideActive(register, _frontierOf(channelId))) {
+      return false;
+    }
+    final top = max(register.s, register.c);
+    if (top == 4294967295) return false;
+    _overrides[channelId] = (s: register.s, c: top + 1, b: register.b);
+    return true;
+  }
+
+  /// The primary's override groups and their co-located frontiers.
+  Map<String, int> _primaryOverrides() => {
+    ...canonicalOverrideEntries(_overrides, _frontierOf),
+    for (final channelId in _overrides.keys)
+      overrideFrontierKey(channelId): _frontierOf(channelId),
+  };
+
+  bool _primaryFits() {
+    try {
+      packReadStateContexts(
+        _publishableLocalContexts(),
+        clientId: _clientId,
+        previous: _placement,
+        primary: _primaryOverrides(),
+      );
+      return true;
+    } on StateError {
+      return false;
+    }
+  }
+
+  Map<String, int> _publishableLocalContexts() {
+    final horizon = _now() - readStateHorizonSeconds;
+    return {
+      for (final entry in _localContexts.entries)
+        if (entry.value >= horizon) entry.key: entry.value,
+    };
+  }
+
+  void _mergeOverrides(Map<String, int> contexts) {
+    for (final MapEntry(key: channelId, value: register)
+        in channelOverrideRegisters(contexts).entries) {
+      final current = _overrides[channelId];
+      _overrides[channelId] = current == null
+          ? register
+          : mergeOverrideRegisters(current, register);
     }
   }
 
@@ -381,6 +518,7 @@ class ReadStateManager {
       if (_disposed || !_servesThisCommunity) return false;
       _lastSnapshotSucceeded = true;
       _mergeEvents(events);
+      _followsLoaded = true;
       await _persistLocalState();
       _onChanged();
       return true;
@@ -395,6 +533,12 @@ class ReadStateManager {
   void _mergeEvents(List<NostrEvent> events) {
     if (!_servesThisCommunity) return;
     for (final event in events) {
+      if (event.pubkey.toLowerCase() == pubkey.toLowerCase()) {
+        if (threadFollowsSlotOf(event) case final slot?) {
+          _mergeFollowEvent(event, slot);
+          continue;
+        }
+      }
       final decoded = decodeReadStateEvent(
         event,
         pubkey: pubkey,
@@ -415,12 +559,12 @@ class ReadStateManager {
       }
       final own = index >= 0 && decoded.blob.clientId == _clientId;
       if (own) {
-        if (index == 0) _carryOwnOverrides(decoded.blob.contexts);
         _published[slot] = Map.of(decoded.blob.contexts);
         while (_placement.length <= index) {
           _placement.add({});
         }
       }
+      _mergeOverrides(decoded.blob.contexts);
       for (final entry in decoded.blob.contexts.entries) {
         if (isOverrideContext(entry.key)) continue;
         if (_applyRemoteContextTimestamp(
@@ -432,7 +576,7 @@ class ReadStateManager {
         }
         // Historical own-slot values are recoverable local writes. Peer
         // maxima never change the locally owned values or placement.
-        if (own && !entry.key.startsWith(msgContextPrefix)) {
+        if (own) {
           _localContexts[entry.key] = max(
             _localContexts[entry.key] ?? 0,
             entry.value,
@@ -445,20 +589,6 @@ class ReadStateManager {
     }
   }
 
-  /// Merges the complete override groups of this device's own slot into
-  /// [_carriedOverrides] by `max()`, the NIP-RS merge rule. An incomplete
-  /// group is rejected whole (see [completeOverrideGroups]).
-  bool _carryOwnOverrides(Map<String, int> contexts) {
-    var changed = false;
-    for (final entry in completeOverrideGroups(contexts).entries) {
-      if (entry.value > (_carriedOverrides[entry.key] ?? -1)) {
-        _carriedOverrides[entry.key] = entry.value;
-        changed = true;
-      }
-    }
-    return changed;
-  }
-
   Future<bool> _startLiveSubscription() async {
     try {
       final unsub = await _relaySession!.subscribe(
@@ -466,7 +596,7 @@ class ReadStateManager {
           kinds: const [EventKind.readState],
           authors: [pubkey],
           tags: const {
-            '#t': ['read-state'],
+            '#t': ['read-state', threadFollowsTag],
           },
           limit: readStateFetchLimit,
         ),
@@ -556,18 +686,15 @@ class ReadStateManager {
   /// the packing in [_publishOnce] without changing any state.
   bool _hasUnpublishedState() {
     if (_pending.isNotEmpty) return true;
-    final primary = <String, int>{..._carriedOverrides};
-    for (final key in overrideGroupFrontierKeys(_carriedOverrides)) {
-      if (_effectiveState[key] case final value?) primary[key] = value;
+    for (final MapEntry(key: slot, value: plaintext)
+        in _plannedFollowSlots().entries) {
+      if (_followPublished[slot] != plaintext) return true;
     }
-    final horizon = _now() - readStateHorizonSeconds;
+    final primary = _primaryOverrides();
     final List<Map<String, int>> placement;
     try {
       placement = packReadStateContexts(
-        {
-          for (final entry in _localContexts.entries)
-            if (entry.value >= horizon) entry.key: entry.value,
-        },
+        _publishableLocalContexts(),
         clientId: _clientId,
         previous: _placement,
         primary: primary,
@@ -613,6 +740,7 @@ class ReadStateManager {
         checkConnection?.call();
         snapshot = events;
         _mergeEvents(events);
+        _followsLoaded = true;
         if (events.any(
           (event) =>
               hasValidReadStateTags(event) &&
@@ -637,10 +765,7 @@ class ReadStateManager {
         }
       }
       if (_disposed && !allowDisposed) return;
-      final primary = <String, int>{..._carriedOverrides};
-      for (final key in overrideGroupFrontierKeys(_carriedOverrides)) {
-        if (_effectiveState[key] case final value?) primary[key] = value;
-      }
+      final primary = _primaryOverrides();
       _localContexts.removeWhere(
         (key, value) => value < _now() - readStateHorizonSeconds,
       );
@@ -686,6 +811,30 @@ class ReadStateManager {
               ReadStateBlob(clientId: _clientId, contexts: contexts).toJson(),
             ),
           ),
+        );
+      }
+      final followPlanned = _canPublishFollows
+          ? _plannedFollowSlots()
+          : const <String, String>{};
+      await _persistLocalState();
+      for (final MapEntry(key: slot, value: plaintext)
+          in followPlanned.entries) {
+        final coordinate = '$threadFollowsDTagPrefix$slot';
+        if (_followPublished[slot] == plaintext ||
+            _pending.containsKey(coordinate)) {
+          continue;
+        }
+        prepared[coordinate] = NostrEvent(
+          id: '0' * 64,
+          pubkey: pubkey,
+          sig: '0' * 128,
+          kind: EventKind.readState,
+          createdAt: createdAt++,
+          tags: [
+            ['d', coordinate],
+            ['t', threadFollowsTag],
+          ],
+          content: _crypto.encrypt(plaintext),
         );
       }
       // Check replay and successor prefixes before sending. Not a reservation:
@@ -757,6 +906,51 @@ class ReadStateManager {
         _maxFetchedCreatedAt = event.createdAt;
         await _persistLocalState();
       }
+      for (final MapEntry(key: slot, value: plaintext)
+          in followPlanned.entries) {
+        final coordinate = '$threadFollowsDTagPrefix$slot';
+        final event = prepared[coordinate];
+        if (event == null || _followPublished[slot] == plaintext) continue;
+        if (!_servesThisCommunity ||
+            !_ownsJournal ||
+            (_disposed && !allowDisposed)) {
+          return;
+        }
+        checkConnection?.call();
+        await signedEventRelay.submit(
+          kind: event.kind,
+          content: event.content,
+          tags: event.tags,
+          createdAt: event.createdAt,
+          onSigned: (event) async {
+            _pending[coordinate] = event;
+            await _persistLocalState();
+            checkConnection?.call();
+            if (!_servesThisCommunity ||
+                !_ownsJournal ||
+                (_disposed && !allowDisposed) ||
+                !_followSlots.contains(slot)) {
+              throw StateError(
+                'Thread follow owner or coordinate retired before publication',
+              );
+            }
+          },
+        );
+        if (!_servesThisCommunity ||
+            !_ownsJournal ||
+            (_disposed && !allowDisposed)) {
+          return;
+        }
+        _followPublished[slot] = plaintext;
+        _pending.remove(coordinate);
+        _maxFetchedCreatedAt = event.createdAt;
+        await _persistLocalState();
+      }
+      if (!_canPublishFollows && _ownFollows.isNotEmpty) {
+        throw StateError(
+          'Unreadable thread follow coordinate blocks publication',
+        );
+      }
       syncError = null;
     } catch (error) {
       // The journal retains local advances, placements and exact pending
@@ -795,6 +989,15 @@ class ReadStateManager {
   }
 
   void _acknowledge(String slot, NostrEvent event) {
+    if (slot.startsWith(threadFollowsDTagPrefix)) {
+      final blob = decodeThreadFollowsBlob(_crypto.decrypt(event.content));
+      if (blob == null) throw StateError('Invalid pending thread follow event');
+      _followPublished[slot.substring(threadFollowsDTagPrefix.length)] = blob
+          .encode();
+      _pending.remove(slot);
+      _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
+      return;
+    }
     final blob = decodeReadStateBlob(_crypto.decrypt(event.content));
     if (blob == null) throw StateError('Invalid pending read-state event');
     _published[slot] = Map.of(blob.contexts);
@@ -819,7 +1022,30 @@ class ReadStateManager {
       _clientId = journal['clientId'] as String;
       _effectiveState.addAll(contexts(journal['observed']));
       _localContexts.addAll(contexts(journal['local']));
-      _carriedOverrides.addAll(contexts(journal['overrides']));
+      _mergeOverrides({
+        ...contexts(journal['observed']),
+        ...contexts(journal['overrides']),
+      });
+      _followSlots.addAll(
+        ((journal['followSlots'] as List?) ?? const []).cast<String>(),
+      );
+      _followPlacement = [
+        for (final keys in (journal['followPlacement'] as List?) ?? const [])
+          (keys as List).cast<String>().toSet(),
+      ];
+      for (final entry
+          in ((journal['ownFollows'] as Map?) ?? const {}).entries) {
+        _ownFollows[entry.key as String] = Map<String, Object?>.from(
+          entry.value as Map,
+        );
+      }
+      _ownFollowExtra = Map<String, Object?>.from(
+        (journal['followExtra'] as Map?) ?? const {},
+      );
+      for (final entry
+          in ((journal['followPublished'] as Map?) ?? const {}).entries) {
+        _followPublished[entry.key as String] = entry.value as String;
+      }
       _slots
         ..clear()
         ..addAll((journal['slots'] as List).cast<String>());
@@ -852,14 +1078,12 @@ class ReadStateManager {
               !entry.key.startsWith(msgContextPrefix),
         ),
       );
-      _carriedOverrides.addAll(
-        completeOverrideGroups({
-          for (final entry in stored.contexts.entries)
-            if (isOverrideContext(entry.key) &&
-                stored.publishableContextIds.contains(entry.key))
-              entry.key: entry.value,
-        }, frontiers: stored.contexts),
-      );
+      _mergeOverrides({
+        for (final entry in stored.contexts.entries)
+          if (!isOverrideContext(entry.key) ||
+              stored.publishableContextIds.contains(entry.key))
+            entry.key: entry.value,
+      });
     }
     _persistLocalState();
   }
@@ -876,15 +1100,24 @@ class ReadStateManager {
         _effectiveState,
         nowUnixSeconds: _now(),
       );
-      for (final key in overrideGroupFrontierKeys(_carriedOverrides)) {
-        if (_effectiveState[key] case final value?) observed[key] = value;
+      for (final channelId in _overrides.keys) {
+        if (_effectiveState[channelId] case final value?) {
+          observed[overrideFrontierKey(channelId)] = value;
+        }
       }
       final encoded = jsonEncode({
         'v': 1,
         'clientId': _clientId,
         'observed': observed,
         'local': _localContexts,
-        'overrides': _carriedOverrides,
+        'overrides': canonicalOverrideEntries(_overrides, _frontierOf),
+        'followSlots': _followSlots,
+        'followPlacement': [
+          for (final keys in _followPlacement) keys.toList()..sort(),
+        ],
+        'ownFollows': _ownFollows,
+        'followExtra': _ownFollowExtra,
+        'followPublished': _followPublished,
         'slots': _slots,
         'placement': _placement,
         'published': _published,

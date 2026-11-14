@@ -229,13 +229,15 @@ void main() {
   });
 
   test(
-    'automatic channel-open read preserves forced message entries',
+    'a channel read that moves no frontier preserves forced message entries',
     () async {
       final notifier = await pumpNotifier();
+      notifier.markContextRead(channelId, now);
 
       notifier.markContextUnread(msgKey, channelId: channelId);
 
-      // Channel open marks the channel read without clearForcedMessages.
+      // Channel open with nothing new marks the channel read at the same
+      // frontier, without clearForcedMessages.
       notifier.markContextRead(channelId, now);
 
       expect(state().isForcedUnread(msgKey), isTrue);
@@ -243,6 +245,20 @@ void main() {
       expect(state().effectiveTimestamp(channelId), now);
     },
   );
+
+  test('a device-local message force ends once the covering frontier moves '
+      'past where it was', () async {
+    final notifier = await pumpNotifier();
+    notifier.markContextRead(channelId, now - 10);
+    notifier.markContextUnread(msgKey, channelId: channelId);
+    expect(state().isForcedUnread(msgKey), isTrue);
+
+    // A frontier advance, here or merged from another device, reads past it.
+    notifier.markContextRead(channelId, now);
+
+    expect(state().isForcedUnread(msgKey), isFalse);
+    expect(state().locallyForcedChannelIds, isEmpty);
+  });
 
   test(
     'clearing a channel force keeps its marker and message forces',
@@ -257,7 +273,11 @@ void main() {
 
       expect(state().isForcedUnread(channelId), isFalse);
       expect(state().isForcedUnread(msgKey), isTrue);
-      expect(state().contexts[channelId], isNull);
+      // The synced group's frontier travels with it, at the floor.
+      expect(
+        state().contexts[channelId],
+        lessThanOrEqualTo(state().retentionFloor),
+      );
       expect(state().effectiveTimestamp(channelId), state().retentionFloor);
     },
   );
@@ -266,14 +286,15 @@ void main() {
       'the same channel', () async {
     final notifier = await pumpNotifier();
 
-    // Channel forced unread from the tile, message forced from the sheet.
-    notifier.markContextUnread(channelId, channelId: channelId);
+    notifier.markContextRead(channelId, now);
+    // Channel marked unread from the tile, message forced from the sheet.
+    expect(notifier.markContextUnread(channelId, channelId: channelId), isTrue);
     notifier.markContextUnread(msgKey, channelId: channelId);
 
     notifier.markContextRead(channelId, now);
 
-    // Opening the channel satisfies the channel-scoped force, but the
-    // deliberate message-level force survives until acted on.
+    // Opening the channel ends the channel's manual unread even though no
+    // frontier moved, but the message-level force survives until acted on.
     expect(state().isForcedUnread(channelId), isFalse);
     expect(state().isForcedUnread(msgKey), isTrue);
     expect(state().locallyForcedChannelIds, {channelId});

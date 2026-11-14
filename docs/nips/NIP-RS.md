@@ -476,21 +476,108 @@ precedence over the legacy finite-horizon, per-message-writing, frontier
 replication, and unconditional frontier-slot deletion guidance in this document; the manual-unread override register algebra and durability rules
 are unchanged.
 
+- **Catch-up.** A *catch-up* of a channel occurs when the reader reaches the
+  bottom of that channel's top-level timeline while the app is in the
+  foreground and its window has focus. A catch-up of a thread occurs when the
+  reader reaches the bottom of a full view of that thread under the same
+  condition. A partial or nested thread view is not a catch-up of the thread.
+- **Displayed.** A message is *displayed* when it is rendered on screen while
+  the app is in the foreground and its window has focus.
 - **Semantic retention:** `floor = max(0, now - 2592000)` (30 days, Unix
   seconds). Every effective frontier includes this floor in its maximum,
   including missing contexts and unresolved parents. A message at the floor is
   read; a message one second newer is not read without a covering frontier.
-  Forced-unread overrides still take precedence. Legacy per-message entries
-  remain readable, but clients MUST NOT create or republish `msg:` hints outside
-  an existing primary override group. Sparse device-local UI feedback may be
-  persisted locally, but is not synchronized state and MUST NOT be described as
-  synchronized. Individual-message menu and dwell actions MUST NOT acknowledge
-  their entire channel or thread; direct mentions do not opt into msg writes.
-- **Catch-up frontiers:** `activity:<channel-id>` covers ordinary top-level
-  channel messages, excluding DMs, mentions and broadcasts.
-  `thread-activity:<root-event-id>` covers that thread's replies. Neither is a
-  substitute for the broad channel frontier. A partial/nested thread view MUST
-  NOT advance the entire thread solely because that view reached its bottom.
+  Forced-unread overrides still take precedence.
+- **Per-message entries.** Legacy per-message entries remain readable. A
+  client MUST NOT create a `msg:<event-id>` entry except by a user-initiated
+  explicit mark-read of a message that has no override group, which writes
+  only its `msg:<event-id>` frontier. That
+  frontier is an ordinary frontier: it is pruned below the retention floor
+  and creates no override register and no tombstone floor. Only whole-channel
+  mark-unread creates an override group (see Synchronized manual state). Display, dwell, scroll, catch-up and mention
+  visibility MUST NOT create `msg:` entries; the prohibition is on creation,
+  and advancing an existing frontier or group is not creation. If a creation
+  does not fit the budget, the action MUST fail visibly. Individual-message actions MUST NOT
+  acknowledge their entire channel or thread.
+- **Synchronized manual state.** Explicit mark-read of a channel, thread or
+  single message, and mark-unread of a whole channel, are synchronized state.
+  A client MUST publish override groups only for whole-channel contexts
+  (`<channel-id>`); it MUST NOT publish an override group for a `msg:` or
+  `thread:` context. Clients MUST honour channel override groups from peer
+  installations of the same identity with the same precedence as their own,
+  while preserving the self-authored and quiet-message exclusions. A reader
+  MUST ignore any `msg:` or `thread:` override group it finds on a peer
+  primary: it MUST NOT evaluate it, merge it, or carry it forward. A client
+  MUST NOT present a manual unread as synchronized while it is held only
+  locally.
+- **Device-local overrides.** Mark-unread of a single message or a thread is
+  device-local state: it is stored only on the installation where the user
+  acted and is never published. It forces its message or thread unread on
+  that installation until any of these occurs, after which it MUST be
+  removed:
+  (a) the merged synchronized frontier covering it advances past the
+  frontier it had when it was set, whether by this installation or a peer
+  (a peer's display, explicit mark-read or catch-up);
+  (b) on this installation, the message is displayed, or a catch-up or
+  explicit mark-read covers it, in the scope given under Clearing.
+  A peer frontier merge MUST be evaluated against device-local overrides
+  when it arrives, not only at next display.
+- **Clearing.** An installation performs Mark-read (frontier advance plus
+  clear-counter increment, per Actions) on every channel override group it
+  has merged that is in scope of any of these events, even when no frontier
+  value changes, and removes device-local overrides in the same scope:
+  (a) a message is *displayed*: its own device-local override;
+  (b) a message, thread or channel is explicitly marked read: that context's
+  override and, for a thread or channel, the device-local overrides of
+  messages it covers;
+  (c) a *catch-up* of a channel: the channel's group and the device-local
+  overrides of the top-level messages it covers; a catch-up of a thread:
+  the thread's device-local override and those of its replies.
+  A catch-up of a partial or nested thread view clears only the device-local
+  overrides of messages it displayed, never the thread's override.
+- **Concurrency limitation (accepted).** An installation clears only
+  channel overrides it had merged when the event occurred. A frontier
+  advance on another installation that has not yet merged a mark-unread,
+  or a mark-unread whose baseline was taken from a stale view, deactivates
+  that override through the Liveness Predicate (`F > B`) without any clear.
+  This is an accepted limitation of the Buzz profile: a manual unread MAY be
+  lost to a concurrent or stale-baseline read on another installation, and
+  clients MUST NOT attempt to restore it.
+- **Bounds and lifetime cap.** Every channel override group, and its
+  tombstone floor once dead, is permanent and lives with its frontier on the
+  primary coordinate (see Override State Durability, Override Group
+  Co-Location Rule). Each installation's primary MUST carry the merged union
+  of its own and its peers' channel groups, so the capacity is shared by the
+  identity across all its installations, not per installation. A new group
+  that does not fit MUST fail visibly. If the merged union no longer fits,
+  the client MUST keep its last published primary and fail override actions,
+  including the synchronized clears above, per Bounds and Budget (Terminal
+  behaviour at the ceiling); ordinary frontier advances and device-local
+  overrides remain permitted. It MUST NOT prune tombstones or peer groups to
+  make room.
+- **Catch-up advances the main frontier:** on a catch-up of a channel, the
+  client advances that channel's own context (`<channel-id>`) to the newest
+  top-level message the reader reached, following the Write Discipline (not
+  including thread replies). On a catch-up of a thread, the client advances
+  `thread:<root-event-id>` to the newest reply reached. Every message at or
+  below the resulting effective frontier, including mentions, broadcasts and
+  DMs, is read on every installation. A partial or nested thread view MUST NOT
+  advance the entire thread.
+- **Accepted ordering tradeoff:** frontiers compare against author-assigned
+  `created_at`. A message that arrives after the reader caught up but carries
+  an older timestamp (for example a delayed or retried send, or a sender with
+  a slow clock) is covered by the frontier and is treated as read without
+  having been displayed. Buzz accepts this in exchange for frontier-only
+  state. Clients MUST NOT add per-message writes to compensate for it.
+- **Legacy catch-up keys:** `activity:<channel-id>` and
+  `thread-activity:<root-event-id>` are legacy. Clients MUST NOT create or
+  advance them. Clients MUST read existing values with their original
+  meaning (`activity:` covers ordinary top-level messages, excluding DMs,
+  mentions and broadcasts; `thread-activity:` covers that thread's replies)
+  and MAY carry them in their own published state until they fall below the
+  retention floor. Installations that predate this rule may continue to
+  write fresh legacy values, so readers MUST NOT assume the namespace empties
+  after any fixed period.
 - **Own values, not observed maxima:** publish only frontiers advanced locally,
   or recovered from the installation's owned coordinates/journal. Keep these
   values separate from the merged view. If a local value is 5, a peer supplies
@@ -533,6 +620,89 @@ are unchanged.
 Legacy clients do not gain the semantic floor automatically. A mixed-version
 installation may continue showing old messages unread; wire max-register
 interoperability alone does not imply identical unread presentation.
+
+### Buzz Thread Follow Choices
+
+**Coordinates.** Each installation publishes only its own choices, in
+kind-30078 events with exactly one `d` tag `thread-follows:<slot-id>`
+(`<slot-id>` exactly 32 lowercase hex, random, persisted locally), a `t` tag
+`thread-follows`, and content NIP-44 encrypted to the author's own key. The
+plaintext is
+`{"v":1,"client_id":"<client-id>","threads":{"<channel-id>:<root-event-id>":{"follow":<bool>,"at":<uint32>}}}`.
+
+**Validation.** Events with zero or several `d` tags, another prefix, or a
+malformed `<slot-id>` MUST be ignored. A recognized coordinate whose content
+fails to decrypt, has an unknown `v`, a missing or non-string `client_id`, a
+key that is not `<channel-id>:<64 lowercase hex>`, a non-boolean `follow` or
+an `at` outside 0-4294967295 is *unreadable*: its entries are unknown, not
+absent. A client MUST NOT publish its own coordinate while that coordinate is
+unreadable, and MUST report follow state as possibly incomplete while any
+coordinate is unreadable. Unknown top-level or entry fields MUST be carried
+unchanged by their author.
+
+**States.** No merged entry means *automatic*: the thread counts when the
+user started or replied in it, derived from events. `follow:true` is an
+explicit follow. `follow:false` is an explicit unfollow and overrides
+automatic interest for ordinary replies. An explicit unfollow does not
+suppress mentions of the user, broadcasts, or DMs.
+
+**Writes.** Only an explicit user follow or unfollow writes an entry, with
+`at` set to the time of that action, into the acting installation's own
+slot. Sending a reply, opening a thread, or any automatic interest MUST NOT
+write or re-stamp an entry. A client MUST NOT remove an entry to express
+automatic; a later explicit choice supersedes it. A client MUST NOT copy
+another slot's entries into its own and MUST NOT change `at` on an entry it
+did not just edit.
+
+**Merge.** Readers load every `thread-follows:` coordinate of the identity
+with the full-state retrieval used for read state and merge per key across
+all slots: the greater `at` wins; if `at` is equal, `follow:false` wins.
+Because no installation writes another's slot, concurrent edits from
+different installations cannot erase each other. A choice made in the same
+second as an opposite choice on another installation, or within that
+installation's clock skew, may lose to it.
+
+**Publication and recovery.** Follow coordinates follow the read-state
+rules for own coordinates: `client_id` conflict detection and slot
+regeneration (see `d` Tag); read-before-write of the own coordinate; an
+event `created_at` strictly greater than every pending or observed event for
+that coordinate, independent of the entries' `at`; durable journaling of the
+signed event before sending, exact-byte retry on unknown outcome,
+partial-batch handling, identity/community-scoped and fenced journal
+writers, and the snapshot preflight (see Buzz Frontier-Only Retention
+Profile, Recovery and No loss to fit); and live subscription with
+reconnect refresh (see Live Subscription and Convergence). A retried or
+republished entry keeps its original `at`. A choice is *pending* until its
+event is accepted, *synchronized* after, and *failed* if it cannot be
+published; clients MUST show a failed choice as failed.
+
+**Reinstall and retirement.** A new installation creates a new slot and does
+not need to find its old one; old slots remain merge inputs and a newer `at`
+wins. Clients MUST NOT delete a `thread-follows:` coordinate they did not
+create.
+
+**Legacy import.** A client with pre-sync local choices imports them once
+per identity and community, after a complete merge, and only for keys with
+no synced entry. Imported entries use `at = 0`, so any real action wins over
+them; between imported entries from different installations the equal-`at`
+rule applies. A client MUST NOT stamp an imported entry with the import
+time. A legacy entry without a channel ID is imported only after its root is
+resolved to a channel from verified event evidence; unresolved entries are
+retained locally and retried, not dropped. The import is idempotent and
+journaled like any publication, so a crash mid-import is retried safely.
+
+**Capacity.** Each event's plaintext is at most 40 KiB. When an
+installation's slot is full it MUST spill to additional persisted slots
+under the same `client_id`, using the stable-placement and
+publish-before-remove rules of read state. Before spilling it SHOULD drop
+its own entries that are not the merged winner for their key. Entries do not
+expire by age, and explicit unfollows are never evicted. An installation
+MUST NOT exceed 16 `thread-follows:` coordinates or push the identity's
+kind-30078 snapshot past the read-state snapshot bounds; at that ceiling it
+MUST refuse the new choice and report it as failed.
+
+**Scope.** These choices govern unread and in-app attention only; they do
+not change channel mute or push subscription semantics.
 
 ### Merge Rule
 

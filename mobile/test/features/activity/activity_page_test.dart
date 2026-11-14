@@ -1,3 +1,4 @@
+import 'package:buzz/shared/read_state/thread_follows_format.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'dart:async';
 import 'dart:io';
@@ -1587,8 +1588,26 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
     String contextId,
     int unixTimestamp, {
     bool clearForcedMessages = false,
+    bool explicit = false,
   }) {
     state = state.copyWithContext(contextId, unixTimestamp);
+  }
+
+  @override
+  bool setThreadFollow(String channelId, String rootId, bool follow) {
+    state = ReadStateState(
+      isReady: state.isReady,
+      pubkey: state.pubkey,
+      contexts: state.contexts,
+      version: state.version + 1,
+      forcedUnreadContexts: state.forcedUnreadContexts,
+      threadFollows: {
+        ...state.threadFollows,
+        threadFollowKey(channelId, rootId): (follow: follow, at: 1),
+      },
+      threadFollowsIncomplete: false,
+    );
+    return true;
   }
 }
 
