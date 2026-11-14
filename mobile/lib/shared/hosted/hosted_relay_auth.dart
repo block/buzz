@@ -363,11 +363,21 @@ class HostedRelayAuth extends ChangeNotifier {
     String relay,
     String pubkey,
     bool background,
+  ) => BuilderlabAccountClient.observingRefusals(
+    (clockHint) =>
+        _acquire(config, account, relay, pubkey, background, clockHint),
+  );
+
+  // Only a refusal to this acquisition's own requests supplies [clockHint].
+  Future<String?> _acquire(
+    RelayConfig config,
+    BuilderlabAccountClient account,
+    String relay,
+    String pubkey,
+    bool background,
+    int? Function() clockHint,
   ) async {
     final started = ++_sequence;
-    // Only a refusal observed during this acquisition may supply its hint;
-    // one account issues for one community at a time.
-    account.lastRefusalClockHint = null;
     try {
       if (account.account == null && await account.restore() == null) {
         // A push stop pending at sign-out still gets a few attempts.
@@ -477,9 +487,7 @@ class HostedRelayAuth extends ChangeNotifier {
           pubkey,
           error,
           started,
-          clockHint: error == AccountFailure.denied
-              ? account.lastRefusalClockHint
-              : null,
+          clockHint: error == AccountFailure.denied ? clockHint() : null,
           account: account,
         );
       }

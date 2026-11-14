@@ -723,8 +723,8 @@ MUST match the requested parent blob hash.  A mismatched `x` tag MUST be
 rejected as `evidence_rejected`.
 
 > **Named residual:** while a proof's `created_at` is within 120 seconds of
-> the server's clock in either direction, and before its `expiration` has
-> been more than 120 seconds past, a captured full header set allows
+> the server's clock in either direction, and less than 120 seconds past its
+> `expiration`, a captured full header set allows
 > reading any media blob on exactly one tenant host.  This access is read-only,
 > membership-checked, and revocable via assertion expiry or deny-map
 > enforcement.  It is not state-changing and does not cross tenant boundaries.

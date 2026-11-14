@@ -99,8 +99,12 @@ void main() {
         headers: {'date': HttpDate.format(serverNow)},
       );
 
-  BuilderlabAccountClient account() => BuilderlabAccountClient(
+  BuilderlabAccountClient account({
+    DateTime Function() now = DateTime.now,
+    Future<http.StreamedResponse> Function()? other,
+  }) => BuilderlabAccountClient(
     accountOrigin: organization,
+    now: now,
     httpClient: MockClient.streaming((request, _) async {
       return switch (request.url.path) {
         '/api/goose/v1/auth/me' => json({
@@ -114,6 +118,7 @@ void main() {
           await answers[issued++ < answers.length
               ? issued - 1
               : answers.length - 1](),
+        '/api/goose/v1/buzz/other' when other != null => await other(),
         _ => json({}, 404),
       };
     }),
@@ -238,20 +243,22 @@ void main() {
     test('the offset is read when the headers arrive, not the body', () async {
       // 114 s off at the headers gives no hint; read 3 s later, at the body,
       // it would be over the 115 s threshold.
+      var phoneNow = DateTime.utc(2027, 1, 15, 12);
       answers = [
         refusal(
-          DateTime.now().subtract(const Duration(seconds: 114)),
+          phoneNow.subtract(const Duration(seconds: 114)),
           () => Stream.fromFuture(
-            Future.delayed(
-              const Duration(seconds: 3),
-              () => utf8.encode('{"error":"invalid_proof"}'),
-            ),
+            Future(() {
+              phoneNow = phoneNow.add(const Duration(seconds: 3));
+              return utf8.encode('{"error":"invalid_proof"}');
+            }),
           ),
         ),
       ];
-      final auth = relayAuth(account());
+      final auth = relayAuth(account(now: () => phoneNow));
       await expectLater(auth.headers(relay), throwsA(AccountFailure.denied));
       expect(auth.failureClockHint, isNull);
+      expect(phoneNow, DateTime.utc(2027, 1, 15, 12, 0, 3));
     });
 
     test('a phone clock behind the server is hinted too', () async {
@@ -309,6 +316,32 @@ void main() {
       await organizationAccount.clearLocalSession();
       expect(auth.failureClockHint, isNull);
     });
+
+    test(
+      'another account call refused during issuance never supplies its hint',
+      () async {
+        final released = Completer<void>();
+        final organizationAccount = account(
+          other: () async {
+            await released.future;
+            return refusal(fast, () => Stream.value(utf8.encode('{}')))();
+          },
+        );
+        final auth = relayAuth(organizationAccount);
+        await organizationAccount.restore();
+        // Queued ahead of the issuance's identity lookup, refused after the
+        // issuance has started; then the key is denied locally.
+        final unrelated = organizationAccount.post('/v1/buzz/other', {});
+        identity = {'pubkey_hex': List.filled(64, 'f').join()};
+        final issuance = auth.headers(relay);
+        await pumpEventQueue();
+        released.complete();
+        await expectLater(unrelated, throwsA(AccountFailure.denied));
+        await expectLater(issuance, throwsA(AccountFailure.denied));
+        expect(auth.failure, AccountFailure.denied);
+        expect(auth.failureClockHint, isNull);
+      },
+    );
 
     test('an old refusal never explains a later local denial', () async {
       final auth = relayAuth(account());

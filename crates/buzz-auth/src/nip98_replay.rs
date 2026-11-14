@@ -294,6 +294,25 @@ mod tests {
             "the replay must be refused"
         );
         assert!(admit_at(last_valid + 1).is_err());
+
+        // The marker itself, checked on the guard directly: live through
+        // t + TTL - 1, gone at t + TTL. This is the in-memory guard's model,
+        // not evidence of Redis expiry.
+        let mark_at = |now| {
+            crate::test_clock::pinned(now, || {
+                rt.block_on(guard.try_mark_in_scope(
+                    "community",
+                    &event.id,
+                    DEFAULT_REPLAY_TTL_SECS,
+                ))
+            })
+        };
+        assert_eq!(DEFAULT_REPLAY_TTL_SECS, 250);
+        assert!(matches!(
+            mark_at(t + DEFAULT_REPLAY_TTL_SECS - 1),
+            Ok(false)
+        ));
+        assert!(matches!(mark_at(t + DEFAULT_REPLAY_TTL_SECS), Ok(true)));
     }
 
     #[test]

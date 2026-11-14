@@ -355,6 +355,7 @@ async fn test_auth_expired_token() {
             Tag::parse(["x", &sha256]).unwrap(),
             // Past the 120 s grace a slow client gets.
             Tag::parse(["expiration", &(now - 180).to_string()]).unwrap(),
+            Tag::parse(["server", &relay_server_authority()]).unwrap(),
         ],
     );
     let resp = upload_with_auth(&client, &auth, &sha256, &jpeg).await;
