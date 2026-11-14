@@ -13,7 +13,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter/semantics.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
@@ -369,9 +369,11 @@ class MessageContent extends HookConsumerWidget {
 
     // A new pool per message text, so an edit retires the old links'
     // recognizers (and any hold under way on them) with the old text.
-    final linkRecognizers = useMemoized(_LinkTextRecognizers.new, [
-      markdownContent,
-    ]);
+    final pressedLink = useValueNotifier<_LinkTextRecognizer?>(null);
+    final linkRecognizers = useMemoized(
+      () => _LinkTextRecognizers(pressedLink),
+      [markdownContent],
+    );
     useEffect(() => linkRecognizers.dispose, [linkRecognizers]);
 
     final finalContent = useMemoized(() {
@@ -425,57 +427,60 @@ class MessageContent extends HookConsumerWidget {
       key: ValueKey(
         '$text\u0000$mentionPresentationKey\u0000$channelPresentationKey',
       ),
-      child: GptMarkdown(
-        text,
-        style: style,
-        styleSheet: bubble
-            ? GptMarkdownStyleSheet(
-                blockQuote: BlockQuoteStyle(barColor: bubbleInk),
-                hr: HrStyle(color: bubbleInk.withValues(alpha: 0.3)),
-                table: TableStyle(
-                  borderColor: bubbleInk.withValues(alpha: 0.3),
-                  headerBackground: Colors.transparent,
-                  headerTextStyle: TextStyle(color: bubbleInk),
-                ),
-              )
-            : null,
-        followLinkColor: false,
-        // normalizeBareLinks() already turns bare URLs into Markdown links;
-        // gpt_markdown autolinks by default, so both would run.
-        autolink: false,
-        // Desktop has no GitHub alerts: a `> [!NOTE]` quote stays a quote.
-        alertBuilder: (_, alert) => alert.asBlockQuote(),
-        codeBuilder: (context, name, code, closed) => _MessageCodeBlock(
-          name: name,
-          code: code,
-          bubble: bubble,
-          ink: bubble && ownMessage ? ownTextColor : null,
+      child: _LinkPressHighlight(
+        pressed: pressedLink,
+        child: GptMarkdown(
+          text,
+          style: style,
+          styleSheet: bubble
+              ? GptMarkdownStyleSheet(
+                  blockQuote: BlockQuoteStyle(barColor: bubbleInk),
+                  hr: HrStyle(color: bubbleInk.withValues(alpha: 0.3)),
+                  table: TableStyle(
+                    borderColor: bubbleInk.withValues(alpha: 0.3),
+                    headerBackground: Colors.transparent,
+                    headerTextStyle: TextStyle(color: bubbleInk),
+                  ),
+                )
+              : null,
+          followLinkColor: false,
+          // normalizeBareLinks() already turns bare URLs into Markdown links;
+          // gpt_markdown autolinks by default, so both would run.
+          autolink: false,
+          // Desktop has no GitHub alerts: a `> [!NOTE]` quote stays a quote.
+          alertBuilder: (_, alert) => alert.asBlockQuote(),
+          codeBuilder: (context, name, code, closed) => _MessageCodeBlock(
+            name: name,
+            code: code,
+            bubble: bubble,
+            ink: bubble && ownMessage ? ownTextColor : null,
+          ),
+          // Chips, media links and taps are handled in _buildLink, so the
+          // package's own tap is not used.
+          inlineLinkBuilder: (link) => _buildLink(
+            link,
+            ref,
+            unmaskInlinePatterns(link.url),
+            style,
+            resolvedChannelTap,
+            resolvedChannelNames,
+            linkRecognizers,
+            imetaByUrl,
+          ),
+          imageBuilder: (context, maskedUrl, _, _) {
+            final imageUrl = unmaskInlinePatterns(maskedUrl);
+            return _buildMedia(
+              context,
+              imageUrl,
+              imetaByUrl[imageUrl],
+              onReply: onMediaReply == null ? null : mediaReply,
+              onMore: onMediaMore == null ? null : mediaMore,
+            );
+          },
+          textAlign: textAlign ?? (bubble ? TextAlign.start : null),
+          maxLines: maxLines,
+          inlinePatterns: components,
         ),
-        // Chips, media links and taps are handled in _buildLink, so the
-        // package's own tap is not used.
-        inlineLinkBuilder: (link) => _buildLink(
-          link,
-          ref,
-          unmaskInlinePatterns(link.url),
-          style,
-          resolvedChannelTap,
-          resolvedChannelNames,
-          linkRecognizers,
-          imetaByUrl,
-        ),
-        imageBuilder: (context, maskedUrl, _, _) {
-          final imageUrl = unmaskInlinePatterns(maskedUrl);
-          return _buildMedia(
-            context,
-            imageUrl,
-            imetaByUrl[imageUrl],
-            onReply: onMediaReply == null ? null : mediaReply,
-            onMore: onMediaMore == null ? null : mediaMore,
-          );
-        },
-        textAlign: textAlign ?? (bubble ? TextAlign.start : null),
-        maxLines: maxLines,
-        inlinePatterns: components,
       ),
     );
     final segments = bubble
@@ -858,7 +863,8 @@ class MessageContent extends HookConsumerWidget {
       })
       ..onHold = () {
         if (context.mounted) showActions();
-      };
+      }
+      ..highlightColor = highlightColor;
     // A canonical label is drawn as its plain text, as before; an authored
     // label keeps its parsed spans (bold, code) in the link style.
     if (isCanonicalBuzzLabel) {

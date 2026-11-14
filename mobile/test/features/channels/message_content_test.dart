@@ -887,6 +887,38 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     });
 
+    testWidgets('pressing a text link tints it until the finger lifts', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _testable(
+          const MessageContent(
+            content: 'See [report](https://example.com/report) now',
+          ),
+        ),
+      );
+      RenderObject content() =>
+          tester.renderObject(find.byType(MessageContent));
+      expect(content(), isNot(paints..rrect()));
+
+      final press = await tester.startGesture(textCenter(tester, 'report'));
+      await tester.pump();
+      expect(content(), paints..rrect());
+
+      // A finger that slides off scrolls, which clears the tint too.
+      await press.moveBy(const Offset(0, 40));
+      await tester.pump();
+      expect(content(), isNot(paints..rrect()));
+      await press.up();
+
+      final tap = await tester.startGesture(textCenter(tester, 'report'));
+      await tester.pump();
+      expect(content(), paints..rrect());
+      await tap.up();
+      await tester.pump();
+      expect(content(), isNot(paints..rrect()));
+    });
+
     testWidgets('a second finger does not restart a link hold', (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
