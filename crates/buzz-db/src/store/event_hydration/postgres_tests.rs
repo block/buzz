@@ -381,6 +381,7 @@ async fn channel_create_resend_requires_exact_timestamp_and_live_community_row()
         labels: &[],
         unlisted: false,
         members: &[],
+        admins: &[],
     };
     assert!(matches!(
         db.create_channel_with_event(a, channel_id, channel(), &event)

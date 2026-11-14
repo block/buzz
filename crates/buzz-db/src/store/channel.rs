@@ -239,6 +239,7 @@ pub async fn create_channel_with_id(
             labels,
             unlisted: false,
             members: &[],
+            admins: &[],
         },
     )
     .await?;
@@ -283,9 +284,12 @@ pub struct NewChannel<'a> {
     pub labels: &'a [String],
     /// Leave the channel out of listings for non-members from the start.
     pub unlisted: bool,
-    /// 32-byte pubkeys added as ordinary members invited by the creator. The
-    /// caller has authorized each addition.
+    /// 32-byte pubkeys invited by the creator, ordinary unless in `admins`.
+    /// The caller has authorized each addition.
     pub members: &'a [Vec<u8>],
+    /// Members to grant admin at creation, in the same transaction. A subset
+    /// of `members`; resending a create never reapplies these roles.
+    pub admins: &'a [Vec<u8>],
 }
 
 /// What [`Db::create_channel_with_event`] did.
@@ -366,7 +370,13 @@ async fn insert_channel_rows(
         labels,
         unlisted,
         members,
+        admins,
     } = channel;
+    if admins.iter().any(|admin| !members.contains(admin)) {
+        return Err(DbError::InvalidData(
+            "initial admins must be initial members".into(),
+        ));
+    }
     let community_id = tx.community();
     if created_by.len() != 32 {
         return Err(DbError::InvalidData(format!(
@@ -444,7 +454,7 @@ async fn insert_channel_rows(
             sqlx::query(
                 r#"
                 INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
-                VALUES ($1, $2, $3, 'member', $4)
+                VALUES ($1, $2, $3, CASE WHEN $5 THEN 'admin' ELSE 'member' END::member_role, $4)
                 ON CONFLICT (community_id, channel_id, pubkey) DO NOTHING
                 "#,
             )
@@ -452,6 +462,7 @@ async fn insert_channel_rows(
             .bind(channel_id)
             .bind(member)
             .bind(created_by)
+            .bind(admins.contains(member))
             .execute(tx.conn())
             .await?;
         }
@@ -2759,6 +2770,7 @@ mod postgres_tests {
             labels: &[],
             unlisted: false,
             members,
+            admins: &[],
         }
     }
 
