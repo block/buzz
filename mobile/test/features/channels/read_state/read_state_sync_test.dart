@@ -443,6 +443,33 @@ void main() {
       );
     });
 
+    test('an unreadable peer head alone keeps follows incomplete after a '
+        'restart', () async {
+      final phone = await device('phone');
+      relay.retained['${threadFollowsDTagPrefix}peer'] = NostrEvent(
+        id: 'unreadable-peer',
+        pubkey: keys.public,
+        createdAt: clock,
+        kind: EventKind.readState,
+        tags: [
+          ['d', '$threadFollowsDTagPrefix$slot'],
+          ['t', threadFollowsTag],
+        ],
+        content: crypto.encrypt('{"v":2}'),
+        sig: 'sig',
+      );
+      await phone.reinitializeRemote();
+      expect(phone.threadFollowsIncomplete, isTrue);
+      phone.dispose(flushPending: false);
+
+      relay.offline = true;
+      final restarted = await device('phone');
+      expect(restarted.threadFollowsIncomplete, isTrue);
+      relay.offline = false;
+      await restarted.reinitializeRemote();
+      expect(restarted.threadFollowsIncomplete, isTrue);
+    });
+
     test('a choice made before a retry is sent after it', () async {
       final phone = await device('phone');
       relay.failNext = true;
@@ -602,6 +629,23 @@ void main() {
       expect(desktop.clearChannelOverride(other), isFalse);
       expect(desktop.syncError, isNotNull);
       expect(desktop.activeChannelOverrides, {other});
+    });
+
+    test('a failed clear stays reported until a clear succeeds', () async {
+      final phone = await device('phone');
+      phone.markContextRead(channel, clock - 100);
+      expect(phone.markChannelUnread(channel), isTrue);
+      await phone.flush();
+      await overfill();
+      await phone.reinitializeRemote();
+      expect(phone.clearChannelOverride(channel), isFalse);
+
+      // Unrelated syncing, with nothing else to send, does not hide it.
+      await phone.flush();
+      await phone.reinitializeRemote();
+      await phone.flush();
+      expect(phone.syncError, isNotNull);
+      expect(phone.activeChannelOverrides, contains(channel));
     });
 
     test('a live peer group schedules a canonical publish', () async {

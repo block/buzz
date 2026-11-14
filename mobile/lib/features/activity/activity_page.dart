@@ -288,11 +288,10 @@ class ActivityPage extends HookConsumerWidget {
     void markItemRead(InboxItem item) {
       final notifier = ref.read(readStateProvider.notifier);
       final inbox = ref.read(inboxLocalStateProvider.notifier);
+      // Only this row's own marks. A scope-wide clear belongs to catch-up
+      // and to an explicit channel or thread mark read.
       inbox.clearUnread(groupedInboxItemIds(item));
       final isDmRow = item.conversationId.startsWith('dm:');
-      if (!rowsArePartial) {
-        if (scopeOf(item) case final scope?) inbox.clearScope(scope);
-      }
       final partialChannelId = rowsArePartial ? item.item.channelId : null;
       if (partialChannelId != null) {
         markPartialRowRead(item, partialChannelId, isDmRow: isDmRow);

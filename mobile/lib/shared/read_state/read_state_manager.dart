@@ -151,6 +151,16 @@ class ReadStateManager {
   Future<void> _saved = Future.value();
   bool _saveScheduled = false;
   Object? syncError;
+  // Channels whose synced clear failed. Their error outlives unrelated
+  // successful syncs until the clear lands or the override ends.
+  final Set<String> _failedClears = {};
+  Object? get _standingError {
+    _failedClears.retainAll(activeChannelOverrides);
+    return _failedClears.isEmpty
+        ? null
+        : StateError('Channel mark read cannot be synchronized');
+  }
+
   // Whether the latest snapshot read succeeded. A publish that skips its own
   // snapshot clears [syncError] only on this evidence.
   bool _lastSnapshotSucceeded = false;
@@ -660,7 +670,7 @@ class ReadStateManager {
       if (!_hasUnpublishedState()) {
         // Nothing pending and every slot published, so after a good snapshot
         // this device is in sync, as a full publish would have concluded.
-        if (_lastSnapshotSucceeded) syncError = null;
+        if (_lastSnapshotSucceeded) syncError = _standingError;
         return;
       }
       final checkConnection = _relaySession?.captureConnectionFence();
@@ -894,7 +904,7 @@ class ReadStateManager {
           'Unreadable thread follow coordinate blocks publication',
         );
       }
-      syncError = null;
+      syncError = _standingError;
     } catch (error) {
       // The journal retains local advances, placements and exact pending
       // events. Reconnect/flush retries; never acknowledge the whole batch.

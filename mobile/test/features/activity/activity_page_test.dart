@@ -1218,6 +1218,37 @@ void main() {
     expect(find.byKey(const ValueKey('inbox-unread-dot-m1')), findsOneWidget);
   });
 
+  testWidgets('reading one row keeps another row\'s mark unread in the same '
+      'channel', (tester) async {
+    await tester.pumpWidget(
+      await buildTestable(
+        readContexts: {'ch1': now, 'ch2': now, 'thread:$threadIdRoot1': now},
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    Future<void> rowAction(String id, String action) async {
+      await tester.longPress(find.byKey(ValueKey('inbox-row-$id')));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.descendant(
+          of: find.byType(BottomSheet),
+          matching: find.text(action),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    // Two top-level rows in ch1, both already read through the channel.
+    await rowAction('m1', 'Mark unread');
+    await rowAction('ag1', 'Mark unread');
+    expect(find.byKey(const ValueKey('inbox-unread-dot-ag1')), findsOneWidget);
+
+    await rowAction('m1', 'Mark as read');
+    expect(find.byKey(const ValueKey('inbox-unread-dot-m1')), findsNothing);
+    expect(find.byKey(const ValueKey('inbox-unread-dot-ag1')), findsOneWidget);
+  });
+
   testWidgets('long-press follows a thread and sets a reminder', (
     tester,
   ) async {

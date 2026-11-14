@@ -65,10 +65,14 @@ extension ReadStateOverrides on ReadStateManager {
     final top = max(register.s, register.c);
     if (top < 4294967295) {
       _overrides[channelId] = (s: register.s, c: top + 1, b: register.b);
-      if (_primaryFits()) return true;
+      if (_primaryFits()) {
+        _failedClears.remove(channelId);
+        return true;
+      }
       _overrides[channelId] = register;
     }
-    syncError = StateError('Channel mark read cannot be synchronized');
+    _failedClears.add(channelId);
+    syncError = _standingError;
     _onChanged();
     return false;
   }
