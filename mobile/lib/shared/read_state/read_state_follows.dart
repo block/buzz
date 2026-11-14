@@ -27,10 +27,16 @@ extension ReadStateFollows on ReadStateManager {
   bool get threadFollowsIncomplete =>
       !_followsLoaded || _unreadableFollowSlots.isNotEmpty;
 
+  /// Whether follow and unfollow taps are accepted: this writer has
+  /// completed a recovery of its own state and every owned follow head is
+  /// readable. Each new writer starts not ready, whatever its journal holds.
+  bool get threadFollowsReady => _canPublishFollows;
+
   /// Record an explicit follow or unfollow in this installation's own slot.
   /// The choice shows at once but is accepted only once journaled: resolves
-  /// false, leaving the previous choice, when the slots are full, no later
-  /// timestamp can be reserved, or the journal write fails.
+  /// false, leaving the previous choice, before [threadFollowsReady], when the
+  /// slots are full, no later timestamp can be reserved, or the journal write
+  /// fails.
   Future<bool> setThreadFollow(
     String channelId,
     String rootId,
@@ -38,8 +44,8 @@ extension ReadStateFollows on ReadStateManager {
   ) async {
     final key = threadFollowKey(channelId, rootId);
     if (_disposed || !isValidThreadFollowKey(key)) return false;
-    if (_followSlots.any(_unreadableFollowSlots.contains)) {
-      syncError = StateError('Unreadable thread follow coordinate');
+    if (!threadFollowsReady) {
+      syncError = StateError(threadFollowsNotReadyMessage);
       _onChanged();
       return false;
     }
@@ -129,11 +135,14 @@ extension ReadStateFollows on ReadStateManager {
       return const {};
     }
     if (imported.isNotEmpty) _onChanged();
-    // A key is settled, so the caller may retire its legacy source, only once
-    // a journal write covering it has succeeded, whether this import's or an
-    // earlier tap's or import's still being saved. The save queue is serial.
+    // A key is settled, so the caller may retire its legacy source, only if
+    // the successful journal write this import awaited covered it, and the
+    // entry it wrote is still the current one: never from the live map alone,
+    // which can hold a later write's tentative entry, nor from a write whose
+    // tentative entry was since reverted.
+    final Map<String, int> written;
     try {
-      await _persistLocalState();
+      written = await _persistFollowKeys();
     } catch (error) {
       revert();
       syncError = error;
@@ -142,11 +151,12 @@ extension ReadStateFollows on ReadStateManager {
     }
     if (_disposed) return const {};
     if (imported.isNotEmpty) _schedulePublish();
-    // An earlier tentative entry may have been reverted while saving.
     final present = threadFollows;
     return {
       for (final key in candidates)
-        if (present.containsKey(key)) key,
+        if (present.containsKey(key) &&
+            written[key] == (_followEdits[key] ?? 0))
+          key,
     };
   }
 

@@ -1,5 +1,6 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../../shared/read_state/read_state_manager.dart';
 import '../../../shared/read_state/read_state_provider.dart';
 import '../../../shared/read_state/thread_follows_format.dart';
 import '../../../shared/relay/relay.dart';
@@ -81,6 +82,12 @@ class ThreadFollowsNotifier extends Notifier<ThreadFollowsState> {
 
   Future<bool> unfollowThread(String channelId, String rootId) =>
       _set(channelId, rootId, false);
+
+  /// The failure to show when a follow or unfollow was refused.
+  String get failureMessage =>
+      ref.read(readStateProvider.notifier).threadFollowsReady
+      ? 'Couldn’t save that. Try again.'
+      : threadFollowsNotReadyMessage;
 
   Future<bool> _set(String channelId, String rootId, bool follow) async {
     if (rootId.isEmpty) return false;

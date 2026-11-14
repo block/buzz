@@ -396,6 +396,103 @@ void main() {
     );
   });
 
+  test('startup gate: a tap before the first recovery is refused and '
+      'changes nothing; after recovery it is accepted', () async {
+    final first = await device();
+    expect(await first.setThreadFollow(channel, 'a' * 64, true), isTrue);
+    first.dispose(flushPending: false);
+    final saved = Map.of(journal());
+    relay.offline = true;
+    // A cold start from a journal a recovered writer saved.
+    final phone = await device();
+    expect(phone.threadFollowsReady, isFalse);
+    expect(phone.threadFollows[keyK]!.follow, isTrue);
+    expect(await phone.setThreadFollow(channel, 'a' * 64, false), isFalse);
+    expect(await phone.setThreadFollow(channel, 'b' * 64, true), isFalse);
+    expect(phone.threadFollows[keyK]!.follow, isTrue);
+    expect(phone.threadFollows.containsKey(keyB), isFalse);
+    expect(journal()['followEdits'], saved['followEdits']);
+    expect(journal()['ownFollows'], saved['ownFollows']);
+    expect('${phone.syncError}', contains(threadFollowsNotReadyMessage));
+    relay.offline = false;
+    await phone.reinitializeRemote();
+    expect(phone.threadFollowsReady, isTrue);
+    expect(await phone.setThreadFollow(channel, 'b' * 64, true), isTrue);
+    expect(phone.threadFollows[keyB]!.follow, isTrue);
+  });
+
+  test('startup gate: reads and channel mark unread are not gated', () async {
+    relay.offline = true;
+    final offline = await device();
+    offline.markContextRead(channel, clock - 100);
+    expect(offline.getEffectiveTimestamp(channel), clock - 100);
+    offline.dispose(flushPending: false);
+    relay.offline = false;
+    final writer = await device();
+    await writer.setThreadFollow(channel, 'a' * 64, true);
+    await writer.flush();
+    writer.dispose(flushPending: false);
+    // Recovered, but an unreadable own head keeps follows not ready.
+    final coordinate = relay.follows().single.tags.firstWhere(
+      (tag) => tag.first == 'd',
+    )[1];
+    relay.retained[coordinate] = NostrEvent(
+      id: '2' * 64,
+      pubkey: keys.public,
+      createdAt: clock + 5,
+      kind: EventKind.readState,
+      tags: [
+        ['d', coordinate],
+        ['t', threadFollowsTag],
+      ],
+      content: crypto.encrypt('{"v":2}'),
+      sig: 'sig',
+    );
+    final phone = await device();
+    expect(phone.threadFollowsReady, isFalse);
+    expect(await phone.setThreadFollow(channel, 'b' * 64, true), isFalse);
+    phone.markContextRead('other', clock - 50);
+    expect(phone.getEffectiveTimestamp('other'), clock - 50);
+    expect(phone.markChannelUnread(channel), isTrue);
+  });
+
+  test('I4: an import is not settled by a later tentative entry', () async {
+    final phone = await device();
+    final gates = [for (var i = 0; i < 3; i++) Completer<void>()];
+    var writes = 0;
+    store.holdJournal = (_) => writes < 3 ? gates[writes++].future : null;
+    // A imports K; its save is held.
+    final a = phone.importLegacyFollows({keyK: true});
+    await pumpEventQueue();
+    // B sees A's tentative K and awaits a save of its own.
+    final b = phone.importLegacyFollows({keyK: true});
+    await pumpEventQueue();
+    // A's save fails and A reverts K.
+    store.failJournal = true;
+    gates[0].complete();
+    expect(await a, isEmpty);
+    expect(phone.threadFollows.containsKey(keyK), isFalse);
+    // C imports K again while B's save is still held.
+    final c = phone.importLegacyFollows({keyK: true});
+    await pumpEventQueue();
+    // B's save succeeds; C's then fails.
+    store.failJournal = false;
+    gates[1].complete();
+    expect(await b, isEmpty);
+    store.failJournal = true;
+    gates[2].complete();
+    expect(await c, isEmpty);
+    store.failJournal = false;
+    // A later save drops the reverted entry from the journal.
+    phone.markContextRead(channel, clock - 100);
+    await phone.flush();
+    phone.dispose(flushPending: false);
+    // Nothing was settled, so the legacy source still holds K to import.
+    final restarted = await device();
+    expect(restarted.threadFollows.containsKey(keyK), isFalse);
+    expect(await restarted.importLegacyFollows({keyK: true}), {keyK});
+  });
+
   test('I4: a legacy import is not settled until it is journaled', () async {
     final phone = await device();
     store.failJournal = true;
@@ -519,6 +616,7 @@ class _HoldingRelay extends RelaySessionNotifier {
   Completer<void> held = Completer();
   NostrEvent? inFlight;
   bool dropNext = false;
+  bool offline = false;
   _Echo echo = _Echo.beforeOk;
   final attempts = <NostrEvent>[];
 
@@ -536,7 +634,10 @@ class _HoldingRelay extends RelaySessionNotifier {
   @override
   Future<List<NostrEvent>> fetchReadStateSnapshot({
     Duration timeout = const Duration(seconds: 8),
-  }) async => retained.values.toList();
+  }) async {
+    if (offline) throw TimeoutException('relay unreachable');
+    return retained.values.toList();
+  }
 
   @override
   Future<void Function()> subscribe(

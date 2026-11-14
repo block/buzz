@@ -125,6 +125,11 @@ class ReadStateCrypto {
 
 enum _ApplyRemoteContextResult { unchanged, advanced }
 
+/// The failure shown for a follow or unfollow refused before
+/// [ReadStateFollows.threadFollowsReady].
+const threadFollowsNotReadyMessage =
+    'Follow choices are not ready. Connect and try again.';
+
 class ReadStateManager {
   final String pubkey;
   final String relayUrl;
@@ -149,6 +154,9 @@ class ReadStateManager {
   final Map<String, Map<String, int>> _published = {};
   final Map<String, NostrEvent> _pending = {};
   Future<void> _saved = Future.value();
+  // The follow keys the latest scheduled journal write covers, each with the
+  // pending edit generation it wrote (0: no pending edit, already synced).
+  Future<Map<String, int>> _savedFollows = Future.value(const {});
   bool _saveScheduled = false;
   Object? syncError;
   // Channels whose synced clear failed. Their error outlives unrelated
@@ -1087,10 +1095,17 @@ class ReadStateManager {
     _persistLocalState();
   }
 
+  /// Saves like [_persistLocalState], resolving with the follow keys the
+  /// write it awaited actually covered; see [_savedFollows].
+  Future<Map<String, int>> _persistFollowKeys() {
+    _persistLocalState();
+    return _savedFollows;
+  }
+
   Future<void> _persistLocalState() {
     if (_saveScheduled) return _saved;
     _saveScheduled = true;
-    Future<void> save() async {
+    Future<Map<String, int>> save() async {
       _saveScheduled = false;
       if (!_ownsJournal) {
         throw StateError('Read-state journal writer retired');
@@ -1132,15 +1147,20 @@ class ReadStateManager {
           },
         'createdAt': _maxFetchedCreatedAt,
       });
+      final follows = {
+        for (final key in threadFollows.keys) key: _followEdits[key] ?? 0,
+      };
       await _storage.writeJournal(_journalKey, encoded, owner: _journalOwner);
+      return follows;
     }
 
     // Coalesce synchronous batches without allowing a later write to race an
     // earlier write. A sender awaits this entire chain before network I/O.
-    _saved = _saved.then(
+    _savedFollows = _saved.then(
       (_) => save(),
       onError: (Object _, StackTrace _) => save(),
     );
+    _saved = _savedFollows.then((_) {});
     unawaited(
       _saved.catchError((Object error) {
         syncError = error;

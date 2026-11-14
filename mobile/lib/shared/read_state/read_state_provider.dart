@@ -287,6 +287,9 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       _manager?.setThreadFollow(channelId, rootId, follow) ??
       Future.value(false);
 
+  /// See [ReadStateFollows.threadFollowsReady].
+  bool get threadFollowsReady => _manager?.threadFollowsReady ?? false;
+
   /// See [ReadStateManager.importLegacyFollows].
   Future<Set<String>> importLegacyFollows(Map<String, bool> choices) =>
       _manager?.importLegacyFollows(choices) ?? Future.value(const {});

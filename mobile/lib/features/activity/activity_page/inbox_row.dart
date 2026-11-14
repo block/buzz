@@ -410,9 +410,7 @@ class _InboxRow extends HookConsumerWidget {
                             : notifier.followThread(channelId, followRootId));
                         if (!saved) {
                           messenger?.showFeedbackSnackBar(
-                            const SnackBar(
-                              content: Text('Couldn’t save that. Try again.'),
-                            ),
+                            SnackBar(content: Text(notifier.failureMessage)),
                             kind: ToastKind.error,
                           );
                         }

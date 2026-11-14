@@ -550,11 +550,15 @@ are unchanged.
   of its own and its peers' channel groups, so the capacity is shared by the
   identity across all its installations, not per installation. A new group
   that does not fit MUST fail visibly. If the merged union no longer fits,
-  the client MUST keep its last published primary and fail override actions,
-  including the synchronized clears above, per Bounds and Budget (Terminal
-  behaviour at the ceiling); ordinary frontier advances and device-local
-  overrides remain permitted. It MUST NOT prune tombstones or peer groups to
-  make room.
+  the client MUST rewrite its primary compactly from the groups its last
+  published primary carried: each group in its canonical form against the
+  current frontiers (a dead group as its tombstone floor), with its
+  co-located frontier advanced. The rewrite MUST NOT omit merged groups or
+  tombstone floors that primary carried, and override actions, including the
+  synchronized clears above, MUST fail visibly while the union does not fit,
+  per Bounds and Budget (Terminal behaviour at the ceiling); ordinary
+  frontier advances and device-local overrides remain permitted. It MUST NOT
+  prune tombstones or peer groups to make room.
 - **Catch-up advances the main frontier:** on a catch-up of a channel, the
   client advances that channel's own context (`<channel-id>`) to the newest
   top-level message the reader reached, following the Write Discipline (not
@@ -924,7 +928,7 @@ Because legacy clients can carry and republish old `ov_*` keys indefinitely (the
 - **Key growth:** a live override adds 3 entries per context; a tombstoned override adds 1 entry per context. At 100 overridden channel contexts: ~300 live entries or ~100 tombstone entries.
 - **Byte cost (small-counter example, common case):** channel UUID context (36 chars), counters S=1/C=0/B=10 — live override ~138 bytes; tombstone ~45 bytes. **Byte cost at uint32 maximum** (S=4294967295, worst case): live override ~164 bytes; tombstone ~54 bytes.
 - **Hard ceiling on ever-overridden contexts.** Because all `ov_*` entries live in one coordinate (see `d` Tag) and tombstones can never be pruned (see Override State Durability — there is no safe finite GC horizon), the primary blob's plaintext budget is a hard ceiling on the number of contexts a single installation can ever have manually marked unread. Against a 32 KiB plaintext budget: roughly **600** tombstoned contexts at the worst-case ~54 bytes, ~730 at the common ~45 bytes, or ~199 simultaneously live overrides at ~164 bytes — and that is before frontier entries get any room at all.
-- **Terminal behaviour at the ceiling.** When the primary blob cannot accommodate a new override group after all prunable frontier entries have been evicted, the client MUST refuse the mark-unread action and report it as failed. It MUST NOT split override state across coordinates and MUST NOT drop tombstone floors to make room. Likewise, a client whose merged override state — including tombstones merged in from peer installations — no longer fits in its primary blob MUST leave its last-published primary in place, MUST NOT publish a primary that omits merged `ov_*` entries, and MUST report override actions as failed; publishing a truncated override set is budget-driven override loss under another name. No floor is lost in this state, because the installations that originated those floors still carry them; the constrained installation simply stops acting as a replica until it has room. This is the same policy shape as counter exhaustion (see Actions): visible failure, never silent degradation.
+- **Terminal behaviour at the ceiling.** When the primary blob cannot accommodate a new override group after all prunable frontier entries have been evicted, the client MUST refuse the mark-unread action and report it as failed. It MUST NOT split override state across coordinates and MUST NOT drop tombstone floors to make room. Likewise, a client whose merged override state — including tombstones merged in from peer installations — no longer fits in its primary blob MUST rewrite its primary compactly from the groups its last-published primary carried, each canonical against the current frontiers with its co-located frontier advanced; it MUST NOT omit merged groups or tombstone floors that primary carried, and MUST report override actions as failed; publishing a truncated override set is budget-driven override loss under another name. No floor is lost in this state, because the installations that originated those floors still carry them; the constrained installation simply stops acting as a replica until it has room. This is the same policy shape as counter exhaustion (see Actions): visible failure, never silent degradation.
 - **10,000-key limit:** override entries count toward the existing per-blob validation limit. Tombstones accumulate permanently with every distinct ever-overridden context; they cannot be pruned. Clients SHOULD compact dead overrides aggressively and MAY enforce an active-live-override cap. Note that a cap on live overrides does not bound the total `ov_*` entry count over an unbounded context lifetime — tombstones from all historical overrides remain. The 32 KiB and 10,000-entry limits are expressed per blob at write time; a client that has overridden many distinct contexts over its lifetime must account for all accumulated tombstones when evaluating budget headroom.
 - **256-byte key limit:** override keys (`ov_s:`, `ov_c:`, `ov_b:` + context ID) count toward the per-entry 256-byte validation limit. Context IDs up to 251 bytes are safe. Buzz's own context ID shapes (UUID 36 bytes, `msg:hex64` 68 bytes, `thread:hex64` 71 bytes) are well within this limit.
 

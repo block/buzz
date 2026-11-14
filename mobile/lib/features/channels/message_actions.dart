@@ -658,7 +658,7 @@ class _FollowThreadTile extends ConsumerWidget {
             : notifier.followThread(channelId, rootId));
         if (!saved) {
           messenger?.showFeedbackSnackBar(
-            const SnackBar(content: Text('Couldn’t save that. Try again.')),
+            SnackBar(content: Text(notifier.failureMessage)),
             kind: ToastKind.error,
           );
         }
