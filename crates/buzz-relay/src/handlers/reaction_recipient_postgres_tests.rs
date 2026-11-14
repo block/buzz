@@ -306,3 +306,64 @@ async fn a_mention_row_without_a_p_tag_matches_only_for_reactions() {
         );
     }
 }
+
+/// A derived recipient reads a reaction only while it can read the reaction's
+/// channel: once the target's author leaves a private channel, `#p` REQ and
+/// COUNT return none of its reactions to them.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_derived_recipient_outside_the_channel_reads_nothing() {
+    let state = state().await;
+    let tenant = community(&state, "reaction-recipient-access").await;
+    let owner = Keys::generate();
+    let author = Keys::generate();
+    let reactor = Keys::generate();
+    let author_hex = author.public_key().to_hex();
+    let reactor_hex = reactor.public_key().to_hex();
+    let channel_id = create_channel(&state, &tenant, &owner, &[&["visibility", "private"]]).await;
+    let channel = channel_id.to_string();
+    for member in [&author_hex, &reactor_hex] {
+        publish(
+            &state,
+            &tenant,
+            &owner,
+            9000,
+            "",
+            &[&["h", &channel], &["p", member]],
+        )
+        .await;
+    }
+    let message = publish(&state, &tenant, &author, 9, "hello", &[&["h", &channel]]).await;
+    let reaction = publish(
+        &state,
+        &tenant,
+        &reactor,
+        7,
+        "+",
+        &[&["e", &message.id.to_hex()]],
+    )
+    .await;
+    let by_author = json!({"kinds": [7], "#p": [author_hex]});
+    assert_eq!(
+        req_event_ids(&state, &tenant, &author, by_author.clone()).await,
+        vec![reaction.id.to_hex()],
+        "a member reads the untagged reaction to their message"
+    );
+    assert_eq!(count(&state, &tenant, &author, by_author.clone()).await, 1);
+
+    publish(
+        &state,
+        &tenant,
+        &owner,
+        9001,
+        "",
+        &[&["h", &channel], &["p", &author_hex]],
+    )
+    .await;
+    assert_eq!(
+        req_event_ids(&state, &tenant, &author, by_author.clone()).await,
+        Vec::<String>::new(),
+        "a removed author reads no reaction from the channel"
+    );
+    assert_eq!(count(&state, &tenant, &author, by_author).await, 0);
+}
