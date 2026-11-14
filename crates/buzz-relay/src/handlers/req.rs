@@ -1422,6 +1422,11 @@ fn filter_to_query_params(
             None
         }
     });
+    let p_tag_values = filter
+        .generic_tags
+        .get(&p_tag)
+        .filter(|values| values.len() > 1)
+        .map(|values| values.iter().map(|v| v.to_string()).collect());
 
     // Push single-value #d tag into SQL via the d_tag column (NIP-33).
     // Critical for parameterized replaceable lookups (authors + kinds + #d)
@@ -1485,6 +1490,7 @@ fn filter_to_query_params(
         until,
         limit: Some(limit),
         p_tag_hex,
+        p_tag_values,
         d_tag,
         d_tags,
         authors,

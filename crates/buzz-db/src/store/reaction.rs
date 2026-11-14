@@ -31,6 +31,10 @@ pub enum ReactionEventInsertOutcome {
         stored_event: Box<StoredEvent>,
         /// Whether the event row itself was newly inserted.
         was_inserted: bool,
+        /// Whether this write added the derived recipient's `event_mentions`
+        /// row; `false` when a literal `p` tag or an earlier write had already
+        /// indexed it, or the event row already existed.
+        derived_recipient_inserted: bool,
     },
 }
 
@@ -171,6 +175,11 @@ pub(crate) async fn add_reaction_tx(
 /// Ordering is load-bearing: resolve target, upsert/reactivate the reaction row,
 /// check `rows_affected`, then insert the kind:7 event. Active duplicates return
 /// before event insertion so duplicate reactions never store a duplicate kind:7.
+///
+/// `derived_recipient` is the target's effective author. A newly stored
+/// reaction is indexed in `event_mentions` under it, in the same transaction,
+/// so `#p` reads find the reaction without a `p` tag. The returned event
+/// carries it in `derived_recipients`.
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_reaction_event_with_thread_metadata(
     pool: &PgPool,
@@ -181,6 +190,7 @@ pub async fn insert_reaction_event_with_thread_metadata(
     target_event_id: &[u8],
     actor_pubkey: &[u8],
     emoji: &str,
+    derived_recipient: &[u8],
 ) -> Result<ReactionEventInsertOutcome> {
     let mut tx = crate::begin_community_event_write_transaction(
         pool,
@@ -227,16 +237,56 @@ pub async fn insert_reaction_event_with_thread_metadata(
         insert_event_with_thread_metadata_tx(&mut tx, reaction_event, channel_id, thread_meta)
             .await?;
 
+    let derived_recipient_hex = hex::encode(derived_recipient);
+    let mut derived_recipient_inserted = false;
     if was_inserted {
         crate::insert_mentions_in_transaction(&mut tx, reaction_event, channel_id).await?;
+        derived_recipient_inserted = insert_derived_recipient_mention(
+            &mut tx,
+            reaction_event,
+            channel_id,
+            &derived_recipient_hex,
+        )
+        .await?;
     }
 
     tx.commit().await?;
 
     Ok(ReactionEventInsertOutcome::Inserted {
-        stored_event: Box::new(stored_event),
+        stored_event: Box::new(stored_event.with_derived_recipients(vec![derived_recipient_hex])),
         was_inserted,
+        derived_recipient_inserted,
     })
+}
+
+/// Index `reaction_event` under `recipient_hex` in `event_mentions`. Returns
+/// whether a row was added; a literal `p` tag naming the same pubkey already
+/// added it.
+async fn insert_derived_recipient_mention(
+    tx: &mut AdmittedTx,
+    reaction_event: &Event,
+    channel_id: Option<Uuid>,
+    recipient_hex: &str,
+) -> Result<bool> {
+    let created_at_secs = reaction_event.created_at.as_secs() as i64;
+    let created_at = DateTime::from_timestamp(created_at_secs, 0)
+        .ok_or(crate::error::DbError::InvalidTimestamp(created_at_secs))?;
+    let community = tx.community();
+    let result = sqlx::query(
+        "INSERT INTO event_mentions \
+         (community_id, pubkey_hex, event_id, event_created_at, channel_id, event_kind) \
+         VALUES ($1, $2, $3, $4, $5, $6) \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(community.as_uuid())
+    .bind(recipient_hex)
+    .bind(reaction_event.id.as_bytes().as_slice())
+    .bind(created_at)
+    .bind(channel_id)
+    .bind(i32::from(reaction_event.kind.as_u16()))
+    .execute(tx.conn())
+    .await?;
+    Ok(result.rows_affected() != 0)
 }
 
 /// Soft-delete a reaction by setting `removed_at`.
@@ -579,6 +629,7 @@ impl Db {
         target_event_id: &[u8],
         actor_pubkey: &[u8],
         emoji: &str,
+        derived_recipient: &[u8],
     ) -> Result<ReactionEventInsertOutcome> {
         crate::reaction::insert_reaction_event_with_thread_metadata(
             &self.pool,
@@ -589,6 +640,7 @@ impl Db {
             target_event_id,
             actor_pubkey,
             emoji,
+            derived_recipient,
         )
         .await
     }
@@ -851,6 +903,7 @@ mod postgres_tests {
             target.id.as_bytes(),
             &actor.public_key().to_bytes(),
             &emoji,
+            &target.pubkey.to_bytes(),
         )
         .await
         .expect("store wrapped 64-character shortcode");
@@ -890,6 +943,7 @@ mod postgres_tests {
             target.id.as_bytes(),
             &actor_pubkey,
             "👍",
+            &target.pubkey.to_bytes(),
         )
         .await
         .expect("first reaction insert");
@@ -910,6 +964,7 @@ mod postgres_tests {
             target.id.as_bytes(),
             &actor_pubkey,
             "👍",
+            &target.pubkey.to_bytes(),
         )
         .await
         .expect("duplicate reaction insert");
@@ -948,6 +1003,7 @@ mod postgres_tests {
             target.id.as_bytes(),
             &actor_pubkey,
             "👍",
+            &target.pubkey.to_bytes(),
         )
         .await
         .expect("cross-community reaction attempt");
@@ -1007,6 +1063,7 @@ mod postgres_tests {
             target.id.as_bytes(),
             &actor_pubkey,
             "👍",
+            &target.pubkey.to_bytes(),
         )
         .await
         .expect_err("ephemeral event insert must fail after reaction upsert attempt");
@@ -1056,6 +1113,7 @@ mod postgres_tests {
                 target.id.as_bytes(),
                 &actor_pubkey,
                 "👍",
+                &target.pubkey.to_bytes(),
             )
             .await
             .expect("first reaction insert"),
@@ -1081,6 +1139,7 @@ mod postgres_tests {
             target.id.as_bytes(),
             &actor_pubkey,
             "👍",
+            &target.pubkey.to_bytes(),
         )
         .await
         .expect("reactivate reaction");
@@ -1160,6 +1219,7 @@ mod postgres_tests {
                 target.id.as_bytes(),
                 &actor.public_key().to_bytes(),
                 "👍",
+                &target.pubkey.to_bytes(),
             )
             .await
             .expect_err("mention-indexing failure must fail reaction insert");
@@ -1254,6 +1314,7 @@ mod postgres_tests {
                 target.id.as_bytes(),
                 &actor_pubkey,
                 "👍",
+                &target.pubkey.to_bytes(),
             )
             .await
             .expect("insert reaction with thread metadata and mention");
@@ -1304,17 +1365,21 @@ mod postgres_tests {
             "thread metadata must commit with reaction event"
         );
 
-        let mention_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM event_mentions WHERE community_id = $1 AND event_id = $2",
+        let mut mentioned_pubkeys: Vec<String> = sqlx::query_scalar(
+            "SELECT pubkey_hex FROM event_mentions WHERE community_id = $1 AND event_id = $2",
         )
         .bind(community_uuid)
         .bind(reaction.id.as_bytes().as_slice())
-        .fetch_one(&pool)
+        .fetch_all(&pool)
         .await
-        .expect("count mention rows");
+        .expect("read mention rows");
+        mentioned_pubkeys.sort();
+        let mut expected = vec![mentioned.public_key().to_hex(), target.pubkey.to_hex()];
+        expected.sort();
         assert_eq!(
-            mention_count, 1,
-            "mention row must commit atomically with reaction, event, and thread metadata"
+            mentioned_pubkeys, expected,
+            "the p tag and the target author's mention rows must commit atomically with \
+             reaction, event, and thread metadata"
         );
     }
 
@@ -1545,6 +1610,7 @@ mod postgres_tests {
             target.id.as_bytes(),
             &actor_pubkey,
             emoji,
+            &target.pubkey.to_bytes(),
         )
         .await
         .expect_err("fenced community must reject reaction inserts");

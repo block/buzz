@@ -249,6 +249,15 @@ holding a write-blocking lock. Scans that do not block writes, such as
   asserted in `scripts/reconcile-schema-after-pgschema.sql`. Rows read only by
   the static lint, such as `_operator_global_tables`, do not go there.
 
+Repair scripts in `scripts/maintenance/` under this rule:
+
+- `backfill_reaction_target_mentions.sql` indexes every stored kind:7
+  reaction under its target's effective author in `event_mentions`, so `#p`
+  reads find reactions that do not tag that author. Run it after every
+  serving relay writes that row at ingest and old relays are drained, with
+  `-v relay_pubkey_hex=<relay public key>`. Its last query MUST print 0; a
+  rerun inserts nothing.
+
 ### 4. Change every schema location
 
 Until the declarative schema is the only source, one logical change spans

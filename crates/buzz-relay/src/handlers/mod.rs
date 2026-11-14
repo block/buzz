@@ -52,6 +52,8 @@ pub mod product_feedback;
 pub mod push_lease;
 #[cfg(test)]
 mod put_user_postgres_tests;
+#[cfg(test)]
+mod reaction_recipient_postgres_tests;
 /// NIP-43 relay membership admin command handler (kinds 9030–9032).
 pub mod relay_admin;
 /// NIP-56 report (kind:1984) validation + moderation queue persistence.

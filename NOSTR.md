@@ -47,7 +47,7 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | Feature | Status | Notes |
 |---------|:------:|-------|
 | **Group chat (kind:9)** | ✅ | Send/receive messages with `#h <channel-uuid>` tag |
-| **Reactions (kind:7)** | ✅ | Standard NIP-25; channel derived from target event's `#e` tag (client `#h` ignored) |
+| **Reactions (kind:7)** | ✅ | Standard NIP-25; channel derived from target event's `#e` tag (client `#h` ignored). The relay indexes the target's author as a `#p` recipient of the reaction; clients SHOULD still tag `p` per NIP-25. |
 | **Deletions (kind:5)** | ✅ | Standard NIP-09; self-authored only. `#h` optional, `#e` required |
 | **User profiles (kind:0)** | ✅ | NIP-01 metadata; synced to users table (display_name, avatar, about, NIP-05). NIP-05 handles must canonicalize to this relay's domain — off-domain or invalid handles are silently cleared. If a NIP-05 handle collides with another user's (UNIQUE constraint), the handle is skipped but other profile fields (display_name, avatar, about) are still synced. |
 | **Group creation (kind:9007)** | ✅ | NIP-29; include an `h` tag with the new channel id and a `name` tag, optional `visibility`, `channel_type`, label `t` and `unlisted` tags. The relay refuses a 9007 without `h`. It refuses a listed channel (open, not unlisted, stream or forum) whose name another listed channel already has, ignoring case and including archived ones: `invalid: an open channel named "<name>" already exists`. |
