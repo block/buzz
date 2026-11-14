@@ -1315,9 +1315,9 @@ impl ObserverPublishQueue {
                 // only the newest event's envelope metadata needs measuring.
                 if !picked.is_empty()
                     && serialized_len(&empty_batch_envelope(&event))
-                        + picked_bytes
-                        + bytes
-                        + picked.len()
+                        .saturating_add(picked_bytes)
+                        .saturating_add(bytes)
+                        .saturating_add(picked.len())
                         > OBSERVER_MAX_PLAINTEXT_LEN
                 {
                     // Frame full: the overflow event stays queued and leads
