@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { FolderGit2, Globe, SquareTerminal } from "lucide-react";
+import { FolderGit2, Globe, SquareTerminal, Trash2 } from "lucide-react";
 
 import type {
   Project,
@@ -23,6 +23,17 @@ import {
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/shared/ui/alert-dialog";
+import { Button } from "@/shared/ui/button";
 import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
 import { Card } from "@/shared/ui/card";
 import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
@@ -49,7 +60,10 @@ export type RepositoryListItem = {
 };
 
 type RepositoryItemProps = RepositoryListItem & {
+  canDelete?: boolean;
+  deleteDisabled?: boolean;
   hasLocal: boolean;
+  onDelete?: (repository: Repository) => Promise<void> | void;
   onOpen: (project: Project, repository: Repository) => void;
   onOpenTerminal: (repository: Repository) => void;
   profiles?: UserProfileLookup;
@@ -169,27 +183,93 @@ function repositoryPeople(
 }
 
 function RepositoryActionsMenu({
+  canDelete = false,
+  disabled = false,
   hasLocal,
+  onDelete,
   onOpenTerminal,
   repository,
-}: Pick<RepositoryItemProps, "hasLocal" | "onOpenTerminal" | "repository">) {
+}: {
+  canDelete?: boolean;
+  disabled?: boolean;
+  hasLocal: boolean;
+  onDelete?: (repository: Repository) => Promise<void> | void;
+  onOpenTerminal: (repository: Repository) => Promise<void> | void;
+  repository: Repository;
+}) {
+  const [confirmOpen, setConfirmOpen] = React.useState(false);
+
   return (
-    <ProjectListRowMenu label={`More options for ${repository.name}`}>
-      <CopyShareLinkMenuItem
-        link={repositoryShareLink(repository)}
-        testId={`repository-copy-link-${repository.dtag}`}
-      />
-      <DropdownMenuItem
-        onSelect={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          onOpenTerminal(repository);
-        }}
-      >
-        <SquareTerminal className="h-4 w-4" />
-        {projectTerminalLabel(hasLocal)}
-      </DropdownMenuItem>
-    </ProjectListRowMenu>
+    <AlertDialog onOpenChange={setConfirmOpen} open={confirmOpen}>
+      <ProjectListRowMenu label={`More options for ${repository.name}`}>
+        <CopyShareLinkMenuItem
+          link={repositoryShareLink(repository)}
+          testId={`repository-copy-link-${repository.dtag}`}
+        />
+        <DropdownMenuItem
+          onSelect={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            void onOpenTerminal(repository);
+          }}
+        >
+          <SquareTerminal className="h-4 w-4" />
+          {projectTerminalLabel(hasLocal)}
+        </DropdownMenuItem>
+        {onDelete ? (
+          <DropdownMenuItem
+            className="text-destructive focus:text-destructive"
+            disabled={!canDelete || disabled}
+            onSelect={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              if (canDelete && !disabled) {
+                setConfirmOpen(true);
+              }
+            }}
+          >
+            <Trash2 className="h-4 w-4" />
+            Delete repository
+          </DropdownMenuItem>
+        ) : null}
+      </ProjectListRowMenu>
+      {onDelete ? (
+        <AlertDialogContent
+          data-testid={`repository-delete-confirm-${repository.dtag}`}
+        >
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete repository?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Delete {repository.name} from Repositories for everyone. This can
+              only be done for repositories you own and cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel asChild>
+              <Button disabled={disabled} type="button" variant="outline">
+                Cancel
+              </Button>
+            </AlertDialogCancel>
+            <AlertDialogAction asChild>
+              <Button
+                data-testid={`repository-delete-confirm-button-${repository.dtag}`}
+                disabled={disabled}
+                onClick={(event) => {
+                  event.preventDefault();
+                  void Promise.resolve(onDelete(repository)).finally(() =>
+                    setConfirmOpen(false),
+                  );
+                }}
+                type="button"
+                variant="destructive"
+              >
+                {disabled ? "Deleting..." : "Delete repository"}
+              </Button>
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      ) : null}
+    </AlertDialog>
   );
 }
 
@@ -199,7 +279,10 @@ export const RepositoryGridCard = React.memo(function RepositoryGridCard(
   props: RepositoryItemProps,
 ) {
   const {
+    canDelete,
+    deleteDisabled,
     hasLocal,
+    onDelete,
     onOpen,
     onOpenTerminal,
     profiles,
@@ -227,7 +310,10 @@ export const RepositoryGridCard = React.memo(function RepositoryGridCard(
           />
           <div className="pointer-events-auto ml-auto">
             <RepositoryActionsMenu
+              canDelete={canDelete}
+              disabled={deleteDisabled}
               hasLocal={hasLocal}
+              onDelete={onDelete}
               onOpenTerminal={onOpenTerminal}
               repository={repository}
             />
@@ -264,7 +350,10 @@ export const RepositoryListRow = React.memo(function RepositoryListRow(
   props: RepositoryItemProps,
 ) {
   const {
+    canDelete,
+    deleteDisabled,
     hasLocal,
+    onDelete,
     onOpen,
     onOpenTerminal,
     profiles,
@@ -307,7 +396,10 @@ export const RepositoryListRow = React.memo(function RepositoryListRow(
       titleSecondaryTestId="repositories-row-description"
       trailing={
         <RepositoryActionsMenu
+          canDelete={canDelete}
+          disabled={deleteDisabled}
           hasLocal={hasLocal}
+          onDelete={onDelete}
           onOpenTerminal={onOpenTerminal}
           repository={repository}
         />
