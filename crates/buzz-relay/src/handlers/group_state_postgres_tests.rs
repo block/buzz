@@ -1621,6 +1621,7 @@ async fn a_relay_operator_may_not_rename_an_unlisted_channel() {
             ],
             &owner.public_key().to_bytes(),
             false,
+            &|_: &str, _: &[u8]| Ok(()),
         )
         .await
         .expect("open dm");

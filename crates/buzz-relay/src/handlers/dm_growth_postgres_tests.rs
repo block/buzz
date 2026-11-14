@@ -450,8 +450,8 @@ async fn an_agents_group_dm_keeps_its_own_identity() {
     assert_ne!(peoples, agents_dm);
 }
 
-/// Only people share a DM's history: an agent's add with the tag is refused,
-/// and without it starts a new DM, as before.
+/// Only people share a DM's history: an agent's add or open with the tag is
+/// refused, and an add without it starts a new DM, as before.
 /// Mutation: let agents grow DMs → C joins the original DM → RED.
 #[tokio::test]
 #[ignore = "requires Postgres"]
@@ -472,6 +472,10 @@ async fn an_agent_cannot_share_a_dms_history() {
 
     rejected(
         add(&state, &tenant, &agent, dm, &[&c], true).await,
+        "only people",
+    );
+    rejected(
+        open_with_history(&state, &tenant, &agent, &[&a, &b]).await,
         "only people",
     );
     let (target, created) = add(&state, &tenant, &agent, dm, &[&c], false)
@@ -515,6 +519,7 @@ async fn growing_does_not_reveal_a_dm_the_actor_is_not_in() {
             dm,
             &agent.public_key().to_bytes(),
             &[c_bytes.as_slice()],
+            &|_: &str, _: &[u8]| Ok(()),
         )
         .await;
 
@@ -541,6 +546,7 @@ async fn the_moderation_dm_cannot_grow() {
             &[&a.public_key().to_bytes()],
             &relay,
             false,
+            &|_: &str, _: &[u8]| Ok(()),
         )
         .await
         .expect("moderation dm");
@@ -864,5 +870,288 @@ async fn a_person_added_to_an_agent_only_dm_starts_a_new_one() {
     assert_eq!(
         open(&state, &tenant, &a, &[&agent]).await.expect("reopen"),
         dm
+    );
+}
+
+/// An agent joining a DM still identified by all its members (from before
+/// agents were told apart) moves it to its people, so they find it by name.
+/// Mutation: compare against the recomputed people hash instead of the stored
+/// one → the DM keeps its old fingerprint → A and B get a new DM → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn an_agent_joining_a_dm_named_by_all_its_members_moves_it_to_its_people() {
+    let state = state().await;
+    let tenant = community(&state, "dm-legacy-agent-join").await;
+    let (a, b, x, y) = (
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+    );
+    make_agent(&state, &tenant, &x, &a, "anyone").await;
+    make_agent(&state, &tenant, &y, &a, "anyone").await;
+    // Without the tag, the DM is identified by all its members.
+    let dm = open(&state, &tenant, &a, &[&b, &x]).await.expect("open");
+
+    let (target, created) = add(&state, &tenant, &a, dm, &[&y], true)
+        .await
+        .expect("add agent");
+
+    assert_eq!((target, created), (dm, false));
+    assert_eq!(
+        open_with_history(&state, &tenant, &b, &[&a])
+            .await
+            .expect("people"),
+        dm
+    );
+}
+
+/// Reopening a DM with someone else's agent in it is not adding that agent:
+/// only agents that join need their add policy.
+/// Mutation: check the policy of every named agent → A's reopen is refused →
+/// RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn reopening_a_dm_ignores_the_policy_of_agents_already_in_it() {
+    let state = state().await;
+    let tenant = community(&state, "dm-reopen-owner-only").await;
+    let (a, b, agent) = (Keys::generate(), Keys::generate(), Keys::generate());
+    make_agent(&state, &tenant, &agent, &b, "owner_only").await;
+    let dm = open(&state, &tenant, &a, &[&b]).await.expect("open");
+    add(&state, &tenant, &b, dm, &[&agent], true)
+        .await
+        .expect("owner adds");
+
+    assert_eq!(
+        open_with_history(&state, &tenant, &a, &[&b, &agent])
+            .await
+            .expect("reopen"),
+        dm
+    );
+}
+
+/// Concurrent opens of the same people, each naming another agent, meet in
+/// one DM, and every agent joins it: one that loses the race to create the DM
+/// still adds its agent.
+/// Mutation: report a lost race as created → that open skips adding its
+/// agent → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn concurrent_opens_all_add_their_agents() {
+    let state = state().await;
+    let tenant = community(&state, "dm-open-race").await;
+    let (a, b) = (Keys::generate(), Keys::generate());
+    let agents: Vec<Keys> = (0..6).map(|_| Keys::generate()).collect();
+    for agent in &agents {
+        make_agent(&state, &tenant, agent, &a, "anyone").await;
+    }
+
+    let named: Vec<[&Keys; 2]> = agents.iter().map(|agent| [&b, agent]).collect();
+    let opened = futures::future::join_all(
+        named
+            .iter()
+            .map(|others| open_with_history(&state, &tenant, &a, others)),
+    )
+    .await;
+
+    let dm = *opened[0].as_ref().expect("open");
+    for result in &opened {
+        assert_eq!(*result.as_ref().expect("open"), dm);
+    }
+    let mut everyone: Vec<&Keys> = vec![&a, &b];
+    everyone.extend(&agents);
+    assert_eq!(members(&state, &tenant, dm).await, set_of(&everyone));
+}
+
+/// Reopening a DM identified by all its members with the tag moves it to its
+/// people, so the people alone find it afterwards.
+/// Mutation: reconcile only when someone joins → A and B get a new DM → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_tagged_reopen_moves_an_old_dm_to_its_people() {
+    let state = state().await;
+    let tenant = community(&state, "dm-legacy-reopen").await;
+    let (a, b, x) = (Keys::generate(), Keys::generate(), Keys::generate());
+    make_agent(&state, &tenant, &x, &a, "anyone").await;
+    let dm = open(&state, &tenant, &a, &[&b, &x]).await.expect("open");
+
+    assert_eq!(
+        open_with_history(&state, &tenant, &a, &[&b, &x])
+            .await
+            .expect("tagged reopen"),
+        dm
+    );
+    assert_eq!(
+        open_with_history(&state, &tenant, &b, &[&a])
+            .await
+            .expect("people"),
+        dm
+    );
+    assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a, &b, &x]));
+}
+
+/// When the people of a DM identified by all its members already have their
+/// own DM, an agent added to it joins it in place, and both DMs keep their
+/// identities.
+/// Mutation: send the agent to the people's DM, or move the fingerprint over
+/// it → the agent lands elsewhere or the write fails → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn an_agent_joins_an_old_dm_in_place_when_its_people_have_another() {
+    let state = state().await;
+    let tenant = community(&state, "dm-legacy-collision").await;
+    let (a, b, x, y) = (
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+    );
+    make_agent(&state, &tenant, &x, &a, "anyone").await;
+    make_agent(&state, &tenant, &y, &a, "anyone").await;
+    let peoples = open(&state, &tenant, &a, &[&b]).await.expect("people");
+    let old = open(&state, &tenant, &a, &[&b, &x]).await.expect("old");
+
+    assert_eq!(
+        add(&state, &tenant, &a, old, &[&y], true)
+            .await
+            .expect("add agent"),
+        (old, false)
+    );
+    assert_eq!(
+        members(&state, &tenant, old).await,
+        set_of(&[&a, &b, &x, &y])
+    );
+    assert_eq!(members(&state, &tenant, peoples).await, set_of(&[&a, &b]));
+    assert_eq!(
+        open_with_history(&state, &tenant, &b, &[&a])
+            .await
+            .expect("people"),
+        peoples
+    );
+}
+
+/// Adding a person to a DM with someone else's agent starts a DM that puts
+/// that agent with others, so it needs the agent's add policy, with or without
+/// the tag.
+/// Mutation: check only the agents being added → the new DM is made → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn adding_to_a_dm_with_someone_elses_agent_follows_its_policy() {
+    let state = state().await;
+    let tenant = community(&state, "dm-fork-policy").await;
+    let (a, b, c, agent) = (
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+    );
+    make_agent(&state, &tenant, &agent, &b, "nobody").await;
+    let dm = open(&state, &tenant, &a, &[&agent]).await.expect("open");
+
+    for history in [true, false] {
+        rejected(
+            add(&state, &tenant, &a, dm, &[&c], history).await,
+            "policy:nobody",
+        );
+    }
+    assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a, &agent]));
+}
+
+/// A new DM started from a DM holds who is in that DM when it is made, not
+/// who was in it when the add arrived.
+/// Mutation: build the new DM from members read before taking the DM's lock
+/// → C, who left meanwhile, is in it → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_new_dm_from_a_dm_holds_its_current_members() {
+    let state = state().await;
+    let tenant = community(&state, "dm-fork-live").await;
+    let (a, b, c, d) = (
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+    );
+    let dm = open(&state, &tenant, &a, &[&b, &c]).await.expect("open");
+
+    // Hold the DM's membership lock while the add reads its members, then
+    // let C leave and release it.
+    let mut lock = state.db.pool().begin().await.expect("begin");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "buzz_channel_membership:{}:{dm}",
+            tenant.community().as_uuid()
+        ))
+        .execute(&mut *lock)
+        .await
+        .expect("lock");
+    let adding = tokio::spawn({
+        let (state, tenant, a, d) = (state.clone(), tenant.clone(), a.clone(), d.clone());
+        async move { add(&state, &tenant, &a, dm, &[&d], false).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    sqlx::query(
+        "UPDATE channel_members SET removed_at = NOW() \
+         WHERE channel_id = $1 AND pubkey = $2",
+    )
+    .bind(dm)
+    .bind(c.public_key().to_bytes().as_slice())
+    .execute(&mut *lock)
+    .await
+    .expect("C leaves");
+    lock.commit().await.expect("release");
+
+    let (target, created) = adding.await.expect("task").expect("add");
+    assert!(created);
+    assert_eq!(
+        members(&state, &tenant, target).await,
+        set_of(&[&a, &b, &d])
+    );
+}
+
+/// The relay joins no DM but its moderation DM.
+/// Mutation: drop the relay-key check on additions → the relay joins → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn the_relay_cannot_be_added_to_a_dm() {
+    let state = state().await;
+    let tenant = community(&state, "dm-add-relay").await;
+    let (a, b) = (Keys::generate(), Keys::generate());
+    let dm = open(&state, &tenant, &a, &[&b]).await.expect("open");
+
+    for history in [true, false] {
+        rejected(
+            add(&state, &tenant, &a, dm, &[&state.relay_keypair], history).await,
+            "cannot be changed",
+        );
+    }
+    assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a, &b]));
+}
+
+/// The limit counts the caller only if they are a person: an agent may open a
+/// DM with nine people, and no more.
+/// Mutation: count the caller as a person → the agent's DM is refused → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn an_agent_can_open_a_dm_with_nine_people() {
+    let state = state().await;
+    let tenant = community(&state, "dm-agent-nine").await;
+    let (owner, agent) = (Keys::generate(), Keys::generate());
+    make_agent(&state, &tenant, &agent, &owner, "anyone").await;
+    let people: Vec<Keys> = (0..9).map(|_| Keys::generate()).collect();
+    let nine: Vec<&Keys> = people.iter().collect();
+
+    let dm = open(&state, &tenant, &agent, &nine)
+        .await
+        .expect("nine people");
+    let mut everyone = nine.clone();
+    everyone.push(&agent);
+    assert_eq!(members(&state, &tenant, dm).await, set_of(&everyone));
+
+    let mut ten = nine;
+    ten.push(&owner);
+    rejected(
+        open(&state, &tenant, &agent, &ten).await,
+        "at most 9 people",
     );
 }

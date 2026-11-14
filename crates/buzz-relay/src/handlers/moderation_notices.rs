@@ -116,6 +116,8 @@ pub async fn send_moderation_notice(
             &[recipient_pubkey],
             relay_pubkey_bytes.as_slice(),
             false,
+            // Two-party: no agent needs permission.
+            &|_: &str, _: &[u8]| Ok(()),
         )
         .await?;
     let dm_channel_id = dm_channel.id;

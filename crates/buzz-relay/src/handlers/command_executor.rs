@@ -428,6 +428,10 @@ fn history_opt_in(event: &Event) -> Result<bool, IngestError> {
 /// Why the relay's moderation DM cannot take anyone else.
 const MODERATION_DM_REFUSAL: &str = "invalid: this DM cannot be changed";
 
+/// Why an agent cannot send the history tag: only people choose to share a
+/// DM's history, or which DM their people share.
+const ONLY_PEOPLE_SHARE_HISTORY: &str = "forbidden: only people can share a DM's history";
+
 /// The agents among `pubkeys` (users with an owner): each one's
 /// `channel_add_policy` and owner.
 async fn dm_agents(
@@ -446,19 +450,14 @@ async fn dm_agents(
         .collect())
 }
 
-/// Refuse unless `actor` may put each of `agents` in a DM with other people,
-/// by its `channel_add_policy`, as a kind:9000 add would decide.
-fn check_dm_agent_policies(
-    agents: &HashMap<Vec<u8>, (String, Vec<u8>)>,
-    actor: &[u8],
-) -> Result<(), IngestError> {
-    for (agent, (policy, owner)) in agents {
-        if agent.as_slice() != actor {
-            super::channel_authz::decide_channel_add_policy(policy, Some(owner), actor)
-                .map_err(|e| IngestError::Rejected(format!("forbidden: {e}")))?;
-        }
+/// Whether `actor` may put an agent, given its `channel_add_policy` and
+/// owner, in a DM with others, as a kind:9000 add would decide. The DM writes
+/// apply it to the agents actually joining, under the DM's lock.
+fn agent_add_policy(actor: &[u8]) -> impl Fn(&str, &[u8]) -> Result<(), String> + Sync + '_ {
+    move |policy, owner| {
+        super::channel_authz::decide_channel_add_policy(policy, Some(owner), actor)
+            .map_err(|e| e.to_string())
     }
-    Ok(())
 }
 
 async fn handle_dm_open(
@@ -484,10 +483,9 @@ async fn handle_dm_open(
         ));
     }
 
-    // 2. The relay's moderation DM stays two-party. At most 8 other people
-    //    (9 total); agents do not count. Putting an agent in a DM with anyone
-    //    besides the caller needs its channel_add_policy; messaging one alone
-    //    does not.
+    // 2. The relay's moderation DM stays two-party. At most 9 people, the
+    //    caller included; agents do not count. Only people share a DM's
+    //    history.
     let relay_pubkey = state.relay_keypair.public_key().to_bytes();
     if others.len() > 1
         && others
@@ -496,20 +494,21 @@ async fn handle_dm_open(
     {
         return Err(IngestError::Rejected(MODERATION_DM_REFUSAL.into()));
     }
-    let agents = dm_agents(tenant, state, &others).await?;
-    let other_people = others.iter().filter(|pk| !agents.contains_key(*pk)).count();
-    if others.len() > 1 {
-        check_dm_agent_policies(&agents, &self_bytes)?;
-    }
-    if other_people > MAX_DM_PEOPLE - 1 {
-        return Err(IngestError::Rejected(format!(
-            "invalid: pubkeys may contain at most {} other people ({MAX_DM_PEOPLE} total); agents do not count",
-            MAX_DM_PEOPLE - 1
-        )));
-    }
-
     let mut all_bytes: Vec<Vec<u8>> = vec![self_bytes.clone()];
     all_bytes.extend(others);
+    let agents = dm_agents(tenant, state, &all_bytes).await?;
+    let people = all_bytes
+        .iter()
+        .filter(|pk| !agents.contains_key(*pk))
+        .count();
+    if people > MAX_DM_PEOPLE {
+        return Err(IngestError::Rejected(format!(
+            "invalid: a DM may hold at most {MAX_DM_PEOPLE} people; agents do not count"
+        )));
+    }
+    if include_history && agents.contains_key(&self_bytes) {
+        return Err(IngestError::Rejected(ONLY_PEOPLE_SHARE_HISTORY.into()));
+    }
 
     // Persist the command event (idempotency) — returns open transaction
     let tx = match persist_command_event(&state.db, tenant, event, None).await? {
@@ -523,18 +522,49 @@ async fn handle_dm_open(
         PersistResult::Inserted(tx) => tx,
     };
 
-    // 3. Execute. With history, open the DM of these people and add any named
-    //    agents it does not hold yet; without, the DM of exactly these members.
+    // 3. Execute. With history, open the DM of these people, bring it up to
+    //    date and add any named agents it does not hold yet; without, the DM of
+    //    exactly these members. Each agent that joins needs its policy.
     let all_refs: Vec<&[u8]> = all_bytes.iter().map(|b| b.as_slice()).collect();
+    let policy = agent_add_policy(&self_bytes);
     let (channel, was_created) = state
         .db
-        .open_dm(tenant.community(), &all_refs, &self_bytes, include_history)
+        .open_dm(
+            tenant.community(),
+            &all_refs,
+            &self_bytes,
+            include_history,
+            &policy,
+        )
         .await
         .map_err(dm_write_error)?;
-    let added = if was_created || !include_history {
-        Vec::new()
+    let (target, added) = if was_created || !include_history {
+        (channel.id, Vec::new())
     } else {
-        grow_with_agents(tenant, state, channel.id, &self_bytes, &agents).await?
+        match state
+            .db
+            .grow_dm(
+                tenant.community(),
+                channel.id,
+                &self_bytes,
+                &all_refs,
+                &policy,
+            )
+            .await
+            .map_err(dm_write_error)?
+        {
+            DmGrowth::Grown { added } => (channel.id, added),
+            // A DM of these people already exists: they meet there.
+            DmGrowth::Existing(other) => {
+                let added = grow_existing(tenant, state, other, &self_bytes, &all_bytes).await?;
+                (other, added)
+            }
+            DmGrowth::PeopleStartNewDm => {
+                return Err(IngestError::Internal(
+                    "error: reopening a DM changed its people".into(),
+                ))
+            }
+        }
     };
 
     // Finalize the idempotency record after the separate mutation succeeds.
@@ -544,14 +574,23 @@ async fn handle_dm_open(
 
     // 4. Side effects (post-commit, best-effort)
     if was_created {
-        announce_dm_created(tenant, state, channel.id, &self_bytes, &all_bytes).await;
+        announce_dm_created(tenant, state, target, &self_bytes, &all_bytes).await;
     } else {
         // Re-open of an existing DM cleared the caller's hidden_at; refresh
         // their NIP-DV snapshot so the DM reappears in the sidebar.
+        if target != channel.id {
+            if let Err(e) = state
+                .db
+                .unhide_dm(tenant.community(), target, &self_bytes)
+                .await
+            {
+                warn!("DM re-open: unhide failed: {e}");
+            }
+        }
         if let Err(e) = publish_dm_visibility_snapshot(tenant, state, &self_bytes).await {
             warn!("DM re-open: visibility snapshot failed: {e}");
         }
-        announce_dm_additions(tenant, state, channel.id, &self_bytes, &added).await;
+        announce_dm_additions(tenant, state, target, &self_bytes, &added).await;
     }
 
     // 5. Return response
@@ -561,29 +600,30 @@ async fn handle_dm_open(
         message: format!(
             "response:{}",
             serde_json::json!({
-                "channel_id": channel.id.to_string(),
+                "channel_id": target.to_string(),
                 "created": was_created,
             })
         ),
     })
 }
 
-/// Add `agents` to the existing DM `channel_id` in place. Agents never change
-/// which DM it is, so the DM cannot turn out to be another one.
-async fn grow_with_agents(
+/// Add `pubkeys` to `channel_id`, an existing DM that [`grow_dm`] named as the
+/// DM of these people. Its people are all among its members, so only agents
+/// join and it cannot turn out to be another DM.
+///
+/// [`grow_dm`]: buzz_db::dm::grow_dm
+async fn grow_existing(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     channel_id: Uuid,
     actor: &[u8],
-    agents: &HashMap<Vec<u8>, (String, Vec<u8>)>,
+    pubkeys: &[Vec<u8>],
 ) -> Result<Vec<Vec<u8>>, IngestError> {
-    if agents.is_empty() {
-        return Ok(Vec::new());
-    }
-    let refs: Vec<&[u8]> = agents.keys().map(Vec::as_slice).collect();
+    let refs: Vec<&[u8]> = pubkeys.iter().map(Vec::as_slice).collect();
+    let policy = agent_add_policy(actor);
     match state
         .db
-        .grow_dm(tenant.community(), channel_id, actor, &refs)
+        .grow_dm(tenant.community(), channel_id, actor, &refs, &policy)
         .await
         .map_err(dm_write_error)?
     {
@@ -645,7 +685,8 @@ async fn handle_dm_add_member(
         return Err(IngestError::Rejected("invalid: channel is not a DM".into()));
     }
 
-    // 4. Read the current members. The relay's moderation DM stays two-party.
+    // 4. Read the current members. The relay's moderation DM stays two-party,
+    //    and the relay joins no other DM.
     let members: Vec<Vec<u8>> = state
         .db
         .get_members_for_event_write(tenant.community(), channel_id)
@@ -665,22 +706,19 @@ async fn handle_dm_add_member(
     let mut additions: Vec<Vec<u8>> = Vec::new();
     for hex_str in &p_tags {
         let pk = decode_pubkey(hex_str)?;
+        if pk.as_slice() == relay_pubkey.as_slice() {
+            return Err(IngestError::Rejected(MODERATION_DM_REFUSAL.into()));
+        }
         if !members.contains(&pk) && !additions.contains(&pk) {
             additions.push(pk);
         }
     }
-    let participants: Vec<Vec<u8>> = members.iter().chain(&additions).cloned().collect();
-    let agents = dm_agents(tenant, state, &additions).await?;
-    check_dm_agent_policies(&agents, &self_bytes)?;
-    // Only people grow a DM or share its history. Any other add starts a new
-    // DM of everyone, as every add did before.
-    let actor_is_agent = !dm_agents(tenant, state, std::slice::from_ref(&self_bytes))
-        .await?
-        .is_empty();
-    if actor_is_agent && include_history {
-        return Err(IngestError::Rejected(
-            "forbidden: only people can share a DM's history".into(),
-        ));
+    if include_history
+        && !dm_agents(tenant, state, std::slice::from_ref(&self_bytes))
+            .await?
+            .is_empty()
+    {
+        return Err(IngestError::Rejected(ONLY_PEOPLE_SHARE_HISTORY.into()));
     }
 
     // Persist the command event — returns open transaction
@@ -695,39 +733,50 @@ async fn handle_dm_add_member(
         PersistResult::Inserted(tx) => tx,
     };
 
-    // 5. Execute.
+    // 5. Execute. Each write reads the DM's members under its lock and checks
+    //    the agents that actually join.
     let addition_refs: Vec<&[u8]> = additions.iter().map(Vec::as_slice).collect();
+    let policy = agent_add_policy(&self_bytes);
     let growth = if include_history {
         // Grow this DM in place.
         Some(
             state
                 .db
-                .grow_dm(tenant.community(), channel_id, &self_bytes, &addition_refs)
+                .grow_dm(
+                    tenant.community(),
+                    channel_id,
+                    &self_bytes,
+                    &addition_refs,
+                    &policy,
+                )
                 .await
                 .map_err(dm_write_error)?,
         )
     } else {
         None
     };
-    let (target, was_created, added, moved_elsewhere) = match growth {
-        Some(DmGrowth::Grown { added }) => (channel_id, false, added, false),
+    let (target, was_created, added, moved_elsewhere, participants) = match growth {
+        Some(DmGrowth::Grown { added }) => (channel_id, false, added, false, Vec::new()),
         // These people already have a DM: the agents join them there.
         Some(DmGrowth::Existing(other)) => {
-            let added = grow_with_agents(tenant, state, other, &self_bytes, &agents).await?;
-            (other, false, added, true)
+            let added = grow_existing(tenant, state, other, &self_bytes, &additions).await?;
+            (other, false, added, true, Vec::new())
         }
         // Start a new DM of everyone (no history); this DM is untouched. A DM
         // of at most one person never gains people, even with the tag.
         Some(DmGrowth::PeopleStartNewDm) | None => {
-            let mut all_bytes = members.clone();
-            all_bytes.extend(additions.iter().cloned());
-            let all_refs: Vec<&[u8]> = all_bytes.iter().map(Vec::as_slice).collect();
-            let (channel, created) = state
+            let (channel, created, participants) = state
                 .db
-                .open_dm(tenant.community(), &all_refs, &self_bytes, false)
+                .fork_dm(
+                    tenant.community(),
+                    channel_id,
+                    &self_bytes,
+                    &addition_refs,
+                    &policy,
+                )
                 .await
                 .map_err(dm_write_error)?;
-            (channel.id, created, Vec::new(), !created)
+            (channel.id, created, Vec::new(), !created, participants)
         }
     };
 
@@ -738,8 +787,6 @@ async fn handle_dm_add_member(
 
     // 6. Side effects (post-commit, best-effort)
     if was_created {
-        let mut participants = members;
-        participants.extend(additions);
         announce_dm_created(tenant, state, target, &self_bytes, &participants).await;
     } else {
         if moved_elsewhere {

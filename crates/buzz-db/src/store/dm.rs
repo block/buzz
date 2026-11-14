@@ -88,17 +88,12 @@ pub fn dm_identity_hash(members: &[&[u8]], agents: &HashSet<Vec<u8>>) -> [u8; 32
     }
 }
 
-/// The fingerprint a DM of `members` opened by `creator` gets. With
-/// `by_people`, the DM of its people ([`dm_identity_hash`]). Otherwise, and
-/// always for an agent, the DM of exactly these members, as before agents were
-/// told apart: only people, choosing to, decide which DM their people share.
-fn opened_identity_hash(
-    members: &[&[u8]],
-    agents: &HashSet<Vec<u8>>,
-    creator: &[u8],
-    by_people: bool,
-) -> [u8; 32] {
-    if by_people && !agents.contains(creator) {
+/// The fingerprint a DM of `members` gets when opened. With `by_people`, the
+/// DM of its people ([`dm_identity_hash`]). Otherwise the DM of exactly these
+/// members, as before agents were told apart: only callers who opt in decide
+/// which DM their people share.
+fn opened_identity_hash(members: &[&[u8]], agents: &HashSet<Vec<u8>>, by_people: bool) -> [u8; 32] {
+    if by_people {
         dm_identity_hash(members, agents)
     } else {
         compute_participant_hash(members)
@@ -126,6 +121,52 @@ async fn agents_among<'e>(
     .fetch_all(executor)
     .await?;
     Ok(agents.into_iter().collect())
+}
+
+/// Decides whether the caller may put an agent, given its
+/// `channel_add_policy` and owner, into a DM with others. `Err` carries the
+/// refusal.
+pub type AgentAddPolicy<'a> = &'a (dyn Fn(&str, &[u8]) -> std::result::Result<(), String> + Sync);
+
+/// Refuse unless every agent in `joining` may join a DM that will hold
+/// `result`, by `policy`. A DM of just `actor` and one agent needs no
+/// permission: messaging an agent alone is always allowed.
+///
+/// Callers run this in the same transaction, and under the same locks, as the
+/// write it guards, so it sees exactly who joins.
+async fn check_joining_agents(
+    conn: &mut sqlx::PgConnection,
+    community_id: CommunityId,
+    actor: &[u8],
+    joining: &[&[u8]],
+    result: &[&[u8]],
+    policy: AgentAddPolicy<'_>,
+) -> Result<()> {
+    if result.len() == 2 && result.contains(&actor) {
+        return Ok(());
+    }
+    let joining: Vec<Vec<u8>> = joining
+        .iter()
+        .filter(|pk| **pk != actor)
+        .map(|pk| pk.to_vec())
+        .collect();
+    if joining.is_empty() {
+        return Ok(());
+    }
+    let rows = sqlx::query(
+        "SELECT channel_add_policy::text AS policy, agent_owner_pubkey AS owner FROM users \
+         WHERE community_id = $1 AND pubkey = ANY($2) AND agent_owner_pubkey IS NOT NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(&joining)
+    .fetch_all(&mut *conn)
+    .await?;
+    for row in rows {
+        let agent_policy: String = row.try_get("policy")?;
+        let owner: Vec<u8> = row.try_get("owner")?;
+        policy(&agent_policy, &owner).map_err(DbError::AccessDenied)?;
+    }
+    Ok(())
 }
 
 // -- DB functions -------------------------------------------------------------
@@ -171,13 +212,18 @@ pub async fn find_dm_by_participants(
 /// - `created_by` must be one of the participants.
 /// - The operation is idempotent: the same identity (see
 ///   [`opened_identity_hash`] for `by_people`) -> the same channel returned.
+/// - A new DM's agents need `policy`'s permission ([`check_joining_agents`]).
+///
+/// Returns `(channel, was_created)`; `was_created` is false when the DM
+/// already existed, including when a concurrent open made it first.
 pub async fn create_dm(
     pool: &PgPool,
     community_id: CommunityId,
     participants: &[&[u8]],
     created_by: &[u8],
     by_people: bool,
-) -> Result<ChannelRecord> {
+    policy: AgentAddPolicy<'_>,
+) -> Result<(ChannelRecord, bool)> {
     if participants.len() < 2 {
         return Err(DbError::InvalidData(
             "DM requires at least 2 participants".to_string(),
@@ -198,7 +244,7 @@ pub async fn create_dm(
         )));
     }
 
-    let hash = opened_identity_hash(participants, &agents, created_by, by_people);
+    let hash = opened_identity_hash(participants, &agents, by_people);
 
     let mut tx = crate::begin_community_write_transaction(
         pool,
@@ -231,8 +277,17 @@ pub async fn create_dm(
 
     if let Some(row) = existing {
         tx.commit().await?;
-        return row_to_channel_record(row);
+        return Ok((row_to_channel_record(row)?, false));
     }
+    check_joining_agents(
+        tx.conn(),
+        community_id,
+        created_by,
+        participants,
+        participants,
+        policy,
+    )
+    .await?;
 
     // Name the DM based on participant count.
     let name = if participants.len() == 2 {
@@ -243,7 +298,7 @@ pub async fn create_dm(
 
     let id = Uuid::new_v4();
 
-    sqlx::query(
+    let inserted = sqlx::query(
         r#"
         INSERT INTO channels
             (id, community_id, name, channel_type, visibility, created_by, participant_hash)
@@ -256,7 +311,20 @@ pub async fn create_dm(
     .bind(created_by)
     .bind(hash.as_slice())
     .execute(tx.conn())
-    .await?;
+    .await;
+    // A concurrent open made this DM since the check above.
+    if let Err(sqlx::Error::Database(e)) = &inserted {
+        if e.code().as_deref() == Some("23505") {
+            tx.rollback().await?;
+            return match find_dm_by_participants(pool, community_id, &hash).await? {
+                Some(existing) => Ok((existing, false)),
+                None => Err(DbError::InvalidData(
+                    "a DM with these members already exists".to_string(),
+                )),
+            };
+        }
+    }
+    inserted?;
 
     // Add all participants as members with role='member'.
     for pk in participants {
@@ -297,7 +365,7 @@ pub async fn create_dm(
 
     let record = row_to_channel_record(row)?;
     tx.commit().await?;
-    Ok(record)
+    Ok((record, true))
 }
 
 /// List all DM conversations for a given user, ordered by most recent activity.
@@ -434,10 +502,10 @@ pub async fn list_dms_for_user(
 /// With `by_people`, the DM is found by its people ([`dm_identity_hash`]), so
 /// it may hold agents that `pubkeys` does not name, and lack agents it does.
 /// Adding those is [`grow_dm`]'s job. A DM made before agents were told apart
-/// is still found by all its members. Without `by_people`, and always for an
-/// agent opening a DM, only a DM of exactly these members, agents included, is
-/// found or made. A found DM is returned only to an active member of it:
-/// an agent naming its people cannot use this to see or join their DM.
+/// is still found by all its members. Without `by_people`, only a DM of
+/// exactly these members, agents included, is found or made. A found DM is
+/// returned only to an active member of it, so naming a DM's people cannot be
+/// used to see or join it. A new DM's agents need `policy`'s permission.
 ///
 /// Returns `(channel, was_created)`:
 /// - `was_created = true`  -- a new DM was created.
@@ -448,6 +516,7 @@ pub async fn open_dm(
     pubkeys: &[&[u8]],
     created_by: &[u8],
     by_people: bool,
+    policy: AgentAddPolicy<'_>,
 ) -> Result<(ChannelRecord, bool)> {
     let mut all: Vec<&[u8]> = vec![created_by];
     for pk in pubkeys {
@@ -463,7 +532,7 @@ pub async fn open_dm(
         )));
     }
 
-    let hash = opened_identity_hash(&all, &agents, created_by, by_people);
+    let hash = opened_identity_hash(&all, &agents, by_people);
     // DMs made before agents were told apart are identified by all members.
     let legacy = compute_participant_hash(&all);
 
@@ -473,20 +542,34 @@ pub async fn open_dm(
         existing = find_dm_by_participants(pool, community_id, &legacy).await?;
     }
     if let Some(existing) = existing {
-        if !crate::channel_members::is_member(pool, community_id, existing.id, created_by).await? {
-            return Err(DbError::AccessDenied(
-                "a DM with these people already exists".to_string(),
-            ));
-        }
-        // Clear hidden_at for the caller so the DM reappears in their sidebar.
-        unhide_dm(pool, community_id, existing.id, created_by).await?;
-        return Ok((existing, false));
+        return reopen_dm(pool, community_id, existing, created_by).await;
     }
 
-    // Create new DM.
-    let channel = create_dm(pool, community_id, &all, created_by, by_people).await?;
+    let (channel, created) =
+        create_dm(pool, community_id, &all, created_by, by_people, policy).await?;
+    if created {
+        Ok((channel, true))
+    } else {
+        // A concurrent open made it first.
+        reopen_dm(pool, community_id, channel, created_by).await
+    }
+}
 
-    Ok((channel, true))
+/// Return the existing DM `existing` to `caller`, who must be an active member
+/// of it, and show it in their sidebar again.
+async fn reopen_dm(
+    pool: &PgPool,
+    community_id: CommunityId,
+    existing: ChannelRecord,
+    caller: &[u8],
+) -> Result<(ChannelRecord, bool)> {
+    if !crate::channel_members::is_member(pool, community_id, existing.id, caller).await? {
+        return Err(DbError::AccessDenied(
+            "a DM with these people already exists".to_string(),
+        ));
+    }
+    unhide_dm(pool, community_id, existing.id, caller).await?;
+    Ok((existing, false))
 }
 
 /// The outcome of [`grow_dm`].
@@ -511,10 +594,17 @@ pub enum DmGrowth {
 ///
 /// Agents join a DM of two or more people without changing which DM it is.
 /// Otherwise the DM's identity moves to the grown set ([`dm_identity_hash`]), so
-/// opening a DM with the original members afterwards starts a new one. If a DM
-/// with the grown set already exists, nothing is written and that DM is
-/// returned as [`DmGrowth::Existing`], provided `actor` is in it. People never
+/// opening a DM with the original members afterwards starts a new one. If
+/// people join and a DM of the grown set already exists, nothing is written and
+/// that DM is returned as [`DmGrowth::Existing`], provided `actor` is in it;
+/// agents alone join in place, and the DM keeps the identity it has. People never
 /// join a DM of at most one person: that is [`DmGrowth::PeopleStartNewDm`].
+///
+/// The DM's stored fingerprint is brought up to date even when nothing is
+/// added, so a DM still identified by all its members (from before agents
+/// were told apart) becomes its people's DM. A DM that gave its identity up
+/// ([`release_dm_identity`]) takes a new one only when people join. Each agent
+/// that joins needs `policy`'s permission ([`check_joining_agents`]).
 ///
 /// `actor` must be an active member. The DM must be live and not archived, and
 /// may hold at most [`MAX_DM_PEOPLE`] people afterwards. Re-adding members is
@@ -530,6 +620,7 @@ pub async fn grow_dm(
     channel_id: Uuid,
     actor: &[u8],
     additions: &[&[u8]],
+    policy: AgentAddPolicy<'_>,
 ) -> Result<DmGrowth> {
     for pk in additions {
         if pk.len() != 32 {
@@ -549,7 +640,7 @@ pub async fn grow_dm(
     crate::channel_members::lock_channel_for_member_put(&mut tx, channel_id).await?;
 
     let channel = sqlx::query(
-        "SELECT channel_type::text AS channel_type, archived_at FROM channels \
+        "SELECT channel_type::text AS channel_type, archived_at, participant_hash FROM channels \
          WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
     )
     .bind(community_id.as_uuid())
@@ -580,15 +671,13 @@ pub async fn grow_dm(
         return Err(DbError::AccessDenied("not a member of this DM".to_string()));
     }
 
+    let stored: Option<Vec<u8>> = channel.try_get("participant_hash")?;
+
     let mut added: Vec<&[u8]> = Vec::new();
     for pk in additions {
         if !members.iter().any(|m| m == pk) && !added.contains(pk) {
             added.push(pk);
         }
-    }
-    if added.is_empty() {
-        tx.commit().await?;
-        return Ok(DmGrowth::Grown { added: Vec::new() });
     }
 
     let mut grown: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
@@ -608,10 +697,18 @@ pub async fn grow_dm(
         return Ok(DmGrowth::PeopleStartNewDm);
     }
 
-    // People move the DM's identity to the grown set of people. So do agents
-    // joining a DM of at most one person, which is identified by all members.
+    check_joining_agents(tx.conn(), community_id, actor, &added, &grown, policy).await?;
+
+    // The DM takes the grown set's identity: its people's, or all its members'
+    // when it has at most one person. If another DM has it, people meet there;
+    // agents join this DM in place, which keeps the identity it has.
     let hash = dm_identity_hash(&grown, &agents);
-    if hash != dm_identity_hash(&current, &agents) {
+    let people_join = count_people(&grown, &agents) != count_people(&current, &agents);
+    let moves = match &stored {
+        Some(stored) => stored.as_slice() != hash.as_slice(),
+        None => people_join,
+    };
+    if moves {
         let existing = sqlx::query_scalar::<_, Uuid>(
             "SELECT id FROM channels \
              WHERE community_id = $1 AND participant_hash = $2 AND id <> $3 \
@@ -622,32 +719,44 @@ pub async fn grow_dm(
         .bind(channel_id)
         .fetch_optional(tx.conn())
         .await?;
-        if let Some(existing) = existing {
-            tx.rollback().await?;
-            return existing_for(pool, community_id, existing, actor).await;
-        }
-        let moved = sqlx::query(
-            "UPDATE channels SET participant_hash = $3, updated_at = NOW() \
-             WHERE community_id = $1 AND id = $2",
-        )
-        .bind(community_id.as_uuid())
-        .bind(channel_id)
-        .bind(hash.as_slice())
-        .execute(tx.conn())
-        .await;
-        // A DM created or grown into the same people since the check above.
-        if let Err(sqlx::Error::Database(e)) = &moved {
-            if e.code().as_deref() == Some("23505") {
-                tx.rollback().await?;
-                return match find_dm_by_participants(pool, community_id, &hash).await? {
-                    Some(existing) => existing_for(pool, community_id, existing.id, actor).await,
-                    None => Err(DbError::InvalidData(
-                        "a DM with these people already exists".to_string(),
-                    )),
-                };
+        let claimed = match existing {
+            Some(_) => false,
+            None => {
+                // A savepoint, so losing the claim to a DM created or grown
+                // into the same people since the check above leaves the
+                // transaction usable.
+                let mut claim = sqlx::Connection::begin(tx.conn()).await?;
+                let moved = sqlx::query(
+                    "UPDATE channels SET participant_hash = $3, updated_at = NOW() \
+                     WHERE community_id = $1 AND id = $2",
+                )
+                .bind(community_id.as_uuid())
+                .bind(channel_id)
+                .bind(hash.as_slice())
+                .execute(&mut *claim)
+                .await;
+                match moved {
+                    Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("23505") => {
+                        claim.rollback().await?;
+                        false
+                    }
+                    moved => {
+                        moved?;
+                        claim.commit().await?;
+                        true
+                    }
+                }
             }
+        };
+        if !claimed && people_join {
+            tx.rollback().await?;
+            return match find_dm_by_participants(pool, community_id, &hash).await? {
+                Some(existing) => existing_for(pool, community_id, existing.id, actor).await,
+                None => Err(DbError::InvalidData(
+                    "a DM with these people already exists".to_string(),
+                )),
+            };
         }
-        moved?;
     }
 
     for pk in &added {
@@ -675,6 +784,52 @@ pub async fn grow_dm(
     Ok(DmGrowth::Grown {
         added: added.into_iter().map(<[u8]>::to_vec).collect(),
     })
+}
+
+/// Start a DM of everyone in the DM `source` plus `additions`, without its
+/// history: what adding people to a DM does when they do not join it in place.
+///
+/// `source`'s members are read under its membership lock, held until the new
+/// DM is made, so the new DM holds exactly who is in `source` now. `actor`
+/// must be an active member of it. Every agent in the new DM needs `policy`'s
+/// permission, whoever brought it into `source` ([`open_dm`]).
+///
+/// Returns `(channel, was_created, participants)`.
+pub async fn fork_dm(
+    pool: &PgPool,
+    community_id: CommunityId,
+    source: Uuid,
+    actor: &[u8],
+    additions: &[&[u8]],
+    policy: AgentAddPolicy<'_>,
+) -> Result<(ChannelRecord, bool, Vec<Vec<u8>>)> {
+    let mut lock = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    crate::channel_members::lock_channel_for_member_put(&mut lock, source).await?;
+    let mut members: Vec<Vec<u8>> = sqlx::query_scalar(
+        "SELECT pubkey FROM channel_members \
+         WHERE community_id = $1 AND channel_id = $2 AND removed_at IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(source)
+    .fetch_all(lock.conn())
+    .await?;
+    if !members.iter().any(|m| m == actor) {
+        return Err(DbError::AccessDenied("not a member of this DM".to_string()));
+    }
+    for pk in additions {
+        if !members.iter().any(|m| m == pk) {
+            members.push(pk.to_vec());
+        }
+    }
+    let refs: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
+    let (channel, created) = open_dm(pool, community_id, &refs, actor, false, policy).await?;
+    lock.rollback().await?;
+    Ok((channel, created, members))
 }
 
 /// Keep `channel_id`'s fingerprint, if it is a DM, true to who is still in it
@@ -908,13 +1063,15 @@ impl Db {
         participants: &[&[u8]],
         created_by: &[u8],
         by_people: bool,
-    ) -> Result<ChannelRecord> {
+        policy: AgentAddPolicy<'_>,
+    ) -> Result<(ChannelRecord, bool)> {
         crate::dm::create_dm(
             &self.pool,
             community_id,
             participants,
             created_by,
             by_people,
+            policy,
         )
         .await
     }
@@ -939,8 +1096,17 @@ impl Db {
         pubkeys: &[&[u8]],
         created_by: &[u8],
         by_people: bool,
+        policy: AgentAddPolicy<'_>,
     ) -> Result<(ChannelRecord, bool)> {
-        crate::dm::open_dm(&self.pool, community_id, pubkeys, created_by, by_people).await
+        crate::dm::open_dm(
+            &self.pool,
+            community_id,
+            pubkeys,
+            created_by,
+            by_people,
+            policy,
+        )
+        .await
     }
 
     /// Add members to a DM in place, keeping its history.
@@ -951,8 +1117,30 @@ impl Db {
         channel_id: Uuid,
         actor: &[u8],
         additions: &[&[u8]],
+        policy: AgentAddPolicy<'_>,
     ) -> Result<DmGrowth> {
-        crate::dm::grow_dm(&self.pool, community_id, channel_id, actor, additions).await
+        crate::dm::grow_dm(
+            &self.pool,
+            community_id,
+            channel_id,
+            actor,
+            additions,
+            policy,
+        )
+        .await
+    }
+
+    /// Start a DM of everyone in a DM plus `additions`, without its history.
+    #[datastore_span(name = "fork_dm", system = "postgresql")]
+    pub async fn fork_dm(
+        &self,
+        community_id: CommunityId,
+        source: Uuid,
+        actor: &[u8],
+        additions: &[&[u8]],
+        policy: AgentAddPolicy<'_>,
+    ) -> Result<(ChannelRecord, bool, Vec<Vec<u8>>)> {
+        crate::dm::fork_dm(&self.pool, community_id, source, actor, additions, policy).await
     }
 
     /// Hide a DM channel for a specific user.

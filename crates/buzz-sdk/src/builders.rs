@@ -1982,14 +1982,26 @@ pub fn build_workflow_approval(
 /// Build a DM open event (kind 41010).
 ///
 /// `pubkeys` must be 1–8 hex-encoded pubkeys to include in the DM conversation.
-/// The relay finds or makes the DM of exactly these members. With a
-/// `["history", "include"]` tag, it instead finds the DM of the named people
-/// and adds any named agents it lacks.
+/// The relay finds or makes the DM of exactly these members. To find the DM of
+/// the named people instead, use [`build_dm_open_with_history`].
 ///
 /// The relay answers kind 41010 and kind 41011 with
 /// `response:{"channel_id":"<uuid>","created":<bool>}`, where `created` is
 /// true only when a new DM was made.
 pub fn build_dm_open(pubkeys: &[&str]) -> Result<EventBuilder, SdkError> {
+    dm_open(pubkeys, false)
+}
+
+/// Build a DM open event (kind 41010) with a `["history", "include"]` tag.
+///
+/// The relay finds the DM of the named people, whatever agents it holds, adds
+/// any named agents it lacks, so they see its history, and makes the DM if
+/// there is none. `pubkeys` is as for [`build_dm_open`].
+pub fn build_dm_open_with_history(pubkeys: &[&str]) -> Result<EventBuilder, SdkError> {
+    dm_open(pubkeys, true)
+}
+
+fn dm_open(pubkeys: &[&str], include_history: bool) -> Result<EventBuilder, SdkError> {
     if pubkeys.is_empty() || pubkeys.len() > 8 {
         return Err(SdkError::InvalidInput(
             "dm open requires 1-8 pubkeys".into(),
@@ -1999,6 +2011,9 @@ pub fn build_dm_open(pubkeys: &[&str]) -> Result<EventBuilder, SdkError> {
     for pk in pubkeys {
         let validated = check_pubkey_hex(pk, "pubkey")?;
         tags.push(tag(&["p", &validated])?);
+    }
+    if include_history {
+        tags.push(tag(&["history", "include"])?);
     }
     Ok(EventBuilder::new(Kind::Custom(KIND_DM_OPEN as u16), "").tags(tags))
 }
@@ -5120,6 +5135,27 @@ mod tests {
         let ev = sign(build_dm_open(&[&pk]).unwrap());
         assert_eq!(ev.kind.as_u16(), 41010);
         assert!(has_tag(&ev, "p", &pk));
+        assert!(!ev.tags.iter().any(|t| t.as_slice()[0] == "history"));
+    }
+
+    #[test]
+    fn dm_open_with_history_tags_the_open() {
+        let (a, b) = ("a".repeat(64), "b".repeat(64));
+        let ev = sign(build_dm_open_with_history(&[&a, &b]).unwrap());
+        assert_eq!(ev.kind.as_u16(), 41010);
+        assert!(has_tag(&ev, "p", &a));
+        assert!(has_tag(&ev, "p", &b));
+        assert!(has_tag(&ev, "history", "include"));
+    }
+
+    #[test]
+    fn dm_open_with_history_validates_like_dm_open() {
+        let pk = "a".repeat(64);
+        let nine: Vec<&str> = vec![pk.as_str(); 9];
+        for pubkeys in [&[][..], &nine[..], &["bad-hex"][..]] {
+            let err = build_dm_open_with_history(pubkeys).unwrap_err();
+            assert!(matches!(err, SdkError::InvalidInput(_)));
+        }
     }
 
     #[test]
