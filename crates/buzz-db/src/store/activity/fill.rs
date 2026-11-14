@@ -39,7 +39,7 @@ impl Wanting {
     }
 }
 
-/// The person's joined channels and live threads whose shared row is missing,
+/// The person's joined channels and listed threads whose shared row is missing,
 /// behind the log, or names a deleted message. `only_*` restrict the check to
 /// named rows.
 ///
@@ -83,8 +83,7 @@ pub(super) async fn wanting(
         r#"SELECT f.channel_id, f.root_id FROM (
                 SELECT f.channel_id, f.root_id FROM personal_read_frontiers f
                 WHERE f.community_id = $1 AND f.actor = $2 AND f.root_id <> ''::bytea
-                    AND f.state <> 'muted'
-                    AND (f.state = 'following'
+                    AND (f.state <> 'default' OR f.marked_unread
                         OR f.engaged_at >= clock_timestamp() - make_interval(secs => $5))
                     AND ($3::bytea[] IS NULL OR f.root_id = ANY($3))
                 ORDER BY f.engaged_at DESC NULLS LAST LIMIT $6
