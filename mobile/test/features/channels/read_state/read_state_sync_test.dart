@@ -374,6 +374,75 @@ void main() {
       );
     });
 
+    test('restoring a backup taken before a send keeps the newer accepted '
+        'choice', () async {
+      final phone = await device('phone');
+      clock += 10;
+      phone.setThreadFollow(channel, root, true);
+      await phone.flush();
+      clock += 10;
+      phone.setThreadFollow(channel, root, false);
+      await Future<void>.delayed(Duration.zero);
+      final backup = {
+        for (final name in prefs.getKeys()) name: prefs.getString(name),
+      };
+      await phone.flush();
+      clock += 10;
+      phone.setThreadFollow(channel, root, true);
+      await phone.flush();
+      phone.dispose(flushPending: false);
+      for (final MapEntry(:key, :value) in backup.entries) {
+        if (value != null) await prefs.setString(key, value);
+      }
+
+      final restored = await device('phone');
+      restored.markContextRead(channel, clock - 1);
+      await restored.flush();
+      final accepted = (follow: true, at: clock);
+      expect(
+        decodeThreadFollowsBlob(
+          crypto.decrypt(relay.followEvents().single.content),
+        )!.choices[key],
+        accepted,
+      );
+      expect((await device('reader')).threadFollows[key], accepted);
+    });
+
+    test('an unreadable head is decoded again after a restart', () async {
+      final phone = await device('phone');
+      phone.setThreadFollow(channel, root, true);
+      await phone.flush();
+      final own = relay.followEvents().single;
+      final ownSlot = threadFollowsSlotOf(own)!;
+      NostrEvent unreadable(String slot) => NostrEvent(
+        id: 'unreadable-$slot',
+        pubkey: keys.public,
+        createdAt: clock + 5,
+        kind: EventKind.readState,
+        tags: [
+          ['d', '$threadFollowsDTagPrefix$slot'],
+          ['t', threadFollowsTag],
+        ],
+        content: crypto.encrypt('{"v":2}'),
+        sig: 'sig',
+      );
+      relay.retained['$threadFollowsDTagPrefix$ownSlot'] = unreadable(ownSlot);
+      relay.retained['${threadFollowsDTagPrefix}peer'] = unreadable(slot);
+      await phone.reinitializeRemote();
+      expect(phone.threadFollowsIncomplete, isTrue);
+      phone.dispose(flushPending: false);
+
+      final restarted = await device('phone');
+      expect(restarted.threadFollowsIncomplete, isTrue);
+      clock += 10;
+      restarted.setThreadFollow(channel, 'c' * 64, true);
+      await restarted.flush();
+      expect(
+        relay.retained['$threadFollowsDTagPrefix$ownSlot']!.id,
+        'unreadable-$ownSlot',
+      );
+    });
+
     test('a choice made before a retry is sent after it', () async {
       final phone = await device('phone');
       relay.failNext = true;
@@ -462,6 +531,79 @@ void main() {
       },
     );
 
+    Future<void> overfill() async {
+      for (var peer = 0; peer < 3; peer++) {
+        relay.retained['read-state:peer$peer'] = _readStateEvent(
+          keys: keys,
+          crypto: crypto,
+          clientId: 'peer$peer',
+          slot: 'peer$peer',
+          contexts: {
+            for (var index = 0; index < 160; index++)
+              for (final id in ['$peer-$index'.padLeft(36, '0')]) ...{
+                id: clock - 100,
+                'ov_s:$id': 1,
+                'ov_c:$id': 0,
+                'ov_b:$id': clock - 100,
+              },
+          },
+          createdAt: clock - 50,
+        );
+      }
+    }
+
+    test(
+      'an overfull fallback publishes a dead own group as a tombstone',
+      () async {
+        final phone = await device('phone');
+        phone.markContextRead(channel, clock - 100);
+        expect(phone.markChannelUnread(channel), isTrue);
+        await phone.flush();
+        await overfill();
+        await phone.reinitializeRemote();
+
+        phone.markContextRead(channel, clock - 1);
+        await phone.flush();
+        final own = readStateBlobs().where((blob) => blob.containsKey(channel));
+        expect(own.single[channel], clock - 1);
+        expect(own.single.containsKey('ov_s:$channel'), isFalse);
+        expect(own.single['ov_c:$channel'], 1);
+      },
+    );
+
+    test('a clear the primary cannot carry, or an exhausted counter, '
+        'fails visibly', () async {
+      final phone = await device('phone');
+      phone.markContextRead(channel, clock - 100);
+      expect(phone.markChannelUnread(channel), isTrue);
+      await phone.flush();
+      await overfill();
+      await phone.reinitializeRemote();
+      expect(phone.clearChannelOverride(channel), isFalse);
+      expect(phone.syncError, isNotNull);
+      expect(phone.activeChannelOverrides, contains(channel));
+
+      relay.retained.clear();
+      final other = 'f' * 36;
+      relay.retained['read-state:max'] = _readStateEvent(
+        keys: keys,
+        crypto: crypto,
+        clientId: 'max',
+        slot: 'max',
+        contexts: {
+          other: clock - 100,
+          'ov_s:$other': 4294967295,
+          'ov_c:$other': 0,
+          'ov_b:$other': clock - 100,
+        },
+        createdAt: clock - 50,
+      );
+      final desktop = await device('desktop');
+      expect(desktop.clearChannelOverride(other), isFalse);
+      expect(desktop.syncError, isNotNull);
+      expect(desktop.activeChannelOverrides, {other});
+    });
+
     test('a live peer group schedules a canonical publish', () async {
       final phone = await device('phone');
       final desktop = await device('desktop');
@@ -512,6 +654,32 @@ void main() {
       );
       expect(second.length, greaterThan(1));
       expect(second.first.containsAll(first.first), isTrue);
+    });
+
+    test('measures each slot with its own unknown fields', () {
+      final first = packThreadFollowKeys(entries(200), clientId: 'c');
+      final all = entries(260);
+      final extras = [
+        {'future': 'x' * 10000},
+        {'future': ''},
+      ];
+      final placed = packThreadFollowKeys(
+        all,
+        clientId: 'c',
+        previous: [first.first, {}],
+        extras: extras,
+      );
+      for (var index = 0; index < placed.length; index++) {
+        final plaintext = ThreadFollowsBlob(
+          clientId: 'c',
+          entries: {for (final key in placed[index]) key: all[key]!},
+          extra: index < extras.length ? extras[index] : const {},
+        ).encode();
+        expect(
+          utf8.encode(plaintext).length,
+          lessThanOrEqualTo(readStatePlaintextBytes),
+        );
+      }
     });
 
     test('refuses past the slot ceiling', () {

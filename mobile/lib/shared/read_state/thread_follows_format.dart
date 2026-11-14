@@ -127,15 +127,16 @@ List<Set<String>> packThreadFollowKeys(
   Map<String, Map<String, Object?>> entries, {
   required String clientId,
   List<Set<String>> previous = const [],
-  Map<String, Object?> extra = const {},
+  List<Map<String, Object?>> extras = const [],
   int maxBytes = readStatePlaintextBytes,
 }) {
-  int size(Set<String> keys) => utf8
+  // Each slot is measured with its own unknown fields; new slots have none.
+  int size(Set<String> keys, int index) => utf8
       .encode(
         ThreadFollowsBlob(
           clientId: clientId,
           entries: {for (final key in keys) key: entries[key]!},
-          extra: extra,
+          extra: index < extras.length ? extras[index] : const {},
         ).encode(),
       )
       .length;
@@ -149,8 +150,10 @@ List<Set<String>> packThreadFollowKeys(
   if (slots.isEmpty) slots.add({});
   // Exact compact JSON sizes, adding each entry and its comma without
   // re-encoding whole slots.
-  final sizes = [for (final slot in slots) size(slot)];
-  final emptySize = size({});
+  final sizes = [
+    for (var index = 0; index < slots.length; index++)
+      size(slots[index], index),
+  ];
   final assigned = {for (final slot in slots) ...slot};
   for (final key
       in entries.keys.where((k) => !assigned.contains(k)).toList()..sort()) {
@@ -166,8 +169,8 @@ List<Set<String>> packThreadFollowKeys(
       }
     }
     if (!placed) {
+      sizes.add(size({}, slots.length) + bytes);
       slots.add({key});
-      sizes.add(emptySize + bytes);
     }
   }
   if (slots.length > threadFollowsMaxSlots ||

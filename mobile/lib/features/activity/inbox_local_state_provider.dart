@@ -23,11 +23,20 @@ class InboxLocalState {
   final Set<String> doneIds;
   final Map<String, int> unreadBaselines;
 
-  const InboxLocalState({required this.doneIds, required this.unreadBaselines});
+  /// The catch-up scope covering each override: its channel id, or
+  /// `thread:<root>` for a thread row. Overrides saved before scopes have none.
+  final Map<String, String> unreadScopes;
+
+  const InboxLocalState({
+    required this.doneIds,
+    required this.unreadBaselines,
+    this.unreadScopes = const {},
+  });
 
   const InboxLocalState.empty()
     : doneIds = const {},
-      unreadBaselines = const {};
+      unreadBaselines = const {},
+      unreadScopes = const {};
 
   Set<String> get unreadIds => unreadBaselines.keys.toSet();
 }
@@ -64,7 +73,14 @@ class InboxLocalStateNotifier extends Notifier<InboxLocalState> {
       Set<String> readIds(Object? value) =>
           value is List ? value.whereType<String>().toSet() : const <String>{};
       final unread = decoded['unread'];
+      final scopes = decoded['scopes'];
       return InboxLocalState(
+        unreadScopes: scopes is Map
+            ? {
+                for (final MapEntry(:key, :value) in scopes.entries)
+                  if (key is String && value is String) key: value,
+              }
+            : const {},
         doneIds: readIds(decoded['done']),
         unreadBaselines: unread is Map
             ? {
@@ -87,15 +103,33 @@ class InboxLocalStateNotifier extends Notifier<InboxLocalState> {
 
   /// Reopen [ids]. [baseline] is the newest marker covering the row now
   /// (see [inboxItemReadAt]).
-  void markUnread(Iterable<String> ids, {required int baseline}) {
+  /// [scope] is the catch-up scope that covers the row (see
+  /// [InboxLocalState.unreadScopes]).
+  void markUnread(
+    Iterable<String> ids, {
+    required int baseline,
+    String? scope,
+  }) {
     _update(
       doneIds: {...state.doneIds}..removeAll(ids),
       unreadBaselines: {
         ...state.unreadBaselines,
         for (final id in ids) id: baseline,
       },
+      unreadScopes: {
+        ...state.unreadScopes,
+        if (scope != null)
+          for (final id in ids) id: scope,
+      },
     );
   }
+
+  /// Ends the overrides a catch-up or explicit read of [scope] covers, even
+  /// when no frontier moved.
+  void clearScope(String scope) => clearUnread([
+    for (final MapEntry(:key, :value) in state.unreadScopes.entries)
+      if (value == scope) key,
+  ]);
 
   void clearUnread(Iterable<String> ids) {
     if (!ids.any(state.unreadBaselines.containsKey)) return;
@@ -109,6 +143,7 @@ class InboxLocalStateNotifier extends Notifier<InboxLocalState> {
   void _update({
     required Set<String> doneIds,
     required Map<String, int> unreadBaselines,
+    Map<String, String>? unreadScopes,
   }) {
     Set<String> capped(Set<String> ids) => ids.length <= _maxTrackedIds
         ? ids
@@ -117,6 +152,10 @@ class InboxLocalStateNotifier extends Notifier<InboxLocalState> {
     state = InboxLocalState(
       doneIds: capped(doneIds),
       unreadBaselines: {for (final id in keptUnread) id: unreadBaselines[id]!},
+      unreadScopes: {
+        for (final id in keptUnread)
+          id: ?(unreadScopes ?? state.unreadScopes)[id],
+      },
     );
     final key = _key;
     if (key == null) return;
@@ -127,6 +166,7 @@ class InboxLocalStateNotifier extends Notifier<InboxLocalState> {
           jsonEncode({
             'done': state.doneIds.toList(),
             'unread': state.unreadBaselines,
+            'scopes': state.unreadScopes,
           }),
         );
   }

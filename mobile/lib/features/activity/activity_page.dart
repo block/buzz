@@ -274,12 +274,25 @@ class ActivityPage extends HookConsumerWidget {
       }
     }
 
+    // The catch-up scope covering a row: its thread, or its whole channel
+    // for a DM or top-level row.
+    String? scopeOf(InboxItem item) {
+      final threadRootId = item.conversationId.startsWith('dm:')
+          ? null
+          : item.threadRootId;
+      return threadRootId != null
+          ? threadContextKey(threadRootId)
+          : item.item.channelId;
+    }
+
     void markItemRead(InboxItem item) {
       final notifier = ref.read(readStateProvider.notifier);
-      ref
-          .read(inboxLocalStateProvider.notifier)
-          .clearUnread(groupedInboxItemIds(item));
+      final inbox = ref.read(inboxLocalStateProvider.notifier);
+      inbox.clearUnread(groupedInboxItemIds(item));
       final isDmRow = item.conversationId.startsWith('dm:');
+      if (!rowsArePartial) {
+        if (scopeOf(item) case final scope?) inbox.clearScope(scope);
+      }
       final partialChannelId = rowsArePartial ? item.item.channelId : null;
       if (partialChannelId != null) {
         markPartialRowRead(item, partialChannelId, isDmRow: isDmRow);
@@ -323,6 +336,7 @@ class ActivityPage extends HookConsumerWidget {
               item,
               markerOf: (contextId) => readState.contexts[contextId],
             ),
+            scope: scopeOf(item),
           );
     }
 

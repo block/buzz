@@ -81,8 +81,7 @@ extension ReadStateFollows on ReadStateManager {
       _ownFollows,
       clientId: _clientId,
       previous: _followPlacement,
-      // Sized against every slot's unknown fields, conservatively.
-      extra: {for (final extra in _followExtra.values) ...extra},
+      extras: [for (final slot in _followSlots) _followExtra[slot] ?? const {}],
     );
     try {
       _followPlacement = pack();
@@ -141,20 +140,21 @@ extension ReadStateFollows on ReadStateManager {
       _followExtra.remove(slot);
     } else if (index >= 0) {
       // The relay's own head is authoritative. A pending event it already
-      // supersedes was sent; a local entry survives only while it differs
-      // from what was last published, an edit still to send.
+      // supersedes was sent; a local entry survives only while its `at` is
+      // strictly greater, since greater `at` wins the merge anyway.
       final coordinate = '$threadFollowsDTagPrefix$slot';
       if (_pending[coordinate] case final sent?
           when sent.createdAt <= event.createdAt) {
         _acknowledge(coordinate, sent);
       }
-      final published = switch (_followPublished[slot]) {
-        final plaintext? => decodeThreadFollowsBlob(plaintext)?.entries,
-        null => null,
-      };
+      final local = ThreadFollowsBlob(
+        clientId: _clientId,
+        entries: _ownFollows,
+      ).choices;
+      final relay = blob.choices;
       for (final MapEntry(:key, :value) in blob.entries.entries) {
-        final mine = _ownFollows[key];
-        if (mine == null || jsonEncode(mine) == jsonEncode(published?[key])) {
+        final (mine, theirs) = (local[key], relay[key]);
+        if (mine == null || theirs != null && mine.at <= theirs.at) {
           _ownFollows[key] = value;
         }
         if (!_followPlacement.any((keys) => keys.contains(key))) {
@@ -172,17 +172,19 @@ extension ReadStateFollows on ReadStateManager {
   }
 
   /// Peer follow heads and choices, cached in the journal for offline use.
+  /// An unreadable head is not cached, so the next fetch decodes it again.
   Map<String, Object?> _followHeadsJson() => {
     for (final MapEntry(key: slot, value: head) in _followHeads.entries)
-      slot: {
-        'createdAt': head.createdAt,
-        'id': head.id,
-        'threads': {
-          for (final MapEntry(:key, :value)
-              in (_remoteFollows[slot] ?? const {}).entries)
-            key: {'follow': value.follow, 'at': value.at},
+      if (!_unreadableFollowSlots.contains(slot))
+        slot: {
+          'createdAt': head.createdAt,
+          'id': head.id,
+          'threads': {
+            for (final MapEntry(:key, :value)
+                in (_remoteFollows[slot] ?? const {}).entries)
+              key: {'follow': value.follow, 'at': value.at},
+          },
         },
-      },
   };
 
   void _hydrateFollowHeads(Object? json) {

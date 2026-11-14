@@ -139,8 +139,12 @@ useClearsCoveredUnread(WidgetRef ref, {required bool active}) {
     final shown = ids.difference(onScreen);
     previous.value = ids;
     notifier.clearCovered(displayed: shown);
-    ref.read(inboxLocalStateProvider.notifier).clearUnread(shown);
-    return (scope) => notifier.clearCovered(scope: scope, onScreen: onScreen);
+    final inbox = ref.read(inboxLocalStateProvider.notifier)
+      ..clearUnread(shown);
+    return (scope) {
+      notifier.clearCovered(scope: scope, onScreen: onScreen);
+      inbox.clearScope(scope);
+    };
   };
 }
 

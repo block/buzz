@@ -271,12 +271,14 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
   /// bottom of a channel the reader marked unread uses this: it ends the
   /// manual unread but must not read mentions or replies the reader has not
   /// seen.
-  void clearForcedUnread(String contextId) {
+  /// Returns false when a synced clear failed; [ReadStateState.syncError]
+  /// then says why.
+  bool clearForcedUnread(String contextId) {
     if (_forcedUnreadContexts.remove(contextId) != null) {
       _refreshForcedState();
-    } else {
-      _manager?.clearChannelOverride(contextId);
+      return true;
     }
+    return _manager?.clearChannelOverride(contextId) ?? true;
   }
 
   /// Record an explicit follow or unfollow; see [ReadStateManager]. Returns

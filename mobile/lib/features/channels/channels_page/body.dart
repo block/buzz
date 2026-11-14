@@ -481,6 +481,9 @@ class _SliverChannelsList extends HookConsumerWidget {
                           clearForcedMessages: true,
                         );
                     ref
+                        .read(inboxLocalStateProvider.notifier)
+                        .clearScope(channel.id);
+                    ref
                         .read(channelsProvider.notifier)
                         .clearObservedUnreadCoveredByRead(channel.id, ts);
                   }

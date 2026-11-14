@@ -17,6 +17,7 @@ import 'thread_follows_format.dart';
 import '../theme/community_theme_preference.dart';
 
 part 'read_state_follows.dart';
+part 'read_state_overrides.dart';
 
 class ReadStateCrypto {
   final Uint8List conversationKey;
@@ -278,7 +279,7 @@ class ReadStateManager {
       unixTimestamp,
       publishable: publishable,
     );
-    final cleared = _clearChannelOverride(contextId);
+    final cleared = _clearChannelOverride(contextId) == true;
     if (advanced || cleared) {
       _persistLocalState();
       _onChanged();
@@ -298,107 +299,6 @@ class ReadStateManager {
   /// The effective frontier synced groups use: never below the floor.
   int _frontierOf(String contextId) =>
       max(_effectiveState[contextId] ?? 0, readStateFloor(_now()));
-
-  /// Synchronized whole-channel mark unread (NIP-RS Actions). Returns false,
-  /// leaving state unchanged, when the action must fail visibly: no complete
-  /// load, an exhausted counter, or a primary that cannot fit the group.
-  bool markChannelUnread(String channelId) {
-    if (_disposed || !_hasFullState || !isChannelOverrideTarget(channelId)) {
-      return false;
-    }
-    final previous = _overrides[channelId];
-    final register = previous ?? (s: 0, c: 0, b: 0);
-    final top = max(register.s, register.c);
-    if (top == 4294967295) return false;
-    // The group travels with its frontier; a channel never read keeps the
-    // retention floor as both.
-    final previousFrontier = _effectiveState[channelId];
-    final frontier = max(previousFrontier ?? 0, readStateFloor(_now()));
-    _effectiveState[channelId] = frontier;
-    _overrides[channelId] = (s: top + 1, c: register.c, b: frontier);
-    if (!_primaryFits()) {
-      if (previous == null) {
-        _overrides.remove(channelId);
-      } else {
-        _overrides[channelId] = previous;
-      }
-      if (previousFrontier == null) {
-        _effectiveState.remove(channelId);
-      } else {
-        _effectiveState[channelId] = previousFrontier;
-      }
-      return false;
-    }
-    _persistLocalState();
-    _onChanged();
-    _schedulePublish();
-    return true;
-  }
-
-  /// Ends a live channel override without moving its frontier: reaching the
-  /// bottom of a channel with nothing new to read.
-  void clearChannelOverride(String channelId) {
-    if (_disposed || !_clearChannelOverride(channelId)) return;
-    _persistLocalState();
-    _onChanged();
-    _schedulePublish();
-  }
-
-  /// Ends a live channel override with a clear-counter increment, even when
-  /// no frontier moved. Returns whether a clear was recorded.
-  bool _clearChannelOverride(String channelId) {
-    final register = _overrides[channelId];
-    if (register == null ||
-        !_hasFullState ||
-        !isOverrideActive(register, _frontierOf(channelId))) {
-      return false;
-    }
-    final top = max(register.s, register.c);
-    if (top == 4294967295) return false;
-    _overrides[channelId] = (s: register.s, c: top + 1, b: register.b);
-    return true;
-  }
-
-  /// The primary's override groups and their co-located frontiers.
-  Map<String, int> _primaryOverrides() => {
-    ...canonicalOverrideEntries(_overrides, _frontierOf),
-    for (final channelId in _overrides.keys)
-      overrideFrontierKey(channelId): _frontierOf(channelId),
-  };
-
-  bool _primaryFits() {
-    try {
-      _packSlots(_primaryOverrides());
-      return true;
-    } on StateError {
-      return false;
-    }
-  }
-
-  List<Map<String, int>> _packSlots(Map<String, int> primary) =>
-      packReadStateContexts(
-        _publishableLocalContexts(),
-        clientId: _clientId,
-        previous: _placement,
-        primary: primary,
-      );
-
-  /// The slot plan. When the merged groups overfill the primary, it keeps
-  /// the last published groups so frontiers still publish; only override
-  /// actions fail ([_primaryFits]).
-  List<Map<String, int>> _planSlots() {
-    try {
-      return _packSlots(_primaryOverrides());
-    } on StateError {
-      final last = _published[_slots.first] ?? const <String, int>{};
-      return _packSlots({
-        for (final MapEntry(:key, :value) in last.entries)
-          if (isOverrideContext(key)) key: value,
-        for (final key in last.keys)
-          if (_overrides.containsKey(key)) key: _frontierOf(key),
-      });
-    }
-  }
 
   Map<String, int> _publishableLocalContexts() {
     final horizon = _now() - readStateHorizonSeconds;

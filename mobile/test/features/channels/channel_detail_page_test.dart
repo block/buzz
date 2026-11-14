@@ -21488,7 +21488,7 @@ class _SynchronousReadStateNotifier extends ReadStateNotifier {
   }
 
   @override
-  void clearForcedUnread(String contextId) {
+  bool clearForcedUnread(String contextId) {
     clearedForcedContexts.add(contextId);
     state = ReadStateState(
       isReady: state.isReady,
@@ -21500,6 +21500,7 @@ class _SynchronousReadStateNotifier extends ReadStateNotifier {
           if (entry.key != contextId) entry.key: entry.value,
       },
     );
+    return true;
   }
 }
 

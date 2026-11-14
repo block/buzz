@@ -36,6 +36,7 @@ import 'manage_channel_sheet.dart';
 import 'members_sheet.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/read_state/read_state_provider.dart';
+import '../activity/inbox_local_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
 import '../../shared/widgets/covered_route_keyboard_insets.dart';
 
@@ -167,6 +168,9 @@ class ChannelActionsSheet extends HookConsumerWidget {
                               timestamp,
                               clearForcedMessages: true,
                             );
+                        ref
+                            .read(inboxLocalStateProvider.notifier)
+                            .clearScope(channel.id);
                         ref
                             .read(channelsProvider.notifier)
                             .clearObservedUnreadCoveredByRead(
