@@ -322,7 +322,7 @@ final profileProvider = AsyncNotifierProvider<ProfileNotifier, UserProfile?>(
 ///
 /// Sends a heartbeat every 60s while the app is active by publishing a
 /// kind:20001 presence event over the relay WebSocket. Watches
-/// [appLifecycleProvider] to send "away" when backgrounded.
+/// [appForegroundProvider] to send "away" when backgrounded.
 class PresenceNotifier extends AsyncNotifier<String> {
   static const _heartbeatInterval = Duration(seconds: 60);
   static const _preferenceKeyPrefix = 'buzz_presence_preference_';
@@ -346,7 +346,7 @@ class PresenceNotifier extends AsyncNotifier<String> {
       _manualPresence = stored == 'away' || stored == 'offline' ? stored : null;
     }
 
-    final lifecycle = ref.watch(appLifecycleProvider);
+    final foreground = ref.watch(appForegroundProvider);
 
     ref.onDispose(() {
       _heartbeatTimer?.cancel();
@@ -360,19 +360,13 @@ class PresenceNotifier extends AsyncNotifier<String> {
       return _setPresence(manualPresence);
     }
 
-    if (lifecycle == AppLifecycleState.resumed) {
+    if (foreground) {
       _startHeartbeat();
       return _setPresence('online');
-    } else if (lifecycle == AppLifecycleState.paused ||
-        lifecycle == AppLifecycleState.detached) {
-      _heartbeatTimer?.cancel();
-      _heartbeatTimer = null;
-      return _setPresence('away');
     }
-
-    // Default: we don't know. Reflect the most recent state we set, or
-    // 'offline' if never set.
-    return Future.value('offline');
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+    return _setPresence('away');
   }
 
   void _startHeartbeat() {
@@ -397,8 +391,7 @@ class PresenceNotifier extends AsyncNotifier<String> {
           .setString('$_preferenceKeyPrefix$pubkey', _manualPresence ?? 'auto');
     }
 
-    if (_manualPresence == null &&
-        ref.read(appLifecycleProvider) == AppLifecycleState.resumed) {
+    if (_manualPresence == null && ref.read(appForegroundProvider)) {
       _startHeartbeat();
     } else {
       _heartbeatTimer?.cancel();

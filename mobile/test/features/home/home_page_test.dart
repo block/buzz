@@ -2,6 +2,7 @@ import 'package:buzz/shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'package:buzz/shared/widgets/navigation_backdrop.dart';
 import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+
 import 'dart:async';
 
 import 'package:buzz/features/channels/default_agent_launcher.dart';
@@ -12,6 +13,7 @@ import 'package:buzz/features/activity/inbox_unread_provider.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/profile/profile_edit_page.dart';
+import 'package:buzz/features/channels/channels_page.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/me/default_agent.dart';
 import 'package:buzz/shared/relay/app_lifecycle_provider.dart';
@@ -158,6 +160,48 @@ void main() {
 
     expect(homeBuilds, 0);
   });
+
+  for (final (name, size, rightInset, platform) in [
+    ('phone', const Size(402, 874), 0.0, null),
+    ('iOS Duo', const Size(951, 669), 76.0, TargetPlatform.iOS),
+  ]) {
+    testWidgets('a sheet opening above Home does not rebuild its inventory '
+        '($name)', (tester) async {
+      debugDefaultTargetPlatformOverride = platform;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      tester.view.physicalSize = size;
+      tester.view.viewPadding = FakeViewPadding(right: rightInset);
+      tester.view.padding = tester.view.viewPadding;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(await buildHome());
+      await tester.pumpAndSettle();
+      final rebuilds = <String>[];
+      debugOnRebuildDirtyWidget = (element, _) {
+        final type = '${element.widget.runtimeType}';
+        if (const {'HomePage', 'ChannelsPage', '_ChannelTile'}.contains(type)) {
+          rebuilds.add(type);
+        }
+      };
+      addTearDown(() => debugOnRebuildDirtyWidget = null);
+
+      unawaited(
+        showModalBottomSheet<void>(
+          context: tester.element(find.byType(ChannelsPage)),
+          useRootNavigator: true,
+          builder: (_) => const Text('Sheet'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Sheet'), findsOneWidget);
+      Navigator.of(tester.element(find.text('Sheet'))).pop();
+      await tester.pumpAndSettle();
+      debugOnRebuildDirtyWidget = null;
+      debugDefaultTargetPlatformOverride = null;
+
+      expect(rebuilds, isEmpty);
+    });
+  }
 
   testWidgets('feedback clears floating navigation and wraps large text', (
     tester,

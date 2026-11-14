@@ -8,7 +8,6 @@ fn database_metrics_and_slow_logs_exclude_sensitive_or_unbounded_fields() {
         "\"community\" =>",
         "\"event_id\" =>",
         "\"event_kind\" =>",
-        "\"kind\" =>",
         "\"sql\" =>",
         "\"query\" =>",
         "\"query_id\" =>",
@@ -25,6 +24,35 @@ fn database_metrics_and_slow_logs_exclude_sensitive_or_unbounded_fields() {
         assert!(
             !instrumentation.contains(forbidden),
             "database instrumentation must not expose {forbidden}"
+        );
+    }
+
+    // Only the advisory-lock observer carries `kind`, bounded by the kind
+    // registry so client-chosen kinds collapse to one fallback value. Every
+    // other database metric and slow warning stays kind-free.
+    let (before_lock_observer, lock_observer) = implementation
+        .split_once("async fn observe_lock<")
+        .expect("advisory locks must record through one observer");
+    let (lock_observer, after_lock_observer) = lock_observer
+        .split_once("\n}\n")
+        .expect("the advisory-lock observer must end");
+    assert_eq!(
+        lock_observer.matches("\"kind\" =>").count(),
+        2,
+        "both advisory-lock metrics must carry kind"
+    );
+    let event_lock_observer = before_lock_observer
+        .split_once("pub(crate) async fn observe_event_lock<")
+        .expect("event-keyed locks must have one observer")
+        .1;
+    assert!(
+        event_lock_observer.contains("buzz_core::kind::registered_kind_label(kind)"),
+        "the kind label must come from the kind registry"
+    );
+    for outside in [before_lock_observer, after_lock_observer, datastore_macro] {
+        assert!(
+            !outside.contains("\"kind\" =>"),
+            "only advisory-lock metrics may carry kind"
         );
     }
 

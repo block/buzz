@@ -246,13 +246,20 @@ void main() {
     await tester.tap(find.text('Change to member'));
     await tester.pumpAndSettle();
     expect(actions.calls, ['test:alice:admin', 'test:alice:member']);
+
+    // An owned agent demoted to ordinary membership is now reported as bot.
+    // That label must not remove the owner's ability to promote it again.
+    role = 'bot';
+    container.invalidate(channelMembersProvider('test'));
+    await tester.pumpAndSettle();
+    expect(find.text('Make channel admin'), findsOneWidget);
   });
   for (final role in ['member', 'admin', 'guest', 'bot']) {
     testWidgets('management rows for $role', (tester) async {
       await _pump(tester, targetRole: role);
       expect(
         find.text('Make channel admin'),
-        role == 'member' || role == 'guest' ? findsOneWidget : findsNothing,
+        role == 'admin' ? findsNothing : findsOneWidget,
       );
       expect(
         find.text('Change to member'),

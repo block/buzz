@@ -123,8 +123,9 @@ async fn replace_parameterized_event_in_transaction_impl(
         pubkey_bytes.as_slice(),
         Some(d_tag.as_bytes()),
     );
-    observability::observe_advisory_lock(
+    observability::observe_event_lock(
         LockType::Replacement,
+        kind_i32,
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(lock_key)
             .execute(tx.conn()),
@@ -446,8 +447,9 @@ pub(crate) async fn take_replacement_lock(
         pubkey,
         channel_id.as_ref().map(|id| id.as_bytes().as_slice()),
     );
-    observability::observe_advisory_lock(
+    observability::observe_event_lock(
         LockType::Replacement,
+        kind,
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(lock_key)
             .execute(tx.conn()),

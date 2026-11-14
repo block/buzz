@@ -624,6 +624,7 @@ mod tests {
         // 20 s refreshes at half-life (10 s); 300 s at half-life (150 s),
         // earlier than 30 s before expiry.
         for (lifetime, refresh) in [(20, 10), (300, 150)] {
+            crate::cached_assertion::test_clock::freeze(1_800_000_000);
             let (base, seen) = adapter(move |req| {
                 issued(req["nostr_pubkey"].as_str().unwrap(), unix_now() + lifetime)
             })
