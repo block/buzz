@@ -34,10 +34,14 @@ void _threadFollowCases() {
       sig: 'sig',
     );
 
-    Future<(ProviderContainer, _FakeRelaySession, _TestFollows)> start() async {
+    Future<(ProviderContainer, _FakeRelaySession, _TestFollows)> start({
+      String channelType = 'stream',
+    }) async {
       final session = _FakeRelaySession(
         memberships: [_membership(_channelA, 'me')],
-        metadata: [_meta(id: _channelA, name: 'general')],
+        metadata: [
+          _meta(id: _channelA, name: 'general', channelType: channelType),
+        ],
       );
       final follows = _TestFollows();
       final container = _buildContainer(session: session, follows: follows);
@@ -78,6 +82,27 @@ void _threadFollowCases() {
       follows.choose(followed: {root});
       await _settle();
       await container.read(channelsProvider.notifier).waitForUnreadCatchUp();
+      expect(observed(container), contains(reply.id));
+    });
+
+    test('an unfollow never mutes an ordinary DM reply', () async {
+      final (container, session, follows) = await start(channelType: 'dm');
+      // The reader took part in the thread, then unfollowed it.
+      session.emit(
+        NostrEvent(
+          id: 'own-reply',
+          pubkey: 'me',
+          createdAt: base + 40,
+          kind: 9,
+          tags: reply.tags,
+          content: 'mine',
+          sig: 'sig',
+        ),
+      );
+      follows.choose(unfollowed: {root});
+      await _settle();
+      session.emit(reply);
+      await _settle();
       expect(observed(container), contains(reply.id));
     });
   });

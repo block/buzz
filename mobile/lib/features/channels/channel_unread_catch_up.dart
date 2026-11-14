@@ -146,7 +146,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
           participatedRootIds: _participatedRootIds,
           followedRootIds: _followedRootIds(),
           authoredRootIds: _authoredRootIds,
-          mutedRootIds: _unfollowedRootIds(),
+          mutedRootIds: _unfollowedRootIds(channel),
           mutedChannelIds: mutedChannelIds,
           channelId: channel.id,
         )) {

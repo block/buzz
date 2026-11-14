@@ -81,7 +81,8 @@ extension ReadStateFollows on ReadStateManager {
       _ownFollows,
       clientId: _clientId,
       previous: _followPlacement,
-      extra: _ownFollowExtra,
+      // Sized against every slot's unknown fields, conservatively.
+      extra: {for (final extra in _followExtra.values) ...extra},
     );
     try {
       _followPlacement = pack();
@@ -108,15 +109,22 @@ extension ReadStateFollows on ReadStateManager {
   }
 
   void _mergeFollowEvent(NostrEvent event, String slot) {
-    final ThreadFollowsBlob? blob;
-    try {
-      blob = decodeThreadFollowsBlob(_crypto.decrypt(event.content));
-    } catch (_) {
-      _unreadableFollowSlots.add(slot);
+    // Only the coordinate's newest head counts (created_at, then lowest id).
+    final head = _followHeads[slot];
+    if (head != null &&
+        (event.createdAt < head.createdAt ||
+            event.createdAt == head.createdAt &&
+                event.id.compareTo(head.id) >= 0)) {
       return;
     }
+    _followHeads[slot] = (createdAt: event.createdAt, id: event.id);
+    ThreadFollowsBlob? blob;
+    try {
+      blob = decodeThreadFollowsBlob(_crypto.decrypt(event.content));
+    } catch (_) {}
     if (blob == null) {
       _unreadableFollowSlots.add(slot);
+      _remoteFollows.remove(slot);
       return;
     }
     _unreadableFollowSlots.remove(slot);
@@ -130,10 +138,25 @@ extension ReadStateFollows on ReadStateManager {
       _followSlots[index] = fresh;
       _pending.remove('$threadFollowsDTagPrefix$slot');
       _followPublished.remove(slot);
+      _followExtra.remove(slot);
     } else if (index >= 0) {
-      // Recover own entries the journal lost; local edits stay newer.
+      // The relay's own head is authoritative. A pending event it already
+      // supersedes was sent; a local entry survives only while it differs
+      // from what was last published, an edit still to send.
+      final coordinate = '$threadFollowsDTagPrefix$slot';
+      if (_pending[coordinate] case final sent?
+          when sent.createdAt <= event.createdAt) {
+        _acknowledge(coordinate, sent);
+      }
+      final published = switch (_followPublished[slot]) {
+        final plaintext? => decodeThreadFollowsBlob(plaintext)?.entries,
+        null => null,
+      };
       for (final MapEntry(:key, :value) in blob.entries.entries) {
-        _ownFollows.putIfAbsent(key, () => value);
+        final mine = _ownFollows[key];
+        if (mine == null || jsonEncode(mine) == jsonEncode(published?[key])) {
+          _ownFollows[key] = value;
+        }
         if (!_followPlacement.any((keys) => keys.contains(key))) {
           while (_followPlacement.length <= index) {
             _followPlacement.add({});
@@ -141,10 +164,44 @@ extension ReadStateFollows on ReadStateManager {
           _followPlacement[index].add(key);
         }
       }
-      if (_ownFollowExtra.isEmpty) _ownFollowExtra = Map.of(blob.extra);
+      _followExtra[slot] = Map.of(blob.extra);
       _followPublished[slot] = blob.encode();
+      return;
     }
     _remoteFollows[slot] = blob.choices;
+  }
+
+  /// Peer follow heads and choices, cached in the journal for offline use.
+  Map<String, Object?> _followHeadsJson() => {
+    for (final MapEntry(key: slot, value: head) in _followHeads.entries)
+      slot: {
+        'createdAt': head.createdAt,
+        'id': head.id,
+        'threads': {
+          for (final MapEntry(:key, :value)
+              in (_remoteFollows[slot] ?? const {}).entries)
+            key: {'follow': value.follow, 'at': value.at},
+        },
+      },
+  };
+
+  void _hydrateFollowHeads(Object? json) {
+    for (final MapEntry(:key, :value) in ((json as Map?) ?? const {}).entries) {
+      final slot = key as String;
+      final head = value as Map;
+      _followHeads[slot] = (
+        createdAt: head['createdAt'] as int,
+        id: head['id'] as String,
+      );
+      if (_followSlots.contains(slot)) continue;
+      _remoteFollows[slot] = {
+        for (final MapEntry(:key, :value) in (head['threads'] as Map).entries)
+          key as String: (
+            follow: (value as Map)['follow'] as bool,
+            at: value['at'] as int,
+          ),
+      };
+    }
   }
 
   /// The plaintext of each own follow slot as it should be published.
@@ -160,7 +217,7 @@ extension ReadStateFollows on ReadStateManager {
           entries: {
             for (final key in _followPlacement[index]) key: ?_ownFollows[key],
           },
-          extra: _ownFollowExtra,
+          extra: _followExtra[_followSlots[index]] ?? const {},
         ).encode(),
     };
   }

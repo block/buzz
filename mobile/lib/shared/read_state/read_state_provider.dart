@@ -30,6 +30,10 @@ class ReadStateState {
   /// Whether [threadFollows] may be missing entries.
   final bool threadFollowsIncomplete;
 
+  /// The last publish or load failure, for the read-state error notice;
+  /// null once a sync succeeds.
+  final Object? syncError;
+
   const ReadStateState({
     required this.isReady,
     required this.pubkey,
@@ -39,6 +43,7 @@ class ReadStateState {
     this.retentionFloor = 0,
     this.threadFollows = const {},
     this.threadFollowsIncomplete = true,
+    this.syncError,
   });
 
   const ReadStateState.inert()
@@ -49,7 +54,8 @@ class ReadStateState {
       retentionFloor = 0,
       forcedUnreadContexts = const {},
       threadFollows = const {},
-      threadFollowsIncomplete = true;
+      threadFollowsIncomplete = true,
+      syncError = null;
 
   /// Channels that should surface as unread because of a forced-unread flag —
   /// either forced directly, or containing a forced message.
@@ -84,6 +90,7 @@ class ReadStateState {
       forcedUnreadContexts: forcedUnreadContexts,
       threadFollows: threadFollows,
       threadFollowsIncomplete: threadFollowsIncomplete,
+      syncError: syncError,
     );
   }
 }
@@ -202,9 +209,35 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       removed = removed || _forcedUnreadContexts.length != before;
     }
     _manager?.markContextRead(contextId, unixTimestamp, explicit: explicit);
-    if (removed) {
-      _refreshForcedState();
-    }
+    if (removed) _refreshForcedState();
+    if (explicit) clearCovered(scope: contextId);
+  }
+
+  /// Ends the device-local marks a read covers, whether or not a frontier
+  /// moved (NIP-RS Clearing): [displayed] messages, and for a catch-up or
+  /// explicit read [scope], a channel's top-level messages or a
+  /// `thread:<root>`'s replies. [onScreen] messages, still shown since the
+  /// last read, keep their marks so marking one unread in place holds.
+  void clearCovered({
+    String? scope,
+    Iterable<String> displayed = const [],
+    Set<String> onScreen = const {},
+  }) {
+    final shown = displayed.map(msgContextKey).toSet();
+    final kept = onScreen.map(msgContextKey).toSet();
+    final root = scope != null && scope.startsWith(threadContextPrefix)
+        ? scope.substring(threadContextPrefix.length)
+        : null;
+    final before = _forcedUnreadContexts.length;
+    _forcedUnreadContexts.removeWhere(
+      (contextId, force) =>
+          shown.contains(contextId) ||
+          !kept.contains(contextId) &&
+              (root != null
+                  ? force.threadRootId == root
+                  : force.channelId == scope && force.threadRootId == null),
+    );
+    if (_forcedUnreadContexts.length != before) _refreshForcedState();
   }
 
   /// Mark a context unread. A channel id is synchronized whole-channel
@@ -339,6 +372,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       }),
       threadFollows: Map.unmodifiable(manager.threadFollows),
       threadFollowsIncomplete: manager.threadFollowsIncomplete,
+      syncError: manager.syncError,
     );
   }
 }

@@ -313,6 +313,183 @@ void main() {
     });
   });
 
+  group('sync seams', () {
+    final key = threadFollowKey(channel, root);
+    final slot = 'b' * 32;
+    NostrEvent peerFollow(bool follow, int at, {String? content}) =>
+        _followEvent(
+          crypto: crypto,
+          pubkey: keys.public,
+          slot: slot,
+          choices: {key: (follow: follow, at: at)},
+          createdAt: at,
+          content: content,
+        );
+
+    test('a stale follow delivery never replaces a newer head, in either '
+        'order', () async {
+      final phone = await device('phone');
+      final older = peerFollow(true, clock - 20);
+      final newer = peerFollow(false, clock - 10);
+      relay
+        ..deliver(newer)
+        ..deliver(older);
+      expect(phone.threadFollows[key]!.follow, isFalse);
+
+      final desktop = await device('desktop');
+      relay
+        ..deliver(older)
+        ..deliver(newer);
+      expect(desktop.threadFollows[key]!.follow, isFalse);
+
+      // A stale unreadable event does not hide its readable successor.
+      relay.deliver(peerFollow(true, clock - 30, content: '{"v":2}'));
+      expect(desktop.threadFollowsIncomplete, isFalse);
+      expect(desktop.threadFollows[key]!.follow, isFalse);
+    });
+
+    test('restoring an older journal keeps a newer accepted choice', () async {
+      final phone = await device('phone');
+      phone.setThreadFollow(channel, root, true);
+      await phone.flush();
+      final backup = {
+        for (final name in prefs.getKeys()) name: prefs.getString(name),
+      };
+      clock += 10;
+      phone.setThreadFollow(channel, root, false);
+      await phone.flush();
+      phone.dispose(flushPending: false);
+      for (final MapEntry(:key, :value) in backup.entries) {
+        if (value != null) await prefs.setString(key, value);
+      }
+
+      final restored = await device('phone');
+      await restored.flush();
+      expect(restored.threadFollows[key], (follow: false, at: clock));
+      expect(
+        decodeThreadFollowsBlob(
+          crypto.decrypt(relay.followEvents().single.content),
+        )!.choices[key],
+        (follow: false, at: clock),
+      );
+    });
+
+    test('a choice made before a retry is sent after it', () async {
+      final phone = await device('phone');
+      relay.failNext = true;
+      phone.setThreadFollow(channel, root, true);
+      await phone.flush();
+      clock++;
+      phone.setThreadFollow(channel, root, false);
+      await phone.flush();
+
+      expect(
+        decodeThreadFollowsBlob(
+          crypto.decrypt(relay.followEvents().single.content),
+        )!.choices[key],
+        (follow: false, at: clock),
+      );
+    });
+
+    test('peer follow choices survive an offline restart', () async {
+      final desktop = await device('desktop');
+      final other = threadFollowKey(channel, 'c' * 64);
+      desktop.setThreadFollow(channel, root, true);
+      desktop.setThreadFollow(channel, 'c' * 64, false);
+      final phone = await device('phone');
+      await sync(desktop, phone);
+      phone.dispose(flushPending: false);
+
+      relay.offline = true;
+      final restarted = await device('phone');
+      expect(restarted.threadFollows[key]!.follow, isTrue);
+      expect(restarted.threadFollows[other]!.follow, isFalse);
+    });
+
+    test('an older build replays the journal without a follow event', () async {
+      final phone = await device('phone');
+      relay.failNext = true;
+      phone.setThreadFollow(channel, root, true);
+      await phone.flush();
+      final journal = [
+        for (final name in prefs.getKeys())
+          if (prefs.getString(name) case final raw?
+              when raw.contains('"followPending"'))
+            jsonDecode(raw) as Map<String, dynamic>,
+      ].single;
+      expect(journal['followPending'] as Map, isNotEmpty);
+      // The older build decodes every `pending` entry as read state.
+      for (final event in (journal['pending'] as Map).values) {
+        final content = NostrEvent.fromJson(
+          Map<String, dynamic>.from(event as Map),
+        ).content;
+        expect(decodeReadStateBlob(crypto.decrypt(content)), isNotNull);
+      }
+    });
+
+    test(
+      'an overfull merged primary still publishes reads and follows',
+      () async {
+        for (var peer = 0; peer < 3; peer++) {
+          relay.retained['read-state:peer$peer'] = _readStateEvent(
+            keys: keys,
+            crypto: crypto,
+            clientId: 'peer$peer',
+            slot: 'peer$peer',
+            contexts: {
+              for (var index = 0; index < 160; index++)
+                for (final id in ['$peer-$index'.padLeft(36, '0')]) ...{
+                  id: clock - 100,
+                  'ov_s:$id': 1,
+                  'ov_c:$id': 0,
+                  'ov_b:$id': clock - 100,
+                },
+            },
+            createdAt: clock - 50,
+          );
+        }
+        final phone = await device('phone');
+        expect(phone.activeChannelOverrides, hasLength(480));
+        expect(phone.markChannelUnread(channel), isFalse);
+        phone.markContextRead(channel, clock - 1);
+        phone.setThreadFollow(channel, root, true);
+        await phone.flush();
+
+        expect(phone.syncError, isNull);
+        final desktop = await device('desktop');
+        expect(desktop.getEffectiveTimestamp(channel), clock - 1);
+        expect(desktop.threadFollows[key]!.follow, isTrue);
+      },
+    );
+
+    test('a live peer group schedules a canonical publish', () async {
+      final phone = await device('phone');
+      final desktop = await device('desktop');
+      phone.markContextRead(channel, clock - 100);
+      expect(phone.markChannelUnread(channel), isTrue);
+      await phone.flush();
+      expect(desktop.activeChannelOverrides, {channel});
+
+      // The debounced publish carries the merged group in the desktop's
+      // own primary.
+      await Future<void>.delayed(const Duration(seconds: 6));
+      expect(
+        readStateBlobs().where((blob) => blob['ov_s:$channel'] != null),
+        hasLength(2),
+      );
+    });
+
+    test(
+      'a group with no frontier dies once the retention floor passes it',
+      () async {
+        final phone = await device('phone');
+        expect(phone.markChannelUnread(channel), isTrue);
+        clock += 2 * 24 * 3600;
+        expect(phone.activeChannelOverrides, isEmpty);
+      },
+    );
+  });
+
   group('follow slot packing', () {
     Map<String, Map<String, Object?>> entries(int count) => {
       for (var index = 0; index < count; index++)
@@ -371,11 +548,50 @@ NostrEvent _readStateEvent({
   sig: 'sig',
 );
 
+NostrEvent _followEvent({
+  required ReadStateCrypto crypto,
+  required String pubkey,
+  required String slot,
+  required Map<String, ThreadFollowChoice> choices,
+  required int createdAt,
+  String clientId = 'peer',
+  String? content,
+}) => NostrEvent(
+  id: 'follow-$slot-$createdAt',
+  pubkey: pubkey,
+  createdAt: createdAt,
+  kind: EventKind.readState,
+  tags: [
+    ['d', '$threadFollowsDTagPrefix$slot'],
+    ['t', threadFollowsTag],
+  ],
+  content: crypto.encrypt(
+    content ??
+        ThreadFollowsBlob(
+          clientId: clientId,
+          entries: {
+            for (final MapEntry(:key, :value) in choices.entries)
+              key: {'follow': value.follow, 'at': value.at},
+          },
+        ).encode(),
+  ),
+  sig: 'sig',
+);
+
 /// A relay that keeps the newest event per coordinate and serves them all as
 /// the read-state snapshot.
 class _MemoryRelay extends RelaySessionNotifier {
   final retained = <String, NostrEvent>{};
+  final _live = <void Function(NostrEvent)>[];
   bool failNext = false;
+  bool offline = false;
+
+  /// Delivers [event] to live subscribers without retaining it.
+  void deliver(NostrEvent event) {
+    for (final onEvent in List.of(_live)) {
+      onEvent(event);
+    }
+  }
 
   List<NostrEvent> followEvents() => [
     for (final event in retained.values)
@@ -385,14 +601,21 @@ class _MemoryRelay extends RelaySessionNotifier {
   @override
   Future<List<NostrEvent>> fetchReadStateSnapshot({
     Duration timeout = const Duration(seconds: 8),
-  }) async => retained.values.toList();
+  }) async {
+    if (offline) throw TimeoutException('offline');
+    return retained.values.toList();
+  }
 
   @override
   Future<void Function()> subscribe(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
-  }) async => () {};
+  }) async {
+    if (offline) throw TimeoutException('offline');
+    _live.add(onEvent);
+    return () => _live.remove(onEvent);
+  }
 
   @override
   Future<NostrEvent> publish(
@@ -404,7 +627,14 @@ class _MemoryRelay extends RelaySessionNotifier {
       throw TimeoutException('relay timeout');
     }
     final d = event.tags.firstWhere((tag) => tag.first == 'd')[1];
-    retained[d] = event;
+    final head = retained[d];
+    // NIP-01 replaceable: a newer created_at wins, then the lower id.
+    if (head == null ||
+        event.createdAt > head.createdAt ||
+        event.createdAt == head.createdAt && event.id.compareTo(head.id) < 0) {
+      retained[d] = event;
+    }
+    deliver(event);
     return event;
   }
 }

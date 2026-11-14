@@ -874,7 +874,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
             participatedRootIds: _participatedRootIds,
             followedRootIds: _followedRootIds(),
             authoredRootIds: _authoredRootIds,
-            mutedRootIds: _unfollowedRootIds(),
+            mutedRootIds: _unfollowedRootIds(channel),
             mutedChannelIds: mutedChannelIds,
             channelId: channel.id,
           ) &&

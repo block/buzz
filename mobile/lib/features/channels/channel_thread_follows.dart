@@ -7,8 +7,10 @@ extension _ChannelThreadFollows on ChannelsNotifier {
   Set<String> _followedRootIds() =>
       ref.read(threadFollowsProvider).followedRootIds;
 
-  Set<String> _unfollowedRootIds() =>
-      ref.read(threadFollowsProvider).unfollowedRootIds;
+  // An unfollow never mutes a DM, whose replies are read like messages.
+  Set<String> _unfollowedRootIds(Channel channel) => channel.isDm
+      ? const {}
+      : ref.read(threadFollowsProvider).unfollowedRootIds;
 
   void _noteThreadChannel(NostrEvent event, String channelId) {
     if (event.threadReference.rootId case final rootId?) {

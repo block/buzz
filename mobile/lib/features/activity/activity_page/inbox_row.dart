@@ -398,15 +398,24 @@ class _InboxRow extends HookConsumerWidget {
                         following ? 'Unfollow thread' : 'Follow thread',
                       ),
                       onTap: () {
+                        final messenger = ScaffoldMessenger.maybeOf(context);
                         Navigator.of(sheetContext).pop();
                         final notifier = ref.read(
                           threadFollowsProvider.notifier,
                         );
                         final channelId = item.item.channelId;
                         if (channelId == null) return;
-                        following
+                        final saved = following
                             ? notifier.unfollowThread(channelId, followRootId)
                             : notifier.followThread(channelId, followRootId);
+                        if (!saved) {
+                          messenger?.showFeedbackSnackBar(
+                            const SnackBar(
+                              content: Text('Couldn’t save that. Try again.'),
+                            ),
+                            kind: ToastKind.error,
+                          );
+                        }
                       },
                     ),
                   if (canRemind)

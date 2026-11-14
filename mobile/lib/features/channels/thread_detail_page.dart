@@ -729,7 +729,19 @@ class ThreadDetailPage extends HookConsumerWidget {
       );
       return null;
     }, [hasFetchedReplies, replies.length, settleGeometry, headHeight.value]);
-    final clearDisplayedForces = useDisplayClearsForcedUnread(ref);
+    // Reading starts once the thread holds still for the dwell while this
+    // page is in front and the app is in use.
+    final appInUse = isAppInUse(useAppLifecycleState());
+    final readStateReady = ref.watch(
+      readStateProvider.select((state) => state.isReady),
+    );
+    final readingActive =
+        threadViewportVisible &&
+        readStateReady &&
+        appInUse &&
+        (ModalRoute.of(context)?.isCurrent ?? true) &&
+        ConversationPaneScope.isActiveOf(context);
+    final clearCovered = useClearsCoveredUnread(ref, active: readingActive);
     void readVisibleReplies() {
       final readState = ref.read(readStateProvider);
       if (!context.mounted ||
@@ -780,7 +792,7 @@ class ThreadDetailPage extends HookConsumerWidget {
           ref.read(channelsProvider.notifier).channelById(channelId)?.isDm ??
           false;
       // Displaying a row ends its device-local unread before it is read.
-      clearDisplayedForces(visible);
+      final endCatchUp = clearCovered(visible);
       final marks = readingMarks(
         readState: ref.read(readStateProvider),
         channelId: channelId,
@@ -791,6 +803,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         bottom: atBottom ? replies.last : null,
         threadRootId: queryRootId,
         isRootThread: threadHead.parentId == null,
+        onCatchUp: endCatchUp,
       );
       final notifier = ref.read(readStateProvider.notifier);
       for (final mark in marks.entries) {
@@ -798,20 +811,9 @@ class ThreadDetailPage extends HookConsumerWidget {
       }
     }
 
-    // Reading starts once the thread holds still for the dwell while this
-    // page is in front and the app is in use.
-    final appInUse = isAppInUse(useAppLifecycleState());
-    final readStateReady = ref.watch(
-      readStateProvider.select((state) => state.isReady),
-    );
     useReadingDwell(
       positions: itemPositionsListener.itemPositions,
-      active:
-          threadViewportVisible &&
-          readStateReady &&
-          appInUse &&
-          (ModalRoute.of(context)?.isCurrent ?? true) &&
-          ConversationPaneScope.isActiveOf(context),
+      active: readingActive,
       onDwell: readVisibleReplies,
       keys: [threadHead.id, readingContentKey(allMsgs), navigationBottomInset],
     );

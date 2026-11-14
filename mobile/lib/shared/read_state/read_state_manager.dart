@@ -165,7 +165,10 @@ class ReadStateManager {
   final List<String> _followSlots = [];
   List<Set<String>> _followPlacement = [];
   final Map<String, Map<String, Object?>> _ownFollows = {};
-  Map<String, Object?> _ownFollowExtra = {};
+  // Each own slot's unknown top-level fields, carried with that slot.
+  final Map<String, Map<String, Object?>> _followExtra = {};
+  // The newest event seen per follow coordinate.
+  final Map<String, ({int createdAt, String id})> _followHeads = {};
   final Map<String, String> _followPublished = {};
   final Map<String, Map<String, ThreadFollowChoice>> _remoteFollows = {};
   final Set<String> _unreadableFollowSlots = {};
@@ -292,7 +295,9 @@ class ReadStateManager {
   /// Whether the last full-state load succeeded, as override actions need.
   bool get _hasFullState => _lastSnapshotSucceeded;
 
-  int _frontierOf(String contextId) => _effectiveState[contextId] ?? 0;
+  /// The effective frontier synced groups use: never below the floor.
+  int _frontierOf(String contextId) =>
+      max(_effectiveState[contextId] ?? 0, readStateFloor(_now()));
 
   /// Synchronized whole-channel mark unread (NIP-RS Actions). Returns false,
   /// leaving state unchanged, when the action must fail visibly: no complete
@@ -363,15 +368,35 @@ class ReadStateManager {
 
   bool _primaryFits() {
     try {
+      _packSlots(_primaryOverrides());
+      return true;
+    } on StateError {
+      return false;
+    }
+  }
+
+  List<Map<String, int>> _packSlots(Map<String, int> primary) =>
       packReadStateContexts(
         _publishableLocalContexts(),
         clientId: _clientId,
         previous: _placement,
-        primary: _primaryOverrides(),
+        primary: primary,
       );
-      return true;
+
+  /// The slot plan. When the merged groups overfill the primary, it keeps
+  /// the last published groups so frontiers still publish; only override
+  /// actions fail ([_primaryFits]).
+  List<Map<String, int>> _planSlots() {
+    try {
+      return _packSlots(_primaryOverrides());
     } on StateError {
-      return false;
+      final last = _published[_slots.first] ?? const <String, int>{};
+      return _packSlots({
+        for (final MapEntry(:key, :value) in last.entries)
+          if (isOverrideContext(key)) key: value,
+        for (final key in last.keys)
+          if (_overrides.containsKey(key)) key: _frontierOf(key),
+      });
     }
   }
 
@@ -620,6 +645,8 @@ class ReadStateManager {
     _mergeEvents([event]);
     _persistLocalState();
     _onChanged();
+    // A merged peer group can change this device's canonical primary.
+    if (_hasFullState && _hasUnpublishedState()) _schedulePublish();
   }
 
   _ApplyRemoteContextResult _applyRemoteContextTimestamp({
@@ -674,6 +701,7 @@ class ReadStateManager {
     } finally {
       _isPublishing = false;
       _publishAgain = false;
+      if (!_disposed) _onChanged(); // Surfaces syncError.
       completer.complete();
       if (_publishCompleter == completer) {
         _publishCompleter = null;
@@ -690,15 +718,9 @@ class ReadStateManager {
         in _plannedFollowSlots().entries) {
       if (_followPublished[slot] != plaintext) return true;
     }
-    final primary = _primaryOverrides();
     final List<Map<String, int>> placement;
     try {
-      placement = packReadStateContexts(
-        _publishableLocalContexts(),
-        clientId: _clientId,
-        previous: _placement,
-        primary: primary,
-      );
+      placement = _planSlots();
     } on StateError {
       // Let the real publish surface the capacity error.
       return true;
@@ -765,16 +787,10 @@ class ReadStateManager {
         }
       }
       if (_disposed && !allowDisposed) return;
-      final primary = _primaryOverrides();
       _localContexts.removeWhere(
         (key, value) => value < _now() - readStateHorizonSeconds,
       );
-      _placement = packReadStateContexts(
-        _localContexts,
-        clientId: _clientId,
-        previous: _placement,
-        primary: primary,
-      );
+      _placement = _planSlots();
       while (_slots.length < _placement.length) {
         _slots.add(generateReadStateSlotId());
       }
@@ -910,7 +926,12 @@ class ReadStateManager {
           in followPlanned.entries) {
         final coordinate = '$threadFollowsDTagPrefix$slot';
         final event = prepared[coordinate];
-        if (event == null || _followPublished[slot] == plaintext) continue;
+        if (_followPublished[slot] == plaintext) continue;
+        if (event == null) {
+          // Skipped for a pending replay; send the newer choice next pass.
+          _publishAgain = true;
+          continue;
+        }
         if (!_servesThisCommunity ||
             !_ownsJournal ||
             (_disposed && !allowDisposed)) {
@@ -1039,9 +1060,11 @@ class ReadStateManager {
           entry.value as Map,
         );
       }
-      _ownFollowExtra = Map<String, Object?>.from(
-        (journal['followExtra'] as Map?) ?? const {},
-      );
+      for (final entry
+          in ((journal['followExtra'] as Map?) ?? const {}).entries) {
+        _followExtra[entry.key as String] = Map.from(entry.value as Map);
+      }
+      _hydrateFollowHeads(journal['followHeads']);
       for (final entry
           in ((journal['followPublished'] as Map?) ?? const {}).entries) {
         _followPublished[entry.key as String] = entry.value as String;
@@ -1057,7 +1080,11 @@ class ReadStateManager {
       for (final entry in (journal['published'] as Map).entries) {
         _published[entry.key as String] = contexts(entry.value);
       }
-      for (final entry in (journal['pending'] as Map).entries) {
+      // Follow events have their own field, which older builds ignore.
+      for (final entry in {
+        ...journal['pending'] as Map,
+        ...?journal['followPending'] as Map?,
+      }.entries) {
         _pending[entry.key as String] = NostrEvent.fromJson(
           Map<String, dynamic>.from(entry.value as Map),
         );
@@ -1116,14 +1143,18 @@ class ReadStateManager {
           for (final keys in _followPlacement) keys.toList()..sort(),
         ],
         'ownFollows': _ownFollows,
-        'followExtra': _ownFollowExtra,
+        'followExtra': _followExtra,
+        'followHeads': _followHeadsJson(),
         'followPublished': _followPublished,
         'slots': _slots,
         'placement': _placement,
         'published': _published,
-        'pending': {
-          for (final entry in _pending.entries) entry.key: entry.value.toJson(),
-        },
+        for (final follows in [false, true])
+          follows ? 'followPending' : 'pending': {
+            for (final MapEntry(:key, :value) in _pending.entries)
+              if (key.startsWith(threadFollowsDTagPrefix) == follows)
+                key: value.toJson(),
+          },
         'createdAt': _maxFetchedCreatedAt,
       });
       await _storage.writeJournal(_journalKey, encoded, owner: _journalOwner);

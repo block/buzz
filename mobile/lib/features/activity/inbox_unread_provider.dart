@@ -11,6 +11,23 @@ final inboxHasUnreadProvider = Provider<bool>((ref) {
   final readState = ref.watch(readStateProvider);
   final localState = ref.watch(inboxLocalStateProvider);
   if (!readState.isReady) return false;
+  // A mark any device has read past is stale: remove it, not just ignore it.
+  final stale = [
+    for (final item in items)
+      for (final id in groupedInboxItemIds(item))
+        if (localState.unreadBaselines[id] case final baseline?
+            when inboxItemReadAt(
+                  item,
+                  markerOf: (contextId) => readState.contexts[contextId],
+                ) >
+                baseline)
+          id,
+  ];
+  if (stale.isNotEmpty) {
+    Future.microtask(
+      () => ref.read(inboxLocalStateProvider.notifier).clearUnread(stale),
+    );
+  }
   return items.any(
     (item) => !isInboxItemDone(
       item,
