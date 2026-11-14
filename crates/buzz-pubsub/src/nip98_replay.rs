@@ -187,4 +187,67 @@ mod tests {
             .await
             .expect("replay with extreme ttl must succeed via clamp"));
     }
+
+    #[tokio::test]
+    #[ignore = "requires Redis"]
+    async fn a_marked_proof_is_refused_by_another_instance() {
+        use nostr::{Tag, Timestamp};
+
+        // Two relay instances sharing one Redis.
+        let pod_a = RedisNip98ReplayGuard::new(redis_pool());
+        let pod_b = RedisNip98ReplayGuard::new(redis_pool());
+        let ctx = fresh_ctx();
+        let url = "https://relay.example.com/api/tokens";
+
+        // Signed by a client clock ~120 s slow: the oldest event the verifier
+        // still admits.
+        let created = Timestamp::from(Timestamp::now().as_secs() - 119);
+        let event = EventBuilder::new(Kind::HttpAuth, "")
+            .tags([
+                Tag::parse(["u", url]).unwrap(),
+                Tag::parse(["method", "POST"]).unwrap(),
+            ])
+            .custom_created_at(created)
+            .sign_with_keys(&Keys::generate())
+            .expect("sign");
+        let json = serde_json::to_string(&event).unwrap();
+
+        assert!(buzz_auth::verify_nip98_event(&json, url, "POST", None).is_ok());
+        assert!(pod_a
+            .try_mark(&ctx, &event.id, DEFAULT_REPLAY_TTL_SECS)
+            .await
+            .expect("mark"));
+
+        // Timestamp validation alone still admits the duplicate; the shared
+        // seen-set is what refuses it.
+        assert!(buzz_auth::verify_nip98_event(&json, url, "POST", None).is_ok());
+        assert!(!pod_b
+            .try_mark(&ctx, &event.id, DEFAULT_REPLAY_TTL_SECS)
+            .await
+            .expect("replay"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Redis"]
+    async fn the_marker_ttl_exceeds_the_admission_window() {
+        let guard = RedisNip98ReplayGuard::new(redis_pool());
+        let ctx = fresh_ctx();
+        let eid = fresh_event_id();
+        assert!(guard
+            .try_mark(&ctx, &eid, DEFAULT_REPLAY_TTL_SECS)
+            .await
+            .expect("mark"));
+
+        let mut conn = redis_pool();
+        let ttl: i64 = redis::cmd("TTL")
+            .arg(buzz_auth::nip98_replay_key(&ctx, &eid))
+            .query_async(&mut conn)
+            .await
+            .expect("ttl");
+        // An event first seen at the earliest admissible moment (signed 120 s
+        // in the future) stays admissible for 2×120 + 1 s; the marker must
+        // still be live past that, with the pod clock budget on top.
+        let window = 2 * buzz_auth::TIMESTAMP_TOLERANCE_SECS as i64 + 1;
+        assert!(ttl > window, "marker ttl {ttl}s must exceed {window}s");
+    }
 }

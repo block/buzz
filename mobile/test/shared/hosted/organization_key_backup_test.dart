@@ -14,6 +14,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import '../../helpers/test_assertion.dart';
 
 class _FakeHpke extends HpkeBackup {
   _FakeHpke(this.envelope);
@@ -80,7 +81,7 @@ void main() {
         ),
         '/v1/buzz/identity/assertions' => http.Response(
           jsonEncode({
-            'assertion': 'org-token',
+            'assertion': testAssertion('org-token'),
             'nostr_pubkey': keys.public,
             'expires_at': DateTime.now().millisecondsSinceEpoch ~/ 1000 + 300,
           }),
@@ -132,7 +133,7 @@ void main() {
       enabled: true,
     );
     expect(await auth.headers(relay), {
-      'Nostr-Federated-Identity': 'Bearer org-token',
+      'Nostr-Federated-Identity': 'Bearer ${testAssertion('org-token')}',
     });
   }
 

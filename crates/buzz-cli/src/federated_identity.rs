@@ -218,12 +218,13 @@ impl AdapterSession {
     /// re-minted at its refresh point. Concurrent callers share one mint.
     pub async fn assertion(&self, keys: &Keys) -> Result<Option<String>, CliError> {
         self.cached
-            .get(async { self.mint(&self.relay_url, keys).await.map(Some) })
+            .get(|| async { self.mint(&self.relay_url, keys).await.map(Some) })
             .await
     }
 
     /// Mint with bounded retries; a refusal or a definitive error returns at once.
-    async fn mint(&self, relay_url: &str, keys: &Keys) -> Result<String, CliError> {
+    /// Returns the assertion and when the attempt that got it was sent.
+    async fn mint(&self, relay_url: &str, keys: &Keys) -> Result<(String, u64), CliError> {
         let mut attempt = 0;
         loop {
             match self.mint_once(relay_url, keys).await? {
@@ -252,7 +253,7 @@ impl AdapterSession {
         &self,
         relay_url: &str,
         keys: &Keys,
-    ) -> Result<Result<String, Transient>, CliError> {
+    ) -> Result<Result<(String, u64), Transient>, CliError> {
         let pubkey = keys.public_key().to_hex();
         let body = serde_json::to_vec(&serde_json::json!({
             "relay_url": relay_url,
@@ -269,6 +270,7 @@ impl AdapterSession {
         let mut proof = reqwest::header::HeaderValue::try_from(format!("Nostr {proof}"))
             .map_err(|_| CliError::Other("NIP-98 proof is not a valid header value".into()))?;
         proof.set_sensitive(true);
+        let sent_at = crate::cached_assertion::monotonic_now();
         let sent = self
             .http
             .post(self.endpoint.clone())
@@ -307,7 +309,7 @@ impl AdapterSession {
             return Err(denial(status, code.as_deref(), relay_url));
         }
         match body {
-            Ok(body) => accept(body.as_deref(), &pubkey).map(Ok),
+            Ok(body) => accept(body.as_deref(), &pubkey).map(|a| Ok((a, sent_at))),
             // A 200 whose body never arrived is a transport failure, not a rejected 200.
             Err(e) => Ok(Err(Transient::from(e))),
         }
@@ -639,6 +641,95 @@ mod tests {
         }
     }
 
+    /// An assertion for `pubkey` issued at `iat` and expiring at `exp`.
+    fn issued_at(pubkey: &str, iat: u64, exp: u64) -> (StatusCode, String) {
+        issued_as(
+            pubkey,
+            exp,
+            &test_support::assertion_issued_at(pubkey, iat, exp),
+        )
+    }
+
+    #[tokio::test]
+    async fn an_assertion_with_no_lifetime_left_is_refused_and_reminted() {
+        // The first reply takes 20 s to arrive for a 10 s token; the second
+        // is a normal one. Only the second is returned and cached.
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let n = calls.clone();
+        let (base, seen) = adapter(move |req| {
+            let pk = req["nostr_pubkey"].as_str().unwrap();
+            let now = unix_now();
+            if n.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                // A 10 s token whose `exp` is still ahead of the local clock.
+                crate::cached_assertion::test_clock::advance(20);
+                issued_at(pk, now + 20, now + 30)
+            } else {
+                issued_at(pk, now, now + 300)
+            }
+        })
+        .await;
+        let keys = Keys::generate();
+        let session = AdapterSession::new(&base, TOKEN, RELAY).unwrap();
+        let assertion = session.assertion(&keys).await.unwrap().unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        let exp = crate::cached_assertion::jws_exp(&assertion).unwrap();
+        assert!(exp > unix_now() + 200, "the exhausted token was returned");
+        assert_eq!(session.assertion(&keys).await.unwrap().unwrap(), assertion);
+        assert_eq!(seen.lock().unwrap().len(), 2, "the good one is cached");
+    }
+
+    #[tokio::test]
+    async fn assertions_that_never_have_lifetime_left_end_in_an_error() {
+        let (base, seen) = adapter(|req| {
+            let now = unix_now();
+            crate::cached_assertion::test_clock::advance(20);
+            issued_at(req["nostr_pubkey"].as_str().unwrap(), now + 20, now + 30)
+        })
+        .await;
+        let session = AdapterSession::new(&base, TOKEN, RELAY).unwrap();
+        let err = session.assertion(&Keys::generate()).await.unwrap_err();
+        assert!(matches!(err, CliError::Auth(_)), "{err:?}");
+        assert_eq!(seen.lock().unwrap().len(), 3, "bounded reacquisition");
+    }
+
+    #[tokio::test]
+    async fn the_lifetime_counts_from_the_attempt_that_got_the_reply() {
+        // A first attempt that takes 100 s and fails, then a 60 s token: the
+        // lifetime starts at the second send, so it is usable and cached
+        // until half of it has passed.
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let n = calls.clone();
+        let (base, seen) = adapter(move |req| {
+            if n.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                crate::cached_assertion::test_clock::advance(100);
+                return (StatusCode::BAD_GATEWAY, "{}".into());
+            }
+            let now = unix_now();
+            issued_at(req["nostr_pubkey"].as_str().unwrap(), now, now + 60)
+        })
+        .await;
+        let keys = Keys::generate();
+        let session = AdapterSession::new(&base, TOKEN, RELAY).unwrap();
+        let first = session.assertion(&keys).await.unwrap();
+        assert!(first.is_some());
+        crate::cached_assertion::test_clock::advance(29);
+        assert_eq!(session.assertion(&keys).await.unwrap(), first);
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_assertion_without_iat_is_refused() {
+        let (base, _) = adapter(|req| {
+            let pk = req["nostr_pubkey"].as_str().unwrap();
+            let exp = unix_now() + 300;
+            issued_as(pk, exp, &test_support::assertion_without_iat(pk, exp))
+        })
+        .await;
+        let session = AdapterSession::new(&base, TOKEN, RELAY).unwrap();
+        let err = session.assertion(&Keys::generate()).await.unwrap_err();
+        assert!(matches!(err, CliError::Auth(_)), "{err:?}");
+    }
+
     /// NIP-FA §Denials: every status/code the adapter can answer, plus the
     /// 200 responses a client must refuse. Retryable answers stay retryable
     /// (`CliError::Relay` with the status) for the request's retry loop;
@@ -921,19 +1012,38 @@ pub(crate) mod test_support {
     /// with `typ: nip-fi+jwt`, the NIP-FI claims, and a 64-byte signature.
     /// The CLI never verifies the signature; the relay does.
     pub(crate) fn assertion(pubkey: &str, exp: u64) -> String {
+        assertion_issued_at(pubkey, exp.saturating_sub(300), exp)
+    }
+
+    pub(crate) fn assertion_issued_at(pubkey: &str, iat: u64, exp: u64) -> String {
+        jws(serde_json::json!({
+            "iss": "https://adapter.example",
+            "sub": "user-1",
+            "aud": "https://relay.example.com",
+            "iat": iat,
+            "exp": exp,
+            "jti": "a1b2c3",
+            "nostr_pubkey": pubkey,
+        }))
+    }
+
+    pub(crate) fn assertion_without_iat(pubkey: &str, exp: u64) -> String {
+        jws(serde_json::json!({
+            "iss": "https://adapter.example",
+            "sub": "user-1",
+            "aud": "https://relay.example.com",
+            "exp": exp,
+            "jti": "a1b2c3",
+            "nostr_pubkey": pubkey,
+        }))
+    }
+
+    fn jws(claims: serde_json::Value) -> String {
         let segment = |v: serde_json::Value| URL_SAFE_NO_PAD.encode(v.to_string());
         format!(
             "{}.{}.{}",
             segment(serde_json::json!({"alg": "ES256", "typ": "nip-fi+jwt", "kid": "k1"})),
-            segment(serde_json::json!({
-                "iss": "https://adapter.example",
-                "sub": "user-1",
-                "aud": "https://relay.example.com",
-                "iat": exp.saturating_sub(300),
-                "exp": exp,
-                "jti": "a1b2c3",
-                "nostr_pubkey": pubkey,
-            })),
+            segment(claims),
             URL_SAFE_NO_PAD.encode([7u8; 64]),
         )
     }

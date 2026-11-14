@@ -186,11 +186,11 @@ impl GitAuth {
         // then reuses the token for POST (pack data). Method binding can't work here.
         //
         // Security is provided by: service-binding in the URL (clone vs push scoped),
-        // ±60s timestamp, and the pre-receive hook for push authorization.
+        // ±120s timestamp, and the pre-receive hook for push authorization.
         // We pass the method from the event itself so verify_nip98_event always accepts.
         //
         // body=None: can't buffer streaming pack data to verify payload hash.
-        // Token is time-bounded (±60s) and URL-locked — acceptable trade-off.
+        // Token is time-bounded (±120s) and URL-locked — acceptable trade-off.
         let headers_clone = parts.headers.clone();
         let method_str = method.to_owned();
         let proof_slot = slot.clone();
@@ -474,7 +474,7 @@ fn verify_git_proof(
     // SECURITY: method intentionally not verified for git routes. The tautological
     // check (event.method == event.method) is deliberate — see comment block above.
     // Git's credential protocol signs once with GET and reuses for POST. The URL tag
-    // provides the real security boundary (±60s timestamp + URL lock + HTTPS).
+    // provides the real security boundary (±120s timestamp + URL lock + HTTPS).
     let pubkey =
         buzz_auth::nip98::verify_nip98_event(&event_json, expected_url, &method_for_verify, None)
             .map_err(|e| {
@@ -488,7 +488,7 @@ fn verify_git_proof(
     // Git's credential protocol reuses one signed token across multiple requests
     // in a session (info_refs GET -> upload-pack/receive-pack POST). Rejecting
     // replayed event IDs would break normal clone/push operations.
-    // The +-60s timestamp window + URL scoping + HTTPS transport provide sufficient
+    // The ±120s timestamp window + URL scoping + HTTPS transport provide sufficient
     // replay protection for v1. Per-request signing requires protocol changes.
 
     let event: nostr::Event = serde_json::from_str(&event_json).map_err(|_| {

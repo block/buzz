@@ -10,7 +10,7 @@
 //!
 //! The required shape (§5):
 //!
-//! - shared state (Redis), atomic set-if-absent, TTL ≥ 120s
+//! - shared state (Redis), atomic set-if-absent, TTL ≥ [`DEFAULT_REPLAY_TTL_SECS`]
 //! - community-scoped key — see [`nip98_replay_key`]
 //!
 //! ## Usage shape
@@ -26,8 +26,9 @@
 //! // safe to honor the request as `pubkey`
 //! ```
 //!
-//! The TTL must cover the verifier's clock-skew tolerance (currently ±60s, so
-//! the window over which a duplicate event id is even plausible is 2×60 = 120s).
+//! The TTL must cover the verifier's clock-skew tolerance (±120s, so the
+//! window over which a duplicate event id is even plausible is 2×120 = 240s),
+//! plus the slack described on [`DEFAULT_REPLAY_TTL_SECS`].
 //! [`DEFAULT_REPLAY_TTL_SECS`] is the floor; deployments may raise it.
 
 use std::{future::Future, pin::Pin};
@@ -35,19 +36,33 @@ use std::{future::Future, pin::Pin};
 use buzz_core::TenantContext;
 use nostr::EventId;
 
-use crate::error::AuthError;
+use crate::{error::AuthError, TIMESTAMP_TOLERANCE_SECS};
 
 /// Floor for the replay-prevention window, in seconds.
 ///
-/// Matches the §5 gate ("TTL ≥ 120s") and the doubled NIP-98 timestamp
-/// tolerance (±60s window → 120s span). Implementations MAY use a larger TTL
-/// for safety margin; they MUST NOT use a smaller one.
-pub const DEFAULT_REPLAY_TTL_SECS: u64 = 120;
+/// An event is admissible for `2 × TIMESTAMP_TOLERANCE_SECS` (240s) of
+/// verifier time, plus 1s because both whole-second bounds are inclusive.
+/// The remaining 9s budget covers the clock difference between any two relay
+/// pods sharing this seen-set: a marker written by one pod must outlive the
+/// last second another pod would still admit the event. That budget assumes
+/// NTP-synced pods whose pairwise difference stays within 9s; it is an
+/// operational assumption, not something this constant can enforce.
+///
+/// Implementations MAY use a larger TTL for safety margin; they MUST NOT use
+/// a smaller one.
+pub const DEFAULT_REPLAY_TTL_SECS: u64 = 250;
+
+/// Pairwise relay-pod clock difference budgeted into [`DEFAULT_REPLAY_TTL_SECS`].
+const POD_CLOCK_DIFFERENCE_BUDGET_SECS: u64 = 9;
+
+const _: () = assert!(
+    DEFAULT_REPLAY_TTL_SECS >= 2 * TIMESTAMP_TOLERANCE_SECS + 1 + POD_CLOCK_DIFFERENCE_BUDGET_SECS
+);
 
 /// Ceiling for the replay-prevention window, in seconds.
 ///
 /// Any TTL beyond an hour is implausible for NIP-98 replay protection: the
-/// verifier only accepts events within ±60s, so a same-id replay is only
+/// verifier only accepts events within ±120s, so a same-id replay is only
 /// physically possible inside that window plus clock skew. A 1-hour cap is
 /// 30× the natural maximum and still keeps Redis values well inside
 /// `i64::MAX` seconds (which Redis `EX` requires). Anything larger reaching
@@ -89,7 +104,7 @@ pub trait Nip98ReplayGuard: Send + Sync {
     /// NOT honor it as-given.
     ///
     /// `ttl_secs` MUST be clamped down to [`MAX_REPLAY_TTL_SECS`] if larger.
-    /// The replay window's natural maximum is the verifier's ±60s tolerance;
+    /// The replay window's natural maximum is the verifier's ±120s tolerance;
     /// values past an hour are implausible and risk Redis `EX` parse failures
     /// (Redis interprets `EX` as a signed 64-bit integer).
     fn try_mark<'a>(
@@ -209,12 +224,109 @@ mod tests {
 
     #[test]
     fn default_ttl_meets_gate_floor() {
-        // §5 gate: TTL ≥ 120s. Drift this constant down and the gate breaks.
+        // TTL must cover the ±120s window. Drift this constant down and the
+        // gate breaks.
         // Const-drift tripwire: the assertion is intentionally over a constant.
         #[allow(clippy::assertions_on_constants)]
         {
-            assert!(DEFAULT_REPLAY_TTL_SECS >= 120);
+            assert!(DEFAULT_REPLAY_TTL_SECS >= 2 * TIMESTAMP_TOLERANCE_SECS);
         }
+    }
+
+    /// Set-if-absent markers that expire `ttl` seconds after the test clock.
+    #[derive(Default)]
+    struct InMemoryGuard(std::sync::Mutex<std::collections::HashMap<String, u64>>);
+
+    impl Nip98ReplayGuard for InMemoryGuard {
+        fn try_mark_in_scope<'a>(
+            &'a self,
+            scope: &'a str,
+            event_id: &'a EventId,
+            ttl_secs: u64,
+        ) -> Pin<Box<dyn Future<Output = Result<bool, AuthError>> + Send + 'a>> {
+            let now = crate::wall_now();
+            let mut markers = self.0.lock().unwrap();
+            let key = format!("{scope}:{event_id}");
+            let fresh = markers.get(&key).is_none_or(|&expires| expires <= now);
+            if fresh {
+                markers.insert(key, now + ttl_secs);
+            }
+            Box::pin(std::future::ready(Ok(fresh)))
+        }
+    }
+
+    #[test]
+    fn a_duplicate_still_verifies_at_the_last_second_its_marker_must_cover() {
+        // First seen at server time t, signed 120 s ahead: timestamp
+        // validation keeps admitting it through t + 240 and refuses it at
+        // t + 241, so only the replay marker (live until t + TTL) can refuse
+        // the duplicate in between.
+        let url = "https://relay.example.com/api/tokens";
+        let t = 1_800_000_000u64;
+        let event = EventBuilder::new(Kind::HttpAuth, "")
+            .tags([
+                nostr::Tag::parse(["u", url]).unwrap(),
+                nostr::Tag::parse(["method", "POST"]).unwrap(),
+            ])
+            .custom_created_at(nostr::Timestamp::from(t + TIMESTAMP_TOLERANCE_SECS))
+            .sign_with_keys(&Keys::generate())
+            .expect("sign");
+        let json = serde_json::to_string(&event).unwrap();
+        let guard = InMemoryGuard::default();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let admit_at = |now| {
+            crate::test_clock::pinned(now, || {
+                crate::verify_nip98_event(&json, url, "POST", None)?;
+                rt.block_on(guard.try_mark_in_scope(
+                    "community",
+                    &event.id,
+                    DEFAULT_REPLAY_TTL_SECS,
+                ))
+            })
+        };
+
+        assert!(matches!(admit_at(t), Ok(true)));
+        let last_valid = t + 2 * TIMESTAMP_TOLERANCE_SECS;
+        assert!(
+            matches!(admit_at(last_valid), Ok(false)),
+            "the replay must be refused"
+        );
+        assert!(admit_at(last_valid + 1).is_err());
+
+        // The marker itself, checked on the guard directly: live through
+        // t + TTL - 1, gone at t + TTL. This is the in-memory guard's model,
+        // not evidence of Redis expiry.
+        let mark_at = |now| {
+            crate::test_clock::pinned(now, || {
+                rt.block_on(guard.try_mark_in_scope(
+                    "community",
+                    &event.id,
+                    DEFAULT_REPLAY_TTL_SECS,
+                ))
+            })
+        };
+        assert_eq!(DEFAULT_REPLAY_TTL_SECS, 250);
+        assert!(matches!(
+            mark_at(t + DEFAULT_REPLAY_TTL_SECS - 1),
+            Ok(false)
+        ));
+        assert!(matches!(mark_at(t + DEFAULT_REPLAY_TTL_SECS), Ok(true)));
+    }
+
+    #[test]
+    fn marker_covers_a_pod_with_a_slower_clock() {
+        // Pod A first sees an event signed 120 s ahead of A's clock, at A
+        // time t, and writes its marker until t + TTL. Pod B's clock runs
+        // 9 s behind A's, so B still admits the event until B time
+        // t + 240, which is A time t + 249. The marker must still be live
+        // then, or B would accept a replay.
+        let t = 1_000_000u64;
+        let marker_expires_a = t + DEFAULT_REPLAY_TTL_SECS;
+        let last_admissible_on_b_in_a_time =
+            t + 2 * TIMESTAMP_TOLERANCE_SECS + POD_CLOCK_DIFFERENCE_BUDGET_SECS;
+        assert!(last_admissible_on_b_in_a_time < marker_expires_a);
     }
 
     #[test]

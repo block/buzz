@@ -6,7 +6,7 @@
 //!
 //! AUTH events are **never** stored or logged (may contain bearer tokens).
 
-use nostr::{Event, Kind, TagKind, Timestamp};
+use nostr::{Event, Kind, TagKind};
 use url::Url;
 
 use crate::error::AuthError;
@@ -32,7 +32,7 @@ fn normalize_relay_url(raw: &str) -> String {
     parsed.to_string()
 }
 
-const TIMESTAMP_TOLERANCE_SECS: u64 = 60;
+use crate::TIMESTAMP_TOLERANCE_SECS;
 
 /// Generate a random NIP-42 challenge (32 CSPRNG bytes, hex-encoded).
 pub fn generate_challenge() -> String {
@@ -42,7 +42,7 @@ pub fn generate_challenge() -> String {
 
 /// Verify a NIP-42 AUTH event.
 ///
-/// Checks kind, signature, challenge, relay URL, and timestamp (±60s).
+/// Checks kind, signature, challenge, relay URL, and timestamp (±[`TIMESTAMP_TOLERANCE_SECS`]).
 /// CPU-bound (Schnorr verify) — call via `spawn_blocking` in async contexts.
 pub fn verify_nip42_event(
     event: &Event,
@@ -75,7 +75,7 @@ pub fn verify_nip42_event(
         return Err(AuthError::RelayUrlMismatch);
     }
 
-    let now = Timestamp::now().as_secs();
+    let now = crate::wall_now();
     let event_ts = event.created_at.as_secs();
     let delta = now.abs_diff(event_ts);
     if delta > TIMESTAMP_TOLERANCE_SECS {
@@ -140,20 +140,50 @@ mod tests {
         ));
     }
 
+    const SERVER_NOW: u64 = 1_800_000_000;
+
+    fn auth_event_at(keys: &Keys, challenge: &str, offset_secs: i64) -> Event {
+        let url = RelayUrl::parse(TEST_RELAY).unwrap();
+        let ts = SERVER_NOW.saturating_add_signed(offset_secs);
+        EventBuilder::auth(challenge, url)
+            .custom_created_at(Timestamp::from(ts))
+            .sign_with_keys(keys)
+            .expect("sign")
+    }
+
+    fn verify_at_server_now(event: &Event, challenge: &str) -> Result<(), AuthError> {
+        crate::test_clock::pinned(SERVER_NOW, || {
+            verify_nip42_event(event, challenge, TEST_RELAY)
+        })
+    }
+
+    #[test]
+    fn timestamp_within_tolerance_accepted() {
+        let keys = Keys::generate();
+        let challenge = generate_challenge();
+        for offset in [120, -120] {
+            let event = auth_event_at(&keys, &challenge, offset);
+            assert!(
+                verify_at_server_now(&event, &challenge).is_ok(),
+                "offset {offset}s should be accepted"
+            );
+        }
+    }
+
     #[test]
     fn expired_event_rejected() {
         let keys = Keys::generate();
         let challenge = generate_challenge();
-        let url = RelayUrl::parse(TEST_RELAY).unwrap();
-        let old_ts = Timestamp::from(Timestamp::now().as_secs().saturating_sub(120));
-        let event = EventBuilder::auth(&challenge, url)
-            .custom_created_at(old_ts)
-            .sign_with_keys(&keys)
-            .expect("sign");
-        assert!(matches!(
-            verify_nip42_event(&event, &challenge, TEST_RELAY),
-            Err(AuthError::EventExpired)
-        ));
+        for offset in [-121, 121] {
+            let event = auth_event_at(&keys, &challenge, offset);
+            assert!(
+                matches!(
+                    verify_at_server_now(&event, &challenge),
+                    Err(AuthError::EventExpired)
+                ),
+                "offset {offset}s should be rejected"
+            );
+        }
     }
 
     #[test]

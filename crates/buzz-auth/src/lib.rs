@@ -32,6 +32,35 @@ pub mod rate_limit;
 /// OAuth scope parsing and enforcement.
 pub mod scope;
 
+/// How far a signed event's `created_at` may differ from server time, in
+/// either direction, for NIP-42 AUTH and NIP-98 HTTP Auth.
+pub const TIMESTAMP_TOLERANCE_SECS: u64 = 120;
+
+/// Unix seconds now, as the verifiers see it. Tests pin it with
+/// [`test_clock::pinned`].
+fn wall_now() -> u64 {
+    #[cfg(test)]
+    if let Some(now) = test_clock::NOW.with(std::cell::Cell::get) {
+        return now;
+    }
+    nostr::Timestamp::now().as_secs()
+}
+
+#[cfg(test)]
+pub(crate) mod test_clock {
+    thread_local! {
+        pub(crate) static NOW: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    }
+
+    /// Runs `f` with the verifiers' clock fixed at `now`.
+    pub(crate) fn pinned<T>(now: u64, f: impl FnOnce() -> T) -> T {
+        NOW.with(|c| c.set(Some(now)));
+        let out = f();
+        NOW.with(|c| c.set(None));
+        out
+    }
+}
+
 pub use access::{check_read_access, check_write_access, require_scope, ChannelAccessChecker};
 pub use error::AuthError;
 pub use nip42::{generate_challenge, verify_nip42_event};

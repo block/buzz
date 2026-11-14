@@ -431,7 +431,6 @@ pub struct Provider {
     same_user: bool,
     public_key: PublicKey,
     methods: Vec<String>,
-    cached: crate::cached_assertion::CachedAssertion,
 }
 
 impl std::fmt::Debug for Provider {
@@ -516,7 +515,6 @@ impl Provider {
             same_user,
             public_key,
             methods: describe.methods,
-            cached: Default::default(),
         })))
     }
 
@@ -609,28 +607,24 @@ impl Provider {
         }
     }
 
-    /// The NIP-FI assertion for the relay it was opened for, cached until
-    /// shortly before its `exp`. `None` when the desktop has none for it.
+    /// The NIP-FI assertion for the relay it was opened for. Asked of the
+    /// desktop every time and never cached here: the desktop's cache owns
+    /// each assertion's deadline. `None` when the desktop has none for it.
     pub async fn federated_identity(&self) -> Result<Option<String>, CliError> {
-        let params = [self.relay.clone()];
-        self.cached
-            .get(async {
-                match call(
-                    &self.endpoint,
-                    Some(&self.token),
-                    self.same_user,
-                    "federated_identity",
-                    &params,
-                )
-                .await
-                {
-                    Ok(a) if a.is_empty() => Ok(None),
-                    Ok(a) => Ok(Some(a)),
-                    Err(ProviderError::UnknownMethod) => Ok(None),
-                    Err(e) => Err(e.into_cli("federated_identity")),
-                }
-            })
-            .await
+        match call(
+            &self.endpoint,
+            Some(&self.token),
+            self.same_user,
+            "federated_identity",
+            std::slice::from_ref(&self.relay),
+        )
+        .await
+        {
+            Ok(a) if a.is_empty() => Ok(None),
+            Ok(a) => Ok(Some(a)),
+            Err(ProviderError::UnknownMethod) => Ok(None),
+            Err(e) => Err(e.into_cli("federated_identity")),
+        }
     }
 
     /// NIP-44 decrypt `payload` from `peer`. `Ok(None)` when the desktop
@@ -1696,43 +1690,32 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn short_and_long_assertions_refresh_at_the_earlier_point() {
-        use base64::Engine;
-        for (lifetime, refresh) in [(20, 10), (300, 150)] {
-            crate::cached_assertion::test_clock::freeze(1_800_000_000);
-            let (endpoint, seen) = provider(move |_, request| match request["method"].as_str() {
-                Some("federated_identity") => {
-                    let b64 = |v: serde_json::Value| {
-                        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string())
-                    };
-                    let jws = format!(
-                        "{}.{}.c2ln",
-                        b64(serde_json::json!({"alg": "ES256"})),
-                        b64(serde_json::json!({"exp": unix_now() + lifetime}))
-                    );
-                    serde_json::json!({ "result": jws })
-                }
-                _ => describe(&[RELAY]),
-            })
-            .await;
-            let Ok(Ok(provider)) = Provider::open(endpoint, "tok".into(), false, RELAY).await
-            else {
-                panic!("the provider should open");
-            };
-            let mints = || {
-                let seen = seen.lock().unwrap();
-                seen.iter()
-                    .filter(|s| s.2["method"] == "federated_identity")
-                    .count()
-            };
-            provider.federated_identity().await.unwrap();
-            crate::cached_assertion::test_clock::advance(refresh - 1);
-            provider.federated_identity().await.unwrap();
-            assert_eq!(mints(), 1, "lifetime {lifetime}");
-            crate::cached_assertion::test_clock::advance(1);
-            provider.federated_identity().await.unwrap();
-            assert_eq!(mints(), 2, "lifetime {lifetime}");
+    async fn the_assertion_is_asked_of_the_desktop_every_time() {
+        // The desktop owns each assertion's deadline; the CLI keeps no copy,
+        // so repeated identical answers never get a fresh local lifetime.
+        let jws = assertion(300);
+        let answer = jws.clone();
+        let (endpoint, seen) = provider(move |_, request| match request["method"].as_str() {
+            Some("federated_identity") => serde_json::json!({ "result": answer }),
+            _ => describe(&[RELAY]),
+        })
+        .await;
+        let Ok(Ok(provider)) = Provider::open(endpoint, "tok".into(), false, RELAY).await else {
+            panic!("the provider should open");
+        };
+        for _ in 0..3 {
+            assert_eq!(
+                provider.federated_identity().await.unwrap(),
+                Some(jws.clone())
+            );
         }
+        let asked = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|s| s.2["method"] == "federated_identity")
+            .count();
+        assert_eq!(asked, 3);
     }
 
     #[tokio::test]
@@ -1928,7 +1911,8 @@ pub(crate) mod tests {
 
     /// A desktop acting as `keys` for `relays`: it signs, encrypts, decrypts
     /// (answering `invalid_request` for bad ciphertext, as #2260 does),
-    /// derives engram `d` tags and hands out [`mock_assertion`].
+    /// derives engram `d` tags and hands out one [`mock_assertion`], the
+    /// same each time, as the desktop's cache does.
     pub(crate) async fn desktop(keys: nostr::Keys, relays: Vec<String>) -> (Endpoint, Seen) {
         provider(desktop_answers(keys, relays)).await
     }
@@ -1938,6 +1922,7 @@ pub(crate) mod tests {
         keys: nostr::Keys,
         relays: Vec<String>,
     ) -> impl Fn(&str, &serde_json::Value) -> serde_json::Value + Send + Sync + 'static {
+        let assertion = mock_assertion();
         move |_, request| {
             let params: Vec<String> =
                 serde_json::from_value(request["params"].clone()).unwrap_or_default();
@@ -1971,7 +1956,7 @@ pub(crate) mod tests {
                     let k_c = buzz_core::engram::conversation_key(keys.secret_key(), &peer());
                     ok(buzz_core::engram::d_tag(&k_c, &params[1]))
                 }
-                "federated_identity" => ok(mock_assertion()),
+                "federated_identity" => ok(assertion.clone()),
                 _ => serde_json::json!({"result": "", "error": "unknown_method"}),
             }
         }

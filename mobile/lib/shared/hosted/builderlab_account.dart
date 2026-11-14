@@ -13,6 +13,7 @@ import '../storage/secure_storage.dart';
 
 import 'hosted_environment.dart';
 import 'bounded_http_response.dart';
+import 'clock_hint.dart';
 import '../relay/relay_session.dart';
 import 'account_identity_store.dart';
 
@@ -63,7 +64,9 @@ class BuilderlabAccountClient {
     FlutterSecureStorage? storage,
     Uri? accountOrigin,
     this.onSessionChanged,
-  }) : _http = httpClient ?? newAppHttpClient(),
+    DateTime Function() now = DateTime.now,
+  }) : _now = now,
+       _http = httpClient ?? newAppHttpClient(),
        _storage = storage ?? defaultStorage,
        accountOrigin = accountOrigin ?? origin;
 
@@ -86,6 +89,24 @@ class BuilderlabAccountClient {
   /// Remote-agent registry routes, shared with desktop.
   /// Safe request diagnostics: no headers, credentials, bodies or user data.
   ({String path, int status})? lastRejectedRequest;
+
+  /// Runs [operation], giving it the clock hint of the last refusal (403) that
+  /// its own requests to any account client received: how many minutes the
+  /// local clock looked off from the server's `Date` when its headers arrived,
+  /// when far enough to explain it. See [clockHintMinutes]. Requests made
+  /// outside [operation] never supply it.
+  static Future<T> observingRefusals<T>(
+    Future<T> Function(int? Function() clockHint) operation,
+  ) {
+    final evidence = _RefusalEvidence();
+    return runZoned(
+      () => operation(() => evidence.clockHint),
+      zoneValues: {_RefusalEvidence: evidence},
+    );
+  }
+
+  // The local wall clock, compared with a refusal's `Date`.
+  final DateTime Function() _now;
 
   static const _beekeeperRoutes = {
     '/v3/beekeeper/get-model-catalog',
@@ -491,11 +512,30 @@ class BuilderlabAccountClient {
           );
         }
       }
-      final response = await boundedHttpResponse(
-        _http,
-        request,
-        maxBytes: _responseLimit(path),
-      );
+      var refused = false;
+      final http.Response response;
+      try {
+        response = await boundedHttpResponse(
+          _http,
+          request,
+          maxBytes: _responseLimit(path),
+          onHeaders: (headers) {
+            if (headers.statusCode != 403) return;
+            refused = true;
+            final evidence = Zone.current[_RefusalEvidence];
+            if (evidence is _RefusalEvidence) {
+              evidence.clockHint = clockHintMinutes(
+                headers.headers['date'],
+                _now(),
+              );
+            }
+          },
+        );
+      } catch (_) {
+        // The status is the answer; a lost or oversized body does not change it.
+        if (refused) throw AccountFailure.denied;
+        rethrow;
+      }
       if (kDebugMode && response.statusCode >= 400) {
         debugPrint(
           'Builderlab ${accountOrigin.host} ${request.method} $path: HTTP ${response.statusCode} contentType=${response.headers['content-type']?.split(';').first}',
@@ -530,4 +570,9 @@ class BuilderlabAccountClient {
     _subject.dispose();
     _http.close();
   }
+}
+
+/// What [BuilderlabAccountClient.observingRefusals] collects for one operation.
+class _RefusalEvidence {
+  int? clockHint;
 }

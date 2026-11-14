@@ -101,8 +101,11 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
   private let loadHostedSession: () -> BuzzOrganizationSession?
   private let session: URLSession
   private let now: () -> Date
+  /// Monotonic seconds, for local deadlines a wall-clock change cannot move.
+  private let uptime: () -> TimeInterval
   private let lock = NSLock()
-  private var cached: [String: (token: String, expiry: Date)] = [:]
+  /// Each assertion with its local deadline on [uptime]; see [localDeadline].
+  private var cached: [String: (token: String, deadline: TimeInterval)] = [:]
   private var refused: [String: Date] = [:]
   /// Hosted credential and key pairs the account is already bound to.
   private var bound: Set<String> = []
@@ -113,12 +116,39 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
     session: URLSession,
     loadSession: @escaping () -> BuzzOrganizationSession?,
     loadHostedSession: @escaping () -> BuzzOrganizationSession? = { nil },
-    now: @escaping () -> Date = Date.init
+    now: @escaping () -> Date = Date.init,
+    uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
   ) {
     self.session = session
     self.loadSession = loadSession
     self.loadHostedSession = loadHostedSession
     self.now = now
+    self.uptime = uptime
+  }
+
+  /// The local deadline, on the [uptime] clock, of an assertion requested at `requestStart`
+  /// and received at `receipt`: the issuer's lifetime (`exp − iat`) counted from before the
+  /// request was sent, capped by `exp` against the local wall clock. The first bound keeps a
+  /// skewed phone clock from stretching the token; the second keeps a short session-capped
+  /// token from outliving its `exp`. A deadline at or before `receipt` means no lifetime is left.
+  static func localDeadline(
+    requestStart: TimeInterval, receipt: TimeInterval, wallAtReceipt: Date, exp: Int, iat: Int
+  ) -> TimeInterval {
+    let byExp = receipt + max(0, TimeInterval(exp) - wallAtReceipt.timeIntervalSince1970)
+    return min(byExp, requestStart + TimeInterval(max(0, exp - iat)))
+  }
+
+  /// The `iat` claim of a compact JWS, or nil when it has none or it is unreadable.
+  static func issuedAt(_ token: String) -> Int? {
+    let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+    guard parts.count == 3 else { return nil }
+    var payload = parts[1].replacingOccurrences(of: "-", with: "+")
+      .replacingOccurrences(of: "_", with: "/")
+    payload += String(repeating: "=", count: (4 - payload.count % 4) % 4)
+    guard let data = Data(base64Encoded: payload),
+      let claims = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else { return nil }
+    return claims["iat"] as? Int
   }
 
   /// Whether the account session that issued `assertion` is still the shared one. A
@@ -183,7 +213,7 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
     }
     let cacheKey = "\(organization.origin)|\(relay)|\(pubkey)|\(organization.credential)"
     lock.lock()
-    if let entry = cached[cacheKey], entry.expiry.timeIntervalSince(now()) > Self.reuseMargin {
+    if let entry = cached[cacheKey], entry.deadline - uptime() > Self.reuseMargin {
       lock.unlock()
       completion(BuzzRelayAssertion(header: "Bearer \(entry.token)", organization: organization))
       return
@@ -275,6 +305,8 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
     request.setValue(organization.origin, forHTTPHeaderField: "Origin")
     request.setValue(organization.credential, forHTTPHeaderField: "X-BB-Session-Credential")
     request.setValue(auth, forHTTPHeaderField: "Authorization")
+    // Sampled before the request, so time in flight counts against the token's life.
+    let requestStart = uptime()
     BuzzNotificationDownload.start(
       request: request, configuration: session.configuration,
       maximumBytes: Self.maximumResponseBytes
@@ -300,14 +332,22 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
         completion(nil)
         return
       }
-      let expiry = Date(timeIntervalSince1970: TimeInterval(expiresAt))
+      let receipt = uptime()
+      // An assertion without a readable `iat` has no lifetime to count, so it is refused.
+      guard let iat = Self.issuedAt(token) else {
+        completion(nil)
+        return
+      }
+      let deadline = Self.localDeadline(
+        requestStart: requestStart, receipt: receipt, wallAtReceipt: now(), exp: expiresAt,
+        iat: iat)
       // A sign-out or account change during issuance revokes this result.
-      guard expiry > now(), current(organization.isHosted) == organization else {
+      guard deadline > receipt, current(organization.isHosted) == organization else {
         completion(nil)
         return
       }
       lock.lock()
-      cached[cacheKey] = (token, expiry)
+      cached[cacheKey] = (token, deadline)
       lock.unlock()
       completion(BuzzRelayAssertion(header: "Bearer \(token)", organization: organization))
     }

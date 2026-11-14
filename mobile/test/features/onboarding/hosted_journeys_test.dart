@@ -37,6 +37,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 
 import '../../helpers/hosted_journey_fixture.dart';
+import '../../helpers/test_assertion.dart';
 
 void main() {
   // Bottom banners over Home must stay above its floating tab bar, which the
@@ -687,7 +688,7 @@ void main() {
       expect(f.socketHeaders.length, greaterThan(connects));
       expect(
         f.socketHeaders.last['Nostr-Federated-Identity'],
-        'Bearer organization-assertion',
+        'Bearer ${testAssertion('organization-assertion')}',
       );
       expect(
         f.container.read(relaySessionProvider).status,
@@ -770,13 +771,15 @@ void main() {
       await f.settle(tester);
       expect(f.discoveries, greaterThan(discoveries));
       expect(f.socketHeaders.last, {
-        'Nostr-Federated-Identity': 'Bearer synthetic-assertion',
+        'Nostr-Federated-Identity':
+            'Bearer ${testAssertion('synthetic-assertion')}',
       });
       expect(f.sent('/identity/assertions'), hasLength(1));
       await session.queryRelay(const []);
       expect(f.sent('/identity/assertions'), hasLength(1));
       expect(auth.cachedHeaders(config), {
-        'Nostr-Federated-Identity': 'Bearer synthetic-assertion',
+        'Nostr-Federated-Identity':
+            'Bearer ${testAssertion('synthetic-assertion')}',
       });
     },
     requiresAuthDomain: true,
@@ -885,7 +888,7 @@ void main() {
         expect(
           request.headers['Nostr-Federated-Identity'],
           origin.contains('communities.buzz.xyz')
-              ? 'Bearer synthetic-assertion'
+              ? 'Bearer ${testAssertion('synthetic-assertion')}'
               : isNull,
         );
         if (origin.contains('communities.buzz.xyz')) {
@@ -958,6 +961,24 @@ void main() {
       expect((await f.storage.loadAll()).single.nsec, community.nsec);
       expect(await f.storage.loadActiveId(), community.id);
       expect((await f.store.read())!.pubkey, f.keys.public);
+      // An issuer refusal whose `Date` is 10 minutes off explains itself.
+      f.denyAssertion = true;
+      f.denialDate = DateTime.now().add(const Duration(minutes: 10));
+      f.assertionNow = f.assertionNow.add(const Duration(minutes: 6));
+      await session.reconnect();
+      await f.settle(tester);
+      expect(
+        find.text(
+          'This account cannot reconnect to this community with its saved key.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining("Your device's clock looks about 10 minutes off"),
+        findsOneWidget,
+      );
+      f.denyAssertion = false;
+      f.denialDate = null;
       for (final path in [
         '/status',
         '/enrollment',
