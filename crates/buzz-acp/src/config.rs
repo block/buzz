@@ -490,6 +490,12 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_RESPOND_TO_ALLOWLIST", value_delimiter = ',')]
     pub respond_to_allowlist: Option<Vec<String>>,
 
+    /// Treat a relay-signed workflow message as coming from the workflow
+    /// owner it names. Off by default: the relay key can sign any owner, so
+    /// enabling this lets the relay operator speak as that owner.
+    #[arg(long, env = "BUZZ_ACP_TRUST_RELAY_WORKFLOW_ATTRIBUTION")]
+    pub trust_relay_workflow_attribution: bool,
+
     /// Comma-separated list of allowed `--respond-to` modes.
     /// When set, the harness rejects startup if `--respond-to` is not in this list.
     /// Modes: owner-only, allowlist, anyone, nobody.
@@ -600,6 +606,8 @@ pub struct Config {
     pub respond_to: RespondTo,
     /// Validated allowlist of pubkey hex strings (used when respond_to == Allowlist).
     pub respond_to_allowlist: HashSet<String>,
+    /// Attribute relay-signed workflow messages to their named owner.
+    pub trust_relay_workflow_attribution: bool,
     /// Allowed `respond_to` modes. Empty = all modes allowed.
     pub allowed_respond_to: Vec<String>,
     /// Per-persona env vars to inject at agent spawn time (e.g., GOOSE_PROVIDER, GOOSE_MODEL, BUZZ_AGENT_MODEL).
@@ -1226,6 +1234,7 @@ impl Config {
             permission_mode: args.permission_mode,
             respond_to: args.respond_to,
             respond_to_allowlist,
+            trust_relay_workflow_attribution: args.trust_relay_workflow_attribution,
             allowed_respond_to,
             persona_env_vars,
             has_generated_codex_config,
@@ -1257,8 +1266,13 @@ impl Config {
             modes.sort();
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
+        let trust_relay_detail = if self.trust_relay_workflow_attribution {
+            " trust_relay_workflow_attribution"
+        } else {
+            ""
+        };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} session_policy={} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} session_policy={} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1282,6 +1296,7 @@ impl Config {
             self.permission_mode,
             respond_to_detail,
             allowed_respond_to_detail,
+            trust_relay_detail,
         )
     }
 }
@@ -1604,6 +1619,7 @@ mod tests {
             permission_mode: PermissionMode::BypassPermissions,
             respond_to: RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
+            trust_relay_workflow_attribution: false,
             allowed_respond_to: Vec::new(),
             persona_env_vars: vec![],
             has_generated_codex_config: false,
@@ -2345,6 +2361,20 @@ channels = "ALL"
             "120",
         ]);
         assert_eq!(configured.exit_after_inactivity, 120);
+    }
+
+    #[test]
+    fn trust_relay_workflow_attribution_defaults_off() {
+        let key = "0".repeat(64);
+        let default = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert!(!default.trust_relay_workflow_attribution);
+        let enabled = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--trust-relay-workflow-attribution",
+        ]);
+        assert!(enabled.trust_relay_workflow_attribution);
     }
 
     #[test]
