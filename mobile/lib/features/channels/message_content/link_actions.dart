@@ -370,12 +370,17 @@ class _RenderLinkPressHighlight extends RenderProxyBox {
       void visit(RenderObject node) {
         if (node is RenderParagraph) {
           final transform = node.getTransformTo(this);
+          final clip = _visibleRect(node, transform);
           for (final range in _linkRanges(node.text, link)) {
             final boxes = node.getBoxesForSelection(
               TextSelection(baseOffset: range.start, extentOffset: range.end),
             );
             for (final box in boxes) {
-              final rect = MatrixUtils.transformRect(transform, box.toRect());
+              final rect = MatrixUtils.transformRect(
+                transform,
+                box.toRect(),
+              ).intersect(clip);
+              if (rect.isEmpty) continue;
               context.canvas.drawRRect(
                 RRect.fromRectAndRadius(
                   rect.shift(offset),
@@ -392,6 +397,29 @@ class _RenderLinkPressHighlight extends RenderProxyBox {
       visit(root);
     }
     super.paint(context, offset);
+  }
+
+  /// The part of [paragraph] that is visible, in this box's coordinates: its
+  /// own bounds cut by every clip between it and this box, such as a
+  /// horizontally scrolled table cell.
+  Rect _visibleRect(RenderParagraph paragraph, Matrix4 transform) {
+    var visible = MatrixUtils.transformRect(
+      transform,
+      Offset.zero & paragraph.size,
+    );
+    RenderObject node = paragraph;
+    while (node != this) {
+      final parent = node.parent;
+      if (parent == null) break;
+      final clip = parent.describeApproximatePaintClip(node);
+      if (clip != null) {
+        visible = visible.intersect(
+          MatrixUtils.transformRect(parent.getTransformTo(this), clip),
+        );
+      }
+      node = parent;
+    }
+    return visible;
   }
 }
 

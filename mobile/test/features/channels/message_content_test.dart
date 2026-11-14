@@ -917,7 +917,100 @@ void main() {
       await tap.up();
       await tester.pump();
       expect(content(), isNot(paints..rrect()));
+
+      // Lifting a second finger keeps the first finger's tint.
+      final primary = await tester.startGesture(
+        textCenter(tester, 'report'),
+        pointer: 21,
+      );
+      final secondary = await tester.startGesture(
+        textCenter(tester, 'report'),
+        pointer: 22,
+      );
+      await secondary.up();
+      await tester.pump();
+      expect(content(), paints..rrect());
+      await primary.cancel();
+      await tester.pump();
+      expect(content(), isNot(paints..rrect()));
+
+      // Removing a message while its link is pressed cleans up safely.
+      final removed = await tester.startGesture(textCenter(tester, 'report'));
+      await tester.pump();
+      expect(content(), paints..rrect());
+      await tester.pumpWidget(_testable(const SizedBox()));
+      await tester.pump(const Duration(seconds: 1));
+      await removed.up();
+      expect(tester.takeException(), isNull);
     });
+
+    testWidgets(
+      'a pressed link in a scrolled table tints only inside the table',
+      (tester) async {
+        const connectivity = MethodChannel(
+          'dev.fluttercommunity.plus/connectivity_status',
+        );
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          connectivity,
+          (_) async => null,
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            connectivity,
+            null,
+          ),
+        );
+        _setSurfaceSize(tester, const Size(400, 300));
+        addTearDown(tester.view.reset);
+        final capture = GlobalKey();
+        await tester.pumpWidget(
+          _testable(
+            RepaintBoundary(
+              key: capture,
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 100),
+                child: MessageContent(
+                  content:
+                      '| Link |\n| --- |\n| [abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz](https://example.com) |',
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final paragraph = tester.renderObject<RenderParagraph>(
+          findLinkParagraph(
+            'abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz',
+          ),
+        );
+        final point = paragraph.localToGlobal(const Offset(10, 10));
+        final sampleY = point.dy.toInt();
+        Future<List<int>> pixel() async => (await tester.runAsync(() async {
+          final boundary =
+              capture.currentContext!.findRenderObject()!
+                  as RenderRepaintBoundary;
+          final image = await boundary.toImage(pixelRatio: 1);
+          final bytes = (await image.toByteData(
+            format: ui.ImageByteFormat.rawRgba,
+          ))!;
+          final offset = (sampleY * image.width + 330) * 4;
+          final rgba = bytes.buffer.asUint8List().sublist(offset, offset + 4);
+          image.dispose();
+          return rgba;
+        }))!;
+        final before = await pixel();
+        final press = await tester.startGesture(point);
+        await tester.pump();
+        final after = await pixel();
+        await press.cancel();
+        await tester.pump();
+        expect(
+          after,
+          before,
+          reason: 'The pixel is 30px beyond the table viewport',
+        );
+      },
+    );
 
     testWidgets('a second finger does not restart a link hold', (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
