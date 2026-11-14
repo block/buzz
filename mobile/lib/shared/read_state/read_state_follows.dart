@@ -33,13 +33,22 @@ extension ReadStateFollows on ReadStateManager {
     final key = threadFollowKey(channelId, rootId);
     if (_disposed || !isValidThreadFollowKey(key)) return false;
     final previous = _ownFollows[key];
+    final previousEdit = _followEdits[key];
+    final previousReserved = _lastReserved;
     _ownFollows[key] = {...?previous, 'follow': follow, 'at': _now()};
+    _followEdits[key] = _reserve();
     if (!_packFollows()) {
       if (previous == null) {
         _ownFollows.remove(key);
       } else {
         _ownFollows[key] = previous;
       }
+      if (previousEdit == null) {
+        _followEdits.remove(key);
+      } else {
+        _followEdits[key] = previousEdit;
+      }
+      _lastReserved = previousReserved;
       return false;
     }
     _persistLocalState();
@@ -61,11 +70,13 @@ extension ReadStateFollows on ReadStateManager {
       settled.add(key);
       if (merged.containsKey(key) || _ownFollows.containsKey(key)) continue;
       _ownFollows[key] = {'follow': follow, 'at': 0};
+      _followEdits[key] = _reserve();
       added.add(key);
     }
     if (added.isEmpty) return settled;
     if (!_packFollows()) {
       added.forEach(_ownFollows.remove);
+      added.forEach(_followEdits.remove);
       return const {};
     }
     _persistLocalState();
@@ -94,7 +105,9 @@ extension ReadStateFollows on ReadStateManager {
       ).choices;
       final dropped = {
         for (final MapEntry(:key, :value) in own.entries)
-          if (merged[key] != value) key: _ownFollows[key]!,
+          // Pending edits, captured or not, are never dropped to make room.
+          if (merged[key] != value && !_followEdits.containsKey(key))
+            key: _ownFollows[key]!,
       };
       dropped.keys.forEach(_ownFollows.remove);
       try {
@@ -108,20 +121,23 @@ extension ReadStateFollows on ReadStateManager {
   }
 
   void _mergeFollowEvent(NostrEvent event, String slot) {
-    // Only the coordinate's newest head counts (created_at, then lowest id).
+    final index = _followSlots.indexOf(slot);
+    // Only the coordinate's newest head counts (created_at, then lowest id),
+    // but an older echo of a retained packet still acknowledges that packet.
     final head = _followHeads[slot];
-    if (head != null &&
-        (event.createdAt < head.createdAt ||
-            event.createdAt == head.createdAt &&
-                event.id.compareTo(head.id) >= 0)) {
+    if (head != null && !_outranksFollowHead(event, head)) {
+      final coordinate = '$threadFollowsDTagPrefix$slot';
+      if (index >= 0 && _pending[coordinate]?.id == event.id) {
+        _resolveFollowPacket(coordinate, event);
+      }
       return;
     }
-    _followHeads[slot] = (createdAt: event.createdAt, id: event.id);
     ThreadFollowsBlob? blob;
     try {
       blob = decodeThreadFollowsBlob(_crypto.decrypt(event.content));
     } catch (_) {}
     if (blob == null) {
+      _followHeads[slot] = (createdAt: event.createdAt, id: event.id);
       _unreadableFollowSlots.add(slot);
       _remoteFollows.remove(slot);
       return;
@@ -130,45 +146,96 @@ extension ReadStateFollows on ReadStateManager {
     if (_isPlausibleCreatedAt(event.createdAt)) {
       _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
     }
-    final index = _followSlots.indexOf(slot);
     if (index >= 0 && blob.clientId != _clientId) {
-      // Never replace another installation's coordinate.
+      // Never replace another installation's coordinate. Pending edits stay
+      // and are re-placed on the fresh coordinate.
+      _followHeads[slot] = (createdAt: event.createdAt, id: event.id);
       final fresh = generateReadStateSlotId();
       _followSlots[index] = fresh;
       _pending.remove('$threadFollowsDTagPrefix$slot');
+      _followCaptured.remove('$threadFollowsDTagPrefix$slot');
       _followPublished.remove(slot);
       _followExtra.remove(slot);
-    } else if (index >= 0) {
-      // The relay's own head is authoritative. A pending event it already
-      // supersedes was sent; a local entry survives only while its `at` is
-      // strictly greater, since greater `at` wins the merge anyway.
-      final coordinate = '$threadFollowsDTagPrefix$slot';
-      if (_pending[coordinate] case final sent?
-          when sent.createdAt <= event.createdAt) {
-        _acknowledge(coordinate, sent);
-      }
-      final local = ThreadFollowsBlob(
-        clientId: _clientId,
-        entries: _ownFollows,
-      ).choices;
-      final relay = blob.choices;
-      for (final MapEntry(:key, :value) in blob.entries.entries) {
-        final (mine, theirs) = (local[key], relay[key]);
-        if (mine == null || theirs != null && mine.at <= theirs.at) {
-          _ownFollows[key] = value;
-        }
-        if (!_followPlacement.any((keys) => keys.contains(key))) {
-          while (_followPlacement.length <= index) {
-            _followPlacement.add({});
-          }
-          _followPlacement[index].add(key);
-        }
-      }
-      _followExtra[slot] = Map.of(blob.extra);
-      _followPublished[slot] = blob.encode();
+      _remoteFollows[slot] = blob.choices;
       return;
     }
+    if (index >= 0) {
+      _applyOwnFollowHead(index, event, blob);
+      return;
+    }
+    _followHeads[slot] = (createdAt: event.createdAt, id: event.id);
     _remoteFollows[slot] = blob.choices;
+  }
+
+  static bool _outranksFollowHead(
+    NostrEvent event,
+    ({int createdAt, String id}) head,
+  ) =>
+      event.createdAt > head.createdAt ||
+      event.createdAt == head.createdAt &&
+          event.id.toLowerCase().compareTo(head.id.toLowerCase()) < 0;
+
+  /// Resolve the retained packet [event] by its exact ID: only the edit
+  /// generations it captured, and only while they are still current.
+  void _resolveFollowPacket(String coordinate, NostrEvent event) {
+    if (_pending[coordinate]?.id != event.id) return;
+    final captured = _followCaptured.remove(coordinate) ?? const {};
+    for (final MapEntry(:key, value: generation) in captured.entries) {
+      if (_followEdits[key] == generation) _followEdits.remove(key);
+    }
+    _pending.remove(coordinate);
+  }
+
+  /// A readable own head that outranks the accepted one (or the exact
+  /// retained packet, after the relay accepted it) becomes the accepted head.
+  /// Edits on this coordinate reserved at or below it are covered by it,
+  /// since every full-slot packet carries all earlier pending edits; later
+  /// edits stay pending. The whole payload is adopted otherwise.
+  void _applyOwnFollowHead(
+    int index,
+    NostrEvent event,
+    ThreadFollowsBlob blob,
+  ) {
+    final slot = _followSlots[index];
+    final coordinate = '$threadFollowsDTagPrefix$slot';
+    _resolveFollowPacket(coordinate, event);
+    final head = _followHeads[slot];
+    if (head != null && !_outranksFollowHead(event, head)) return;
+    _followHeads[slot] = (createdAt: event.createdAt, id: event.id);
+    while (_followPlacement.length <= index) {
+      _followPlacement.add({});
+    }
+    final placed = _followPlacement[index];
+    _followEdits.removeWhere(
+      (key, generation) =>
+          generation <= event.createdAt && placed.contains(key),
+    );
+    for (final key in placed.toList()) {
+      if (_followEdits.containsKey(key) || blob.entries.containsKey(key)) {
+        continue;
+      }
+      _ownFollows.remove(key);
+      placed.remove(key);
+    }
+    for (final MapEntry(:key, :value) in blob.entries.entries) {
+      if (!_followEdits.containsKey(key)) _ownFollows[key] = value;
+      if (!_followPlacement.any((keys) => keys.contains(key))) {
+        placed.add(key);
+      }
+    }
+    // A retained packet the new head outranks was superseded, not accepted.
+    final pending = _pending[coordinate];
+    if (pending != null &&
+        (pending.id == event.id ||
+            !_outranksFollowHead(pending, (
+              createdAt: event.createdAt,
+              id: event.id,
+            )))) {
+      _pending.remove(coordinate);
+      _followCaptured.remove(coordinate);
+    }
+    _followExtra[slot] = Map.of(blob.extra);
+    _followPublished[slot] = blob.encode();
   }
 
   /// Peer follow heads and choices, cached in the journal for offline use.

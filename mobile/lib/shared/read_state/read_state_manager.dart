@@ -174,6 +174,20 @@ class ReadStateManager {
   final Map<String, Map<String, ThreadFollowChoice>> _remoteFollows = {};
   final Set<String> _unreadableFollowSlots = {};
   bool _followsLoaded = false;
+  // Pending own follow edits not yet covered by an accepted own head, by key:
+  // the reservation (generation) of the edit. Their entries are in
+  // [_ownFollows], which is the accepted heads plus these edits.
+  final Map<String, int> _followEdits = {};
+  // The edit generations each retained follow packet in [_pending] captured.
+  final Map<String, Map<String, int>> _followCaptured = {};
+  // The highest timestamp reserved here; every edit and packet takes a
+  // strictly later one, so a wall-clock rollback cannot reuse a version.
+  int _lastReserved = 0;
+
+  int _reserve() => _lastReserved = max(
+    max(_now(), _maxFetchedCreatedAt + 1),
+    _lastReserved + 1,
+  );
 
   Timer? _debounceTimer;
   void Function()? _unsubscribeLive;
@@ -699,10 +713,6 @@ class ReadStateManager {
         for (final blob in _placement) Map<String, int>.of(blob),
       ];
       final prepared = <String, NostrEvent>{};
-      var createdAt = max(_now(), _maxFetchedCreatedAt + 1);
-      for (final pending in _pending.values) {
-        createdAt = max(createdAt, pending.createdAt + 1);
-      }
       for (var index = 0; index < planned.length; index++) {
         final slot = _slots[index];
         final contexts = planned[index];
@@ -717,7 +727,7 @@ class ReadStateManager {
           pubkey: pubkey,
           sig: '0' * 128,
           kind: EventKind.readState,
-          createdAt: createdAt++,
+          createdAt: _reserve(),
           tags: [
             ['d', '$readStateDTagPrefix$slot'],
             ['t', 'read-state'],
@@ -732,6 +742,8 @@ class ReadStateManager {
       final followPlanned = _canPublishFollows
           ? _plannedFollowSlots()
           : const <String, String>{};
+      final followCaptures = <String, Map<String, int>>{};
+      final followBases = <String, String?>{};
       await _persistLocalState();
       for (final MapEntry(key: slot, value: plaintext)
           in followPlanned.entries) {
@@ -740,12 +752,17 @@ class ReadStateManager {
             _pending.containsKey(coordinate)) {
           continue;
         }
+        final placed = _followPlacement[_followSlots.indexOf(slot)];
+        followCaptures[coordinate] = {
+          for (final key in placed) key: ?_followEdits[key],
+        };
+        followBases[coordinate] = _followHeads[slot]?.id;
         prepared[coordinate] = NostrEvent(
           id: '0' * 64,
           pubkey: pubkey,
           sig: '0' * 128,
           kind: EventKind.readState,
-          createdAt: createdAt++,
+          createdAt: _reserve(),
           tags: [
             ['d', coordinate],
             ['t', threadFollowsTag],
@@ -819,7 +836,7 @@ class ReadStateManager {
         }
         _published[slot] = contexts;
         _pending.remove(slot);
-        _maxFetchedCreatedAt = event.createdAt;
+        _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
         await _persistLocalState();
       }
       for (final MapEntry(key: slot, value: plaintext)
@@ -838,13 +855,20 @@ class ReadStateManager {
           return;
         }
         checkConnection?.call();
-        await signedEventRelay.submit(
+        final signed = await signedEventRelay.submit(
           kind: event.kind,
           content: event.content,
           tags: event.tags,
           createdAt: event.createdAt,
           onSigned: (event) async {
+            // The accepted head moved while signing: this payload is stale.
+            // Recompose next pass rather than sending or re-stamping it.
+            if (_followHeads[slot]?.id != followBases[coordinate] ||
+                !_followSlots.contains(slot)) {
+              throw StateError('Thread follow head moved before publication');
+            }
             _pending[coordinate] = event;
+            _followCaptured[coordinate] = followCaptures[coordinate]!;
             await _persistLocalState();
             checkConnection?.call();
             if (!_servesThisCommunity ||
@@ -862,9 +886,7 @@ class ReadStateManager {
             (_disposed && !allowDisposed)) {
           return;
         }
-        _followPublished[slot] = plaintext;
-        _pending.remove(coordinate);
-        _maxFetchedCreatedAt = event.createdAt;
+        _acknowledge(coordinate, signed);
         await _persistLocalState();
       }
       if (!_canPublishFollows && _ownFollows.isNotEmpty) {
@@ -911,11 +933,15 @@ class ReadStateManager {
 
   void _acknowledge(String slot, NostrEvent event) {
     if (slot.startsWith(threadFollowsDTagPrefix)) {
+      // An OK is evidence about this exact packet only. A later packet or a
+      // newer head may already have replaced it.
       final blob = decodeThreadFollowsBlob(_crypto.decrypt(event.content));
       if (blob == null) throw StateError('Invalid pending thread follow event');
-      _followPublished[slot.substring(threadFollowsDTagPrefix.length)] = blob
-          .encode();
-      _pending.remove(slot);
+      final index = _followSlots.indexOf(
+        slot.substring(threadFollowsDTagPrefix.length),
+      );
+      if (_pending[slot]?.id != event.id || index < 0) return;
+      _applyOwnFollowHead(index, event, blob);
       _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
       return;
     }
@@ -966,6 +992,16 @@ class ReadStateManager {
       }
       _hydrateFollowHeads(journal['followHeads']);
       for (final entry
+          in ((journal['followEdits'] as Map?) ?? const {}).entries) {
+        _followEdits[entry.key as String] = entry.value as int;
+      }
+      for (final entry
+          in ((journal['followCaptured'] as Map?) ?? const {}).entries) {
+        _followCaptured[entry.key as String] = (entry.value as Map).map(
+          (key, value) => MapEntry(key as String, value as int),
+        );
+      }
+      for (final entry
           in ((journal['followPublished'] as Map?) ?? const {}).entries) {
         _followPublished[entry.key as String] = entry.value as String;
       }
@@ -990,6 +1026,13 @@ class ReadStateManager {
         );
       }
       _maxFetchedCreatedAt = journal['createdAt'] as int;
+      // Never below anything already reserved, even if the journal's own
+      // counter is older than a retained edit or packet.
+      _lastReserved = [
+        (journal['reserved'] as int?) ?? 0,
+        ..._followEdits.values,
+        for (final event in _pending.values) event.createdAt,
+      ].reduce(max);
     } else {
       final stored = _storage.read(pubkey, relayUrl);
       _effectiveState.addEntries(
@@ -1046,6 +1089,9 @@ class ReadStateManager {
         'followExtra': _followExtra,
         'followHeads': _followHeadsJson(),
         'followPublished': _followPublished,
+        'followEdits': _followEdits,
+        'followCaptured': _followCaptured,
+        'reserved': _lastReserved,
         'slots': _slots,
         'placement': _placement,
         'published': _published,
