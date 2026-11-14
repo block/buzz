@@ -3,6 +3,53 @@ import XCTest
 @testable import BuzzPushKit
 
 final class BuzzRelayAssertionLifetimeTests: XCTestCase {
+  func testAssertionThatExpiredDuringSleepIsReplaced() throws {
+    typealias Stub = BuzzPushNotificationResolverTests.URLProtocolStub
+    Stub.reset()
+    defer { Stub.reset() }
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [Stub.self]
+    let session = URLSession(configuration: config)
+    defer { session.invalidateAndCancel() }
+    var wall = 1_800_000_000
+    var awake: TimeInterval = 1_000
+    var mints = 0
+    Stub.handler = { request in
+      mints += 1
+      let claims = try JSONSerialization.data(withJSONObject: ["iat": wall, "exp": wall + 300])
+      let payload = claims.base64EncodedString().replacingOccurrences(of: "=", with: "")
+      let data = try JSONSerialization.data(withJSONObject: [
+        "assertion": "e30.\(payload).c2ln",
+        "nostr_pubkey": BuzzPushNotificationResolverTests.ownPubkey,
+        "expires_at": wall + 300,
+      ])
+      return BuzzPushNotificationResolverTests.response(request, status: 200, data: data)
+    }
+    let issuer = BuzzRelayAssertionIssuer(
+      session: session,
+      loadSession: {
+        BuzzOrganizationSession(origin: "https://identity.org.example", credential: "credential",
+          relayHosts: ["relay.org.example"])
+      },
+      now: { Date(timeIntervalSince1970: TimeInterval(wall)) }, uptime: { awake })
+    func acquire() {
+      let done = expectation(description: "assertion")
+      issuer.header(relayURL: URL(string: "https://relay.org.example")!,
+        privateKeyHex: BuzzPushNotificationResolverTests.privateKey) { result in
+        XCTAssertNotNil(result)
+        done.fulfill()
+      }
+      wait(for: [done], timeout: 3)
+    }
+    acquire()
+    XCTAssertEqual(mints, 1)
+    // Sleep: the wall clock moves on while systemUptime does not. The issuer is process-wide.
+    wall += 600
+    awake += 1
+    acquire()
+    XCTAssertEqual(mints, 2, "an assertion that expired during sleep must be replaced")
+  }
+
   func testDeadlineWithPhoneClock120SecondsSlowOrFast() {
     // Issuer: iat 10_000, exp 10_180. Request sent at uptime 1_000, answered at once.
     func deadline(wall: Int) -> TimeInterval {

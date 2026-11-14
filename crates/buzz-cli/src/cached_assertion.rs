@@ -200,6 +200,11 @@ pub(crate) mod test_clock {
     pub(crate) fn advance(secs: u64) {
         SKEW.with(|skew| skew.set(skew.get() + secs));
     }
+    /// Move only this thread's frozen wall clock, as a sleep does while the
+    /// monotonic clock stands still. Requires [`freeze`].
+    pub(crate) fn advance_wall(secs: u64) {
+        FROZEN.with(|frozen| frozen.set(Some(frozen.get().expect("freeze first") + secs)));
+    }
 }
 
 #[cfg(test)]
