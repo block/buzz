@@ -1,6 +1,8 @@
 //! User-specific submission and inventory preparation over the shared deletion tables.
 use crate::Db;
 use sqlx::PgPool;
+/// Ordered user and owned-agent content cleanup in read-only and delete modes.
+pub mod content_batches;
 mod discovery;
 mod inventory;
 mod requests;
@@ -29,3 +31,12 @@ mod postgres_tests;
 
 #[cfg(test)]
 mod discovery_postgres_tests;
+
+/// Controls source-data effects for user-deletion handlers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMode {
+    /// Print the selected rows without changing source data.
+    ReadOnly,
+    /// Delete the selected rows with relay and external workers stopped.
+    Delete,
+}

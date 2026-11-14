@@ -34,6 +34,11 @@ async fn fixture() -> (EntityDeletionStore, Uuid, sqlx::PgPool) {
 fn options() -> RunOptions {
     RunOptions {
         next_step: false,
+        db: None,
+        delete: false,
+        relay_pubkey: None,
+        batch_size: 100,
+        max_items: 1_000_000,
         fail_stage: None,
         stage_delay: Duration::ZERO,
         no_agents_in: Vec::new(),
@@ -62,9 +67,9 @@ async fn assert_completed(store: &EntityDeletionStore, id: Uuid) {
         actual,
         vec![
             ("gate_user", None),
-            ("purge_db", b.clone()),
+            ("purge_content", b.clone()),
             ("purge_agents", b),
-            ("purge_db", c.clone()),
+            ("purge_content", c.clone()),
             ("purge_agents", c)
         ]
     );
@@ -120,7 +125,7 @@ async fn next_step_advances_one_handler_at_a_time_through_completion() {
     assert_eq!(paused.request.status, "running");
     assert!(paused.execution.lease_owner.is_none());
     assert_eq!(paused.stage_history.len(), 2);
-    assert_eq!(paused.stage_history[1].stage, "purge_db");
+    assert_eq!(paused.stage_history[1].stage, "purge_content");
     assert_eq!(paused.stage_history[1].status, "pending");
     let gate = serde_json::to_value(&paused.stage_history[0]).unwrap();
     for completed_handlers in 2..=5 {
@@ -159,7 +164,7 @@ async fn next_step_advances_one_handler_at_a_time_through_completion() {
 async fn dummy_executor_failure_retries_same_community_stage() {
     let (store, id, pool) = fixture().await;
     let fail = RunOptions {
-        fail_stage: Some("purge_db".to_owned()),
+        fail_stage: Some("purge_content".to_owned()),
         ..options()
     };
     assert_eq!(

@@ -26,7 +26,7 @@ pub(super) struct Rule {
 }
 
 pub(super) const INITIAL_STAGE: &str = "gate_user";
-const COMMUNITY_INITIAL_STAGE: &str = "purge_db";
+const COMMUNITY_INITIAL_STAGE: &str = "purge_content";
 const RULES: &[Rule] = &[
     Rule {
         name: "gate_user",
@@ -35,10 +35,10 @@ const RULES: &[Rule] = &[
         decide: |_| Ok(Decision::EnterCommunities),
     },
     Rule {
-        name: "purge_db",
+        name: "purge_content",
         community_scope: true,
         allowed: &[Decision::Stage("purge_agents"), Decision::CommunityComplete],
-        decide: after_purge_db,
+        decide: after_purge_content,
     },
     Rule {
         name: "purge_agents",
@@ -48,11 +48,16 @@ const RULES: &[Rule] = &[
     },
 ];
 
-fn after_purge_db(result: &Value) -> Result<Decision> {
+fn after_purge_content(result: &Value) -> Result<Decision> {
+    // Real content cleanup leaves account and agent cleanup to later stages.
+    if result["account_erasure_complete"] == false {
+        return Ok(Decision::Stage("purge_agents"));
+    }
+    // Demo execution retains its saved, simulated agent-routing result.
     match result["has_agents"].as_bool() {
         Some(true) => Ok(Decision::Stage("purge_agents")),
         Some(false) => Ok(Decision::CommunityComplete),
-        None => Err(invalid("purge_db result must contain has_agents")),
+        None => Err(invalid("purge_content result must contain has_agents")),
     }
 }
 
@@ -222,6 +227,34 @@ impl Progress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_routes_real_cleanup_and_saved_demo_results() {
+        assert_eq!(COMMUNITY_INITIAL_STAGE, "purge_content");
+        let content = rule(COMMUNITY_INITIAL_STAGE).unwrap();
+        assert!(content.community_scope);
+        for (result, expected) in [
+            (
+                serde_json::json!({"content": {}, "account_erasure_complete": false}),
+                Decision::Stage("purge_agents"),
+            ),
+            (
+                serde_json::json!({"account_erasure_complete": false, "has_agents": false}),
+                Decision::Stage("purge_agents"),
+            ),
+            (
+                serde_json::json!({"dummy": true, "has_agents": true}),
+                Decision::Stage("purge_agents"),
+            ),
+            (
+                serde_json::json!({"dummy": true, "has_agents": false}),
+                Decision::CommunityComplete,
+            ),
+        ] {
+            assert_eq!((content.decide)(&result).unwrap(), expected);
+        }
+        assert!((content.decide)(&serde_json::json!({})).is_err());
+    }
 
     #[test]
     fn stage_options_follow_the_workflow_definition() {

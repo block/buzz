@@ -902,7 +902,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 88);
+        assert_eq!(migrations.len(), 89);
         assert!(migrations[83]
             .sql
             .as_str()
@@ -4224,7 +4224,9 @@ mod postgres_tests {
                 .await
                 .unwrap();
             if prebuilt {
-                run_migrations(&pool)
+                // Only 0086 is prebuilt here. Later migrations may legitimately
+                // build other indexes and need the writer lock released first.
+                run_migrations_through(&pool, 86)
                     .await
                     .expect("verified prebuild does not request an index-build lock");
                 writer.rollback().await.unwrap();

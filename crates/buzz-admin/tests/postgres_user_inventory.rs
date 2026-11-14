@@ -1,4 +1,4 @@
-//! Exercise the real CLI with SELECT-only access and no workflow tables.
+//! Exercise inventory access, demo completion, and unfinished real workflows.
 
 use nostr::ToBech32;
 use serde_json::Value;
@@ -216,13 +216,61 @@ async fn workflow_cli(url: &str, args: &[&str], success: bool) -> Value {
     if success {
         serde_json::from_slice(&output.stdout).unwrap()
     } else {
-        Value::Null
+        serde_json::json!({
+            "exit_code": output.status.code(),
+            "stderr": String::from_utf8_lossy(&output.stderr),
+        })
     }
+}
+
+async fn assert_real_workflow_stops_at_gate(url: &str, id: &str) -> Value {
+    let approved = workflow_cli(url, &["inspect", id], true).await;
+    let refused = workflow_cli(url, &["run", id, "--next-step"], false).await;
+    assert_eq!(refused["exit_code"], 5);
+    assert!(refused["stderr"]
+        .as_str()
+        .unwrap()
+        .contains("real workflow execution requires --delete"));
+    assert_eq!(workflow_cli(url, &["inspect", id], true).await, approved);
+
+    let mut first_stage = None;
+    for _ in 0..2 {
+        let refused = workflow_cli(url, &["run", id, "--delete", "--next-step"], false).await;
+        assert_eq!(refused["exit_code"], 5);
+        assert!(refused["stderr"]
+            .as_str()
+            .unwrap()
+            .contains("real handler gate_user is not implemented"));
+        let inspected = workflow_cli(url, &["inspect", id], true).await;
+        assert_ne!(inspected["status"], "completed");
+        assert!(inspected["completed_at"].is_null());
+        assert!(inspected["lease_owner"].is_null());
+        assert_eq!(inspected["target"], approved["target"]);
+        assert_eq!(
+            inspected["inventory_manifest"],
+            approved["inventory_manifest"]
+        );
+        let stages = inspected["stage_history"].as_array().unwrap();
+        assert_eq!(stages.len(), 1);
+        assert_eq!(stages[0]["stage"], "gate_user");
+        assert_eq!(stages[0]["status"], "pending");
+        assert_eq!(stages[0]["is_current"], true);
+        assert_eq!(
+            stages[0]["metadata_json"]["inputs"]["target"],
+            approved["target"]
+        );
+        if let Some(first) = &first_stage {
+            assert_eq!(&stages[0]["id"], first);
+        } else {
+            first_stage = Some(stages[0]["id"].clone());
+        }
+    }
+    workflow_cli(url, &["inspect", id], true).await
 }
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn inventory_submission_runs_demo_and_public_key_workflows_end_to_end() {
+async fn inventory_submission_completes_demo_and_stops_unimplemented_real_workflow() {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap();
     let pool = PgPool::connect(&url).await.unwrap();
     let key = "ab".repeat(32);
@@ -292,19 +340,24 @@ async fn inventory_submission_runs_demo_and_public_key_workflows_end_to_end() {
         )
         .await;
         assert!(approved["stage_history"].as_array().unwrap().is_empty());
-        let stepped = workflow_cli(&url, &["run", id, "--next-step"], true).await;
-        assert_eq!(stepped["stage_history"][0]["status"], "completed");
-        let first_id = stepped["stage_history"][0]["id"].clone();
-        let done = workflow_cli(&url, &["run", id], true).await;
-        assert_eq!(done["status"], "completed");
-        assert_eq!(done["stage_history"][0]["id"], first_id);
-        let stages = done["stage_history"].as_array().unwrap();
-        assert_eq!(stages.len(), if subject == "demo" { 5 } else { 3 });
-        assert!(stages
-            .iter()
-            .all(|s| s["status"] == "completed" && s["is_current"] == false));
+        let outcome = if subject == "demo" {
+            let stepped = workflow_cli(&url, &["run", id, "--next-step"], true).await;
+            assert_eq!(stepped["stage_history"][0]["status"], "completed");
+            let first_id = stepped["stage_history"][0]["id"].clone();
+            let done = workflow_cli(&url, &["run", id], true).await;
+            assert_eq!(done["status"], "completed");
+            assert_eq!(done["stage_history"][0]["id"], first_id);
+            let stages = done["stage_history"].as_array().unwrap();
+            assert_eq!(stages.len(), 5);
+            assert!(stages
+                .iter()
+                .all(|s| s["status"] == "completed" && s["is_current"] == false));
+            done
+        } else {
+            assert_real_workflow_stops_at_gate(&url, id).await
+        };
         let inspected = workflow_cli(&url, &["inspect", id], true).await;
-        assert_eq!(inspected, done);
+        assert_eq!(inspected, outcome);
         // Hex and npub converge on the same saved request without rediscovery.
         let repeat = workflow_cli(
             &url,
@@ -319,7 +372,7 @@ async fn inventory_submission_runs_demo_and_public_key_workflows_end_to_end() {
         )
         .await;
         for (field, value) in repeat.as_object().unwrap() {
-            assert_eq!(value, &done[field]);
+            assert_eq!(value, &outcome[field]);
         }
         workflow_cli(
             &url,
@@ -334,7 +387,7 @@ async fn inventory_submission_runs_demo_and_public_key_workflows_end_to_end() {
         )
         .await;
     }
-    // Real membership data remains unchanged after all dummy handlers execute.
+    // Demo completion and real-handler refusal both preserve membership data.
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM channel_members WHERE community_id = $1 AND pubkey = decode($2, 'hex')")
         .bind(community).bind(&key).fetch_one(&pool).await.unwrap();
     assert_eq!(count, 1);
@@ -342,7 +395,7 @@ async fn inventory_submission_runs_demo_and_public_key_workflows_end_to_end() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn inventory_approval_and_resume_use_saved_account_identity_without_resolution() {
+async fn inventory_approval_preserves_saved_account_identity_without_dummy_execution() {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap();
     let pool = PgPool::connect(&url).await.unwrap();
     let saved = workflow_cli(
@@ -380,15 +433,7 @@ async fn inventory_approval_and_resume_use_saved_account_identity_without_resolu
         true,
     )
     .await;
-    let stepped = workflow_cli(&url, &["run", id, "--next-step"], true).await;
-    let first_stage = stepped["stage_history"][0]["id"].clone();
-    let completed = workflow_cli(&url, &["run", id], true).await;
-    assert_eq!(completed["target"], account);
-    assert_eq!(completed["inventory_manifest"], saved["inventory_manifest"]);
-    assert_eq!(completed["status"], "completed");
-    assert_eq!(completed["stage_history"][0]["id"], first_stage);
-    for stage in completed["stage_history"].as_array().unwrap() {
-        assert_eq!(stage["metadata_json"]["inputs"]["target"], account);
-        assert_eq!(stage["status"], "completed");
-    }
+    let stopped = assert_real_workflow_stops_at_gate(&url, id).await;
+    assert_eq!(stopped["target"], account);
+    assert_eq!(stopped["inventory_manifest"], saved["inventory_manifest"]);
 }
