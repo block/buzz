@@ -98,7 +98,7 @@ async fn accessory_router_signed_url_body_replay_and_actor_boundary() {
         .id;
     let actor = Keys::generate();
     let other = Keys::generate();
-    let path = "/buzz/v1/me/sidebar?limit=1";
+    let path = "/buzz/v1/me/activity?limit=1";
     let auth = proof(&actor, &host, path, "GET", None);
     assert_eq!(
         request(state.clone(), &host, path, "GET", Some(&auth), b"")
@@ -126,7 +126,7 @@ async fn accessory_router_signed_url_body_replay_and_actor_boundary() {
             .0,
         StatusCode::UNAUTHORIZED
     );
-    let wrong_query = proof(&actor, &host, "/buzz/v1/me/sidebar?limit=2", "GET", None);
+    let wrong_query = proof(&actor, &host, "/buzz/v1/me/activity?limit=2", "GET", None);
     assert_eq!(
         request(state.clone(), &host, path, "GET", Some(&wrong_query), b"")
             .await
@@ -149,31 +149,40 @@ async fn accessory_router_signed_url_body_replay_and_actor_boundary() {
             .0,
         StatusCode::UNAUTHORIZED
     );
-    // Targeted refresh is exclusive with paging and bounded to unique IDs.
+    // Named rows are exclusive with paging and with `since`, and bounded
+    // to unique ids.
     let id = uuid::Uuid::new_v4();
-    let many = (0..21)
+    let many = (0..101)
         .map(|_| uuid::Uuid::new_v4().to_string())
         .collect::<Vec<_>>()
         .join(",");
     for (query, status) in [
-        (format!("channel_ids={id}"), StatusCode::OK),
-        (format!("channel_ids={id},{id}"), StatusCode::BAD_REQUEST),
-        (format!("channel_ids={id}&limit=1"), StatusCode::BAD_REQUEST),
+        (format!("ids={id}"), StatusCode::OK),
+        (format!("ids={id},{}", "ab".repeat(32)), StatusCode::OK),
+        (format!("ids={id},{id}"), StatusCode::BAD_REQUEST),
+        (format!("ids={id}&limit=1"), StatusCode::BAD_REQUEST),
+        (format!("ids={id}&before=abc"), StatusCode::BAD_REQUEST),
+        (format!("ids={id}&since=0.1"), StatusCode::BAD_REQUEST),
+        ("ids=".into(), StatusCode::BAD_REQUEST),
+        ("ids=not-an-id".into(), StatusCode::BAD_REQUEST),
+        (format!("ids={many}"), StatusCode::BAD_REQUEST),
+        ("before=not-a-cursor".into(), StatusCode::BAD_REQUEST),
+        ("since=not-a-marker".into(), StatusCode::BAD_REQUEST),
+        ("kinds=sidebar".into(), StatusCode::BAD_REQUEST),
+        ("limit=501".into(), StatusCode::BAD_REQUEST),
         (
-            format!("channel_ids={id}&cursor={id}"),
-            StatusCode::BAD_REQUEST,
+            "kinds=thread,mention&unread=true&limit=500".into(),
+            StatusCode::OK,
         ),
-        ("channel_ids=".into(), StatusCode::BAD_REQUEST),
-        ("channel_ids=not-a-uuid".into(), StatusCode::BAD_REQUEST),
-        (format!("channel_ids={many}"), StatusCode::BAD_REQUEST),
     ] {
-        let path = format!("/buzz/v1/me/sidebar?{query}");
+        let path = format!("/buzz/v1/me/activity?{query}");
         let auth = proof(&actor, &host, &path, "GET", None);
         let (got, body) = request(state.clone(), &host, &path, "GET", Some(&auth), b"").await;
         assert_eq!(got, status, "{query}: {body}");
         if status == StatusCode::OK {
-            assert_eq!(body["channels"], json!([]), "unjoined ID is simply absent");
-            assert!(body["next_cursor"].is_null());
+            assert_eq!(body["rows"], json!([]), "an unjoined id is simply absent");
+            assert!(body["next"].is_null());
+            assert_eq!(body["reset"], false);
         }
     }
     let channel = state
@@ -246,7 +255,7 @@ async fn accessory_router_signed_url_body_replay_and_actor_boundary() {
     assert_eq!(applied.0, StatusCode::OK, "{}", applied.1);
     assert_eq!(applied.1["outcomes"][0]["status"], "applied");
     // The frontier belongs to the signer alone.
-    let path = format!("/buzz/v1/me/sidebar?channel_ids={channel}");
+    let path = format!("/buzz/v1/me/activity?ids={channel}");
     start_before_everything(&state, community, &other).await;
     for (key, unread, read_through) in [
         (&actor, false, json!(event.id.to_hex())),
@@ -255,8 +264,8 @@ async fn accessory_router_signed_url_body_replay_and_actor_boundary() {
         let auth = proof(key, &host, &path, "GET", None);
         let page = request(state.clone(), &host, &path, "GET", Some(&auth), b"").await;
         assert_eq!(page.0, StatusCode::OK, "{}", page.1);
-        assert_eq!(page.1["channels"][0]["unread"], unread, "{}", page.1);
-        assert_eq!(page.1["channels"][0]["read_through_id"], read_through);
+        assert_eq!(page.1["rows"][0]["unread"], unread, "{}", page.1);
+        assert_eq!(page.1["rows"][0]["read_through_id"], read_through);
     }
 }
 
@@ -310,18 +319,32 @@ async fn accessory_batch_outcomes_are_independent_and_return_applied_rows() {
                 .insert_event(community, &event, Some(channel))
                 .await
                 .unwrap();
-            event.id.to_hex()
+            (
+                event.id.to_hex(),
+                event.pubkey.to_hex(),
+                event.created_at.as_secs(),
+            )
         }
     };
-    let (event, elsewhere) = (post(channel).await, post(unjoined).await);
+    let ((event, author, created_at), (elsewhere, ..)) =
+        (post(channel).await, post(unjoined).await);
+    // Arrival time is the relay's clock: read it back rather than guess it.
+    let result_at = |body: &Value| body["rows"][0]["activity"]["at"].clone();
     start_before_everything(&state, community, &actor).await;
-    let path = format!("/buzz/v1/me/sidebar?channel_ids={channel}");
+    let path = format!("/buzz/v1/me/activity?ids={channel}");
     let auth = proof(&actor, &host, &path, "GET", None);
     let result = request(state.clone(), &host, &path, "GET", Some(&auth), b"").await;
     assert_eq!(result.0, StatusCode::OK, "{}", result.1);
-    let unread = json!({"channel_id":channel,"unread":true,"mentions":0,
-        "read_through_id":null,"latest_id":event,"threads":[]});
-    assert_eq!(result.1["channels"], json!([unread]));
+    let row = |unread: bool, read_through: Value| {
+        json!({"kind":"channel","id":channel,"channel_id":channel,
+            "activity":{"at":result_at(&result.1),"id":event,"pubkey":author},
+            "preview":{"id":event,"pubkey":author,"created_at":created_at,
+                "text":"read state","edited":false},
+            "unread":unread,"mentions":0,"read_through_id":read_through,"state":"default"})
+    };
+    assert_eq!(result.1["rows"], json!([row(true, Value::Null)]));
+    assert_eq!(result.1["removed"], json!([]));
+    assert!(result.1["totals"].is_null() && result.1["marker"].is_string());
     let write_path = "/buzz/v1/me/read-state";
     let body = serde_json::to_vec(&json!({"intents":[
         {"type":"unknown"},
@@ -342,9 +365,39 @@ async fn accessory_batch_outcomes_are_independent_and_return_applied_rows() {
     );
     // One updated row per applied channel; the blocked and the unjoined
     // channels have none.
-    let read = json!({"channel_id":channel,"unread":false,"mentions":0,
-        "read_through_id":event,"latest_id":event,"threads":[]});
-    assert_eq!(result.1["channels"], json!([read]));
+    assert_eq!(result.1["rows"], json!([row(false, json!(event))]));
+
+    // The other intents: a manual unread, then muting.
+    for (intent, unread, state_name) in [
+        (
+            json!({"type":"mark_unread","target":{"channel_id":channel}}),
+            true,
+            "default",
+        ),
+        (
+            json!({"type":"set_state","target":{"channel_id":channel},"state":"muted"}),
+            false,
+            "muted",
+        ),
+        (
+            json!({"type":"set_state","target":{"channel_id":channel},"state":"loud"}),
+            false,
+            "",
+        ),
+    ] {
+        let body = serde_json::to_vec(&json!({ "intents": [intent] })).unwrap();
+        let auth = proof(&actor, &host, write_path, "POST", Some(&body));
+        let result = request(state.clone(), &host, write_path, "POST", Some(&auth), &body).await;
+        assert_eq!(result.0, StatusCode::OK, "{}", result.1);
+        if state_name.is_empty() {
+            assert_eq!(result.1["outcomes"], json!([{"status":"invalid"}]));
+            assert_eq!(result.1["rows"], json!([]));
+            continue;
+        }
+        assert_eq!(result.1["outcomes"], json!([{"status":"applied"}]));
+        assert_eq!(result.1["rows"][0]["unread"], unread, "{}", result.1);
+        assert_eq!(result.1["rows"][0]["state"], state_name, "{}", result.1);
+    }
 
     // The removed context read is not served, however well signed.
     let targets = json!([{"target":{"channel_id":channel},"message_ids":[event]}]);
@@ -462,12 +515,16 @@ async fn accessory_write_revocation_is_terminal_before_persistence() {
     // Exercise the same per-item function the batch handler uses after admission.
     let result = super::handlers::write_intent(&state, &headers, &principal, &intent).await;
     assert_eq!(result, json!({"status":"blocked"}));
-    let persisted: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM personal_read_accounts WHERE community_id=$1")
-            .bind(community.as_uuid())
-            .fetch_one(state.db.pool())
-            .await
-            .unwrap();
+    // The message's author gets a row of their own from the background
+    // writer; only the denied actor's matters here.
+    let persisted: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM personal_read_accounts WHERE community_id=$1 AND actor=$2",
+    )
+    .bind(community.as_uuid())
+    .bind(actor.public_key().to_bytes().as_slice())
+    .fetch_one(state.db.pool())
+    .await
+    .unwrap();
     assert_eq!(persisted, 0, "denied intent must not persist");
 }
 
@@ -523,8 +580,8 @@ async fn accessory_discovery_is_host_bound_and_opt_in() {
                     // Exactly these fields: context and thread-cap limits are gone.
                     assert_eq!(
                         doc["buzz_v1"],
-                        json!({"version":1,"base_path":"/buzz/v1","retention_seconds":1234,
-                            "max_channels":20,"max_intents":100,
+                        json!({"version":2,"base_path":"/buzz/v1","retention_seconds":1234,
+                            "max_rows":500,"max_intents":100,
                             "eligible_kinds":[9, 40002, 45001, 45003]})
                     );
                 }
@@ -532,7 +589,7 @@ async fn accessory_discovery_is_host_bound_and_opt_in() {
         }
         // Disabled means unmounted: indistinguishable from a path that never existed.
         let mut statuses = Vec::new();
-        for path in ["/buzz/v1/me/sidebar", "/buzz/v1-never-existed"] {
+        for path in ["/buzz/v1/me/activity", "/buzz/v1-never-existed"] {
             let request = Request::builder().uri(path).header("host", host.as_str());
             let response = crate::router::build_router(state.clone())
                 .oneshot(request.body(Body::empty()).unwrap())
@@ -584,7 +641,7 @@ async fn accessory_shadow_matches_off() {
             let snapshotter = recorder.snapshotter();
             let _guard = metrics::set_default_local_recorder(&recorder);
             // An assertion the guard accepts, and no NIP-98 proof.
-            let req = Request::get("/buzz/v1/me/sidebar")
+            let req = Request::get("/buzz/v1/me/activity")
                 .header("host", &host)
                 .header(buzz_auth::CLIENT_ATTACHED_HEADER, "Bearer a.b.c")
                 .body(Body::empty())
@@ -697,7 +754,7 @@ async fn signed_sidebar_deletion(deletion_kind: u16) {
         .tags(tags)
         .sign_with_keys(signer)
         .unwrap();
-    let path = format!("/buzz/v1/me/sidebar?channel_ids={channel}");
+    let path = format!("/buzz/v1/me/activity?ids={channel}");
     start_before_everything(&state, community, &reader).await;
     for (event, key, count) in [(&message, &author, 1), (&deletion, signer, 0)] {
         let body = serde_json::to_vec(event).unwrap();
@@ -727,7 +784,7 @@ async fn signed_sidebar_deletion(deletion_kind: u16) {
         let auth = proof(&reader, &host, &path, "GET", None);
         let (status, sidebar) = request(state.clone(), &host, &path, "GET", Some(&auth), b"").await;
         assert_eq!(status, StatusCode::OK, "{sidebar}");
-        let channels = sidebar["channels"].as_array().unwrap();
+        let channels = sidebar["rows"].as_array().unwrap();
         assert_eq!(channels.len(), 1, "{sidebar}");
         assert_eq!(channels[0]["channel_id"], channel.to_string());
         assert_eq!(

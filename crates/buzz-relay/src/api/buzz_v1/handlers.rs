@@ -6,91 +6,215 @@ use axum::{
     http::HeaderMap,
     response::Response,
 };
-use buzz_db::personal_read::{
-    ChannelReadSummary, ReadIntent, SidebarPage, MAX_CHANNELS, MAX_INTENTS,
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use buzz_db::{
+    activity::{
+        self, Cursor, Marker, Page, Row, RowKind, Select, DEFAULT_LIMIT, MAX_IDS, MAX_LIMIT,
+    },
+    personal_read::{ReadIntent, ReadTarget, MAX_INTENTS},
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 use uuid::Uuid;
 
-/// 1..=MAX_CHANNELS unique UUIDs, comma-separated; anything else is invalid.
-fn parse_channel_ids(value: &str) -> Option<Vec<Uuid>> {
-    let ids = value
-        .split(',')
-        .map(|id| Uuid::parse_str(id).ok())
-        .collect::<Option<Vec<_>>>()?;
-    let unique: std::collections::HashSet<_> = ids.iter().collect();
-    ((1..=MAX_CHANNELS).contains(&ids.len()) && unique.len() == ids.len()).then_some(ids)
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct SidebarQuery {
+pub(super) struct ActivityQuery {
+    /// Comma-separated row kinds; all when absent.
+    kinds: Option<String>,
+    /// Only unread rows.
+    unread: Option<bool>,
+    /// Cursor of the next older page.
+    before: Option<String>,
+    /// Marker of an earlier read: only what changed.
+    since: Option<String>,
+    /// Comma-separated row ids to refresh.
+    ids: Option<String>,
     limit: Option<usize>,
-    cursor: Option<Uuid>,
-    /// Comma-separated channel UUIDs to refresh; exclusive with paging.
-    channel_ids: Option<String>,
 }
 
-pub(super) async fn sidebar(
+/// Unique kinds in wire order; `None` when a name is unknown or repeated.
+fn parse_kinds(value: Option<&str>) -> Option<Vec<RowKind>> {
+    let Some(value) = value else {
+        return Some(RowKind::ALL.to_vec());
+    };
+    let kinds = value
+        .split(',')
+        .map(RowKind::parse)
+        .collect::<Option<BTreeSet<_>>>()?;
+    (kinds.len() == value.split(',').count()).then(|| kinds.into_iter().collect())
+}
+
+fn event_id(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 || value.bytes().any(|b| !b.is_ascii_hexdigit()) {
+        return None;
+    }
+    hex::decode(value).ok()?.try_into().ok()
+}
+
+/// 1..=MAX_IDS unique ids. A UUID names a conversation; a 64-hex id names a
+/// thread root, a mention, or both.
+fn parse_ids(value: &str) -> Option<Select> {
+    let parts: Vec<&str> = value.split(',').collect();
+    let unique: BTreeSet<&str> = parts.iter().copied().collect();
+    if !(1..=MAX_IDS).contains(&parts.len()) || unique.len() != parts.len() {
+        return None;
+    }
+    let (mut channels, mut events) = (Vec::new(), Vec::new());
+    for part in parts {
+        match (Uuid::parse_str(part), event_id(part)) {
+            (_, Some(id)) => events.push(id),
+            (Ok(id), None) => channels.push(id),
+            _ => return None,
+        }
+    }
+    Some(Select::Ids {
+        channels,
+        roots: events.clone(),
+        mentions: events,
+    })
+}
+
+/// What a cursor is bound to: it continues only the listing that issued it.
+fn filter_tag(kinds: &[RowKind], unread_only: bool) -> String {
+    let mask = RowKind::ALL
+        .iter()
+        .enumerate()
+        .filter(|(_, kind)| kinds.contains(kind))
+        .fold(0u8, |mask, (bit, _)| mask | (1 << bit));
+    format!("{mask}{}", u8::from(unread_only))
+}
+
+fn encode_cursor(cursor: &Cursor, filter: &str) -> String {
+    URL_SAFE_NO_PAD.encode(format!(
+        "{}.{}.{}.{filter}",
+        cursor.micros, cursor.rank, cursor.id
+    ))
+}
+
+fn decode_cursor(value: &str, filter: &str) -> Option<Cursor> {
+    let text = String::from_utf8(URL_SAFE_NO_PAD.decode(value).ok()?).ok()?;
+    let mut parts = text.split('.');
+    let cursor = Cursor {
+        micros: parts.next()?.parse().ok()?,
+        rank: parts.next()?.parse().ok()?,
+        id: parts.next()?.to_owned(),
+    };
+    let valid_id = Uuid::parse_str(&cursor.id).is_ok() || event_id(&cursor.id).is_some();
+    (parts.next()? == filter && parts.next().is_none() && cursor.rank <= 2 && valid_id)
+        .then_some(cursor)
+}
+
+fn parse_query(query: ActivityQuery) -> Option<(activity::Query, String)> {
+    let kinds = parse_kinds(query.kinds.as_deref())?;
+    let unread_only = query.unread.unwrap_or(false);
+    let filter = filter_tag(&kinds, unread_only);
+    let select = match (query.since, query.ids, query.before) {
+        (Some(since), None, None) if query.limit.is_none() => Select::Since(Marker::parse(&since)?),
+        (None, Some(ids), None) if query.limit.is_none() => parse_ids(&ids)?,
+        (None, None, before) => Select::Page {
+            before: match before {
+                Some(before) => Some(decode_cursor(&before, &filter)?),
+                None => None,
+            },
+            limit: query.limit.map_or(Some(DEFAULT_LIMIT), |limit| {
+                (1..=MAX_LIMIT).contains(&limit).then_some(limit)
+            })?,
+        },
+        _ => return None,
+    };
+    Some((
+        activity::Query {
+            kinds,
+            unread_only,
+            select,
+        },
+        filter,
+    ))
+}
+
+/// The response body. A listing too large for the response limit is cut and
+/// continues from `next`; a `since` read too large asks the caller to start
+/// over.
+fn body(mut page: Page, filter: &str, since: bool) -> Value {
+    loop {
+        let value = json!({
+            "rows": page.rows,
+            "removed": page.removed,
+            "totals": page.totals,
+            "next": page.next.as_ref().map(|cursor| encode_cursor(cursor, filter)),
+            "marker": page.marker.map(Marker::encode),
+            "reset": page.reset,
+        });
+        let fits =
+            serde_json::to_vec(&value).is_ok_and(|bytes| bytes.len() <= auth::MAX_RESPONSE_BYTES);
+        if fits || page.rows.len() <= 1 {
+            return value;
+        }
+        if since {
+            page = Page {
+                reset: true,
+                ..Page::default()
+            };
+            continue;
+        }
+        page.rows.truncate(page.rows.len() / 2);
+        page.next = page.rows.last().map(Row::cursor);
+    }
+}
+
+pub(super) async fn activity(
     State(state): State<Arc<AppState>>,
     slot: crate::access::AccessSlot,
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
-    query: Result<Query<SidebarQuery>, axum::extract::rejection::QueryRejection>,
+    query: Result<Query<ActivityQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Result<Response, Error> {
     tokio::time::timeout(Duration::from_secs(8), async {
         let principal = auth::authorize(&state, &slot, &headers, &uri, "GET", None).await?;
         let Query(query) = query.map_err(|_| Error::invalid())?;
-        if query
-            .limit
-            .is_some_and(|limit| !(1..=MAX_CHANNELS).contains(&limit))
-        {
-            return Err(Error::invalid());
-        }
-        let community = principal.tenant.community();
-        let retention = state.config.buzz_v1_retention_seconds;
-        let page = match query.channel_ids {
-            Some(ids) => {
-                let ids = parse_channel_ids(&ids)
-                    .filter(|_| query.limit.is_none() && query.cursor.is_none())
-                    .ok_or_else(Error::invalid)?;
-                state
-                    .db
-                    .personal_read_sidebar_channels(community, &principal.actor, retention, &ids)
-                    .await
-            }
-            None => {
-                state
-                    .db
-                    .personal_read_sidebar(
-                        community,
-                        &principal.actor,
-                        retention,
-                        query.limit.unwrap_or(MAX_CHANNELS),
-                        query.cursor,
-                    )
-                    .await
-            }
-        }
-        .map_err(|_| Error::unavailable())?;
-        auth::response(release(&state, &headers, &principal, page).await?)
+        let (query, filter) = parse_query(query).ok_or_else(Error::invalid)?;
+        let page = read(&state, &headers, &principal, &query).await?;
+        let since = matches!(query.select, Select::Since(_));
+        auth::response(body(page, &filter, since))
     })
     .await
     .map_err(|_| Error::unavailable())?
 }
 
-/// Release projected rows only after admission and the actor's membership of
-/// every row are rechecked outside the projection snapshot.
-async fn release(
+/// Read rows and release them only after admission and the actor's
+/// membership of every row's channel are rechecked outside the read's
+/// snapshot.
+async fn read(
     state: &AppState,
     headers: &HeaderMap,
     principal: &auth::Principal,
-    page: SidebarPage,
-) -> Result<SidebarPage, Error> {
+    query: &activity::Query,
+) -> Result<Page, Error> {
+    let page = state
+        .db
+        .activity(
+            principal.tenant.community(),
+            &principal.actor,
+            state.config.buzz_v1_retention_seconds,
+            query,
+        )
+        .await
+        .map_err(|error| match error {
+            buzz_db::DbError::InvalidData(_) | buzz_db::DbError::InvalidTimestamp(_) => {
+                Error::invalid()
+            }
+            _ => Error::unavailable(),
+        })?;
     auth::recheck(state, headers, principal).await?;
-    let channels: Vec<_> = page.channels.iter().map(|c| c.channel_id).collect();
+    let channels: Vec<Uuid> = page
+        .rows
+        .iter()
+        .map(|row| row.channel_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     let memberships = state
         .db
         .membership_pairs(
@@ -106,30 +230,41 @@ async fn release(
     Ok(page)
 }
 
-/// Updated rows for the channels a batch applied to. A channel the actor has
-/// not joined has no row.
+/// Updated rows for the contexts a batch applied to. A context in a channel
+/// the actor has not joined has no row.
 async fn refreshed(
     state: &AppState,
     headers: &HeaderMap,
     principal: &auth::Principal,
-    channels: &BTreeSet<Uuid>,
-) -> Result<Vec<ChannelReadSummary>, Error> {
-    let channels: Vec<_> = channels.iter().copied().collect();
-    let mut rows = Vec::with_capacity(channels.len());
-    for chunk in channels.chunks(MAX_CHANNELS) {
-        let page = state
-            .db
-            .personal_read_sidebar_channels(
-                principal.tenant.community(),
-                &principal.actor,
-                state.config.buzz_v1_retention_seconds,
-                chunk,
-            )
-            .await
-            .map_err(|_| Error::unavailable())?;
-        rows.extend(release(state, headers, principal, page).await?.channels);
+    applied: &[ReadTarget],
+) -> Result<Vec<Row>, Error> {
+    let mut channels = BTreeSet::new();
+    let mut roots = BTreeSet::new();
+    for target in applied {
+        match target.root_id.as_deref().map(event_id) {
+            None => channels.insert(target.channel_id),
+            Some(Some(root)) => roots.insert(root),
+            Some(None) => false,
+        };
     }
-    Ok(rows)
+    if channels.is_empty() && roots.is_empty() {
+        return Ok(Vec::new());
+    }
+    let query = activity::Query {
+        kinds: vec![
+            RowKind::Channel,
+            RowKind::Dm,
+            RowKind::Solo,
+            RowKind::Thread,
+        ],
+        unread_only: false,
+        select: Select::Ids {
+            channels: channels.into_iter().collect(),
+            roots: roots.into_iter().collect(),
+            mentions: Vec::new(),
+        },
+    };
+    Ok(read(state, headers, principal, &query).await?.rows)
 }
 
 #[derive(Deserialize)]
@@ -155,7 +290,7 @@ pub(super) async fn write(
     }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
     let mut outcomes = Vec::with_capacity(batch.intents.len());
-    let mut applied = BTreeSet::new();
+    let mut applied = Vec::new();
     for item in batch.intents {
         let Ok(intent) = serde_json::from_value::<ReadIntent>(item) else {
             outcomes.push(json!({"status":"invalid"}));
@@ -169,19 +304,26 @@ pub(super) async fn write(
         )
         .await
         .unwrap_or_else(|_| json!({"status":"unknown","retryable":true}));
-        if outcome["status"] == "applied" {
-            let ReadIntent::MarkThrough { target, .. } = &intent;
-            applied.insert(target.channel_id);
+        if outcome["status"] == "applied" && !applied.contains(intent.target()) {
+            applied.push(intent.target().clone());
         }
         outcomes.push(outcome);
     }
     let mut body = json!({ "outcomes": outcomes });
     // Committed outcomes stand even when their rows cannot be read in the
-    // remaining budget: omit them.
-    if let Ok(Ok(channels)) =
+    // remaining budget: omit them. The person's other devices then learn of
+    // the change from their next `since` read.
+    if let Ok(Ok(rows)) =
         tokio::time::timeout_at(deadline, refreshed(&state, &headers, &principal, &applied)).await
     {
-        body["channels"] = json!(channels);
+        if !rows.is_empty() {
+            state.push_personal_activity(
+                &principal.tenant,
+                &principal.actor.to_bytes(),
+                json!(["BUZZ", "activity", { "rows": rows }]).to_string(),
+            );
+        }
+        body["rows"] = json!(rows);
     }
     auth::response(body)
 }
@@ -214,35 +356,62 @@ pub(super) async fn write_intent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use buzz_db::personal_read::{ThreadReadSummary, MAX_THREAD_SUMMARIES};
 
-    /// A POST that applied to `MAX_INTENTS` channels, each with a full thread
-    /// list, must still fit: an oversized body is a 503 that hides committed
-    /// outcomes.
+    fn query(kinds: Option<&str>, before: Option<String>) -> ActivityQuery {
+        ActivityQuery {
+            kinds: kinds.map(str::to_owned),
+            unread: None,
+            before,
+            since: None,
+            ids: None,
+            limit: None,
+        }
+    }
+
     #[test]
-    fn largest_write_response_fits_the_response_limit() {
-        let id = || Some("f".repeat(64));
-        let channels: Vec<_> = (0..MAX_INTENTS)
-            .map(|_| ChannelReadSummary {
-                channel_id: Uuid::max(),
-                unread: true,
-                mentions: u32::MAX,
-                read_through_id: id(),
-                latest_id: id(),
-                threads: (0..MAX_THREAD_SUMMARIES)
-                    .map(|_| ThreadReadSummary {
-                        root_id: "f".repeat(64),
-                        unread: true,
-                        mentions: u32::MAX,
-                        read_through_id: id(),
-                        latest_id: "f".repeat(64),
-                    })
-                    .collect(),
-            })
-            .collect();
-        let outcomes = vec![json!({"status":"unknown","retryable":true}); MAX_INTENTS];
-        let body = json!({ "outcomes": outcomes, "channels": channels });
-        let bytes = serde_json::to_vec(&body).unwrap().len();
-        assert!(bytes <= auth::MAX_RESPONSE_BYTES, "{bytes} bytes");
+    fn a_cursor_continues_only_the_listing_that_issued_it() {
+        let cursor = Cursor {
+            micros: 1_700_000_000_123_456,
+            rank: 1,
+            id: "ab".repeat(32),
+        };
+        let (_, filter) = parse_query(query(Some("thread,mention"), None)).unwrap();
+        let wire = encode_cursor(&cursor, &filter);
+        let (parsed, _) = parse_query(query(Some("mention,thread"), Some(wire.clone()))).unwrap();
+        assert!(matches!(
+            parsed.select,
+            Select::Page { before: Some(before), limit: DEFAULT_LIMIT } if before == cursor
+        ));
+        assert!(parse_query(query(Some("thread"), Some(wire.clone()))).is_none());
+        assert!(parse_query(query(None, Some(wire))).is_none());
+    }
+
+    #[test]
+    fn selectors_are_exclusive_and_bounded() {
+        let with = |edit: fn(&mut ActivityQuery)| {
+            let mut q = query(None, None);
+            edit(&mut q);
+            parse_query(q).is_some()
+        };
+        assert!(with(|q| q.since = Some("3.1700000000000000".into())));
+        assert!(!with(|q| q.since = Some("x".into())));
+        assert!(!with(|q| {
+            q.since = Some("3.1700000000000000".into());
+            q.limit = Some(5);
+        }));
+        assert!(!with(|q| {
+            q.since = Some("3.1700000000000000".into());
+            q.ids = Some(Uuid::nil().to_string());
+        }));
+        assert!(with(
+            |q| q.ids = Some(format!("{},{}", Uuid::nil(), "f".repeat(64)))
+        ));
+        assert!(!with(|q| q.ids = Some(format!("{0},{0}", Uuid::nil()))));
+        assert!(!with(|q| q.ids = Some("nope".into())));
+        assert!(with(|q| q.limit = Some(MAX_LIMIT)));
+        assert!(!with(|q| q.limit = Some(MAX_LIMIT + 1)));
+        assert!(!with(|q| q.limit = Some(0)));
+        assert!(!with(|q| q.kinds = Some("channel,channel".into())));
+        assert!(!with(|q| q.kinds = Some("sidebar".into())));
     }
 }

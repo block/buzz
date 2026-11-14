@@ -1,5 +1,7 @@
 //! Domain-owned persistence implementations.
 
+/// The activity list: conversations, threads and mentions for one person.
+pub mod activity;
 /// Explicit deployment-global admin report reads.
 pub mod admin_moderation;
 /// Community-scoped authentication allowlist persistence.
