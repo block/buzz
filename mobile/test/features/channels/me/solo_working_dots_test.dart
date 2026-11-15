@@ -34,11 +34,15 @@ void main() {
     final start = opacities(tester);
     expect(tester.binding.hasScheduledFrame, isFalse);
 
-    await tester.pump(const Duration(milliseconds: 80));
-    expect(opacities(tester), start);
+    // Check before pumping: pump draws any frame scheduled in the interval.
+    await tester.binding.delayed(const Duration(milliseconds: 80));
     expect(tester.binding.hasScheduledFrame, isFalse);
+    await tester.pump();
+    expect(opacities(tester), start);
 
-    await tester.pump(const Duration(milliseconds: 3));
+    await tester.binding.delayed(const Duration(milliseconds: 3));
+    expect(tester.binding.hasScheduledFrame, isTrue);
+    await tester.pump();
     final next = opacities(tester);
     expect(next, isNot(start));
     expect(opacities(tester, 1), next);

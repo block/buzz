@@ -19,10 +19,12 @@ class SoloWorkingDots extends HookWidget {
   Widget build(BuildContext context) {
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final animate = TickerMode.valuesOf(context).enabled && !reducedMotion;
-    final step = useState(_PulseClock.instance.step);
+    // A per-row revision, not the shared step: a row that rejoins while
+    // another row kept the clock running must still rebuild on its next tick.
+    final revision = useState(0);
     useEffect(() {
       if (!animate) return null;
-      void onStep() => step.value = _PulseClock.instance.step;
+      void onStep() => revision.value++;
       _PulseClock.instance.add(onStep);
       return () => _PulseClock.instance.remove(onStep);
     }, [animate]);
