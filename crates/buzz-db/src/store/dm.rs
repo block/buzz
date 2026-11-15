@@ -728,15 +728,16 @@ pub async fn grow_dm(
     })
 }
 
-/// Start a DM of everyone in the DM `source` plus `additions`, without its
+/// Start a DM of the people in the DM `source` plus `additions`, without its
 /// history: what adding people to a DM does when they do not join it in place.
+/// Agents already in `source` stay behind and can be added later; agents among
+/// `additions` join, with `policy`'s permission.
 ///
 /// `source` must be a live, unarchived DM with `actor` as an active member.
 /// Its members are read under its membership lock, held until the new DM is
 /// made on the same transaction, so the new DM holds exactly who is in
-/// `source` now. Every agent in the new DM needs `policy`'s permission,
-/// whoever brought it into `source`. If a DM of exactly these members exists,
-/// it is returned to `actor` if they are in it, and shown in their sidebar.
+/// `source` now. If a DM of exactly these members exists, it is returned to
+/// `actor` if they are in it, and shown in their sidebar.
 ///
 /// Returns `(channel, was_created, participants)`.
 pub async fn fork_dm(
@@ -754,7 +755,13 @@ pub async fn fork_dm(
     )
     .await?;
     crate::channel_members::lock_channel_for_member_put(&mut tx, source).await?;
-    let mut members = locked_dm_members(tx.conn(), community_id, source, actor).await?;
+    let source_members = locked_dm_members(tx.conn(), community_id, source, actor).await?;
+    let source_refs: Vec<&[u8]> = source_members.iter().map(Vec::as_slice).collect();
+    let agents = agents_among(tx.conn(), community_id, &source_refs).await?;
+    let mut members: Vec<Vec<u8>> = source_members
+        .into_iter()
+        .filter(|pk| pk.as_slice() == actor || !agents.contains(pk))
+        .collect();
     for pk in additions {
         if !members.iter().any(|m| m == pk) {
             members.push(pk.to_vec());

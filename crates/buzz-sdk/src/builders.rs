@@ -2025,8 +2025,9 @@ fn dm_open(pubkeys: &[&str], include_history: bool) -> Result<EventBuilder, SdkE
 ///
 /// With `include_history`, the member joins this DM and sees its history,
 /// unless a person is joining a DM of at most one person and their agents.
-/// Otherwise adding anyone starts a new DM of everyone. Only people may send
-/// the history tag: the relay refuses it from an agent.
+/// Otherwise it starts a new DM of this DM's people and the member; agents
+/// already here stay behind. Only people may send the history tag: the relay
+/// refuses it from an agent.
 pub fn build_dm_add_member(
     channel_id: Uuid,
     pubkey: &str,

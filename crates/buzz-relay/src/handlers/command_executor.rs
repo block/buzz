@@ -734,8 +734,9 @@ async fn handle_dm_add_member(
             let added = grow_with_agents(tenant, state, other, &self_bytes, &agents).await?;
             (other, false, added, true, Vec::new())
         }
-        // Start a new DM of everyone (no history); this DM is untouched. A DM
-        // of at most one person never gains people, even with the tag.
+        // Start a new DM of its people and the additions (no history); this
+        // DM and its agents stay put. A DM of at most one person never gains
+        // people, even with the tag.
         Some(DmGrowth::PeopleStartNewDm) | None => {
             let (channel, created, participants) = state
                 .db

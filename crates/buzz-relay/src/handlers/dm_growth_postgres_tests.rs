@@ -838,7 +838,7 @@ async fn an_agent_joining_a_one_person_dm_moves_its_identity() {
 }
 
 /// A DM of one person and their agents never gains a person in place, even
-/// with the history tag: adding one starts a DM of everyone, and adding them
+/// with the history tag: adding one starts a DM of its people, and adding them
 /// again opens that DM. The original keeps its members and its identity.
 /// Mutation: let the tag grow it in place → the original gains B → RED.
 #[tokio::test]
@@ -857,10 +857,7 @@ async fn a_person_added_to_an_agent_only_dm_starts_a_new_one() {
     assert!(created);
     assert_ne!(target, dm);
     assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a, &agent]));
-    assert_eq!(
-        members(&state, &tenant, target).await,
-        set_of(&[&a, &b, &agent])
-    );
+    assert_eq!(members(&state, &tenant, target).await, set_of(&[&a, &b]));
     assert_eq!(
         add(&state, &tenant, &a, dm, &[&b], true)
             .await
@@ -1080,31 +1077,61 @@ async fn an_agent_joins_an_old_dm_in_place_when_its_people_have_another() {
     );
 }
 
-/// Adding a person to a DM with someone else's agent starts a DM that puts
-/// that agent with others, so it needs the agent's add policy, with or without
-/// the tag.
-/// Mutation: check only the agents being added → the new DM is made → RED.
+/// A new DM started from a DM carries its people, not the agents in it, so
+/// no agent's add policy can block it. Agents named in the add still join.
+/// Mutation: carry the source's agents → X, M and Y are in the new DMs, or the
+/// policy refuses them → RED.
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn adding_to_a_dm_with_someone_elses_agent_follows_its_policy() {
+async fn a_new_dm_from_a_dm_carries_only_its_people() {
     let state = state().await;
-    let tenant = community(&state, "dm-fork-policy").await;
-    let (a, b, c, agent) = (
+    let tenant = community(&state, "dm-fork-people").await;
+    let (a, b, c, x, m, y) = (
+        Keys::generate(),
+        Keys::generate(),
         Keys::generate(),
         Keys::generate(),
         Keys::generate(),
         Keys::generate(),
     );
-    make_agent(&state, &tenant, &agent, &b, "nobody").await;
-    let dm = open(&state, &tenant, &a, &[&agent]).await.expect("open");
+    make_agent(&state, &tenant, &x, &b, "owner_only").await;
+    make_agent(&state, &tenant, &m, &a, "owner_only").await;
+    make_agent(&state, &tenant, &y, &b, "nobody").await;
 
-    for history in [true, false] {
-        rejected(
-            add(&state, &tenant, &a, dm, &[&c], history).await,
-            "policy:nobody",
-        );
+    // A DM of people with someone else's agent: the new DM is its people.
+    let trio = open(&state, &tenant, &a, &[&b]).await.expect("open");
+    add(&state, &tenant, &b, trio, &[&x], true)
+        .await
+        .expect("owner adds");
+    let (forked, created) = add(&state, &tenant, &a, trio, &[&c], false)
+        .await
+        .expect("start new DM");
+    assert!(created);
+    assert_eq!(
+        members(&state, &tenant, forked).await,
+        set_of(&[&a, &b, &c])
+    );
+    assert_eq!(members(&state, &tenant, trio).await, set_of(&[&a, &b, &x]));
+
+    // An agent named in the add joins.
+    let (named, created) = add(&state, &tenant, &a, trio, &[&c, &m], false)
+        .await
+        .expect("start new DM with an agent");
+    assert!(created);
+    assert_eq!(
+        members(&state, &tenant, named).await,
+        set_of(&[&a, &b, &c, &m])
+    );
+
+    // A DM of one person and agents, theirs or not: the new DM is people only.
+    for (agent, history) in [(&m, true), (&y, false)] {
+        let solo = open(&state, &tenant, &a, &[agent]).await.expect("solo");
+        let (target, _) = add(&state, &tenant, &a, solo, &[&c], history)
+            .await
+            .expect("add a person");
+        assert_ne!(target, solo);
+        assert_eq!(members(&state, &tenant, target).await, set_of(&[&a, &c]));
     }
-    assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a, &agent]));
 }
 
 /// A new DM started from a DM holds who is in that DM when it is made, not
