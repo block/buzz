@@ -13,42 +13,58 @@ final class QuickSendBridge {
 
   private var channel: FlutterMethodChannel?
   private var ready = false
-  private var waiters: [CheckedContinuation<Void, Never>] = []
+  private var sending = false
+  private var waiters: [UUID: CheckedContinuation<Bool, Never>] = [:]
 
   func attach(messenger: FlutterBinaryMessenger) {
     let channel = FlutterMethodChannel(name: "buzz/quick_send", binaryMessenger: messenger)
     self.channel = channel
     ready = false
     channel.setMethodCallHandler { [weak self] call, result in
-      guard call.method == "ready", let self else {
+      guard let self else { return result(FlutterMethodNotImplemented) }
+      switch call.method {
+      case "ready":
+        Self.log.notice("dart ready")
+        self.ready = true
+        let waiting = self.waiters.values
+        self.waiters = [:]
+        waiting.forEach { $0.resume(returning: true) }
+        result(nil)
+      case "unready":
+        // Home left, for example on sign-out, and took its handler with it.
+        self.ready = false
+        result(nil)
+      default:
         result(FlutterMethodNotImplemented)
-        return
       }
-      Self.log.notice("dart ready")
-      self.ready = true
-      let waiting = self.waiters
-      self.waiters = []
-      waiting.forEach { $0.resume() }
-      result(nil)
+    }
+  }
+
+  /// Waits for Home's `ready`, returning false once [deadline] passes first.
+  @MainActor
+  private func waitUntilReady(_ deadline: Duration) async -> Bool {
+    if ready { return true }
+    let id = UUID()
+    return await withCheckedContinuation { continuation in
+      waiters[id] = continuation
+      Task { @MainActor in
+        try? await Task.sleep(for: deadline)
+        self.waiters.removeValue(forKey: id)?.resume(returning: false)
+      }
     }
   }
 
   /// Sends [text] to the Bestie, or throws a message Siri can read.
   @MainActor
   func send(_ text: String, deadline: Duration = .seconds(20)) async throws {
+    // One at a time: each send starts its own Solo chat creation in Dart.
+    guard !sending else { throw QuickSendError("Another message is still sending.") }
+    sending = true
+    defer { sending = false }
     let start = ContinuousClock.now
-    if !ready {
-      await withTaskGroup(of: Void.self) { group in
-        group.addTask { @MainActor in
-          await withCheckedContinuation { self.waiters.append($0) }
-        }
-        group.addTask { try? await Task.sleep(for: deadline) }
-        await group.next()
-        group.cancelAll()
-      }
+    guard await waitUntilReady(deadline), let channel else {
+      throw QuickSendError("Open Buzz, then try again.")
     }
-    // A timed-out waiter stays queued and is resumed by a later `ready`.
-    guard ready, let channel else { throw QuickSendError("Buzz didn't start in time.") }
     let failure: String? = await withCheckedContinuation { continuation in
       channel.invokeMethod("send", arguments: text) { reply in
         if let error = reply as? FlutterError {

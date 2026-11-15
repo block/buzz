@@ -243,11 +243,7 @@ void main() {
     final container = ProviderScope.containerOf(
       tester.element(find.byType(QuickSendHost)),
     );
-    // Home keeps the session and the Bestie choice watched (shortcut host,
-    // Solo tab); a bare read of that stream would never receive it.
     container.read(relaySessionProvider);
-    final sub = container.listen(defaultAgentProvider, (_, _) {});
-    addTearDown(sub.close);
     relay.connect();
     await tester.pump();
 
@@ -299,5 +295,9 @@ void main() {
       isNull,
       reason: 'The finished chat leaves nothing to resume',
     );
+
+    // Leaving Home, for example on sign-out, takes the handler with it.
+    await tester.pumpWidget(const SizedBox());
+    expect(platformCalls, ['ready', 'unready']);
   });
 }

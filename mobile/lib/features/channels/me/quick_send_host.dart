@@ -2,6 +2,12 @@ part of 'me_page.dart';
 
 const _quickSendChannel = MethodChannel('buzz/quick_send');
 
+/// A quick send Buzz turned down, with a reason Siri reads out.
+class _QuickSendRefused implements Exception {
+  const _QuickSendRefused(this.message);
+  final String message;
+}
+
 /// Answers quick sends from Siri and Shortcuts while Home is mounted.
 ///
 /// iOS can run a quick send with Buzz in the background; the app still
@@ -12,6 +18,8 @@ class QuickSendHost extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Keeps the Bestie choice loaded for a send that arrives in the background.
+    ref.watch(defaultAgentProvider);
     useEffect(() {
       _quickSendChannel.setMethodCallHandler((call) async {
         if (call.method != 'send') throw MissingPluginException();
@@ -20,31 +28,31 @@ class QuickSendHost extends HookConsumerWidget {
           throw PlatformException(code: 'empty', message: 'Say a message.');
         }
         try {
-          await quickSendToBestie(ref, text.trim());
-        } on PlatformException {
-          rethrow;
+          await _quickSendToBestie(ref, text.trim());
+        } on _QuickSendRefused catch (failure) {
+          throw PlatformException(code: 'failed', message: failure.message);
         } catch (failure) {
+          debugPrint('Quick send failed: $failure');
           throw PlatformException(
             code: 'failed',
-            message: failure.toString().replaceFirst(
-              RegExp(r'^(Bad state|Exception): '),
-              '',
-            ),
+            message: "Buzz couldn't send that. Open Buzz to try again.",
           );
         }
       });
       unawaited(_quickSendChannel.invokeMethod<void>('ready'));
-      return () => _quickSendChannel.setMethodCallHandler(null);
+      return () {
+        _quickSendChannel.setMethodCallHandler(null);
+        unawaited(_quickSendChannel.invokeMethod<void>('unready'));
+      };
     }, const []);
     return const SizedBox.shrink();
   }
 }
 
 /// Starts a new Solo chat with the Bestie whose first message is [content].
-@visibleForTesting
-Future<void> quickSendToBestie(WidgetRef ref, String content) async {
+Future<void> _quickSendToBestie(WidgetRef ref, String content) async {
   if (utf8.encode(content).length > 8192) {
-    throw StateError('That message is too long.');
+    throw _QuickSendRefused('That message is too long.');
   }
   // After its background grace period the session has closed the socket.
   // Reopen it for this send, then let the background pause start over.
@@ -67,16 +75,15 @@ Future<void> _sendToBestie(WidgetRef ref, String content) async {
   await _connected(ref);
   final sync = ref.read(meSyncProvider);
   if (MeChatCreation.pending(sync) != null) {
-    throw StateError('Open Buzz to finish a chat that was interrupted.');
+    throw _QuickSendRefused('Open Buzz to finish a chat that was interrupted.');
   }
   final bestie = await ref
       .read(defaultAgentProvider.future)
       .timeout(const Duration(seconds: 10));
-  if (bestie == null) throw StateError('Choose a Bestie in Buzz first.');
+  if (bestie == null) throw _QuickSendRefused('Choose a Bestie in Buzz first.');
   final channelId = const Uuid().v4();
   for (var attempt = 1; ; attempt++) {
     try {
-      // A retry resumes the saved creation, with the same first message.
       await _createMeChat(
         ref,
         sync,
@@ -87,10 +94,17 @@ Future<void> _sendToBestie(WidgetRef ref, String content) async {
         initialContent: content,
       );
       return;
-    } catch (failure) {
-      // Catching up after a reconnect can briefly use the relay's write quota.
-      if (attempt == 3 || !'$failure'.contains('rate-limited:')) rethrow;
+    } on StateError {
+      rethrow; // The agent or community changed; trying again can't help.
+    } on MeRecoveryConflict {
+      rethrow;
+    } catch (_) {
+      // A background launch often meets a dropped connection or, catching up
+      // after a reconnect, the relay's write quota. Retrying is safe because
+      // it resumes the saved creation with the same signed first message.
+      if (attempt == 3) rethrow;
       await Future<void>.delayed(Duration(seconds: attempt));
+      await _connected(ref);
     }
   }
 }
@@ -111,7 +125,7 @@ Future<void> _connected(WidgetRef ref) async {
   try {
     await connected.future.timeout(const Duration(seconds: 10));
   } on TimeoutException {
-    throw StateError("Buzz couldn't reach your community.");
+    throw _QuickSendRefused("Buzz couldn't reach your community.");
   } finally {
     subscription.close();
   }
