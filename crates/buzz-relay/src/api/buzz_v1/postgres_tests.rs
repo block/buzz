@@ -161,7 +161,10 @@ async fn accessory_router_signed_url_body_replay_and_actor_boundary() {
         ("since=not-a-marker".into(), StatusCode::BAD_REQUEST),
         ("kinds=sidebar".into(), StatusCode::BAD_REQUEST),
         ("limit=501".into(), StatusCode::BAD_REQUEST),
-        ("kinds=thread,mention&limit=500".into(), StatusCode::OK),
+        ("kinds=thread,dm&limit=500".into(), StatusCode::OK),
+        ("kinds=thread,mention".into(), StatusCode::BAD_REQUEST),
+        ("kinds=mention&limit=500&unread=true".into(), StatusCode::OK),
+        ("kinds=channel&unread=true".into(), StatusCode::BAD_REQUEST),
     ] {
         let path = format!("/buzz/v1/me/activity?{query}");
         let auth = proof(&actor, &host, &path, "GET", None);

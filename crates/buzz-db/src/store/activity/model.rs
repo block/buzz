@@ -18,7 +18,8 @@ pub const MAX_MENTIONS: u32 = 99;
 pub const HORIZON_SECONDS: i64 = 30 * 24 * 60 * 60;
 /// Newest events per channel, or replies per thread, the fill examines.
 pub const FILL_SCAN: i64 = 512;
-/// The person's newest mentions examined for the unread mention total.
+/// The person's newest mentions examined for the unread mention total, and
+/// the mentions one page of the mention feed scans.
 pub const MENTION_SCAN: i64 = 2000;
 /// A row is stamped just before its transaction commits; a `since` read is
 /// widened by this much so a slow commit is not missed.
@@ -48,6 +49,15 @@ impl RowKind {
         RowKind::Solo,
         RowKind::Thread,
         RowKind::Mention,
+    ];
+
+    /// The kinds of the list: conversations and threads. Mentions are a feed
+    /// of their own.
+    pub const LIST: [RowKind; 4] = [
+        RowKind::Channel,
+        RowKind::Dm,
+        RowKind::Solo,
+        RowKind::Thread,
     ];
 
     /// The wire name.
@@ -209,6 +219,16 @@ pub enum Select {
     },
     /// Rows changed since a marker.
     Since(Marker),
+    /// The person's mentions, newest first: a feed of its own, paged on
+    /// demand and never part of a `since` read.
+    Mentions {
+        /// Resume after this row.
+        before: Option<Cursor>,
+        /// Rows wanted.
+        limit: usize,
+        /// Only mentions not yet read.
+        unread: bool,
+    },
     /// Named conversation and thread rows: what a write hands back.
     Ids {
         /// Conversations.
@@ -221,7 +241,7 @@ pub enum Select {
 /// One read of the list.
 #[derive(Debug, Clone)]
 pub struct Query {
-    /// Kinds wanted.
+    /// Conversation and thread kinds wanted. Ignored by [`Select::Mentions`].
     pub kinds: Vec<RowKind>,
     /// Which rows.
     pub select: Select,

@@ -98,22 +98,30 @@ const THREADS: &str = r#"SELECT 'thread' AS kind, encode(f.root_id, 'hex') AS id
             OR f.engaged_at >= $8::timestamptz - make_interval(secs => $9))
         AND ($17::bytea[] IS NULL OR f.root_id = ANY($17))"#;
 
-/// Messages that tag the person, in channels they are still in. A row's
-/// unread follows the read position of the channel or thread it is in.
+/// One page of the messages that tag the person, newest first, in channels
+/// they are still in. A row's unread follows the read position of the channel
+/// or thread it is in.
 ///
-/// A `since` read passes the channels in which the person's read position
-/// moved (`$16`) and those they joined (`$21`): it returns the mentions that
-/// arrived since the marker, those in a scope whose read position moved,
-/// since that changes whether they are unread, and those of a joined channel,
-/// which the client does not hold.
+/// The inner query walks the person's mentions in arrival order and stops at
+/// `$10` of them, so a page costs a bounded scan however few rows pass the
+/// joins and the unread filter (`$11`). The caller continues from the last
+/// mention scanned.
 const MENTIONS: &str = r#"SELECT 'mention' AS kind, encode(m.event_id, 'hex') AS id,
         m.channel_id, m.root_id, m.received_at AS sort_at,
         m.event_id AS preview_id, e.pubkey AS preview_pubkey,
-        e.created_at AS preview_created_at, left(e.content, $19) AS preview_text,
+        e.created_at AS preview_created_at, left(e.content, $9) AS preview_text,
         m.received_at > GREATEST(COALESCE(f.through_timestamp, '-infinity'),
             COALESCE($4::timestamptz, 'infinity')) AS unread,
         COALESCE(f.state, 'default') AS state
-    FROM event_mentions m
+    FROM (
+        SELECT event_id, event_created_at, channel_id, root_id, received_at
+        FROM event_mentions
+        WHERE community_id = $1 AND pubkey_hex = $3 AND received_at > $5::timestamptz
+            AND channel_id IS NOT NULL AND event_kind = ANY($6)
+            AND received_at <= COALESCE($7::timestamptz, 'infinity')
+            AND ($7::timestamptz IS NULL OR received_at < $7 OR event_id > $8)
+        ORDER BY received_at DESC, event_id LIMIT $10
+    ) m
     JOIN channel_members cm ON cm.community_id = $1 AND cm.channel_id = m.channel_id
         AND cm.pubkey = $2 AND cm.removed_at IS NULL
     JOIN channels c ON c.community_id = $1 AND c.id = m.channel_id AND c.deleted_at IS NULL
@@ -121,24 +129,35 @@ const MENTIONS: &str = r#"SELECT 'mention' AS kind, encode(m.event_id, 'hex') AS
         AND e.id = m.event_id AND e.deleted_at IS NULL AND e.pubkey <> $2
     LEFT JOIN personal_read_frontiers f ON f.community_id = $1 AND f.actor = $2
         AND f.channel_id = m.channel_id AND f.root_id = COALESCE(m.root_id, ''::bytea)
-    WHERE m.community_id = $1 AND m.pubkey_hex = $3 AND m.received_at > $20::timestamptz
-        AND m.channel_id IS NOT NULL AND m.event_kind = ANY($5)
-        AND ($16::uuid[] IS NULL OR m.received_at >= $15 OR m.channel_id = ANY($21)
-            OR (m.channel_id = ANY($16)
-                AND COALESCE(f.seq > $14 OR f.through_timestamp >= $15, false)))"#;
+    WHERE NOT $11 OR m.received_at > GREATEST(COALESCE(f.through_timestamp, '-infinity'),
+        COALESCE($4::timestamptz, 'infinity'))
+    ORDER BY m.received_at DESC, m.event_id LIMIT $12"#;
+
+/// The last mention the scan of [`MENTIONS`] reached, when it ran to its
+/// bound: where the next page continues, whatever the page returned.
+const MENTIONS_SCANNED: &str = r#"SELECT received_at, event_id FROM event_mentions
+    WHERE community_id = $1 AND pubkey_hex = $2 AND received_at > $3::timestamptz
+        AND channel_id IS NOT NULL AND event_kind = ANY($4)
+        AND received_at <= COALESCE($5::timestamptz, 'infinity')
+        AND ($5::timestamptz IS NULL OR received_at < $5 OR event_id > $6)
+    ORDER BY received_at DESC, event_id OFFSET $7 LIMIT 1"#;
+
+/// Whether a message tagged the person since the marker: the unread mention
+/// total may have changed though no row of the list did.
+const MENTIONED_SINCE: &str = r#"SELECT EXISTS (SELECT 1 FROM event_mentions
+    WHERE community_id = $1 AND pubkey_hex = $2 AND received_at >= $3::timestamptz)"#;
 
 /// The conversations and threads of the person's list that changed since a
-/// marker: `(channel, thread root or '', whether their read position moved)`.
+/// marker: `(channel, thread root or '', whether they joined it)`.
 ///
 /// It walks the person's own memberships and thread rows and looks each
 /// shared row up by its key, so its cost follows the size of the person's
 /// list, whatever the marker's age and however busy the community is. A
 /// conversation changed when the person joined it, its shared row changed, or
 /// the person changed their own row; a thread, the last two. A post moves its
-/// author's read position without their counter, so the position's own time
-/// is compared too.
+/// author's read position without their counter; the shared row it also moves
+/// is what reports it.
 const CHANGED: &str = r#"(SELECT cm.channel_id, ''::bytea AS root_id,
-        COALESCE(f.seq > $3 OR f.through_timestamp >= $4, false) AS read_moved,
         cm.sync_modified_at >= $4 AS joined
     FROM channel_members cm
     LEFT JOIN channel_heads h ON h.community_id = $1 AND h.channel_id = cm.channel_id
@@ -148,9 +167,7 @@ const CHANGED: &str = r#"(SELECT cm.channel_id, ''::bytea AS root_id,
         AND (cm.sync_modified_at >= $4 OR h.updated_at >= $4 OR f.seq > $3)
     LIMIT $5)
     UNION ALL
-    (SELECT f.channel_id, f.root_id,
-        f.seq > $3 OR COALESCE(f.through_timestamp >= $4, false) AS read_moved,
-        false AS joined
+    (SELECT f.channel_id, f.root_id, false AS joined
     FROM personal_read_frontiers f
     LEFT JOIN thread_heads h ON h.community_id = $1 AND h.root_id = f.root_id
     WHERE f.community_id = $1 AND f.actor = $2 AND f.root_id <> ''::bytea
@@ -200,16 +217,11 @@ struct Binds<'a> {
 /// What one query of a read adds to [`Binds`].
 #[derive(Default)]
 struct Scope<'q> {
-    /// Only these conversations; for mentions, the channels in which the
-    /// person's read position moved.
+    /// Only these conversations.
     channels: Option<&'q [Uuid]>,
     /// Only these threads.
     roots: Option<&'q [Vec<u8>]>,
     limit: Option<i64>,
-    /// Mentions are scanned from here when it is later than the floor.
-    mentions_from: Option<DateTime<Utc>>,
-    /// For mentions, the channels the person joined since the marker.
-    joined: Option<&'q [Uuid]>,
 }
 
 impl Binds<'_> {
@@ -237,13 +249,6 @@ impl Binds<'_> {
             .bind(scope.channels)
             .bind(scope.roots)
             .bind(scope.limit)
-            .bind(PREVIEW_CHARS as i32)
-            .bind(
-                scope
-                    .mentions_from
-                    .map_or(self.mention_floor, |from| from.max(self.mention_floor)),
-            )
-            .bind(scope.joined.unwrap_or_default())
     }
 }
 
@@ -308,11 +313,7 @@ fn reset() -> Page {
 struct Changed {
     channels: Vec<Uuid>,
     roots: Vec<Vec<u8>>,
-    /// Channels in which the person's read position moved, in the channel's
-    /// timeline or one of its threads.
-    read_moved: Vec<Uuid>,
-    /// Channels the person joined, whose threads and mentions are all new
-    /// to the client.
+    /// Channels the person joined, whose threads are all new to the client.
     joined: Vec<Uuid>,
 }
 
@@ -338,13 +339,9 @@ async fn changed(
         .fetch_all(&mut *conn)
         .await?;
     let mut changed = Changed::default();
-    let mut read_moved = std::collections::BTreeSet::new();
     for row in rows {
         let channel: Uuid = row.try_get("channel_id")?;
         let root: Vec<u8> = row.try_get("root_id")?;
-        if row.try_get("read_moved")? {
-            read_moved.insert(channel);
-        }
         if row.try_get("joined")? {
             changed.joined.push(channel);
         }
@@ -372,7 +369,6 @@ async fn changed(
     if changed.channels.len().max(changed.roots.len()) > MAX_SINCE_ROWS {
         return Ok(None);
     }
-    changed.read_moved = read_moved.into_iter().collect();
     Ok(Some(changed))
 }
 
@@ -401,7 +397,30 @@ impl Db {
             {
                 return invalid("invalid id list")
             }
+            Select::Mentions { limit, .. } if !(1..=MAX_LIMIT).contains(limit) => {
+                return invalid("invalid limit")
+            }
+            Select::Mentions {
+                before,
+                limit,
+                unread,
+            } => {
+                return self
+                    .mentions(
+                        community,
+                        actor,
+                        retention_seconds,
+                        before.as_ref(),
+                        *limit,
+                        *unread,
+                    )
+                    .await
+            }
             _ => {}
+        }
+        // Mentions are a feed of their own, not rows of this list.
+        if query.kinds.contains(&RowKind::Mention) {
+            return invalid("mentions are read on their own");
         }
         let actor_bytes = actor.to_bytes();
         let actor_hex = hex::encode(actor_bytes);
@@ -492,6 +511,7 @@ impl Db {
             Select::Page { before, limit } => (before.as_ref(), Some(*limit)),
             Select::Since(_) => (None, Some(MAX_SINCE_ROWS)),
             Select::Ids { .. } => (None, None),
+            Select::Mentions { .. } => (None, None),
         };
         let cursor = match cursor {
             Some(cursor) => Some((
@@ -524,7 +544,7 @@ impl Db {
             (None, None) => (None, None),
         };
         let row_limit = limit.map(|limit| limit as i64 + 1);
-        let groups: [(u8, &str, Option<Scope<'_>>); 3] = [
+        let groups: [(u8, &str, Option<Scope<'_>>); 2] = [
             (
                 0,
                 &conversations,
@@ -540,29 +560,6 @@ impl Db {
                 roots.is_none_or(|ids| !ids.is_empty()).then(|| Scope {
                     roots,
                     limit: row_limit,
-                    ..Scope::default()
-                }),
-            ),
-            (
-                2,
-                MENTIONS,
-                // A read of named rows names no mention.
-                named.is_none().then(|| Scope {
-                    channels: changed
-                        .as_ref()
-                        .map(|changed| changed.read_moved.as_slice()),
-                    limit: row_limit,
-                    // With no read position moved and no channel joined,
-                    // only new mentions matter.
-                    mentions_from: match (&changed, since) {
-                        (Some(changed), Some((_, at)))
-                            if changed.read_moved.is_empty() && changed.joined.is_empty() =>
-                        {
-                            Some(at)
-                        }
-                        _ => None,
-                    },
-                    joined: changed.as_ref().map(|changed| changed.joined.as_slice()),
                     ..Scope::default()
                 }),
             ),
@@ -611,23 +608,125 @@ impl Db {
                 return Ok(reset());
             }
         }
-        // A `since` read that found nothing has nothing new to count. One
-        // that asked for only some kinds cannot tell, so it counts.
-        let counted = match query.select {
-            Select::Page { .. } => first,
-            Select::Since(_) => {
+        // A `since` read that found nothing has nothing new to count. A
+        // mention is not a row of this list, so its arrival is asked for.
+        let counted = match (&query.select, since) {
+            (Select::Page { .. }, _) => first,
+            (Select::Since(_), Some((_, at))) => {
                 !page.rows.is_empty()
                     || !page.removed.is_empty()
                     || changed.as_ref().is_some_and(|changed| !changed.is_empty())
-                    || !wants(2)
+                    || sqlx::query_scalar(MENTIONED_SINCE)
+                        .bind(community.as_uuid())
+                        .bind(&actor_hex)
+                        .bind(at)
+                        .fetch_one(&mut *tx)
+                        .await?
             }
-            Select::Ids { .. } => false,
+            _ => false,
         };
         if counted {
             page.totals = Some(totals(&mut tx, &binds, &conversations).await?);
         }
         tx.commit().await?;
         Ok(page)
+    }
+
+    /// One page of the person's mentions, newest first; `unread` keeps only
+    /// those not yet read. It reads no shared row, so it rebuilds nothing,
+    /// and it returns no marker and no totals: the list read has those.
+    async fn mentions(
+        &self,
+        community: CommunityId,
+        actor: &nostr::PublicKey,
+        retention_seconds: u32,
+        before: Option<&Cursor>,
+        limit: usize,
+        unread: bool,
+    ) -> Result<Page> {
+        let actor_bytes = actor.to_bytes();
+        let actor_hex = hex::encode(actor_bytes);
+        let before = match before {
+            Some(cursor) => Some((
+                micros(cursor.micros)?,
+                hex::decode(&cursor.id)
+                    .ok()
+                    .filter(|id| id.len() == 32)
+                    .ok_or_else(|| DbError::InvalidData("invalid cursor".into()))?,
+            )),
+            None => None,
+        };
+        if before.is_none() {
+            self.start_account(community, &actor_bytes).await?;
+        }
+        let mut conn = observability::acquire_writer(
+            &self.pool,
+            observability::WriterOperation::SubscriptionHistory,
+        )
+        .await?;
+        let mut tx = conn.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::raw_sql("SET LOCAL statement_timeout = '5000ms'; SET LOCAL jit = off")
+            .execute(&mut *tx)
+            .await?;
+        let snapshot = snapshot(&mut tx, community, &actor_bytes).await?;
+        let floor = snapshot.now - chrono::Duration::seconds(i64::from(retention_seconds));
+        // Nothing before the account's start is unread: do not scan it.
+        let floor = match snapshot.started_at {
+            Some(started) if unread => floor.max(started),
+            _ => floor,
+        };
+        let found = sqlx::query(MENTIONS)
+            .bind(community.as_uuid())
+            .bind(actor_bytes.as_slice())
+            .bind(&actor_hex)
+            .bind(snapshot.started_at)
+            .bind(floor)
+            .bind(ELIGIBLE_KINDS.to_vec())
+            .bind(before.as_ref().map(|before| before.0))
+            .bind(before.as_ref().map(|before| before.1.as_slice()))
+            .bind(PREVIEW_CHARS as i32)
+            .bind(MENTION_SCAN)
+            .bind(unread)
+            .bind(limit as i64 + 1)
+            .fetch_all(&mut *tx)
+            .await?;
+        let mut rows = found.iter().map(row).collect::<Result<Vec<_>>>()?;
+        let next = if rows.len() > limit {
+            rows.truncate(limit);
+            rows.last().map(Row::cursor)
+        } else {
+            // The page holds every row the scan passed. When the scan ran to
+            // its bound there may be more beyond it: continue from there.
+            sqlx::query(MENTIONS_SCANNED)
+                .bind(community.as_uuid())
+                .bind(&actor_hex)
+                .bind(floor)
+                .bind(ELIGIBLE_KINDS.to_vec())
+                .bind(before.as_ref().map(|before| before.0))
+                .bind(before.as_ref().map(|before| before.1.as_slice()))
+                .bind(MENTION_SCAN - 1)
+                .fetch_optional(&mut *tx)
+                .await?
+                .map(|last| -> Result<Cursor> {
+                    Ok(Cursor {
+                        micros: last
+                            .try_get::<DateTime<Utc>, _>("received_at")?
+                            .timestamp_micros(),
+                        rank: RowKind::Mention.rank(),
+                        id: hex::encode(last.try_get::<Vec<u8>, _>("event_id")?),
+                    })
+                })
+                .transpose()?
+        };
+        tx.commit().await?;
+        Ok(Page {
+            rows,
+            next,
+            ..Page::default()
+        })
     }
 
     /// Start the person's account on their first read. Reading the list is
