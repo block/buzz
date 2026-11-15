@@ -140,7 +140,9 @@ class ChannelDetailsPage extends HookConsumerWidget {
         !resolvedChannel.isArchived &&
         resolvedChannel.canAddMembers(currentMember?.role);
     // The relay's moderation DM only carries its notices; no one joins it.
-    final relayUrl = ref.watch(activeCommunityProvider).asData?.value?.relayUrl;
+    final relayUrl = resolvedChannel.isDm
+        ? ref.watch(activeCommunityProvider).asData?.value?.relayUrl
+        : null;
     final relayAuthor = relayUrl == null
         ? null
         : ref.watch(relayAuthorProvider(relayUrl)).asData?.value;

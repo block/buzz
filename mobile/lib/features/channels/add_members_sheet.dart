@@ -103,6 +103,9 @@ class AddChannelMembersSheet extends HookConsumerWidget {
     final selectedUsers = useState<List<MentionCandidate>>([]);
     final isSubmitting = useState(false);
     final submitError = useState<String?>(null);
+    // The iOS picker marks itself busy before asking Dart to add; a bump
+    // rebuilds the sheet so it receives the unchanged idle state again.
+    final resync = useState(0);
     final actions = useMemoized(() => ref.read(channelActionsProvider));
 
     // The same candidates, ranking, debounce and search cache as mention
@@ -221,13 +224,18 @@ class AddChannelMembersSheet extends HookConsumerWidget {
     Future<void> addSelectedMembers() async {
       if (selectedUsers.value.isEmpty || isSubmitting.value) return;
       final submittedUsers = List<MentionCandidate>.of(selectedUsers.value);
-      final includeHistory = isDm
-          ? await askIncludeHistory(submittedUsers)
-          : null;
-      if (isDm && (includeHistory == null || !context.mounted)) return;
-      isSubmitting.value = true;
       submitError.value = null;
       try {
+        final bool? includeHistory;
+        try {
+          includeHistory = isDm
+              ? await askIncludeHistory(submittedUsers)
+              : null;
+        } finally {
+          if (context.mounted) resync.value++;
+        }
+        if (isDm && (includeHistory == null || !context.mounted)) return;
+        isSubmitting.value = true;
         if (includeHistory != null) {
           final dm = await actions.addToDm(
             channelId: channelId,
