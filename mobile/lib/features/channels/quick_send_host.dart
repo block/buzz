@@ -38,8 +38,15 @@ class QuickSendHost extends HookConsumerWidget {
         try {
           return switch ((call.method, call.arguments)) {
             ('bestie', _) => await _bestie(ref),
-            ('send', {'text': final String text, 'bestie': final String to}) =>
-              await _quickSend(ref, text.trim(), to),
+            (
+              'send',
+              {
+                'text': final String text,
+                'bestie': final String to,
+                'scope': final String scope,
+              },
+            ) =>
+              await _quickSend(ref, text.trim(), to, scope),
             _ => throw MissingPluginException(),
           };
         } on _QuickSendRefused catch (failure) {
@@ -82,11 +89,37 @@ Future<Map<String, String?>> _bestie(WidgetRef ref) async {
         .preload([bestie])
         .timeout(const Duration(seconds: 2), onTimeout: () => false);
   }
-  return {'pubkey': bestie, 'name': ref.read(userCacheProvider)[bestie]?.label};
+  return {
+    'pubkey': bestie,
+    'name': ref.read(userCacheProvider)[bestie]?.label,
+    'scope': _scope(ref),
+  };
+}
+
+/// The account and community a confirmed Bestie belongs to.
+String _scope(WidgetRef ref) =>
+    '${ref.read(relayConfigProvider).baseUrl} ${ref.read(myPubkeyProvider)}';
+
+/// Refuses a send whose confirmation was for another account or community.
+void _ensureScope(WidgetRef ref, String scope) {
+  if (_scope(ref) != scope) {
+    throw const _QuickSendRefused(
+      'Buzz switched communities. Try again to confirm the new Bestie.',
+    );
+  }
 }
 
 /// Posts [content] in the direct conversation with [bestie].
-Future<void> _quickSend(WidgetRef ref, String content, String bestie) async {
+Future<void> _quickSend(
+  WidgetRef ref,
+  String content,
+  String bestie,
+  String scope,
+) async {
+  _ensureScope(ref, scope);
+  // Bound to this community: each refuses to act after a switch.
+  final actions = ref.read(channelActionsProvider);
+  final send = ref.read(sendMessageProvider);
   if (content.isEmpty) throw const _QuickSendRefused('Say a message.');
   if (utf8.encode(content).length > 8192) {
     throw const _QuickSendRefused('That message is too long.');
@@ -101,12 +134,10 @@ Future<void> _quickSend(WidgetRef ref, String content, String bestie) async {
   if (paused) session.onAppResumed();
   try {
     await _connected(ref);
+    _ensureScope(ref, scope);
     final dm =
         cachedBestieConversation(ref, bestie) ??
-        await ref
-            .read(channelActionsProvider)
-            .openDm(pubkeys: [bestie], waitForChannelList: false);
-    final send = ref.read(sendMessageProvider);
+        await actions.openDm(pubkeys: [bestie], waitForChannelList: false);
     for (var attempt = 1; ; attempt++) {
       try {
         await send(channelId: dm.id, content: content, channel: dm);

@@ -70,13 +70,13 @@ final class QuickSendBridge {
       throw QuickSendError("Open Buzz, then try again.")
     }
     let bestie = try await call("bestie") as? [String: Any]
-    guard let pubkey = bestie?["pubkey"] as? String else {
+    guard let pubkey = bestie?["pubkey"] as? String, let scope = bestie?["scope"] as? String else {
       throw QuickSendError("Buzz couldn't find your Bestie.")
     }
     try await confirm(bestie?["name"] as? String)
     let start = ContinuousClock.now
     do {
-      _ = try await call("send", arguments: ["text": text, "bestie": pubkey])
+      _ = try await call("send", arguments: ["text": text, "bestie": pubkey, "scope": scope])
       Self.log.notice("send finished after \(ContinuousClock.now - start, privacy: .public)")
     } catch {
       Self.log.notice("send failed after \(ContinuousClock.now - start, privacy: .public)")

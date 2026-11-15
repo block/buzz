@@ -260,11 +260,21 @@ void main() {
     container.invalidate(defaultAgentProvider);
     await tester.pump();
     final (named, _) = await siri('bestie');
-    expect(named, {'pubkey': bestie.public, 'name': 'Bestie'});
+    final scope = (named! as Map)['scope'];
+    expect(named, {'pubkey': bestie.public, 'name': 'Bestie', 'scope': scope});
+
+    // A confirmation from before a community switch can't send here.
+    final (_, switched) = await siri('send', {
+      'text': 'Remind me to call Sam',
+      'bestie': bestie.public,
+      'scope': 'https://other.test $scope',
+    });
+    expect(switched?.message, contains('switched communities'));
 
     final (_, blank) = await siri('send', {
       'text': '  \n ',
       'bestie': bestie.public,
+      'scope': scope,
     });
     expect(blank?.code, 'failed');
     expect(blank?.message, 'Say a message.');
@@ -280,6 +290,7 @@ void main() {
     final (_, failure) = await siri('send', {
       'text': '  Remind me to call Sam  ',
       'bestie': bestie.public,
+      'scope': scope,
     });
     expect(failure, isNull);
     expect(
@@ -303,6 +314,7 @@ void main() {
     final (_, again) = await siri('send', {
       'text': 'And buy milk',
       'bestie': bestie.public,
+      'scope': scope,
     });
     expect(again, isNull);
     final messages = relay.published.where((e) => e.kind == 9).toList();
