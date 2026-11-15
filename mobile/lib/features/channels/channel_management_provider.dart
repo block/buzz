@@ -385,6 +385,9 @@ final channelDetailsProvider = FutureProvider.family<ChannelDetails, String>((
     ),
   );
   if (events.isEmpty) {
+    // A channel that turned private or was deleted stays in the saved
+    // directory until its next full read. Opening it is how we learn early.
+    ref.read(channelsProvider.notifier).forgetDirectoryChannel(channelId);
     throw Exception('Channel not found: $channelId');
   }
   return channelDetailsFromEvent(events.first);

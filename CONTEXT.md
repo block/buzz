@@ -1,6 +1,6 @@
 # Buzz domain language
 
-Shared terminology for Buzz product behavior. This glossary currently covers mobile [push suppression](#push-suppression), the [notification body](#notification-body), [mobile builds](#mobile-builds) and [sharing](#sharing); it is not a complete model of Buzz.
+Shared terminology for Buzz product behavior. This glossary currently covers mobile [push suppression](#push-suppression), the [notification body](#notification-body), [mobile builds](#mobile-builds), [sharing](#sharing), [quick send](#quick-send) and the [open-channel directory](#open-channel-directory); it is not a complete model of Buzz.
 
 ## Notifications
 
@@ -83,3 +83,25 @@ _Avoid_: Forward, post
 A conversation offered among the share sheet's suggested destinations: an existing channel or DM, or a new Solo chat. Share targets are learned from top-level messages a person sends in a conversation; thread replies and incoming messages never count.
 
 _Avoid_: Recipient, contact, suggestion
+
+## Agents and conversations
+
+### Bestie
+
+The one agent a person has chosen as their default in a community. A community has at most one Bestie per person.
+
+_Avoid_: Default agent, main agent, assistant
+
+### Quick send
+
+Sending a message to Buzz from outside the app (Siri, Shortcuts, the Action button) without opening Buzz. A quick send to the [Bestie](#bestie) posts the message in the person's DM with the Bestie.
+
+_Avoid_: Siri message, dictation, background send
+
+## Channels
+
+### Open-channel directory
+
+The open, listed channels of a community that a person can find and preview without being a member. Private channels, DMs and unlisted channels are never in it. A client's saved copy is the set it last saw, so a channel that has since turned private, unlisted or deleted can linger in it until the next full read.
+
+_Avoid_: Channel list, public channels, discovery

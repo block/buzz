@@ -7,6 +7,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
 import '../../shared/channels/channel_list_snapshot.dart';
+import '../../shared/channels/open_channel_directory_storage.dart';
 import '../../shared/theme/theme_provider.dart';
 import '../../shared/utils/string_utils.dart';
 import 'channel.dart';
@@ -122,18 +123,19 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   String? _memberSnapshotPubkey;
   Map<String, List<ChannelMember>> _memberSnapshotsByChannelId = const {};
   List<NostrEvent> _directoryMetas = const [];
-  // The scope [_directoryMetas] came from. A community switch drops them, so
-  // the directory status alone cannot say this scope's directory is cached.
-  String? _directoryMetasScope;
+  // The scope and read times of [_directoryMetas]; a switch resets them.
+  final _savedDirectory = _SavedDirectory();
   Set<String> _hiddenDmIds = const {};
 
   /// Fences directory responses to the relay and identity that requested them.
   late final _ChannelRefreshCoordinator _refreshCoordinator =
       _ChannelRefreshCoordinator.forRef(ref);
 
-  // Expose the notifier's protected Ref only to same-library extensions used to
-  // keep lifecycle code below the file-size ratchet.
+  // Expose the notifier's protected Ref and state only to same-library
+  // extensions used to keep code below the file-size ratchet.
   Ref get _lifecycleRef => ref;
+  AsyncValue<List<Channel>> get _listState => state;
+  set _listState(AsyncValue<List<Channel>> value) => state = value;
 
   /// The member snapshot already returned while loading the channel list.
   ///
@@ -222,7 +224,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _memberSnapshotPubkey = pubkey;
       _memberSnapshotsByChannelId = const {};
       _directoryMetas = const [];
-      _directoryMetasScope = null;
+      _savedDirectory.reset();
       _hiddenDmIds = const {};
       _confirmedJoins.clear();
       // Retire any in-flight directory request: its response describes the
@@ -248,7 +250,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         sessionState.status != SessionStatus.connected;
     ref.listen(relaySessionProvider, (previous, next) {
       if (next.status != SessionStatus.connected) return;
-      if (previous?.status != SessionStatus.connected) connectionVersion++;
+      if (previous?.status != SessionStatus.connected) {
+        connectionVersion++;
+        _checkSavedDirectoryOnConnect();
+      }
       if (waitingForInitialConnection && !connected.isCompleted) {
         connected.complete();
       } else if (previous?.status != SessionStatus.connected) {
@@ -423,11 +428,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // private channels and DMs below so discovery fails closed if that contract
     // ever regresses. The composite cursor preserves tied-timestamp rows.
     if (fetchDirectory) {
-      final metas = await _refreshCoordinator.loadDirectory(session, fence);
-      if (metas != null) {
-        _directoryMetas = metas;
-        _directoryMetasScope = fence.scope;
-      }
+      final read = await _refreshCoordinator.loadDirectory(session, fence);
+      if (read != null) _installFullRead(read, fence.scope);
     }
     final directoryMetas = _directoryMetas;
 
@@ -1046,26 +1048,25 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     return _channelFromMeta(latest, data, isMember: false);
   }
 
-  /// Loads the directory unless it is loading, or loaded within [maxAge]
-  /// (any age when null), for the current relay and identity.
-  Future<void> ensureDirectoryLoaded({Duration? maxAge}) async {
+  /// Makes the directory available to a reader that just opened: restores
+  /// the saved copy or reads the whole directory, then checks the relay for
+  /// changes in the background, on the next connect when disconnected (see
+  /// [_ChannelsNotifierDirectory]).
+  Future<void> ensureDirectoryLoaded() async {
     final directoryState = ref.read(channelDirectoryLoadStatusProvider);
     final scope = channelDirectoryScope(
       ref.read(relayConfigProvider).baseUrl,
       ref.read(myPubkeyProvider),
     );
-    final loadedAt = directoryState.loadedAt;
-    final fresh =
-        directoryState.status == ChannelDirectoryLoadStatus.loaded &&
-        _directoryMetasScope == scope &&
-        (maxAge == null ||
-            (loadedAt != null && DateTime.now().difference(loadedAt) < maxAge));
     if (directoryState.scope == scope &&
-        (directoryState.status == ChannelDirectoryLoadStatus.loading ||
-            fresh)) {
+        directoryState.status == ChannelDirectoryLoadStatus.loading) {
       return;
     }
-    await retryDirectory(directoryOnly: true);
+    if (!await _restoreSavedDirectory(scope)) {
+      await retryDirectory(directoryOnly: true);
+      return;
+    }
+    _checkSavedDirectoryWhenConnected();
   }
 
   /// Retries channel discovery while retaining the current channel list.

@@ -641,6 +641,69 @@ impl Db {
             .await
     }
 
+    /// Replace a relay-built replaceable event whose `created_at` depends on
+    /// the live head: `build` receives the head's `created_at` (or `None`)
+    /// read behind the coordinate's replacement lock, so concurrent writers
+    /// of one coordinate each see the previous writer's event and can stamp
+    /// theirs strictly later. The built event must be signed by `pubkey` and
+    /// have `kind`. Otherwise as [`Db::replace_addressable_event`].
+    #[datastore_span(name = "replace_addressable_event_after_head", system = "postgresql")]
+    pub async fn replace_addressable_event_after_head(
+        &self,
+        community_id: CommunityId,
+        kind: i32,
+        pubkey: &[u8],
+        channel_id: Option<Uuid>,
+        build: impl FnOnce(Option<u64>) -> Result<nostr::Event> + Send,
+    ) -> Result<(StoredEvent, bool)> {
+        let mut tx = crate::begin_community_event_write_transaction_with_legacy_metrics(
+            &self.pool,
+            community_id,
+            observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        tx.set_push_enqueue(self.push_enqueue.clone());
+        let transaction_timer = observability::TransactionTimer::start(
+            observability::TransactionOperation::ReplaceAddressableEvent,
+        );
+
+        transaction_timer
+            .observe(async {
+                take_replacement_lock(&mut tx, kind, pubkey, channel_id).await?;
+                let head_sql = if channel_id.is_some() {
+                    replacement_head_sql!(in_channel)
+                } else {
+                    replacement_head_sql!(global)
+                };
+                let mut head = sqlx::query_as(head_sql)
+                    .bind(community_id.as_uuid())
+                    .bind(kind)
+                    .bind(pubkey);
+                if let Some(channel_id) = channel_id {
+                    head = head.bind(channel_id);
+                }
+                let existing: Option<(chrono::DateTime<chrono::Utc>, Vec<u8>)> =
+                    head.fetch_optional(tx.conn()).await?;
+                let event = build(existing.map(|(created_at, _)| created_at.timestamp() as u64))?;
+                if buzz_core::kind::event_kind_i32(&event) != kind
+                    || event.pubkey.to_bytes().as_slice() != pubkey
+                {
+                    return Err(DbError::InvalidData(
+                        "replacement does not match its locked coordinate".into(),
+                    ));
+                }
+                let (stored, was_inserted) =
+                    replace_addressable_event_under_lock(&mut tx, &event, channel_id).await?;
+                if was_inserted {
+                    tx.commit().await?;
+                } else {
+                    tx.rollback().await?;
+                }
+                Ok((stored, was_inserted))
+            })
+            .await
+    }
+
     /// Replace a NIP-33 event inside a caller-owned transaction.
     ///
     /// The caller owns commit or rollback. Requiring [`AdmittedTx`] here and
