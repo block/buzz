@@ -124,7 +124,7 @@ pub struct Row {
     pub preview: Option<Preview>,
     /// Whether the row needs the person's attention.
     pub unread: bool,
-    /// `default`, `following` or `muted`.
+    /// `default` or `muted`.
     pub state: &'static str,
     /// Arrival in microseconds: the exact sort key, for cursors.
     #[serde(skip)]
