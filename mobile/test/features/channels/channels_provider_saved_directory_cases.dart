@@ -198,4 +198,38 @@ void _savedDirectoryCases() {
     await app.open();
     expect(app.reads().last, isNull);
   });
+
+  test(
+    'a reader opening before the session connects checks on connect',
+    () async {
+      final app = await _SavedDirectoryHarness.create(
+        _FakeRelaySession(
+          memberships: const [],
+          metadata: [_meta(id: _channelA, name: 'general', createdAt: 100)],
+        ),
+      );
+      await app.launch();
+      await app.open();
+      await app.expectSaved(['general']);
+
+      // Days later, the app relaunches and search opens before the session
+      // connects: the saved copy serves at once.
+      app.now = app.now.add(const Duration(days: 3));
+      app.session.metadata = [
+        _meta(id: _channelB, name: 'fresh', createdAt: 200),
+      ];
+      await app.relaunch();
+      app.session.setStatus(SessionStatus.connecting);
+      await app.open();
+      expect(app.unjoined(), ['general']);
+      final reads = app.reads().length;
+
+      // Connecting runs the check the reader missed: here, the overdue full
+      // read.
+      app.session.setStatus(SessionStatus.connected);
+      await _settle();
+      expect(app.reads().skip(reads), [null]);
+      expect(app.unjoined(), ['fresh']);
+    },
+  );
 }

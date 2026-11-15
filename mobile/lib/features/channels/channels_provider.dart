@@ -250,7 +250,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         sessionState.status != SessionStatus.connected;
     ref.listen(relaySessionProvider, (previous, next) {
       if (next.status != SessionStatus.connected) return;
-      if (previous?.status != SessionStatus.connected) connectionVersion++;
+      if (previous?.status != SessionStatus.connected) {
+        connectionVersion++;
+        _checkSavedDirectoryOnConnect();
+      }
       if (waitingForInitialConnection && !connected.isCompleted) {
         connected.complete();
       } else if (previous?.status != SessionStatus.connected) {
@@ -1047,7 +1050,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
   /// Makes the directory available to a reader that just opened: restores
   /// the saved copy or reads the whole directory, then checks the relay for
-  /// changes in the background (see [_ChannelsNotifierDirectory]).
+  /// changes in the background, on the next connect when disconnected (see
+  /// [_ChannelsNotifierDirectory]).
   Future<void> ensureDirectoryLoaded() async {
     final directoryState = ref.read(channelDirectoryLoadStatusProvider);
     final scope = channelDirectoryScope(
@@ -1062,14 +1066,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       await retryDirectory(directoryOnly: true);
       return;
     }
-    if (ref.read(relaySessionProvider).status != SessionStatus.connected) {
-      return;
-    }
-    unawaited(
-      _checkSavedDirectory().catchError((Object error) {
-        debugPrint('[ChannelsNotifier] directory check failed: $error');
-      }),
-    );
+    _checkSavedDirectoryWhenConnected();
   }
 
   /// Retries channel discovery while retaining the current channel list.

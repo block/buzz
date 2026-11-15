@@ -758,6 +758,10 @@ class _SavedDirectory {
   /// When a reader last asked the relay for changes.
   DateTime? checkedAt;
 
+  /// Whether a reader opened while the session was not connected, so the
+  /// next connect checks the relay for it.
+  bool checkOnConnect = false;
+
   /// The relay read a reader started, until it settles. Readers that open
   /// meanwhile share it, so a read slower than the check interval is not
   /// displaced by another.
@@ -772,6 +776,7 @@ class _SavedDirectory {
     fullAt = null;
     readAt = null;
     checkedAt = null;
+    checkOnConnect = false;
     checking = null;
     forgotten.clear();
   }
@@ -868,6 +873,26 @@ extension _ChannelsNotifierDirectory on ChannelsNotifier {
     _invalidateChangedDetails(channels, previous);
     _listState = AsyncData(channels);
     _saveSnapshot?.call(channels, _hiddenDmIds);
+  }
+
+  /// Checks a held directory for changes in the background now, or on the
+  /// next connect when the session is not connected.
+  void _checkSavedDirectoryWhenConnected() {
+    final connected =
+        _lifecycleRef.read(relaySessionProvider).status ==
+        SessionStatus.connected;
+    _savedDirectory.checkOnConnect = !connected;
+    if (!connected) return;
+    unawaited(
+      _checkSavedDirectory().catchError((Object error) {
+        debugPrint('[ChannelsNotifier] directory check failed: $error');
+      }),
+    );
+  }
+
+  /// Runs the check a reader asked for while the session was not connected.
+  void _checkSavedDirectoryOnConnect() {
+    if (_savedDirectory.checkOnConnect) _checkSavedDirectoryWhenConnected();
   }
 
   /// Reads the relay for a held directory, at most once per
