@@ -78,6 +78,9 @@ class QuickSendHost extends HookConsumerWidget {
 /// This is the saved choice, which may predate a change made on another
 /// device that this one hasn't synced; naming it lets the person catch that.
 Future<Map<String, String?>> _bestie(WidgetRef ref) async {
+  // Captured first: a switch during the awaits must not pair this
+  // community's scope with another's Bestie.
+  final scope = _scope(ref);
   final bestie = await ref
       .read(defaultAgentProvider.future)
       .timeout(const Duration(seconds: 10));
@@ -91,10 +94,11 @@ Future<Map<String, String?>> _bestie(WidgetRef ref) async {
         .preload([bestie])
         .timeout(const Duration(seconds: 2), onTimeout: () => false);
   }
+  _ensureScope(ref, scope);
   return {
     'pubkey': bestie,
     'name': ref.read(userCacheProvider)[bestie]?.label,
-    'scope': _scope(ref),
+    'scope': scope,
   };
 }
 
