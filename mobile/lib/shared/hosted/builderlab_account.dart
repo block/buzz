@@ -184,58 +184,65 @@ class BuilderlabAccountClient {
     required String code,
     required String verifier,
     bool Function()? isCurrent,
-  }) => _serial(() async {
+  }) {
+    // Taken at the call, so an exchange queued before a sign-out can never
+    // sign back in after it.
     final epoch = _sessionEpoch;
-    if (code.isEmpty ||
-        !RegExp(r'^[A-Za-z0-9._~-]{43,128}$').hasMatch(verifier)) {
-      throw AccountFailure.invalidResponse;
-    }
-    final stored = await _readRecord();
-    final result = await _request(
-      '/v1/auth/login/exchange',
-      body: {'code': code, 'code_verifier': verifier},
-    );
-    final credential = result['session_credential'];
-    if (credential is! String ||
-        credential.isEmpty ||
-        credential.length > 512) {
-      throw AccountFailure.invalidResponse;
-    }
-    final verified = await _verify(credential);
-    if (DateTime.tryParse(
-          result['expires_at'] is String ? result['expires_at'] as String : '',
-        ) !=
-        verified.expiresAt) {
-      throw AccountFailure.invalidResponse;
-    }
-    if (stored != null && stored.subject != verified.subject) {
-      throw AccountFailure.differentAccount;
-    }
-    final record = jsonEncode({
-      'origin': accountOrigin.toString(),
-      'credential': credential,
-      'subject': verified.subject,
-      'expires_at': verified.expiresAt.toIso8601String(),
-    });
-    // Saved and adopted as one storage change, so a sign-out lands wholly
-    // before or after it.
-    return _storageQueue.run(() async {
-      if (_disposed ||
-          epoch != _sessionEpoch ||
-          (isCurrent != null && !isCurrent())) {
-        throw AccountFailure.unavailable;
+    return _serial(() async {
+      if (epoch != _sessionEpoch) throw AccountFailure.unavailable;
+      if (code.isEmpty ||
+          !RegExp(r'^[A-Za-z0-9._~-]{43,128}$').hasMatch(verifier)) {
+        throw AccountFailure.invalidResponse;
       }
-      try {
-        await _storage.write(key: _storageKey, value: record);
-        if (await _storage.read(key: _storageKey) != record) {
+      final stored = await _readRecord();
+      final result = await _request(
+        '/v1/auth/login/exchange',
+        body: {'code': code, 'code_verifier': verifier},
+      );
+      final credential = result['session_credential'];
+      if (credential is! String ||
+          credential.isEmpty ||
+          credential.length > 512) {
+        throw AccountFailure.invalidResponse;
+      }
+      final verified = await _verify(credential);
+      if (DateTime.tryParse(
+            result['expires_at'] is String
+                ? result['expires_at'] as String
+                : '',
+          ) !=
+          verified.expiresAt) {
+        throw AccountFailure.invalidResponse;
+      }
+      if (stored != null && stored.subject != verified.subject) {
+        throw AccountFailure.differentAccount;
+      }
+      final record = jsonEncode({
+        'origin': accountOrigin.toString(),
+        'credential': credential,
+        'subject': verified.subject,
+        'expires_at': verified.expiresAt.toIso8601String(),
+      });
+      // Saved and adopted as one storage change, so a sign-out lands wholly
+      // before or after it.
+      return _storageQueue.run(() async {
+        if (_disposed ||
+            epoch != _sessionEpoch ||
+            (isCurrent != null && !isCurrent())) {
+          throw AccountFailure.unavailable;
+        }
+        try {
+          await _storage.write(key: _storageKey, value: record);
+          if (await _storage.read(key: _storageKey) != record) {
+            throw AccountFailure.storage;
+          }
+        } catch (_) {
           throw AccountFailure.storage;
         }
-      } catch (_) {
-        throw AccountFailure.storage;
-      }
-      return _adopt(credential, verified);
+        return _adopt(credential, verified);
+      });
     });
-  });
+  }
 
   /// An unreadable record is a storage failure, never an absent session: its
   /// subject is unknown, so only an explicit [clearLocalSession] may drop it.
@@ -461,6 +468,8 @@ class BuilderlabAccountClient {
         // Unreadable: there is no credential to keep.
       }
     }
+    // Nothing may share the credential again while it is being removed.
+    _unshared = null;
     // Attempt both removals so one failure never leaves the other copy live.
     var failed = false;
     try {
