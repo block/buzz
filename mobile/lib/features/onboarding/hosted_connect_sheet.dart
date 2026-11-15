@@ -4,6 +4,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/hosted/hosted_flow.dart';
+import '../../shared/hosted/hosted_environment.dart';
 import '../../shared/widgets/onboarding_step_page.dart';
 import '../../shared/widgets/bee_loading_mark.dart';
 import '../../shared/widgets/onboarding_loading_page.dart';
@@ -90,6 +91,20 @@ class HostedConnectSheet extends HookConsumerWidget {
                   ? 'Create a new Buzz identity, or import the identity you already use.'
                   : 'Bring your existing Buzz identity from your other device.'
             : 'Your identity hasn’t been backed up yet. Bring it from your other device to keep using the same Buzz account.',
+      HostedFlowStage.confirmBackup =>
+        flow.bindingOnly
+            ? 'Link this identity to the receiving Builderlab account? '
+                  'This app cannot change the linked identity later. '
+                  'No backup is uploaded by this browser handoff. '
+                  'Cancelling stops setup; it does not undo any earlier linking.'
+            : 'Allow Builderlab to link this identity to your account and upload '
+                  'an encrypted copy of your secret key (nsec) to '
+                  '${HostedEnvironment.origin.host}? Builderlab can decrypt this backup. '
+                  'Anyone signed in to this account can recover the key and use your '
+                  'identity, including on self-hosted relays. '
+                  'This app cannot change the linked identity later. '
+                  'Joining requires a backup. Cancelling stops setup; it does not undo '
+                  'any earlier linking or upload, including an upload whose confirmation was lost.',
       HostedFlowStage.chooseCommunities => 'Select a community',
       HostedFlowStage.communityConflict =>
         '${flow.addingCommunityName} is already saved with a different identity. '
@@ -145,6 +160,37 @@ class HostedConnectSheet extends HookConsumerWidget {
       ],
       if (!fullScreen) Text(message, style: context.textTheme.bodyLarge),
       const SizedBox(height: Grid.sm),
+      if (stage == HostedFlowStage.confirmBackup) ...[
+        Text(
+          flow.backupAccountEmail == null
+              ? 'We couldn’t identify the receiving account. Sign out and sign in again before continuing.'
+              : 'Receiving account: ${flow.backupAccountEmail}',
+          style: context.textTheme.bodyLarge,
+        ),
+        const SizedBox(height: Grid.twelve),
+        SelectableText(
+          fullNpub(flow.backupPubkey ?? '') ?? '',
+          style: context.textTheme.bodySmall,
+        ),
+        const SizedBox(height: Grid.twelve),
+        FilledButton(
+          style: actionStyle,
+          onPressed: flow.confirmBackup,
+          child: Text(
+            flow.bindingOnly ? 'Link and continue' : 'Back up and continue',
+          ),
+        ),
+        TextButton(
+          style: actionStyle,
+          onPressed: () => flow.leave(),
+          child: const Text('Cancel setup'),
+        ),
+        TextButton(
+          style: actionStyle,
+          onPressed: flow.signOutAccount,
+          child: const Text('Sign out'),
+        ),
+      ],
       for (final choice in flow.identityChoices)
         Padding(
           padding: const EdgeInsets.only(bottom: Grid.sm),
@@ -186,7 +232,9 @@ class HostedConnectSheet extends HookConsumerWidget {
         ),
         const SizedBox(height: Grid.twelve),
         Text(
-          'We’ll securely back it up so your next sign-in is easier.',
+          flow.bindingOnly
+              ? 'This links the identity to your Builderlab account. This app cannot change it later. No backup is uploaded by this browser handoff.'
+              : 'New identities are linked to your Builderlab account and backed up automatically. This app cannot change the linked identity later. Existing keys require confirmation before backup.',
           textAlign: TextAlign.center,
           style: context.textTheme.bodySmall,
         ),
@@ -253,6 +301,7 @@ class HostedConnectSheet extends HookConsumerWidget {
           stage != HostedFlowStage.acceptPolicy &&
           stage != HostedFlowStage.chooseIdentity &&
           stage != HostedFlowStage.setupIdentity &&
+          stage != HostedFlowStage.confirmBackup &&
           stage != HostedFlowStage.chooseCommunities &&
           stage != HostedFlowStage.communityConflict &&
           stage != HostedFlowStage.complete &&
@@ -282,6 +331,8 @@ class HostedConnectSheet extends HookConsumerWidget {
                   ? 'Create or import a Buzz identity'
                   : 'Import your Buzz identity'
             : 'Bring your identity with you',
+      HostedFlowStage.confirmBackup =>
+        flow.bindingOnly ? 'Link your identity?' : 'Back up your secret key?',
       HostedFlowStage.chooseIdentity => 'Choose your identity',
       HostedFlowStage.working =>
         flow.addingCommunityName == null

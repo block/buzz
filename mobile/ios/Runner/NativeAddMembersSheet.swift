@@ -8,6 +8,9 @@ final class NativeAddMembersSheetCoordinator: NSObject, UIAdaptivePresentationCo
   private var navigation: UINavigationController?
   private var picker: NativeAddMembersViewController?
   private var session: String?
+  /// Presents that arrived while the previous picker was still animating
+  /// closed. They run once it is gone, so a replacement picker can open.
+  private var afterClose: [() -> Void]?
 
   init(messenger: FlutterBinaryMessenger, parentViewController: UIViewController?) {
     channel = FlutterMethodChannel(name: "buzz/add_members_sheet", binaryMessenger: messenger)
@@ -25,6 +28,10 @@ final class NativeAddMembersSheetCoordinator: NSObject, UIAdaptivePresentationCo
     }
     switch call.method {
     case "present":
+      if afterClose != nil {
+        afterClose?.append { [weak self] in self?.handle(call, result: result) }
+        return
+      }
       guard navigation == nil else {
         result(FlutterError(code: "busy", message: "A member picker is already open.", details: nil))
         return
@@ -78,10 +85,33 @@ final class NativeAddMembersSheetCoordinator: NSObject, UIAdaptivePresentationCo
     session = nil
     self.navigation = nil
     picker = nil
-    navigation.dismiss(animated: !UIAccessibility.isReduceMotionEnabled) { [weak self] in
+    afterClose = afterClose ?? []
+    Self.dismiss(navigation) { [weak self] in
       if notify { self?.channel.invokeMethod("closed", arguments: ["session": request]) }
       completion?()
+      let queued = self?.afterClose ?? []
+      self?.afterClose = nil
+      queued.forEach { $0() }
     }
+  }
+
+  /// UIKit ignores a dismiss that arrives mid-transition (the sheet still
+  /// animating in, or an interactive swipe-down) and never runs its
+  /// completion, which would hold every later present forever. Waits for the
+  /// transition to end, then dismisses whatever is still presented.
+  private static func dismiss(_ navigation: UINavigationController, completion: @escaping () -> Void) {
+    if let transition = navigation.transitionCoordinator {
+      // The coordinator is still attached while its completion runs.
+      transition.animate(alongsideTransition: nil) { _ in
+        DispatchQueue.main.async { dismiss(navigation, completion: completion) }
+      }
+      return
+    }
+    guard navigation.presentingViewController != nil else {
+      completion()
+      return
+    }
+    navigation.dismiss(animated: !UIAccessibility.isReduceMotionEnabled, completion: completion)
   }
 
   func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {

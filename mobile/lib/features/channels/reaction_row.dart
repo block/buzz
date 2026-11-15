@@ -15,6 +15,8 @@ import '../../shared/hosted/builderlab_account.dart';
 import '../../shared/hosted/hosted_relay_auth.dart';
 import '../../shared/hosted/native_media_headers.dart';
 import '../../shared/relay/relay_provider.dart';
+import '../../shared/custom_emoji/custom_emoji.dart';
+import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../../shared/emoji/emoji_burst.dart';
 import '../../shared/emoji/emoji_avatar.dart';
@@ -425,16 +427,40 @@ class _AddReactionPill extends StatelessWidget {
   }
 }
 
-class _ReactionEmoji extends StatelessWidget {
+/// A `:shortcode:` reaction body, as opposed to a unicode emoji.
+bool _isShortcodeReaction(String emoji) =>
+    emoji.length > 2 &&
+    emoji.startsWith(':') &&
+    emoji.endsWith(':') &&
+    normalizeShortcode(emoji) != null;
+
+/// The image behind [reaction]: the NIP-30 `emoji` tag on its event, else, for
+/// a tagless `:shortcode:` (an agent's reaction, say), the community palette
+/// entry. Null for a unicode emoji or a shortcode nothing resolves.
+String? _reactionImageUrl(
+  TimelineReaction reaction,
+  List<CustomEmoji> palette,
+) {
+  final tagged = reaction.emojiUrl;
+  if (tagged != null && tagged.isNotEmpty) return tagged;
+  if (!_isShortcodeReaction(reaction.emoji)) return null;
+  return reactionEmojiUrl(reaction.emoji, palette);
+}
+
+/// A reaction slot never shows shortcode text: a custom emoji is its image, and
+/// a shortcode with no image (unknown, or one that fails to load) is the
+/// neutral [CustomEmojiPlaceholder].
+class _ReactionEmoji extends ConsumerWidget {
   final TimelineReaction reaction;
   final double size;
 
   const _ReactionEmoji({required this.reaction, required this.size});
 
   @override
-  Widget build(BuildContext context) {
-    final emojiUrl = reaction.emojiUrl;
-    if (emojiUrl == null || emojiUrl.isEmpty) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hasTag = reaction.emojiUrl?.isNotEmpty ?? false;
+    final isShortcode = _isShortcodeReaction(reaction.emoji);
+    if (!hasTag && !isShortcode) {
       return NativeEmojiGlyph(
         emoji: reaction.emoji,
         size: size,
@@ -442,17 +468,27 @@ class _ReactionEmoji extends StatelessWidget {
         centerInOpticalBox: true,
       );
     }
-    final shortcode = reaction.emoji.substring(1, reaction.emoji.length - 1);
+    final url = _reactionImageUrl(
+      reaction,
+      // Only a tagless shortcode needs the palette; other pills don't rebuild
+      // when it loads.
+      hasTag ? const [] : ref.watch(customEmojiListProvider),
+    );
+    final shortcode = isShortcode
+        ? reaction.emoji.substring(1, reaction.emoji.length - 1)
+        : reaction.emoji;
     return SizedBox.square(
       dimension: size,
       child: FittedBox(
         fit: BoxFit.scaleDown,
-        child: CustomEmojiImage(
-          shortcode: shortcode,
-          url: emojiUrl,
-          size: size,
-          compact: true,
-        ),
+        child: url == null
+            ? CustomEmojiPlaceholder(shortcode: shortcode, size: size)
+            : CustomEmojiImage(
+                shortcode: shortcode,
+                url: url,
+                size: size,
+                compact: true,
+              ),
       ),
     );
   }
@@ -824,7 +860,13 @@ Future<bool> _showNativeReactionDetails(
           'selected': reaction.reactedByCurrentUser,
           'burst': isPositiveEmojiParticle(reaction.emoji),
           'users': reaction.userPubkeys.toSet().toList(),
-          if (reaction.emojiUrl case final String url) ...{
+          // `isShortcode` tells the native glyph never to print the text.
+          if (_isShortcodeReaction(reaction.emoji)) 'isShortcode': true,
+          if (_reactionImageUrl(
+                reaction,
+                container.read(customEmojiListProvider),
+              )
+              case final String url) ...{
             'url': url,
             'headers': nativeMediaHeaders(url),
             // The timeline usually downloaded this emoji already; reuse it so
@@ -849,6 +891,11 @@ Future<bool> _showNativeReactionDetails(
     }
 
     reactions.addListener(updateReactions);
+    // A tagless shortcode shows the placeholder until the palette arrives.
+    final paletteSubscription = container.listen(
+      customEmojiListProvider,
+      (_, _) => updateReactions(),
+    );
     // Native headers read the cached assertion synchronously, and that cache
     // reads as empty inside its refresh margin while the live socket is still
     // valid. Present at once with what is cached, refresh in the background,
@@ -894,6 +941,7 @@ Future<bool> _showNativeReactionDetails(
       timer?.cancel();
       subscription.close();
       namesSubscription.close();
+      paletteSubscription.close();
     }
   });
   if (addRequested && context.mounted) onAddReaction?.call();

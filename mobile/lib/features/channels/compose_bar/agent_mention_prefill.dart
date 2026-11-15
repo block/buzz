@@ -126,6 +126,10 @@ void _useAgentMentionPrefill({
     final bindings = <String, MentionCandidate>{};
     for (final agent in agents) {
       final label = selectedMentionLabel(agent.label, agent.pubkey, {
+        // A later namesake qualifies this agent as well as itself.
+        for (final other in agents)
+          if (other.pubkey.toLowerCase() != agent.pubkey.toLowerCase())
+            other.label: other.pubkey,
         for (final entry in bindings.entries) entry.key: entry.value.pubkey,
       });
       bindings[label] = agent;

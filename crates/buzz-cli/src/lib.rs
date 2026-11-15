@@ -132,7 +132,9 @@ Configuration (flags override env vars):
                      Buzz desktop credential acts on; else, with no private key,
                      the one relay a running Buzz desktop accepts this CLI's
                      pairing for (see `buzz auth desktop list`); else
-                     http://localhost:3000]
+                     http://localhost:3000. `auth desktop pair` given none
+                     pairs for the desktop's active community. A bare host
+                     means https://]
   BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [unless a Buzz desktop provides it]
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
   BUZZ_FEDERATED_IDENTITY_TOKEN    Your NIP-FA sign-in session token  [optional]
@@ -148,11 +150,13 @@ Exit codes: 0=ok  1=bad input  2=relay/network error  3=auth error  4=other  5=w
 Errors are JSON on stderr: {\"error\": \"<category>\", \"message\": \"<detail>\"}"
 )]
 struct Cli {
-    /// Relay URL (http:// or https://). Overrides BUZZ_RELAY_URL env var.
-    /// Without either, the relay an agent's inherited Buzz desktop credential
-    /// acts on; else, with no private key, the one relay a running Buzz
-    /// desktop accepts this CLI's pairing for; otherwise http://localhost:3000.
-    #[arg(long, env = "BUZZ_RELAY_URL")]
+    /// Relay URL; a bare host means https://. Overrides BUZZ_RELAY_URL env
+    /// var. Without either, the relay an agent's inherited Buzz desktop
+    /// credential acts on; else, with no private key, the one relay a running
+    /// Buzz desktop accepts this CLI's pairing for; otherwise
+    /// http://localhost:3000. Pairing given none uses the desktop's active
+    /// community.
+    #[arg(long, global = true, env = "BUZZ_RELAY_URL")]
     relay: Option<String>,
 
     /// Nostr private key (hex or nsec). This is the CLI's identity.
@@ -365,8 +369,9 @@ enum AuthCmd {
 
 #[derive(Subcommand)]
 enum DesktopAuthCmd {
-    /// Ask the running Buzz desktop to let this CLI act as you on --relay.
-    /// Approve in Buzz; the token is stored in the OS keychain.
+    /// Ask the running Buzz desktop to let this CLI act as you on --relay,
+    /// or, given none, on its active community. Approve in Buzz; the token
+    /// is stored in the OS keychain.
     Pair {
         /// Name shown in the desktop's approval prompt
         #[arg(long, default_value = "buzz CLI")]
@@ -388,10 +393,11 @@ enum DesktopAuthCmd {
 
 /// The relay for a command given none: the one an agent's inherited Buzz
 /// desktop credential acts on; else, without an explicit key, the one relay
-/// a running Buzz desktop still accepts this CLI's pairing for; else
-/// `http://localhost:3000`. Local-only unpairing never asks the desktop,
+/// a running Buzz desktop still accepts this CLI's pairing for; else `None`,
+/// which [`connect`] reads as [`FALLBACK_RELAY`] and pairing as the
+/// desktop's active community. Local-only unpairing never asks the desktop,
 /// and pairing never asks for other pairings.
-async fn default_relay(command: &Cmd, explicit_key: bool) -> Result<String, CliError> {
+async fn default_relay(command: &Cmd, explicit_key: bool) -> Result<Option<String>, CliError> {
     #[cfg(unix)]
     let (inherited, paired) = (
         desktop_provider::inherited_relay(),
@@ -410,14 +416,14 @@ pub(crate) async fn default_relay_with(
     explicit_key: bool,
     inherited: impl std::future::Future<Output = Result<Option<String>, CliError>>,
     paired: impl std::future::Future<Output = Result<Option<String>, CliError>>,
-) -> Result<String, CliError> {
+) -> Result<Option<String>, CliError> {
     #[cfg(unix)]
     if !matches!(
         command,
         Cmd::Auth(AuthCmd::Desktop(DesktopAuthCmd::Unpair { .. }))
     ) {
         if let Some(relay) = inherited.await? {
-            return Ok(relay);
+            return Ok(Some(relay));
         }
         // Pairing asks its own desktop; another desktop's answer is moot.
         let pairing = matches!(
@@ -426,17 +432,29 @@ pub(crate) async fn default_relay_with(
         );
         if !explicit_key && !pairing {
             if let Some(relay) = paired.await? {
-                return Ok(relay);
+                return Ok(Some(relay));
             }
         }
     }
     #[cfg(not(unix))]
     let _ = (command, explicit_key, inherited, paired);
-    Ok("http://localhost:3000".to_owned())
+    Ok(None)
+}
+
+/// The relay a command given none, and found none, acts on.
+const FALLBACK_RELAY: &str = "http://localhost:3000";
+
+/// `raw` as a relay URL: a bare host means `https://`; any scheme stays.
+fn relay_url(raw: &str) -> String {
+    if raw.contains("://") {
+        raw.to_owned()
+    } else {
+        format!("https://{raw}")
+    }
 }
 
 #[cfg(unix)]
-async fn run_auth(cmd: AuthCmd, relay_url: &str) -> Result<(), CliError> {
+async fn run_auth(cmd: AuthCmd, relay_url: Option<&str>) -> Result<(), CliError> {
     let AuthCmd::Desktop(cmd) = cmd;
     let out = match cmd {
         DesktopAuthCmd::Pair { name, instance } => {
@@ -472,7 +490,7 @@ async fn list_pairings(_: &OutputFormat) -> Result<(), CliError> {
 }
 
 #[cfg(not(unix))]
-async fn run_auth(_: AuthCmd, _: &str) -> Result<(), CliError> {
+async fn run_auth(_: AuthCmd, _: Option<&str>) -> Result<(), CliError> {
     Err(CliError::Usage(
         "the Buzz desktop credential provider is not available on Windows yet".into(),
     ))
@@ -770,7 +788,7 @@ pub enum MessagesCmd {
     },
     /// Full-text search across messages
     #[command(
-        after_help = "Examples:\n  buzz messages search --query checkout\n  buzz messages search --author npub1... --since 1783497600\n  buzz messages search --author Aaron --query checkout --limit 20"
+        after_help = "Examples:\n  buzz messages search --query checkout\n  buzz messages search --author npub1... --since 1783497600\n  buzz messages search --author Aaron --query checkout --limit 20\n  buzz messages search --author npub1... --before 1783584000 --before-id <last result id> --limit 100"
     )]
     Search {
         /// Search query string (optional when --author is given)
@@ -782,6 +800,14 @@ pub enum MessagesCmd {
         /// Unix timestamp — return messages after this time
         #[arg(long)]
         since: Option<i64>,
+        /// Unix timestamp cursor — return messages created at or before this time.
+        /// To page back, pass the last result's `created_at` here and its `id` as --before-id.
+        #[arg(long)]
+        before: Option<i64>,
+        /// Event ID cursor — with --before, resume after this event, so events from the
+        /// same second are neither repeated nor skipped. Not allowed with --query.
+        #[arg(long, requires = "before")]
+        before_id: Option<String>,
         /// Maximum number of results to return
         #[arg(long)]
         limit: Option<u32>,
@@ -2593,15 +2619,16 @@ pub(crate) fn normalize_auth_tag_input(input: &str) -> String {
     trimmed.to_owned()
 }
 
-/// Binds the configured community: `auth` pairs it, anything else builds
-/// the client. A desktop binds the whole community URL, trailing slash
+/// Binds the configured community: `auth` pairs it (`None`: the desktop's
+/// active one), anything else builds the client ([`FALLBACK_RELAY`] for
+/// `None`). A desktop binds the whole community URL, trailing slash
 /// included, so pairing and the credential chain take it as configured; only
 /// requests use the trimmed base, which the client derives. The two steps are parameters so a test can
 /// run them against a fake desktop.
 pub(crate) async fn connect(
-    configured: &str,
+    configured: Option<&str>,
     command: Cmd,
-    pair: impl AsyncFnOnce(AuthCmd, &str) -> Result<(), CliError>,
+    pair: impl AsyncFnOnce(AuthCmd, Option<&str>) -> Result<(), CliError>,
     credentials: impl AsyncFnOnce(&str) -> Result<credentials::Credentials, CliError>,
 ) -> Result<Option<(Cmd, BuzzClient)>, CliError> {
     // Pairing runs before any credential exists.
@@ -2609,6 +2636,7 @@ pub(crate) async fn connect(
         pair(sub, configured).await?;
         return Ok(None);
     }
+    let configured = configured.unwrap_or(FALLBACK_RELAY);
     let credentials = credentials(configured).await?;
     let client = BuzzClient::new(configured.to_owned(), credentials)?;
     Ok(Some((command, client)))
@@ -2637,10 +2665,10 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     }
     let explicit_key = settings.private_key.is_some();
     let relay = match cli.relay {
-        Some(relay) => relay,
+        Some(relay) => Some(relay_url(&relay)),
         None => default_relay(&cli.command, explicit_key).await?,
     };
-    let Some((command, client)) = connect(&relay, cli.command, run_auth, async |relay| {
+    let Some((command, client)) = connect(relay.as_deref(), cli.command, run_auth, async |relay| {
         credentials::resolve(settings, relay).await
     })
     .await?
@@ -2760,12 +2788,17 @@ mod tests {
     async fn relay_selection_asks_only_what_a_command_needs() {
         use clap::Parser;
         const INHERITED: &str = "wss://inherited.example/";
-        const DEFAULT: &str = "http://localhost:3000";
         let cases = [
-            ("users get", true, Some(None), DEFAULT),
-            ("auth desktop unpair", false, None, DEFAULT),
-            ("auth desktop pair", false, Some(None), DEFAULT),
-            ("users get", false, Some(Some(INHERITED)), INHERITED),
+            ("users get", true, Some(None), None),
+            ("auth desktop unpair", false, None, None),
+            ("auth desktop pair", false, Some(None), None),
+            (
+                "auth desktop pair",
+                false,
+                Some(Some(INHERITED)),
+                Some(INHERITED),
+            ),
+            ("users get", false, Some(Some(INHERITED)), Some(INHERITED)),
         ];
         for (args, explicit_key, inherited, want) in cases {
             let argv = std::iter::once("buzz").chain(args.split(' '));
@@ -2779,7 +2812,26 @@ mod tests {
             let relay = default_relay_with(&cli.command, explicit_key, inherited, paired)
                 .await
                 .unwrap();
-            assert_eq!(relay, want, "`{args}`");
+            assert_eq!(relay.as_deref(), want, "`{args}`");
+        }
+    }
+
+    /// `--relay` is accepted after the subcommand, and a bare host means
+    /// `https://` while an explicit scheme stays as typed.
+    #[test]
+    fn relay_flag_is_global_and_a_bare_host_means_https() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["buzz", "auth", "desktop", "pair", "--relay", "h.example"])
+            .unwrap();
+        assert_eq!(cli.relay.as_deref(), Some("h.example"));
+        assert_eq!(relay_url("h.example"), "https://h.example");
+        assert_eq!(relay_url("h.example/team"), "https://h.example/team");
+        for kept in [
+            "http://localhost:3000",
+            "ws://h.example",
+            "wss://h.example/",
+        ] {
+            assert_eq!(relay_url(kept), kept);
         }
     }
 
@@ -2825,6 +2877,26 @@ mod tests {
             event.as_str(),
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn messages_search_parses_cursor_and_requires_before_for_before_id() {
+        let search = |extra: &[&str]| {
+            let mut argv = vec!["buzz", "messages", "search", "--author", "x"];
+            argv.extend_from_slice(extra);
+            Cli::try_parse_from(argv)
+        };
+        let id = "a".repeat(64);
+        match search(&["--before", "200", "--before-id", &id]).map(|c| c.command) {
+            Ok(Cmd::Messages(MessagesCmd::Search {
+                before, before_id, ..
+            })) => {
+                assert_eq!(before, Some(200));
+                assert_eq!(before_id.as_deref(), Some(id.as_str()));
+            }
+            _ => panic!("messages search should parse --before and --before-id"),
+        }
+        assert!(search(&["--before-id", &id]).is_err());
     }
 
     #[test]

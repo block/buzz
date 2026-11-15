@@ -70,6 +70,15 @@ void showUserProfileSheet(
 class UserProfileSheet extends HookConsumerWidget {
   final String pubkey;
 
+  /// Opens a conversation from an embedded profile without popping its pane.
+  final ValueChanged<Channel>? onOpenChannel;
+
+  /// Uses the available pane height instead of the modal sheet height cap.
+  final bool embedded;
+
+  /// Insets the profile controls while artwork fills the surrounding pane.
+  final EdgeInsets contentPadding;
+
   /// Agent artwork treatment within the profile sheet.
   final bool agentPresentation;
   final String? agentSubtitle;
@@ -99,6 +108,9 @@ class UserProfileSheet extends HookConsumerWidget {
   const UserProfileSheet({
     super.key,
     required this.pubkey,
+    this.onOpenChannel,
+    this.embedded = false,
+    this.contentPadding = EdgeInsets.zero,
     this.agentPresentation = false,
     this.agentSubtitle,
     this.agentSubtitleIcon,
@@ -198,7 +210,11 @@ class UserProfileSheet extends HookConsumerWidget {
             .read(channelActionsProvider)
             .openDm(pubkeys: [pk], waitForChannelList: false);
         if (!context.mounted) return;
-        Navigator.of(context).pop(channel);
+        if (onOpenChannel != null) {
+          onOpenChannel!(channel);
+        } else {
+          Navigator.of(context).pop(channel);
+        }
       } catch (_) {
         // Silently fail — user tapped but DM open failed.
         if (context.mounted) isOpeningDirectMessage.value = false;
@@ -207,7 +223,9 @@ class UserProfileSheet extends HookConsumerWidget {
 
     final content = ConstrainedBox(
       constraints: BoxConstraints(
-        maxHeight: MediaQuery.sizeOf(context).height * 0.7,
+        maxHeight: embedded
+            ? double.infinity
+            : MediaQuery.sizeOf(context).height * 0.7,
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -526,12 +544,17 @@ class UserProfileSheet extends HookConsumerWidget {
     return AgentArtworkPanel(
       imageUrl: avatarUrl,
       borderRadius: BorderRadius.zero,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          BuzzSheetHeader(leading: headerLeading),
-          Flexible(child: SafeArea(top: false, child: content)),
-        ],
+      child: SafeArea(
+        top: false,
+        bottom: false,
+        minimum: contentPadding,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            BuzzSheetHeader(leading: headerLeading),
+            Flexible(child: SafeArea(top: false, child: content)),
+          ],
+        ),
       ),
     );
   }

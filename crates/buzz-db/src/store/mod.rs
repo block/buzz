@@ -41,6 +41,9 @@ pub mod user_deletion_fences;
 #[cfg(test)]
 mod event_follow_up_postgres_tests;
 
+#[cfg(test)]
+mod event_floor_postgres_tests;
+
 /// Home feed queries.
 pub mod feed;
 /// Git repository name registry (NIP-34 kind:30617).

@@ -482,6 +482,12 @@ Future<void> _confirmAndRun(
   required String confirmLabel,
   required Future<void> Function() action,
 }) async {
+  // The action can take a relay round trip. Close only the sheet or page that
+  // offered it, and only if it is still on top: popping whatever is on top
+  // would close Home if the user dismissed this route meanwhile, and routes
+  // opened over it may still depend on its context.
+  final ownerNavigator = Navigator.of(sheetContext);
+  final ownerRoute = ModalRoute.of(sheetContext);
   final pageContext = Navigator.of(sheetContext, rootNavigator: true).context;
   final confirmed = await showBuzzDialog<bool>(
     context: pageContext,
@@ -503,7 +509,9 @@ Future<void> _confirmAndRun(
   if (confirmed != true) return;
   try {
     await action();
-    if (pageContext.mounted) Navigator.of(pageContext).pop(true);
+    if (ownerNavigator.mounted && ownerRoute?.isCurrent == true) {
+      ownerNavigator.pop(true);
+    }
   } catch (error) {
     if (!pageContext.mounted) return;
     ScaffoldMessenger.of(pageContext).showFeedbackSnackBar(

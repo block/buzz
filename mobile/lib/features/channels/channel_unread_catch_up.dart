@@ -268,3 +268,11 @@ extension _UnreadCatchUp on ChannelsNotifier {
     }
   }
 }
+
+Channel _advanceLastMessageAt(Channel channel, int? createdAt) {
+  if (createdAt == null) return channel;
+  final at = DateTime.fromMillisecondsSinceEpoch(createdAt * 1000, isUtc: true);
+  final current = channel.lastMessageAt;
+  if (current != null && !at.isAfter(current)) return channel;
+  return channel.copyWith(lastMessageAt: at);
+}

@@ -136,6 +136,59 @@ void agentPrefillTests() {
     expect(text(), isEmpty);
   });
 
+  testWidgets('prefills same-name agents with every one qualified', (
+    tester,
+  ) async {
+    final viewer = 'f' * 64;
+    final first = 'a' * 64;
+    final second = 'b' * 64;
+    List<String>? sent;
+    await tester.pumpWidget(
+      _buildComposeBar(
+        uploadService: _testUploadService(nostr.Keys.generate().nsec),
+        currentPubkey: viewer,
+        channels: [_makeCurrentChannel()],
+        loadMembers: () async => [
+          for (final key in [first, second])
+            ChannelMember(
+              pubkey: key,
+              displayName: 'Jitter',
+              role: 'bot',
+              joinedAt: DateTime(2025),
+            ),
+        ],
+        prefillScopeMessages: [
+          TimelineMessage(
+            id: '1',
+            pubkey: viewer,
+            createdAt: 10,
+            content: '',
+            tags: [
+              const ['h', 'channel-1'],
+              ['p', first],
+              ['p', second],
+            ],
+          ),
+        ],
+        onSend: (_, mentions, {mediaTags = const []}) async => sent = mentions,
+      ),
+    );
+    await tester.pumpAndSettle();
+    final prefill = '@Jitter ($first) @Jitter ($second) ';
+    expect(find.text(prefill.trim()), findsOneWidget);
+    await tester.tap(find.text(prefill.trim()));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      prefill,
+    );
+    await tester.enterText(find.byType(TextField), '${prefill}hi');
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+    await tester.pumpAndSettle();
+    expect(sent, [first, second]);
+  });
+
   testWidgets('takes back an untouched prefill once it is out of date', (
     tester,
   ) async {

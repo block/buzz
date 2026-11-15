@@ -68,15 +68,12 @@ class PendingDeepLinkNotifier extends Notifier<BuzzDeepLink?> {
     state = _waiting.isEmpty ? null : _waiting.removeFirst();
   }
 
-  /// Selects the device-local community carried by a structured push target.
+  /// Selects the device-local community a push or share target names.
   /// Ordinary shared deep links have no community ID and remain unchanged.
   Future<DeepLinkCommunityPreparation> prepareCommunity(
-    BuzzDeepLink link,
+    String? communityId,
   ) async {
-    if (link is! MessageDeepLink || link.communityId == null) {
-      return DeepLinkCommunityPreparation.ready;
-    }
-    final communityId = link.communityId!;
+    if (communityId == null) return DeepLinkCommunityPreparation.ready;
     try {
       final communities = await ref.read(communityListProvider.future);
       if (!communities.any((community) => community.id == communityId)) {

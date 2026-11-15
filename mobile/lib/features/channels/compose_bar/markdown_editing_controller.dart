@@ -362,6 +362,42 @@ class _MarkdownEditingController extends TextEditingController {
     );
   }
 
+  /// The code spans and blocks [buildTextSpan] draws in [source]: the same
+  /// leftmost-rule walk, so a delimiter that bold or italics consume does not
+  /// pair as code.
+  List<TextRange> _styledCodeRanges(String source, [int at = 0]) {
+    final ranges = <TextRange>[];
+    var offset = 0;
+    while (offset < source.length) {
+      final tail = source.substring(offset);
+      _MarkdownRule? nextRule;
+      RegExpMatch? nextMatch;
+      for (final rule in _rules) {
+        final match = rule.pattern.firstMatch(tail);
+        if (match == null) continue;
+        if (nextMatch == null || match.start < nextMatch.start) {
+          nextRule = rule;
+          nextMatch = match;
+        }
+      }
+      if (nextRule == null || nextMatch == null) break;
+      final start = at + offset + nextMatch.start;
+      if (nextRule.parsesNestedFormatting) {
+        final (contentStart, _) = _contentBounds(
+          nextMatch.group(0)!,
+          nextRule.style,
+        );
+        ranges.addAll(
+          _styledCodeRanges(nextMatch.group(1)!, start + contentStart),
+        );
+      } else {
+        ranges.add(TextRange(start: start, end: at + offset + nextMatch.end));
+      }
+      offset += nextMatch.end;
+    }
+    return ranges;
+  }
+
   /// Whether [start, end) sits inside inline or fenced code, where links
   /// stay raw text rather than chips.
   static bool _isInCode(String source, int start, int end) => _rules.any(

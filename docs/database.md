@@ -224,8 +224,9 @@ holding a write-blocking lock. Scans that do not block writes, such as
 - A repair script MUST respect community deletion, as
   [ARCHITECTURE.md](../ARCHITECTURE.md) § *Supported Writer Contract*
   requires of operator maintenance. Each batch MUST take
-  `pg_advisory_xact_lock_shared(community_deletion_lock_key(<community>))` for
-  every community it touches. After taking the lock, in the same
+  `pg_advisory_xact_lock_shared(hashtextextended('buzz-community-deletion:' || <community>::text, 0))`
+  for every community it touches (the key `deletion::community_deletion_lock_key`
+  builds). After taking the lock, in the same
   transaction, it MUST read the community's state and touch only rows whose
   community has `deletion_state = 'active'` and `deleted_at IS NULL`, as
   `DeletionStore::guard_transaction` does. Selecting active communities
