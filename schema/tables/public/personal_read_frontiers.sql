@@ -22,4 +22,3 @@ CREATE TABLE personal_read_frontiers (
     FOREIGN KEY (community_id, channel_id)
         REFERENCES channels (community_id, id) ON DELETE CASCADE
 );
-CREATE INDEX personal_read_frontiers_seq ON personal_read_frontiers (community_id, actor, seq);

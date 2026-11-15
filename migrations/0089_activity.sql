@@ -1,7 +1,7 @@
 -- Stored state for GET /buzz/v1/me/activity. See docs/buzz-v1-activity.md.
 -- Expand only: two new tables and nullable or constant-default columns. No
--- trigger, function, foreign key or backfill. 0090 adds the indexes on the
--- existing tables.
+-- trigger, function, foreign key or backfill. 0090 adds the index on an
+-- existing table.
 --
 -- channel_heads and thread_heads are caches of the event log that a read
 -- verifies and rebuilds. They are written after the event commits and by the
@@ -12,9 +12,6 @@ SET LOCAL statement_timeout = '30s';
 CREATE TABLE channel_heads (
     community_id UUID NOT NULL,
     channel_id UUID NOT NULL,
-    activity_at TIMESTAMPTZ,
-    activity_id BYTEA CHECK (octet_length(activity_id) = 32),
-    activity_pubkey BYTEA CHECK (octet_length(activity_pubkey) = 32),
     head_id BYTEA CHECK (octet_length(head_id) = 32),
     head_created_at TIMESTAMPTZ,
     head_received_at TIMESTAMPTZ,
@@ -36,12 +33,10 @@ CREATE TABLE thread_heads (
     activity_created_at TIMESTAMPTZ,
     activity_pubkey BYTEA CHECK (octet_length(activity_pubkey) = 32),
     activity_text TEXT,
-    reply_count INT NOT NULL DEFAULT 0,
     seen_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (community_id, root_id)
 );
-CREATE INDEX thread_heads_updated ON thread_heads (community_id, updated_at);
 
 ALTER TABLE personal_read_accounts ADD COLUMN seq BIGINT NOT NULL DEFAULT 0;
 

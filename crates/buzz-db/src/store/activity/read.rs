@@ -12,10 +12,13 @@ use crate::{
     Db, DbError, Result,
 };
 
-/// Unread mentions per `(channel, thread root)`, from the person's newest
-/// mentions since their floor. `''` is the channel timeline.
-const MENTION_COUNTS: &str = r#"mc AS (
-    SELECT m.channel_id, COALESCE(m.root_id, ''::bytea) AS root_id, count(*) AS n
+/// Most rows one read may name.
+const MAX_NAMED: usize = 200;
+
+/// The person's unread mentions, from their newest mentions since their
+/// floor. Stops counting one past the largest total reported.
+const UNREAD_MENTIONS: &str = r#"SELECT count(*) FROM (
+    SELECT 1
     FROM (
         SELECT event_id, event_created_at, channel_id, root_id, received_at
         FROM event_mentions
@@ -33,28 +36,26 @@ const MENTION_COUNTS: &str = r#"mc AS (
         AND f.channel_id = m.channel_id AND f.root_id = COALESCE(m.root_id, ''::bytea)
     WHERE m.received_at > COALESCE(f.through_timestamp, '-infinity')
         AND e.deleted_at IS NULL AND e.pubkey <> $2
-    GROUP BY 1, 2
-)"#;
+    LIMIT $18
+) unread"#;
 
-/// The person's joined conversations, one row each.
+/// The person's joined conversations, one row each. A conversation sorts by
+/// the arrival of the message it shows, so a reply inside a thread does not
+/// move it.
 fn conversations_sql() -> String {
     format!(
         r#"SELECT CASE WHEN c.channel_type::text = 'dm' THEN 'dm'
                     WHEN 'buzz.solo' = ANY(c.labels) THEN 'solo' ELSE 'channel' END AS kind,
                 c.id::text AS id, c.id AS channel_id, NULL::bytea AS root_id,
-                COALESCE(h.activity_at, c.created_at) AS sort_at,
-                h.activity_id, h.activity_pubkey,
+                COALESCE(h.head_received_at, c.created_at) AS sort_at,
                 CASE WHEN e.id IS NOT NULL THEN h.head_id END AS preview_id,
                 h.head_pubkey AS preview_pubkey, h.head_created_at AS preview_created_at,
-                h.head_text AS preview_text, h.head_edit_at IS NOT NULL AS edited,
+                h.head_text AS preview_text,
                 COALESCE(f.state, 'default') <> 'muted' AND (COALESCE(f.marked_unread, false)
                     OR (e.id IS NOT NULL AND h.head_pubkey <> $2 AND h.head_received_at >
                         GREATEST(COALESCE(f.through_timestamp, '-infinity'),
                             COALESCE($4::timestamptz, 'infinity')))) AS unread,
-                COALESCE(mc.n, 0) AS mentions, f.through_message_id,
-                COALESCE(f.state, 'default') AS state, NULL::int4 AS reply_count,
-                (COALESCE(f.seq > $15, false) OR h.updated_at >= $16
-                    OR cm.sync_modified_at >= $16) AS changed
+                COALESCE(f.state, 'default') AS state
             FROM channel_members cm
             JOIN channels c ON c.community_id = cm.community_id AND c.id = cm.channel_id
             LEFT JOIN channel_heads h ON h.community_id = c.community_id AND h.channel_id = c.id
@@ -63,10 +64,9 @@ fn conversations_sql() -> String {
                 AND e.deleted_at IS NULL
             LEFT JOIN personal_read_frontiers f ON f.community_id = $1 AND f.actor = $2
                 AND f.channel_id = c.id AND f.root_id = ''::bytea
-            LEFT JOIN mc ON mc.channel_id = c.id AND mc.root_id = ''::bytea
             WHERE cm.community_id = $1 AND cm.pubkey = $2 AND cm.removed_at IS NULL
                 AND c.deleted_at IS NULL AND {legacy}
-                AND ($17::uuid[] IS NULL OR c.id = ANY($17))"#,
+                AND ($16::uuid[] IS NULL OR c.id = ANY($16))"#,
         legacy = legacy_channel_type_sql("c.channel_type"),
     )
 }
@@ -75,17 +75,16 @@ fn conversations_sql() -> String {
 /// horizon, in channels they are still in. The horizon bounds the list by
 /// recent activity rather than by a person's whole history.
 const THREADS: &str = r#"SELECT 'thread' AS kind, encode(f.root_id, 'hex') AS id,
-        f.channel_id, f.root_id, h.activity_at AS sort_at, h.activity_id, h.activity_pubkey,
+        f.channel_id, f.root_id, h.activity_at AS sort_at,
         CASE WHEN e.id IS NOT NULL THEN h.activity_id END AS preview_id,
         h.activity_pubkey AS preview_pubkey, h.activity_created_at AS preview_created_at,
-        h.activity_text AS preview_text, false AS edited,
+        h.activity_text AS preview_text,
         f.state <> 'muted' AND (f.marked_unread
             OR ((f.state = 'following' OR f.engaged_at >= $8::timestamptz - make_interval(secs => $9))
                 AND e.id IS NOT NULL AND h.activity_pubkey <> $2 AND h.activity_at >
                     GREATEST(COALESCE(f.through_timestamp, '-infinity'),
                         COALESCE($4::timestamptz, 'infinity')))) AS unread,
-        COALESCE(mc.n, 0) AS mentions, f.through_message_id, f.state, h.reply_count,
-        (COALESCE(f.seq > $15, false) OR h.updated_at >= $16) AS changed
+        f.state
     FROM personal_read_frontiers f
     JOIN channel_members cm ON cm.community_id = $1 AND cm.channel_id = f.channel_id
         AND cm.pubkey = $2 AND cm.removed_at IS NULL
@@ -93,26 +92,27 @@ const THREADS: &str = r#"SELECT 'thread' AS kind, encode(f.root_id, 'hex') AS id
     JOIN thread_heads h ON h.community_id = $1 AND h.root_id = f.root_id
     LEFT JOIN events e ON e.community_id = $1 AND e.created_at = h.activity_created_at
         AND e.id = h.activity_id AND e.deleted_at IS NULL
-    LEFT JOIN mc ON mc.channel_id = f.channel_id AND mc.root_id = f.root_id
     WHERE f.community_id = $1 AND f.actor = $2 AND f.root_id <> ''::bytea
         AND h.activity_at IS NOT NULL
         AND (f.state <> 'default' OR f.marked_unread
             OR f.engaged_at >= $8::timestamptz - make_interval(secs => $9))
-        AND ($18::bytea[] IS NULL OR f.root_id = ANY($18))"#;
+        AND ($17::bytea[] IS NULL OR f.root_id = ANY($17))"#;
 
 /// Messages that tag the person, in channels they are still in. A row's
 /// unread follows the read position of the channel or thread it is in.
+///
+/// A `since` read passes the channels in which the person's read position
+/// moved (`$16`) and those they joined (`$21`): it returns the mentions that
+/// arrived since the marker, those in a scope whose read position moved,
+/// since that changes whether they are unread, and those of a joined channel,
+/// which the client does not hold.
 const MENTIONS: &str = r#"SELECT 'mention' AS kind, encode(m.event_id, 'hex') AS id,
-        m.channel_id, m.root_id, m.received_at AS sort_at, m.event_id AS activity_id,
-        e.pubkey AS activity_pubkey, m.event_id AS preview_id, e.pubkey AS preview_pubkey,
-        e.created_at AS preview_created_at, left(e.content, $20) AS preview_text,
-        false AS edited,
+        m.channel_id, m.root_id, m.received_at AS sort_at,
+        m.event_id AS preview_id, e.pubkey AS preview_pubkey,
+        e.created_at AS preview_created_at, left(e.content, $19) AS preview_text,
         m.received_at > GREATEST(COALESCE(f.through_timestamp, '-infinity'),
             COALESCE($4::timestamptz, 'infinity')) AS unread,
-        0::bigint AS mentions, f.through_message_id, COALESCE(f.state, 'default') AS state,
-        NULL::int4 AS reply_count,
-        (COALESCE(f.seq > $15 OR f.through_timestamp >= $16, false)
-            OR m.received_at >= $16) AS changed
+        COALESCE(f.state, 'default') AS state
     FROM event_mentions m
     JOIN channel_members cm ON cm.community_id = $1 AND cm.channel_id = m.channel_id
         AND cm.pubkey = $2 AND cm.removed_at IS NULL
@@ -121,29 +121,66 @@ const MENTIONS: &str = r#"SELECT 'mention' AS kind, encode(m.event_id, 'hex') AS
         AND e.id = m.event_id AND e.deleted_at IS NULL AND e.pubkey <> $2
     LEFT JOIN personal_read_frontiers f ON f.community_id = $1 AND f.actor = $2
         AND f.channel_id = m.channel_id AND f.root_id = COALESCE(m.root_id, ''::bytea)
-    WHERE m.community_id = $1 AND m.pubkey_hex = $3 AND m.received_at > $6::timestamptz
+    WHERE m.community_id = $1 AND m.pubkey_hex = $3 AND m.received_at > $20::timestamptz
         AND m.channel_id IS NOT NULL AND m.event_kind = ANY($5)
-        AND ($18::bytea[] IS NULL OR m.event_id = ANY($18))"#;
+        AND ($16::uuid[] IS NULL OR m.received_at >= $15 OR m.channel_id = ANY($21)
+            OR (m.channel_id = ANY($16)
+                AND COALESCE(f.seq > $14 OR f.through_timestamp >= $15, false)))"#;
+
+/// The conversations and threads of the person's list that changed since a
+/// marker: `(channel, thread root or '', whether their read position moved)`.
+///
+/// It walks the person's own memberships and thread rows and looks each
+/// shared row up by its key, so its cost follows the size of the person's
+/// list, whatever the marker's age and however busy the community is. A
+/// conversation changed when the person joined it, its shared row changed, or
+/// the person changed their own row; a thread, the last two. A post moves its
+/// author's read position without their counter, so the position's own time
+/// is compared too.
+const CHANGED: &str = r#"(SELECT cm.channel_id, ''::bytea AS root_id,
+        COALESCE(f.seq > $3 OR f.through_timestamp >= $4, false) AS read_moved,
+        cm.sync_modified_at >= $4 AS joined
+    FROM channel_members cm
+    LEFT JOIN channel_heads h ON h.community_id = $1 AND h.channel_id = cm.channel_id
+    LEFT JOIN personal_read_frontiers f ON f.community_id = $1 AND f.actor = $2
+        AND f.channel_id = cm.channel_id AND f.root_id = ''::bytea
+    WHERE cm.community_id = $1 AND cm.pubkey = $2 AND cm.removed_at IS NULL
+        AND (cm.sync_modified_at >= $4 OR h.updated_at >= $4 OR f.seq > $3)
+    LIMIT $5)
+    UNION ALL
+    (SELECT f.channel_id, f.root_id,
+        f.seq > $3 OR COALESCE(f.through_timestamp >= $4, false) AS read_moved,
+        false AS joined
+    FROM personal_read_frontiers f
+    LEFT JOIN thread_heads h ON h.community_id = $1 AND h.root_id = f.root_id
+    WHERE f.community_id = $1 AND f.actor = $2 AND f.root_id <> ''::bytea
+        AND (f.seq > $3 OR h.updated_at >= $4)
+    LIMIT $5)"#;
+
+/// The person's thread rows in channels they joined since the marker. A
+/// client dropped them when the person left, and a first join can find
+/// threads the person was tagged into before.
+const JOINED_THREADS: &str = r#"SELECT f.root_id FROM personal_read_frontiers f
+    WHERE f.community_id = $1 AND f.actor = $2 AND f.channel_id = ANY($3)
+        AND f.root_id <> ''::bytea
+    LIMIT $4"#;
 
 /// Wrap a group's rows with the read's filter, order and limit. `rank` is
 /// the group's place in the sort order, for the cursor.
 fn select_sql(base: &str, rank: u8) -> String {
     format!(
-        r#"WITH {MENTION_COUNTS} SELECT q.* FROM ({base}) q
-        WHERE q.kind = ANY($11) AND ($10 = false OR q.unread)
-            AND ($15::bigint IS NULL OR q.changed)
-            AND ($12::timestamptz IS NULL OR q.sort_at < $12
-                OR (q.sort_at = $12 AND ({rank} > $13
-                    OR ({rank} = $13 AND q.id COLLATE "C" > $14))))
-        ORDER BY q.sort_at DESC, q.id COLLATE "C" LIMIT $19"#
+        r#"SELECT q.* FROM ({base}) q
+        WHERE q.kind = ANY($10)
+            AND ($11::timestamptz IS NULL OR q.sort_at < $11
+                OR (q.sort_at = $11 AND ({rank} > $12
+                    OR ({rank} = $12 AND q.id COLLATE "C" > $13))))
+        ORDER BY q.sort_at DESC, q.id COLLATE "C" LIMIT $18"#
     )
 }
 
 fn totals_sql(base: &str) -> String {
     format!(
-        r#"WITH {MENTION_COUNTS} SELECT q.kind, count(*) FILTER (WHERE q.unread) AS unread,
-            COALESCE(sum(q.mentions), 0)::bigint AS mentions
-        FROM ({base}) q GROUP BY q.kind"#
+        "SELECT q.kind, count(*) FILTER (WHERE q.unread) AS unread FROM ({base}) q GROUP BY q.kind"
     )
 }
 
@@ -153,20 +190,33 @@ struct Binds<'a> {
     actor: &'a [u8; 32],
     actor_hex: &'a str,
     snapshot: Snapshot,
+    /// Mentions that arrived before this are not listed or counted.
     mention_floor: DateTime<Utc>,
-    unread_only: bool,
     kinds: Vec<&'static str>,
     cursor: Option<(DateTime<Utc>, i32, &'a str)>,
     since: Option<(i64, DateTime<Utc>)>,
+}
+
+/// What one query of a read adds to [`Binds`].
+#[derive(Default)]
+struct Scope<'q> {
+    /// Only these conversations; for mentions, the channels in which the
+    /// person's read position moved.
+    channels: Option<&'q [Uuid]>,
+    /// Only these threads.
+    roots: Option<&'q [Vec<u8>]>,
     limit: Option<i64>,
+    /// Mentions are scanned from here when it is later than the floor.
+    mentions_from: Option<DateTime<Utc>>,
+    /// For mentions, the channels the person joined since the marker.
+    joined: Option<&'q [Uuid]>,
 }
 
 impl Binds<'_> {
     fn bind<'q>(
         &'q self,
         sql: String,
-        channels: Option<&'q [Uuid]>,
-        ids: Option<&'q [Vec<u8>]>,
+        scope: Scope<'q>,
     ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
         sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(self.community)
@@ -178,17 +228,22 @@ impl Binds<'_> {
             .bind(MENTION_SCAN)
             .bind(self.snapshot.now)
             .bind(HORIZON_SECONDS as f64)
-            .bind(self.unread_only)
             .bind(&self.kinds)
             .bind(self.cursor.map(|c| c.0))
             .bind(self.cursor.map(|c| c.1))
             .bind(self.cursor.map(|c| c.2))
             .bind(self.since.map(|s| s.0))
             .bind(self.since.map(|s| s.1))
-            .bind(channels)
-            .bind(ids)
-            .bind(self.limit)
+            .bind(scope.channels)
+            .bind(scope.roots)
+            .bind(scope.limit)
             .bind(PREVIEW_CHARS as i32)
+            .bind(
+                scope
+                    .mentions_from
+                    .map_or(self.mention_floor, |from| from.max(self.mention_floor)),
+            )
+            .bind(scope.joined.unwrap_or_default())
     }
 }
 
@@ -212,7 +267,6 @@ fn row(row: &PgRow) -> Result<Row> {
             text: row
                 .try_get::<Option<String>, _>("preview_text")?
                 .unwrap_or_default(),
-            edited: row.try_get("edited")?,
         }),
         None => None,
     };
@@ -226,27 +280,100 @@ fn row(row: &PgRow) -> Result<Row> {
         id: row.try_get("id")?,
         channel_id: row.try_get("channel_id")?,
         root_id: hex("root_id")?,
-        activity: Activity {
-            at: sort_at.timestamp(),
-            id: hex("activity_id")?,
-            pubkey: hex("activity_pubkey")?,
-        },
+        at: sort_at.timestamp(),
         preview,
         unread: row.try_get("unread")?,
-        mentions: capped(row.try_get("mentions")?),
-        read_through_id: hex("through_message_id")?,
         state,
-        reply_count: row.try_get("reply_count")?,
         sort_at: sort_at.timestamp_micros(),
     })
 }
 
-fn capped(count: i64) -> u32 {
-    count.clamp(0, i64::from(MAX_MENTIONS)) as u32
+fn count(value: i64, most: u32) -> u32 {
+    value.clamp(0, i64::from(most)) as u32
 }
 
 fn micros(value: i64) -> Result<DateTime<Utc>> {
     DateTime::from_timestamp_micros(value).ok_or(DbError::InvalidTimestamp(value))
+}
+
+fn reset() -> Page {
+    Page {
+        reset: true,
+        ..Page::default()
+    }
+}
+
+/// What a `since` read found changed.
+#[derive(Default)]
+struct Changed {
+    channels: Vec<Uuid>,
+    roots: Vec<Vec<u8>>,
+    /// Channels in which the person's read position moved, in the channel's
+    /// timeline or one of its threads.
+    read_moved: Vec<Uuid>,
+    /// Channels the person joined, whose threads and mentions are all new
+    /// to the client.
+    joined: Vec<Uuid>,
+}
+
+impl Changed {
+    fn is_empty(&self) -> bool {
+        self.channels.is_empty() && self.roots.is_empty()
+    }
+}
+
+/// `None` when more changed than a `since` read returns.
+async fn changed(
+    conn: &mut PgConnection,
+    community: CommunityId,
+    actor: &[u8; 32],
+    (seq, since): (i64, DateTime<Utc>),
+) -> Result<Option<Changed>> {
+    let rows = sqlx::query(CHANGED)
+        .bind(community.as_uuid())
+        .bind(actor.as_slice())
+        .bind(seq)
+        .bind(since)
+        .bind(MAX_SINCE_ROWS as i64 + 1)
+        .fetch_all(&mut *conn)
+        .await?;
+    let mut changed = Changed::default();
+    let mut read_moved = std::collections::BTreeSet::new();
+    for row in rows {
+        let channel: Uuid = row.try_get("channel_id")?;
+        let root: Vec<u8> = row.try_get("root_id")?;
+        if row.try_get("read_moved")? {
+            read_moved.insert(channel);
+        }
+        if row.try_get("joined")? {
+            changed.joined.push(channel);
+        }
+        if root.is_empty() {
+            changed.channels.push(channel);
+        } else {
+            changed.roots.push(root);
+        }
+    }
+    if !changed.joined.is_empty() {
+        let rows = sqlx::query(JOINED_THREADS)
+            .bind(community.as_uuid())
+            .bind(actor.as_slice())
+            .bind(&changed.joined)
+            .bind(MAX_SINCE_ROWS as i64 + 1)
+            .fetch_all(&mut *conn)
+            .await?;
+        for row in rows {
+            let root: Vec<u8> = row.try_get("root_id")?;
+            if !changed.roots.contains(&root) {
+                changed.roots.push(root);
+            }
+        }
+    }
+    if changed.channels.len().max(changed.roots.len()) > MAX_SINCE_ROWS {
+        return Ok(None);
+    }
+    changed.read_moved = read_moved.into_iter().collect();
+    Ok(Some(changed))
 }
 
 impl Db {
@@ -268,12 +395,9 @@ impl Db {
             Select::Page { limit, .. } if !(1..=MAX_LIMIT).contains(limit) => {
                 return invalid("invalid limit")
             }
-            Select::Ids {
-                channels,
-                roots,
-                mentions,
-            } if channels.len() + roots.len().max(mentions.len()) > MAX_IDS
-                || (channels.is_empty() && roots.is_empty() && mentions.is_empty()) =>
+            Select::Ids { channels, roots }
+                if channels.len() + roots.len() > MAX_NAMED
+                    || (channels.is_empty() && roots.is_empty()) =>
             {
                 return invalid("invalid id list")
             }
@@ -281,17 +405,12 @@ impl Db {
         }
         let actor_bytes = actor.to_bytes();
         let actor_hex = hex::encode(actor_bytes);
-        let (ids_channels, ids_roots, ids_mentions) = match &query.select {
-            Select::Ids {
-                channels,
-                roots,
-                mentions,
-            } => (
-                Some(channels.clone()),
-                Some(roots.iter().map(|id| id.to_vec()).collect::<Vec<_>>()),
-                Some(mentions.iter().map(|id| id.to_vec()).collect::<Vec<_>>()),
-            ),
-            _ => (None, None, None),
+        let named = match &query.select {
+            Select::Ids { channels, roots } => Some((
+                channels.clone(),
+                roots.iter().map(|id| id.to_vec()).collect::<Vec<_>>(),
+            )),
+            _ => None,
         };
         let first = !matches!(
             &query.select,
@@ -318,8 +437,8 @@ impl Db {
                     &mut tx,
                     community,
                     &actor_bytes,
-                    ids_channels.as_deref(),
-                    ids_roots.as_deref(),
+                    named.as_ref().map(|named| named.0.as_slice()),
+                    named.as_ref().map(|named| named.1.as_slice()),
                 )
                 .await?
             };
@@ -352,10 +471,7 @@ impl Db {
             Select::Since(since) => {
                 let at = micros(since.micros)?;
                 if at < horizon || since.seq > snapshot.seq {
-                    return Ok(Page {
-                        reset: true,
-                        ..Page::default()
-                    });
+                    return Ok(reset());
                 }
                 Some((
                     since.seq,
@@ -363,6 +479,14 @@ impl Db {
                 ))
             }
             _ => None,
+        };
+        // A `since` read first finds what changed, then reads only those rows.
+        let changed = match since {
+            Some(since) => match changed(&mut tx, community, &actor_bytes, since).await? {
+                Some(changed) => Some(changed),
+                None => return Ok(reset()),
+            },
+            None => None,
         };
         let (cursor, limit) = match &query.select {
             Select::Page { before, limit } => (before.as_ref(), Some(*limit)),
@@ -384,34 +508,73 @@ impl Db {
             actor_hex: &actor_hex,
             snapshot,
             mention_floor: snapshot.now - chrono::Duration::seconds(i64::from(retention_seconds)),
-            unread_only: listing && query.unread_only,
             kinds: query.kinds.iter().map(|kind| kind.as_str()).collect(),
             cursor,
             since,
-            limit: limit.map(|limit| limit as i64 + 1),
         };
         let wants = |rank: u8| query.kinds.iter().any(|kind| kind.rank() == rank);
         let conversations = conversations_sql();
-        type Group<'a> = (u8, &'a str, Option<&'a [Uuid]>, Option<&'a [Vec<u8>]>);
-        let groups: [Group<'_>; 3] = [
-            (0, &conversations, ids_channels.as_deref(), None),
-            (1, THREADS, None, ids_roots.as_deref()),
-            (2, MENTIONS, None, ids_mentions.as_deref()),
+        // The rows each group is restricted to; `None` is the whole group.
+        let (channels, roots) = match (&changed, &named) {
+            (Some(changed), _) => (
+                Some(changed.channels.as_slice()),
+                Some(changed.roots.as_slice()),
+            ),
+            (None, Some((channels, roots))) => (Some(channels.as_slice()), Some(roots.as_slice())),
+            (None, None) => (None, None),
+        };
+        let row_limit = limit.map(|limit| limit as i64 + 1);
+        let groups: [(u8, &str, Option<Scope<'_>>); 3] = [
+            (
+                0,
+                &conversations,
+                channels.is_none_or(|ids| !ids.is_empty()).then(|| Scope {
+                    channels,
+                    limit: row_limit,
+                    ..Scope::default()
+                }),
+            ),
+            (
+                1,
+                THREADS,
+                roots.is_none_or(|ids| !ids.is_empty()).then(|| Scope {
+                    roots,
+                    limit: row_limit,
+                    ..Scope::default()
+                }),
+            ),
+            (
+                2,
+                MENTIONS,
+                // A read of named rows names no mention.
+                named.is_none().then(|| Scope {
+                    channels: changed
+                        .as_ref()
+                        .map(|changed| changed.read_moved.as_slice()),
+                    limit: row_limit,
+                    // With no read position moved and no channel joined,
+                    // only new mentions matter.
+                    mentions_from: match (&changed, since) {
+                        (Some(changed), Some((_, at)))
+                            if changed.read_moved.is_empty() && changed.joined.is_empty() =>
+                        {
+                            Some(at)
+                        }
+                        _ => None,
+                    },
+                    joined: changed.as_ref().map(|changed| changed.joined.as_slice()),
+                    ..Scope::default()
+                }),
+            ),
         ];
         let mut rows = Vec::new();
         let mut more = false;
-        for (rank, base, channels, ids) in groups {
-            // A read of named rows touches only the groups it names.
-            let named = match (&query.select, rank) {
-                (Select::Ids { .. }, 0) => channels.is_some_and(|ids| !ids.is_empty()),
-                (Select::Ids { .. }, _) => ids.is_some_and(|ids| !ids.is_empty()),
-                _ => true,
-            };
-            if !wants(rank) || !named {
+        for (rank, base, scope) in groups {
+            let Some(scope) = scope.filter(|_| wants(rank)) else {
                 continue;
-            }
+            };
             let found = binds
-                .bind(select_sql(base, rank), channels, ids)
+                .bind(select_sql(base, rank), scope)
                 .fetch_all(&mut *tx)
                 .await?;
             more |= limit.is_some_and(|limit| found.len() > limit);
@@ -420,10 +583,7 @@ impl Db {
             }
         }
         if since.is_some() && more {
-            return Ok(Page {
-                reset: true,
-                ..Page::default()
-            });
+            return Ok(reset());
         }
         rows.sort_by(|a, b| {
             (b.sort_at, a.kind.rank(), &a.id).cmp(&(a.sort_at, b.kind.rank(), &b.id))
@@ -441,14 +601,30 @@ impl Db {
             };
         }
         page.rows = rows;
-        if first && !matches!(query.select, Select::Ids { .. }) {
-            page.totals = Some(totals(&mut tx, &binds, &conversations).await?);
-        }
         if let Some((seq, since)) = since {
             page.removed = removed(&mut tx, community, &actor_bytes, since).await?;
             page.removed.extend(
                 removed_threads(&mut tx, community, &actor_bytes, seq, snapshot.now).await?,
             );
+            // More removals than one read returns: the client reads again.
+            if page.removed.len() > MAX_SINCE_ROWS {
+                return Ok(reset());
+            }
+        }
+        // A `since` read that found nothing has nothing new to count. One
+        // that asked for only some kinds cannot tell, so it counts.
+        let counted = match query.select {
+            Select::Page { .. } => first,
+            Select::Since(_) => {
+                !page.rows.is_empty()
+                    || !page.removed.is_empty()
+                    || changed.as_ref().is_some_and(|changed| !changed.is_empty())
+                    || !wants(2)
+            }
+            Select::Ids { .. } => false,
+        };
+        if counted {
+            page.totals = Some(totals(&mut tx, &binds, &conversations).await?);
         }
         tx.commit().await?;
         Ok(page)
@@ -513,38 +689,30 @@ async fn totals(conn: &mut PgConnection, binds: &Binds<'_>, conversations: &str)
     let mut totals = Totals::default();
     for base in [conversations, THREADS] {
         let rows = binds
-            .bind(totals_sql(base), None, None)
+            .bind(totals_sql(base), Scope::default())
             .fetch_all(&mut *conn)
             .await?;
         for row in rows {
-            let total = Total {
-                unread: row
-                    .try_get::<i64, _>("unread")?
-                    .clamp(0, i64::from(u32::MAX)) as u32,
-                mentions: capped(row.try_get("mentions")?),
-            };
+            let unread = count(row.try_get("unread")?, u32::MAX);
             match kind_of(row.try_get("kind")?)? {
-                RowKind::Channel => totals.channel = total,
-                RowKind::Dm => totals.dm = total,
-                RowKind::Solo => totals.solo = total,
-                RowKind::Thread => totals.thread = total,
+                RowKind::Channel => totals.channel = unread,
+                RowKind::Dm => totals.dm = unread,
+                RowKind::Solo => totals.solo = unread,
+                RowKind::Thread => totals.thread = unread,
                 RowKind::Mention => {}
             }
         }
     }
+    let scope = Scope {
+        limit: Some(i64::from(MAX_MENTIONS) + 1),
+        ..Scope::default()
+    };
     let unread: i64 = binds
-        .bind(
-            format!("WITH {MENTION_COUNTS} SELECT COALESCE(sum(n), 0)::bigint FROM mc"),
-            None,
-            None,
-        )
+        .bind(UNREAD_MENTIONS.to_owned(), scope)
         .fetch_one(&mut *conn)
         .await?
         .try_get(0)?;
-    totals.mention = Total {
-        unread: capped(unread),
-        mentions: capped(unread),
-    };
+    totals.mention = count(unread, MAX_MENTIONS);
     Ok(totals)
 }
 
@@ -568,7 +736,7 @@ async fn removed(
     .bind(community.as_uuid())
     .bind(actor.as_slice())
     .bind(since)
-    .bind(MAX_SINCE_ROWS as i64)
+    .bind(MAX_SINCE_ROWS as i64 + 1)
     .fetch_all(&mut *conn)
     .await?;
     rows.iter()
@@ -611,7 +779,7 @@ async fn removed_threads(
     .bind(seq)
     .bind(now)
     .bind(HORIZON_SECONDS as f64)
-    .bind(MAX_SINCE_ROWS as i64)
+    .bind(MAX_SINCE_ROWS as i64 + 1)
     .fetch_all(&mut *conn)
     .await?;
     rows.iter()

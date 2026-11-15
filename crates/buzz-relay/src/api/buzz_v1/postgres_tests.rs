@@ -149,31 +149,19 @@ async fn accessory_router_signed_url_body_replay_and_actor_boundary() {
             .0,
         StatusCode::UNAUTHORIZED
     );
-    // Named rows are exclusive with paging and with `since`, and bounded
-    // to unique ids.
+    // Parameters are strict: the ones this version does not have are
+    // rejected, and `since` is exclusive with paging.
     let id = uuid::Uuid::new_v4();
-    let many = (0..101)
-        .map(|_| uuid::Uuid::new_v4().to_string())
-        .collect::<Vec<_>>()
-        .join(",");
     for (query, status) in [
-        (format!("ids={id}"), StatusCode::OK),
-        (format!("ids={id},{}", "ab".repeat(32)), StatusCode::OK),
-        (format!("ids={id},{id}"), StatusCode::BAD_REQUEST),
-        (format!("ids={id}&limit=1"), StatusCode::BAD_REQUEST),
-        (format!("ids={id}&before=abc"), StatusCode::BAD_REQUEST),
-        (format!("ids={id}&since=0.1"), StatusCode::BAD_REQUEST),
-        ("ids=".into(), StatusCode::BAD_REQUEST),
-        ("ids=not-an-id".into(), StatusCode::BAD_REQUEST),
-        (format!("ids={many}"), StatusCode::BAD_REQUEST),
+        (format!("ids={id}"), StatusCode::BAD_REQUEST),
+        ("unread=true".to_owned(), StatusCode::BAD_REQUEST),
+        ("since=0.1&limit=1".into(), StatusCode::BAD_REQUEST),
+        ("since=0.1&before=abc".into(), StatusCode::BAD_REQUEST),
         ("before=not-a-cursor".into(), StatusCode::BAD_REQUEST),
         ("since=not-a-marker".into(), StatusCode::BAD_REQUEST),
         ("kinds=sidebar".into(), StatusCode::BAD_REQUEST),
         ("limit=501".into(), StatusCode::BAD_REQUEST),
-        (
-            "kinds=thread,mention&unread=true&limit=500".into(),
-            StatusCode::OK,
-        ),
+        ("kinds=thread,mention&limit=500".into(), StatusCode::OK),
     ] {
         let path = format!("/buzz/v1/me/activity?{query}");
         let auth = proof(&actor, &host, &path, "GET", None);
@@ -255,17 +243,14 @@ async fn accessory_router_signed_url_body_replay_and_actor_boundary() {
     assert_eq!(applied.0, StatusCode::OK, "{}", applied.1);
     assert_eq!(applied.1["outcomes"][0]["status"], "applied");
     // The frontier belongs to the signer alone.
-    let path = format!("/buzz/v1/me/activity?ids={channel}");
+    let path = "/buzz/v1/me/activity?kinds=channel".to_owned();
     start_before_everything(&state, community, &other).await;
-    for (key, unread, read_through) in [
-        (&actor, false, json!(event.id.to_hex())),
-        (&other, true, Value::Null),
-    ] {
+    for (key, unread) in [(&actor, false), (&other, true)] {
         let auth = proof(key, &host, &path, "GET", None);
         let page = request(state.clone(), &host, &path, "GET", Some(&auth), b"").await;
         assert_eq!(page.0, StatusCode::OK, "{}", page.1);
+        assert_eq!(page.1["rows"][0]["channel_id"], channel.to_string());
         assert_eq!(page.1["rows"][0]["unread"], unread, "{}", page.1);
-        assert_eq!(page.1["rows"][0]["read_through_id"], read_through);
     }
 }
 
@@ -329,22 +314,27 @@ async fn accessory_batch_outcomes_are_independent_and_return_applied_rows() {
     let ((event, author, created_at), (elsewhere, ..)) =
         (post(channel).await, post(unjoined).await);
     // Arrival time is the relay's clock: read it back rather than guess it.
-    let result_at = |body: &Value| body["rows"][0]["activity"]["at"].clone();
+    let result_at = |body: &Value| body["rows"][0]["at"].clone();
     start_before_everything(&state, community, &actor).await;
-    let path = format!("/buzz/v1/me/activity?ids={channel}");
+    let path = "/buzz/v1/me/activity?kinds=channel".to_owned();
     let auth = proof(&actor, &host, &path, "GET", None);
     let result = request(state.clone(), &host, &path, "GET", Some(&auth), b"").await;
     assert_eq!(result.0, StatusCode::OK, "{}", result.1);
-    let row = |unread: bool, read_through: Value| {
+    // The whole row: nothing else is sent.
+    let row = |unread: bool| {
         json!({"kind":"channel","id":channel,"channel_id":channel,
-            "activity":{"at":result_at(&result.1),"id":event,"pubkey":author},
+            "at":result_at(&result.1),
             "preview":{"id":event,"pubkey":author,"created_at":created_at,
-                "text":"read state","edited":false},
-            "unread":unread,"mentions":0,"read_through_id":read_through,"state":"default"})
+                "text":"read state"},
+            "unread":unread,"state":"default"})
     };
-    assert_eq!(result.1["rows"], json!([row(true, Value::Null)]));
+    assert_eq!(result.1["rows"], json!([row(true)]));
     assert_eq!(result.1["removed"], json!([]));
-    assert!(result.1["totals"].is_null() && result.1["marker"].is_string());
+    assert_eq!(
+        result.1["totals"],
+        json!({"channel":1,"dm":0,"solo":0,"thread":0,"mention":0})
+    );
+    assert!(result.1["marker"].is_string());
     let write_path = "/buzz/v1/me/read-state";
     let body = serde_json::to_vec(&json!({"intents":[
         {"type":"unknown"},
@@ -365,7 +355,7 @@ async fn accessory_batch_outcomes_are_independent_and_return_applied_rows() {
     );
     // One updated row per applied channel; the blocked and the unjoined
     // channels have none.
-    assert_eq!(result.1["rows"], json!([row(false, json!(event))]));
+    assert_eq!(result.1["rows"], json!([row(false)]));
 
     // The other intents: a manual unread, then muting.
     for (intent, unread, state_name) in [
@@ -754,7 +744,7 @@ async fn signed_sidebar_deletion(deletion_kind: u16) {
         .tags(tags)
         .sign_with_keys(signer)
         .unwrap();
-    let path = format!("/buzz/v1/me/activity?ids={channel}");
+    let path = "/buzz/v1/me/activity?kinds=channel".to_owned();
     start_before_everything(&state, community, &reader).await;
     for (event, key, count) in [(&message, &author, 1), (&deletion, signer, 0)] {
         let body = serde_json::to_vec(event).unwrap();
@@ -788,7 +778,7 @@ async fn signed_sidebar_deletion(deletion_kind: u16) {
         assert_eq!(channels.len(), 1, "{sidebar}");
         assert_eq!(channels[0]["channel_id"], channel.to_string());
         assert_eq!(
-            (&channels[0]["unread"], &channels[0]["mentions"]),
+            (&channels[0]["unread"], &sidebar["totals"]["mention"]),
             (&json!(count == 1), &json!(count)),
             "kind {deletion_kind}, after kind {}: {sidebar}",
             event.kind.as_u16()
