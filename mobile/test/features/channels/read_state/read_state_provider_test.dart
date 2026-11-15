@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:buzz/shared/read_state/read_state_format.dart';
@@ -157,6 +158,64 @@ void main() {
     expect(state().isForcedUnread(msgKey), isTrue);
   });
 
+  test('a session rebuild (auth completing) keeps the manager and reopens '
+      'its live subscription on connect', () async {
+    final notifier = await pumpNotifier();
+    notifier.markContextUnread(msgKey, channelId: channelId);
+    expect(session.subscribeCount, 1);
+
+    // The manager initialized before auth. Auth completing rebuilds the
+    // session in place, which drops its live subscriptions without a CLOSED.
+    container.read(_sessionRebuildProvider.notifier).rebuild();
+    container.read(relaySessionProvider);
+    expect(session.liveSubscriptions, 0);
+
+    session.setStatus(SessionStatus.connected);
+    await flushMicrotasks();
+    expect(session.subscribeCount, 2);
+    expect(session.liveSubscriptions, 1);
+    expect(state().isForcedUnread(msgKey), isTrue);
+  });
+
+  test('a session rebuild during the live subscribe reopens it on the new '
+      'session', () async {
+    final gate = Completer<void>();
+    _subscribeGate = gate.future;
+    addTearDown(() => _subscribeGate = null);
+    final keys = nostr.Keys.generate();
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    config = _FakeRelayConfig(keys.nsec);
+    container = ProviderContainer(
+      overrides: [
+        savedPrefsProvider.overrideWithValue(prefs),
+        relayConfigProvider.overrideWith(() => config),
+        relaySessionProvider.overrideWith(_FakeRelaySession.new),
+        activeCommunityProvider.overrideWith((ref) async => null),
+        appLifecycleProvider.overrideWith(_FakeAppLifecycle.new),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.read(readStateProvider);
+    await container.read(activeCommunityProvider.future);
+    container.read(readStateProvider);
+    await flushMicrotasks();
+    session =
+        container.read(relaySessionProvider.notifier) as _FakeRelaySession;
+    expect(session.subscribeCount, 1);
+    expect(state().isReady, isFalse);
+
+    // Auth completes while the subscribe waits for ready.
+    container.read(_sessionRebuildProvider.notifier).rebuild();
+    container.read(relaySessionProvider);
+    _subscribeGate = null;
+    gate.complete();
+    await settle();
+
+    expect(session.subscribeCount, 2);
+    expect(session.liveSubscriptions, 1);
+  });
+
   test('switching account rebuilds the manager and drops forced unread '
       'flags', () async {
     final notifier = await pumpNotifier();
@@ -300,6 +359,20 @@ class _FakeRelayConfig extends RelayConfigNotifier {
 /// Relay session that returns no history and counts the read-state fetches
 /// and live subscriptions the manager makes, keeping it fully local while
 /// exercising its real code paths. Its status is driven by [setStatus].
+/// Stands in for auth completing, which rebuilds the session in place.
+final _sessionRebuildProvider = NotifierProvider<_SessionRebuild, int>(
+  _SessionRebuild.new,
+);
+
+class _SessionRebuild extends Notifier<int> {
+  @override
+  int build() => 0;
+
+  void rebuild() => state++;
+}
+
+Future<void>? _subscribeGate;
+
 class _FakeRelaySession extends RelaySessionNotifier {
   int fetchCount = 0;
   int subscribeCount = 0;
@@ -318,8 +391,16 @@ class _FakeRelaySession extends RelaySessionNotifier {
   }
 
   @override
-  SessionState build() =>
-      const SessionState(status: SessionStatus.disconnected);
+  SessionState build() {
+    ref.watch(_sessionRebuildProvider);
+    // Like the real session, a rebuild drops every live subscription.
+    ref.onDispose(() {
+      _open.clear();
+      liveSubscriptions = 0;
+      debugDispose();
+    });
+    return const SessionState(status: SessionStatus.disconnected);
+  }
 
   @override
   Future<List<NostrEvent>> fetchReadStateSnapshot({
@@ -335,6 +416,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
     required void Function(RelaySubscriptionStatus status) onStatusChanged,
+    bool resumeSince = true,
   }) async {
     final unsubscribe = await subscribe(filter, onEvent, onClosed: onClosed);
     _open.add(onStatusChanged);
@@ -352,8 +434,11 @@ class _FakeRelaySession extends RelaySessionNotifier {
   }) async {
     subscribeCount++;
     liveSubscriptions++;
+    final dropped = liveSubscriptionOwner;
     var open = true;
+    await _subscribeGate;
     return () {
+      if (dropped != liveSubscriptionOwner) open = false;
       if (open) liveSubscriptions--;
       open = false;
     };

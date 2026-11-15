@@ -21073,6 +21073,7 @@ class _IdentityUpdateRelaySession extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
     required void Function(RelaySubscriptionStatus status) onStatusChanged,
+    bool resumeSince = true,
   }) async {
     if (filter.kinds.contains(10100)) {
       identityFilter = filter;

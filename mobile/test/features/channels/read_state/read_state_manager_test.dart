@@ -1253,6 +1253,85 @@ void main() {
     manager.dispose(flushPending: false);
   });
 
+  test('a reconnect through the real session replays the live REQ without a '
+      'since bound, so an older-timestamp peer mark still arrives', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    final socket = _RecordingRelaySocket();
+    final session = _SnapshotCountingSession()
+      ..debugAttachSocketForTest(socket);
+    List<Map<String, dynamic>> reqFilters() => [
+      for (final message in socket.messages)
+        if (message.first == 'REQ') message[2] as Map<String, dynamic>,
+    ];
+    final manager = ReadStateManager(
+      pubkey: keychain.public,
+      relayUrl: _relayUrl,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: session,
+      signedEventRelay: _FakeSignedEventRelay(),
+      remoteEnabled: true,
+      onChanged: () {},
+    );
+
+    final initializing = manager.initialize();
+    await pumpEventQueue();
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    await initializing;
+
+    // A peer's mark arrives live, which would move a resume cursor.
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    session.debugHandleMessage([
+      'EVENT',
+      'l-1',
+      _readStateEvent(
+        pubkey: keychain.public,
+        crypto: crypto,
+        clientId: 'desktop',
+        slotId: 'desktop-slot',
+        contexts: {'channel-1': now},
+        createdAt: now,
+      ).toJson(),
+    ]);
+    session.debugFlushEventBuffer();
+    await pumpEventQueue();
+    expect(manager.getEffectiveTimestamp('channel-1'), now);
+
+    socket.messages.clear();
+    session.debugSupersedeConnection();
+    await session.debugReplayLiveSubscriptions();
+    expect(reqFilters(), hasLength(1));
+    expect(reqFilters().single['limit'], 0);
+    expect(reqFilters().single.containsKey('since'), isFalse);
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    await pumpEventQueue();
+
+    // Another device publishes a mark stamped well before the last one,
+    // which the relay accepts after the snapshot.
+    session.debugHandleMessage([
+      'EVENT',
+      'l-1',
+      _readStateEvent(
+        pubkey: keychain.public,
+        crypto: crypto,
+        clientId: 'phone',
+        slotId: 'phone-slot',
+        contexts: {'channel-2': now - 600},
+        createdAt: now - 600,
+      ).toJson(),
+    ]);
+    session.debugFlushEventBuffer();
+    await pumpEventQueue();
+    expect(manager.getEffectiveTimestamp('channel-2'), now - 600);
+    manager.dispose(flushPending: false);
+  });
+
   test(
     'an older snapshot finishing late keeps a newer failed read\'s retry',
     () async {
@@ -1582,6 +1661,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
     required void Function(RelaySubscriptionStatus status) onStatusChanged,
+    bool resumeSince = true,
   }) async {
     statusListeners.add(onStatusChanged);
     // Holds subscribe, as a REQ waits for the socket before it goes live.

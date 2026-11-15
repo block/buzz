@@ -162,6 +162,9 @@ class ReadStateManager {
 
   Timer? _debounceTimer;
   void Function()? _unsubscribeLive;
+  // The session build that holds [_unsubscribeLive]'s subscription. A
+  // rebuild drops it without a CLOSED.
+  Object? _liveOwner;
   bool _initialized = false;
   bool _initialSeedComplete = false;
   // The one sync loop, while it runs. Each pass opens the live subscription
@@ -290,7 +293,7 @@ class ReadStateManager {
   Future<void> reinitializeRemote() async {
     if (_disposed || !_remoteEnabled || !_initialized) return;
     debugPrint('[ReadStateManager] reinitializeRemote');
-    if (_unsubscribeLive == null) await _requestSync();
+    if (!_liveOpen) await _requestSync();
     _schedulePublish();
     _onChanged();
   }
@@ -312,7 +315,7 @@ class ReadStateManager {
   Future<void> _runSync(Completer<void> done) async {
     try {
       while (_snapshotWanted && !_disposed) {
-        if (_unsubscribeLive == null) {
+        if (!_liveOpen) {
           await _startLiveSubscription();
           if (_disposed) return;
         }
@@ -459,9 +462,38 @@ class ReadStateManager {
     return changed;
   }
 
+  /// Whether the live subscription is open on the session's current build.
+  bool get _liveOpen =>
+      _unsubscribeLive != null &&
+      _liveOwner == _relaySession!.liveSubscriptionOwner;
+
   Future<bool> _startLiveSubscription() async {
+    _unsubscribeLive = null;
     try {
-      final unsub = await _relaySession!.subscribeWithStatus(
+      // A rebuild while the subscribe waits for ready drops it, so open
+      // again on the new build. Each pass needs another rebuild.
+      void Function() unsub;
+      Object owner;
+      do {
+        owner = _relaySession!.liveSubscriptionOwner;
+        unsub = await _subscribeLive();
+        if (_disposed) {
+          unsub.call();
+          return false;
+        }
+      } while (owner != _relaySession.liveSubscriptionOwner);
+      _unsubscribeLive = unsub;
+      _liveOwner = owner;
+      debugPrint('[ReadStateManager] live subscription established');
+      return true;
+    } catch (e) {
+      debugPrint('[ReadStateManager] live subscription FAILED: $e');
+      return false;
+    }
+  }
+
+  Future<void Function()> _subscribeLive() =>
+      _relaySession!.subscribeWithStatus(
         NostrFilter(
           kinds: const [EventKind.readState],
           authors: [pubkey],
@@ -484,19 +516,10 @@ class ReadStateManager {
         },
         // The session dropped it, so the next reconnect opens a new one.
         onClosed: (_) => _unsubscribeLive = null,
+        // A peer's mark can carry an older created_at (its clock, or a
+        // publish that waited), and a since bound would drop it live.
+        resumeSince: false,
       );
-      if (_disposed) {
-        unsub.call();
-        return false;
-      }
-      _unsubscribeLive = unsub;
-      debugPrint('[ReadStateManager] live subscription established');
-      return true;
-    } catch (e) {
-      debugPrint('[ReadStateManager] live subscription FAILED: $e');
-      return false;
-    }
-  }
 
   void _handleIncomingEvent(NostrEvent event) {
     if (_disposed || !_servesThisCommunity) return;

@@ -113,6 +113,15 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// before reading from or publishing through it.
   String? get relayUrl => _relayUrl;
 
+  Object _liveSubscriptionOwner = Object();
+
+  /// Identifies the build that holds the live subscriptions. build() can
+  /// re-run on this notifier (auth completing, a config change), and its
+  /// dispose drops every live subscription without a CLOSED, so a holder
+  /// that outlives the rebuild compares this to learn its subscription is
+  /// gone.
+  Object get liveSubscriptionOwner => _liveSubscriptionOwner;
+
   @visibleForTesting
   set debugRelayUrl(String? value) => _relayUrl = value;
 
@@ -351,16 +360,23 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// when a retryable or rate-limited CLOSED begins backoff. Terminal CLOSED
   /// invokes [onClosed] and removes the subscription instead of retrying it.
   /// Calling the cleanup callback cancels pending retries and sends CLOSE.
+  ///
+  /// A replay narrows [filter] with a `since` just before the newest event
+  /// delivered, unless [resumeSince] is false. Turn it off for a `limit: 0`
+  /// stream whose events can carry older timestamps: the relay matches live
+  /// events against `since` too, so the bound would drop them.
   Future<void Function()> subscribeWithStatus(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
     required void Function(RelaySubscriptionStatus status) onStatusChanged,
+    bool resumeSince = true,
   }) => _subscribe(
     filter,
     onEvent,
     onClosed: onClosed,
     onStatusChanged: onStatusChanged,
+    resumeSince: resumeSince,
   );
 
   Future<void Function()> _subscribe(
@@ -368,6 +384,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
     void Function(RelaySubscriptionStatus status)? onStatusChanged,
+    bool resumeSince = true,
   }) async {
     if (_disposed) throw StateError('Relay session is disposed');
     final subId = _nextSubId('l');
@@ -378,6 +395,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       onEvent: onEvent,
       onClosed: onClosed,
       onStatusChanged: onStatusChanged,
+      resumeSince: resumeSince,
       readyCompleter: readyCompleter,
     );
     _liveSubscriptions[subId] = subscription;
@@ -788,6 +806,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   NostrFilter _replayFilter(_LiveSubscription subscription) {
     final filter = subscription.filter;
+    if (!subscription.resumeSince) return filter;
     final since = relayResumeSince(
       originalSince: filter.since,
       until: filter.until,
@@ -1182,6 +1201,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _rejectAllPending(null);
     final subscriptions = _liveSubscriptions.values.toList();
     _liveSubscriptions.clear();
+    _liveSubscriptionOwner = Object();
     for (final subscription in subscriptions) {
       subscription.closedRetryTimer?.cancel();
       subscription.closedRetryTimer = null;
