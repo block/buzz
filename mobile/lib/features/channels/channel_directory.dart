@@ -895,6 +895,10 @@ extension _ChannelsNotifierDirectory on ChannelsNotifier {
   /// Rebuilds the list's unjoined channels from [_directoryMetas] and saves
   /// the member snapshot, when the list has loaded.
   void _mergeDirectoryIntoList() {
+    // While a list load runs or after it failed, the value can still be the
+    // previous community's or account's list. The load merges the held
+    // directory itself when it lands.
+    if (_listState.isLoading || _listState.hasError) return;
     final previous = _listState.value;
     if (previous == null) return;
     final channels = [...previous];

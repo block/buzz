@@ -246,6 +246,45 @@ void _savedDirectoryCases() {
     },
   );
 
+  test('a restore during an account switch keeps the old list out', () async {
+    final app = await _SavedDirectoryHarness.create(
+      _FakeRelaySession(
+        memberships: [_membership(_channelB, 'me')],
+        metadata: [
+          _meta(id: _channelA, name: 'general', createdAt: 100),
+          _meta(id: _channelB, name: 'staff', visibility: 'private'),
+          _meta(id: _channelC, name: 'quiet', unlisted: true),
+        ],
+      ),
+    );
+    await app.launch();
+    await app.open();
+    await app.expectSaved(['general']);
+
+    // Another account takes over, and its member list is slow to load. A
+    // reader restoring the saved directory meanwhile must not publish the
+    // previous account's list, with its private channel, as this account's.
+    app.session.memberships = [_membership(_channelC, _otherPk)];
+    final gate = app.session.metadataGate = Completer<void>();
+    app.container.read(_testPubkeyProvider.notifier).set(_otherPk);
+    await _settle();
+    await app.channels.ensureDirectoryLoaded();
+    await _settle();
+    expect(app.container.read(channelsProvider).isLoading, isTrue);
+
+    // The load lands with the restored directory merged in.
+    gate.complete();
+    await app.container.read(channelsProvider.future);
+    await _settle();
+    expect(
+      [
+        for (final channel in app.container.read(channelsProvider).requireValue)
+          channel.name,
+      ]..sort(),
+      ['general', 'quiet'],
+    );
+  });
+
   test('restoring the saved directory leaves a running load alone', () async {
     final app = await _SavedDirectoryHarness.create(
       _FakeRelaySession(
