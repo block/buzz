@@ -722,10 +722,21 @@ class _SavedDirectory {
   /// When a reader last asked the relay for changes.
   DateTime? checkedAt;
 
+  /// The relay read a reader started, until it settles. Readers that open
+  /// meanwhile share it, so a read slower than the check interval is not
+  /// displaced by another.
+  Future<void>? checking;
+
+  /// Channels dropped on open while [checking] was in flight. Its response
+  /// predates the drop, so it must not bring them back.
+  final forgotten = <String>{};
+
   void reset() {
     scope = null;
     fullAt = null;
     checkedAt = null;
+    checking = null;
+    forgotten.clear();
   }
 }
 
@@ -807,14 +818,29 @@ extension _ChannelsNotifierDirectory on ChannelsNotifier {
   /// read is older than [savedDirectoryFullReadAge], otherwise only what
   /// changed since the newest saved change. Both are quiet: readers keep
   /// showing the held directory meanwhile.
-  Future<void> _checkSavedDirectory() async {
+  /// A reader opening while a read is in flight shares it.
+  Future<void> _checkSavedDirectory() {
+    final inFlight = _savedDirectory.checking;
+    if (inFlight != null) return inFlight;
     final now = _lifecycleRef.read(channelDirectoryClockProvider)();
     final checkedAt = _savedDirectory.checkedAt;
     if (checkedAt != null &&
         now.difference(checkedAt) < savedDirectoryCheckInterval) {
-      return;
+      return Future.value();
     }
     _savedDirectory.checkedAt = now;
+    late final Future<void> check;
+    check = _readSavedDirectoryChanges(now).whenComplete(() {
+      if (identical(_savedDirectory.checking, check)) {
+        _savedDirectory
+          ..checking = null
+          ..forgotten.clear();
+      }
+    });
+    return _savedDirectory.checking = check;
+  }
+
+  Future<void> _readSavedDirectoryChanges(DateTime now) async {
     final fullAt = _savedDirectory.fullAt;
     final fullReadDue =
         fullAt == null ||
@@ -830,17 +856,33 @@ extension _ChannelsNotifierDirectory on ChannelsNotifier {
     }
     final fence = _refreshCoordinator.beginDirectoryOnly();
     try {
-      final metas = await _refreshCoordinator.loadDirectory(
+      var metas = await _refreshCoordinator.loadDirectory(
         _lifecycleRef.read(relaySessionProvider.notifier),
         fence,
         since: since,
         quiet: true,
       );
       if (metas == null) return;
+      final forgotten = _savedDirectory.forgotten;
+      if (forgotten.isNotEmpty) {
+        metas = [
+          for (final event in metas)
+            if (!forgotten.contains(event.getTagValue('d'))) event,
+        ];
+      }
       if (since == null) {
         _installDirectory(metas, fence.scope, full: true);
       } else {
-        if (metas.isEmpty) return;
+        // The overlap always brings back the newest saved event; a catch-up
+        // of only held events changed nothing, so nothing is saved or rebuilt.
+        final held = {
+          for (final event in _directoryMetas) (event.id, event.createdAt),
+        };
+        if (metas.every(
+          (event) => held.contains((event.id, event.createdAt)),
+        )) {
+          return;
+        }
         _installDirectory(
           _latestChannelEvents([..._directoryMetas, ...metas], kind: 39000),
           fence.scope,
@@ -859,6 +901,9 @@ extension _ChannelsNotifierDirectory on ChannelsNotifier {
     if (scope == null ||
         !_directoryMetas.any((event) => event.getTagValue('d') == channelId)) {
       return;
+    }
+    if (_savedDirectory.checking != null) {
+      _savedDirectory.forgotten.add(channelId);
     }
     _installDirectory([
       for (final event in _directoryMetas)

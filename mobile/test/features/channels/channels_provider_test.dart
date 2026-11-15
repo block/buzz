@@ -169,6 +169,22 @@ void main() {
       expect(names(container), unorderedEquals(['general-chat', 'fresh']));
       await expectSaved(['fresh', 'general-chat']);
 
+      // A catch-up that brings back only held events (the overlap always
+      // returns the newest) neither rebuilds the list nor rewrites the file.
+      final list = container.read(channelsProvider).requireValue;
+      final stamp = DateTime(2020);
+      file.setLastModifiedSync(stamp);
+      now = now.add(const Duration(minutes: 1));
+      await channels.ensureDirectoryLoaded();
+      await _settle();
+      expect(reads().last, 200 - 60);
+      expect(
+        identical(container.read(channelsProvider).requireValue, list),
+        isTrue,
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(file.lastModifiedSync(), stamp);
+
       // After a relaunch the saved copy serves at once; the relay is asked only
       // for changes since the newest saved one.
       container.dispose();
@@ -197,7 +213,17 @@ void main() {
       await _settle();
       expect(names(container), unorderedEquals(['general-chat', 'fresh']));
       now = now.add(savedDirectoryFullReadAge);
+      // A full read slower than the check interval is shared, not displaced:
+      // a reader opening a minute later asks the relay nothing more.
+      session.pauseNextDirectoryQuery();
       await channels.ensureDirectoryLoaded();
+      await session.nextDirectoryQueryStarted;
+      final held = reads().length;
+      now = now.add(const Duration(minutes: 2));
+      await channels.ensureDirectoryLoaded();
+      await _settle();
+      expect(reads().length, held);
+      session.resumePausedDirectoryQuery();
       await _settle();
       expect(reads().last, isNull);
       expect(names(container), ['general-chat']);
@@ -208,7 +234,17 @@ void main() {
         ChannelDirectoryLoadStatus.loaded,
       );
 
-      // Opening a channel the relay no longer serves drops it at once.
+      // Opening a channel the relay no longer serves drops it at once, and a
+      // read already in flight, whose response predates the drop, does not
+      // bring it back.
+      now = now.add(const Duration(minutes: 1));
+      session.metadata = [
+        _meta(id: _channelA, name: 'general-chat', createdAt: 150),
+        _meta(id: _channelB, name: 'late', createdAt: 300),
+      ];
+      session.pauseNextDirectoryQuery();
+      await channels.ensureDirectoryLoaded();
+      await session.nextDirectoryQueryStarted;
       session.metadata = [];
       await expectLater(
         container.read(channelDetailsProvider(_channelA).future),
@@ -216,7 +252,10 @@ void main() {
       );
       await _settle();
       expect(names(container), isEmpty);
-      await expectSaved([]);
+      session.resumePausedDirectoryQuery();
+      await _settle();
+      expect(names(container), ['late']);
+      await expectSaved(['late']);
     },
   );
 

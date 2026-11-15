@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -37,7 +38,17 @@ class SavedOpenChannelDirectory {
 /// store, so a write in flight when the community or account goes away does
 /// not recreate the file.
 class OpenChannelDirectoryStorage {
-  OpenChannelDirectoryStorage(this._file);
+  OpenChannelDirectoryStorage(Future<File?> file)
+    // Readers wait for the file, so never wait on it for long; an
+    // unavailable caches directory reads as no saved copy.
+    : _file = file.timeout(_openTimeout, onTimeout: () => null).catchError((
+        Object error,
+      ) {
+        debugPrint('[OpenChannelDirectoryStorage] no file: $error');
+        return null;
+      });
+
+  static const _openTimeout = Duration(seconds: 3);
 
   final Future<File?> _file;
   bool _closed = false;
@@ -86,13 +97,13 @@ class OpenChannelDirectoryStorage {
   Future<SavedOpenChannelDirectory?> read() async {
     final file = await _file;
     if (file == null || _closed) return null;
-    final String raw;
+    final Uint8List raw;
     try {
       if (!await file.exists()) return null;
       if (await file.length() > maxSavedDirectoryBytes) {
         throw const FormatException('size');
       }
-      raw = await file.readAsString();
+      raw = await file.readAsBytes();
     } on FileSystemException catch (error) {
       debugPrint('[OpenChannelDirectoryStorage] read failed: $error');
       return null;
@@ -100,7 +111,8 @@ class OpenChannelDirectoryStorage {
       await _discard(file);
       return null;
     }
-    final saved = _decode(raw);
+    // Up to 16 MiB of JSON: decode off the UI isolate.
+    final saved = await Isolate.run(() => _decode(raw));
     if (saved == null) await _discard(file);
     return _closed ? null : saved;
   }
@@ -117,23 +129,12 @@ class OpenChannelDirectoryStorage {
   Future<bool> _write(SavedOpenChannelDirectory directory) async {
     final file = await _file;
     if (file == null || _closed) return false;
-    final raw = directory.metas.length > maxSavedDirectoryChannels
-        ? null
-        : jsonEncode({
-            'v': _version,
-            'full_at': directory.fullAt,
-            'metas': [
-              for (final event in directory.metas)
-                {
-                  'id': event.id,
-                  'pubkey': event.pubkey,
-                  'created_at': event.createdAt,
-                  'tags': event.tags,
-                  'content': event.content,
-                },
-            ],
-          });
-    if (raw == null || utf8.encode(raw).length > maxSavedDirectoryBytes) {
+    final metas = directory.metas;
+    final fullAt = directory.fullAt;
+    // Up to 20,000 channels: encode off the UI isolate.
+    final raw = await Isolate.run(() => _encode(metas, fullAt));
+    if (_closed) return false;
+    if (raw == null) {
       // An older, smaller copy no longer describes the directory.
       await _discard(file);
       return false;
@@ -142,7 +143,7 @@ class OpenChannelDirectoryStorage {
     // Write beside the file and rename over it, so a crash mid-write leaves
     // the previous copy rather than a torn one.
     final pending = File('${file.path}.pending');
-    await pending.writeAsString(raw, flush: true);
+    await pending.writeAsBytes(raw, flush: true);
     if (_closed) {
       await pending.delete();
       return false;
@@ -164,9 +165,31 @@ class OpenChannelDirectoryStorage {
   }
 }
 
-SavedOpenChannelDirectory? _decode(String raw) {
+/// The file's UTF-8 JSON, or null when [metas] exceed the bounds.
+Uint8List? _encode(List<NostrEvent> metas, int fullAt) {
+  if (metas.length > maxSavedDirectoryChannels) return null;
+  final bytes = utf8.encode(
+    jsonEncode({
+      'v': _version,
+      'full_at': fullAt,
+      'metas': [
+        for (final event in metas)
+          {
+            'id': event.id,
+            'pubkey': event.pubkey,
+            'created_at': event.createdAt,
+            'tags': event.tags,
+            'content': event.content,
+          },
+      ],
+    }),
+  );
+  return bytes.length > maxSavedDirectoryBytes ? null : bytes;
+}
+
+SavedOpenChannelDirectory? _decode(Uint8List raw) {
   try {
-    final json = jsonDecode(raw) as Map<String, dynamic>;
+    final json = jsonDecode(utf8.decode(raw)) as Map<String, dynamic>;
     if (json['v'] != _version) return null;
     final metas = json['metas'] as List<dynamic>;
     if (metas.length > maxSavedDirectoryChannels) return null;
