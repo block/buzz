@@ -1,6 +1,84 @@
 part of 'channels_provider_test.dart';
 
 void _requestPathCases() {
+  test(
+    'keeps joined channels beyond the relay cap with archived rooms',
+    () async {
+      final ids = List.generate(
+        1080,
+        (index) =>
+            '${index.toString().padLeft(8, '0')}-0000-4000-8000-000000000000',
+      );
+      final session = _CappedChannelSession(
+        memberships: [
+          for (var i = 0; i < ids.length; i++)
+            _membership(
+              ids[i],
+              'me',
+              additionalPubkey: 'alice',
+              eventId: (i + 2000).toRadixString(16).padLeft(64, '0'),
+            ),
+        ],
+        metadata: [
+          for (var i = 0; i < ids.length; i++)
+            _cappedMeta(ids[i], i, archived: i < 1016),
+          // Old addressable revisions may coexist after a relay backfill. They
+          // must not crowd another channel out of even a bounded ID chunk.
+          for (var i = 0; i < 501; i++)
+            _cappedMeta(ids[1000], i + 3000, archived: true, createdAt: 15),
+        ],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      final channels = await container.read(channelsProvider.future);
+      expect(channels, hasLength(1080));
+      expect(
+        channels
+            .where((channel) => !channel.isArchived)
+            .map((channel) => channel.id),
+        unorderedEquals(ids.skip(1016)),
+      );
+      expect(channels.every((channel) => channel.memberCount == 2), isTrue);
+      expect(
+        session.historyFilters
+            .where((filter) => filter.kinds.contains(39000))
+            .every(
+              (filter) =>
+                  filter.tags['#d']!.length <= 500 && filter.limit <= 500,
+            ),
+        isTrue,
+      );
+      expect(
+        container
+            .read(channelsProvider.notifier)
+            .cachedMembersForChannel(ids.last)
+            .map((member) => member.pubkey),
+        ['me', 'alice'],
+      );
+
+      // A failed later page cannot replace the complete cached list with the
+      // prefix that happened to arrive. The same refresh must be retryable.
+      session.failMetadataRequest = session.metadataRequests + 2;
+      await container.read(channelsProvider.notifier).refresh();
+      expect(session.metadataRequests, session.failMetadataRequest);
+      expect(container.read(channelsProvider).requireValue, hasLength(1080));
+      session.failMetadataRequest = null;
+      await container.read(channelsProvider.notifier).refresh();
+      expect(container.read(channelsProvider).requireValue, hasLength(1080));
+
+      session.ignoreMetadataCursor = true;
+      await expectLater(
+        container.read(channelsProvider.notifier).fetchFresh(),
+        throwsStateError,
+      );
+      expect(container.read(channelsProvider).requireValue, hasLength(1080));
+      session.ignoreMetadataCursor = false;
+      await container.read(channelsProvider.notifier).refresh();
+      expect(container.read(channelsProvider).requireValue, hasLength(1080));
+    },
+  );
+
   test('DM hydration overlaps history and shares admitted profiles', () async {
     final session = _RequestPathSession();
     final profilesGate = session.profilesGate = Completer<void>();
@@ -198,6 +276,107 @@ void _requestPathCases() {
       );
     },
   );
+}
+
+NostrEvent _cappedMeta(
+  String channelId,
+  int eventIndex, {
+  required bool archived,
+  int? createdAt,
+}) => NostrEvent(
+  id: eventIndex.toRadixString(16).padLeft(64, '0'),
+  pubkey: 'creator',
+  createdAt: createdAt ?? (archived ? 20 : 10),
+  kind: 39000,
+  tags: [
+    ['d', channelId],
+    ['name', 'channel-$channelId'],
+    ['t', 'stream'],
+    ['public'],
+    if (archived) ['archived', 'true'],
+  ],
+  content: '',
+  sig: 'sig',
+);
+
+// Protocol double: enforces the relay's per-filter 1000-event clamp and
+// created_at DESC/id ASC composite cursor, including tied timestamps. Network
+// authentication/signature checks remain outside this provider regression.
+class _CappedChannelSession extends _FakeRelaySession {
+  _CappedChannelSession({required super.memberships, required super.metadata});
+
+  int metadataRequests = 0;
+  int? failMetadataRequest;
+  bool ignoreMetadataCursor = false;
+
+  List<NostrEvent> _page(
+    List<NostrEvent> events,
+    NostrFilter filter, {
+    bool ignoreBeforeId = false,
+  }) {
+    final beforeId = ignoreBeforeId
+        ? null
+        : filter.extensions['before_id'] as String?;
+    final page =
+        events.where((event) {
+          final until = filter.until;
+          return until == null ||
+              event.createdAt < until ||
+              (event.createdAt == until &&
+                  (beforeId == null || event.id.compareTo(beforeId) > 0));
+        }).toList()..sort((a, b) {
+          final byTime = b.createdAt.compareTo(a.createdAt);
+          return byTime != 0 ? byTime : a.id.compareTo(b.id);
+        });
+    return page.take(min(filter.limit, 1000)).toList();
+  }
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    final query = ignoreMetadataCursor && filter.kinds.contains(39000)
+        ? NostrFilter(
+            kinds: filter.kinds,
+            authors: filter.authors,
+            ids: filter.ids,
+            limit: filter.limit,
+            since: filter.since,
+            until: filter.until,
+            search: filter.search,
+            tags: filter.tags,
+            extensions: {
+              for (final entry in filter.extensions.entries)
+                if (entry.key != 'before_id') entry.key: entry.value,
+            },
+          )
+        : filter;
+    final events = await super.fetchHistory(query, timeout: timeout);
+    if (filter.kinds.contains(39000) && filter.tags.containsKey('#d')) {
+      metadataRequests++;
+      if (metadataRequests == failMetadataRequest) {
+        throw StateError('joined metadata page failed');
+      }
+      return _page(events, filter, ignoreBeforeId: ignoreMetadataCursor);
+    }
+    return events;
+  }
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    if (filters case [final filter]
+        when filter.kinds.length == 1 &&
+            filter.kinds.single == 39002 &&
+            filter.tags.containsKey('#p')) {
+      membershipQueryFilters.add(filter);
+      return _page(memberships, filter);
+    }
+    return super.queryRelay(filters, timeout: timeout);
+  }
 }
 
 NostrEvent _requestProfile(

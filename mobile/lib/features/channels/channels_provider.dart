@@ -390,11 +390,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // send those reads together instead of one round trip after another. A
     // user with no memberships must still continue to directory discovery.
     final memberChannelIdList = memberChannelIds.toList();
-    final memberMetasRequest = memberChannelIds.isEmpty
-        ? Future.value(const <NostrEvent>[])
-        : session.fetchHistory(
-            NostrFilters.channelMetadata(memberChannelIdList),
-          );
+    final memberMetasRequest = _fetchJoinedChannelMetas(
+      session,
+      memberChannelIdList,
+      ensureCurrent: fence.ensureCurrent,
+    );
     final hiddenDmIdsRequest = _fetchHiddenDmIds(session, myPk);
     final huddleStartsRequest = _fetchHuddleStarts(
       session,
