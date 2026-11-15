@@ -102,6 +102,6 @@ _Avoid_: Siri message, dictation, background send
 
 ### Open-channel directory
 
-The open, listed channels of a community that a person can find and preview without being a member. Private channels, DMs and unlisted channels are never in it.
+The open, listed channels of a community that a person can find and preview without being a member. Private channels, DMs and unlisted channels are never in it. A client's saved copy is the set it last saw, so a channel that has since turned private, unlisted or deleted can linger in it until the next full read.
 
 _Avoid_: Channel list, public channels, discovery

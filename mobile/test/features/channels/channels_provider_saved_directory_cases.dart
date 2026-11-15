@@ -143,37 +143,40 @@ void _savedDirectoryCases() {
     await app.expectSaved([]);
   });
 
-  test('a catch-up starts no later than the last read started', () async {
+  test('a catch-up starts before the last read, by device clock', () async {
     final app = await _SavedDirectoryHarness.create(
       _FakeRelaySession(memberships: const []),
     );
     final start = app.nowSecs;
-    // A burst of joins has stamped the channel ten minutes ahead.
+    // The device clock runs five minutes ahead of the relay's, and a burst of
+    // joins has stamped the channel ten minutes ahead of the relay.
+    final relayStart = start - 300;
     app.session.metadata = [
-      _meta(id: _channelA, name: 'busy', createdAt: start + 600),
+      _meta(id: _channelA, name: 'busy', createdAt: relayStart + 600),
     ];
     await app.launch();
     await app.open();
     expect(app.unjoined(), ['busy']);
 
     // Two minutes on, a channel created meanwhile carries an earlier stamp
-    // than the newest saved one, and the catch-up still finds it.
+    // than both the newest saved one and the device's read time, and the
+    // catch-up still finds it.
     app.now = app.now.add(const Duration(minutes: 2));
     app.session.metadata = [
       ...app.session.metadata,
-      _meta(id: _channelB, name: 'fresh', createdAt: start + 120),
+      _meta(id: _channelB, name: 'fresh', createdAt: relayStart + 120),
     ];
     await app.open();
-    expect(app.reads().last, start - 60);
     expect(app.unjoined(), ['busy', 'fresh']);
+    expect(app.reads().last, start - relayCrossDeviceSkewSeconds);
     await app.expectSaved(['busy', 'fresh']);
 
-    // After a relaunch the saved read time still caps the cursor, now at the
-    // catch-up's start.
+    // After a relaunch the saved read time still bounds the cursor, now from
+    // the catch-up's start.
     await app.relaunch();
     app.now = app.now.add(const Duration(minutes: 1));
     await app.open();
-    expect(app.reads().last, start + 120 - 60);
+    expect(app.reads().last, start + 120 - relayCrossDeviceSkewSeconds);
   });
 
   test('a read dated in the future by a clock since set back is due', () async {

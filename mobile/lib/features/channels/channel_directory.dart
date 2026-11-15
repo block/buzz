@@ -878,7 +878,9 @@ extension _ChannelsNotifierDirectory on ChannelsNotifier {
     // A load that finished meanwhile is newer than the file.
     if (_savedDirectory.scope == scope) return true;
     if (saved == null) return false;
-    _directoryMetas = saved.metas;
+    // Filtered again, so a copy saved under older rules holds nothing the
+    // current rules exclude.
+    _directoryMetas = _discoverableChannelEvents(saved.metas);
     _savedDirectory
       ..scope = scope
       ..fullAt = saved.fullAt
@@ -964,10 +966,18 @@ extension _ChannelsNotifierDirectory on ChannelsNotifier {
         0,
         (newest, event) => max(newest, event.createdAt),
       );
-      // Never later than the last read started: a channel created since
-      // then may carry an earlier stamp than the newest held one.
-      final cursor = min(newest, _savedDirectory.readAt ?? newest);
-      since = max(0, cursor - savedDirectoryCatchUpOverlap.inSeconds);
+      // A channel created since the last read may carry an earlier stamp
+      // than the newest held one, so the catch-up also starts before that
+      // read. Its start is device time and the stamps are relay time, so it
+      // reaches back by the clock skew the relay tolerates.
+      final readAt = _savedDirectory.readAt;
+      since = max(
+        0,
+        min(
+          newest - savedDirectoryCatchUpOverlap.inSeconds,
+          readAt == null ? newest : readAt - relayCrossDeviceSkewSeconds,
+        ),
+      );
     }
     final fence = _refreshCoordinator.beginDirectoryOnly();
     try {
