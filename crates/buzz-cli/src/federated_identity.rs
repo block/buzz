@@ -642,6 +642,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_assertion_that_expired_during_sleep_is_reminted() {
+        crate::cached_assertion::test_clock::freeze(1_800_000_000);
+        let (base, seen) =
+            adapter(|req| issued(req["nostr_pubkey"].as_str().unwrap(), unix_now() + 300)).await;
+        let keys = Keys::generate();
+        let session = AdapterSession::new(&base, TOKEN, RELAY).unwrap();
+        session.assertion(&keys).await.unwrap();
+        // Sleep: the wall clock moves on while the monotonic clock does not.
+        crate::cached_assertion::test_clock::advance_wall(600);
+        crate::cached_assertion::test_clock::advance(1);
+        session.assertion(&keys).await.unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
     async fn assertions_that_never_have_lifetime_left_end_in_an_error() {
         // Each 10 s assertion takes 20 s to arrive.
         let (base, seen) = adapter(|req| {
