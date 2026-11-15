@@ -46,6 +46,20 @@ class _LiveSubscription {
     this.resumeSince = true,
     this.readyCompleter,
   });
+
+  /// The REQ filter for a replay, resumed from what this subscription saw.
+  NostrFilter get replayFilter {
+    if (!resumeSince) return filter;
+    final since = relayResumeSince(
+      originalSince: filter.since,
+      until: filter.until,
+      lastSeenCreatedAt: lastSeenCreatedAt,
+      liveUntil: liveUntil,
+    );
+    return since == null || since == filter.since
+        ? filter
+        : filter.copyWithSince(since);
+  }
 }
 
 class _ClosedRetry {

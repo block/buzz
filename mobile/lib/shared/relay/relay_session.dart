@@ -102,6 +102,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   bool _hasConnectedOnce = false;
   int _connectionGeneration = 0;
   int _contextGeneration = 0;
+  Object _liveSubscriptionOwner = Object();
   final Map<Object, String> _visibleChannelsByOwner = {};
   final Map<Object, Future<void> Function()> _beforePauseCallbacks = {};
   bool _socketConnected = false;
@@ -113,13 +114,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// before reading from or publishing through it.
   String? get relayUrl => _relayUrl;
 
-  Object _liveSubscriptionOwner = Object();
-
-  /// Identifies the build that holds the live subscriptions. build() can
-  /// re-run on this notifier (auth completing, a config change), and its
-  /// dispose drops every live subscription without a CLOSED, so a holder
-  /// that outlives the rebuild compares this to learn its subscription is
-  /// gone.
+  /// Changes when a rebuild (e.g. auth completing) drops every live
+  /// subscription without a CLOSED, so a holder can tell its own is gone.
   Object get liveSubscriptionOwner => _liveSubscriptionOwner;
 
   @visibleForTesting
@@ -360,11 +356,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// when a retryable or rate-limited CLOSED begins backoff. Terminal CLOSED
   /// invokes [onClosed] and removes the subscription instead of retrying it.
   /// Calling the cleanup callback cancels pending retries and sends CLOSE.
-  ///
-  /// A replay narrows [filter] with a `since` just before the newest event
-  /// delivered, unless [resumeSince] is false. Turn it off for a `limit: 0`
-  /// stream whose events can carry older timestamps: the relay matches live
-  /// events against `since` too, so the bound would drop them.
+  /// Turn off [resumeSince] for a `limit: 0` stream whose events can carry
+  /// older timestamps: the relay matches live events against a replay's
+  /// `since`, so the resume bound would drop them.
   Future<void Function()> subscribeWithStatus(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
@@ -804,20 +798,6 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   bool _isActiveConnection(int generation) =>
       !_disposed && generation == _connectionGeneration;
 
-  NostrFilter _replayFilter(_LiveSubscription subscription) {
-    final filter = subscription.filter;
-    if (!subscription.resumeSince) return filter;
-    final since = relayResumeSince(
-      originalSince: filter.since,
-      until: filter.until,
-      lastSeenCreatedAt: subscription.lastSeenCreatedAt,
-      liveUntil: subscription.liveUntil,
-    );
-    return since == null || since == filter.since
-        ? filter
-        : filter.copyWithSince(since);
-  }
-
   void _handleMessage(List<dynamic> data) {
     _lastInboundAt = _now();
     if (data.isEmpty) return;
@@ -1105,7 +1085,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       subscription.ambiguousGeneration = _connectionGeneration;
     }
     subscription.reqGeneration = _connectionGeneration;
-    _sendReq(subId, _replayFilter(subscription));
+    _sendReq(subId, subscription.replayFilter);
   }
 
   void _sendReq(String subId, NostrFilter filter) {
