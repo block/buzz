@@ -1,6 +1,6 @@
 # Buzz domain language
 
-Shared terminology for Buzz product behavior. This glossary currently covers mobile [push suppression](#push-suppression), the [notification body](#notification-body), [mobile builds](#mobile-builds) and [sharing](#sharing); it is not a complete model of Buzz.
+Shared terminology for Buzz product behavior. This glossary currently covers mobile [push suppression](#push-suppression), the [notification body](#notification-body), [mobile builds](#mobile-builds), [sharing](#sharing) and [quick send](#quick-send); it is not a complete model of Buzz.
 
 ## Notifications
 
@@ -83,3 +83,23 @@ _Avoid_: Forward, post
 A conversation offered among the share sheet's suggested destinations: an existing channel or DM, or a new Solo chat. Share targets are learned from top-level messages a person sends in a conversation; thread replies and incoming messages never count.
 
 _Avoid_: Recipient, contact, suggestion
+
+## Agents and conversations
+
+### Bestie
+
+The one agent a person has chosen as their default in a community. A community has at most one Bestie per person.
+
+_Avoid_: Default agent, main agent, assistant
+
+### Solo chat
+
+A private chat a person starts with their agents, listed under Solo rather than among channels and DMs.
+
+_Avoid_: Me chat, agent DM
+
+### Quick send
+
+Sending a message to Buzz from outside the app (Siri, Shortcuts, the Action button) without opening Buzz. A quick send to the [Bestie](#bestie) starts a new [Solo chat](#solo-chat) with the message as its first message.
+
+_Avoid_: Siri message, dictation, background send
