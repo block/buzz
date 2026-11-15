@@ -116,6 +116,12 @@ class BuilderlabAccountClient {
   // already pending can still reach their relays for a short while.
   ({String credential, DateTime until})? _signedOut;
   final _queue = SerialQueue();
+  // Session storage changes, kept apart from [_queue] so signing out never
+  // waits behind a pending account request.
+  final _storageQueue = SerialQueue();
+  // Advances at each sign-out, so a request already in flight cannot adopt or
+  // save a session afterwards.
+  int _sessionEpoch = 0;
 
   /// How long after sign-out [pushStopAssertion] can still issue.
   static const pushStopWindow = Duration(minutes: 10);
@@ -143,7 +149,11 @@ class BuilderlabAccountClient {
       _restoring ??= _restore().whenComplete(() => _restoring = null);
   Future<BuilderlabAccount?>? _restoring;
   Future<BuilderlabAccount?> _restore() => _serial(() async {
-    final record = await _readRecord();
+    // Read behind any sign-out still clearing, so this never adopts the
+    // session it is deleting.
+    final (epoch, record) = await _storageQueue.run(
+      () async => (_sessionEpoch, await _readRecord()),
+    );
     if (record == null) {
       // Retries a removal that failed after an earlier sign-out.
       await _unshare();
@@ -151,13 +161,15 @@ class BuilderlabAccountClient {
     }
     try {
       final verified = await _verify(record.credential);
+      // Signed out while the check was pending.
+      if (epoch != _sessionEpoch) return null;
       if (verified.subject != record.subject) {
         throw AccountFailure.invalidResponse;
       }
       return _adopt(record.credential, verified);
     } on AccountFailure catch (failure) {
       if (failure == AccountFailure.signedOut) {
-        await _clear();
+        await _clearSince(epoch);
         return null;
       }
       rethrow;
@@ -172,51 +184,65 @@ class BuilderlabAccountClient {
     required String code,
     required String verifier,
     bool Function()? isCurrent,
-  }) => _serial(() async {
-    if (code.isEmpty ||
-        !RegExp(r'^[A-Za-z0-9._~-]{43,128}$').hasMatch(verifier)) {
-      throw AccountFailure.invalidResponse;
-    }
-    final stored = await _readRecord();
-    final result = await _request(
-      '/v1/auth/login/exchange',
-      body: {'code': code, 'code_verifier': verifier},
-    );
-    final credential = result['session_credential'];
-    if (credential is! String ||
-        credential.isEmpty ||
-        credential.length > 512) {
-      throw AccountFailure.invalidResponse;
-    }
-    final verified = await _verify(credential);
-    if (DateTime.tryParse(
-          result['expires_at'] is String ? result['expires_at'] as String : '',
-        ) !=
-        verified.expiresAt) {
-      throw AccountFailure.invalidResponse;
-    }
-    if (stored != null && stored.subject != verified.subject) {
-      throw AccountFailure.differentAccount;
-    }
-    if (_disposed || (isCurrent != null && !isCurrent())) {
-      throw AccountFailure.unavailable;
-    }
-    final record = jsonEncode({
-      'origin': accountOrigin.toString(),
-      'credential': credential,
-      'subject': verified.subject,
-      'expires_at': verified.expiresAt.toIso8601String(),
-    });
-    try {
-      await _storage.write(key: _storageKey, value: record);
-      if (await _storage.read(key: _storageKey) != record) {
-        throw AccountFailure.storage;
+  }) {
+    // Taken at the call, so an exchange queued before a sign-out can never
+    // sign back in after it.
+    final epoch = _sessionEpoch;
+    return _serial(() async {
+      if (epoch != _sessionEpoch) throw AccountFailure.unavailable;
+      if (code.isEmpty ||
+          !RegExp(r'^[A-Za-z0-9._~-]{43,128}$').hasMatch(verifier)) {
+        throw AccountFailure.invalidResponse;
       }
-    } catch (_) {
-      throw AccountFailure.storage;
-    }
-    return _adopt(credential, verified);
-  });
+      final stored = await _readRecord();
+      final result = await _request(
+        '/v1/auth/login/exchange',
+        body: {'code': code, 'code_verifier': verifier},
+      );
+      final credential = result['session_credential'];
+      if (credential is! String ||
+          credential.isEmpty ||
+          credential.length > 512) {
+        throw AccountFailure.invalidResponse;
+      }
+      final verified = await _verify(credential);
+      if (DateTime.tryParse(
+            result['expires_at'] is String
+                ? result['expires_at'] as String
+                : '',
+          ) !=
+          verified.expiresAt) {
+        throw AccountFailure.invalidResponse;
+      }
+      if (stored != null && stored.subject != verified.subject) {
+        throw AccountFailure.differentAccount;
+      }
+      final record = jsonEncode({
+        'origin': accountOrigin.toString(),
+        'credential': credential,
+        'subject': verified.subject,
+        'expires_at': verified.expiresAt.toIso8601String(),
+      });
+      // Saved and adopted as one storage change, so a sign-out lands wholly
+      // before or after it.
+      return _storageQueue.run(() async {
+        if (_disposed ||
+            epoch != _sessionEpoch ||
+            (isCurrent != null && !isCurrent())) {
+          throw AccountFailure.unavailable;
+        }
+        try {
+          await _storage.write(key: _storageKey, value: record);
+          if (await _storage.read(key: _storageKey) != record) {
+            throw AccountFailure.storage;
+          }
+        } catch (_) {
+          throw AccountFailure.storage;
+        }
+        return _adopt(credential, verified);
+      });
+    });
+  }
 
   /// An unreadable record is a storage failure, never an absent session: its
   /// subject is unknown, so only an explicit [clearLocalSession] may drop it.
@@ -341,6 +367,7 @@ class BuilderlabAccountClient {
       );
     }
     return _serial(() async {
+      final epoch = _sessionEpoch;
       final credential = _credential;
       if (credential == null) throw AccountFailure.signedOut;
       _share();
@@ -366,7 +393,7 @@ class BuilderlabAccountClient {
       try {
         await _verify(credential);
       } on AccountFailure catch (failure) {
-        if (failure == AccountFailure.signedOut) await _clear();
+        if (failure == AccountFailure.signedOut) await _clearSince(epoch);
         rethrow;
       }
       throw AccountFailure.denied;
@@ -418,8 +445,31 @@ class BuilderlabAccountClient {
         );
       });
 
-  Future<void> clearLocalSession() => _serial(_clear);
+  /// Runs at once, without waiting for pending account requests; none of them
+  /// can adopt or save a session after it.
+  Future<void> clearLocalSession() {
+    if (_disposed) return Future.error(AccountFailure.unavailable);
+    _sessionEpoch++;
+    return _storageQueue.run(_clear);
+  }
+
+  /// Ends a session a request found rejected, unless a sign-out already did.
+  Future<void> _clearSince(int epoch) => _storageQueue.run(() async {
+    if (epoch == _sessionEpoch) await _clear();
+  });
   Future<void> _clear() async {
+    // A session saved but not yet restored (an offline launch) still backs
+    // the push stops that follow, so read it before deleting it.
+    var signedOut = _credential;
+    if (signedOut == null) {
+      try {
+        signedOut = (await _readRecord())?.credential;
+      } on AccountFailure {
+        // Unreadable: there is no credential to keep.
+      }
+    }
+    // Nothing may share the credential again while it is being removed.
+    _unshared = null;
     // Attempt both removals so one failure never leaves the other copy live.
     var failed = false;
     try {
@@ -433,15 +483,22 @@ class BuilderlabAccountClient {
       failed = true;
     }
     if (failed) {
+      // The record may already be gone, so an unrestored session's credential
+      // must survive for the retry's push stops.
+      if (_credential == null && signedOut != null) {
+        _signedOut = (
+          credential: signedOut,
+          until: DateTime.now().add(pushStopWindow),
+        );
+      }
       // The account stays signed in, so the extension gets its copy back.
       _unshared = _credential;
       _share();
       throw AccountFailure.storage;
     }
-    final credential = _credential;
-    if (credential != null) {
+    if (signedOut != null) {
       _signedOut = (
-        credential: credential,
+        credential: signedOut,
         until: DateTime.now().add(pushStopWindow),
       );
     }
