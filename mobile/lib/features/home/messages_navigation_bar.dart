@@ -33,8 +33,17 @@ class MessagesNavigationBar extends HookWidget {
   @override
   Widget build(BuildContext context) {
     final menuOpen = useState(false);
+    final menuMoving = useState(false);
+    final disableAnimations = MediaQuery.disableAnimationsOf(context);
+    void menuVisibilityChanged(bool visible) {
+      if (menuOpen.value == visible) return;
+      menuMoving.value = !disableAnimations;
+      menuOpen.value = visible;
+    }
+
     useEffect(() {
       menuOpen.value = false;
+      menuMoving.value = false;
       return null;
     }, [axis]);
     final overlay = useState(false);
@@ -47,7 +56,7 @@ class MessagesNavigationBar extends HookWidget {
     );
     return AgentNavigationOverlay(
       active: overlay,
-      menuOpen: menuOpen.value,
+      menuOpen: menuOpen.value || menuMoving.value,
       onRecordingChanged: onRecordingChanged,
       child: Builder(
         builder: (context) {
@@ -65,8 +74,7 @@ class MessagesNavigationBar extends HookWidget {
                         key: const ValueKey('vertical-create-menu'),
                         mergingNavigation: true,
                         navigationAxis: Axis.vertical,
-                        onMenuVisibilityChanged: (visible) =>
-                            menuOpen.value = visible,
+                        onMenuVisibilityChanged: menuVisibilityChanged,
                         actions: creationActions,
                         dividerBefore: const {2},
                         sectionTitles: const {0: 'Solo', 2: 'Team'},
@@ -112,6 +120,7 @@ class MessagesNavigationBar extends HookWidget {
                           offset: menuOpen.value ? -56 - Grid.xs : 0,
                           menuOpen: menuOpen.value,
                           alignment: Alignment.center,
+                          onEnd: () => menuMoving.value = false,
                           child: NavigationGlassGroup(child: agent),
                         ),
                       ),
@@ -132,8 +141,7 @@ class MessagesNavigationBar extends HookWidget {
                     IosMessageCreateButton(
                       key: const ValueKey('horizontal-create-menu'),
                       mergingNavigation: true,
-                      onMenuVisibilityChanged: (visible) =>
-                          menuOpen.value = visible,
+                      onMenuVisibilityChanged: menuVisibilityChanged,
                       actions: creationActions,
                       dividerBefore: const {2},
                       sectionTitles: const {0: 'Solo', 2: 'Team'},
@@ -178,6 +186,7 @@ class MessagesNavigationBar extends HookWidget {
                           offset: menuOpen.value ? -100 : 0,
                           menuOpen: menuOpen.value,
                           alignment: Alignment.center,
+                          onEnd: () => menuMoving.value = false,
                           child: NavigationGlassGroup(child: agent),
                         ),
                       ),
@@ -242,7 +251,9 @@ class _MenuNudge extends StatelessWidget {
     required this.menuOpen,
     required this.alignment,
     required this.child,
+    this.onEnd,
   });
+  final VoidCallback? onEnd;
   final double offset;
   final Axis axis;
   final bool menuOpen;
@@ -260,6 +271,7 @@ class _MenuNudge extends StatelessWidget {
       child: ExcludeSemantics(
         excluding: menuOpen,
         child: AnimatedContainer(
+          onEnd: onEnd,
           duration: duration,
           curve: Curves.easeOutCubic,
           transformAlignment: alignment,

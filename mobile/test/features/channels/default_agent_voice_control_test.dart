@@ -121,6 +121,7 @@ void main() {
   Future<void> mount(
     WidgetTester tester, {
     bool nativeAvatar = false,
+    bool disableAnimations = false,
     Axis axis = Axis.horizontal,
     DefaultAgentVoiceDraft? storage,
     Future<void> Function(VoiceNoteRecording)? onRecorded,
@@ -135,6 +136,12 @@ void main() {
         ],
         child: MaterialApp(
           theme: AppTheme.light(),
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(disableAnimations: disableAnimations),
+            child: child!,
+          ),
           home: Scaffold(
             body: Center(
               child: MessagesNavigationBar(
@@ -251,6 +258,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Retry voice note'), findsNothing);
     menu.onMenuVisibilityChanged!(false);
+    await tester.pump();
+    expect(find.text('Retry voice note'), findsNothing);
     await tester.pumpAndSettle();
     expect(
       tester
@@ -259,6 +268,18 @@ void main() {
           .hasAction(SemanticsAction.tap),
       isTrue,
     );
+    await mount(tester, nativeAvatar: true, disableAnimations: true);
+    await tester.pumpAndSettle();
+    final reducedMotionMenu = tester.widget<IosMessageCreateButton>(
+      find.byType(IosMessageCreateButton),
+    );
+    reducedMotionMenu.onMenuVisibilityChanged!(true);
+    await tester.pumpAndSettle();
+    expect(find.text('Retry voice note'), findsNothing);
+    reducedMotionMenu.onMenuVisibilityChanged!(false);
+    await tester.pumpAndSettle();
+    expect(find.text('Retry voice note'), findsOneWidget);
+    expect(tester.takeException(), isNull);
     await mount(tester, nativeAvatar: true, axis: Axis.vertical);
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Discard voice note'));
