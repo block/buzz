@@ -135,10 +135,10 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
   /// skewed phone clock from stretching the token; the second keeps a short session-capped
   /// token from outliving its `exp`. A deadline at or before `receipt` means no lifetime is left.
   static func localDeadline(
-    requestStart: TimeInterval, receipt: TimeInterval, wallAtReceipt: Date, exp: Int, iat: Int
+    requestStart: TimeInterval, receipt: TimeInterval, wallAtReceipt: Date, exp: Int, iat: Double
   ) -> TimeInterval {
     let byExp = receipt + max(0, TimeInterval(exp) - wallAtReceipt.timeIntervalSince1970)
-    return min(byExp, requestStart + TimeInterval(max(0, exp - iat)))
+    return min(byExp, requestStart + max(0, (TimeInterval(exp) - iat).rounded(.down)))
   }
 
   /// Whether an assertion received at `receipt` (uptime) and `wall` is still within its reuse
@@ -150,8 +150,9 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
     max(uptime - receipt, now.timeIntervalSince(wall)) < budget
   }
 
-  /// The `iat` claim of a compact JWS, or nil when it has none or it is unreadable.
-  static func issuedAt(_ token: String) -> Int? {
+  /// The `iat` claim of a compact JWS, or nil when it has none or it is unreadable. A
+  /// NumericDate, so it may be fractional.
+  static func issuedAt(_ token: String) -> Double? {
     let parts = token.split(separator: ".", omittingEmptySubsequences: false)
     guard parts.count == 3 else { return nil }
     var payload = parts[1].replacingOccurrences(of: "-", with: "+")
@@ -160,7 +161,8 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
     guard let data = Data(base64Encoded: payload),
       let claims = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     else { return nil }
-    return claims["iat"] as? Int
+    guard let iat = claims["iat"] as? Double, iat.isFinite else { return nil }
+    return iat
   }
 
   /// Whether the account session that issued `assertion` is still the shared one. A

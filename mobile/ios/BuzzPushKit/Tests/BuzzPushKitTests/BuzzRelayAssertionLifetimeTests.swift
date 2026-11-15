@@ -60,6 +60,13 @@ final class BuzzRelayAssertionLifetimeTests: XCTestCase {
     XCTAssertEqual(deadline(wall: 9_880), 1_180, "slow: the lifetime caps it")
     XCTAssertEqual(deadline(wall: 10_120), 1_060, "fast: only what exp leaves")
     XCTAssertEqual(deadline(wall: 10_181), 1_000, "none left: refused at receipt")
+    // A fractional `iat` is a valid NumericDate; the lifetime rounds down.
+    let iat = BuzzRelayAssertionIssuer.issuedAt("e30.eyJpYXQiOjEwMDAwLjUsImV4cCI6MTAxODB9.c2ln")
+    XCTAssertEqual(iat, 10_000.5)
+    XCTAssertEqual(
+      BuzzRelayAssertionIssuer.localDeadline(
+        requestStart: 1_000, receipt: 1_000, wallAtReceipt: Date(timeIntervalSince1970: 9_880),
+        exp: 10_180, iat: iat ?? 0), 1_179)
     // A sleep: the wall clock jumps 1 hour, uptime doesn't.
     let wall = Date(timeIntervalSince1970: 10_000)
     func reusable(_ now: Date) -> Bool {

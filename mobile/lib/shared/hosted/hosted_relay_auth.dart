@@ -433,7 +433,7 @@ class HostedRelayAuth extends ChangeNotifier {
           expectedSubject: session.subject,
         );
         final issued = _token(value, pubkey);
-        final iat = _issuedAt(issued.token);
+        final iat = issuedAt(issued.token);
         if (iat == null) throw AccountFailure.invalidResponse;
         receipt = _elapsed();
         deadline = localDeadline(
@@ -498,8 +498,9 @@ class HostedRelayAuth extends ChangeNotifier {
   }
 
   /// The `iat` claim of a compact JWS, or null when it has none or it is
-  /// unreadable.
-  static int? _issuedAt(String token) {
+  /// unreadable. A NumericDate, so it may be fractional.
+  @visibleForTesting
+  static num? issuedAt(String token) {
     final parts = token.split('.');
     if (parts.length != 3) return null;
     try {
@@ -507,7 +508,7 @@ class HostedRelayAuth extends ChangeNotifier {
         utf8.decode(base64Url.decode(base64Url.normalize(parts[1]))),
       );
       final iat = claims is Map ? claims['iat'] : null;
-      return iat is int ? iat : null;
+      return iat is num && iat.isFinite ? iat : null;
     } on FormatException {
       return null;
     }
@@ -657,9 +658,10 @@ Duration localDeadline({
   required Duration receipt,
   required int wallAtReceipt,
   required int exp,
-  required int iat,
+  required num iat,
 }) {
   final byExp = receipt + Duration(seconds: max(0, exp - wallAtReceipt));
-  final byLifetime = requestStart + Duration(seconds: max(0, exp - iat));
+  final byLifetime =
+      requestStart + Duration(seconds: max(0, (exp - iat).floor()));
   return byLifetime < byExp ? byLifetime : byExp;
 }

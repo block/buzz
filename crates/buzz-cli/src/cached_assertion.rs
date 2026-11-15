@@ -71,7 +71,7 @@ impl CachedAssertion {
                 return Ok(None);
             };
             let claims = jws_claims(&jws)
-                .filter(|c| c.iat.is_some())
+                .filter(|c| c.lifetime.is_some())
                 .ok_or_else(|| {
                     CliError::Auth("the evidence source returned an unreadable assertion".into())
                 })?;
@@ -101,10 +101,10 @@ impl CachedAssertion {
 /// send, capped by `exp` against the local wall clock. The first term keeps a
 /// skewed local clock from stretching the token; the second keeps a short
 /// session-capped token from outliving its `exp`. A deadline at or before
-/// `receipt` means no lifetime is left. `claims.iat` must be present.
+/// `receipt` means no lifetime is left. `claims.lifetime` must be present.
 fn local_deadline(request_start: u64, receipt: u64, wall_at_receipt: u64, claims: Claims) -> u64 {
     let by_exp = receipt + claims.exp.saturating_sub(wall_at_receipt);
-    let by_lifetime = request_start + claims.exp.saturating_sub(claims.iat.unwrap_or(claims.exp));
+    let by_lifetime = request_start + claims.lifetime.unwrap_or(0);
     by_exp.min(by_lifetime)
 }
 
@@ -127,14 +127,15 @@ pub(crate) fn jws_exp(token: &str) -> Option<u64> {
     jws_claims(token).map(|c| c.exp)
 }
 
-/// The `exp` and, when present, `iat` claims of an assertion.
+/// The `exp` claim of an assertion and, when it has a numeric `iat`, its
+/// issuer lifetime `exp − iat` in whole seconds.
 #[derive(Clone, Copy)]
 struct Claims {
     exp: u64,
-    iat: Option<u64>,
+    lifetime: Option<u64>,
 }
 
-/// [`jws_exp`]'s structural check, also returning `iat`.
+/// [`jws_exp`]'s structural check, also returning the lifetime.
 fn jws_claims(token: &str) -> Option<Claims> {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     let mut segments = token.split('.');
@@ -156,8 +157,16 @@ fn jws_claims(token: &str) -> Option<Claims> {
     let payload = json(payload)?;
     Some(Claims {
         exp: payload.get("exp")?.as_u64()?,
-        iat: payload.get("iat").and_then(serde_json::Value::as_u64),
+        lifetime: lifetime(&payload),
     })
+}
+
+/// `max(0, floor(exp − iat))`. Both are NumericDates, so either may be
+/// fractional; rounding down never stretches the token.
+fn lifetime(payload: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
+    let exp = payload.get("exp")?.as_f64()?;
+    let iat = payload.get("iat")?.as_f64()?;
+    Some((exp - iat).floor().max(0.0) as u64)
 }
 
 /// Whole seconds on a monotonic clock, for local deadlines a wall-clock
@@ -224,7 +233,7 @@ mod tests {
     fn the_deadline_counts_the_lifetime_from_the_request_start() {
         let claims = |iat, exp| Claims {
             exp,
-            iat: Some(iat),
+            lifetime: Some(exp - iat),
         };
         // Issuer clock: iat 10_000, exp 10_180. The reply took 20 s.
         // A local clock 120 s slow would read 180 + 120 s left by `exp`;
@@ -252,5 +261,9 @@ mod tests {
         assert_eq!(jws_exp(&format!("e30.{payload}.c2ln")), None, "no alg");
         assert_eq!(jws_exp(&format!("{header}.{payload}")), None);
         assert_eq!(jws_exp(&format!("{header}.{payload}.c2ln.x")), None);
+        // A fractional `iat` is a valid NumericDate; the lifetime rounds down.
+        let fractional = "eyJpYXQiOjE3OTAwMDAwMDAuNSwiZXhwIjoxNzkwMDAwMzAwfQ"; // {"iat":1790000000.5,"exp":1790000300}
+        let claims = jws_claims(&format!("{header}.{fractional}.c2ln")).unwrap();
+        assert_eq!((claims.exp, claims.lifetime), (1_790_000_300, Some(299)));
     }
 }
