@@ -423,9 +423,9 @@ void swipeReplyLinkTests() {
         );
         await tester.pumpAndSettle();
         final gesture = await tester.startGesture(
-          tester.getCenter(
-            onLink ? find.text('the doc') : find.textContaining('carefully'),
-          ),
+          onLink
+              ? linkCenter(tester, 'the doc')
+              : textCenter(tester, 'carefully'),
         );
         await gesture.moveBy(const Offset(-25, 0));
         await gesture.moveBy(const Offset(-100, 0));
