@@ -36,6 +36,7 @@ mod writer;
 pub use model::*;
 #[cfg(test)]
 pub(crate) use writer::flush;
+pub use writer::flush_pending;
 pub(crate) use writer::{seen, stage, submit, Staged};
 
 #[cfg(test)]

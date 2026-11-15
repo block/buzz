@@ -8,19 +8,17 @@ pub const PREVIEW_CHARS: usize = 256;
 pub const DEFAULT_LIMIT: usize = 100;
 /// Most rows in one page.
 pub const MAX_LIMIT: usize = 500;
-/// Most rows one read may name.
-pub const MAX_IDS: usize = 100;
 /// Most changed rows a `since` read returns per kind group. Past it the
 /// read answers `reset` and the caller starts over from a snapshot.
 pub const MAX_SINCE_ROWS: usize = 1000;
-/// Largest mention count reported for a row or a total.
+/// Largest unread mention total reported.
 pub const MAX_MENTIONS: u32 = 99;
 /// How far back a `since` marker may reach, and how long a thread in the
 /// default state stays live after the person last engaged with it.
 pub const HORIZON_SECONDS: i64 = 30 * 24 * 60 * 60;
 /// Newest events per channel, or replies per thread, the fill examines.
 pub const FILL_SCAN: i64 = 512;
-/// The person's newest mentions examined for unread counts.
+/// The person's newest mentions examined for the unread mention total.
 pub const MENTION_SCAN: i64 = 2000;
 /// A row is stamped just before its transaction commits; a `since` read is
 /// widened by this much so a slow commit is not missed.
@@ -83,18 +81,6 @@ impl RowKind {
     }
 }
 
-/// What a row last did. The list is ordered by `at`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Activity {
-    /// Relay arrival of the newest message, Unix seconds. A conversation with
-    /// no message yet carries its creation time.
-    pub at: i64,
-    /// That message, lowercase hex; `None` when there is none.
-    pub id: Option<String>,
-    /// Who posted it, lowercase hex.
-    pub pubkey: Option<String>,
-}
-
 /// The message a row shows. Marking the row read marks through `id`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Preview {
@@ -104,10 +90,8 @@ pub struct Preview {
     pub pubkey: String,
     /// The author's signed `created_at`, Unix seconds. Display only.
     pub created_at: i64,
-    /// The first [`PREVIEW_CHARS`] characters.
+    /// The first [`PREVIEW_CHARS`] characters, after the latest edit.
     pub text: String,
-    /// Whether `text` comes from an edit.
-    pub edited: bool,
 }
 
 /// One row of the list.
@@ -122,23 +106,16 @@ pub struct Row {
     /// Thread root, for a thread row and for a mention inside a thread.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub root_id: Option<String>,
-    /// Sort key and newest message.
-    pub activity: Activity,
+    /// The sort key, Unix seconds: relay arrival of the message in `preview`.
+    /// A conversation with no such message carries its creation time.
+    pub at: i64,
     /// The message to show: a conversation's newest top-level message, a
     /// thread's newest reply, or the mention itself.
     pub preview: Option<Preview>,
     /// Whether the row needs the person's attention.
     pub unread: bool,
-    /// Unread messages in the row's scope that tag the person, at most
-    /// [`MAX_MENTIONS`]. Always 0 on a mention row.
-    pub mentions: u32,
-    /// The message the scope was last marked read through.
-    pub read_through_id: Option<String>,
     /// `default`, `following` or `muted`.
     pub state: &'static str,
-    /// Replies in the thread; thread rows only.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reply_count: Option<i32>,
     /// Arrival in microseconds: the exact sort key, for cursors.
     #[serde(skip)]
     pub(super) sort_at: i64,
@@ -164,28 +141,19 @@ pub struct Removed {
     pub id: String,
 }
 
-/// Unread rows and mentions of one kind, over the whole set.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-pub struct Total {
-    /// Rows that are unread.
-    pub unread: u32,
-    /// Unread mentions, at most [`MAX_MENTIONS`].
-    pub mentions: u32,
-}
-
-/// Totals per kind.
+/// Unread rows of each kind, over the whole set.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct Totals {
     /// Channels.
-    pub channel: Total,
+    pub channel: u32,
     /// Direct messages.
-    pub dm: Total,
+    pub dm: u32,
     /// Solo chats.
-    pub solo: Total,
+    pub solo: u32,
     /// Threads.
-    pub thread: Total,
-    /// Mentions: `unread` and `mentions` are the same number.
-    pub mention: Total,
+    pub thread: u32,
+    /// Unread mentions, at most [`MAX_MENTIONS`].
+    pub mention: u32,
 }
 
 /// Where a `since` read resumes: the person's change counter and the
@@ -241,14 +209,12 @@ pub enum Select {
     },
     /// Rows changed since a marker.
     Since(Marker),
-    /// Named rows. A hex id names a thread root, a mention, or both.
+    /// Named conversation and thread rows: what a write hands back.
     Ids {
         /// Conversations.
         channels: Vec<Uuid>,
         /// Thread roots.
         roots: Vec<[u8; 32]>,
-        /// Mention event ids.
-        mentions: Vec<[u8; 32]>,
     },
 }
 
@@ -257,8 +223,6 @@ pub enum Select {
 pub struct Query {
     /// Kinds wanted.
     pub kinds: Vec<RowKind>,
-    /// Only unread rows.
-    pub unread_only: bool,
     /// Which rows.
     pub select: Select,
 }
@@ -270,7 +234,8 @@ pub struct Page {
     pub rows: Vec<Row>,
     /// Rows that left the list; `since` reads only.
     pub removed: Vec<Removed>,
-    /// Totals over the whole set; first pages and `since` reads only.
+    /// Totals over the whole set: with a first page, and with a `since`
+    /// read that found a change.
     pub totals: Option<Totals>,
     /// Where the next older page starts.
     pub next: Option<Cursor>,

@@ -18,4 +18,3 @@ CREATE TABLE personal_read_frontiers (
     engaged_at TIMESTAMPTZ,
     PRIMARY KEY (community_id, actor, channel_id, root_id)
 );
-CREATE INDEX personal_read_frontiers_seq ON personal_read_frontiers (community_id, actor, seq);
