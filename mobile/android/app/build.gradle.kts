@@ -189,6 +189,8 @@ android {
             }
         }
         release {
+            // PROTOTYPE: never collide with the real app on a shared device.
+            applicationIdSuffix = ".androidpushproto"
             if (hasUploadSigning) {
                 signingConfig = signingConfigs.getByName("upload")
             }

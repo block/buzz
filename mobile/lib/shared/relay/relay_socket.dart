@@ -66,6 +66,9 @@ class RelaySocket {
   /// Scoped assertion supplied by the connection owner before connecting.
   Map<String, String> headers = const {};
 
+  /// PROTOTYPE: called once the websocket upgrade completes, before NIP-42.
+  void Function()? onOpen;
+
   RelaySocket({
     required String wsUrl,
     required String? nsec,
@@ -109,6 +112,7 @@ class RelaySocket {
       return;
     }
 
+    onOpen?.call();
     _state = SocketState.authenticating;
     _authCompleter = Completer<void>();
 

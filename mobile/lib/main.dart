@@ -11,13 +11,18 @@ import 'features/age_gate/age_signal_push_bootstrap.dart';
 import 'features/agents/agents_page.dart';
 import 'features/invites/invite_join_provider.dart';
 import 'shared/agents/agents_surface.dart';
+import 'push_proto/push_wake_entry.dart'
+    as push_proto; // PROTOTYPE: pulls the headless entrypoint into the AOT snapshot
 import 'shared/push/push_bridge.dart';
 import 'shared/relay/media_disk_cache.dart';
 import 'shared/relay/relay_closed_policy.dart';
 import 'shared/relay/relay_websocket.dart';
 import 'shared/theme/theme_provider.dart';
 
-void main() => runBuzzApp(const App());
+void main() {
+  push_proto.pushWakeMain; // PROTOTYPE: reachability only
+  runBuzzApp(const App());
+}
 
 Future<void> runBuzzApp(Widget app) async {
   WidgetsFlutterBinding.ensureInitialized();
