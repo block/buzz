@@ -423,6 +423,10 @@ class _ChannelRefreshCoordinator {
   int _directoryGeneration = 0;
   int? _directoryOnlyGeneration;
 
+  /// The generation of the non-quiet load in flight, if any. A quiet load
+  /// never displaces it: readers wait on its status.
+  int? _loudGeneration;
+
   /// Starts a directory-only load for the active scope.
   _DirectoryOnlyFence beginDirectoryOnly() =>
       _DirectoryOnlyFence(this, currentScope());
@@ -513,7 +517,8 @@ class _ChannelRefreshCoordinator {
   ///
   /// Returns the metadata with when the read started, or null when the
   /// request failed inside the current scope, which means
-  /// "retain the cached discovery", or when a newer directory load started,
+  /// "retain the cached discovery", when a quiet load would displace a
+  /// non-quiet one in flight, or when a newer directory load started,
   /// which then owns the directory and its status. The fence is re-checked
   /// after the await and before every write, on both the success and the
   /// failure path.
@@ -523,11 +528,15 @@ class _ChannelRefreshCoordinator {
     int? since,
     bool quiet = false,
   }) async {
+    if (quiet && _loudGeneration == _directoryGeneration) return null;
     final directoryGeneration = ++_directoryGeneration;
     _directoryOnlyGeneration = fence is _DirectoryOnlyFence
         ? directoryGeneration
         : null;
-    if (!quiet) loadStatus().markLoading(fence.scope);
+    if (!quiet) {
+      _loudGeneration = directoryGeneration;
+      loadStatus().markLoading(fence.scope);
+    }
     final startedAt = clock();
     final List<NostrEvent> metas;
     try {
@@ -541,6 +550,8 @@ class _ChannelRefreshCoordinator {
         'cached discovery: $error\n$stackTrace',
       );
       return null;
+    } finally {
+      if (_loudGeneration == directoryGeneration) _loudGeneration = null;
     }
     fence.ensureCurrent();
     if (directoryGeneration != _directoryGeneration) return null;
@@ -857,7 +868,9 @@ extension _ChannelsNotifierDirectory on ChannelsNotifier {
       ..scope = scope
       ..fullAt = saved.fullAt
       ..readAt = saved.readAt;
-    _refreshCoordinator.loadStatus().markLoaded(scope);
+    // A load that started meanwhile owns the status until it settles.
+    final status = _refreshCoordinator.loadStatus();
+    if (!status.isLoading(scope)) status.markLoaded(scope);
     _mergeDirectoryIntoList();
     return true;
   }

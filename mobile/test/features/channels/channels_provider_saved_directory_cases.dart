@@ -232,4 +232,49 @@ void _savedDirectoryCases() {
       expect(app.unjoined(), ['fresh']);
     },
   );
+
+  test('restoring the saved directory leaves a running load alone', () async {
+    final app = await _SavedDirectoryHarness.create(
+      _FakeRelaySession(
+        memberships: const [],
+        metadata: [_meta(id: _channelA, name: 'general', createdAt: 100)],
+      ),
+    );
+    await app.launch();
+    await app.open();
+    await app.expectSaved(['general']);
+
+    // On the next launch the saved file is slow to open, and a retry starts
+    // a full read meanwhile.
+    app.container.dispose();
+    app.now = app.now.add(const Duration(minutes: 5));
+    app.session = _FakeRelaySession(
+      memberships: const [],
+      metadata: [_meta(id: _channelB, name: 'fresh', createdAt: 50)],
+    );
+    final file = Completer<File?>();
+    await app.launch(storage: OpenChannelDirectoryStorage(file.future));
+    final opened = app.channels.ensureDirectoryLoaded();
+    await _settle();
+    app.session.pauseNextDirectoryQuery();
+    final retry = app.channels.retryDirectory(directoryOnly: true);
+    await app.session.nextDirectoryQueryStarted;
+    ChannelDirectoryLoadStatus status() =>
+        app.container.read(channelDirectoryLoadStatusProvider).status;
+    expect(status(), ChannelDirectoryLoadStatus.loading);
+
+    // The restore neither reports the read finished nor displaces it with a
+    // catch-up.
+    file.complete(app.file);
+    await opened;
+    await _settle();
+    expect(status(), ChannelDirectoryLoadStatus.loading);
+    app.session.resumePausedDirectoryQuery();
+    await retry;
+    await _settle();
+    expect(status(), ChannelDirectoryLoadStatus.loaded);
+    expect(app.reads().last, isNull);
+    expect(app.unjoined(), ['fresh']);
+    await app.expectSaved(['fresh']);
+  });
 }
