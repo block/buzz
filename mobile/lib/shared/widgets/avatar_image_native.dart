@@ -6,17 +6,17 @@ Future<Uint8List?> nativeAvatarImage({
   required String initial,
   bool isAgent = false,
   bool circular = false,
+  double dimension = 72,
   required Color background,
   required Color foreground,
   required List<ImageProvider> Function(String url) networkImages,
 }) async {
-  const dimension = 72.0;
   final animatedAvatar = parseAnimatedAvatarUrl(url);
   final poster = animatedAvatar?.posterUrl ?? url;
   final source = _AvatarSource.parse(poster);
   final recorder = ui.PictureRecorder();
   final canvas = Canvas(recorder);
-  final bounds = const Rect.fromLTWH(0, 0, dimension, dimension);
+  final bounds = Rect.fromLTWH(0, 0, dimension, dimension);
   canvas.clipPath(avatarPath(bounds, isAgent: isAgent && !circular));
   canvas.drawColor(background, BlendMode.src);
   final imageBounds = isAgent && usesInsetAgentArtwork(url)
