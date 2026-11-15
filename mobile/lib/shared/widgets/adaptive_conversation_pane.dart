@@ -195,11 +195,20 @@ class AdaptiveConversationPane extends HookConsumerWidget {
     // The compact detail route that fully covers the list. While a detail
     // pushes, pops or follows a back swipe, the list stays painted beneath it.
     final coveringDetail = useValueNotifier<Route<Object?>?>(null);
+    // Compact detail routes still mounted. A pop clears the selection as it
+    // starts, so the detail stays onstage until its reverse transition ends.
+    // Not disposed with the pane: a detail unmounting with the pane reports
+    // after the frame, once the pane is gone.
+    final mountedDetails = useMemoized(() => ValueNotifier(0));
+    final listenable = useMemoized(
+      () => Listenable.merge([controller, mountedDetails]),
+      [controller],
+    );
     return ConversationPaneScope(
       controller: controller,
       active: active && (ModalRoute.isCurrentOf(context) ?? true),
       child: ListenableBuilder(
-        listenable: controller,
+        listenable: listenable,
         builder: (context, _) => LayoutBuilder(
           builder: (context, constraints) {
             final stripWidth = strip?.width ?? 0;
@@ -213,6 +222,8 @@ class AdaptiveConversationPane extends HookConsumerWidget {
             final wide = usesConversationPanes(context, strip: strip);
             final book = wide ? bookDivisionOf(context) : null;
             final selected = controller.selectedId;
+            final detailShown =
+                wide || selected != null || mountedDetails.value > 0;
             if (ownerRoute != null) {
               _compactPaneNavigators[ownerRoute] =
                   active && !wide && selected != null ? navigator : null;
@@ -292,9 +303,9 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                       bottom: 0,
                       width: detailWidth,
                       child: Offstage(
-                        offstage: !wide && selected == null,
+                        offstage: !detailShown,
                         child: TickerMode(
-                          enabled: wide || selected != null,
+                          enabled: detailShown,
                           child: MediaQueryOverride(
                             transform: (media) => media.copyWith(
                               size: Size(detailWidth, constraints.maxHeight),
@@ -382,6 +393,7 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                                                 key: controller.selectionKey,
                                                 child: _CoveringDetail(
                                                   covering: coveringDetail,
+                                                  mounted: mountedDetails,
                                                   builder:
                                                       controller.detailBuilder!,
                                                 ),
@@ -391,6 +403,7 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                                                 key: controller.selectionKey,
                                                 builder: (_) => _CoveringDetail(
                                                   covering: coveringDetail,
+                                                  mounted: mountedDetails,
                                                   builder:
                                                       controller.detailBuilder!,
                                                 ),
@@ -483,15 +496,30 @@ class MediaQueryOverride extends StatelessWidget {
 /// Reports its route as [covering] once the route fully covers the compact
 /// list, and withdraws it while the route pushes, pops or follows a back swipe.
 class _CoveringDetail extends HookWidget {
-  const _CoveringDetail({required this.covering, required this.builder});
+  const _CoveringDetail({
+    required this.covering,
+    required this.mounted,
+    required this.builder,
+  });
 
   final ValueNotifier<Route<Object?>?> covering;
+
+  /// Counts mounted details. A popped route unmounts its content only once
+  /// its reverse transition has finished.
+  final ValueNotifier<int> mounted;
   final WidgetBuilder builder;
 
   @override
   Widget build(BuildContext context) {
     final route = ModalRoute.of(context);
     final navigator = Navigator.of(context);
+    useEffect(() {
+      // The count rebuilds an ancestor, which cannot rebuild while this
+      // mounts or unmounts.
+      WidgetsBinding.instance.addPostFrameCallback((_) => mounted.value++);
+      return () =>
+          WidgetsBinding.instance.addPostFrameCallback((_) => mounted.value--);
+    }, [mounted]);
     useEffect(() {
       if (route == null) return null;
       void sync() {
