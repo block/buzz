@@ -101,6 +101,17 @@ void main() {
             );
           }
         }
+        if (localEntries) {
+          await storage.save(
+            Community(
+              id: 'other-owner',
+              name: 'Other identity',
+              relayUrl: 'wss://team.example:9443',
+              addedAt: DateTime(2025),
+              accountSyncOwner: '${account.accountOrigin.origin}\nother',
+            ),
+          );
+        }
         final label = localEntries
             ? 'team.example (team.example:9443)'
             : 'team.example:9443';
@@ -153,7 +164,14 @@ void main() {
         );
         await tester.tap(find.text('Remove').last);
         await tester.pumpAndSettle();
-        expect(find.text('team.example:9443'), findsOneWidget);
+        expect(
+          find.text(
+            localEntries
+                ? 'Other identity (team.example:9443)'
+                : 'team.example:9443',
+          ),
+          findsOneWidget,
+        );
         expect(find.textContaining('is pending account sync'), findsOneWidget);
         expect(await sync.pendingRemovals('owner'), {
           'wss://team.example:9443',
@@ -190,7 +208,7 @@ void main() {
         expect(account.targets, everyElement('wss://team.example:9443'));
         expect(
           (await storage.loadAll()).map((c) => c.id),
-          localEntries ? ['8443'] : <String>[],
+          localEntries ? ['8443', 'other-owner'] : <String>[],
         );
         expect(tester.takeException(), isNull);
       },

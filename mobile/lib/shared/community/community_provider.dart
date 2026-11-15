@@ -355,6 +355,9 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       final removedIndex = current.indexWhere(
         (community) => community.id == id,
       );
+      if (sync != null && await account.localEditSubject() != subject) {
+        throw AccountFailure.differentAccount;
+      }
       if (removedIndex >= 0) {
         await _removeChannelListSnapshot(current[removedIndex]);
         // Persist every remote-cleanup dependency before erasing credentials.
@@ -364,7 +367,12 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
           communityPushLeaseRevocationEnqueuerProvider,
         )(current[removedIndex]);
       }
-      if (sync != null && await account.localEditSubject() != subject) {
+      // A durable revocation commits this removal to its confirmed account.
+      // Finish local deletion even if the account changed during journaling;
+      // aborting now would leave a saved community with a revoked push lease.
+      if (!revocationJournaled &&
+          sync != null &&
+          await account.localEditSubject() != subject) {
         throw AccountFailure.differentAccount;
       }
       await storage.remove(

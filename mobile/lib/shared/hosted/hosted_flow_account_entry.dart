@@ -10,6 +10,13 @@ extension HostedFlowAccountEntry on HostedFlow {
     bool discoverOnly = false,
     bool reauthenticate = false,
   }) {
+    // Completed admission no longer owns account entry. Keep in-flight targets
+    // intact, but let recovery start a fresh account flow after a successful join.
+    if (openBrowser && stage == HostedFlowStage.complete) {
+      _target = null;
+      _pairedPubkey = null;
+      pairedSensitiveActionPolicy = null;
+    }
     if (_target != null ||
         stage == HostedFlowStage.working ||
         stage == HostedFlowStage.signIn) {

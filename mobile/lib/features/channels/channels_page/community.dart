@@ -93,6 +93,8 @@ Future<void> _confirmRemoveCommunity(
         .any(
           (item) =>
               item.id != community.id &&
+              item.accountSyncOwner ==
+                  '${account.accountOrigin.origin}\n$subject' &&
               knownCommunityAddress(item.relayUrl) ==
                   knownCommunityAddress(community.relayUrl),
         );

@@ -1,3 +1,4 @@
+import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:buzz/hosted_app_gate.dart';
 import 'package:buzz/onboarding_app_entry.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
@@ -65,6 +66,23 @@ class _Backend {
           jsonEncode({
             'subject': request.headers['X-BB-Session-Credential'],
             'expires_at': expiry,
+          }),
+          200,
+        );
+      }
+      if (path.endsWith('/nostr-identities/current')) {
+        return http.Response(
+          jsonEncode({
+            'identity': {'pubkey_hex': nostr.Keys('1'.padLeft(64, '0')).public},
+          }),
+          200,
+        );
+      }
+      if (path.endsWith('/nsec-backups/status')) {
+        return http.Response(
+          jsonEncode({
+            'backup_nostr_pubkeys': [],
+            'current_nostr_pubkey': nostr.Keys('1'.padLeft(64, '0')).public,
           }),
           200,
         );
@@ -227,6 +245,33 @@ void main() {
         (subject: 'A', op: 'remove', url: 'wss://private.example'),
       ]);
       expect(backend.edits.every((e) => e.subject == 'A'), isTrue);
+      // Once push revocation is durable, an account change must not strand the
+      // saved identity with a revoked lease. Finish A's confirmed removal.
+      final committedContainer = _container(
+        account,
+        storage,
+        sync,
+        beforeRemove: (_) async {
+          await account.clearLocalSession();
+          backend.subject = 'B';
+          await _signIn(account);
+          return true;
+        },
+      );
+      addTearDown(committedContainer.dispose);
+      sync.setActive(false);
+      await storage.save(await sync.prepareAddition(_community('committed')));
+      await committedContainer.read(communityListProvider.future);
+      await committedContainer
+          .read(communityListProvider.notifier)
+          .removeCommunity('committed');
+      expect(await storage.loadAll(), isEmpty);
+      await account.clearLocalSession();
+      backend.subject = 'A';
+      await _signIn(account);
+      sync.setActive(true);
+      await sync.synchronize();
+      expect(await sync.pendingRemovals('A'), isEmpty);
     },
   );
 
@@ -538,6 +583,16 @@ void main() {
       final sync = _sync(account, storage);
       final browser = DiscoveryBrowser();
       final store = AccountIdentityStore(subject: 'A');
+      final keys = nostr.Keys('1'.padLeft(64, '0'));
+      await store.create(keys.nsec);
+      await store.confirmBackup(
+        BackupReceipt(
+          backend: BuilderlabAccountClient.origin.toString(),
+          subject: 'A',
+          pubkey: keys.public,
+          backupId: 'backup',
+        ),
+      );
       final flow = HostedFlow(
         account: account,
         browser: browser,
@@ -547,6 +602,14 @@ void main() {
         enterCommunity: (_, _, _, _) async {},
       );
       await flow.initialize();
+      await flow.start(
+        const AddCommunityDeepLink(
+          name: 'Joined',
+          relayUrl: 'wss://joined.communities.buzz.xyz',
+        ),
+      );
+      expect(flow.stage, HostedFlowStage.complete);
+      backend.edits.clear();
       backend.denied = true;
       await sync.remove('wss://denied.example');
       await sync.synchronize();
