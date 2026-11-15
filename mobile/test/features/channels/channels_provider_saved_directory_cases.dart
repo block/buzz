@@ -1,0 +1,135 @@
+part of 'channels_provider_test.dart';
+
+const _channelC = '33333333-3333-4333-8333-333333333333';
+
+/// Launches of the app over one saved directory file, with a clock the test
+/// sets.
+class _SavedDirectoryHarness {
+  _SavedDirectoryHarness(this.file, this.session);
+
+  final File file;
+  _FakeRelaySession session;
+  final sessions = <_FakeRelaySession>[];
+  var now = DateTime.utc(2026, 1, 1);
+  late ProviderContainer container;
+
+  static Future<_SavedDirectoryHarness> create(
+    _FakeRelaySession session,
+  ) async {
+    final root = await Directory.systemTemp.createTemp('saved-directory');
+    addTearDown(() => root.delete(recursive: true));
+    return _SavedDirectoryHarness(File('${root.path}/directory.json'), session);
+  }
+
+  int get nowSecs => now.millisecondsSinceEpoch ~/ 1000;
+
+  ChannelsNotifier get channels => container.read(channelsProvider.notifier);
+
+  /// Starts the app on [session] over [storage], or the saved file.
+  Future<void> launch({OpenChannelDirectoryStorage? storage}) async {
+    sessions.add(session);
+    container = _buildContainer(
+      session: session,
+      overrides: [
+        openChannelDirectoryStorageProvider.overrideWithValue(
+          storage ?? OpenChannelDirectoryStorage(Future.value(file)),
+        ),
+        channelDirectoryClockProvider.overrideWithValue(() => now),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(channelsProvider.future);
+  }
+
+  /// Ends this launch and starts the next on a fresh session serving the same
+  /// metadata.
+  Future<void> relaunch() async {
+    container.dispose();
+    session = _FakeRelaySession(
+      memberships: session.memberships,
+      metadata: session.metadata,
+    );
+    await launch();
+  }
+
+  /// The `since` of the first page of each directory read; a read pages on
+  /// with `until`.
+  List<int?> reads() => [
+    for (final session in sessions)
+      for (final filter in session.directoryQueryFilters)
+        if (filter.until == null) filter.since,
+  ];
+
+  /// The names of the list's channels the user has not joined.
+  List<String> unjoined() => [
+    for (final channel in container.read(channelsProvider).requireValue)
+      if (!channel.isMember) channel.name,
+  ]..sort();
+
+  List<String> saved() {
+    if (!file.existsSync()) return const [];
+    final json = jsonDecode(file.readAsStringSync()) as Map;
+    return [
+      for (final meta in (json['metas'] as List).cast<Map>())
+        for (final tag in (meta['tags'] as List).cast<List>())
+          if (tag.first == 'name') tag[1] as String,
+    ]..sort();
+  }
+
+  /// Saving runs behind the list update, on real file I/O.
+  Future<void> expectSaved(List<String> expected) async {
+    for (var i = 0; i < 200 && !listEquals(saved(), expected); i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    expect(saved(), expected);
+  }
+
+  /// Opens the directory as a reader does and lets its reads settle.
+  Future<void> open() async {
+    await channels.ensureDirectoryLoaded();
+    await _settle();
+  }
+}
+
+void _savedDirectoryCases() {
+  test('the saved directory holds only discoverable channels', () async {
+    final app = await _SavedDirectoryHarness.create(
+      _FakeRelaySession(
+        memberships: [
+          _membership(_channelB, 'me'),
+          _membership(_channelC, 'me'),
+          _membership(_channelD, 'me'),
+        ],
+        metadata: [
+          _meta(id: _channelA, name: 'general', createdAt: 100),
+          _meta(id: _channelB, name: 'staff', visibility: 'private'),
+          _meta(id: _channelC, name: 'quiet', unlisted: true),
+          _meta(id: _channelD, name: 'pair', channelType: 'dm'),
+        ],
+      ),
+    );
+    await app.launch();
+
+    // The relay's directory read also returns the user's own private,
+    // unlisted and DM channels; none of them is saved.
+    await app.open();
+    expect(app.unjoined(), ['general']);
+    await app.expectSaved(['general']);
+
+    // A catch-up that finds a saved channel turned private drops it.
+    app.now = app.now.add(const Duration(minutes: 1));
+    app.session.metadata = [
+      ...app.session.metadata.skip(1),
+      _meta(
+        id: _channelA,
+        name: 'general',
+        visibility: 'private',
+        createdAt: 200,
+      ),
+    ];
+    await app.open();
+    expect(app.reads().last, isNotNull);
+    expect(app.unjoined(), isEmpty);
+    await app.expectSaved([]);
+  });
+}

@@ -705,6 +705,20 @@ const savedDirectoryCheckInterval = Duration(minutes: 1);
 /// relay stamped in the same second as it are not missed.
 const savedDirectoryCatchUpOverlap = Duration(minutes: 1);
 
+/// The latest revision of each channel in [metas], kept only while it is
+/// discoverable: open, listed and not a DM. The relay's directory read also
+/// returns the caller's own private, unlisted and DM channels, which must
+/// never be held or saved as the open-channel directory. A channel whose
+/// latest revision is no longer discoverable drops out.
+List<NostrEvent> _discoverableChannelEvents(List<NostrEvent> metas) => [
+  for (final event in _latestChannelEvents(metas, kind: 39000))
+    if (ChannelData.fromEvent(event) case final data
+        when data.visibility != 'private' &&
+            data.channelType != 'dm' &&
+            !data.isUnlisted)
+      event,
+];
+
 /// The clock the saved directory's full-read and check intervals use.
 final channelDirectoryClockProvider = Provider<DateTime Function()>(
   (ref) => DateTime.now,
@@ -746,16 +760,16 @@ class _SavedDirectory {
 /// Lives in this part file because `channels_provider.dart` sits against the
 /// repository-wide 1200-line file ceiling enforced by `just file-size-check`.
 extension _ChannelsNotifierDirectory on ChannelsNotifier {
-  /// Installs [metas] as this scope's directory and saves it. A [full] read
-  /// replaces the directory and restarts its full-read age and check
-  /// interval.
+  /// Installs the discoverable channels in [served] as this scope's
+  /// directory and saves them. A [full] read replaces the directory and
+  /// restarts its full-read age and check interval.
   void _installDirectory(
-    List<NostrEvent> metas,
+    List<NostrEvent> served,
     String scope, {
     bool full = false,
   }) {
     final now = _lifecycleRef.read(channelDirectoryClockProvider)();
-    _directoryMetas = metas;
+    final metas = _directoryMetas = _discoverableChannelEvents(served);
     _savedDirectory.scope = scope;
     if (full) {
       _savedDirectory
@@ -874,19 +888,18 @@ extension _ChannelsNotifierDirectory on ChannelsNotifier {
         _installDirectory(metas, fence.scope, full: true);
       } else {
         // The overlap always brings back the newest saved event; a catch-up
-        // of only held events changed nothing, so nothing is saved or rebuilt.
-        final held = {
-          for (final event in _directoryMetas) (event.id, event.createdAt),
-        };
-        if (metas.every(
-          (event) => held.contains((event.id, event.createdAt)),
-        )) {
+        // that leaves the held events as they are changed nothing, so nothing
+        // is saved or rebuilt.
+        final held = {for (final event in _directoryMetas) event.id};
+        final merged = _discoverableChannelEvents([
+          ..._directoryMetas,
+          ...metas,
+        ]);
+        if (merged.length == held.length &&
+            merged.every((event) => held.contains(event.id))) {
           return;
         }
-        _installDirectory(
-          _latestChannelEvents([..._directoryMetas, ...metas], kind: 39000),
-          fence.scope,
-        );
+        _installDirectory(merged, fence.scope);
       }
     } on _StaleChannelRefresh {
       return;

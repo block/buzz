@@ -37,6 +37,7 @@ part 'channels_provider_readiness_cases.dart';
 part 'channels_provider_request_path_cases.dart';
 part 'channels_provider_activity_cases.dart';
 part 'channels_provider_join_cases.dart';
+part 'channels_provider_saved_directory_cases.dart';
 
 /// Tests for [ChannelsNotifier] in the pure-Nostr world.
 ///
@@ -56,6 +57,7 @@ void main() {
   _requestPathCases();
   _threadActivityCases();
   _confirmedJoinCases();
+  _savedDirectoryCases();
   const myPk = 'me';
 
   test(
