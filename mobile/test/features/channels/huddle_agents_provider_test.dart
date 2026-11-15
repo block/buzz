@@ -173,6 +173,19 @@ void main() {
     expect(await container.read(huddleHumanCountProvider)(_channelId), 3);
   });
 
+  test('last-human count skips the record read for a lone person', () async {
+    final relay = _HuddleRelaySession(
+      members: {_owner.public: 'owner', _botAgent: 'bot'},
+      recordError: Exception('relay timeout'),
+    );
+    final container = _container(relay);
+
+    // Records can only lower the count, so a failed read must not keep a
+    // bot-only Huddle open after its last person leaves.
+    expect(await container.read(huddleHumanCountProvider)(_channelId), 1);
+    expect(relay.recordFilters, isEmpty);
+  });
+
   test('last-human count fails when the records cannot be read', () async {
     final relay = _HuddleRelaySession(
       members: {_owner.public: 'owner', _ownerAgent: 'member'},

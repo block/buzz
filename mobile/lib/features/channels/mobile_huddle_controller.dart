@@ -67,6 +67,12 @@ final huddleHumanCountProvider = Provider<HuddleHumanCountLoader>((ref) {
     }
     if (events.isEmpty) return 0;
     final members = membersFromEvent(events.first);
+    final nonBotCount = members.where((member) => member.role != 'bot').length;
+    // A managed-agent record can only lower this count. With at most one
+    // non-bot member the answer is final, so skip the record read: a slow or
+    // failed read must not keep a bot-only Huddle open after its last person
+    // leaves, as it did before records were consulted.
+    if (nonBotCount <= 1) return nonBotCount;
     // An agent without NIP-OA has role `member`. A failed record read throws,
     // so leave keeps the Huddle open rather than count an agent as a person.
     final recordAgents = await fetchTrustedManagedAgentPubkeys(
