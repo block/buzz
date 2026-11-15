@@ -425,10 +425,15 @@ pub fn resolve_step_templates(
             channel: t_opt(channel)?,
             reply_in_thread: *reply_in_thread,
         }),
-        SendDm { to, text } => Ok(SendDm {
-            to: t(to)?,
-            text: t(text)?,
-        }),
+        SendDm { to, text } => {
+            // Recheck stored definitions too: a workflow saved before recipient
+            // validation was introduced must not route from arbitrary input.
+            crate::schema::validate_dm_recipient(to)?;
+            Ok(SendDm {
+                to: t(to)?,
+                text: t(text)?,
+            })
+        }
         SetChannelTopic { topic } => Ok(SetChannelTopic { topic: t(topic)? }),
         AddReaction { emoji } => Ok(AddReaction { emoji: t(emoji)? }),
         CallWebhook {
