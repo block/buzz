@@ -44,7 +44,7 @@ ALTER TABLE personal_read_accounts ADD COLUMN seq BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE personal_read_frontiers
     ALTER COLUMN through_timestamp DROP NOT NULL,
     ADD COLUMN state TEXT NOT NULL DEFAULT 'default'
-        CHECK (state IN ('default', 'following', 'muted')),
+        CHECK (state IN ('default', 'muted')),
     ADD COLUMN marked_unread BOOLEAN NOT NULL DEFAULT false,
     ADD COLUMN seq BIGINT NOT NULL DEFAULT 0,
     ADD COLUMN engaged_at TIMESTAMPTZ;

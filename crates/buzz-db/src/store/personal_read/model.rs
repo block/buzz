@@ -26,8 +26,6 @@ pub enum ReadState {
     /// A conversation is unread on any new message; a thread while the
     /// person is part of it.
     Default,
-    /// A thread stays live however long ago the person engaged with it.
-    Following,
     /// Never unread; mentions are still counted.
     Muted,
 }
@@ -37,7 +35,6 @@ impl ReadState {
     pub fn as_str(self) -> &'static str {
         match self {
             ReadState::Default => "default",
-            ReadState::Following => "following",
             ReadState::Muted => "muted",
         }
     }

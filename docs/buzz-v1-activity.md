@@ -79,7 +79,7 @@ those views draw; filter and re-sort the rows on the client.
 | `kind` | `id` | Listed when | `preview` |
 |---|---|---|---|
 | `channel`, `dm`, `solo` | channel UUID | you are a current member of the channel. `dm` is a DM channel, `solo` a channel labelled `buzz.solo`, `channel` the rest | newest top-level message |
-| `thread` | root event id | the thread has a reply, its channel is one you are in, and you are part of it: you replied, someone replied to your message, a reply tagged you, within the last 30 days; or you follow it, muted it, or flagged it unread | newest reply |
+| `thread` | root event id | the thread has a reply, its channel is one you are in, and you are part of it: you replied, someone replied to your message, a reply tagged you, within the last 30 days; or you muted it or flagged it unread | newest reply |
 | `mention` | the mentioning event id | a message of an eligible kind in a channel you are in tags you with `p`, arrived within `retention_seconds`, is not deleted and is not yours | the message itself |
 
 `root_id` is present on thread rows and on mentions inside a thread. Names,
@@ -105,14 +105,14 @@ not this API.
     position, or you flagged it unread. A reply that is not broadcast never
     makes a conversation unread.
   - thread: its newest reply is someone else's and arrived after your read
-    position, while the thread is live for you: `following`, or you were last
-    part of it (posted, were replied to, were tagged) within 30 days. Or you
+    position, and you were last part of it (posted, were replied to, were
+    tagged) within 30 days. Or you
     flagged it unread.
   - mention: it arrived after the read position of the channel timeline or
     thread it is in. Marking that scope read reads its mentions.
   - A `muted` conversation or thread is never unread. A mention row inside it
     is still unread and still counted: a mention gets through a mute.
-- **`state`** is `default`, `following` or `muted`.
+- **`state`** is `default` or `muted`.
 
 A row has no mention count. To mark a conversation or thread as holding an
 unread mention, look at the unread mention rows: each carries `channel_id`, and
@@ -263,7 +263,7 @@ The two keep independent read positions.
   anchor is the thread's root or one of its replies. To mark a row read, send
   its `preview.id`.
 - **`mark_unread`** flags the scope unread until the next `mark_through`.
-- **`set_state`** sets `default`, `following` or `muted`.
+- **`set_state`** sets `default` or `muted`.
 
 Posting a message moves your own read position to it, in the thread and, for a
 top-level or broadcast message, in the channel. No intent is needed. It does not
@@ -367,7 +367,7 @@ These are accepted. Each is rare, and the counters above watch the first two.
   channel's next top-level message, and right again from it on.
 - A message with an author time ahead of the relay's clock is checked for only
   once that time has passed.
-- Threads you neither follow, muted nor flagged leave the list 30 days after
+- Threads you neither muted nor flagged leave the list 30 days after
   you were last part of them.
 - Mention rows written before this migration have no arrival time and are not
   listed or counted until the backfill below fills them, for the last 30 days.
@@ -381,7 +381,7 @@ These are accepted. Each is rare, and the counters above watch the first two.
   grow with every thread a person has ever been part of.
 - At most 64 people tagged by one message, and 1,024 people per channel per
   write interval, are marked part of a thread.
-- An unfollowed thread stops being unread 30 days after you were last part of
+- A thread stops being unread 30 days after you were last part of
   it, without a `since` change.
 - 64 KiB write body; 1 MiB response. DB statement and lock deadlines and an
   eight-second request deadline bound the work.
@@ -433,14 +433,13 @@ additive: a client that does not know `BUZZ` frames ignores them.
 
 Not in this version: a window of rows around a given message, search cursors,
 synchronisation with NIP-RS, per-row mention counts, reply counts, the message
-a scope was last read through, and a server-side unread filter for
+a scope was last read through, following a thread you are not part of, and
+a server-side unread filter for
 conversations and threads (the client holds that whole list and filters it).
 Each was left out because no view draws it yet; add it when one does.
 
 ## Open questions
 
-- **Following.** `following` is stored and synced here, but clients keep
-  thread following per device today. Should it move here with mute, or later?
 - **Older clients.** How long must a mute set through this API also be written
   to the place older clients read it from?
 

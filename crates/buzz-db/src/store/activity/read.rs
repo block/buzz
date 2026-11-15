@@ -71,7 +71,7 @@ fn conversations_sql() -> String {
     )
 }
 
-/// Threads the person follows, muted, flagged, or was part of within the
+/// Threads the person muted, flagged, or was part of within the
 /// horizon, in channels they are still in. The horizon bounds the list by
 /// recent activity rather than by a person's whole history.
 const THREADS: &str = r#"SELECT 'thread' AS kind, encode(f.root_id, 'hex') AS id,
@@ -80,7 +80,7 @@ const THREADS: &str = r#"SELECT 'thread' AS kind, encode(f.root_id, 'hex') AS id
         h.activity_pubkey AS preview_pubkey, h.activity_created_at AS preview_created_at,
         h.activity_text AS preview_text,
         f.state <> 'muted' AND (f.marked_unread
-            OR ((f.state = 'following' OR f.engaged_at >= $8::timestamptz - make_interval(secs => $9))
+            OR (f.engaged_at >= $8::timestamptz - make_interval(secs => $9)
                 AND e.id IS NOT NULL AND h.activity_pubkey <> $2 AND h.activity_at >
                     GREATEST(COALESCE(f.through_timestamp, '-infinity'),
                         COALESCE($4::timestamptz, 'infinity')))) AS unread,
@@ -276,7 +276,6 @@ fn row(row: &PgRow) -> Result<Row> {
         None => None,
     };
     let state = match row.try_get::<&str, _>("state")? {
-        "following" => "following",
         "muted" => "muted",
         _ => "default",
     };

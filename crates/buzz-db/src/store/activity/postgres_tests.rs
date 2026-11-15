@@ -442,7 +442,7 @@ async fn activity_threads_and_mentions_follow_the_thread_position() {
     assert_eq!(f.mention_ids(true).await, []);
     assert_eq!(f.list().await.totals.expect("totals").mention, 0);
 
-    // Someone else's thread is not mine until I am tagged or follow it.
+    // Someone else's thread is not mine until I am tagged, or set its state.
     let theirs = f.post(&f.other, "their topic", 40).await;
     f.reply(&f.other, &theirs, "talking to myself", 50).await;
     assert!(f
@@ -451,21 +451,21 @@ async fn activity_threads_and_mentions_follow_the_thread_position() {
         .rows
         .iter()
         .all(|row| row.id != theirs.id.to_hex()));
-    let follow = ReadIntent::SetState {
+    let mute = ReadIntent::SetState {
         target: f.target(Some(&theirs)),
-        state: ReadState::Following,
+        state: ReadState::Muted,
     };
-    assert_eq!(f.intent(follow).await, IntentOutcome::Applied);
-    let followed = f.row(&theirs.id.to_hex()).await;
-    assert_eq!((followed.unread, followed.state), (true, "following"));
+    assert_eq!(f.intent(mute).await, IntentOutcome::Applied);
+    let muted = f.row(&theirs.id.to_hex()).await;
+    assert_eq!((muted.unread, muted.state), (false, "muted"));
 
-    // Unfollowing takes it off the list, and a `since` read says so.
+    // Unmuting takes it off the list, and a `since` read says so.
     let marker = f.list().await.marker.expect("marker");
-    let unfollow = ReadIntent::SetState {
+    let unmute = ReadIntent::SetState {
         target: f.target(Some(&theirs)),
         state: ReadState::Default,
     };
-    assert_eq!(f.intent(unfollow).await, IntentOutcome::Applied);
+    assert_eq!(f.intent(unmute).await, IntentOutcome::Applied);
     let page = f
         .read(&Query {
             select: Select::Since(marker),
