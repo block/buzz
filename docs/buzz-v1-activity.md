@@ -51,29 +51,25 @@ Unknown request fields are rejected. Never turn a transport failure into read.
 ## The list
 
 `GET /buzz/v1/me/activity` returns one person's conversations, threads and
-mentions as rows of one shape, newest activity first. It is what a sidebar, an
-inbox and a threads view read, each with its own filter.
+mentions as rows of one shape, newest first. It is what a sidebar, an inbox and
+a threads view read. A row carries only what those views draw; filter and
+re-sort the rows on the client.
 
 | Parameter | Meaning |
 |---|---|
 | `kinds` | Comma-separated: any of `channel`, `dm`, `solo`, `thread`, `mention`. Default: all. |
-| `unread=true` | Only unread rows. Applies to listing (with or without `before`). |
-| `limit` | Rows per page, 1–500, default 100. |
-| `before` | The `next` cursor of the previous page. Valid only with the `kinds` and `unread` it came from. |
-| `since` | The `marker` of an earlier read: only what changed. Not combinable with `before`, `ids` or `limit`. |
-| `ids` | 1–100 comma-separated row ids to refresh. A UUID names a conversation; a 64-hex id names a thread, a mention, or both. Not combinable with the paging parameters. |
+| `limit` | Rows per page, 1–500, default 100. A view that shows the whole list asks for 500. |
+| `before` | The `next` cursor of the previous page. Valid only with the `kinds` it came from. |
+| `since` | The `marker` of an earlier read: only what changed. Not combinable with `before` or `limit`. |
 
 ```json
 {"rows":[{"kind":"thread","id":"<root id>","channel_id":"<uuid>","root_id":"<root id>",
-   "activity":{"at":1731550000,"id":"<64-hex>","pubkey":"<64-hex>"},
+   "at":1731550000,
    "preview":{"id":"<64-hex>","pubkey":"<64-hex>","created_at":1731549990,
-     "text":"first 256 characters","edited":false},
-   "unread":true,"mentions":1,"read_through_id":"<64-hex>|null",
-   "state":"default","reply_count":4}],
+     "text":"first 256 characters"},
+   "unread":true,"state":"default"}],
  "removed":[{"kind":"channel","id":"<uuid>"}],
- "totals":{"channel":{"unread":2,"mentions":1},"dm":{"unread":0,"mentions":0},
-   "solo":{"unread":0,"mentions":0},"thread":{"unread":1,"mentions":1},
-   "mention":{"unread":1,"mentions":1}},
+ "totals":{"channel":2,"dm":0,"solo":0,"thread":1,"mention":1},
  "next":"<cursor>|null","marker":"<opaque>|null","reset":false}
 ```
 
@@ -85,21 +81,24 @@ inbox and a threads view read, each with its own filter.
 | `thread` | root event id | the thread has a reply, its channel is one you are in, and you are part of it: you replied, someone replied to your message, a reply tagged you, within the last 30 days; or you follow it, muted it, or flagged it unread | newest reply |
 | `mention` | the mentioning event id | a message of an eligible kind in a channel you are in tags you with `p`, arrived within `retention_seconds`, is not deleted and is not yours | the message itself |
 
-`root_id` is present on thread rows and on mentions inside a thread.
-`reply_count` is present on thread rows. Names, types, membership lists and
-archived state come from Nostr channel metadata, not this API.
+`root_id` is present on thread rows and on mentions inside a thread. Names,
+types, membership lists and archived state come from Nostr channel metadata,
+not this API.
 
-- **`activity`** is the newest message of the row: for a conversation, at any
-  depth. `activity.at` is the relay's arrival time in Unix seconds and is the
-  sort key for every kind. A conversation with no message carries its creation
-  time and a null `id`.
 - **`preview`** is what to show. For a conversation it follows the channel
   window's rule: a message with no parent, or a depth-1 reply broadcast to the
-  channel. A message tagged `["audience","agents"]` is never a preview. The
-  latest edit of a conversation's preview is applied (`edited`); a thread's
+  channel. A message tagged `["audience","agents"]` is never a conversation's
+  preview; a thread's preview is its newest reply, whatever its audience. The
+  latest edit of a conversation's preview is applied to its text; a thread's
   preview is the reply as stored. `preview.created_at` is the author's time,
   for display only. A deleted message is never returned: the row falls back to
   the previous one, or `preview` is null.
+- **`at`** is the sort key: the relay's arrival time, in Unix seconds, of the
+  message in `preview`. A conversation with no such message carries its
+  creation time. A reply inside a thread moves the thread's row, not its
+  conversation's. To also move a conversation up when one of your threads in
+  it gets a reply, take the later of its `at` and its thread rows' `at`;
+  thread rows carry `channel_id`.
 - **`unread`**
   - conversation: its preview is someone else's and arrived after your read
     position, or you flagged it unread. A reply that is not broadcast never
@@ -110,15 +109,13 @@ archived state come from Nostr channel metadata, not this API.
     flagged it unread.
   - mention: it arrived after the read position of the channel timeline or
     thread it is in. Marking that scope read reads its mentions.
-  - A `muted` conversation or thread is never unread. Its `mentions` still
-    count, and a mention row inside it is still unread: a mention gets through
-    a mute.
-- **`mentions`** counts unread messages in the row's own scope that tag you: a
-  conversation counts top-level messages, a thread its replies. It stops at 99.
-  A DM does not count every message as a mention; badge DMs on `unread`.
-- **`read_through_id`** is the message the scope was last marked through, or
-  null. It may name a message deleted since.
+  - A `muted` conversation or thread is never unread. A mention row inside it
+    is still unread and still counted: a mention gets through a mute.
 - **`state`** is `default`, `following` or `muted`.
+
+A row has no mention count. To mark a conversation or thread as holding an
+unread mention, look at the unread mention rows: each carries `channel_id`, and
+`root_id` when it is inside a thread.
 
 Nothing is unread before your account starts. Your first request to this API
 starts it; every read position is floored at that moment, so a scope you never
@@ -126,7 +123,7 @@ marked counts only what arrived afterwards.
 
 ### Order and paging
 
-Rows sort by `activity.at` descending (compared at microsecond resolution),
+Rows sort by `at` descending (compared at microsecond resolution),
 then conversations before threads before mentions, then `id`. `next` is null on
 the last page. A page is cut short of `limit` when it would exceed the response
 size; follow `next`.
@@ -136,27 +133,34 @@ or seen twice. Page to fill a view; use `since` to stay current.
 
 ### Totals
 
-`totals` counts unread rows and unread mentions per kind over the whole set,
-whatever the filter and page. It comes with a first page (no `before`) and with
-every `since` read, and is null otherwise. `totals.mention` is the number of
-unread mentions (both fields); mention counts stop at 99.
+`totals` is the number of unread rows of each kind over the whole set,
+whatever the filter and page. `totals.mention` is your unread mentions, and
+stops at 99. It comes with a first page (no `before`) and with a `since` read
+that found a change. It is null otherwise: keep the numbers you have.
 
 ### Staying current
 
 A first page and every `since` read return a `marker`. `GET
 /me/activity?since=<marker>` returns the rows that changed since then, the rows
-that left (`removed`), fresh `totals` and a new marker. Replace rows by
-`(kind, id)`. A read of `ids` also returns a marker. A `since` read may repeat a row that did not change (rows changed
-in the 30 seconds before the marker are sent again).
+that left (`removed`), fresh `totals` when anything changed, and a new marker.
+Replace rows by `(kind, id)`. A `since` read may repeat a row that did not
+change (rows changed in the 30 seconds before the marker are sent again).
 
 `since` covers:
 
 - every change you made: marks, manual unread, state changes, and the read
   position your own post moved;
-- a new message in a row's scope, an edit of a conversation's preview, a change
-  of a thread's reply count;
-- joining or leaving a channel. `removed` names the conversation; drop its
-  thread and mention rows with it (they carry `channel_id`).
+- a new preview: a top-level message in a conversation, a reply in a thread,
+  or an edit of a conversation's preview;
+- a mention that arrived since the marker, and every mention in a channel
+  timeline or thread whose read position you moved since the marker (a mark
+  from any device, or your own post), because that is what changes whether it
+  is unread;
+- joining or leaving a channel. Joining returns the conversation's row however
+  old its last message is, and with it your thread and mention rows in that
+  channel. The join itself is not pushed: read `since` after
+  it succeeds. `removed` names a conversation you left; drop its thread and
+  mention rows with it (they carry `channel_id`).
 - a thread your own change took off the list (a state set back to `default`
   or a flag cleared on a thread you are not otherwise part of). `removed`
   names the thread.
@@ -165,7 +169,11 @@ It does not report a deletion that changes only a count, or a row whose only
 change is that it aged out. `reset: true` means the marker is older than 30
 days or too much changed (more than 1,000 conversations, threads or
 mentions): discard the list and read
-page one. `since` ignores `unread`; it honours `kinds`.
+page one. `since` honours `kinds`.
+
+A `since` read costs what the person's own list costs, not what the community
+did meanwhile: it walks the person's memberships and thread rows, looks each
+shared row up by its key, and then reads only the rows that changed.
 
 A WebSocket connection admitted as you also receives your own changes as
 they commit, from any of your devices:
@@ -177,6 +185,28 @@ they commit, from any of your devices:
 The rows are the ones the `POST` below returned. The push is best effort and
 unordered relative to reads; treat it as a hint and let `since` correct it.
 New messages are not pushed this way: they already arrive as events.
+
+### What a client does
+
+- **On start and on reconnect, read `since`.** Not per event, and not on a
+  timer. On reconnect, first wait a random 0–10 seconds: when a relay restarts,
+  every client reconnects in the same moment, and the delay spreads their
+  reads. Live events still arrive during the wait.
+- **While connected, apply new messages to the rows yourself**, from the
+  events you already receive. A message becomes its conversation's preview and
+  makes the row unread when it is top-level or a reply broadcast to the
+  channel, is not yours, is not tagged `["audience","agents"]`, and the
+  conversation is not muted. A reply that is not yours does the same for its
+  thread's row, whatever its audience. The
+  relay pushes only the changes you made (below).
+- **After joining a channel, read `since`** to get its row.
+- **When you mark a row read, mark its mention rows read locally**: those in
+  the same channel timeline, or the same thread, that arrived at or before the
+  message you marked through.
+- **Mute through this API.** `state` is where a mute is read and `set_state`
+  where it is written, on every device. A client that still keeps mutes in its
+  own synced preferences moves them here once: one `set_state` per muted
+  conversation (100 per request), then stops writing them there.
 
 ## Writes
 
@@ -229,8 +259,8 @@ clock skew, and messages with the identical stamp are read together.
 
 | Table | One row per | Holds |
 |---|---|---|
-| `channel_heads` | conversation | newest message (arrival, id, author), newest top-level message with its text and latest edit |
-| `thread_heads` | thread with a reply | newest reply with its text, reply count |
+| `channel_heads` | conversation | newest top-level message with its arrival, text and latest edit |
+| `thread_heads` | thread with a reply | newest reply with its arrival and text |
 | `personal_read_frontiers` | person and scope | read position, state, manual unread, when the person was last part of the thread, their change counter at their last write |
 | `personal_read_accounts` | person | when unread tracking started, their change counter |
 | `event_mentions` | person tagged in an event | now also the event's arrival and thread root |
@@ -240,7 +270,7 @@ their own freshness: each row records the newest stored event it accounts for
 (`seen_at`), and a read asks the log, with one index probe per row, whether
 anything newer exists. A row that is missing, behind, or names a deleted
 message is rebuilt from history before it is returned. So nothing has to be
-backfilled, and a lost write is found by the next read (two exceptions are
+backfilled, and a lost write is found by the next read (the exceptions are
 under Limits).
 
 - **On a message.** The storing transaction only records in memory what it
@@ -250,10 +280,17 @@ under Limits).
   and no message transaction holds or waits for a shared row. The same write
   moves the author's read position and marks the thread as one the parent's
   author and the people tagged are part of.
-- **On a read.** A first page, a `since` read and a read of named rows check
-  the person's joined channels and live threads and rebuild what is behind, at
-  most 256 rows per read and four rebuilds at once per process; a read that
-  cannot get a turn serves what is stored and the next read tries again.
+- **On shutdown.** Once a relay has stopped serving it waits up to three
+  seconds for the writes still in memory, so a deploy or a restart loses none.
+  Only a process that is killed, or crashes, loses them.
+- **On a read.** A first page and a `since` read check the person's joined
+  channels and live threads and rebuild what is behind. A read rebuilds for at
+  most 2.5 seconds, 64 rows per transaction, and four reads rebuild at once
+  per process. Rows it did not reach, and the rows of a read that could not
+  get a turn, are served as stored, and the next read continues. A
+  conversation not yet rebuilt is still listed, with no preview and placed by
+  its creation time; it is not shown as unread for messages older than the
+  account's start, which is all a rebuild could add.
 - **On an intent.** The person's account row is locked and its counter
   incremented; the scope's row is stamped with it. Counter order is therefore
   commit order, which is what makes the personal half of `since` exact.
@@ -262,19 +299,39 @@ The marker is `{counter, database time}`. A `since` read returns the person's
 rows with a higher counter, plus shared rows, memberships and mentions changed
 after the marker's time less 30 seconds.
 
+Three counters say how often the accepted losses below happen. They should
+stay at zero in normal running:
+
+| Counter | Counts |
+|---|---|
+| `buzz_db_activity_write_failures_total` | shared-row writes given up on: a bound was hit or eight attempts failed. The next read rebuilds the row, except for an edit or a thread beyond the per-channel bound of one write interval (32 edits, 256 threads), which is rebuilt only when the row is next rebuilt for another reason. |
+| `buzz_db_activity_people_writes_dropped_total` | writes of people's own rows given up on. Nothing rebuilds these (first limit below). |
+| `buzz_db_activity_unwritten_at_shutdown_total` | channels still unwritten when the shutdown wait ran out. |
+
+`buzz_db_activity_repairs_skipped_total` and
+`buzz_db_activity_repairs_unfinished_total` count reads that could not get a
+turn to rebuild, or ran out of time; both are expected while a deployment's
+rows are first being built.
+
 ### Limits
 
-- A background write is lost when its process exits before it runs, or when
-  eight attempts fail (a row held by a rebuild, a database error). After
-  failed attempts the rows are marked unverified, so the next read rebuilds
-  them. After a process exit the next read still finds the gap, unless another
-  event in that channel was written first or the lost message carries an
-  author time older than one already seen (a slow clock, up to 15 minutes);
-  then the row is right again from the next message on.
-- People's own rows are written separately from the shared rows and before
-  them, and nothing rebuilds them. If that write is lost, the author may see
-  their own message as unread, and a person replied to or tagged in it is not
-  added to its thread (the mention row is unaffected).
+These are accepted. Each is rare, and the counters above watch the first two.
+
+- **A lost write of a person's own row is not repaired.** People's own rows
+  are written separately from the shared rows and before them, and nothing
+  rebuilds them. If that write is lost (the process was killed before it ran,
+  or eight attempts failed), the author may see their own message as unread,
+  and a person replied to or tagged in it is not added to its thread: the
+  thread is missing from their list until its next reply. The mention row is
+  unaffected.
+- **A lost write of a shared row is repaired by the next read, with a
+  hole.** After eight failed attempts the rows are marked unverified and
+  changed, so the next read of any kind rebuilds them. After a killed process
+  the next read still finds the gap, unless another event in that channel was
+  written first (a reaction, a reply inside a thread, a message for agents
+  only) or the lost message carries an author time older than one already seen
+  (a slow sender clock, up to 15 minutes). Then the row is stale until the
+  channel's next top-level message, and right again from it on.
 - A message with an author time ahead of the relay's clock is checked for only
   once that time has passed.
 - Threads you neither follow, muted nor flagged leave the list 30 days after
@@ -282,12 +339,14 @@ after the marker's time less 30 seconds.
 - Mention rows written before this migration have no arrival time and are not
   listed or counted. Filling them is a one-off maintenance job, not part of
   this change.
-- Mention counts examine the person's 2,000 newest mentions since their floor.
+- The unread mention total examines the person's 2,000 newest mentions since
+  their floor.
 - The rebuild examines a conversation's newest 512 events and a thread's newest
-  512 replies. A conversation whose newest 512 events hold no eligible message
-  shows no activity until a new message arrives.
-- A conversation's `activity` may name a message deleted since; its `preview`
-  never does.
+  512 replies. A conversation whose newest 512 events hold no top-level message
+  (a channel where everything since is reactions, edits or thread replies)
+  shows no preview until a new one arrives.
+- A `since` read walks all of the person's thread rows, live or not. They
+  grow with every thread a person has ever been part of.
 - At most 64 people tagged by one message, and 1,024 people per channel per
   write interval, are marked part of a thread.
 - An unfollowed thread stops being unread 30 days after you were last part of
@@ -298,11 +357,13 @@ after the marker's time less 30 seconds.
 Apply migrations 0089 and 0090 (or the equivalent desired schema). 0089 creates
 `channel_heads` and `thread_heads` empty, adds nullable or defaulted columns to
 the three existing tables and makes `personal_read_frontiers.through_timestamp`
-nullable. 0090 builds the two indexes on those columns inline and verifies
-them. `event_mentions` is large: a deployment that applies migrations out of
-band should apply 0089, build both indexes with `CREATE INDEX CONCURRENTLY`
-(the statements are in 0090's header), then apply 0090, which skips an index
-that already exists. The previous release never reads or writes the new columns, and its
+nullable. The two shared tables have no index beyond their primary key: every
+read reaches them by key from the person's own rows. 0090 builds the one new index, on
+`event_mentions` by person and arrival, inline and verifies it.
+`event_mentions` is large: a deployment that applies migrations out of band
+should apply 0089, build the index with `CREATE INDEX CONCURRENTLY` (the
+statement is in 0090's header), then apply 0090, which skips an index that
+already exists. The previous release never reads or writes the new columns, and its
 inserts keep working against the migrated schema.
 
 ## Compatibility
@@ -313,7 +374,28 @@ only after the relay advertises a version that has it. The WebSocket frame is
 additive: a client that does not know `BUZZ` frames ignores them.
 
 Not in this version: a window of rows around a given message, search cursors,
-and synchronisation with NIP-RS.
+synchronisation with NIP-RS, per-row mention counts, reply counts, the message
+a scope was last read through, and a server-side unread filter. Each was left
+out because no view draws it yet; add it when one does.
+
+## Open questions
+
+- **Warming before launch.** The first read of each conversation after this
+  ships rebuilds its row from history, and a person with hundreds of
+  conversations may need more than one read before every preview is there.
+  Should an operator job build every conversation's row before clients start
+  reading, so nobody waits on a rebuild? Not built. Measure cold first reads
+  on a staging copy of a large community against the 2.5-second rebuild budget
+  and the 5-second statement limit before deciding.
+- **Threads at launch.** The relay learns that a person is part of a thread
+  only from replies stored after it deploys, so the Threads list starts empty
+  for everyone and fills as replies arrive. A one-off maintenance job could
+  fill the last 30 days from history. Is an empty start acceptable for a first
+  release?
+- **Following.** `following` is stored and synced here, but clients keep
+  thread following per device today. Should it move here with mute, or later?
+- **Older clients.** How long must a mute set through this API also be written
+  to the place older clients read it from?
 
 ## Privacy and lifecycle
 

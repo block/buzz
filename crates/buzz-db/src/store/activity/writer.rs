@@ -35,6 +35,17 @@ const MAX_STAGED_PEOPLE: usize = 1024;
 /// Most people one message pulls into its thread by tagging them.
 const MAX_TAGGED: usize = 64;
 
+/// Shared-row contributions dropped: a bound was hit or every attempt failed.
+/// The next read that checks the row rebuilds it.
+const SHARED_DROPPED: &str = "buzz_db_activity_write_failures_total";
+/// Writes of people's own rows dropped: an author's read position, or a
+/// person's part in a thread. Nothing rebuilds these, so this is the count of
+/// threads that may be missing from someone's list until their next reply.
+const PEOPLE_DROPPED: &str = "buzz_db_activity_people_writes_dropped_total";
+/// Channels whose contributions were still in memory when the shutdown flush
+/// ran out of time.
+const UNWRITTEN_AT_SHUTDOWN: &str = "buzz_db_activity_unwritten_at_shutdown_total";
+
 type Id = [u8; 32];
 /// `(person, thread root)`; no root is the conversation.
 type PersonScope = (Id, Option<Id>);
@@ -91,8 +102,6 @@ pub(crate) struct Staged {
     attempts: u8,
     /// Author time of the newest channel event of any kind.
     seen: Option<DateTime<Utc>>,
-    /// Newest message at any depth.
-    activity: Option<Message>,
     /// Newest top-level message.
     head: Option<Message>,
     /// Edits of a possible head.
@@ -200,6 +209,8 @@ pub(crate) fn stage(
                     at: created_at,
                     text: preview_text(&event.content),
                 });
+            } else {
+                metrics::counter!(SHARED_DROPPED).increment(1);
             }
         }
         return;
@@ -221,9 +232,8 @@ pub(crate) fn stage(
         keep_newer(&mut staged.head, message.clone());
     }
     if let Some(thread) = root.and_then(|root| staged.threads.get_mut(&root)) {
-        keep_newer(&mut thread.newest, message.clone());
+        keep_newer(&mut thread.newest, message);
     }
-    keep_newer(&mut staged.activity, message);
 
     // The author has read their own message. A broadcast reply sits in both
     // the thread and the channel timeline.
@@ -241,16 +251,14 @@ pub(crate) fn stage(
     if let Some((parent, at)) =
         reply.and_then(|meta| Some((id32(meta.parent_event_id?)?, meta.parent_event_created_at?)))
     {
-        if staged.parents.len() < MAX_STAGED_PEOPLE {
-            staged.parents.insert((root, parent, at));
-        }
+        staged.parent((root, parent, at));
     }
 }
 
 impl Staged {
     fn engage(&mut self, key: (Id, Option<Id>), read: Option<(DateTime<Utc>, Id)>) {
         if self.people.len() >= MAX_STAGED_PEOPLE && !self.people.contains_key(&key) {
-            metrics::counter!("buzz_db_activity_write_failures_total").increment(1);
+            metrics::counter!(PEOPLE_DROPPED).increment(1);
             return;
         }
         let slot = self.people.entry(key).or_default();
@@ -261,11 +269,20 @@ impl Staged {
         }
     }
 
+    fn parent(&mut self, parent: (Id, Id, DateTime<Utc>)) {
+        if self.parents.len() < MAX_STAGED_PEOPLE || self.parents.contains(&parent) {
+            self.parents.insert(parent);
+        } else {
+            metrics::counter!(PEOPLE_DROPPED).increment(1);
+        }
+    }
+
+    fn has_people(&self) -> bool {
+        !self.people.is_empty() || !self.parents.is_empty()
+    }
+
     /// Fold a later transaction's contribution into this one, newer wins.
     fn merge(&mut self, other: Staged) {
-        if let Some(message) = other.activity {
-            keep_newer(&mut self.activity, message);
-        }
         if let Some(message) = other.head {
             keep_newer(&mut self.head, message);
         }
@@ -288,12 +305,12 @@ impl Staged {
                     }
                 }
                 None if self.edits.len() < MAX_STAGED_EDITS => self.edits.push(edit),
-                None => metrics::counter!("buzz_db_activity_write_failures_total").increment(1),
+                None => metrics::counter!(SHARED_DROPPED).increment(1),
             }
         }
         for (root, thread) in other.threads {
             if self.threads.len() >= MAX_STAGED_THREADS && !self.threads.contains_key(&root) {
-                metrics::counter!("buzz_db_activity_write_failures_total").increment(1);
+                metrics::counter!(SHARED_DROPPED).increment(1);
                 continue;
             }
             let mine = self.threads.entry(root).or_default();
@@ -308,9 +325,7 @@ impl Staged {
             self.engage(key, read);
         }
         for parent in other.parents {
-            if self.parents.len() < MAX_STAGED_PEOPLE {
-                self.parents.insert(parent);
-            }
+            self.parent(parent);
         }
     }
 }
@@ -385,7 +400,7 @@ fn enqueue(
     community: Uuid,
     staged: BTreeMap<Uuid, Staged>,
 ) {
-    let mut dropped = 0u64;
+    let (mut dropped, mut people_dropped) = (Vec::new(), 0u64);
     for (channel, staged) in staged {
         let total = pending.channels;
         let (_, channels) = pending
@@ -398,12 +413,30 @@ fn enqueue(
                 row.insert(staged);
                 pending.channels += 1;
             }
-            std::collections::btree_map::Entry::Vacant(_) => dropped += 1,
+            std::collections::btree_map::Entry::Vacant(_) => {
+                dropped.push(channel);
+                people_dropped += u64::from(staged.has_people());
+            }
         }
     }
-    if dropped > 0 {
-        metrics::counter!("buzz_db_activity_write_failures_total").increment(dropped);
+    if !dropped.is_empty() {
+        metrics::counter!(SHARED_DROPPED).increment(dropped.len() as u64);
+        // Their rows no longer follow the event log: the next read of each
+        // rebuilds it.
+        distrust_later(pool.clone(), CommunityId::from_uuid(community), dropped);
     }
+    if people_dropped > 0 {
+        metrics::counter!(PEOPLE_DROPPED).increment(people_dropped);
+    }
+}
+
+/// Mark the channels' rows unverified without holding up the writer.
+fn distrust_later(pool: sqlx::PgPool, community: CommunityId, channels: Vec<Uuid>) {
+    tokio::spawn(async move {
+        if let Err(error) = distrust(pool, community, channels).await {
+            tracing::warn!(%error, %community, "activity rows not marked unverified");
+        }
+    });
 }
 
 async fn drain(draining: Draining) {
@@ -424,15 +457,19 @@ async fn drain(draining: Draining) {
         for (community_id, (pool, mut channels)) in communities {
             let community = CommunityId::from_uuid(community_id);
             let write = tokio::time::timeout(WRITE_TIMEOUT, write(&pool, community, &channels));
-            let failed: Vec<Uuid> = match write.await {
+            // `(channel, whether its people's rows are unwritten)`.
+            let all = |channels: &BTreeMap<Uuid, Staged>| -> Vec<(Uuid, bool)> {
+                channels.keys().map(|channel| (*channel, true)).collect()
+            };
+            let failed: Vec<(Uuid, bool)> = match write.await {
                 Ok(Ok(failed)) => failed,
                 Ok(Err(error)) => {
                     tracing::warn!(%error, %community, "activity rows not written");
-                    channels.keys().copied().collect()
+                    all(&channels)
                 }
                 Err(_) => {
                     tracing::warn!(%community, "activity rows not written: timed out");
-                    channels.keys().copied().collect()
+                    all(&channels)
                 }
             };
             if failed.is_empty() {
@@ -443,7 +480,7 @@ async fn drain(draining: Draining) {
             // After the last attempt the rows are left to the next read.
             let mut again = BTreeMap::new();
             let mut given_up = Vec::new();
-            for channel in failed {
+            for (channel, people_unwritten) in failed {
                 let Some(mut staged) = channels.remove(&channel) else {
                     continue;
                 };
@@ -451,17 +488,15 @@ async fn drain(draining: Draining) {
                 if staged.attempts < WRITE_ATTEMPTS {
                     again.insert(channel, staged);
                 } else {
-                    metrics::counter!("buzz_db_activity_write_failures_total").increment(1);
+                    metrics::counter!(SHARED_DROPPED).increment(1);
+                    if people_unwritten && staged.has_people() {
+                        metrics::counter!(PEOPLE_DROPPED).increment(1);
+                    }
                     given_up.push(channel);
                 }
             }
             if !given_up.is_empty() {
-                let pool = pool.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = distrust(pool, community, given_up).await {
-                        tracing::warn!(%error, %community, "activity rows not marked unverified");
-                    }
-                });
+                distrust_later(pool.clone(), community, given_up);
             }
             enqueue(&mut lock_pending(writer), &pool, community_id, again);
         }
@@ -469,27 +504,47 @@ async fn drain(draining: Draining) {
     }
 }
 
-/// Wait until every hand-off this process has accepted is written or given
-/// up on, so a test observes the writer rather than a read's repair.
-#[cfg(test)]
-pub(crate) async fn flush() {
+/// Wait, for at most `timeout`, until every hand-off this process has accepted
+/// is written or given up on. Returns whether it all was.
+///
+/// A relay calls this once it has stopped serving, so a restart does not lose
+/// the contributions of its last moments. Those still unwritten at the timeout
+/// are counted and left to the next read's rebuild.
+pub async fn flush_pending(timeout: std::time::Duration) -> bool {
     let writer = writer();
     let target = lock_pending(writer).submitted;
-    for _ in 0..2000 {
-        let idle = lock_pending(writer).communities.is_empty();
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let (idle, waiting) = {
+            let pending = lock_pending(writer);
+            (pending.communities.is_empty(), pending.channels)
+        };
         if idle && *writer.applied.borrow() >= target {
-            return;
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            // A write in flight has left the map; count it as one.
+            metrics::counter!(UNWRITTEN_AT_SHUTDOWN).increment(waiting.max(1) as u64);
+            return false;
         }
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
 }
 
-/// Returns the channels whose rows were not written.
+/// [`flush_pending`] for tests, so one observes the writer rather than a
+/// read's repair.
+#[cfg(test)]
+pub(crate) async fn flush() {
+    flush_pending(std::time::Duration::from_secs(10)).await;
+}
+
+/// Returns the channels whose rows were not written, each with whether its
+/// people's rows are among them.
 async fn write(
     pool: &sqlx::PgPool,
     community: CommunityId,
     channels: &BTreeMap<Uuid, Staged>,
-) -> Result<Vec<Uuid>> {
+) -> Result<Vec<(Uuid, bool)>> {
     let mut tx = crate::begin_community_write_transaction(
         pool,
         community,
@@ -514,12 +569,12 @@ async fn apply_staged(
     conn: &mut PgConnection,
     community: CommunityId,
     staged: &BTreeMap<Uuid, Staged>,
-) -> Result<Vec<Uuid>> {
+) -> Result<Vec<(Uuid, bool)>> {
     let mut failed = Vec::new();
     for (&channel, staged) in staged {
         // People's own rows first and on their own: nothing rebuilds them,
         // so a shared row held by a reader's rebuild must not cost them.
-        let mut ok = true;
+        let (mut ok, mut people_unwritten) = (true, false);
         for people in [true, false] {
             sqlx::query("SAVEPOINT activity_rows")
                 .execute(&mut *conn)
@@ -538,21 +593,24 @@ async fn apply_staged(
                     .await?;
                 tracing::warn!(%error, channel_id = %channel, people, "activity row update failed");
                 ok = false;
+                people_unwritten |= people;
             }
             sqlx::query("RELEASE SAVEPOINT activity_rows")
                 .execute(&mut *conn)
                 .await?;
         }
         if !ok {
-            failed.push(channel);
+            failed.push((channel, people_unwritten));
         }
     }
     Ok(failed)
 }
 
 /// Mark rows this process gave up writing as unverified, so the next read
-/// rebuilds them even after a later write lands. Waits longer for the rows
-/// than a write does; if it also fails, the rows wait for the next message.
+/// rebuilds them even after a later write lands. `updated_at` moves too, so a
+/// `since` read that looks up only changed rows finds them. Waits longer for
+/// the rows than a write does; if it also fails, the rows wait for the next
+/// message.
 async fn distrust(pool: sqlx::PgPool, community: CommunityId, channels: Vec<Uuid>) -> Result<()> {
     let mut tx = crate::begin_community_write_transaction(
         &pool,
@@ -564,7 +622,7 @@ async fn distrust(pool: sqlx::PgPool, community: CommunityId, channels: Vec<Uuid
         .execute(tx.conn())
         .await?;
     sqlx::query(
-        "UPDATE channel_heads SET seen_at = NULL \
+        "UPDATE channel_heads SET seen_at = NULL, updated_at = clock_timestamp() \
          WHERE community_id = $1 AND channel_id = ANY($2) AND seen_at IS NOT NULL",
     )
     .bind(community.as_uuid())
@@ -572,7 +630,7 @@ async fn distrust(pool: sqlx::PgPool, community: CommunityId, channels: Vec<Uuid
     .execute(tx.conn())
     .await?;
     sqlx::query(
-        "UPDATE thread_heads SET seen_at = NULL \
+        "UPDATE thread_heads SET seen_at = NULL, updated_at = clock_timestamp() \
          WHERE community_id = $1 AND channel_id = ANY($2) AND seen_at IS NOT NULL",
     )
     .bind(community.as_uuid())
@@ -616,11 +674,8 @@ fn seen_sql(seen_new: &str, seen_first: &str) -> (String, String) {
 /// so their order never matters. Later arrival wins and, within one arrival
 /// time, the lower id; of two edits the later, then the higher id, as in the
 /// timeline. `updated_at` moves only when a returned field changes, so
-/// `since` is not woken by reactions.
+/// `since` is not woken by reactions or by replies inside a thread.
 pub(super) fn channel_merge_sql(seen_new: &str, seen_first: &str) -> String {
-    const ACTIVITY: &str = "((EXCLUDED.activity_at, h.activity_id) \
-        > (COALESCE(h.activity_at, '-infinity'), EXCLUDED.activity_id) \
-        OR (EXCLUDED.activity_id IS NOT NULL AND h.activity_id IS NULL))";
     const HEAD: &str = "((EXCLUDED.head_received_at, h.head_id) \
         > (COALESCE(h.head_received_at, '-infinity'), EXCLUDED.head_id) \
         OR (EXCLUDED.head_id IS NOT NULL AND h.head_id IS NULL))";
@@ -630,12 +685,10 @@ pub(super) fn channel_merge_sql(seen_new: &str, seen_first: &str) -> String {
     let (seen_set, seen_changed) = seen_sql(seen_new, seen_first);
     let text = format!("({HEAD} OR {EDIT})");
     format!(
-        "ON CONFLICT (community_id, channel_id) DO UPDATE SET {seen_set}, {activity}, {head}, \
+        "ON CONFLICT (community_id, channel_id) DO UPDATE SET {seen_set}, {head}, \
             {text_set}, \
-            updated_at = CASE WHEN {ACTIVITY} OR {text} THEN clock_timestamp() \
-                ELSE h.updated_at END \
-         WHERE {seen_changed} OR {ACTIVITY} OR {text}",
-        activity = take_when(&["activity_at", "activity_id", "activity_pubkey"], ACTIVITY),
+            updated_at = CASE WHEN {text} THEN clock_timestamp() ELSE h.updated_at END \
+         WHERE {seen_changed} OR {text}",
         head = take_when(
             &[
                 "head_id",
@@ -649,20 +702,16 @@ pub(super) fn channel_merge_sql(seen_new: &str, seen_first: &str) -> String {
     )
 }
 
-/// The same for a thread row. The reply count is read fresh by each writer,
-/// so the newest write's count stands.
+/// The same for a thread row.
 pub(super) fn thread_merge_sql(seen_new: &str, seen_first: &str) -> String {
     const ACTIVITY: &str = "((EXCLUDED.activity_at, h.activity_id) \
         > (COALESCE(h.activity_at, '-infinity'), EXCLUDED.activity_id) \
         OR (EXCLUDED.activity_id IS NOT NULL AND h.activity_id IS NULL))";
-    const COUNT: &str = "EXCLUDED.reply_count <> h.reply_count";
     let (seen_set, seen_changed) = seen_sql(seen_new, seen_first);
     format!(
         "ON CONFLICT (community_id, root_id) DO UPDATE SET {seen_set}, {activity}, \
-            reply_count = EXCLUDED.reply_count, \
-            updated_at = CASE WHEN {ACTIVITY} OR {COUNT} THEN clock_timestamp() \
-                ELSE h.updated_at END \
-         WHERE {seen_changed} OR {ACTIVITY} OR {COUNT}",
+            updated_at = CASE WHEN {ACTIVITY} THEN clock_timestamp() ELSE h.updated_at END \
+         WHERE {seen_changed} OR {ACTIVITY}",
         activity = take_when(
             &[
                 "activity_at",
@@ -676,33 +725,23 @@ pub(super) fn thread_merge_sql(seen_new: &str, seen_first: &str) -> String {
     )
 }
 
-/// Replies under a thread root: the count the message transaction keeps on
-/// the root's thread metadata.
-pub(super) const REPLY_COUNT_SQL: &str = "COALESCE((SELECT tm.descendant_count \
-    FROM thread_metadata tm WHERE tm.community_id = $1 AND tm.event_id = {root} \
-    ORDER BY tm.event_created_at LIMIT 1), 0)";
-
 async fn apply_one(
     conn: &mut PgConnection,
     community: CommunityId,
     channel: Uuid,
     staged: &Staged,
 ) -> Result<()> {
-    if staged.seen.is_some() || staged.activity.is_some() || staged.head.is_some() {
+    if staged.seen.is_some() || staged.head.is_some() {
         let sql = format!(
-            "INSERT INTO channel_heads AS h (community_id, channel_id, activity_at, activity_id, \
-                activity_pubkey, head_id, head_created_at, head_received_at, head_pubkey, \
-                head_text, seen_at, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, clock_timestamp()) {merge}",
-            merge = channel_merge_sql(&not_future("$11::timestamptz"), "NULL::timestamptz"),
+            "INSERT INTO channel_heads AS h (community_id, channel_id, head_id, \
+                head_created_at, head_received_at, head_pubkey, head_text, seen_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, clock_timestamp()) {merge}",
+            merge = channel_merge_sql(&not_future("$8::timestamptz"), "NULL::timestamptz"),
         );
-        let (activity, head) = (staged.activity.as_ref(), staged.head.as_ref());
+        let head = staged.head.as_ref();
         sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(community.as_uuid())
             .bind(channel)
-            .bind(activity.map(|m| m.received_at))
-            .bind(activity.map(|m| m.id.to_vec()))
-            .bind(activity.map(|m| m.pubkey.to_vec()))
             .bind(head.map(|m| m.id.to_vec()))
             .bind(head.map(|m| m.created_at))
             .bind(head.map(|m| m.received_at))
@@ -737,10 +776,9 @@ async fn apply_one(
     for (root, thread) in &staged.threads {
         let sql = format!(
             "INSERT INTO thread_heads AS h (community_id, root_id, channel_id, activity_at, \
-                activity_id, activity_created_at, activity_pubkey, activity_text, reply_count, \
+                activity_id, activity_created_at, activity_pubkey, activity_text, \
                 seen_at, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, {count}, NULL, clock_timestamp()) {merge}",
-            count = REPLY_COUNT_SQL.replace("{root}", "$2"),
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, clock_timestamp()) {merge}",
             merge = thread_merge_sql(&not_future("$9::timestamptz"), "NULL::timestamptz"),
         );
         let newest = thread.newest.as_ref();

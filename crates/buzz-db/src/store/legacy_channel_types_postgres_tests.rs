@@ -128,7 +128,6 @@ async fn reads_that_name_no_channel_leave_out_a_type_added_later() {
             crate::store::personal_read::DEFAULT_RETENTION_SECONDS,
             &crate::store::activity::Query {
                 kinds: crate::store::activity::RowKind::ALL.to_vec(),
-                unread_only: false,
                 select: crate::store::activity::Select::Page {
                     before: None,
                     limit: crate::store::activity::MAX_LIMIT,

@@ -1,6 +1,7 @@
 //! Repair on read: shared rows that are missing, behind the event log, or
-//! name a deleted message are rebuilt from stored history before a first
-//! page, a `since` read or a read of named rows.
+//! name a deleted message are rebuilt from stored history before they are
+//! returned. A first page and a `since` read check every row of the person's
+//! list; a read of named rows checks those rows.
 
 use buzz_core::CommunityId;
 use sqlx::{PgConnection, Row as _};
@@ -8,14 +9,19 @@ use uuid::Uuid;
 
 use super::{
     model::{FILL_SCAN, HORIZON_SECONDS, PREVIEW_CHARS},
-    writer::{channel_merge_sql, not_future, thread_merge_sql, REPLY_COUNT_SQL},
+    writer::{channel_merge_sql, not_future, thread_merge_sql},
 };
 use crate::{observability, store::personal_read::ELIGIBLE_KINDS, Db, Result};
 
 /// Rows rebuilt per transaction.
 const FILL_BATCH: usize = 64;
-/// Most channels and threads one read rebuilds; the rest wait for the next.
-const MAX_REPAIRS: i64 = 256;
+/// Most channels, and most threads, one read finds wanting. A bound on the
+/// query, far above what one person has; time is what limits the rebuild.
+const MAX_WANTING: i64 = 4096;
+/// How long one read spends rebuilding. A batch that starts within it
+/// finishes; rows not reached are served as stored (a conversation without
+/// its preview, placed by its creation time) and the next read continues.
+const REBUILD_BUDGET: std::time::Duration = std::time::Duration::from_millis(2500);
 /// Most of a person's live threads one read checks, most recently engaged
 /// first.
 const MAX_THREAD_PROBES: i64 = 512;
@@ -73,7 +79,7 @@ pub(super) async fn wanting(
     .bind(community.as_uuid())
     .bind(actor.as_slice())
     .bind(only_channels)
-    .bind(MAX_REPAIRS)
+    .bind(MAX_WANTING)
     .fetch_all(&mut *conn)
     .await?;
     for row in rows {
@@ -104,7 +110,7 @@ pub(super) async fn wanting(
     .bind(community.as_uuid())
     .bind(actor.as_slice())
     .bind(only_roots)
-    .bind(MAX_REPAIRS)
+    .bind(MAX_WANTING)
     .bind(HORIZON_SECONDS as f64)
     .bind(MAX_THREAD_PROBES)
     .fetch_all(&mut *conn)
@@ -123,22 +129,44 @@ impl Db {
     /// message is never returned) and the next read tries again.
     pub(super) async fn repair_activity(&self, community: CommunityId, wanting: &Wanting) {
         static REPAIRS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(REPAIRS_AT_ONCE);
+        let deadline = tokio::time::Instant::now() + REBUILD_BUDGET;
         let repaired = match tokio::time::timeout(REPAIR_WAIT, REPAIRS.acquire()).await {
-            Ok(Ok(_turn)) => self
-                .rebuild(community, wanting)
-                .await
-                .map_err(|error| error.to_string()),
+            // A batch still running at the deadline is abandoned and rolls
+            // back, so a slow statement cannot outlast the budget.
+            Ok(Ok(_turn)) => {
+                match tokio::time::timeout_at(deadline, self.rebuild(community, wanting, deadline))
+                    .await
+                {
+                    Ok(rebuilt) => rebuilt.map_err(|error| error.to_string()),
+                    Err(_) => Ok(false),
+                }
+            }
             _ => Err("no turn".to_owned()),
         };
-        if let Err(error) = repaired {
-            metrics::counter!("buzz_db_activity_repairs_skipped_total").increment(1);
-            tracing::debug!(%error, %community, "activity rows not rebuilt");
+        match repaired {
+            Ok(true) => {}
+            Ok(false) => {
+                metrics::counter!("buzz_db_activity_repairs_unfinished_total").increment(1);
+            }
+            Err(error) => {
+                metrics::counter!("buzz_db_activity_repairs_skipped_total").increment(1);
+                tracing::debug!(%error, %community, "activity rows not rebuilt");
+            }
         }
     }
 
-    /// Each batch is its own admitted transaction.
-    async fn rebuild(&self, community: CommunityId, wanting: &Wanting) -> Result<()> {
+    /// Each batch is its own admitted transaction. Returns whether every row
+    /// was rebuilt before `deadline`.
+    async fn rebuild(
+        &self,
+        community: CommunityId,
+        wanting: &Wanting,
+        deadline: tokio::time::Instant,
+    ) -> Result<bool> {
         for batch in wanting.channels.chunks(FILL_BATCH) {
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(false);
+            }
             let mut tx = self.begin_repair(community).await?;
             // Take every row first, creating missing ones, in channel order.
             // An edit stored from here on waits for this transaction, and
@@ -173,6 +201,9 @@ impl Db {
             tx.commit().await?;
         }
         for batch in wanting.threads.chunks(FILL_BATCH) {
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(false);
+            }
             let (channels, roots): (Vec<Uuid>, Vec<Vec<u8>>) = batch.iter().cloned().unzip();
             let mut tx = self.begin_repair(community).await?;
             sqlx::query(
@@ -205,7 +236,7 @@ impl Db {
             fill_threads(tx.conn(), community, &channels, &roots).await?;
             tx.commit().await?;
         }
-        Ok(())
+        Ok(true)
     }
 
     async fn begin_repair(&self, community: CommunityId) -> Result<crate::AdmittedTx> {
@@ -238,11 +269,10 @@ async fn fill_channels(
     channels: &[Uuid],
 ) -> Result<()> {
     let sql = format!(
-        r#"INSERT INTO channel_heads AS h (community_id, channel_id, activity_at, activity_id,
-                activity_pubkey, head_id, head_created_at, head_received_at, head_pubkey,
-                head_text, head_edit_at, head_edit_id, seen_at, updated_at)
-            SELECT $1, c.id, a.received_at, a.id, a.pubkey, t.id, t.created_at, t.received_at,
-                t.pubkey, left(COALESCE(edit.content, t.content), $5), edit.created_at, edit.id,
+        r#"INSERT INTO channel_heads AS h (community_id, channel_id, head_id, head_created_at,
+                head_received_at, head_pubkey, head_text, head_edit_at, head_edit_id, seen_at,
+                updated_at)
+            SELECT $1, c.id, t.id, t.created_at, t.received_at, t.pubkey, left(COALESCE(edit.content, t.content), $5), edit.created_at, edit.id,
                 newest.created_at, clock_timestamp()
             FROM unnest($2::uuid[]) AS c(id)
             LEFT JOIN LATERAL (
@@ -250,15 +280,6 @@ async fn fill_channels(
                 WHERE community_id = $1 AND channel_id = c.id
                 ORDER BY created_at DESC LIMIT 1
             ) newest ON true
-            LEFT JOIN LATERAL (
-                SELECT recent.id, recent.received_at, recent.pubkey FROM (
-                    SELECT id, created_at, received_at, pubkey, kind, deleted_at FROM events
-                    WHERE community_id = $1 AND channel_id = c.id
-                    ORDER BY created_at DESC, id LIMIT $4
-                ) recent
-                WHERE recent.kind = ANY($3) AND recent.deleted_at IS NULL
-                ORDER BY recent.received_at DESC, recent.id LIMIT 1
-            ) a ON true
             LEFT JOIN LATERAL (
                 SELECT recent.id, recent.created_at, recent.received_at, recent.pubkey,
                     recent.content
@@ -302,7 +323,7 @@ async fn fill_channels(
     Ok(())
 }
 
-/// The same for threads: the newest stored reply and the reply count. A
+/// The same for threads: the newest stored reply. A
 /// thread row shows a reply as stored; edits are not applied to it.
 async fn fill_threads(
     conn: &mut PgConnection,
@@ -312,10 +333,10 @@ async fn fill_threads(
 ) -> Result<()> {
     let sql = format!(
         r#"INSERT INTO thread_heads AS h (community_id, root_id, channel_id, activity_at,
-                activity_id, activity_created_at, activity_pubkey, activity_text, reply_count,
+                activity_id, activity_created_at, activity_pubkey, activity_text,
                 seen_at, updated_at)
             SELECT $1, t.root, t.channel, a.received_at, a.id, a.created_at, a.pubkey,
-                left(a.content, $6), {count}, newest.event_created_at, clock_timestamp()
+                left(a.content, $6), newest.event_created_at, clock_timestamp()
             FROM unnest($2::uuid[], $3::bytea[]) AS t(channel, root)
             LEFT JOIN LATERAL (
                 SELECT event_created_at FROM thread_metadata
@@ -336,7 +357,6 @@ async fn fill_threads(
             WHERE EXISTS (SELECT 1 FROM channels c WHERE c.community_id = $1 AND c.id = t.channel)
             ORDER BY t.root
             {merge}"#,
-        count = REPLY_COUNT_SQL.replace("{root}", "t.root"),
         merge = thread_merge_sql(
             &not_future("EXCLUDED.seen_at"),
             &not_future("EXCLUDED.seen_at")

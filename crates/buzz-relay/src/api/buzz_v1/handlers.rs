@@ -8,9 +8,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use buzz_db::{
-    activity::{
-        self, Cursor, Marker, Page, Row, RowKind, Select, DEFAULT_LIMIT, MAX_IDS, MAX_LIMIT,
-    },
+    activity::{self, Cursor, Marker, Page, Row, RowKind, Select, DEFAULT_LIMIT, MAX_LIMIT},
     personal_read::{ReadIntent, ReadTarget, MAX_INTENTS},
 };
 use serde::Deserialize;
@@ -23,14 +21,10 @@ use uuid::Uuid;
 pub(super) struct ActivityQuery {
     /// Comma-separated row kinds; all when absent.
     kinds: Option<String>,
-    /// Only unread rows.
-    unread: Option<bool>,
     /// Cursor of the next older page.
     before: Option<String>,
     /// Marker of an earlier read: only what changed.
     since: Option<String>,
-    /// Comma-separated row ids to refresh.
-    ids: Option<String>,
     limit: Option<usize>,
 }
 
@@ -53,37 +47,14 @@ fn event_id(value: &str) -> Option<[u8; 32]> {
     hex::decode(value).ok()?.try_into().ok()
 }
 
-/// 1..=MAX_IDS unique ids. A UUID names a conversation; a 64-hex id names a
-/// thread root, a mention, or both.
-fn parse_ids(value: &str) -> Option<Select> {
-    let parts: Vec<&str> = value.split(',').collect();
-    let unique: BTreeSet<&str> = parts.iter().copied().collect();
-    if !(1..=MAX_IDS).contains(&parts.len()) || unique.len() != parts.len() {
-        return None;
-    }
-    let (mut channels, mut events) = (Vec::new(), Vec::new());
-    for part in parts {
-        match (Uuid::parse_str(part), event_id(part)) {
-            (_, Some(id)) => events.push(id),
-            (Ok(id), None) => channels.push(id),
-            _ => return None,
-        }
-    }
-    Some(Select::Ids {
-        channels,
-        roots: events.clone(),
-        mentions: events,
-    })
-}
-
 /// What a cursor is bound to: it continues only the listing that issued it.
-fn filter_tag(kinds: &[RowKind], unread_only: bool) -> String {
-    let mask = RowKind::ALL
+fn filter_tag(kinds: &[RowKind]) -> String {
+    RowKind::ALL
         .iter()
         .enumerate()
         .filter(|(_, kind)| kinds.contains(kind))
-        .fold(0u8, |mask, (bit, _)| mask | (1 << bit));
-    format!("{mask}{}", u8::from(unread_only))
+        .fold(0u8, |mask, (bit, _)| mask | (1 << bit))
+        .to_string()
 }
 
 fn encode_cursor(cursor: &Cursor, filter: &str) -> String {
@@ -108,12 +79,10 @@ fn decode_cursor(value: &str, filter: &str) -> Option<Cursor> {
 
 fn parse_query(query: ActivityQuery) -> Option<(activity::Query, String)> {
     let kinds = parse_kinds(query.kinds.as_deref())?;
-    let unread_only = query.unread.unwrap_or(false);
-    let filter = filter_tag(&kinds, unread_only);
-    let select = match (query.since, query.ids, query.before) {
-        (Some(since), None, None) if query.limit.is_none() => Select::Since(Marker::parse(&since)?),
-        (None, Some(ids), None) if query.limit.is_none() => parse_ids(&ids)?,
-        (None, None, before) => Select::Page {
+    let filter = filter_tag(&kinds);
+    let select = match (query.since, query.before) {
+        (Some(since), None) if query.limit.is_none() => Select::Since(Marker::parse(&since)?),
+        (None, before) => Select::Page {
             before: match before {
                 Some(before) => Some(decode_cursor(&before, &filter)?),
                 None => None,
@@ -124,14 +93,7 @@ fn parse_query(query: ActivityQuery) -> Option<(activity::Query, String)> {
         },
         _ => return None,
     };
-    Some((
-        activity::Query {
-            kinds,
-            unread_only,
-            select,
-        },
-        filter,
-    ))
+    Some((activity::Query { kinds, select }, filter))
 }
 
 /// The response body. A listing too large for the response limit is cut and
@@ -257,11 +219,9 @@ async fn refreshed(
             RowKind::Solo,
             RowKind::Thread,
         ],
-        unread_only: false,
         select: Select::Ids {
             channels: channels.into_iter().collect(),
             roots: roots.into_iter().collect(),
-            mentions: Vec::new(),
         },
     };
     Ok(read(state, headers, principal, &query).await?.rows)
@@ -360,10 +320,8 @@ mod tests {
     fn query(kinds: Option<&str>, before: Option<String>) -> ActivityQuery {
         ActivityQuery {
             kinds: kinds.map(str::to_owned),
-            unread: None,
             before,
             since: None,
-            ids: None,
             limit: None,
         }
     }
@@ -401,13 +359,8 @@ mod tests {
         }));
         assert!(!with(|q| {
             q.since = Some("3.1700000000000000".into());
-            q.ids = Some(Uuid::nil().to_string());
+            q.before = Some("x".into());
         }));
-        assert!(with(
-            |q| q.ids = Some(format!("{},{}", Uuid::nil(), "f".repeat(64)))
-        ));
-        assert!(!with(|q| q.ids = Some(format!("{0},{0}", Uuid::nil()))));
-        assert!(!with(|q| q.ids = Some("nope".into())));
         assert!(with(|q| q.limit = Some(MAX_LIMIT)));
         assert!(!with(|q| q.limit = Some(MAX_LIMIT + 1)));
         assert!(!with(|q| q.limit = Some(0)));
