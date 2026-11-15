@@ -247,7 +247,6 @@ export function buildMentionCandidates({
       preferredPubkeys: memberPubkeys,
     },
   );
-  // In a channel, only agents on its roster are offered.
   return mentionChannelId === null
     ? candidates
     : candidates.filter(
