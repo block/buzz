@@ -112,8 +112,12 @@ class MessageAuthorMeta extends StatelessWidget {
 
     return LayoutBuilder(
       builder: (context, constraints) {
+        // The author shares the row equally with each metadata item, so
+        // the optional ones can never squeeze it out.
+        final showDetail = showIdentity && detail != null;
+        final metadataCount = 1 + (showUsername ? 1 : 0) + (showDetail ? 1 : 0);
         final metadataMaxWidth = constraints.hasBoundedWidth
-            ? constraints.maxWidth / (showUsername ? 3 : 2)
+            ? constraints.maxWidth / (metadataCount + 1)
             : double.infinity;
 
         final children = <Widget>[
@@ -131,9 +135,12 @@ class MessageAuthorMeta extends StatelessWidget {
               ),
             ),
           ],
-          if (showIdentity && detail != null) ...[
+          if (showDetail) ...[
             const SizedBox(width: Grid.half),
-            _detail(detail!, resolvedMetadataStyle),
+            ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: metadataMaxWidth),
+              child: _detail(detail!, resolvedMetadataStyle),
+            ),
           ],
           if (showTimestamp) ...[
             if (showIdentity) SizedBox(width: timestampGap),
@@ -166,6 +173,7 @@ class MessageAuthorMeta extends StatelessWidget {
       '· $detail',
       semanticsLabel: detail,
       maxLines: 1,
+      overflow: TextOverflow.ellipsis,
       style: style,
     );
     final tooltip = detailTooltip;

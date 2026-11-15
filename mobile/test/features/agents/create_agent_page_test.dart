@@ -113,7 +113,12 @@ void main() {
       final targetIndex = originalPack.indices.firstWhere(
         (i) => agentAvatarCatalog[i].url != originalAvatar,
       );
-      await tester.ensureVisible(find.text('Choose avatar'));
+      // Centre the button so the later tap lands below the frosted app bar.
+      await Scrollable.ensureVisible(
+        tester.element(find.text('Choose avatar')),
+        alignment: 0.5,
+      );
+      await tester.pumpAndSettle();
       // Repeated callbacks before the next rebuild must still open one editor.
       final openAvatar = tester
           .widget<FilledButton>(
