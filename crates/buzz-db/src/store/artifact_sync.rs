@@ -22,6 +22,7 @@ pub struct Position {
 }
 
 /// A changed identity that requires a current, permission-scoped read.
+#[derive(Debug)]
 pub struct Candidate {
     /// Position used after this candidate is processed.
     pub position: Position,
@@ -162,7 +163,12 @@ impl Db {
 
 // Keep candidate access rules aligned with artifact_query::predicates, which owns
 // current-state visibility. This query also reads retained move and membership rows.
-const CANDIDATES: &str = r#"
+// A membership change in a channel also changes access to its private
+// children and grandchildren (`crate::channel_tree`), so it replays those as
+// it does the channel itself. Parent and visibility changes reset every sync
+// through `artifact_policy_modified_at` instead.
+const CANDIDATES: &str = concat!(
+    r#"
 WITH readable AS NOT MATERIALIZED (
     SELECT c.id FROM channels c
     WHERE c.community_id=$1 AND c.deleted_at IS NULL AND c.ttl_seconds IS NULL
@@ -170,7 +176,28 @@ WITH readable AS NOT MATERIALIZED (
       AND (c.channel_type::text=ANY($11) OR c.id=ANY($9))
       AND ((c.visibility='open' AND (NOT c.unlisted OR c.id=ANY($9))) OR EXISTS (
         SELECT 1 FROM channel_members m WHERE m.community_id=c.community_id
-        AND m.channel_id=c.id AND m.pubkey=$2 AND m.removed_at IS NULL))
+        AND m.channel_id=c.id AND m.pubkey=$2 AND m.removed_at IS NULL)
+        OR (c.visibility='private' AND ("#,
+    crate::channel_tree::implicitly_readable_through_parent_sql!(),
+    " OR (c.id=ANY($9) AND ",
+    crate::channel_tree::readable_through_parent_sql!(),
+    r#"))))
+), memberships AS NOT MATERIALIZED (
+    SELECT m.sync_modified_at,m.removed_at IS NOT NULL AS removed,m.channel_id AS id
+    FROM channel_members m WHERE m.community_id=$1 AND m.pubkey=$2
+      AND $3::timestamptz IS NOT NULL AND m.sync_modified_at >= $3
+      AND m.sync_modified_at <= $4
+), reached AS NOT MATERIALIZED (
+    SELECT m.sync_modified_at,m.removed,m.id FROM memberships m
+    UNION
+    SELECT m.sync_modified_at,m.removed,d.id FROM memberships m
+    JOIN channels d ON d.community_id=$1 AND d.deleted_at IS NULL
+      AND d.visibility='private' AND d.parent_id=m.id
+    UNION
+    SELECT m.sync_modified_at,m.removed,d.id FROM memberships m
+    JOIN channels k ON k.community_id=$1 AND k.deleted_at IS NULL AND k.parent_id=m.id
+    JOIN channels d ON d.community_id=$1 AND d.deleted_at IS NULL
+      AND d.visibility='private' AND d.parent_id=k.id
 ), changes AS (
     SELECT a.modified_at AS at,1 AS source,a.artifact_id::text AS id,
            a.artifact_id,NULL::uuid AS removed_channel
@@ -180,19 +207,15 @@ WITH readable AS NOT MATERIALIZED (
       AND ($3::timestamptz IS NOT NULL OR NOT a.deleted)
       AND (cardinality($8::text[])=0 OR a.artifact_type=ANY($8))
     UNION ALL
-    SELECT m.sync_modified_at,0,m.channel_id::text,NULL::uuid,m.channel_id
-    FROM channel_members m WHERE m.community_id=$1 AND m.pubkey=$2
-      AND $3::timestamptz IS NOT NULL AND m.sync_modified_at >= $3
-      AND m.sync_modified_at <= $4 AND m.removed_at IS NOT NULL
-      AND (NOT $12::boolean OR m.channel_id=ANY($9))
-      AND NOT EXISTS (SELECT 1 FROM readable r WHERE r.id=m.channel_id)
+    SELECT DISTINCT m.sync_modified_at,0,m.id::text,NULL::uuid,m.id
+    FROM reached m WHERE m.removed
+      AND (NOT $12::boolean OR m.id=ANY($9))
+      AND NOT EXISTS (SELECT 1 FROM readable r WHERE r.id=m.id)
     UNION ALL
-    SELECT m.sync_modified_at,2,a.artifact_id::text,a.artifact_id,NULL::uuid
-    FROM channel_members m JOIN artifact_heads a
-      ON a.community_id=m.community_id AND a.channel_id=m.channel_id
-    WHERE m.community_id=$1 AND m.pubkey=$2 AND m.removed_at IS NULL
-      AND $3::timestamptz IS NOT NULL AND m.sync_modified_at >= $3
-      AND m.sync_modified_at <= $4 AND a.channel_id IN (SELECT id FROM readable)
+    SELECT DISTINCT m.sync_modified_at,2,a.artifact_id::text,a.artifact_id,NULL::uuid
+    FROM reached m JOIN artifact_heads a
+      ON a.community_id=$1 AND a.channel_id=m.id
+    WHERE NOT m.removed AND a.channel_id IN (SELECT id FROM readable)
       AND (cardinality($8::text[])=0 OR a.artifact_type=ANY($8))
     UNION ALL
     SELECT DISTINCT r.modified_at,3,r.artifact_id::text,r.artifact_id,NULL::uuid
@@ -202,4 +225,5 @@ WITH readable AS NOT MATERIALIZED (
 )
 SELECT * FROM changes WHERE $5::timestamptz IS NULL OR (at,source,id)>($5,$6,$7)
 ORDER BY at,source,id LIMIT $10
-"#;
+"#
+);

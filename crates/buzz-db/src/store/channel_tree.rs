@@ -178,20 +178,62 @@ pub async fn inherited_role_in_transaction(
 }
 
 /// SQL true when `$2`, a pubkey, can read channel alias `c` through its
-/// parents: `c` has a live parent that `$2` is a member of or that is open,
-/// or a live grandparent reached through that parent that is. Whether `c`
-/// itself grants access is the caller's half of the predicate.
-pub(crate) const READABLE_THROUGH_PARENT_SQL: &str = "EXISTS ( \
+/// parents, given when an open parent grants (`$parent_open` on alias `p`,
+/// `$grandparent_open` on alias `g`): `c` has a live parent that `$2` is a
+/// member of or that grants, or a live grandparent reached through that
+/// parent that is or does.
+macro_rules! through_parent_sql {
+    ($parent_open:literal, $grandparent_open:literal) => {
+        concat!(
+            "EXISTS ( \
     SELECT 1 FROM channels p \
     LEFT JOIN channels g ON g.community_id = p.community_id AND g.id = p.parent_id \
          AND g.deleted_at IS NULL \
     WHERE p.community_id = c.community_id AND p.id = c.parent_id AND p.deleted_at IS NULL \
-      AND (p.visibility = 'open' \
+      AND ((",
+            $parent_open,
+            ") \
            OR EXISTS (SELECT 1 FROM channel_members pm WHERE pm.community_id = p.community_id \
                       AND pm.channel_id = p.id AND pm.pubkey = $2 AND pm.removed_at IS NULL) \
-           OR g.visibility = 'open' \
+           OR (",
+            $grandparent_open,
+            ") \
            OR EXISTS (SELECT 1 FROM channel_members gm WHERE gm.community_id = g.community_id \
-                      AND gm.channel_id = g.id AND gm.pubkey = $2 AND gm.removed_at IS NULL)))";
+                      AND gm.channel_id = g.id AND gm.pubkey = $2 AND gm.removed_at IS NULL)))"
+        )
+    };
+}
+pub(crate) use through_parent_sql;
+
+/// [`READABLE_THROUGH_PARENT_SQL`] as a literal, for `concat!`.
+macro_rules! readable_through_parent_sql {
+    () => {
+        $crate::channel_tree::through_parent_sql!("p.visibility = 'open'", "g.visibility = 'open'")
+    };
+}
+pub(crate) use readable_through_parent_sql;
+
+/// [`IMPLICITLY_READABLE_THROUGH_PARENT_SQL`] as a literal, for `concat!`.
+macro_rules! implicitly_readable_through_parent_sql {
+    () => {
+        $crate::channel_tree::through_parent_sql!(
+            "p.visibility = 'open' AND NOT p.unlisted",
+            "g.visibility = 'open' AND NOT g.unlisted"
+        )
+    };
+}
+pub(crate) use implicitly_readable_through_parent_sql;
+
+/// SQL true when `$2` can read channel alias `c` through its parents, for a
+/// read that names `c`: any open parent grants. Whether `c` itself grants
+/// access is the caller's half of the predicate.
+pub(crate) const READABLE_THROUGH_PARENT_SQL: &str = readable_through_parent_sql!();
+
+/// [`READABLE_THROUGH_PARENT_SQL`] for a read that does not name `c`: only a
+/// listed open parent grants, as in `get_listed_open_channel_ids`. An
+/// unlisted parent's children are named-only.
+pub(crate) const IMPLICITLY_READABLE_THROUGH_PARENT_SQL: &str =
+    implicitly_readable_through_parent_sql!();
 
 /// Push [`READABLE_THROUGH_PARENT_SQL`] onto `query`, binding `pubkey` for
 /// each `$2`, for a query built with a [`sqlx::QueryBuilder`].
@@ -199,7 +241,17 @@ pub(crate) fn push_readable_through_parent(
     query: &mut sqlx::QueryBuilder<sqlx::Postgres>,
     pubkey: &[u8],
 ) {
-    let mut parts = READABLE_THROUGH_PARENT_SQL.split("$2").peekable();
+    push_through_parent(query, READABLE_THROUGH_PARENT_SQL, pubkey);
+}
+
+/// Push `fragment`, one of the through-parent predicates above, onto
+/// `query`, binding `pubkey` for each `$2`.
+pub(crate) fn push_through_parent(
+    query: &mut sqlx::QueryBuilder<sqlx::Postgres>,
+    fragment: &str,
+    pubkey: &[u8],
+) {
+    let mut parts = fragment.split("$2").peekable();
     while let Some(part) = parts.next() {
         query.push(part);
         if parts.peek().is_some() {

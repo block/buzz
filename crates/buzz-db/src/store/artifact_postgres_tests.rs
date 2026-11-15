@@ -823,3 +823,127 @@ async fn sync_snapshot_pages_are_one_cut_and_head_includes_deletions() {
         .unwrap()
         .is_none());
 }
+
+/// Artifacts in a private child are read, synced and revoked through its
+/// parent: a project member reads them unnamed, opens a sync snapshot over
+/// the child, gets them replayed when added to the project, and a
+/// removeChannel when removed. An unlisted open project lends its children
+/// only to reads that name them.
+/// Mutation: drop the parent arm of `push_scope`, of the snapshot check, or
+/// the descendant rows of `reached` in `CANDIDATES` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn artifacts_are_read_synced_and_revoked_through_a_parent() {
+    let fixture = Fixture::new().await;
+    let f = &fixture;
+    let pool = &f.db.pool;
+    let owner = f.owner.public_key().to_bytes();
+    let peer = f.peer.public_key();
+    let channel = |visibility: &'static str, unlisted: bool| async move {
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO channels(community_id,id,name,visibility,channel_type,created_by,unlisted) VALUES($1,$2,$3,$4::channel_visibility,'stream',$5,$6)")
+            .bind(f.community.as_uuid()).bind(id).bind(id.to_string()).bind(visibility)
+            .bind(owner.as_slice()).bind(unlisted).execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO channel_members(community_id,channel_id,pubkey,role) VALUES($1,$2,$3,'owner')")
+            .bind(f.community.as_uuid()).bind(id).bind(owner.as_slice()).execute(pool).await.unwrap();
+        id
+    };
+    let file_under = |child: Uuid, parent: Uuid| async move {
+        sqlx::query("UPDATE channels SET parent_id=$3 WHERE community_id=$1 AND id=$2")
+            .bind(f.community.as_uuid())
+            .bind(child)
+            .bind(parent)
+            .execute(pool)
+            .await
+            .unwrap();
+    };
+    let project = channel("private", false).await;
+    file_under(f.b, project).await;
+    let unlisted_project = channel("open", true).await;
+    let hidden_child = channel("private", false).await;
+    file_under(hidden_child, unlisted_project).await;
+    let in_child = f.revision(Uuid::new_v4(), "create", f.b, None, &f.owner, vec![]);
+    let in_hidden = f.revision(
+        Uuid::new_v4(),
+        "create",
+        hidden_child,
+        None,
+        &f.owner,
+        vec![],
+    );
+    for event in [&in_child, &in_hidden] {
+        assert!(matches!(
+            f.accept(event, None).await,
+            ArtifactOutcome::Accepted(_)
+        ));
+    }
+    let unnamed = serde_json::json!({"artifact":"current"});
+    let ids = |events: Vec<buzz_core::StoredEvent>| {
+        events.into_iter().map(|e| e.event.id).collect::<Vec<_>>()
+    };
+    let snapshot_allowed = |channels: Vec<Uuid>| async move {
+        f.db.open_artifact_snapshot(f.community, peer.as_bytes(), &channels)
+            .await
+            .unwrap()
+            .is_ok()
+    };
+    let sync = |since| async move {
+        let (until, _) = f.db.artifact_sync_boundary(f.community).await.unwrap();
+        f.db.artifact_sync_candidates(
+            f.community,
+            peer.as_bytes(),
+            Some(since),
+            until,
+            None,
+            &artifact::parse_query(&serde_json::json!({"artifact":"current"})).unwrap(),
+        )
+        .await
+        .unwrap()
+    };
+
+    // An unlisted open project's child is read only by naming it.
+    let (events, _) = f.query(&f.peer, unnamed.clone(), false).await;
+    assert!(ids(events).is_empty(), "no access yet: nothing unnamed");
+    let named = serde_json::json!({"artifact":"current","#h":[hidden_child.to_string()]});
+    let (events, _) = f.query(&f.peer, named, false).await;
+    assert_eq!(
+        ids(events),
+        [in_hidden.id],
+        "named through the unlisted project"
+    );
+    assert!(!snapshot_allowed(vec![f.b]).await);
+
+    // Added to the project: the child's artifacts replay and are readable.
+    let (before_add, _) = f.db.artifact_sync_boundary(f.community).await.unwrap();
+    sqlx::query("INSERT INTO channel_members(community_id,channel_id,pubkey,role) VALUES($1,$2,$3,'member')")
+        .bind(f.community.as_uuid()).bind(project).bind(peer.to_bytes().as_slice())
+        .execute(pool).await.unwrap();
+    let replay = sync(before_add).await;
+    assert!(
+        replay
+            .iter()
+            .any(|c| c.position.source == 2 && c.artifact_id.is_some()),
+        "joining the project replays the child's artifacts: {replay:?}"
+    );
+    let (events, _) = f.query(&f.peer, unnamed.clone(), false).await;
+    assert_eq!(
+        ids(events),
+        [in_child.id],
+        "read unnamed through the project"
+    );
+    assert!(snapshot_allowed(vec![f.b]).await);
+
+    // Removed from the project: the child is removed from the sync.
+    let (before_remove, _) = f.db.artifact_sync_boundary(f.community).await.unwrap();
+    sqlx::query("UPDATE channel_members SET removed_at=clock_timestamp(), sync_modified_at=clock_timestamp() WHERE community_id=$1 AND channel_id=$2 AND pubkey=$3")
+        .bind(f.community.as_uuid()).bind(project).bind(peer.to_bytes().as_slice())
+        .execute(pool).await.unwrap();
+    let removal = sync(before_remove).await;
+    assert!(
+        removal.iter().any(|c| c.removed_channel == Some(f.b)),
+        "leaving the project removes the child: {removal:?}"
+    );
+    let (events, _) = f.query(&f.peer, unnamed, false).await;
+    assert!(ids(events).is_empty(), "revoked");
+    assert!(!snapshot_allowed(vec![f.b]).await);
+}

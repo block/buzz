@@ -51,8 +51,9 @@ pub(super) fn predicates(
 
 /// Append the reader's permission scope and the exact tag predicates. A
 /// system channel, or an unlisted open channel the reader is not a member
-/// of, is readable only when `named_channels` names it (NIP-CL). This is the
-/// one copy of the current-state access rule.
+/// of, is readable only when `named_channels` names it (NIP-CL), and so is a
+/// private channel that only an unlisted open parent grants. This is the one
+/// copy of the current-state access rule.
 fn push_scope(
     qb: &mut QueryBuilder<Postgres>,
     community: CommunityId,
@@ -67,9 +68,26 @@ fn push_scope(
         .push(" OR c.id=ANY(")
         .push_bind(named_channels.clone())
         .push(")) AND ((c.visibility='open' AND (NOT c.unlisted OR c.id=ANY(")
-        .push_bind(named_channels)
+        .push_bind(named_channels.clone())
         .push("))) OR EXISTS (SELECT 1 FROM channel_members m WHERE m.community_id=c.community_id AND m.channel_id=c.id AND m.pubkey=")
-        .push_bind(reader.to_vec()).push(" AND m.removed_at IS NULL)))");
+        .push_bind(reader.to_vec())
+        .push(" AND m.removed_at IS NULL) OR (c.visibility='private' AND (");
+    // Through a parent: implicitly, or by naming the channel when only an
+    // unlisted open parent grants it (`crate::channel_tree`).
+    crate::channel_tree::push_through_parent(
+        qb,
+        crate::channel_tree::IMPLICITLY_READABLE_THROUGH_PARENT_SQL,
+        reader,
+    );
+    qb.push(" OR (c.id=ANY(")
+        .push_bind(named_channels)
+        .push(") AND ");
+    crate::channel_tree::push_through_parent(
+        qb,
+        crate::channel_tree::READABLE_THROUGH_PARENT_SQL,
+        reader,
+    );
+    qb.push(")))))");
     tag_predicates(qb, tags);
 }
 
@@ -266,9 +284,11 @@ impl Db {
         sqlx::query("SET LOCAL statement_timeout='2s'")
             .execute(&mut *tx)
             .await?;
-        let readable: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM channels c WHERE c.community_id=$1 AND c.id=ANY($2) AND c.deleted_at IS NULL AND (c.visibility='open' OR EXISTS (SELECT 1 FROM channel_members m WHERE m.community_id=c.community_id AND m.channel_id=c.id AND m.pubkey=$3 AND m.removed_at IS NULL))",
-        )
+        // Every channel is named here, so any open parent grants.
+        let readable: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT count(*) FROM channels c WHERE c.community_id=$1 AND c.id=ANY($2) AND c.deleted_at IS NULL AND (c.visibility='open' OR EXISTS (SELECT 1 FROM channel_members m WHERE m.community_id=c.community_id AND m.channel_id=c.id AND m.pubkey=$3 AND m.removed_at IS NULL) OR (c.visibility='private' AND {}))",
+            crate::channel_tree::READABLE_THROUGH_PARENT_SQL.replace("$2", "$3"),
+        )))
         .bind(community.as_uuid())
         .bind(channels)
         .bind(reader)
