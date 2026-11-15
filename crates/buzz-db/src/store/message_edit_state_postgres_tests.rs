@@ -307,3 +307,103 @@ async fn historical_edit_preflight_matches_selected_live_edit() {
         .unwrap();
     assert_eq!(counts, vec![(45001, 2)]);
 }
+
+/// A reader of a private project reads a private child's effective edit
+/// with no row in the child, and loses it when removed from the project.
+/// Mutation: drop the parent clause from `message_edit_state` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn effective_edit_is_readable_through_a_parent() {
+    let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+        .await
+        .unwrap();
+    let db = Db::from_pool(pool.clone());
+    let community = db
+        .ensure_configured_community("effective-edit-parent.example")
+        .await
+        .unwrap()
+        .id;
+    let (owner, reader, outsider) = (Keys::generate(), Keys::generate(), Keys::generate());
+    for keys in [&owner, &reader, &outsider] {
+        db.ensure_user(community, keys.public_key().as_bytes())
+            .await
+            .unwrap();
+    }
+    let private = |name: &'static str| {
+        let db = db.clone();
+        let owner = owner.public_key();
+        async move {
+            db.create_channel(
+                community,
+                name,
+                ChannelType::Stream,
+                ChannelVisibility::Private,
+                None,
+                owner.as_bytes(),
+                None,
+            )
+            .await
+            .unwrap()
+            .id
+        }
+    };
+    let project = private("project").await;
+    let child = private("child").await;
+    sqlx::query("UPDATE channels SET parent_id = $1 WHERE id = $2")
+        .bind(project)
+        .bind(child)
+        .execute(&pool)
+        .await
+        .unwrap();
+    db.add_member(
+        community,
+        project,
+        reader.public_key().as_bytes(),
+        crate::channel::MemberRole::Member,
+        Some(owner.public_key().as_bytes()),
+    )
+    .await
+    .unwrap();
+    let original = EventBuilder::new(Kind::Custom(9), "original")
+        .tags([Tag::parse(["h", &child.to_string()]).unwrap()])
+        .sign_with_keys(&owner)
+        .unwrap();
+    db.insert_event(community, &original, Some(child))
+        .await
+        .unwrap();
+    let edit = EventBuilder::new(Kind::Custom(40003), "replacement")
+        .tags([
+            Tag::parse(["h", &child.to_string()]).unwrap(),
+            Tag::parse(["e", &original.id.to_hex()]).unwrap(),
+        ])
+        .custom_created_at(Timestamp::from(Timestamp::now().as_secs() + 1))
+        .sign_with_keys(&owner)
+        .unwrap();
+    db.insert_event(community, &edit, Some(child))
+        .await
+        .unwrap();
+    let state = |who: &Keys| {
+        let db = db.clone();
+        let who = who.public_key();
+        let id = original.id;
+        async move {
+            db.message_edit_state(community, child, id.as_bytes(), who.as_bytes())
+                .await
+                .unwrap()
+        }
+    };
+
+    let seen = state(&reader).await.expect("reader through the parent");
+    assert_eq!(seen.edit.unwrap().id, edit.id);
+    assert!(state(&outsider).await.is_none());
+
+    db.remove_member(
+        community,
+        project,
+        reader.public_key().as_bytes(),
+        owner.public_key().as_bytes(),
+    )
+    .await
+    .unwrap();
+    assert!(state(&reader).await.is_none());
+}
