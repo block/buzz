@@ -209,7 +209,11 @@ void main() {
       );
 
       // Opening a channel the relay no longer serves drops it at once.
-      channels.forgetDirectoryChannel(_channelA);
+      session.metadata = [];
+      await expectLater(
+        container.read(channelDetailsProvider(_channelA).future),
+        throwsException,
+      );
       await _settle();
       expect(names(container), isEmpty);
       await expectSaved([]);
