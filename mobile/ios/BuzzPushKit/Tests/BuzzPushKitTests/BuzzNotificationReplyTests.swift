@@ -118,7 +118,13 @@ func `Forum posts and other kinds offer no reply`(kind: Int) {
 
   #expect(buffer.take().map(\.id) == ["1", "2", "3", "4"])
   #expect(buffer.take().isEmpty)
-  buffer.add(request("5")) { outcomes["5", default: []].append($0) }
+  // A Solo chat keeps an expired reply's draft in the chat itself.
+  buffer.add(
+    BuzzNotificationReplyRequest(
+      id: "5", text: "5", target: target,
+      context: BuzzNotificationReplyContext(senderPubkey: "pk", messageCreatedAt: 1, inSolo: true),
+      threadIdentifier: "t")
+  ) { outcomes["5", default: []].append($0) }
 
   buffer.complete(id: "1", outcome: .sent)
   // A deadline after the app reported the outcome changes nothing.
@@ -132,7 +138,9 @@ func `Forum posts and other kinds offer no reply`(kind: Int) {
   #expect(
     outcomes == [
       "1": [.sent], "2": [.notSent(draftThreadRootID: "head")], "3": [.unknown],
-      "4": [.notSent(draftThreadRootID: nil)], "5": [.notSent(draftThreadRootID: nil)],
+      // Expired, it opens the subthread under the notified message, where the
+      // app keeps its draft.
+      "4": [.notSent(draftThreadRootID: parent)], "5": [.notSent(draftThreadRootID: nil)],
     ])
 }
 
@@ -151,12 +159,21 @@ func `Forum posts and other kinds offer no reply`(kind: Int) {
   journal.record(["id": "3", "text": "three"])
   #expect(journal.take().map { $0["id"] } == ["3"])
 
+  // The app got as far as maybe publishing 3.
+  journal.markPublishing(id: "3")
+
   // The app was stopped before reporting 2 and 3, so a relaunch hands them
-  // over again for their drafts.
+  // over again, marked so the app never sends them; one recorded after the
+  // relaunch is fresh.
   let relaunched = BuzzNotificationReplyJournal(defaults: defaults)
-  #expect(relaunched.take().map { $0["text"] } == ["two", "three"])
-  relaunched.settle(id: "2")
-  relaunched.settle(id: "3")
+  relaunched.record(["id": "4", "text": "four"])
+  #expect(
+    relaunched.take() == [
+      ["id": "2", "text": "two", "recovered": "true"],
+      ["id": "3", "text": "three", "publishing": "true", "recovered": "true"],
+      ["id": "4", "text": "four"],
+    ])
+  for id in ["2", "3", "4"] { relaunched.settle(id: id) }
   #expect(BuzzNotificationReplyJournal(defaults: defaults).take().isEmpty)
 }
 
@@ -186,4 +203,42 @@ func `Forum posts and other kinds offer no reply`(kind: Int) {
   #expect(BuzzSelectedCommunity.id(in: defaults) == "community")
   BuzzSelectedCommunity.set(nil, in: defaults)
   #expect(BuzzSelectedCommunity.id(in: defaults) == nil)
+}
+
+@Test func `A sent reply clears the notifications its read marker covers`() {
+  let target = BuzzPushNavigationTarget(eventID: parent, communityID: "c", channelID: "ch")
+  func request(root: String?) -> BuzzNotificationReplyRequest {
+    BuzzNotificationReplyRequest(
+      id: "1", text: "hi", target: target,
+      context: BuzzNotificationReplyContext(
+        senderPubkey: "pk", threadRootID: root, messageCreatedAt: 10),
+      threadIdentifier: "conversation")
+  }
+  func notification(root: String?, at createdAt: Int) -> [AnyHashable: Any] {
+    [
+      BuzzNotificationReplyContext.userInfoKey: BuzzNotificationReplyContext(
+        senderPubkey: "pk", threadRootID: root, messageCreatedAt: createdAt
+      ).userInfoValue
+    ]
+  }
+  let rows: [(request: String?, notified: String?, createdAt: Int, cleared: Bool)] = [
+    // A top-level reply reads the whole conversation, threads included.
+    (nil, nil, 5, true),
+    (nil, "thread", 5, true),
+    (nil, "thread", 11, false),
+    // A reply in a thread reads only that thread.
+    ("thread", "thread", 5, true),
+    ("thread", nil, 5, false),
+    ("thread", "other", 5, false),
+  ]
+  for row in rows {
+    #expect(
+      request(root: row.request).clears(
+        threadIdentifier: "conversation",
+        userInfo: notification(root: row.notified, at: row.createdAt)) == row.cleared)
+  }
+  #expect(
+    !request(root: nil).clears(
+      threadIdentifier: "elsewhere", userInfo: notification(root: nil, at: 5)))
+  #expect(!request(root: nil).clears(threadIdentifier: "conversation", userInfo: [:]))
 }

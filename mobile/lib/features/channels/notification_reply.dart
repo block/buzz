@@ -51,7 +51,8 @@ final notificationReplySenderProvider = Provider<void>((ref) {
               draftThreadRootId: result.draftThreadRootId,
             );
           } catch (error) {
-            // The native side gives up on it at its own deadline.
+            // Unreported, it stays journaled: iOS gives up on it at its own
+            // deadline, and a later launch keeps its draft.
             debugPrint('[NotificationReply] not completed: $error');
           }
         }
@@ -109,6 +110,20 @@ Future<NotificationReplyResult> sendNotificationReply(
   Ref ref,
   BuzzNotificationReply reply,
 ) async {
+  // An earlier launch was given it: it may have gone out, so it is never sent
+  // again, and is kept as a draft only when it surely didn't.
+  if (reply.recovered) {
+    if (reply.mayHavePublished) {
+      return (
+        outcome: NotificationReplyOutcome.unknown,
+        draftThreadRootId: null,
+      );
+    }
+    return (
+      outcome: NotificationReplyOutcome.notSent,
+      draftThreadRootId: await _keepDraft(ref, reply),
+    );
+  }
   // Sending ends early enough to mark read and report before the deadline.
   final left =
       reply.deadline.difference(DateTime.now()) -
@@ -222,6 +237,8 @@ Future<void> _send(
     (member) => member.pubkey.toLowerCase() == sender,
   );
   final head = _replyHead(reply, channel);
+  // Saved before anything can go out, so a relaunch never resends it.
+  await markBuzzNotificationReplyPublishing(reply.id);
   await send(
     channelId: link.channelId,
     content: reply.text,
@@ -239,7 +256,8 @@ String? _replyHead(BuzzNotificationReply reply, Channel channel) =>
     channel.isSolo ? null : reply.replyRootId ?? reply.link.messageId;
 
 /// Keeps the reply's text as a draft, after any draft already there, in the
-/// reply's own community, and returns the thread it's in once it's saved. It
+/// reply's own community, and returns the thread it's in once it's saved, or
+/// throws: the reply then stays with iOS until a later launch saves it. It
 /// goes where the reply would have gone: the subthread under the notified
 /// message, or a Solo chat itself. Whether it's a Solo chat comes from the
 /// loaded channel, or else from the notification.
@@ -255,28 +273,21 @@ Future<String?> _keepDraft(Ref ref, BuzzNotificationReply reply) async {
       : null;
   final solo = channel?.isSolo ?? reply.inSolo;
   final threadHeadId = solo ? null : link.messageId;
-  try {
-    final communities = await ref.read(communityListProvider.future);
-    final community = communities
-        .where((community) => community.id == link.communityId)
-        .firstOrNull;
-    if (community == null) {
-      throw StateError('Community ${link.communityId} not found');
-    }
-    await ref
-        .read(composeDraftsProvider.notifier)
-        .append(
-          config: RelayConfig(
-            baseUrl: community.relayUrl,
-            nsec: community.nsec,
-          ),
-          key: composeDraftKey(link.channelId, threadHeadId: threadHeadId),
-          channelId: link.channelId,
-          threadHeadId: threadHeadId,
-          text: reply.text,
-        );
-  } catch (error) {
-    debugPrint('[NotificationReply] draft not kept: $error');
+  final communities = await ref.read(communityListProvider.future);
+  final community = communities
+      .where((community) => community.id == link.communityId)
+      .firstOrNull;
+  if (community == null) {
+    throw StateError('Community ${link.communityId} not found');
   }
+  await ref
+      .read(composeDraftsProvider.notifier)
+      .append(
+        config: RelayConfig(baseUrl: community.relayUrl, nsec: community.nsec),
+        key: composeDraftKey(link.channelId, threadHeadId: threadHeadId),
+        channelId: link.channelId,
+        threadHeadId: threadHeadId,
+        text: reply.text,
+      );
   return threadHeadId;
 }

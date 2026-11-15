@@ -226,6 +226,13 @@ final class BuzzNotificationReplyBridge {
       // previous launch never finished.
       _ = buffer.take()
       result(journal.take())
+    case "markNotificationReplyPublishing":
+      guard let id = call.arguments as? String else {
+        result(FlutterError(code: "invalid_arguments", message: "Expected id.", details: nil))
+        return true
+      }
+      journal.markPublishing(id: id)
+      result(nil)
     case "completeNotificationReply":
       guard let arguments = call.arguments as? [String: Any],
         let id = arguments["id"] as? String,
@@ -311,14 +318,10 @@ final class BuzzNotificationReplyBridge {
       let ids = delivered.compactMap { notification -> String? in
         let identifier = notification.request.identifier
         let content = notification.request.content
-        guard identifier != notificationID else { return identifier }
-        // Only notifications that offer Reply know where and when their
-        // message was; the replied conversation's earlier ones were read.
-        guard !request.threadIdentifier.isEmpty,
-          content.threadIdentifier == request.threadIdentifier,
-          let context = BuzzNotificationReplyContext.decodeIfPresent(from: content.userInfo),
-          context.threadRootID == request.context.threadRootID,
-          context.messageCreatedAt <= request.context.messageCreatedAt
+        guard
+          identifier == notificationID
+            || request.clears(
+              threadIdentifier: content.threadIdentifier, userInfo: content.userInfo)
         else { return nil }
         return identifier
       }

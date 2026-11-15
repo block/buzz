@@ -145,6 +145,25 @@ public struct BuzzNotificationReplyRequest: Equatable, Sendable {
       id: id, text: text, target: target, context: context,
       threadIdentifier: threadIdentifier, deadline: deadline)
   }
+
+  /// Whether a sent reply clears a delivered notification, matching the
+  /// read marker the app writes: a reply in a thread reads that thread up to
+  /// the notified message, and a top-level reply reads the whole conversation
+  /// up to it, its threads included. Only notifications that offer Reply
+  /// know where and when their message was.
+  public func clears(threadIdentifier other: String, userInfo: [AnyHashable: Any]) -> Bool {
+    guard !threadIdentifier.isEmpty, other == threadIdentifier,
+      let notified = BuzzNotificationReplyContext.decodeIfPresent(from: userInfo),
+      notified.messageCreatedAt <= context.messageCreatedAt
+    else { return false }
+    return context.threadRootID == nil || notified.threadRootID == context.threadRootID
+  }
+
+  /// Where an expired reply's draft is kept: the subthread under the notified
+  /// message, or a Solo chat itself (nil).
+  var expiredDraftThreadRootID: String? {
+    context.inSolo == true ? nil : target.eventID
+  }
 }
 
 /// How a notification reply ended.
@@ -199,9 +218,11 @@ public final class BuzzNotificationReplyBuffer: @unchecked Sendable {
     remove(id: id)?.finish(outcome)
   }
 
-  /// Finishes a request as not sent at its deadline.
+  /// Finishes a request as not sent at its deadline, pointing at where the
+  /// app will keep its draft.
   public func expire(id: String) {
-    remove(id: id)?.finish(.notSent(draftThreadRootID: nil))
+    guard let entry = remove(id: id) else { return }
+    entry.finish(.notSent(draftThreadRootID: entry.request.expiredDraftThreadRootID))
   }
 
   private func remove(id: String) -> Entry? {
@@ -213,8 +234,9 @@ public final class BuzzNotificationReplyBuffer: @unchecked Sendable {
 
 /// Replies typed into notifications that the app hasn't reported on, kept on
 /// disk from the moment they arrive. If the app is stopped before reporting
-/// one, the next launch hands it over again, and its deadline having passed,
-/// the app keeps its text as a draft instead of sending it.
+/// one, the next launch hands it over again marked `recovered`, which the app
+/// never sends: it keeps the text as a draft, or, when the reply was marked
+/// `publishing`, only settles it, since it may have gone out.
 public final class BuzzNotificationReplyJournal: @unchecked Sendable {
   public static let defaultsKey = "buzz.notification_reply.pending"
 
@@ -222,9 +244,15 @@ public final class BuzzNotificationReplyJournal: @unchecked Sendable {
   private let lock = NSLock()
   /// Ids handed to the app by this process, which aren't handed over twice.
   private var handedOver: Set<String> = []
+  /// Ids an earlier process recorded.
+  private let recovered: Set<String>
 
   public init(defaults: UserDefaults) {
     self.defaults = defaults
+    recovered = Set(
+      (defaults.array(forKey: Self.defaultsKey) as? [[String: String]] ?? []).compactMap {
+        $0["id"]
+      })
   }
 
   /// Keeps a reply's app arguments, which carry its `id`.
@@ -240,7 +268,20 @@ public final class BuzzNotificationReplyJournal: @unchecked Sendable {
     defer { lock.unlock() }
     let fresh = pending().filter { !handedOver.contains($0["id"] ?? "") }
     handedOver.formUnion(fresh.compactMap { $0["id"] })
-    return fresh
+    return fresh.map { reply in
+      guard recovered.contains(reply["id"] ?? "") else { return reply }
+      return reply.merging(["recovered": "true"]) { _, new in new }
+    }
+  }
+
+  /// Notes, before the app may publish a reply, that it may go out, so a
+  /// relaunch never drafts or resends it.
+  public func markPublishing(id: String) {
+    lock.lock()
+    defer { lock.unlock() }
+    defaults.set(
+      pending().map { $0["id"] == id ? $0.merging(["publishing": "true"]) { _, new in new } : $0 },
+      forKey: Self.defaultsKey)
   }
 
   /// Forgets a reply once the app has reported it sent, or kept its draft.

@@ -127,7 +127,16 @@ void main() {
         // A reply published without an acknowledgement may have gone out, so
         // no draft is kept.
         _reply('11', channelId: 'lost'),
+        // A reply an earlier launch never finished is never sent again: it's
+        // kept as a draft, or, if it may have gone out then, left alone.
+        {..._reply('14'), 'recovered': 'true'},
+        {..._reply('15'), 'recovered': 'true', 'publishing': 'true'},
+        // A draft that can't be saved isn't reported, so iOS keeps the reply
+        // for a later launch.
+        {..._reply('16', communityId: 'gone'), 'recovered': 'true'},
       ];
+      // What iOS hears, in order, alongside each message sent.
+      final log = <String>[];
       installBuzzPushMethodHandler();
       final outcomes = <String, Object>{};
       final selected = <Object?>[];
@@ -144,6 +153,8 @@ void main() {
                 : args['sent'] == true
                 ? 'sent'
                 : 'draft in ${args['draftThreadRootId']}';
+          case 'markNotificationReplyPublishing':
+            log.add('may publish ${call.arguments}');
           case 'setSelectedCommunity':
             selected.add(call.arguments);
         }
@@ -161,7 +172,7 @@ void main() {
             '"updated_at":1}]',
       });
       final prefs = await SharedPreferences.getInstance();
-      final sender = _RecordingSender();
+      final sender = _RecordingSender(onSend: (text) => log.add('sent $text'));
       final session = _Session();
       var active = _community;
       final container = ProviderContainer(
@@ -207,7 +218,16 @@ void main() {
         '11': 'unknown',
         '12': 'draft in $_message',
         '13': 'draft in null',
+        '14': 'draft in $_message',
+        '15': 'unknown',
       });
+      // iOS knows a reply may go out before anything is published.
+      expect(log, [
+        for (final id in ['1', '2', '3', '10', '11']) ...[
+          'may publish $id',
+          'sent reply $id',
+        ],
+      ]);
       expect(sender.calls, [
         ('general', 'reply 1', _message, _message, _sender),
         ('general', 'reply 2', _message, _root, _sender),
@@ -242,6 +262,10 @@ void main() {
       expect(
         drafts.textFor(composeDraftKey('lost', threadHeadId: _message)),
         isNull,
+      );
+      expect(
+        drafts.textFor(composeDraftKey('general', threadHeadId: _message)),
+        'reply 14',
       );
 
       Future<void> signalReply(Map<String, String> reply) async {
@@ -442,6 +466,8 @@ class _Session extends RelaySessionNotifier {
 }
 
 class _RecordingSender implements SendMessage {
+  _RecordingSender({required this.onSend});
+  final void Function(String text) onSend;
   final calls = <(String, String, String?, String?, String?)>[];
   @override
   Future<void> call({
@@ -462,6 +488,7 @@ class _RecordingSender implements SendMessage {
       rootEventId,
       mentionPubkeys?.join(','),
     ));
+    onSend(content);
     if (channelId == 'lost') throw TimeoutException('no OK');
   }
 }

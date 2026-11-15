@@ -61,6 +61,8 @@ class BuzzNotificationReply {
     required this.deadline,
     this.replyRootId,
     this.inSolo = false,
+    this.recovered = false,
+    this.mayHavePublished = false,
   });
 
   final String id;
@@ -84,6 +86,13 @@ class BuzzNotificationReply {
   /// Whether the notification knew the message is in a Solo chat, which
   /// takes no thread replies.
   final bool inSolo;
+
+  /// Whether an earlier launch was given this reply and never finished it.
+  /// It is never sent again.
+  final bool recovered;
+
+  /// Whether that earlier launch may have published it.
+  final bool mayHavePublished;
 
   static BuzzNotificationReply? fromArguments(Object? arguments) {
     if (arguments is! Map) return null;
@@ -130,6 +139,8 @@ class BuzzNotificationReply {
       deadline: DateTime.fromMillisecondsSinceEpoch(deadline),
       replyRootId: root as String?,
       inSolo: arguments['inSolo'] == 'true',
+      recovered: arguments['recovered'] == 'true',
+      mayHavePublished: arguments['publishing'] == 'true',
     );
   }
 }
@@ -150,6 +161,17 @@ Future<List<BuzzNotificationReply>> takePendingBuzzNotificationReplies() async {
     ];
   } on MissingPluginException {
     return const [];
+  }
+}
+
+/// Tells iOS that a notification reply may be published from now on, so a
+/// relaunch never drafts or resends it. Returns once that is saved.
+Future<void> markBuzzNotificationReplyPublishing(String id) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  try {
+    await _channel.invokeMethod<void>('markNotificationReplyPublishing', id);
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
   }
 }
 
