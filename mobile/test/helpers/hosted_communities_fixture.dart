@@ -103,6 +103,7 @@ class HostedCommunitiesFixture {
   String subject = 'owner';
   Future<void> Function(String)? beforeAdmission;
   Future<void> Function()? beforeList;
+  Future<void> Function()? beforeMe;
   Uri? opened;
 
   Map<String, dynamic> row(String name) => {
@@ -130,6 +131,7 @@ class HostedCommunitiesFixture {
         );
       }
       if (path.endsWith('/me')) {
+        await beforeMe?.call();
         if (expired) return http.Response('{}', 401);
         if (unavailable) return http.Response('{}', 503);
         return http.Response(

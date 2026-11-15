@@ -165,6 +165,22 @@ void main() {
         hosted.browser.clearIntentError = null;
       }
 
+      // A session check still pending must not hold up signing out, nor
+      // restore the session when it finishes afterwards.
+      final heldCheck = Completer<void>();
+      Future<Object?>? pendingRestore;
+      if (hosted != null) {
+        hosted.beforeMe = () => heldCheck.future;
+        pendingRestore = hosted.account.restore().then<Object?>(
+          (restored) => restored,
+          onError: (Object error) => error,
+        );
+        await tester.pump();
+      }
+      addTearDown(() {
+        if (!heldCheck.isCompleted) heldCheck.complete();
+      });
+
       await confirmSignOut();
       // The landing animates, so it never settles.
       await _pumpFor(tester);
@@ -183,6 +199,9 @@ void main() {
       );
       if (hosted != null) {
         expect(sessionAtRemoval, everyElement(isFalse));
+        expect(hosted.account.account, isNull);
+        heldCheck.complete();
+        expect(await pendingRestore, isNull);
         expect(hosted.account.account, isNull);
         expect(await hosted.account.restore(), isNull);
       }

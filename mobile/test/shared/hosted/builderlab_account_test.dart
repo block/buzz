@@ -185,7 +185,8 @@ void main() {
             onError: (Object error) => failure = error,
           ),
     );
-    unawaited(client.clearLocalSession().then((_) => cleared = true));
+    // Any queued account request waits for the deadline.
+    unawaited(client.restore().then((_) => cleared = true));
     await tester.pump();
     await tester.pump(const Duration(seconds: 20));
     await tester.pump(const Duration(seconds: 5));
@@ -307,6 +308,48 @@ void main() {
     // A later restore still re-verifies, so expiry is detected on retry.
     await client.restore();
     expect(verifications, 2);
+  });
+
+  test('a sign-out is never undone by a pending session check', () async {
+    FlutterSecureStorage.setMockInitialValues({
+      storageKey: record('account-1', 'old'),
+    });
+    final storage = _SessionStorage();
+    var check = Completer<void>();
+    final client = BuilderlabAccountClient(
+      storage: storage,
+      httpClient: MockClient((request) async {
+        await check.future;
+        return http.Response(
+          jsonEncode({'subject': 'account-1', 'expires_at': expiry}),
+          200,
+        );
+      }),
+    );
+    // A check already pending when sign-out starts doesn't hold it up.
+    final early = client.restore();
+    await pumpEventQueue();
+    await client.clearLocalSession();
+    check.complete();
+    expect(await early, isNull);
+    expect(client.account, isNull);
+
+    // Nor does a check that starts while the session is being deleted.
+    FlutterSecureStorage.setMockInitialValues({
+      storageKey: record('account-1', 'old'),
+    });
+    check = Completer<void>();
+    final deleted = Completer<void>();
+    storage.holdDelete = deleted.future;
+    final clearing = client.clearLocalSession();
+    final late = client.restore();
+    await pumpEventQueue();
+    deleted.complete();
+    await clearing;
+    check.complete();
+    expect(await late, isNull);
+    expect(client.account, isNull);
+    expect(await stored(), isNull);
   });
 
   test('login for another account keeps the existing session', () async {
@@ -459,6 +502,7 @@ void main() {
 
 class _SessionStorage extends FlutterSecureStorage {
   bool failDelete = false;
+  Future<void>? holdDelete;
 
   @override
   Future<void> delete({
@@ -471,6 +515,7 @@ class _SessionStorage extends FlutterSecureStorage {
     WindowsOptions? wOptions,
   }) async {
     if (failDelete) throw StateError('storage unavailable');
+    await holdDelete;
     await super.delete(key: key);
   }
 }
