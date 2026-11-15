@@ -17,6 +17,8 @@ class _SendButton extends StatelessWidget {
       width: 36,
       height: 36,
       child: IconButton(
+        // The progress indicator names the sending state itself.
+        tooltip: isSending ? null : 'Send message',
         onPressed: (isSending || isDisabled)
             ? null
             : () => _runComposerAction(onTap),
