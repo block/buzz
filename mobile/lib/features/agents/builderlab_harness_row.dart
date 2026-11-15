@@ -26,8 +26,9 @@ class BuilderlabHarnessRow extends StatelessWidget {
         title: 'Harness',
         value: 'Builderlab',
         onTap: explain,
+        // A disclosure chevron: tapping explains, it does not pick.
         trailing: Icon(
-          Icons.unfold_more,
+          Icons.chevron_right,
           size: 16,
           color: context.colors.onSurfaceVariant,
         ),

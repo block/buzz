@@ -76,6 +76,39 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('a detail never squeezes the author out of a narrow row', (
+    tester,
+  ) async {
+    const displayNameKey = Key('author-display-name');
+    tester.platformDispatcher.textScaleFactorTestValue = 2;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: const Scaffold(
+          body: SizedBox(
+            width: 300,
+            child: MessageAuthorMeta(
+              displayName: 'Scout',
+              username: 'cloudbot@example.com',
+              detail: 'Remote',
+              timestamp: '12:16 PM',
+              displayNameKey: displayNameKey,
+              nameColor: Colors.black,
+              metadataColor: Colors.grey,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(tester.getSize(find.byKey(displayNameKey)).width, greaterThan(0));
+    expect(find.text('· Remote'), findsOneWidget);
+  });
+
   testWidgets('reallocates unused metadata width to the display name', (
     tester,
   ) async {
