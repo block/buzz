@@ -192,14 +192,10 @@ class AdaptiveConversationPane extends HookConsumerWidget {
         }
       };
     }, [ownerRoute, navigator]);
-    // The compact detail route that fully covers the list. While a detail
-    // pushes, pops or follows a back swipe, the list stays painted beneath it.
-    final coveringDetail = useValueNotifier<Route<Object?>?>(null);
-    // Compact detail routes still mounted. A pop clears the selection as it
-    // starts, so the detail stays onstage until its reverse transition ends.
+    // The newest detail route, from its mount until its content unmounts.
     // Not disposed with the pane: a detail unmounting with the pane reports
     // after the frame, once the pane is gone.
-    final mountedDetails = useMemoized(() => ValueNotifier(0));
+    final detailRoute = useMemoized(() => ValueNotifier<_DetailRoute?>(null));
     return ConversationPaneScope(
       controller: controller,
       active: active && (ModalRoute.isCurrentOf(context) ?? true),
@@ -256,12 +252,12 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                       bottom: 0,
                       width: wide ? listWidth + leftInset : listWidth,
                       child: ValueListenableBuilder(
-                        valueListenable: coveringDetail,
-                        builder: (context, covering, list) => Offstage(
+                        valueListenable: detailRoute,
+                        builder: (context, detail, list) => Offstage(
                           offstage:
                               !wide &&
                               selected != null &&
-                              (covering?.isActive ?? false),
+                              (detail?.covers ?? false),
                           child: list,
                         ),
                         child: _CoveredList(
@@ -296,10 +292,14 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                       top: 0,
                       bottom: 0,
                       width: detailWidth,
-                      child: ValueListenableBuilder<int>(
-                        valueListenable: mountedDetails,
-                        builder: (context, mounted, detail) {
-                          final shown = wide || selected != null || mounted > 0;
+                      child: ValueListenableBuilder(
+                        valueListenable: detailRoute,
+                        builder: (context, route, detail) {
+                          // A pop clears the selection as it starts. The
+                          // closing route keeps the detail painted and
+                          // ticking until its reverse transition ends.
+                          final shown =
+                              wide || selected != null || route != null;
                           return Offstage(
                             offstage: !shown,
                             child: TickerMode(enabled: shown, child: detail!),
@@ -389,8 +389,7 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                                             MaterialPage<void>(
                                               key: controller.selectionKey,
                                               child: _CoveringDetail(
-                                                covering: coveringDetail,
-                                                mounted: mountedDetails,
+                                                tracker: detailRoute,
                                                 builder:
                                                     controller.detailBuilder!,
                                               ),
@@ -399,8 +398,7 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                                             _ImmediateDetailPage(
                                               key: controller.selectionKey,
                                               builder: (_) => _CoveringDetail(
-                                                covering: coveringDetail,
-                                                mounted: mountedDetails,
+                                                tracker: detailRoute,
                                                 builder:
                                                     controller.detailBuilder!,
                                               ),
@@ -489,20 +487,23 @@ class MediaQueryOverride extends StatelessWidget {
       MediaQuery(data: transform(MediaQuery.of(context)), child: child);
 }
 
-/// Reports its route as [covering] once the route fully covers the compact
-/// list, and withdraws it while the route pushes, pops or follows a back swipe.
+/// The pane's newest detail route, and whether it fully covers the list.
+class _DetailRoute {
+  const _DetailRoute(this.route, {required this.covers});
+
+  final Route<Object?> route;
+
+  /// False while the route pushes, pops or follows a back swipe, so the
+  /// compact list stays painted beneath it.
+  final bool covers;
+}
+
+/// Reports its route to [tracker] from mount until its content unmounts,
+/// which for a popped route is after its reverse transition.
 class _CoveringDetail extends HookWidget {
-  const _CoveringDetail({
-    required this.covering,
-    required this.mounted,
-    required this.builder,
-  });
+  const _CoveringDetail({required this.tracker, required this.builder});
 
-  final ValueNotifier<Route<Object?>?> covering;
-
-  /// Counts mounted details. A popped route unmounts its content only once
-  /// its reverse transition has finished.
-  final ValueNotifier<int> mounted;
+  final ValueNotifier<_DetailRoute?> tracker;
   final WidgetBuilder builder;
 
   @override
@@ -510,36 +511,34 @@ class _CoveringDetail extends HookWidget {
     final route = ModalRoute.of(context);
     final navigator = Navigator.of(context);
     useEffect(() {
-      // The count rebuilds an ancestor, which cannot rebuild while this
-      // mounts or unmounts.
-      WidgetsBinding.instance.addPostFrameCallback((_) => mounted.value++);
-      return () =>
-          WidgetsBinding.instance.addPostFrameCallback((_) => mounted.value--);
-    }, [mounted]);
-    useEffect(() {
       if (route == null) return null;
+      var unmounted = false;
       void sync() {
+        // A detail reopened over this closing one owns the tracker.
+        if (unmounted || (!route.isCurrent && tracker.value?.route != route)) {
+          return;
+        }
         final settled =
             route.animation?.status != AnimationStatus.forward &&
             route.animation?.status != AnimationStatus.reverse &&
             !navigator.userGestureInProgress;
-        if (settled && route.isCurrent) {
-          covering.value = route;
-        } else if (covering.value == route) {
-          covering.value = null;
-        }
+        tracker.value = _DetailRoute(route, covers: settled && route.isCurrent);
       }
 
       void syncStatus(AnimationStatus _) => sync();
       route.animation?.addStatusListener(syncStatus);
       navigator.userGestureInProgressNotifier.addListener(sync);
-      // An immediate route can settle before these listeners attach.
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (context.mounted) sync();
-      });
+      // The tracker rebuilds ancestors, which cannot rebuild while this
+      // mounts or unmounts. An immediate route can also settle before these
+      // listeners attach.
+      WidgetsBinding.instance.addPostFrameCallback((_) => sync());
       return () {
+        unmounted = true;
         route.animation?.removeStatusListener(syncStatus);
         navigator.userGestureInProgressNotifier.removeListener(sync);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (tracker.value?.route == route) tracker.value = null;
+        });
       };
     }, [route, navigator]);
     return builder(context);
