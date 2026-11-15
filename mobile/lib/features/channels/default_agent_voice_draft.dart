@@ -9,7 +9,8 @@ import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'voice_note_recording.dart';
-import '../../shared/relay/nostr_models.dart';
+import 'voice_note_composer_recorder.dart';
+import '../../shared/relay/relay.dart';
 import '../../shared/me/default_agent.dart';
 
 /// Durable unsent voice note, isolated by account, community, and recipient.
@@ -51,7 +52,13 @@ class DefaultAgentVoiceDraft {
   }
 
   Future<VoiceNoteRecording?> read() => _mutate((manifest) async {
-    if (!await manifest.exists()) return null;
+    if (!await manifest.exists()) {
+      if (await File('${manifest.path}.identity').exists() ||
+          await File('${manifest.path}.m4a').exists()) {
+        throw const FormatException('Incomplete saved voice note');
+      }
+      return null;
+    }
     final data =
         jsonDecode(await manifest.readAsString()) as Map<String, dynamic>;
     return VoiceNoteRecording(
@@ -67,8 +74,28 @@ class DefaultAgentVoiceDraft {
     );
   });
 
-  Future<VoiceNoteRecording> save(VoiceNoteRecording note) => _mutate((
-    manifest,
+  Future<VoiceNoteRecording> save(VoiceNoteRecording note) =>
+      _mutate((manifest) => _save(manifest, note));
+
+  /// Reserve this scope before native finalization yields. A remount's read or
+  /// replacement write waits until the released recording is safely retained.
+  Future<VoiceNoteRecording?> finish(Future<VoiceNoteRecording> note) =>
+      _mutate((manifest) async {
+        final completed = await note;
+        if (completed.duration < const Duration(milliseconds: 400)) {
+          await deleteDroppedVoiceNoteRecording(completed.file.path);
+          return null;
+        }
+        final retained = await _save(manifest, completed);
+        if (completed.file.path != retained.file.path) {
+          await deleteDroppedVoiceNoteRecording(completed.file.path);
+        }
+        return retained;
+      });
+
+  Future<VoiceNoteRecording> _save(
+    File manifest,
+    VoiceNoteRecording note,
   ) async {
     // Keep the recipient discoverable even if the manifest becomes unreadable.
     await File(
@@ -105,7 +132,7 @@ class DefaultAgentVoiceDraft {
       duration: note.duration,
       waveform: note.waveform,
     );
-  });
+  }
 
   /// Reuse the signed event after an uncertain acknowledgement.
   Future<NostrEvent?> readEvent() => _mutate((manifest) async {
@@ -115,6 +142,51 @@ class DefaultAgentVoiceDraft {
     return data['event'] == null
         ? null
         : NostrEvent.fromJson(data['event'] as Map<String, dynamic>);
+  });
+
+  /// A timestamp rejection is definitive for these signed bytes. Check the
+  /// authoritative relay before renewing an expired event: a lost OK may have
+  /// left the original already delivered. Query failures remain recoverable.
+  Future<void> retryEvent({
+    required RelaySessionNotifier session,
+    required SignedEventRelay signer,
+    required String? generation,
+    required void Function() validate,
+  }) => _mutate((manifest) async {
+    final data =
+        jsonDecode(await manifest.readAsString()) as Map<String, dynamic>;
+    if (generation != data['generation']) {
+      throw StateError('The saved voice note changed.');
+    }
+    final event = NostrEvent.fromJson(data['event'] as Map<String, dynamic>);
+    validate();
+    try {
+      await session.publish(event);
+      return;
+    } catch (error) {
+      if (!error.toString().contains(
+        'invalid: event timestamp too far from server time',
+      )) {
+        rethrow;
+      }
+    }
+    final accepted = await session.queryRelay([
+      NostrFilter(kinds: [event.kind], ids: [event.id]),
+    ]);
+    validate();
+    if (accepted.any((candidate) => candidate.id == event.id)) return;
+    await signer.submit(
+      kind: event.kind,
+      content: event.content,
+      tags: event.tags,
+      validateDelivery: validate,
+      onSigned: (renewed) async {
+        data['event'] = renewed.toJson();
+        final temporary = File('${manifest.path}.tmp');
+        await temporary.writeAsString(jsonEncode(data), flush: true);
+        await temporary.rename(manifest.path);
+      },
+    );
   });
 
   /// Persist the exact signed event before it can leave the device.
@@ -175,10 +247,16 @@ Future<List<String>> discoverAgentVoiceRecipients(
   if (!await folder.exists()) return [];
   final recipients = <String>{};
   await for (final entry in folder.list()) {
-    if (entry is! File || !entry.path.endsWith('.json')) continue;
+    if (entry is! File) continue;
+    final manifestPath = entry.path.replaceFirst(
+      RegExp(r'\.json(?:\.identity|\.m4a|\.tmp)?$'),
+      '.json',
+    );
+    if (!manifestPath.endsWith('.json')) continue;
+    final manifest = File(manifestPath);
     String? identity;
     try {
-      final data = jsonDecode(await entry.readAsString());
+      final data = jsonDecode(await manifest.readAsString());
       if (data is Map<String, dynamic> && data['identity'] is String) {
         identity = data['identity'] as String;
       }
@@ -189,7 +267,7 @@ Future<List<String>> discoverAgentVoiceRecipients(
     }
     if (identity == null) {
       try {
-        final index = File('${entry.path}.identity');
+        final index = File('${manifest.path}.identity');
         if (await index.exists()) identity = await index.readAsString();
       } on FileSystemException {
         // Preserve unidentifiable files; the current-recipient fallback below

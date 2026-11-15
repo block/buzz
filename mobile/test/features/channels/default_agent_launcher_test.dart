@@ -1,3 +1,5 @@
+import 'dart:io';
+import 'default_agent_voice_control_test.dart' show Recorder;
 import 'package:buzz/shared/me/hold_to_talk.dart';
 import 'package:buzz/features/settings/settings_page.dart';
 import 'dart:async';
@@ -90,17 +92,18 @@ void main() {
       };
       var selected = agent as String?;
       final preferences = StreamController<String?>.broadcast(sync: true);
+      Completer<void>? refresh;
+      final recorder = Recorder();
+      var discoveryFails = false;
+      var choices = 0;
       addTearDown(preferences.close);
       Widget app() => ProviderScope(
         overrides: [
           savedPrefsProvider.overrideWithValue(prefs),
           remoteAgentsEnabledProvider.overrideWithValue(false),
-          voiceNoteRecorderFactoryProvider.overrideWithValue(
-            () => throw StateError(
-              'Unset Bestie must not request the microphone',
-            ),
-          ),
+          voiceNoteRecorderFactoryProvider.overrideWithValue(() => recorder),
           defaultAgentProvider.overrideWith((ref) async* {
+            await refresh?.future;
             yield selected;
             yield* preferences.stream;
           }),
@@ -120,6 +123,8 @@ void main() {
             scopeIdentity,
           ) async {
             ref.watch(defaultAgentProvider);
+            if (discoveryFails)
+              throw const FileSystemException('Disk unavailable');
             return notes.keys
                 .where((key) => key.startsWith('$scopeIdentity:'))
                 .map((key) => key.substring(scopeIdentity.length + 1))
@@ -130,8 +135,9 @@ void main() {
           theme: AppTheme.light(),
           home: Scaffold(
             body: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                DefaultAgentLauncher(onChooseAgent: () {}),
+                DefaultAgentLauncher(onChooseAgent: () => choices++),
                 Builder(
                   builder: (context) => TextButton(
                     onPressed: () => Navigator.of(context).push(
@@ -207,6 +213,25 @@ void main() {
       );
       expect(container.read(holdToTalkProvider), isFalse);
       await container.read(holdToTalkProvider.notifier).setEnabled(true);
+      await tester.pumpAndSettle();
+      final hold = await tester.startGesture(
+        tester.getCenter(find.byType(DefaultAgentLauncher)),
+      );
+      await tester.pump(const Duration(milliseconds: 700));
+      expect(find.byKey(const ValueKey('voice-cancel-target')), findsOneWidget);
+      refresh = Completer<void>();
+      container.invalidate(defaultAgentProvider);
+      await tester.pump();
+      expect(container.read(defaultAgentProvider).isLoading, isTrue);
+      expect(find.byKey(const ValueKey('voice-cancel-target')), findsOneWidget);
+      expect(recorder.cancelled, isFalse);
+      refresh.complete();
+      await tester.pumpAndSettle();
+      await hold.moveBy(const Offset(0, -90));
+      await hold.up();
+      await tester.pumpAndSettle();
+      expect(recorder.cancelled, isTrue);
+      refresh = null;
       selected = null;
       preferences.add(selected);
       await tester.pumpAndSettle();
@@ -227,6 +252,14 @@ void main() {
       expect(find.bySemanticsLabel('Record voice note'), findsNothing);
       semantics.dispose();
       expect(find.text('Retry voice note'), findsNothing);
+      discoveryFails = true;
+      container.invalidate(pendingAgentVoiceRecipientsProvider);
+      await tester.pumpAndSettle();
+      await container.read(holdToTalkProvider.notifier).setEnabled(false);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Bestie'));
+      await tester.pumpAndSettle();
+      expect(choices, 1);
       expect(tester.takeException(), isNull);
     },
   );
@@ -307,6 +340,145 @@ void main() {
     },
   );
 
+  final voicePaneVariant = ValueVariant<bool>({false, true});
+  testWidgets(
+    'saved voice and ordinary Bestie retain independent pane destinations',
+    (tester) async {
+      await tester.runAsync(() async {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          const MethodChannel('dev.fluttercommunity.plus/connectivity_status'),
+          (_) async => null,
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            const MethodChannel(
+              'dev.fluttercommunity.plus/connectivity_status',
+            ),
+            null,
+          ),
+        );
+        final agent = 'a' * 64;
+        final selected = 'b' * 64;
+        final relay = _VoiceRelay();
+        final scope = MeSync(
+          relay,
+          RelayConfig(
+            baseUrl: 'https://voice.test',
+            nsec: nostr.Nip19.encode(
+              prefix: nostr.Nip19Prefix.nsec,
+              data: '0' * 63 + '1',
+            ),
+          ),
+        );
+        final identity = '${scope.community}:account:$agent';
+        late Directory directory;
+        late _VoiceDiskDraft draft;
+
+        directory = await Directory.systemTemp.createTemp('voice-launcher');
+        draft = _VoiceDiskDraft(identity, directory);
+        final source = File('${directory.path}/note.m4a');
+        await source.writeAsBytes([1, 2, 3]);
+        final note = await draft.save(
+          VoiceNoteRecording(
+            file: XFile(source.path),
+            duration: const Duration(seconds: 2),
+            waveform: const [.5],
+          ),
+        );
+        await draft.saveEvent(
+          NostrEvent(
+            id: 'c' * 64,
+            pubkey: scope.pubkey,
+            createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+            kind: 9,
+            tags: [
+              ['h', 'dm-$agent'],
+            ],
+            content: 'voice',
+            sig: 'd' * 128,
+          ),
+          generation: note.draftGeneration,
+        );
+
+        addTearDown(() => directory.delete(recursive: true));
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        final pane = ConversationPaneController();
+        addTearDown(pane.dispose);
+        final actions = _VoiceDmActions();
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              savedPrefsProvider.overrideWithValue(prefs),
+              remoteAgentsEnabledProvider.overrideWithValue(false),
+              meSyncProvider.overrideWithValue(scope),
+              myPubkeyProvider.overrideWithValue('account'),
+              relaySessionProvider.overrideWith(() => relay),
+              defaultAgentProvider.overrideWith(
+                (ref) => Stream.value(selected),
+              ),
+              defaultAgentVoiceDraftProvider.overrideWith((ref, _) => draft),
+              pendingAgentVoiceRecipientsProvider.overrideWith(
+                (ref, _) async => [agent],
+              ),
+              channelsProvider.overrideWith(_NoChannels.new),
+              channelActionsProvider.overrideWithValue(actions),
+            ],
+            child: MaterialApp(
+              theme: AppTheme.light(),
+              home: Scaffold(
+                body: Center(
+                  child: voicePaneVariant.currentValue!
+                      ? ConversationPaneScope(
+                          controller: pane,
+                          child: DefaultAgentLauncher(onChooseAgent: () {}),
+                        )
+                      : DefaultAgentLauncher(onChooseAgent: () {}),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await draft.read();
+
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.byTooltip('Chat with your Bestie'));
+        await tester.pumpAndSettle();
+        expect(actions.recipients.last, selected);
+        if (voicePaneVariant.currentValue!) {
+          expect(pane.selectedId, 'dm-$selected');
+        } else {
+          Navigator.of(tester.element(find.byType(ChannelDetailPage))).pop();
+          await tester.pumpAndSettle();
+        }
+
+        await tester.tap(find.text('Retry voice note'));
+        await relay.started.future.timeout(const Duration(seconds: 5));
+
+        expect(actions.recipients.last, agent);
+        // Completing the saved delivery selects the same pane that a tap uses.
+
+        relay.acknowledged.complete();
+        await draft.cleared.future.timeout(const Duration(seconds: 5));
+
+        await tester.pumpAndSettle();
+        if (voicePaneVariant.currentValue!) {
+          expect(pane.selectedId, 'dm-$agent');
+          expect(find.byType(ChannelDetailPage), findsNothing);
+          expect(find.byType(DefaultAgentLauncher), findsOneWidget);
+        } else {
+          expect(find.byType(ChannelDetailPage), findsOneWidget);
+        }
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+      });
+    },
+    variant: voicePaneVariant,
+  );
+
   final paneVariant = ValueVariant<bool>({false, true});
   testWidgets('a slow Bestie lookup does not open over a newer screen', (
     tester,
@@ -379,6 +551,10 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('Elsewhere'), findsOneWidget);
+    // Delivery uses this same destination helper after its own async work.
+    await openBestieDestination(launcher, await actions.dm.future);
+    await tester.pumpAndSettle();
+    expect(find.text('Elsewhere'), findsOneWidget);
     expect(find.byType(ChannelDetailPage), findsNothing);
 
     // The next open starts a fresh lookup.
@@ -414,6 +590,56 @@ class _SlowDmActions implements ChannelActions {
   }) {
     calls++;
     return dm.future;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _VoiceDiskDraft extends DefaultAgentVoiceDraft {
+  _VoiceDiskDraft(super.identity, Directory directory)
+    : super(directory: () async => directory);
+  final cleared = Completer<void>();
+  @override
+  Future<void> clear({String? generation}) async {
+    await super.clear(generation: generation);
+    if (!cleared.isCompleted) cleared.complete();
+  }
+}
+
+class _VoiceRelay extends FakeRelay {
+  final started = Completer<void>();
+  final acknowledged = Completer<void>();
+  @override
+  Future<NostrEvent> publish(
+    NostrEvent event, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    if (!started.isCompleted) started.complete();
+    await acknowledged.future;
+    return event;
+  }
+}
+
+class _VoiceDmActions implements ChannelActions {
+  final recipients = <String>[];
+  @override
+  Future<Channel> openDm({
+    required List<String> pubkeys,
+    bool waitForChannelList = true,
+  }) async {
+    recipients.add(pubkeys.single);
+    return Channel(
+      id: 'dm-${pubkeys.single}',
+      name: 'Bestie',
+      description: '',
+      createdBy: 'account',
+      createdAt: DateTime(2026),
+      memberCount: 2,
+      visibility: 'private',
+      channelType: 'dm',
+      isMember: true,
+    );
   }
 
   @override

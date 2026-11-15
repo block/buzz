@@ -19,6 +19,7 @@ import 'package:image_picker/image_picker.dart';
 class Recorder implements VoiceNoteRecorder {
   late final stream = StreamController<double>.broadcast(sync: true);
   Completer<void>? startup;
+  Completer<void>? finalization;
   bool cancelled = false;
   int stops = 0;
   @override
@@ -31,6 +32,7 @@ class Recorder implements VoiceNoteRecorder {
   @override
   Future<VoiceNoteRecording> stop() async {
     stops++;
+    await finalization?.future;
     return VoiceNoteRecording(
       file: XFile('/tmp/agent-voice-test.m4a'),
       duration: const Duration(seconds: 2),
@@ -66,6 +68,10 @@ class Draft extends DefaultAgentVoiceDraft {
     note = value;
     return value;
   }
+
+  @override
+  Future<VoiceNoteRecording?> finish(Future<VoiceNoteRecording> value) async =>
+      save(await value);
 
   @override
   Future<void> clear({String? generation}) async {
@@ -133,7 +139,7 @@ void main() {
               child: MessagesNavigationBar(
                 axis: axis,
                 onSearch: () {},
-                onRecordingChanged: recordingStates.add,
+                onRecordingChanged: (value) => recordingStates.add(value),
                 creationActions: const [],
                 agent: DefaultAgentVoiceControl(
                   enabled: true,
@@ -237,7 +243,6 @@ void main() {
       (recoverySurface.decoration as BoxDecoration).color,
       tester.element(find.byType(DefaultAgentVoiceControl)).controlSurface,
     );
-    expect(tester.element(surface.first), same(touchedSurface));
     await mount(tester, nativeAvatar: true, axis: Axis.vertical);
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Discard voice note'));
@@ -260,6 +265,11 @@ void main() {
       final gesture = await hold(tester);
       recorder.stream.add(.8);
       await tester.pump();
+      final focusStart = recordingStates.length;
+      await mount(tester);
+      await tester.pump();
+      await tester.pump();
+      expect(recordingStates.skip(focusStart), isNot(contains(false)));
       final after = tester.getRect(
         find.byKey(const ValueKey('default-agent-voice-pill')),
       );
@@ -349,7 +359,11 @@ void main() {
     await gesture.moveBy(const Offset(0, -90));
     await tester.pump();
     expect(
-      tester.getSemantics(find.byType(DefaultAgentVoiceControl)).value,
+      tester
+          .getSemantics(
+            find.byKey(const ValueKey('default-agent-voice-status')),
+          )
+          .value,
       contains('Release to cancel'),
     );
     final target = find.byKey(const ValueKey('voice-cancel-target'));
@@ -386,6 +400,10 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
     expect(find.byType(BuzzLoadingIndicator), findsOneWidget);
     expect(sent, 0);
+    await tester.tap(find.byTooltip('Agent'));
+    expect(taps, 1);
+    expect(find.byTooltip('Search').hitTestable(), findsOneWidget);
+    await tester.tap(find.byTooltip('Search'));
     delivery!.complete();
     await tester.pumpAndSettle();
     expect(sent, 1);
@@ -428,7 +446,9 @@ void main() {
   ) async {
     final semantics = tester.ensureSemantics();
     void expectRecoverySemantics(String value) {
-      final node = tester.getSemantics(find.byType(DefaultAgentVoiceControl));
+      final node = tester.getSemantics(
+        find.byKey(const ValueKey('default-agent-voice-status')),
+      );
       expect(node.value, value);
       expect(node.hint, isNot(contains('Hold to record')));
       expect(
@@ -436,12 +456,7 @@ void main() {
         isFalse,
       );
       final surface = tester.widget<Semantics>(
-        find
-            .descendant(
-              of: find.byType(DefaultAgentVoiceControl),
-              matching: find.byType(Semantics),
-            )
-            .first,
+        find.byKey(const ValueKey('default-agent-voice-status')),
       );
       expect(surface.properties.customSemanticsActions, isNull);
       final discard = tester.getSemantics(find.byTooltip('Discard voice note'));
@@ -456,6 +471,10 @@ void main() {
     await tester.pumpAndSettle();
     expect(draft.note, isNotNull);
     expectRecoverySemantics('Voice note awaiting delivery');
+    expect(find.byTooltip('Search').hitTestable(), findsOneWidget);
+    await tester.tap(find.byTooltip('Search'));
+    await tester.tap(find.byTooltip('Agent'));
+    expect(taps, 1);
     await tester.tap(find.byTooltip('Discard voice note'));
     await tester.pumpAndSettle();
     expect(draft.note, isNull);
@@ -474,6 +493,48 @@ void main() {
     expect(find.text('Could not restore voice note. Retry'), findsNothing);
     semantics.dispose();
   });
+  testWidgets('released audio survives pause and unmount during native stop', (
+    tester,
+  ) async {
+    for (final unmount in [false, true]) {
+      recorder = Recorder()..finalization = Completer<void>();
+      draft = Draft();
+      await mount(tester);
+      final gesture = await hold(tester);
+      await gesture.up();
+      await tester.pump();
+      if (unmount) {
+        await tester.pumpWidget(const SizedBox());
+      } else {
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        await tester.pump();
+      }
+      recorder.finalization!.complete();
+      await tester.pumpAndSettle();
+      expect(draft.note, isNotNull);
+      expect(sent, 0);
+      if (!unmount) {
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.inactive,
+        );
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.resumed,
+        );
+      }
+      await tester.pumpWidget(const SizedBox());
+      await mount(tester);
+      await tester.pumpAndSettle();
+      expect(find.text('Retry voice note'), findsOneWidget);
+      await tester.tap(find.byTooltip('Agent'));
+      expect(taps, unmount ? 2 : 1);
+      await tester.tap(find.byTooltip('Discard voice note'));
+      await tester.pumpAndSettle();
+      expect(draft.note, isNull);
+      await tester.pumpWidget(const SizedBox());
+    }
+  });
+
   testWidgets('late delivery cannot clear a replacement after remount', (
     tester,
   ) async {

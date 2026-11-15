@@ -147,21 +147,38 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
       unawaited(levels.value?.cancel());
       if (alive.value && context.mounted) recording.value = false;
       try {
-        final note = await current.stop();
+        final note = await draft.finish(
+          current.stop().then((note) {
+            if (alive.value &&
+                context.mounted &&
+                note.duration >= const Duration(milliseconds: 400)) {
+              pending.value = note;
+            }
+            return note;
+          }),
+        );
+        if (note == null) return;
         if (!alive.value ||
             !context.mounted ||
             generation.value != finishingGeneration) {
-          await deleteDroppedVoiceNoteRecording(note.file.path);
-        } else if (note.duration < const Duration(milliseconds: 400)) {
-          await deleteDroppedVoiceNoteRecording(note.file.path);
+          // Release committed this note to recovery, even after navigation or
+          // app suspension. Never deliver through the old widget's callback.
+          if (alive.value && context.mounted) pending.value = note;
         } else {
           unawaited(HapticFeedback.mediumImpact());
           await send(note);
         }
       } catch (_) {
         if (context.mounted) {
+          error.value = 'Retry saving voice note';
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Could not finish the voice note.')),
+            SnackBar(
+              content: Text(
+                pending.value != null
+                    ? 'Could not save your voice note. Keep this screen open and retry; closing it may lose the recording.'
+                    : 'Could not finish the voice note.',
+              ),
+            ),
           );
         }
       } finally {
@@ -286,22 +303,40 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
       });
       return null;
     }, [recording.value, recordingCallback]);
+    final latestRecordingCallback = useRef(recordingCallback);
+    latestRecordingCallback.value = recordingCallback;
     useEffect(() {
       return () {
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          recordingCallback?.call(false);
+          latestRecordingCallback.value?.call(false);
         });
       };
-    }, [recordingCallback]);
+    }, const []);
     final overlay = AgentNavigationOverlay.maybeOf(context);
     useEffect(() {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (alive.value && context.mounted) overlay?.value = active;
+        if (alive.value && context.mounted) overlay?.value = recording.value;
       });
       return null;
-    }, [active, overlay]);
+    }, [recording.value, overlay]);
     final canRecord = enabled && !active && !restoring.value;
-    return Semantics(
+    final recoveryPortal = useMemoized(OverlayPortalController.new);
+    final recoveryLink = useMemoized(LayerLink.new);
+    final recoveryAnchor = useMemoized(GlobalKey.new);
+    final recovering = active && !recording.value;
+    useEffect(() {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!context.mounted) return;
+        if (recovering) {
+          recoveryPortal.show();
+        } else {
+          recoveryPortal.hide();
+        }
+      });
+      return null;
+    }, [recovering]);
+    final pill = Semantics(
+      key: const ValueKey('default-agent-voice-status'),
       value: recording.value
           ? cancelled.value
                 ? 'Release to cancel'
@@ -501,7 +536,9 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
                                   data: TooltipTheme.of(context).copyWith(
                                     triggerMode: TooltipTriggerMode.manual,
                                   ),
-                                  child: child,
+                                  child: recovering
+                                      ? const SizedBox.shrink()
+                                      : child,
                                 ),
                               ),
                             ),
@@ -588,6 +625,38 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
             ),
           ),
         ),
+      ),
+    );
+    return OverlayPortal(
+      controller: recoveryPortal,
+      overlayChildBuilder: (overlayContext) {
+        final box =
+            recoveryAnchor.currentContext?.findRenderObject() as RenderBox?;
+        final origin = box?.localToGlobal(Offset.zero) ?? Offset.zero;
+        final right = origin.dx + (box?.size.width ?? 56);
+        final screen = MediaQuery.sizeOf(overlayContext);
+        final left = (right - 256).clamp(8.0, screen.width - 264);
+        final below = origin.dy < 72;
+        return Positioned.fill(
+          child: Align(
+            alignment: Alignment.topLeft,
+            child: CompositedTransformFollower(
+              link: recoveryLink,
+              showWhenUnlinked: false,
+              targetAnchor: below ? Alignment.bottomRight : Alignment.topRight,
+              followerAnchor: below
+                  ? Alignment.topRight
+                  : Alignment.bottomRight,
+              offset: Offset(left - (right - 256), below ? 8 : -8),
+              child: SizedBox(width: 256, height: 56, child: pill),
+            ),
+          ),
+        );
+      },
+      child: CompositedTransformTarget(
+        key: recoveryAnchor,
+        link: recoveryLink,
+        child: recovering ? child : pill,
       ),
     );
   }

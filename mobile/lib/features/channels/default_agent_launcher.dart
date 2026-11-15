@@ -28,7 +28,6 @@ import 'default_agent_voice_control.dart';
 import 'default_agent_voice_draft.dart';
 import 'voice_note_recording.dart';
 import 'send_message_provider.dart';
-import 'channel_detail_page.dart';
 import 'channels_provider.dart';
 import 'channel_management_provider.dart';
 
@@ -47,10 +46,13 @@ class DefaultAgentLauncher extends HookConsumerWidget {
       pendingAgentVoiceRecipientsProvider(scopeIdentity),
     );
     final savedRecipient = savedRecipients.value?.firstOrNull;
-    final pubkey =
-        savedRecipient ?? (preference.isLoading ? null : preference.value);
+    final selected = useMemoized(() => <String?>[null], [scopeIdentity]);
+    if (!preference.isLoading && !preference.hasError) {
+      selected[0] = preference.value;
+    }
+    final pubkey = savedRecipient ?? selected[0];
     final profiles = ref.watch(userCacheProvider);
-    final profile = profiles[pubkey];
+    final profile = profiles[selected[0]];
     final opening = useState(false);
     final resolving = useState(false);
     final remoteAgents = ref.watch(remoteAgentsEnabledProvider);
@@ -84,18 +86,20 @@ class DefaultAgentLauncher extends HookConsumerWidget {
       return null;
     }, [pubkey, preference.hasError, remoteAgents]);
     final draftIdentity = '$scopeIdentity:$pubkey';
-    final label = pubkey != null
+    final label = selected[0] != null
         ? 'Chat with ${profile?.label ?? 'your Bestie'}'
         : preference.hasError
         ? 'Retry Bestie'
         : 'Bestie';
     Future<void> open({VoiceNoteRecording? recording}) async {
+      final destination = recording == null ? selected[0] : pubkey;
       bool destinationIsCurrent() {
         if (ref.read(meSyncProvider) != scope) return false;
         // An explicit retry keeps the recipient captured with the draft.
         if (recording != null) return true;
         final current = ref.read(defaultAgentProvider);
-        return !current.isLoading && current.value == pubkey;
+        return current.hasError ||
+            (!current.isLoading && current.value == destination);
       }
 
       if (opening.value || !destinationIsCurrent()) {
@@ -107,19 +111,19 @@ class DefaultAgentLauncher extends HookConsumerWidget {
         ref.invalidate(defaultAgentProvider);
         return;
       }
-      if (pubkey == null) {
+      if (destination == null) {
         if (remoteAgents) dismissFirstAgentCallout(ref);
         if (recording != null) throw StateError('No default agent selected.');
         onChooseAgent();
         return;
       }
-      opening.value = true;
+      if (recording == null) opening.value = true;
       try {
         if (recording == null) {
           await openBestieConversation(
             context,
             ref,
-            pubkey,
+            destination,
             onResolving: (value) => resolving.value = value,
           );
           return;
@@ -136,11 +140,10 @@ class DefaultAgentLauncher extends HookConsumerWidget {
                 channel,
                 notifier.cachedMembersForChannel(channel.id),
                 ref.read(myPubkeyProvider),
-                pubkey,
+                destination,
               ),
             )
             .firstOrNull;
-        resolving.value = cached == null;
         final draft = ref.read(defaultAgentVoiceDraftProvider(draftIdentity));
         final uploadService = ref.read(mediaUploadServiceProvider);
         // Resolve the destination while packaging/uploading, with both errors
@@ -148,7 +151,7 @@ class DefaultAgentLauncher extends HookConsumerWidget {
         final (channel, prepared) = await (
           cached != null
               ? Future.value(cached)
-              : ref.read(channelActionsProvider).openDm(pubkeys: [pubkey]),
+              : ref.read(channelActionsProvider).openDm(pubkeys: [destination]),
           () async {
             final event = await draft.readEvent();
             if (event != null) return (event, null);
@@ -171,7 +174,19 @@ class DefaultAgentLauncher extends HookConsumerWidget {
           if (!context.mounted || !destinationIsCurrent()) {
             throw StateError('The community changed.');
           }
-          await session.publish(previousEvent);
+          await draft.retryEvent(
+            session: session,
+            signer: SignedEventRelay(
+              session: session,
+              nsec: ref.read(relayConfigProvider).nsec,
+            ),
+            generation: recording.draftGeneration,
+            validate: () {
+              if (!context.mounted || !destinationIsCurrent()) {
+                throw StateError('The community changed.');
+              }
+            },
+          );
         } else {
           final sender = ref.read(sendMessageProvider);
           final descriptor = prepared.$2!;
@@ -182,7 +197,7 @@ class DefaultAgentLauncher extends HookConsumerWidget {
             channelId: channel.id,
             channel: channel,
             content: descriptor.toMarkdownImage(),
-            mentionPubkeys: [pubkey],
+            mentionPubkeys: [destination],
             mediaTags: [descriptor.toImetaTag()],
             beforePublish: (event) async {
               if (!context.mounted || !destinationIsCurrent()) {
@@ -198,17 +213,9 @@ class DefaultAgentLauncher extends HookConsumerWidget {
         if (!context.mounted || !destinationIsCurrent()) {
           return;
         }
-        unawaited(
-          Navigator.of(context).push<void>(
-            MaterialPageRoute(
-              // Native glass and video layers must track the live route.
-              allowSnapshotting: false,
-              builder: (_) => ChannelDetailPage(channel: channel),
-            ),
-          ),
-        );
+        unawaited(openBestieDestination(context, channel));
       } finally {
-        if (context.mounted) opening.value = false;
+        if (context.mounted && recording == null) opening.value = false;
       }
     }
 
@@ -221,7 +228,7 @@ class DefaultAgentLauncher extends HookConsumerWidget {
                 semanticLabel: 'Opening conversation',
               ),
             )
-          : pubkey == null
+          : selected[0] == null
           ? preference.isLoading || preference.hasError
                 ? const AgentNavigationIcon(size: 24)
                 : const EmptyBestieAvatar()
@@ -239,14 +246,6 @@ class DefaultAgentLauncher extends HookConsumerWidget {
               fallback: Center(child: Text(profile?.initial ?? 'A')),
             ),
     );
-    if (savedRecipients.hasError) {
-      return IconButton(
-        tooltip: 'Retry saved voice notes',
-        onPressed: () =>
-            ref.invalidate(pendingAgentVoiceRecipientsProvider(scopeIdentity)),
-        icon: const Icon(Icons.refresh),
-      );
-    }
     return BuzzCallout(
       message: 'Create your first agent',
       visible: showCallout,
@@ -272,6 +271,7 @@ class DefaultAgentLauncher extends HookConsumerWidget {
             !preference.isLoading &&
             !preference.hasError &&
             !savedRecipients.isLoading &&
+            !savedRecipients.hasError &&
             savedRecipient == null,
         onRecorded: (recording) => open(recording: recording),
         child: SizedBox.square(
@@ -279,7 +279,16 @@ class DefaultAgentLauncher extends HookConsumerWidget {
           child: IconButton(
             tooltip: label,
             padding: EdgeInsets.zero,
-            onPressed: opening.value || preference.isLoading ? null : open,
+            onPressed: opening.value || preference.isLoading
+                ? null
+                : () {
+                    if (savedRecipients.hasError) {
+                      ref.invalidate(
+                        pendingAgentVoiceRecipientsProvider(scopeIdentity),
+                      );
+                    }
+                    unawaited(open());
+                  },
             icon: avatar,
           ),
         ),
