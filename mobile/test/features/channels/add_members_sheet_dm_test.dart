@@ -122,13 +122,13 @@ void main() {
     expect(movedTo, isEmpty);
   });
 
-  testWidgets('Start new DM adds without history and opens the new DM', (
+  testWidgets('Start a new DM adds without history and opens the new DM', (
     tester,
   ) async {
     final actions = _DmAdds('dm-2');
     final movedTo = await _add(tester, actions, 'Robin');
 
-    await tester.tap(find.text('Start new DM'));
+    await tester.tap(find.text('Start a new DM'));
     await tester.pumpAndSettle();
 
     expect(actions.calls.single.includeHistory, isFalse);

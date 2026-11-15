@@ -68,16 +68,15 @@ Future<bool> showConfirmation({
 }
 
 /// Asks whether the people being added to a DM see its history, using a UIKit
-/// alert on iOS. Returns true for Include history, false for Start new DM, and
+/// alert on iOS. Returns true for Include history, false for Start a new DM, and
 /// null when cancelled.
 Future<bool?> showDmHistoryChoice({
   required BuildContext context,
   required String title,
 }) async {
   const message =
-      'Include history to add them to this DM with its earlier messages, or '
-      'start a new DM with everyone and no history.';
-  const options = ['Start new DM', 'Include history'];
+      'Include history to add them to this DM with its earlier messages.';
+  const options = ['Start a new DM', 'Include history'];
   if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
     final index = await const MethodChannel('buzz/confirmation_dialog')
         .invokeMethod<int>('choose', {
