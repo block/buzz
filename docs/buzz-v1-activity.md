@@ -51,17 +51,17 @@ Unknown request fields are rejected. Never turn a transport failure into read.
 ## The list
 
 `GET /buzz/v1/me/activity` returns one person's conversations and threads as
-rows of one shape, newest first, and their mentions as a feed of their own. It
-is what a sidebar, an inbox and a threads view read. A row carries only what
+rows of one shape, newest first. It
+is what a sidebar, an inbox and a threads view read. Mentions are a feed of
+their own, `GET /buzz/v1/me/mentions` (below). A row carries only what
 those views draw; filter and re-sort the rows on the client.
 
 | Parameter | Meaning |
 |---|---|
-| `kinds` | Comma-separated: any of `channel`, `dm`, `solo`, `thread`. Default: all four. Or `mention` alone, for the mention feed. |
+| `kinds` | Comma-separated: any of `channel`, `dm`, `solo`, `thread`. Default: all four. |
 | `limit` | Rows per page, 1–500, default 100. A view that shows the whole list asks for 500. |
 | `before` | The `next` cursor of the previous page. Valid only with the `kinds` it came from. |
-| `since` | The `marker` of an earlier read: only what changed. Not combinable with `before`, `limit` or `kinds=mention`. |
-| `unread` | `true`: only unread mentions. Valid only with `kinds=mention`. |
+| `since` | The `marker` of an earlier read: only what changed. Not combinable with `before` or `limit`. |
 
 ```json
 {"rows":[{"kind":"thread","id":"<root id>","channel_id":"<uuid>","root_id":"<root id>",
@@ -134,12 +134,22 @@ or seen twice. Page to fill a view; use `since` to stay current.
 
 ### Mentions
 
-`GET /me/activity?kinds=mention` is the mention feed: mention rows, newest
-first by arrival, paged with `before`. `unread=true` keeps only the unread
-ones; a cursor is valid only with the `unread` it came from. The feed is read
-when a person opens it, and paged as they scroll.
+`GET /buzz/v1/me/mentions` is the mention feed: rows of the list's shape with
+`kind` `mention`, newest first by arrival.
 
-It has no `marker`, no `totals` and no `since`. A mention is a message, and a
+| Parameter | Meaning |
+|---|---|
+| `limit` | Rows per page, 1–500, default 100. |
+| `before` | The `next` cursor of the previous page. Valid only with the `unread` it came from. |
+| `unread` | `true`: only unread mentions. |
+
+```json
+{"rows":[{"kind":"mention","id":"<event id>","channel_id":"<uuid>", ... }],
+ "next":"<cursor>|null"}
+```
+
+The feed is read when a person opens it, and paged as they scroll. It has no
+`marker`, no `totals` and no `since`. A mention is a message, and a
 connected client already receives it as an event; whether it is unread changes
 only when a read position moves, which the client that moved it knows and
 other devices learn from the row push below. To refresh the feed, read its

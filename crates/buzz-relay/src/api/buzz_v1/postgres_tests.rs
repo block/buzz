@@ -162,9 +162,7 @@ async fn accessory_router_signed_url_body_replay_and_actor_boundary() {
         ("kinds=sidebar".into(), StatusCode::BAD_REQUEST),
         ("limit=501".into(), StatusCode::BAD_REQUEST),
         ("kinds=thread,dm&limit=500".into(), StatusCode::OK),
-        ("kinds=thread,mention".into(), StatusCode::BAD_REQUEST),
-        ("kinds=mention&limit=500&unread=true".into(), StatusCode::OK),
-        ("kinds=channel&unread=true".into(), StatusCode::BAD_REQUEST),
+        ("kinds=mention".into(), StatusCode::BAD_REQUEST),
     ] {
         let path = format!("/buzz/v1/me/activity?{query}");
         let auth = proof(&actor, &host, &path, "GET", None);
@@ -174,6 +172,23 @@ async fn accessory_router_signed_url_body_replay_and_actor_boundary() {
             assert_eq!(body["rows"], json!([]), "an unjoined id is simply absent");
             assert!(body["next"].is_null());
             assert_eq!(body["reset"], false);
+        }
+    }
+    // The mention feed is its own resource: rows and where they continue.
+    for (query, status) in [
+        ("", StatusCode::OK),
+        ("?limit=500&unread=true", StatusCode::OK),
+        ("?since=0.1", StatusCode::BAD_REQUEST),
+        ("?kinds=mention", StatusCode::BAD_REQUEST),
+        ("?before=not-a-cursor", StatusCode::BAD_REQUEST),
+        ("?limit=501", StatusCode::BAD_REQUEST),
+    ] {
+        let path = format!("/buzz/v1/me/mentions{query}");
+        let auth = proof(&actor, &host, &path, "GET", None);
+        let (got, body) = request(state.clone(), &host, &path, "GET", Some(&auth), b"").await;
+        assert_eq!(got, status, "{query}: {body}");
+        if status == StatusCode::OK {
+            assert_eq!(body, json!({"rows": [], "next": null}));
         }
     }
     let channel = state
