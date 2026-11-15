@@ -17,7 +17,17 @@ class _SavedDirectoryHarness {
     _FakeRelaySession session,
   ) async {
     final root = await Directory.systemTemp.createTemp('saved-directory');
-    addTearDown(() => root.delete(recursive: true));
+    // A save still running at teardown can recreate a file mid-delete.
+    addTearDown(() async {
+      for (var attempt = 0; ; attempt++) {
+        try {
+          return await root.delete(recursive: true);
+        } on FileSystemException {
+          if (attempt == 5) rethrow;
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+        }
+      }
+    });
     return _SavedDirectoryHarness(File('${root.path}/directory.json'), session);
   }
 
@@ -277,4 +287,41 @@ void _savedDirectoryCases() {
     expect(app.unjoined(), ['fresh']);
     await app.expectSaved(['fresh']);
   });
+
+  test(
+    'a full read in flight does not bring back a channel dropped on open',
+    () async {
+      final app = await _SavedDirectoryHarness.create(
+        _FakeRelaySession(
+          memberships: const [],
+          metadata: [
+            _meta(id: _channelA, name: 'general', createdAt: 100),
+            _meta(id: _channelB, name: 'fresh', createdAt: 100),
+          ],
+        ),
+      );
+      await app.launch();
+      await app.open();
+      expect(app.unjoined(), ['fresh', 'general']);
+
+      // A full read starts, then opening a channel finds it gone.
+      app.session.pauseNextDirectoryQuery();
+      final retry = app.channels.retryDirectory(directoryOnly: true);
+      await app.session.nextDirectoryQueryStarted;
+      app.session.metadata = [app.session.metadata.last];
+      await expectLater(
+        app.container.read(channelDetailsProvider(_channelA).future),
+        throwsException,
+      );
+      await _settle();
+      expect(app.unjoined(), ['fresh']);
+
+      // The read's response predates the drop, so it does not bring it back.
+      app.session.resumePausedDirectoryQuery();
+      await retry;
+      await _settle();
+      expect(app.unjoined(), ['fresh']);
+      await app.expectSaved(['fresh']);
+    },
+  );
 }

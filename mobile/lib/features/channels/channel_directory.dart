@@ -423,6 +423,17 @@ class _ChannelRefreshCoordinator {
   int _directoryGeneration = 0;
   int? _directoryOnlyGeneration;
 
+  /// For each directory load in flight, the channels dropped on open since it
+  /// started. Its response predates the drop, so it must not bring them back.
+  final _forgottenByLoad = <Set<String>>[];
+
+  /// Records that opening [channelId] found the relay no longer serves it.
+  void forget(String channelId) {
+    for (final forgotten in _forgottenByLoad) {
+      forgotten.add(channelId);
+    }
+  }
+
   /// The generation of the non-quiet load in flight, if any. A quiet load
   /// never displaces it: readers wait on its status.
   int? _loudGeneration;
@@ -538,6 +549,8 @@ class _ChannelRefreshCoordinator {
       loadStatus().markLoading(fence.scope);
     }
     final startedAt = clock();
+    final forgotten = <String>{};
+    _forgottenByLoad.add(forgotten);
     final List<NostrEvent> metas;
     try {
       metas = await _fetchChannelDirectoryMetas(session, since: since);
@@ -551,12 +564,19 @@ class _ChannelRefreshCoordinator {
       );
       return null;
     } finally {
+      _forgottenByLoad.remove(forgotten);
       if (_loudGeneration == directoryGeneration) _loudGeneration = null;
     }
     fence.ensureCurrent();
     if (directoryGeneration != _directoryGeneration) return null;
     loadStatus().markLoaded(fence.scope);
-    return (metas: metas, startedAt: startedAt);
+    return (
+      metas: [
+        for (final event in metas)
+          if (!forgotten.contains(event.getTagValue('d'))) event,
+      ],
+      startedAt: startedAt,
+    );
   }
 }
 
@@ -778,10 +798,6 @@ class _SavedDirectory {
   /// displaced by another.
   Future<void>? checking;
 
-  /// Channels dropped on open while [checking] was in flight. Its response
-  /// predates the drop, so it must not bring them back.
-  final forgotten = <String>{};
-
   void reset() {
     scope = null;
     fullAt = null;
@@ -789,7 +805,6 @@ class _SavedDirectory {
     checkedAt = null;
     checkOnConnect = false;
     checking = null;
-    forgotten.clear();
   }
 }
 
@@ -928,9 +943,7 @@ extension _ChannelsNotifierDirectory on ChannelsNotifier {
     late final Future<void> check;
     check = _readSavedDirectoryChanges(now).whenComplete(() {
       if (identical(_savedDirectory.checking, check)) {
-        _savedDirectory
-          ..checking = null
-          ..forgotten.clear();
+        _savedDirectory.checking = null;
       }
     });
     return _savedDirectory.checking = check;
@@ -965,19 +978,8 @@ extension _ChannelsNotifierDirectory on ChannelsNotifier {
         quiet: true,
       );
       if (read == null) return;
-      var metas = read.metas;
-      final forgotten = _savedDirectory.forgotten;
-      if (forgotten.isNotEmpty) {
-        metas = [
-          for (final event in metas)
-            if (!forgotten.contains(event.getTagValue('d'))) event,
-        ];
-      }
       if (since == null) {
-        _installFullRead((
-          metas: metas,
-          startedAt: read.startedAt,
-        ), fence.scope);
+        _installFullRead(read, fence.scope);
       } else {
         // The overlap always brings back the newest saved event; a catch-up
         // that leaves the held events as they are changed nothing, so nothing
@@ -985,7 +987,7 @@ extension _ChannelsNotifierDirectory on ChannelsNotifier {
         final held = {for (final event in _directoryMetas) event.id};
         final merged = _discoverableChannelEvents([
           ..._directoryMetas,
-          ...metas,
+          ...read.metas,
         ]);
         if (merged.length == held.length &&
             merged.every((event) => held.contains(event.id))) {
@@ -1009,9 +1011,7 @@ extension _ChannelsNotifierDirectory on ChannelsNotifier {
         !_directoryMetas.any((event) => event.getTagValue('d') == channelId)) {
       return;
     }
-    if (_savedDirectory.checking != null) {
-      _savedDirectory.forgotten.add(channelId);
-    }
+    _refreshCoordinator.forget(channelId);
     _installDirectory([
       for (final event in _directoryMetas)
         if (event.getTagValue('d') != channelId) event,
