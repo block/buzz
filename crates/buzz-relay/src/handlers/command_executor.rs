@@ -677,7 +677,9 @@ async fn handle_dm_add_member(
         if pk.as_slice() == relay_pubkey.as_slice() {
             return Err(IngestError::Rejected(MODERATION_DM_REFUSAL.into()));
         }
-        if !members.contains(&pk) && !additions.contains(&pk) {
+        // Keep members named here: an agent in this DM still joins the DM the
+        // add lands in. The write leaves out whoever is already there.
+        if !additions.contains(&pk) {
             additions.push(pk);
         }
     }

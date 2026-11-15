@@ -1134,6 +1134,77 @@ async fn a_new_dm_from_a_dm_carries_only_its_people() {
     }
 }
 
+/// An agent already in a DM and named in an add joins whichever DM the add
+/// lands in: a new DM, the DM its people already have, or the new DM a DM of
+/// one person starts. It still needs its add policy in a new DM, and the DM
+/// the add came from keeps its members.
+/// Mutation: leave out additions already in the source → X is missing from
+/// each target → RED; exempt them from the policy → Y joins → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_named_agent_from_the_dm_joins_the_dm_the_add_lands_in() {
+    let state = state().await;
+    let tenant = community(&state, "dm-named-source-agent").await;
+    let (a, b, c, d, e, x, y) = (
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+    );
+    make_agent(&state, &tenant, &x, &b, "anyone").await;
+    make_agent(&state, &tenant, &y, &b, "owner_only").await;
+    let source = open(&state, &tenant, &a, &[&b]).await.expect("open");
+    add(&state, &tenant, &b, source, &[&x, &y], true)
+        .await
+        .expect("owner adds");
+    let source_members = set_of(&[&a, &b, &x, &y]);
+
+    // Start a new DM.
+    let (forked, created) = add(&state, &tenant, &a, source, &[&c, &x], false)
+        .await
+        .expect("start new DM");
+    assert!(created);
+    assert_eq!(
+        members(&state, &tenant, forked).await,
+        set_of(&[&a, &b, &c, &x])
+    );
+
+    // Include history, landing in the DM these people already have.
+    let existing = open(&state, &tenant, &a, &[&b, &d]).await.expect("abd");
+    assert_eq!(
+        add(&state, &tenant, &a, source, &[&d, &x], true)
+            .await
+            .expect("include history"),
+        (existing, false)
+    );
+    assert_eq!(
+        members(&state, &tenant, existing).await,
+        set_of(&[&a, &b, &d, &x])
+    );
+
+    // Someone else's owner_only agent named for a new DM is still refused.
+    rejected(
+        add(&state, &tenant, &a, source, &[&e, &y], false).await,
+        "policy:owner_only",
+    );
+    assert_eq!(members(&state, &tenant, source).await, source_members);
+
+    // A DM of one person starts a new DM, which the named agent joins.
+    let solo = open(&state, &tenant, &a, &[&x]).await.expect("solo");
+    let (target, created) = add(&state, &tenant, &a, solo, &[&c, &x], true)
+        .await
+        .expect("add a person");
+    assert!(created);
+    assert_eq!(
+        members(&state, &tenant, target).await,
+        set_of(&[&a, &c, &x])
+    );
+    assert_eq!(members(&state, &tenant, solo).await, set_of(&[&a, &x]));
+}
+
 /// A new DM started from a DM holds who is in that DM when it is made, not
 /// who was in it when the add arrived.
 /// Mutation: build the new DM from members read before taking the DM's lock
