@@ -2097,6 +2097,34 @@ mod postgres_tests {
         .expect("insert top-level event");
     }
 
+    /// [`insert_root`] for a row already in storage: the serving writer
+    /// rejects an event older than the `created_at` floor.
+    async fn insert_historical_root(
+        pool: &PgPool,
+        community: CommunityId,
+        channel_id: Uuid,
+        event: &nostr::Event,
+    ) {
+        crate::test_support::insert_historical_event_with_thread_metadata(
+            pool,
+            community,
+            event,
+            channel_id,
+            ThreadMetadataParams {
+                event_id: event.id.as_bytes(),
+                event_created_at: event_created_at(event),
+                channel_id,
+                parent_event_id: None,
+                parent_event_created_at: None,
+                root_event_id: None,
+                root_event_created_at: None,
+                depth: 0,
+                broadcast: true,
+            },
+        )
+        .await;
+    }
+
     /// Insert a depth-1 reply under `root`, with the given broadcast flag.
     async fn insert_reply(
         pool: &PgPool,
@@ -2327,7 +2355,7 @@ mod postgres_tests {
                 .custom_created_at(Timestamp::from(at))
                 .sign_with_keys(&author)
                 .expect("sign");
-            insert_root(&pool, community, channel.id, &event).await;
+            insert_historical_root(&pool, community, channel.id, &event).await;
             newest_first.push(event.id);
         }
 
@@ -2437,7 +2465,7 @@ mod postgres_tests {
             .custom_created_at(Timestamp::from(1_748_736_000)) // 2025-06-01
             .sign_with_keys(&author)
             .expect("sign");
-        insert_root(&pool, community, channel.id, &ancient).await;
+        insert_historical_root(&pool, community, channel.id, &ancient).await;
         let partition_of = |id: nostr::EventId| {
             let pool = pool.clone();
             async move {
@@ -2582,16 +2610,14 @@ mod postgres_tests {
         )
         .await
         .expect("create channel");
-        let db = crate::Db::from_pool(pool.clone());
         let mut partitions = Vec::new();
         for at in [Utc::now().timestamp() as u64 - 10, 1_748_736_000] {
             let event = EventBuilder::new(Kind::Custom(9), format!("at {at}"))
                 .custom_created_at(nostr::Timestamp::from(at))
                 .sign_with_keys(&author)
                 .expect("sign");
-            db.insert_event(community, &event, Some(channel.id))
-                .await
-                .expect("insert");
+            crate::test_support::insert_historical_event(&pool, community, &event, channel.id)
+                .await;
             partitions.push(
                 sqlx::query_scalar::<_, String>(
                     "SELECT tableoid::regclass::text FROM events WHERE id = $1",

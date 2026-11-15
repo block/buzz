@@ -42,21 +42,6 @@ class _MessageImageStack extends HookConsumerWidget {
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final auth = ref.watch(mediaGetAuthServiceProvider);
     final index = value.round() % items.length;
-    // Match the rendered cards, including the next card during a swipe. Do not
-    // download every posterless video in a large attachment group.
-    final posterIndices = {
-      for (var slot = 0; slot <= 3; slot++)
-        (value.floor() + slot) % items.length,
-    };
-    final generatedPosters = [
-      for (var i = 0; i < items.length; i++)
-        if (posterIndices.contains(i) &&
-            items[i].isVideo &&
-            items[i].posterUrl == null)
-          ref.watch(videoPosterProvider(items[i].url)).asData?.value
-        else
-          null,
-    ];
     final hasVideos = items.any((item) => item.isVideo);
     final itemName = hasVideos ? 'Attachment' : 'Photo';
 
@@ -91,17 +76,15 @@ class _MessageImageStack extends HookConsumerWidget {
               (cardWidth * MediaQuery.devicePixelRatioOf(context))
                   .ceilToDouble();
           final providers = [
-            for (var i = 0; i < items.length; i++)
-              if (items[i].isVideo && items[i].posterUrl == null)
-                generatedPosters[i] == null
-                    ? null
-                    : MemoryImage(generatedPosters[i]!)
+            for (final item in items)
+              if (item.isVideo && item.posterUrl == null)
+                null
               else
                 ResizeImage.resizeIfNeeded(
                   physicalDecodeWidth.toInt(),
                   null,
                   MediaImageProvider(
-                    url: items[i].isVideo ? items[i].posterUrl! : items[i].url,
+                    url: item.isVideo ? item.posterUrl! : item.url,
                     auth: auth,
                     client: ref.watch(mediaHttpClientProvider),
                   ),
@@ -268,16 +251,7 @@ class _MessageImageStack extends HookConsumerWidget {
           Widget card(int i) {
             final item = items[i];
             Widget photo = item.isVideo && item.posterUrl == null
-                ? generatedPosters[i] == null
-                      ? const _MediaPreviewFallback(
-                          icon: BuzzIcons.video,
-                          label: 'Video preview unavailable',
-                        )
-                      : Image.memory(
-                          generatedPosters[i]!,
-                          fit: BoxFit.cover,
-                          excludeFromSemantics: true,
-                        )
+                ? ColoredBox(color: context.colors.surfaceContainerHigh)
                 : MediaImage(
                     url: item.isVideo ? item.posterUrl! : item.url,
                     decodeWidth: decodeWidth,

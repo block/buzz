@@ -375,6 +375,37 @@ of the channel's messages: `buzz:workflow-owner` also names the owner. A
 marked `p` tag on any other event, for example a kind:39002 member list role,
 matches `#p` normally. See `docs/buzz-push.md` for the push rules.
 
+### Workflow Mentions
+
+A workflow message may carry `["buzz:workflow-mention", <pubkey>]` tags. Each
+one names a channel member whom the workflow's owner named in the stored text of
+the step, as opposed to text substituted into it when the step ran. The relay adds
+a plain `["p", <pubkey>]` for every member that the rendered text mentions, and a
+`buzz:workflow-mention` tag only for members that the stored text also names.
+
+A `buzz:workflow-mention` tag is the relay's statement that the message may
+direct the named agent on the owner's behalf. An agent acts on a workflow
+message only if all of these hold:
+
+- the message is signed by the relay key that the active community advertises;
+- a `buzz:workflow-mention` tag names the agent;
+- the workflow principal that `buzz:workflow-owner` names passes the receiving
+  client's rule for whom the agent accepts work from: its owner, or an agent
+  that its owner has attested.
+
+`buzz:workflow-owner` is attribution. It does not by itself authorize anything.
+A plain `p` tag on a workflow message notifies the member but does not direct
+an agent.
+
+A relay may leave out `buzz:workflow-mention` tags under a policy. The message
+still posts with its `p` tags, and an agent that no tag names does not act on
+it. A relay's NIP-11 document MUST carry `workflow_agent_mentions`: `"any"`
+when every run may carry the tags, or `"owner"` when only runs the workflow's
+owner or a timer started, on a definition of only `send_message` and `delay`
+steps, carry them; a client MUST treat a missing field as an older relay whose
+policy is unknown. For Buzz's owner-only agent mentions, see
+[docs/operator-workflow-agent-mentions.md](docs/operator-workflow-agent-mentions.md).
+
 ### Sending Messages
 
 ```bash

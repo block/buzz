@@ -1,4 +1,5 @@
 import 'message_author_visibility.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'message_swipe_reply.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
 import 'message_footer_layout.dart';
@@ -762,6 +763,18 @@ class ThreadDetailPage extends HookConsumerWidget {
           visible.add(message);
         }
       }
+      // The tail can sit at the scroll end while the keyboard still covers
+      // it, so it counts as the bottom only when its end is above the
+      // keyboard and composer.
+      final tailIndex = _threadTailIndex(replies.length);
+      final atBottom =
+          replies.isNotEmpty &&
+          threadTailIsVisible() &&
+          itemPositionsListener.itemPositions.value.any(
+            (position) =>
+                position.index == tailIndex &&
+                position.itemTrailingEdge <= bottomEdge,
+          );
       final isDm =
           ref.read(channelsProvider.notifier).channelById(channelId)?.isDm ??
           false;
@@ -772,9 +785,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         currentPubkey: currentPubkey,
         loaded: allMsgs,
         visible: visible,
-        bottom: replies.isNotEmpty && threadTailIsVisible()
-            ? replies.last
-            : null,
+        bottom: atBottom ? replies.last : null,
         threadRootId: queryRootId,
         isRootThread: threadHead.parentId == null,
       );
@@ -796,7 +807,8 @@ class ThreadDetailPage extends HookConsumerWidget {
           threadViewportVisible &&
           readStateReady &&
           appInUse &&
-          (ModalRoute.of(context)?.isCurrent ?? true),
+          (ModalRoute.of(context)?.isCurrent ?? true) &&
+          ConversationPaneScope.isActiveOf(context),
       onDwell: readVisibleReplies,
       keys: [threadHead.id, readingContentKey(allMsgs), navigationBottomInset],
     );

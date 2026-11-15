@@ -503,6 +503,12 @@ impl LockedMemberSnapshot {
         }
         let tags = serde_json::to_value(&event.tags)?;
         validate_channel_roster_snapshot(&mut self.tx, channel_id, &tags).await?;
+        crate::replica_fence::guard_event_created_at_floor(
+            &mut self.tx,
+            created_at,
+            Some(channel_id),
+        )
+        .await?;
         sqlx::query(superseded_with_mentions_sql!(
             "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND channel_id = $4 AND deleted_at IS NULL"
         ))
@@ -569,14 +575,16 @@ pub async fn lock_member_snapshot(
     // this key before INSERT; migration 0032 then takes the membership key in
     // the INSERT trigger. Taking both in that order avoids mixed-version
     // duplicate heads without introducing a lock-order inversion.
+    let members_kind = buzz_core::kind::KIND_NIP29_GROUP_MEMBERS as i32;
     let replacement_lock = crate::replaceable::event_replacement_lock_key(
         community_id,
-        39002,
+        members_kind,
         relay_pubkey,
         Some(channel_id.as_bytes()),
     );
-    crate::observability::observe_advisory_lock(
+    crate::observability::observe_event_lock(
         crate::observability::LockType::Replacement,
+        members_kind,
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(replacement_lock)
             .execute(tx.conn()),
@@ -5506,8 +5514,8 @@ mod postgres_tests {
 
         let mut contender = pool.begin().await.expect("begin deletion contender");
         let exclusive_taken: bool =
-            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(community_deletion_lock_key($1))")
-                .bind(community.as_uuid())
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(crate::deletion::community_deletion_lock_key(community))
                 .fetch_one(&mut *contender)
                 .await
                 .expect("try exclusive community deletion lock");

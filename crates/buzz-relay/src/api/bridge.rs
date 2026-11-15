@@ -2986,7 +2986,13 @@ pub async fn workflow_webhook(
 
     let run_id = state
         .db
-        .create_workflow_run(community_id, id, None, trigger_ctx_json.as_ref())
+        .create_workflow_run(
+            community_id,
+            id,
+            None,
+            trigger_ctx_json.as_ref(),
+            &buzz_db::workflow::RunCause::Webhook,
+        )
         .await
         .map_err(|e| super::internal_error(&format!("db error: {e}")))?;
 
@@ -3020,14 +3026,12 @@ pub async fn workflow_webhook(
             }
         };
 
-        let result = buzz_workflow::executor::execute_from_step(
+        let result = buzz_workflow::executor::execute_run(
             &engine,
             community_id,
             run_id,
             &def,
             &trigger_ctx_clone,
-            0,
-            None,
         )
         .await;
         engine

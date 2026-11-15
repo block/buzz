@@ -933,6 +933,7 @@ async fn handle_workflow_trigger(
             workflow_id,
             Some(&event_id_bytes),
             trigger_ctx_json.as_ref(),
+            &buzz_db::workflow::RunCause::Manual(self_bytes.clone()),
         )
         .await
         .map_err(|e| IngestError::Internal(format!("error: db create_workflow_run: {e}")))?;
@@ -972,14 +973,12 @@ async fn handle_workflow_trigger(
             }
         };
 
-        let result = buzz_workflow::executor::execute_from_step(
+        let result = buzz_workflow::executor::execute_run(
             &engine,
             community_id,
             run_id,
             &def,
             &trigger_ctx_clone,
-            0,
-            None,
         )
         .await;
         engine
@@ -1285,7 +1284,7 @@ async fn handle_approval_deny(
 }
 
 /// Resume a suspended workflow run after an approval gate has been granted.
-async fn resume_workflow_after_approval(
+pub(crate) async fn resume_workflow_after_approval(
     engine: Arc<buzz_workflow::WorkflowEngine>,
     db: buzz_db::Db,
     community_id: CommunityId,

@@ -18,6 +18,7 @@ final class NativeAttachmentPopoverViewController:
   }
 
   private let channel: FlutterMethodChannel
+  private let cameraHorizontalOffset: CGFloat
   private let expandedWidth: CGFloat
   private let maximumMenuHeight: CGFloat
   private let expandedHeight = NativeAttachmentMenuLayout.maximumHeight
@@ -63,10 +64,12 @@ final class NativeAttachmentPopoverViewController:
   init(
     channel: FlutterMethodChannel,
     expandedWidth: CGFloat,
+    cameraHorizontalOffset: CGFloat = 0,
     maximumMenuHeight: CGFloat = NativeAttachmentMenuLayout.maximumHeight
   ) {
     self.channel = channel
     self.expandedWidth = expandedWidth
+    self.cameraHorizontalOffset = cameraHorizontalOffset
     self.maximumMenuHeight = maximumMenuHeight
     super.init(nibName: nil, bundle: nil)
     preferredContentSize = NativeAttachmentMenuLayout.size(
@@ -374,7 +377,8 @@ final class NativeAttachmentPopoverViewController:
         popover.sourceRect = NativeAttachmentPopoverAnchorLayout.sourceRect(
           anchorBounds: sourceView.bounds,
           keyboardDismissalOffset: self.keyboardDismissalOffset,
-          isExpanded: isExpanding
+          isExpanded: isExpanding,
+          horizontalOffset: nextSurface == .camera ? self.cameraHorizontalOffset : 0
         )
       }
       previousView?.alpha = 0

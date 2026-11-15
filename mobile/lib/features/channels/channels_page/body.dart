@@ -366,14 +366,15 @@ class _SliverChannelsList extends HookConsumerWidget {
 
     return SliverPadding(
       padding: EdgeInsets.zero,
-      sliver: SliverList.list(
-        children: [
+      sliver: SliverMainAxisGroup(
+        slivers: [
           if (visibleChannels.isEmpty)
-            const _EmptyState()
+            const SliverToBoxAdapter(child: _EmptyState())
           else ...[
             // Starred channels (exclusive — pinned above all sections).
             if (starredStreamChannels.isNotEmpty)
               _ChannelSection(
+                key: const ValueKey('starred'),
                 title: 'Starred',
                 expanded: starredExpanded.value,
                 onToggle: () => starredExpanded.value = !starredExpanded.value,
@@ -391,8 +392,9 @@ class _SliverChannelsList extends HookConsumerWidget {
             for (final section in userSections) ...[
               if (section != userSections.first ||
                   starredStreamChannels.isNotEmpty)
-                const SizedBox(height: Grid.xxs),
+                const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
               _CustomChannelSection(
+                key: ValueKey(section.id),
                 section: section,
                 channels: sortChannelsForList(
                   streamChannels
@@ -486,8 +488,9 @@ class _SliverChannelsList extends HookConsumerWidget {
               ),
             ],
             if (userSections.isNotEmpty || starredStreamChannels.isNotEmpty)
-              const SizedBox(height: Grid.xxs),
+              const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
             _ChannelSection(
+              key: const ValueKey('channels'),
               title: 'Channels',
               expanded: channelsExpanded.value,
               onToggle: () => channelsExpanded.value = !channelsExpanded.value,
@@ -501,8 +504,9 @@ class _SliverChannelsList extends HookConsumerWidget {
               onSortModeChange: (mode) => setSortMode('channels', mode),
               onSelectChannel: onSelectChannel,
             ),
-            const SizedBox(height: Grid.xxs),
+            const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
             _ChannelSection(
+              key: const ValueKey('dms'),
               title: 'DMs',
               expanded: dmsExpanded.value,
               onToggle: () => dmsExpanded.value = !dmsExpanded.value,

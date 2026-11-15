@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
@@ -129,6 +130,7 @@ void main() {
   };
 
   Future<Widget> buildTestable({
+    bool withPane = false,
     HomeFeedResponse? feed,
     ActivityNotifier Function()? activityNotifier,
     Map<String, UserProfile>? users,
@@ -178,7 +180,11 @@ void main() {
           ).copyWith(textScaler: textScaler, padding: mediaPadding),
           child: child!,
         ),
-        home: ActivityPage(tabReselection: tabReselection),
+        home: withPane
+            ? AdaptiveConversationDestination(
+                child: ActivityPage(tabReselection: tabReselection),
+              )
+            : ActivityPage(tabReselection: tabReselection),
       ),
     );
   }
@@ -367,10 +373,11 @@ void main() {
     expect(material.surfaceTintColor, Colors.transparent);
     expect(material.clipBehavior, Clip.antiAlias);
 
-    final items = tester.widgetList<PopupMenuItem<String>>(
-      find.byType(PopupMenuItem<String>),
+    final items = tester.widgetList<CheckedPopupMenuItem<String>>(
+      find.byType(CheckedPopupMenuItem<String>),
     );
     expect(items, hasLength(3));
+    expect(items.singleWhere((item) => item.checked).value, 'Anyone');
     expect(
       items.every((item) => item.height >= Grid.xl),
       isTrue,
@@ -1083,7 +1090,17 @@ void main() {
       participants: const ['Alice'],
     );
     // A DM reply must still open its thread: the DM timeline hides replies.
-    for (final channelId in ['ch1', 'dm1']) {
+    for (final scenario in [
+      (channel: 'ch1', wide: false),
+      (channel: 'dm1', wide: false),
+      (channel: 'ch1', wide: true),
+    ]) {
+      final channelId = scenario.channel;
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = scenario.wide
+          ? const Size(1100, 800)
+          : const Size(800, 600);
+      addTearDown(tester.view.reset);
       final threadMention = FeedItem(
         id: 'reply-event',
         kind: 9,
@@ -1107,7 +1124,11 @@ void main() {
       );
 
       await tester.pumpWidget(
-        await buildTestable(feed: feed, channels: [...testChannels, dmChannel]),
+        await buildTestable(
+          withPane: scenario.wide,
+          feed: feed,
+          channels: [...testChannels, dmChannel],
+        ),
       );
       await tester.pumpAndSettle();
 
@@ -1122,8 +1143,26 @@ void main() {
       expect(page.initialMessageId, 'reply-event');
       expect(
         page.initialThreadRouteBehavior,
-        InitialThreadRouteBehavior.replaceCurrentRoute,
+        scenario.wide
+            ? InitialThreadRouteBehavior.push
+            : InitialThreadRouteBehavior.replaceCurrentRoute,
       );
+      if (scenario.wide) {
+        final controller = ConversationPaneScope.maybeOf(
+          tester.element(find.byType(ChannelDetailPage)),
+        )!;
+        final previousKey = controller.selectionKey;
+        await tester.tap(find.byKey(const ValueKey('inbox-row-reply-event')));
+        await tester.pumpAndSettle();
+        expect(controller.selectedId, 'reply-event');
+        expect(controller.selectionKey, isNot(previousKey));
+        expect(
+          tester
+              .widget<ChannelDetailPage>(find.byType(ChannelDetailPage))
+              .initialThreadRootId,
+          threadIdParentDashReply,
+        );
+      }
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pumpAndSettle();
     }

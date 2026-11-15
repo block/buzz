@@ -313,7 +313,6 @@ class _MemberTile extends ConsumerWidget {
         : ref
               .read(channelIdentityNamesProvider(channelId))
               .labelFor(member.pubkey);
-    final canChangeRole = showManagementActions && !member.isBot;
     showBuzzModalBottomSheet<void>(
       context: context,
       title: label,
@@ -344,23 +343,21 @@ class _MemberTile extends ConsumerWidget {
                 ],
               ),
             if (showManagementActions) ...[
-              if (canChangeRole) ...[
-                const SizedBox(height: Grid.xxs),
-                _RoleSelector(
-                  selectedRole: member.role,
-                  onChanged: (role) async {
-                    Navigator.of(sheetContext).pop();
-                    await ref
-                        .read(channelActionsProvider)
-                        .changeMemberRole(
-                          channelId: channelId,
-                          pubkey: member.pubkey,
-                          role: role,
-                        );
-                  },
-                ),
-                const SizedBox(height: Grid.xs),
-              ],
+              const SizedBox(height: Grid.xxs),
+              _RoleSelector(
+                selectedRole: member.isBot ? 'member' : member.role,
+                onChanged: (role) async {
+                  Navigator.of(sheetContext).pop();
+                  await ref
+                      .read(channelActionsProvider)
+                      .changeMemberRole(
+                        channelId: channelId,
+                        pubkey: member.pubkey,
+                        role: role,
+                      );
+                },
+              ),
+              const SizedBox(height: Grid.xs),
               SheetActionSection(
                 horizontalPadding: Grid.gutter,
                 children: [

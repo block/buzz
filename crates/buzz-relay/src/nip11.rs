@@ -88,6 +88,9 @@ pub struct RelayInfo {
     /// Absent when the relay is in `Off` mode. [FI-TRACE-DISCOVERY-PRIVATE]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub federated_identity: Option<serde_json::Value>,
+    /// Which workflow runs may direct agents (`any` or `owner`). Relay-wide,
+    /// and always sent, so a missing field means an older relay.
+    pub workflow_agent_mentions: buzz_workflow::AgentMentions,
 }
 
 /// Private read-state accessory contract and enforced client request limits.
@@ -326,6 +329,7 @@ impl RelayInfo {
             relay_self: relay_self.map(|s| s.to_string()),
             federated_identity,
             requires_nip_fi: false,
+            workflow_agent_mentions: buzz_workflow::AgentMentions::Any,
         }
     }
 }
@@ -472,6 +476,7 @@ pub(crate) async fn nip11_document(
         state.config.klipy.as_ref().map(|_| "klipy"),
     );
     info.requires_nip_fi = policy.required;
+    info.workflow_agent_mentions = state.config.workflow_agent_mentions;
     info.artifacts["incremental"] = crate::api::artifact_sync::capability();
     if let Some(tenant) = tenant.as_ref() {
         if let Some(profile) = crate::verified_profiles::discovery(state, tenant).await {
@@ -649,6 +654,35 @@ mod tests {
         }
         assert_ne!(docs[0], docs[1], "enforce advertises NIP-FI");
         assert_eq!(docs[2], docs[1]);
+    }
+
+    #[tokio::test]
+    async fn advertises_the_relay_wide_workflow_agent_mentions_mode() {
+        use buzz_workflow::AgentMentions;
+        let base = crate::state::tests::test_state_with_unreachable_database_url(
+            "postgres://127.0.0.1:1/none",
+        )
+        .await;
+        base.tenant_host_cache.insert(
+            "relay.example".into(),
+            (
+                buzz_core::CommunityId::from_uuid(uuid::Uuid::nil()),
+                std::time::Instant::now(),
+            ),
+        );
+        for (mode, wire) in [(AgentMentions::Any, "any"), (AgentMentions::Owner, "owner")] {
+            let mut state = (*base).clone();
+            let mut config = (*state.config).clone();
+            config.workflow_agent_mentions = mode;
+            state.config = std::sync::Arc::new(config);
+            let document = serde_json::to_value(
+                super::nip11_document(&state, "relay.example")
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(document["workflow_agent_mentions"], wire);
+        }
     }
 
     use super::*;

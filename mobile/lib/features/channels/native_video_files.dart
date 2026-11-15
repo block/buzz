@@ -83,7 +83,6 @@ class _VideoFileDownload {
   Directory? directory;
   bool disposed = false;
   bool finished = false;
-  void Function()? _cancelTimeouts;
 
   Future<String?> _fetch() async {
     Timer? stall;
@@ -97,10 +96,6 @@ class _VideoFileDownload {
     }
 
     final deadline = Timer(owner.maxDuration, abort);
-    _cancelTimeouts = () {
-      stall?.cancel();
-      deadline.cancel();
-    };
     StreamIterator<List<int>>? body;
     RandomAccessFile? output;
     var success = false;
@@ -173,7 +168,6 @@ class _VideoFileDownload {
 
   Future<void> dispose() async {
     disposed = true;
-    _cancelTimeouts?.call();
     if (!stop.isCompleted) stop.complete();
     await result;
     await _delete();

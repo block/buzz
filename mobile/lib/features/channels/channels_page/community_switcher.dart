@@ -305,25 +305,35 @@ class CommunitySwitcherPage extends HookConsumerWidget {
       );
     }
 
+    final ios = defaultTargetPlatform == TargetPlatform.iOS;
+    final toolbarScope = DuoToolbarScope.maybeOf(context);
+    final strip = ios
+        ? (toolbarScope == null
+              ? FoldGeometry.of(context).strip
+              : toolbarScope.strip)
+        : null;
+    final closeAction = IosNavigationAction(
+      label: 'Close community switcher',
+      symbol: 'xmark',
+      onPressed: () => Navigator.of(context).pop(),
+    );
+    final editAction = IosNavigationAction(
+      label: isEditing.value ? 'Done' : 'Edit',
+      symbol: strip == null ? null : (isEditing.value ? 'checkmark' : 'pencil'),
+      onPressed: () => isEditing.value = !isEditing.value,
+    );
     final header = FrostedAppBar(
       nativeTitle: '',
       automaticallyImplyLeading: false,
-      nativeLeading: IosNavigationAction(
-        label: 'Close community switcher',
-        symbol: 'xmark',
-        onPressed: () => Navigator.of(context).pop(),
-      ),
-      nativeActions: [
-        IosNavigationAction(
-          label: isEditing.value ? 'Done' : 'Edit',
-          onPressed: () => isEditing.value = !isEditing.value,
-        ),
-      ],
-      leading: IconButton(
-        tooltip: 'Close community switcher',
-        onPressed: () => Navigator.of(context).pop(),
-        icon: const Icon(BuzzIcons.x),
-      ),
+      nativeLeading: strip == null ? closeAction : null,
+      nativeActions: strip == null ? [editAction] : [],
+      leading: strip != null
+          ? null
+          : IconButton(
+              tooltip: 'Close community switcher',
+              onPressed: () => Navigator.of(context).pop(),
+              icon: const Icon(BuzzIcons.x),
+            ),
       actions: [
         TextButton(
           key: const Key('community-switcher-edit'),
@@ -418,78 +428,104 @@ class CommunitySwitcherPage extends HookConsumerWidget {
     final surface = FrostedScaffold(
       key: const Key('community-switcher-page'),
       appBar: header,
-      body: SafeArea(top: false, child: body),
+      body: SafeArea(
+        top: false,
+        left: strip == null,
+        right: strip == null,
+        child: body,
+      ),
     );
 
-    return PopScope(
-      canPop: flight.value == null,
-      child: IgnorePointer(
-        ignoring: flight.value != null,
-        child: AnimatedBuilder(
-          animation: Listenable.merge([centering, controller, reveal]),
-          child: RepaintBoundary(child: surface),
-          builder: (context, child) {
-            final selected = flight.value;
-            final departure = _communityDepartureCurve.transform(
-              controller.value,
-            );
-            final surfaceExit = Curves.easeOutCubic.transform(centering.value);
-            final centerProgress = _communityCenterCurve.transform(
-              centering.value,
-            );
-            final screen = MediaQuery.sizeOf(context);
-            final center = Offset(screen.width / 2, screen.height / 2);
-            final destinationRect = landingBounds.value;
-            return Stack(
-              fit: StackFit.expand,
-              children: [
-                if (selected != null)
+    return DuoToolbarPortal(
+      strip: strip,
+      active:
+          (toolbarScope?.active ?? true) &&
+          (ModalRoute.isCurrentOf(context) ?? true) &&
+          flight.value == null,
+      actions: [closeAction, editAction],
+      child: PopScope(
+        canPop: flight.value == null,
+        child: IgnorePointer(
+          ignoring: flight.value != null,
+          child: AnimatedBuilder(
+            animation: Listenable.merge([centering, controller, reveal]),
+            child: RepaintBoundary(
+              child: strip == null
+                  ? surface
+                  : DuoToolbarScope(
+                      strip: strip,
+                      active: toolbarScope?.active ?? true,
+                      child: surface,
+                    ),
+            ),
+            builder: (context, child) {
+              final selected = flight.value;
+              final departure = _communityDepartureCurve.transform(
+                controller.value,
+              );
+              final surfaceExit = Curves.easeOutCubic.transform(
+                centering.value,
+              );
+              final centerProgress = _communityCenterCurve.transform(
+                centering.value,
+              );
+              final screen = MediaQuery.sizeOf(context);
+              final center = Offset(screen.width / 2, screen.height / 2);
+              final destinationRect = landingBounds.value;
+              return Stack(
+                fit: StackFit.expand,
+                children: [
+                  if (selected != null)
+                    Opacity(
+                      key: const Key('community-loading-backdrop'),
+                      opacity: 1 - Curves.easeOutCubic.transform(reveal.value),
+                      child: ColoredBox(color: context.colors.surface),
+                    ),
                   Opacity(
-                    key: const Key('community-loading-backdrop'),
-                    opacity: 1 - Curves.easeOutCubic.transform(reveal.value),
-                    child: ColoredBox(color: context.colors.surface),
+                    key: const Key('community-picker-opacity'),
+                    opacity: 1 - surfaceExit,
+                    child: Transform.scale(
+                      scale: 1 + 0.04 * surfaceExit,
+                      child: child,
+                    ),
                   ),
-                Opacity(
-                  key: const Key('community-picker-opacity'),
-                  opacity: 1 - surfaceExit,
-                  child: Transform.scale(
-                    scale: 1 + 0.04 * surfaceExit,
-                    child: child,
-                  ),
-                ),
-                if (selected != null && controller.value == 0)
-                  Positioned(
-                    top: center.dy + _communityCenteredAvatarSize / 2 + Grid.md,
-                    left: 0,
-                    right: 0,
-                    child: Center(
-                      child: RepaintBoundary(
-                        child: BuzzLoadingIndicator(
-                          key: const Key('community-switch-loading'),
-                          size: 18,
-                          color: context.colors.onSecondaryContainer,
-                          semanticLabel: 'Loading ${selected.community.name}',
+                  if (selected != null && controller.value == 0)
+                    Positioned(
+                      top:
+                          center.dy +
+                          _communityCenteredAvatarSize / 2 +
+                          Grid.md,
+                      left: 0,
+                      right: 0,
+                      child: Center(
+                        child: RepaintBoundary(
+                          child: BuzzLoadingIndicator(
+                            key: const Key('community-switch-loading'),
+                            size: 18,
+                            color: context.colors.onSecondaryContainer,
+                            semanticLabel: 'Loading ${selected.community.name}',
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                if (selected != null)
-                  _CommunityFlyingAvatar(
-                    avatar: flightAvatar,
-                    origin: selected.origin.center,
-                    destination:
-                        destinationRect ??
-                        Rect.fromCenter(
-                          center: center,
-                          width: _communityCenteredAvatarSize,
-                          height: _communityCenteredAvatarSize,
-                        ),
-                    centerProgress: centerProgress,
-                    departure: departure,
-                  ),
-              ],
-            );
-          },
+                  if (selected != null)
+                    _CommunityFlyingAvatar(
+                      avatar: flightAvatar,
+                      origin: selected.origin.center,
+                      destination:
+                          destinationRect ??
+                          Rect.fromCenter(
+                            center: center,
+                            width: _communityCenteredAvatarSize,
+                            height: _communityCenteredAvatarSize,
+                          ),
+                      centerProgress: centerProgress,
+                      departure: departure,
+                    ),
+                ],
+              );
+            },
+          ),
         ),
       ),
     );

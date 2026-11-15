@@ -32,7 +32,7 @@
 /// addressable, and the relay's member snapshot) go through this, so a head
 /// and its mention rows leave together on those paths.
 macro_rules! superseded_with_mentions_sql {
-    ($retire:literal) => {
+    ($retire:expr) => {
         concat!(
             "WITH superseded AS (",
             $retire,

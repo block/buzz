@@ -7,6 +7,7 @@ import '../../helpers/controllable_pairing_socket.dart';
 import 'dart:async';
 
 import 'package:buzz/features/pairing/pairing_qr_scanner.dart';
+import 'package:duo_kit/testing.dart';
 import 'package:buzz/features/pairing/pairing_page.dart';
 
 import '../../helpers/widget_helpers.dart';
@@ -176,6 +177,161 @@ void main() {
     });
   });
 
+  for (final pose in [
+    FoldTestPose.duoCover,
+    FoldTestPose.duoCoverWithOcclusions,
+    FoldTestPose.duoCoverLandscapeLeft,
+    FoldTestPose.duoCoverLandscapeRight,
+    FoldTestPose.duoInnerLandscape,
+    FoldTestPose.duoHalfOpenedLandscape,
+  ]) {
+    for (final reducedMotion in [false, true]) {
+      testWidgets(
+        'Duo camera portal ${pose.name}, reduced motion $reducedMotion',
+        (tester) async {
+          debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(_qrScannerPlatformChannel, (
+                call,
+              ) async {
+                if (call.method == 'cameraCutoutFrame') {
+                  final media = FoldTestPose.duoCoverWithOcclusions.data;
+                  final rect = media.displayFeatures.first.bounds;
+                  return [
+                    rect.left,
+                    rect.top,
+                    rect.width,
+                    rect.height,
+                    media.size.width,
+                    media.size.height,
+                  ];
+                }
+                return call.method == 'previewRotationQuarterTurns' ? -1 : null;
+              });
+          final media = pose.data;
+          await tester.binding.setSurfaceSize(media.size);
+          addTearDown(() => tester.binding.setSurfaceSize(null));
+          final camera =
+              (media.displayFeatures.isEmpty
+                      ? FoldTestPose.duoCoverWithOcclusions.data
+                      : media)
+                  .displayFeatures
+                  .first
+                  .bounds;
+          Rect? detectedCamera;
+          await tester.pumpWidget(
+            MaterialApp(
+              builder: (_, child) => MediaQuery(
+                data: media.copyWith(disableAnimations: reducedMotion),
+                child: child!,
+              ),
+              home: Builder(
+                builder: (context) => TextButton(
+                  onPressed: () async {
+                    detectedCamera = await resolveDuoQrScannerCameraFrame(
+                      context,
+                    );
+                    if (!context.mounted || detectedCamera == null) return;
+                    showDynamicIslandPairingQrScanner(
+                      context,
+                      cameraFrame: detectedCamera,
+                    );
+                  },
+                  child: const Text('Open scanner'),
+                ),
+              ),
+            ),
+          );
+          await tester.tap(find.text('Open scanner'));
+          await tester.pump();
+          if (pose == FoldTestPose.duoInnerLandscape ||
+              pose == FoldTestPose.duoHalfOpenedLandscape) {
+            expect(detectedCamera, isNull);
+            expect(
+              find.byKey(const ValueKey('dynamic-island-qr-scanner-portal')),
+              findsNothing,
+            );
+            debugDefaultTargetPlatformOverride = null;
+            return;
+          }
+          expect(detectedCamera, camera);
+          final portal = find.byKey(
+            const ValueKey('dynamic-island-qr-scanner-portal'),
+          );
+          if (!reducedMotion) {
+            final onBottom = camera.center.dy > media.size.height / 2;
+            final pill = Rect.fromLTRB(
+              camera.left,
+              camera.top - (onBottom ? 22 : 4),
+              camera.right,
+              camera.bottom + (onBottom ? 4 : 22),
+            );
+            expect(tester.getRect(portal), pill);
+            expect(
+              tester.widget<ClipRSuperellipse>(portal).borderRadius,
+              BorderRadius.circular(camera.shortestSide / 2),
+            );
+          }
+          await tester.pumpAndSettle();
+          expect(
+            tester
+                .widget<RotatedBox>(
+                  find.byKey(const ValueKey('qr-camera-orientation')),
+                )
+                .quarterTurns,
+            -1,
+          );
+          final expanded = tester.getRect(portal);
+          if (camera.top == 0 && camera.right == media.size.width) {
+            expect(expanded.right, lessThan(camera.left));
+          } else {
+            expect(expanded.contains(camera.center), isTrue);
+            final right = camera.center.dx > media.size.width / 2;
+            final bottom = camera.center.dy > media.size.height / 2;
+            expect(
+              right ? expanded.right : expanded.left,
+              right ? camera.right : camera.left,
+            );
+            expect(
+              bottom ? expanded.bottom : expanded.top,
+              bottom ? camera.bottom + 4 : camera.top - 4,
+            );
+            final radii = tester
+                .widget<ClipRSuperellipse>(portal)
+                .borderRadius
+                .resolve(TextDirection.ltr);
+            final corner = bottom
+                ? (right ? radii.bottomRight : radii.bottomLeft)
+                : (right ? radii.topRight : radii.topLeft);
+            expect(corner, Radius.circular(camera.shortestSide / 2));
+          }
+          expect((Offset.zero & media.size).contains(expanded.topLeft), isTrue);
+          expect(
+            (Offset.zero & media.size).contains(expanded.bottomRight),
+            isTrue,
+          );
+          expect(expanded.width, expanded.height);
+          await tester.tapAt(expanded.center);
+          await tester.pump();
+          if (!reducedMotion) {
+            await tester.pump(const Duration(milliseconds: 300));
+            final closing = tester.getRect(portal);
+            expect(
+              (closing.center - camera.center).distance,
+              lessThan((expanded.center - camera.center).distance),
+            );
+            expect(closing.width, lessThan(expanded.width));
+          }
+          await tester.pumpAndSettle();
+          expect(portal, findsNothing);
+          expect(fakeScannerPlatform._isDisposed, isTrue);
+          expect(tester.takeException(), isNull);
+          debugDefaultTargetPlatformOverride = null;
+        },
+      );
+    }
+  }
+
   group('usesDynamicIslandQrScannerPortal', () {
     test('asks the native bridge on iOS', () async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
@@ -229,6 +385,18 @@ void main() {
 
     await tester.pump(const Duration(milliseconds: 420));
     expect(tester.getRect(sheet).top, closeTo(555, 0.1));
+
+    await tester.binding.setSurfaceSize(const Size(951, 669));
+    await tester.pumpAndSettle();
+    expect(
+      tester.getRect(find.text('Scan a QR code')).bottom,
+      lessThan(tester.getRect(sheet).top),
+    );
+
+    expect(
+      tester.getRect(find.byKey(const ValueKey('fallback-qr-scanner-mask'))),
+      const Rect.fromLTWH(0, 0, 951, 669),
+    );
 
     await tester.tapAt(const Offset(187.5, 100));
     await tester.pump();
@@ -365,9 +533,9 @@ void main() {
       final earlyClosingHeight = tester.getRect(portal).height;
       expect(earlyClosingHeight, lessThan(280));
       expect(find.byType(MobileScanner), findsOneWidget);
-      await tester.pump(const Duration(milliseconds: 200));
+      await tester.pump(const Duration(milliseconds: 100));
       final lateClosingHeight = tester.getRect(portal).height;
-      // The camera is transparent here, but must not shut down mid-collapse.
+      // Keep native camera teardown outside the closing animation.
       expect(find.byType(MobileScanner), findsOneWidget);
       expect(
         tester

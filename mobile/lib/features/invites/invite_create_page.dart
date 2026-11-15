@@ -2,6 +2,11 @@ import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'package:duo_kit/duo_kit.dart';
+import '../../shared/widgets/duo_toolbar.dart';
+import '../../shared/widgets/ios_navigation_bar.dart';
+import '../../shared/widgets/adaptive_conversation_pane.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
@@ -25,40 +30,145 @@ part 'invite_create_page/invite_link_section.dart';
 part 'invite_create_page/person_invite_section.dart';
 
 /// A page for authorized community members to create and send invitations.
-class CommunityInvitePage extends ConsumerWidget {
+class CommunityInvitePage extends HookConsumerWidget {
   /// Creates the community invitation page.
   const CommunityInvitePage({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final roleAsync = ref.watch(currentCommunityRoleProvider);
-    return FrostedScaffold(
-      useUtilitySurfaceTheme: true,
-      appBar: const FrostedAppBar(
-        centerTitle: true,
-        nativeLargeTitle: true,
-        title: Text('Invite to community'),
+    final bodyKey = useMemoized(GlobalKey.new);
+    final optionsNavigator = useMemoized(() => GlobalKey<NavigatorState>());
+    final scope = DuoToolbarScope.maybeOf(context);
+    final strip = scope?.strip ?? FoldGeometry.of(context).strip;
+    final split =
+        defaultTargetPlatform == TargetPlatform.iOS &&
+        strip != null &&
+        usesConversationPanes(context, strip: strip);
+    final form = roleAsync.when(
+      loading: () => const Center(
+        child: BuzzLoadingIndicator(
+          size: 48,
+          semanticLabel: 'Checking community permissions',
+        ),
       ),
-      body: roleAsync.when(
-        loading: () => const Center(
-          child: BuzzLoadingIndicator(
-            size: 48,
-            semanticLabel: 'Checking community permissions',
+      error: (_, _) => _InvitePermissionError(
+        onRetry: () => ref.invalidate(communityMembershipProvider),
+      ),
+      data: (role) => canManageCommunityInvites(role)
+          ? _CommunityInviteBody(role: role!, split: split)
+          : const _InvitePermissionDenied(),
+    );
+    final body = KeyedSubtree(
+      key: bodyKey,
+      child: LayoutBuilder(
+        builder: (context, constraints) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(
+            size: constraints.biggest,
+            padding: split
+                ? MediaQuery.paddingOf(context).copyWith(left: 0, right: 0)
+                : null,
+            viewPadding: split
+                ? MediaQuery.viewPaddingOf(context).copyWith(left: 0, right: 0)
+                : null,
+          ),
+          child: NavigatorPopHandler<void>(
+            onPopWithResult: (_) => optionsNavigator.currentState!.pop(),
+            child: Navigator(
+              key: optionsNavigator,
+              pages: [MaterialPage<void>(child: form)],
+              onDidRemovePage: (_) {},
+            ),
           ),
         ),
-        error: (_, _) => _InvitePermissionError(
-          onRetry: () => ref.invalidate(communityMembershipProvider),
+      ),
+    );
+    if (!split) {
+      return FrostedScaffold(
+        useUtilitySurfaceTheme: true,
+        appBar: const FrostedAppBar(
+          centerTitle: true,
+          nativeLargeTitle: true,
+          title: Text('Invite to community'),
         ),
-        data: (role) => canManageCommunityInvites(role)
-            ? _CommunityInviteBody(role: role!)
-            : const _InvitePermissionDenied(),
+        body: body,
+      );
+    }
+    return Theme(
+      data: utilitySurfaceThemeData(Theme.of(context)),
+      child: DuoToolbarScope(
+        strip: strip,
+        active: scope?.active ?? true,
+        child: Scaffold(
+          body: Padding(
+            padding: EdgeInsets.only(
+              left: strip.side == FoldStripSide.left ? strip.width : 0,
+              right: strip.side == FoldStripSide.right ? strip.width : 0,
+            ),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 375.0.clamp(
+                    0.0,
+                    (MediaQuery.sizeOf(context).width - strip.width - 1) / 2,
+                  ),
+                  child: DuoToolbarPortal(
+                    strip: strip,
+                    active:
+                        (scope?.active ?? true) &&
+                        (ModalRoute.isCurrentOf(context) ?? true),
+                    actions: [
+                      if (Navigator.canPop(context))
+                        IosNavigationAction(
+                          label: 'Back',
+                          symbol: 'chevron.backward',
+                          onPressed: () {
+                            final local = optionsNavigator.currentState;
+                            if (local?.canPop() ?? false) {
+                              local!.pop();
+                            } else {
+                              Navigator.of(context).maybePop();
+                            }
+                          },
+                        ),
+                    ],
+                    child: const SizedBox.expand(
+                      key: ValueKey('invite-title-pane'),
+                      child: IosNavigationBar(
+                        title: 'Invite to community',
+                        standaloneLargeTitle: true,
+                      ),
+                    ),
+                  ),
+                ),
+                VerticalDivider(
+                  width: 1,
+                  thickness: 1,
+                  color: context.colors.outlineVariant,
+                ),
+                Expanded(
+                  child: SafeArea(
+                    left: false,
+                    right: false,
+                    child: SizedBox.expand(
+                      key: const ValueKey('invite-controls-pane'),
+                      child: body,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
 }
 
 class _CommunityInviteBody extends StatelessWidget {
-  const _CommunityInviteBody({required this.role});
+  const _CommunityInviteBody({required this.role, this.split = false});
+
+  final bool split;
 
   final CommunityMemberRole role;
 
@@ -67,7 +177,9 @@ class _CommunityInviteBody extends StatelessWidget {
     return ListView(
       padding: EdgeInsets.fromLTRB(
         0,
-        frostedAppBarHeight(context, nativeLargeTitle: true) + Grid.xs,
+        split
+            ? Grid.sm
+            : frostedAppBarHeight(context, nativeLargeTitle: true) + Grid.xs,
         0,
         Grid.lg,
       ),
