@@ -670,3 +670,25 @@ async fn a_project_reader_loads_a_childs_attachments() {
         buzz_db::media::MediaAccess::Restricted
     );
 }
+
+/// An archived project still lets its readers read a private child.
+/// Mutation: filter archived ancestors out of `get_channel_ancestors` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn an_archived_project_still_grants_its_children() {
+    let t = Tree::new("parent-archived").await;
+    let (state, tenant) = (&t.state, &t.tenant);
+    let message = post(state, tenant, &t.owner, t.child).await.unwrap();
+
+    edit_channel(state, tenant, &t.owner, t.project, &[&["archived", "true"]])
+        .await
+        .expect("archive project");
+
+    assert_eq!(
+        read_named(state, tenant, &t.reader, t.child).await,
+        vec![message]
+    );
+    assert!(read_named(state, tenant, &t.outsider, t.child)
+        .await
+        .is_empty());
+}
