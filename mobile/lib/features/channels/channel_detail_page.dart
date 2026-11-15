@@ -566,13 +566,15 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       });
     }, [channel.id, readState.isReady, openReadActive, openReadTimestamp]);
 
-    final headerMembers = ref.watch(channelMembersProvider(resolvedChannel.id));
+    final headerMembers = ref.watch(
+      latestChannelMembersProvider(resolvedChannel.id),
+    );
     final dmHeader = _watchDmHeader(
       ref,
       resolvedChannel,
       currentPubkey,
       agentPubkeys,
-      soloMembers: headerMembers.value,
+      soloMembers: headerMembers,
       personalChat: personalChat,
     );
     Future<void> openChannelDetails() async {
