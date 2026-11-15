@@ -94,6 +94,15 @@ enum Command {
     RepublishMembers,
     /// List all relay members.
     ListMembers,
+    /// Build the stored rows `GET /buzz/v1/me/activity` reads, so a person's
+    /// first read does not have to: every conversation's latest message, and
+    /// that of every thread with a reply in the last 30 days.
+    ///
+    /// Run once per community after every relay runs the release that keeps
+    /// these rows, and after `scripts/maintenance/backfill-activity.sql`.
+    /// Safe while the relay serves, and safe to run again: it rebuilds only
+    /// rows that are missing or behind.
+    WarmActivity,
     /// Generate a new Nostr keypair (for bootstrapping).
     GenerateKey,
     /// Run pending database migrations.
@@ -209,6 +218,7 @@ async fn run(cli: Cli) -> Result<i32> {
         Command::RemoveMember { pubkey, role } => cmd_remove_member(pubkey, role).await,
         Command::RepublishMembers => cmd_republish_members().await,
         Command::ListMembers => cmd_list_members().await,
+        Command::WarmActivity => cmd_warm_activity().await,
         Command::ProductFeedback {
             command: ProductFeedbackCommand::List { limit },
         } => cmd_list_product_feedback(limit).await,
@@ -625,6 +635,24 @@ async fn cmd_republish_members() -> Result<i32> {
         println!("republished membership list {}", stored.event.id.to_hex());
     }
     fan_out_membership_list(&pubsub, &tenant, write.snapshot).await;
+    Ok(0)
+}
+
+async fn cmd_warm_activity() -> Result<i32> {
+    let db = connect_db().await?;
+    let tenant = resolve_admin_tenant(&db).await?;
+    let warmed = db.warm_activity(tenant.community()).await?;
+    println!(
+        "rebuilt {} conversation rows and {} thread rows",
+        warmed.channels, warmed.threads
+    );
+    if warmed.skipped > 0 {
+        eprintln!(
+            "error: {} rows were not rebuilt; run the command again",
+            warmed.skipped
+        );
+        return Ok(4);
+    }
     Ok(0)
 }
 

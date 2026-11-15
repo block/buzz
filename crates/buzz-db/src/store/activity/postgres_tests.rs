@@ -57,7 +57,7 @@ async fn fixture() -> Fixture {
 
 fn all() -> Query {
     Query {
-        kinds: RowKind::ALL.to_vec(),
+        kinds: RowKind::LIST.to_vec(),
         select: Select::Page {
             before: None,
             limit: DEFAULT_LIMIT,
@@ -168,6 +168,29 @@ impl Fixture {
 
     async fn list(&self) -> Page {
         self.read(&all()).await
+    }
+
+    /// One page of my mention feed.
+    async fn mentions(&self, before: Option<Cursor>, limit: usize, unread: bool) -> Page {
+        self.read(&Query {
+            select: Select::Mentions {
+                before,
+                limit,
+                unread,
+            },
+            ..all()
+        })
+        .await
+    }
+
+    /// `(id, unread)` of the newest mentions, or of the unread ones.
+    async fn mention_ids(&self, unread: bool) -> Vec<(String, bool)> {
+        self.mentions(None, DEFAULT_LIMIT, unread)
+            .await
+            .rows
+            .into_iter()
+            .map(|row| (row.id, row.unread))
+            .collect()
     }
 
     /// The one row with this id.
@@ -367,22 +390,40 @@ async fn activity_threads_and_mentions_follow_the_thread_position() {
     assert!(!row.unread && row.sort_at < thread.sort_at);
     assert_eq!(preview_text(&row), Some("my question"));
 
-    // A reply that tags me is also a mention row.
+    // A reply that tags me is also a mention: counted with the list, and a
+    // row of the mention feed, never of the list.
     let ping = f.event(&f.other, 9, "ping", 30, vec![f.tag_me()]);
     f.store(&ping, f.channel, Some((&root, false))).await;
     let page = f.list().await;
     let totals = page.totals.expect("totals");
     assert_eq!((totals.thread, totals.mention), (1, 1));
-    let mention = f.row(&ping.id.to_hex()).await;
+    // The conversation sorts by its own preview, which is older.
+    let order: Vec<RowKind> = page.rows.iter().map(|row| row.kind).collect();
+    assert_eq!(order, [RowKind::Thread, RowKind::Channel]);
+    let feed = f.mentions(None, DEFAULT_LIMIT, false).await;
+    assert!(feed.totals.is_none() && feed.marker.is_none() && feed.next.is_none());
+    let [mention] = feed.rows.as_slice() else {
+        panic!("one mention, got {:?}", feed.rows);
+    };
     assert_eq!(mention.kind, RowKind::Mention);
+    assert_eq!(mention.id, ping.id.to_hex());
     assert!(mention.unread);
     assert_eq!(mention.root_id, Some(root.id.to_hex()));
-    assert_eq!(preview_text(&mention), Some("ping"));
-    // One reply is the newest message of the thread and the mention: at the
-    // same arrival a thread sorts before a mention. The conversation sorts
-    // by its own preview, which is older.
-    let order: Vec<RowKind> = page.rows.iter().map(|row| row.kind).collect();
-    assert_eq!(order, [RowKind::Thread, RowKind::Mention, RowKind::Channel]);
+    assert_eq!(preview_text(mention), Some("ping"));
+    // A mention cannot be asked for with the list.
+    assert!(f
+        .db
+        .activity(
+            f.community,
+            &f.me.public_key(),
+            DEFAULT_RETENTION_SECONDS,
+            &Query {
+                kinds: RowKind::ALL.to_vec(),
+                ..all()
+            },
+        )
+        .await
+        .is_err());
 
     // Reading the thread through the first reply leaves the ping unread.
     assert_eq!(
@@ -395,7 +436,10 @@ async fn activity_threads_and_mentions_follow_the_thread_position() {
         IntentOutcome::Applied
     );
     assert!(!f.row(&root.id.to_hex()).await.unread);
-    assert!(!f.row(&ping.id.to_hex()).await.unread);
+    // The mention is read with its thread: it stays in the feed and leaves
+    // the unread one.
+    assert_eq!(f.mention_ids(false).await, [(ping.id.to_hex(), false)]);
+    assert_eq!(f.mention_ids(true).await, []);
     assert_eq!(f.list().await.totals.expect("totals").mention, 0);
 
     // Someone else's thread is not mine until I am tagged or follow it.
@@ -449,15 +493,14 @@ async fn activity_threads_and_mentions_follow_the_thread_position() {
     f.store(&shout, f.channel, None).await;
     assert!(f.conversation().await.unread);
     assert_eq!(f.list().await.totals.expect("totals").mention, 1);
+    // The unread feed skips the read mention that is newer in no way but
+    // order: only the unread one passes.
+    assert_eq!(f.mention_ids(true).await, [(shout.id.to_hex(), true)]);
+    assert_eq!(f.mention_ids(false).await.len(), 2);
     // A deleted mention is neither listed nor counted.
     f.delete(&shout).await;
     assert_eq!(f.list().await.totals.expect("totals").mention, 0);
-    assert!(f
-        .list()
-        .await
-        .rows
-        .iter()
-        .all(|row| row.id != shout.id.to_hex()));
+    assert_eq!(f.mention_ids(false).await, [(ping.id.to_hex(), false)]);
 
     // A deleted channel's mentions leave the totals with its rows.
     let last = f.event(&f.other, 9, "still there?", 70, vec![f.tag_me()]);
@@ -471,6 +514,7 @@ async fn activity_threads_and_mentions_follow_the_thread_position() {
     let page = f.list().await;
     assert_eq!(page.totals.expect("totals").mention, 0);
     assert!(page.rows.iter().all(|row| row.channel_id != f.channel));
+    assert_eq!(f.mention_ids(false).await, []);
 }
 
 /// Marking is bound to the timeline the anchor is in.
@@ -515,15 +559,13 @@ async fn activity_pages_cover_every_row_once_in_order() {
     let f = fixture().await;
     f.list().await;
     let mut expected = Vec::new();
+    let mut pings = Vec::new();
     for n in 0..3u64 {
         let root = f.post(&f.me, &format!("root {n}"), 10 + n * 10).await;
         let ping = f.event(&f.other, 9, "ping", 15 + n * 10, vec![f.tag_me()]);
         f.store(&ping, f.channel, Some((&root, false))).await;
-        // Same arrival: the thread sorts before the mention.
-        expected.push(vec![
-            (RowKind::Thread, root.id.to_hex()),
-            (RowKind::Mention, ping.id.to_hex()),
-        ]);
+        expected.push(vec![(RowKind::Thread, root.id.to_hex())]);
+        pings.push(ping.id.to_hex());
     }
     let newest_thread = expected[2][0].1.clone();
     // The channel sorts by its preview, the last root: after that root's
@@ -555,6 +597,37 @@ async fn activity_pages_cover_every_row_once_in_order() {
         }
     }
     assert_eq!(seen, expected);
+
+    // The mention feed pages on its own, newest first.
+    pings.reverse();
+    let first = f.mentions(None, 2, false).await;
+    let ids = |page: &Page| -> Vec<String> { page.rows.iter().map(|row| row.id.clone()).collect() };
+    assert_eq!(ids(&first), pings[..2]);
+    let rest = f.mentions(first.next, 2, false).await;
+    assert_eq!(ids(&rest), pings[2..]);
+    assert!(rest.next.is_none());
+    // A page scans a bounded run of my mentions. When none of a run can be
+    // shown (here: mentions whose messages are gone), the page is empty and
+    // still says where to continue, so paging reaches the ones beyond it.
+    sqlx::query(
+        "INSERT INTO event_mentions (community_id, pubkey_hex, event_id, event_created_at, \
+            channel_id, event_kind, received_at) \
+         SELECT $1, $2, sha256(n::text::bytea), now(), $3, 9, now() + n * interval '1 microsecond' \
+         FROM generate_series(1, $4) AS n",
+    )
+    .bind(f.community.as_uuid())
+    .bind(f.me.public_key().to_hex())
+    .bind(f.channel)
+    .bind(MENTION_SCAN)
+    .execute(&f.pool)
+    .await
+    .expect("add unshowable mentions");
+    let empty_page = f.mentions(None, 2, false).await;
+    assert!(empty_page.rows.is_empty() && empty_page.next.is_some());
+    assert_eq!(
+        ids(&f.mentions(empty_page.next, 2, false).await),
+        pings[..2]
+    );
 
     // A kind filter pages the same way.
     let threads = f
@@ -680,43 +753,30 @@ async fn activity_since_returns_changes_and_removals() {
     assert_eq!(ids, [root.id.to_hex()]);
     let marker = page.marker.expect("marker");
 
-    // Mentions: a new one is returned. An old one is returned again only
-    // when my read position in its scope moved, which is what changes it.
-    let old = f.event(&f.other, 9, "old ping", 50, vec![f.tag_me()]);
-    f.store(&old, f.channel, None).await;
-    let elsewhere = f.channel().await;
-    let other_old = f.event(&f.other, 9, "other old ping", 55, vec![f.tag_me()]);
-    f.store(&other_old, elsewhere, None).await;
-    let marker = {
-        let page = f.read(&since(marker)).await;
-        assert_eq!(
-            page.rows
-                .iter()
-                .filter(|row| row.kind == RowKind::Mention)
-                .count(),
-            2
-        );
-        page.marker.expect("marker")
-    };
+    // A mention is not a row of the list. One that changes no row (it is
+    // for agents only, so it is not the conversation's preview) still
+    // refreshes the totals.
     age().await;
-    assert_eq!(f.read(&since(marker)).await.rows.len(), 0);
-    let new = f.event(&f.other, 9, "new ping", 60, vec![f.tag_me()]);
-    f.store(&new, f.channel, Some((&root, false))).await;
-    let mentions = |page: &Page| -> Vec<(String, bool)> {
-        page.rows
-            .iter()
-            .filter(|row| row.kind == RowKind::Mention)
-            .map(|row| (row.id.clone(), row.unread))
-            .collect()
-    };
+    let ping = f.event(
+        &f.other,
+        9,
+        "quiet ping",
+        50,
+        vec![f.tag_me(), Tag::parse(["audience", "agents"]).expect("tag")],
+    );
+    f.store(&ping, f.channel, None).await;
     let page = f.read(&since(marker)).await;
-    assert_eq!(mentions(&page), [(new.id.to_hex(), true)]);
+    assert!(page.rows.is_empty());
+    assert_eq!(page.totals.expect("totals").mention, 1);
     let marker = page.marker.expect("marker");
     age().await;
-    assert_eq!(f.mark_through(None, &old).await, IntentOutcome::Applied);
+    assert!(f.read(&since(marker)).await.totals.is_none());
+    // Marking the channel read reads the mention; the channel's row reports
+    // it and the totals follow.
+    assert_eq!(f.mark_through(None, &ping).await, IntentOutcome::Applied);
     let page = f.read(&since(marker)).await;
-    assert_eq!(mentions(&page), [(old.id.to_hex(), false)]);
-    assert_eq!(page.totals.expect("totals").mention, 2);
+    assert!(page.rows.iter().all(|row| row.kind != RowKind::Mention));
+    assert_eq!(page.totals.expect("totals").mention, 0);
     let marker = page.marker.expect("marker");
 
     // Joining a channel returns its row, however old its last message is,
@@ -771,8 +831,8 @@ async fn activity_since_returns_changes_and_removals() {
         .iter()
         .all(|row| row.channel_id != quiet));
 
-    // Rejoining a channel returns its thread and mention rows too: the
-    // client dropped them when I left, and nothing else about them changed.
+    // Rejoining a channel returns its thread rows too: the client dropped
+    // them when I left, and nothing else about them changed.
     let marker = f.read(&since(marker)).await.marker.expect("marker");
     age().await;
     f.db.remove_member(
@@ -802,12 +862,7 @@ async fn activity_since_returns_changes_and_removals() {
     let page = f.read(&since(marker)).await;
     let mut ids: Vec<String> = page.rows.iter().map(|row| row.id.clone()).collect();
     ids.sort();
-    let mut expected = vec![
-        f.channel.to_string(),
-        root.id.to_hex(),
-        old.id.to_hex(),
-        new.id.to_hex(),
-    ];
+    let mut expected = vec![f.channel.to_string(), root.id.to_hex()];
     expected.sort();
     assert_eq!(ids, expected);
     let marker = page.marker.expect("marker");
@@ -883,7 +938,8 @@ async fn activity_lists_only_current_memberships_of_one_community() {
     let root = f.post(&f.me, "root", 10).await;
     let ping = f.event(&f.other, 9, "ping", 20, vec![f.tag_me()]);
     f.store(&ping, f.channel, Some((&root, false))).await;
-    assert_eq!(f.list().await.rows.len(), 3);
+    assert_eq!(f.list().await.rows.len(), 2);
+    assert_eq!(f.mention_ids(false).await.len(), 1);
 
     let elsewhere =
         f.db.ensure_configured_community(&format!("activity-other-{}.local", Uuid::new_v4()))
@@ -911,6 +967,7 @@ async fn activity_lists_only_current_memberships_of_one_community() {
     .expect("leave");
     let page = f.list().await;
     assert!(page.rows.is_empty());
+    assert!(f.mention_ids(false).await.is_empty());
     assert_eq!(page.totals.expect("totals"), Totals::default());
     // Intents on a private channel I left are refused; an open one I can
     // still read keeps taking them.
@@ -921,4 +978,123 @@ async fn activity_lists_only_current_memberships_of_one_community() {
         .await
         .expect("make private");
     assert_eq!(f.mark_through(None, &root).await, IntentOutcome::Blocked);
+}
+
+/// History stored before these tables existed: the operator's backfill script
+/// and warm command put back what the relay would have written.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn activity_backfill_restores_history_from_before_the_tables() {
+    let f = fixture().await;
+    f.list().await;
+    let root = f.post(&f.other, "root", 10).await;
+    f.reply(&f.me, &root, "mine", 20).await;
+    f.reply(&f.other, &root, "answer", 30).await;
+    let ping = f.event(&f.other, 9, "ping", 40, vec![f.tag_me()]);
+    f.store(&ping, f.channel, None).await;
+    let before = (
+        f.list().await.rows,
+        f.mention_ids(false).await,
+        f.read(&all()).await.totals,
+    );
+    assert!(before.0.iter().any(|row| row.kind == RowKind::Thread));
+    assert_eq!(before.1.len(), 1);
+
+    // As the rows were before migration 0089.
+    f.forget().await;
+    for sql in [
+        "DELETE FROM personal_read_frontiers WHERE community_id = $1 AND root_id <> ''::bytea",
+        "UPDATE event_mentions SET received_at = NULL, root_id = NULL WHERE community_id = $1",
+    ] {
+        sqlx::query(sql)
+            .bind(f.community.as_uuid())
+            .execute(&f.pool)
+            .await
+            .expect("age rows");
+    }
+    assert!(f.mention_ids(false).await.is_empty());
+
+    let heads = |table: &'static str| {
+        let (pool, community) = (f.pool.clone(), f.community);
+        async move {
+            sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
+                "SELECT count(*) FROM {table} WHERE community_id = $1 AND seen_at IS NOT NULL"
+            )))
+            .bind(community.as_uuid())
+            .fetch_one(&pool)
+            .await
+            .expect("count rows")
+        }
+    };
+    assert_eq!(
+        (heads("channel_heads").await, heads("thread_heads").await),
+        (0, 0)
+    );
+    let warmed = f.db.warm_activity(f.community).await.expect("warm");
+    assert_eq!((warmed.channels, warmed.threads), (1, 1));
+    assert_eq!(
+        (heads("channel_heads").await, heads("thread_heads").await),
+        (1, 1)
+    );
+    // Nothing left for a second run.
+    let again = f.db.warm_activity(f.community).await.expect("warm again");
+    assert_eq!(again, Warmed::default());
+
+    // A client that read the list before the backfill learns of the thread
+    // from `since`, though nothing in the thread changed.
+    for (table, column) in [
+        ("channel_heads", "updated_at"),
+        ("thread_heads", "updated_at"),
+        ("channel_members", "sync_modified_at"),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE {table} SET {column} = {column} - interval '1 hour' \
+             WHERE community_id = $1"
+        )))
+        .bind(f.community.as_uuid())
+        .execute(&f.pool)
+        .await
+        .expect("age rows");
+    }
+    let stale = f.list().await;
+    assert!(stale.rows.iter().all(|row| row.kind != RowKind::Thread));
+    let marker = stale.marker.expect("marker");
+
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/maintenance/backfill-activity.sql");
+    // Twice: a rerun changes nothing and still validates.
+    for _ in 0..2 {
+        let output = tokio::process::Command::new("psql")
+            .args(["-X", "-A", "-t", "-q", "-v", "ON_ERROR_STOP=1", "-f"])
+            .arg(&script)
+            .arg("--dbname")
+            .arg(crate::test_support::database_url())
+            .output()
+            .await
+            .expect("run psql");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // The validation query: nothing left to fill.
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "0|0");
+    }
+    let changed = f
+        .read(&Query {
+            select: Select::Since(marker),
+            ..all()
+        })
+        .await;
+    assert!(changed
+        .rows
+        .iter()
+        .any(|row| row.kind == RowKind::Thread && row.id == root.id.to_hex()));
+
+    let after = (
+        f.list().await.rows,
+        f.mention_ids(false).await,
+        f.read(&all()).await.totals,
+    );
+    assert_eq!(after, before);
 }
