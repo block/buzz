@@ -86,7 +86,7 @@ Decisions recorded as ADRs: [0004](../docs/adr/0004-push-gateway-hides-device-pl
 - The background path records which messages it has shown, so the app and later wakes don't notify for them again.
 - Lease publication drops `transport`. Enrollment gains the Android platform and attestation. The rest of the push layer (subscriptions, renewal, revocation outbox, setup recovery) is shared with iOS unchanged.
 
-Prototype evidence (branch `prototype/android-push-headless-dart`): on an emulator, the real text was posted about 0.1 s after a cold wake, and about 0.8 s median (worst about 1 s) with the CPU slowed about 8x. Memory was about 57 MB PSS. A relay that accepts TCP and never answers held the handler until the watchdog fired. Pixel 9a measurements are pending.
+Prototype evidence (branch `prototype/android-push-headless-dart`): on an emulator, the real text was posted about 0.1 s after a cold wake, and about 0.8 s median (worst about 1 s) with the CPU slowed about 8x. Memory was about 57 MB PSS. A relay that accepts TCP and never answers held the handler until the watchdog fired. On a Pixel 9a over USB (median of 12 cold runs), the real text was posted 0.51 s after the wake (worst 0.54 s), about 45 MB PSS. Most of that time is native engine and Dart startup; the relay round trips over USB took about 0.16 s. The watchdog ended at 9.8 s on the phone, so the real one should fire at about 8 s. No run crossed a real network: the phone couldn't reach the test relay over Wi-Fi.
 
 ## Testing Decisions
 
