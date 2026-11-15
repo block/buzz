@@ -26,21 +26,13 @@ class ChannelDirectoryLoadState {
   /// Current loading status for [scope].
   final ChannelDirectoryLoadStatus status;
 
-  /// When the directory for [scope] last finished loading.
-  final DateTime? loadedAt;
-
   /// Creates directory loading state.
-  const ChannelDirectoryLoadState({
-    required this.scope,
-    required this.status,
-    this.loadedAt,
-  });
+  const ChannelDirectoryLoadState({required this.scope, required this.status});
 
   /// Initial state before any directory request has started.
   const ChannelDirectoryLoadState.idle()
     : scope = null,
-      status = ChannelDirectoryLoadStatus.idle,
-      loadedAt = null;
+      status = ChannelDirectoryLoadStatus.idle;
 }
 
 /// Returns the stable directory scope for a relay and signing identity.
@@ -77,7 +69,6 @@ class ChannelDirectoryLoadNotifier extends Notifier<ChannelDirectoryLoadState> {
   void markLoaded(String scope) => state = ChannelDirectoryLoadState(
     scope: scope,
     status: ChannelDirectoryLoadStatus.loaded,
-    loadedAt: DateTime.now(),
   );
 
   /// Marks the directory request as unsuccessful.
@@ -111,12 +102,12 @@ Future<List<NostrEvent>> _fetchChannelMemberships(
 
 Future<List<NostrEvent>> _fetchChannelDirectoryMetas(
   RelaySessionNotifier session, {
-  void Function()? ensureCurrent,
+  int? since,
 }) => _fetchPaginatedChannelEvents(
   session,
   kind: 39000,
   operation: 'Channel directory',
-  ensureCurrent: ensureCurrent,
+  since: since,
 );
 
 /// Thrown when a channel-list request is retired before it settles.
@@ -509,6 +500,12 @@ class _ChannelRefreshCoordinator {
 
   /// Fetches the directory under [fence], or throws if the fence is retired.
   ///
+  /// With [since], fetches only metadata changed at or after it: a catch-up
+  /// for a directory already shown. A [quiet] load (a catch-up, or the daily
+  /// full read behind a saved copy) leaves the load status alone, so search
+  /// keeps showing the saved copy without a spinner; its failure is logged
+  /// and retried the next time a reader opens.
+  ///
   /// Returns null when the request failed inside the current scope, which means
   /// "retain the cached discovery", or when a newer directory load started,
   /// which then owns the directory and its status. The fence is re-checked
@@ -516,20 +513,22 @@ class _ChannelRefreshCoordinator {
   /// failure path.
   Future<List<NostrEvent>?> loadDirectory(
     RelaySessionNotifier session,
-    _DirectoryLoadFence fence,
-  ) async {
+    _DirectoryLoadFence fence, {
+    int? since,
+    bool quiet = false,
+  }) async {
     final directoryGeneration = ++_directoryGeneration;
     _directoryOnlyGeneration = fence is _DirectoryOnlyFence
         ? directoryGeneration
         : null;
-    loadStatus().markLoading(fence.scope);
+    if (!quiet) loadStatus().markLoading(fence.scope);
     final List<NostrEvent> metas;
     try {
-      metas = await _fetchChannelDirectoryMetas(session);
+      metas = await _fetchChannelDirectoryMetas(session, since: since);
     } catch (error, stackTrace) {
       fence.ensureCurrent();
       if (directoryGeneration != _directoryGeneration) return null;
-      loadStatus().markError(fence.scope);
+      if (!quiet) loadStatus().markError(fence.scope);
       debugPrint(
         '[ChannelsNotifier] channel directory refresh failed; retaining '
         'cached discovery: $error\n$stackTrace',
@@ -550,6 +549,7 @@ Future<List<NostrEvent>> _fetchPaginatedChannelEvents(
   Map<String, List<String>> tags = const {},
   void Function()? ensureCurrent,
   bool strong = false,
+  int? since,
 }) async {
   final events = <NostrEvent>[];
   final seenEventIds = <String>{};
@@ -562,6 +562,7 @@ Future<List<NostrEvent>> _fetchPaginatedChannelEvents(
         kinds: [kind],
         tags: tags,
         limit: _channelDirectoryPageSize,
+        since: since,
         until: until,
         extensions: {
           'before_id': ?beforeId,
@@ -668,6 +669,14 @@ extension _ObservedUnreadRecording on ChannelsNotifier {
   }
 }
 
+/// Directory edits for readers outside the notifier.
+extension ChannelDirectoryForgetting on ChannelsNotifier {
+  /// Drops an unjoined channel the relay no longer serves from the
+  /// directory, so readers stop offering it before the next full read.
+  void forgetDirectoryChannel(String channelId) =>
+      _forgetDirectoryChannel(channelId);
+}
+
 /// Activity projection of the channel unread registry.
 extension ObservedThreadActivity on ChannelsNotifier {
   /// The same eligible replies that supply channel attention dots. Consumers
@@ -684,11 +693,180 @@ extension ObservedThreadActivity on ChannelsNotifier {
   }
 }
 
-/// Directory-only loads and the list edits they share with full refreshes.
+/// How long a saved directory serves readers before its full read again,
+/// which is the only way channels that turned private, were deleted or were
+/// unlisted leave it: the relay never tells a non-member about those.
+const savedDirectoryFullReadAge = Duration(hours: 24);
+
+/// How often directory readers may ask the relay for changes.
+const savedDirectoryCheckInterval = Duration(minutes: 1);
+
+/// How far before the newest saved change a catch-up starts, so changes the
+/// relay stamped in the same second as it are not missed.
+const savedDirectoryCatchUpOverlap = Duration(minutes: 1);
+
+/// The clock the saved directory's full-read and check intervals use.
+final channelDirectoryClockProvider = Provider<DateTime Function()>(
+  (ref) => DateTime.now,
+);
+
+/// Which scope's directory the notifier holds, and when it was last read.
+class _SavedDirectory {
+  /// The relay-and-identity scope [ChannelsNotifier._directoryMetas] holds,
+  /// or null when it holds none.
+  String? scope;
+
+  /// When the relay last served the whole directory, in Unix seconds.
+  int? fullAt;
+
+  /// When a reader last asked the relay for changes.
+  DateTime? checkedAt;
+
+  void reset() {
+    scope = null;
+    fullAt = null;
+    checkedAt = null;
+  }
+}
+
+/// The saved open-channel directory: restoring it, keeping it current, and
+/// the list edits directory loads share with full refreshes.
 ///
 /// Lives in this part file because `channels_provider.dart` sits against the
 /// repository-wide 1200-line file ceiling enforced by `just file-size-check`.
 extension _ChannelsNotifierDirectory on ChannelsNotifier {
+  /// Installs [metas] as this scope's directory and saves it. A [full] read
+  /// replaces the directory and restarts its full-read age and check
+  /// interval.
+  void _installDirectory(
+    List<NostrEvent> metas,
+    String scope, {
+    bool full = false,
+  }) {
+    final now = _lifecycleRef.read(channelDirectoryClockProvider)();
+    _directoryMetas = metas;
+    _savedDirectory.scope = scope;
+    if (full) {
+      _savedDirectory
+        ..fullAt = now.millisecondsSinceEpoch ~/ 1000
+        ..checkedAt = now;
+    }
+    final fullAt = _savedDirectory.fullAt;
+    if (fullAt == null) return;
+    // The scope fence was checked synchronously before this call, so the
+    // storage read here belongs to the same community and account.
+    _lifecycleRef
+        .read(openChannelDirectoryStorageProvider)
+        ?.write(SavedOpenChannelDirectory(metas: metas, fullAt: fullAt))
+        .catchError((Object error) {
+          // The copy is a cache: the next change or full read saves it again.
+          debugPrint('[ChannelsNotifier] saving the directory failed: $error');
+          return false;
+        });
+  }
+
+  /// Restores this scope's saved directory into the list, unless the
+  /// notifier already holds it. Returns whether a directory is now held.
+  Future<bool> _restoreSavedDirectory(String scope) async {
+    if (_savedDirectory.scope == scope) return true;
+    final storage = _lifecycleRef.read(openChannelDirectoryStorageProvider);
+    final fence = _refreshCoordinator.beginDirectoryOnly();
+    final saved = await storage?.read();
+    try {
+      fence.ensureCurrent();
+    } on _StaleChannelRefresh {
+      return false;
+    }
+    // A load that finished meanwhile is newer than the file.
+    if (_savedDirectory.scope == scope) return true;
+    if (saved == null) return false;
+    _directoryMetas = saved.metas;
+    _savedDirectory
+      ..scope = scope
+      ..fullAt = saved.fullAt;
+    _refreshCoordinator.loadStatus().markLoaded(scope);
+    _mergeDirectoryIntoList();
+    return true;
+  }
+
+  /// Rebuilds the list's unjoined channels from [_directoryMetas] and saves
+  /// the member snapshot, when the list has loaded.
+  void _mergeDirectoryIntoList() {
+    final previous = _listState.value;
+    if (previous == null) return;
+    final channels = [...previous];
+    _replaceDirectoryChannels(channels);
+    _sortChannels(channels);
+    _invalidateChangedDetails(channels, previous);
+    _listState = AsyncData(channels);
+    _saveSnapshot?.call(channels, _hiddenDmIds);
+  }
+
+  /// Reads the relay for a held directory, at most once per
+  /// [savedDirectoryCheckInterval]: the whole directory once the last full
+  /// read is older than [savedDirectoryFullReadAge], otherwise only what
+  /// changed since the newest saved change. Both are quiet: readers keep
+  /// showing the held directory meanwhile.
+  Future<void> _checkSavedDirectory() async {
+    final now = _lifecycleRef.read(channelDirectoryClockProvider)();
+    final checkedAt = _savedDirectory.checkedAt;
+    if (checkedAt != null &&
+        now.difference(checkedAt) < savedDirectoryCheckInterval) {
+      return;
+    }
+    _savedDirectory.checkedAt = now;
+    final fullAt = _savedDirectory.fullAt;
+    final fullReadDue =
+        fullAt == null ||
+        now.millisecondsSinceEpoch ~/ 1000 - fullAt >=
+            savedDirectoryFullReadAge.inSeconds;
+    int? since;
+    if (!fullReadDue) {
+      final newest = _directoryMetas.fold<int>(
+        0,
+        (newest, event) => max(newest, event.createdAt),
+      );
+      since = max(0, newest - savedDirectoryCatchUpOverlap.inSeconds);
+    }
+    final fence = _refreshCoordinator.beginDirectoryOnly();
+    try {
+      final metas = await _refreshCoordinator.loadDirectory(
+        _lifecycleRef.read(relaySessionProvider.notifier),
+        fence,
+        since: since,
+        quiet: true,
+      );
+      if (metas == null) return;
+      if (since == null) {
+        _installDirectory(metas, fence.scope, full: true);
+      } else {
+        if (metas.isEmpty) return;
+        _installDirectory(
+          _latestChannelEvents([..._directoryMetas, ...metas], kind: 39000),
+          fence.scope,
+        );
+      }
+    } on _StaleChannelRefresh {
+      return;
+    }
+    _mergeDirectoryIntoList();
+  }
+
+  /// Drops [channelId] from the held directory and from the list's unjoined
+  /// channels, as when opening it finds the relay no longer serves it.
+  void _forgetDirectoryChannel(String channelId) {
+    final scope = _savedDirectory.scope;
+    if (scope == null ||
+        !_directoryMetas.any((event) => event.getTagValue('d') == channelId)) {
+      return;
+    }
+    _installDirectory([
+      for (final event in _directoryMetas)
+        if (event.getTagValue('d') != channelId) event,
+    ], scope);
+    _mergeDirectoryIntoList();
+  }
+
   /// Downloads only the open-channel directory and merges it into the list
   /// [current] returns once it lands, for a list that already has its
   /// memberships. Joined channels keep their entries; live updates keep them
@@ -705,8 +883,7 @@ extension _ChannelsNotifierDirectory on ChannelsNotifier {
         fence,
       );
       if (metas == null) return null;
-      _directoryMetas = metas;
-      _directoryMetasScope = fence.scope;
+      _installDirectory(metas, fence.scope, full: true);
     } on _StaleChannelRefresh {
       return null;
     }

@@ -115,10 +115,6 @@ const searchChannelResultLimit = 8;
 /// Most people rows one query shows.
 const searchPeopleShown = 8;
 
-/// How long a loaded open-channel directory serves searches before the next
-/// search reads it again, as desktop's `PUBLIC_CHANNEL_PAGE_TTL` does.
-const searchDirectoryMaxAge = Duration(seconds: 30);
-
 /// Ranks [channels] for a search [query] with the same rules as desktop
 /// (buzz-app `SearchResults.tsx` and `store.ts` `searchPublic`): name match
 /// rank first, an archived channel half a step behind a live one, then joined
@@ -305,8 +301,7 @@ class SearchNotifier extends Notifier<SearchState> {
     final load = _directoryLoad = Object();
     _directoryAttempted = true;
     final channels = ref.read(channelsProvider.notifier);
-    Future<void> ensure() =>
-        channels.ensureDirectoryLoaded(maxAge: searchDirectoryMaxAge);
+    Future<void> ensure() => channels.ensureDirectoryLoaded();
     unawaited(
       ensure()
           .then((_) {

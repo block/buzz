@@ -52,8 +52,6 @@ void main() {
     await tester.enterText(find.byType(TextField), '4things');
     await tester.pump(const Duration(milliseconds: 300));
     expect(channels.directoryRequests, 1);
-    // Later searches read the directory again once it is this old.
-    expect(channels.maxAge, searchDirectoryMaxAge);
     expect(spinner, findsOneWidget);
     expect(unjoined, findsNothing);
 
@@ -712,7 +710,6 @@ class _HeldUserSearch implements ChannelActions {
 class _DirectoryChannels extends ChannelsNotifier {
   final _directories = <Completer<_DirectoryOutcome>>[];
   var directoryRequests = 0;
-  Duration? maxAge;
 
   void finishDirectory() =>
       _directories.removeAt(0).complete(_DirectoryOutcome.loaded);
@@ -747,8 +744,7 @@ class _DirectoryChannels extends ChannelsNotifier {
   }
 
   @override
-  Future<void> ensureDirectoryLoaded({Duration? maxAge}) async {
-    this.maxAge = maxAge;
+  Future<void> ensureDirectoryLoaded() async {
     final status = ref.read(channelDirectoryLoadStatusProvider.notifier);
     final scope = channelDirectoryScope(
       ref.read(relayConfigProvider).baseUrl,
