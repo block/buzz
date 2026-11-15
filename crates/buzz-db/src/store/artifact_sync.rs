@@ -59,7 +59,10 @@ impl Db {
         )
         .await?;
         let mut tx = sqlx::Transaction::begin(connection, None).await?;
-        sqlx::query("SET LOCAL statement_timeout='2s'")
+        // The candidate plan's estimated cost turns on JIT, whose compile
+        // alone takes about 2 s at 60,000 memberships, past the timeout; the
+        // query itself runs in tens of milliseconds.
+        sqlx::raw_sql("SET LOCAL statement_timeout='2s'; SET LOCAL jit = off")
             .execute(&mut *tx)
             .await?;
         let types = query
