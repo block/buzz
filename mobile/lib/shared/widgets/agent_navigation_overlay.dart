@@ -6,10 +6,18 @@ class AgentNavigationOverlay extends InheritedWidget {
     super.key,
     required this.active,
     this.onRecordingChanged,
+    this.menuOpen = false,
     required super.child,
   });
   final ValueNotifier<bool> active;
   final ValueChanged<bool>? onRecordingChanged;
+  final bool menuOpen;
+
+  static bool menuOpenOf(BuildContext context) =>
+      context
+          .dependOnInheritedWidgetOfExactType<AgentNavigationOverlay>()
+          ?.menuOpen ??
+      false;
 
   static ValueChanged<bool>? recordingCallbackOf(BuildContext context) =>
       context
@@ -23,5 +31,6 @@ class AgentNavigationOverlay extends InheritedWidget {
   @override
   bool updateShouldNotify(AgentNavigationOverlay oldWidget) =>
       active != oldWidget.active ||
+      menuOpen != oldWidget.menuOpen ||
       onRecordingChanged != oldWidget.onRecordingChanged;
 }

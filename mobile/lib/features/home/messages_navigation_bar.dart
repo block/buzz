@@ -47,6 +47,7 @@ class MessagesNavigationBar extends HookWidget {
     );
     return AgentNavigationOverlay(
       active: overlay,
+      menuOpen: menuOpen.value,
       onRecordingChanged: onRecordingChanged,
       child: Builder(
         builder: (context) {

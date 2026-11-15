@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/ios_message_create_button.dart';
 import 'dart:async';
 import 'dart:io';
 
@@ -242,6 +243,21 @@ void main() {
     expect(
       (recoverySurface.decoration as BoxDecoration).color,
       tester.element(find.byType(DefaultAgentVoiceControl)).controlSurface,
+    );
+    final menu = tester.widget<IosMessageCreateButton>(
+      find.byType(IosMessageCreateButton),
+    );
+    menu.onMenuVisibilityChanged!(true);
+    await tester.pumpAndSettle();
+    expect(find.text('Retry voice note'), findsNothing);
+    menu.onMenuVisibilityChanged!(false);
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .getSemantics(find.byTooltip('Discard voice note'))
+          .getSemanticsData()
+          .hasAction(SemanticsAction.tap),
+      isTrue,
     );
     await mount(tester, nativeAvatar: true, axis: Axis.vertical);
     await tester.pumpAndSettle();

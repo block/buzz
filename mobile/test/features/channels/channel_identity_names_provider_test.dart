@@ -225,6 +225,7 @@ class _MembershipRelaySession extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
     required void Function(RelaySubscriptionStatus status) onStatusChanged,
+    bool resumeSince = true,
   }) async {
     if (filter.kinds.contains(39002)) membershipEvents = onEvent;
     onStatusChanged(RelaySubscriptionStatus.ready);

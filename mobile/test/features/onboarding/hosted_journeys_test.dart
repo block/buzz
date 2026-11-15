@@ -289,6 +289,9 @@ void main() {
         release.complete();
         f.beforeStatusReturn = null;
         await f.settle(tester);
+        expect(await f.store.read(), isNull);
+        expect(f.bound, isNull);
+        await f.tap(tester, 'Back up and continue');
         expect(f.bound, f.keys.public);
       }
       final saved = await f.store.read();
@@ -315,6 +318,7 @@ void main() {
       } else {
         await f.tap(tester, 'Try again');
       }
+      await f.tap(tester, 'Back up and continue');
       expect((await f.store.read())!.pubkey, saved.pubkey);
       expect((await f.store.read())!.backup, isNotNull);
       if (entry == 'import') {
@@ -340,115 +344,6 @@ void main() {
       }
     });
   }
-
-  journey(
-    'web binding keeps an explicit identity choice without backup support',
-    (tester, f) async {
-      await f.initialize(localIdentity: false);
-      f.bound = null;
-      await f.mount(tester);
-      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        const MethodChannel('buzz/hosted_hpke'),
-        (_) async => false,
-      );
-      final nativeChannels = <MethodChannel>[];
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        SystemChannels.platform_views,
-        (call) async {
-          if (call.method == 'create') {
-            final id = (call.arguments as Map)['id'];
-            final channel = MethodChannel('buzz/ios_navigation_bar/$id');
-            nativeChannels.add(channel);
-            tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-              channel,
-              (_) async => null,
-            );
-          }
-          return null;
-        },
-      );
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        const MethodChannel('plugins.flutter.io/url_launcher'),
-        (_) async => true,
-      );
-      try {
-        f.container
-            .read(pendingDeepLinkProvider.notifier)
-            .open(
-              Uri(
-                scheme: 'buzz',
-                host: 'nostr-bind',
-                queryParameters: {
-                  'challenge_id': '12345678-1234-1234-1234-123456789012',
-                  'nonce': 'a' * 43,
-                  'verification_code': '123456',
-                  'audience': 'buzz:nostr-identity',
-                  'action': 'bind_nostr_identity',
-                  'protocol': 'buzz-nostr-identity',
-                  'version': '1',
-                  'origin': HostedEnvironment.origin.toString(),
-                  'expires_at': '2099-01-01T00:00:00Z',
-                  'return': 'browser_fragment_v1',
-                  'callback_url': HostedEnvironment.origin
-                      .resolve('/buzz')
-                      .toString(),
-                },
-              ),
-            );
-        await f.settle(tester);
-        expect(
-          find.text('Create my Buzz identity').hitTestable(),
-          findsOneWidget,
-        );
-        expect(
-          find.text('Import existing identity').hitTestable(),
-          findsOneWidget,
-        );
-        expect(await f.store.read(), isNull);
-        expect(f.bound, isNull);
-        expect(f.sent('/verify'), isEmpty);
-        await f.tap(tester, 'Create my Buzz identity');
-        expect(f.flow.problem, HostedFlowProblem.unsupportedPlatform);
-        expect(await f.store.read(), isNull);
-        expect(f.bound, isNull);
-        // Once the OS supports sealing, creation still requires an explicit tap.
-        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-          const MethodChannel('buzz/hosted_hpke'),
-          (_) async => true,
-        );
-        await f.flow.retry();
-        await f.settle(tester);
-        expect(await f.store.read(), isNull);
-        await f.tap(tester, 'Create my Buzz identity');
-        final saved = (await f.store.read())!;
-        expect(f.bound, saved.pubkey);
-        expect(
-          saved.backup,
-          isNull,
-        ); // Web binding has never promised mobile backup.
-        expect(f.flow.stage, HostedFlowStage.browserReturned);
-      } finally {
-        await tester.pumpWidget(const SizedBox.shrink());
-        await tester.pump();
-        debugDefaultTargetPlatformOverride = null;
-        for (final channel in nativeChannels) {
-          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-            channel,
-            null,
-          );
-        }
-        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-          SystemChannels.platform_views,
-          null,
-        );
-        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-          const MethodChannel('plugins.flutter.io/url_launcher'),
-          null,
-        );
-      }
-    },
-  );
 
   journey('linked account without backup imports its key without replacing it', (
     tester,
@@ -482,6 +377,8 @@ void main() {
     await tester.enterText(find.byType(TextField).hitTestable(), f.keys.nsec);
     await f.tap(tester, 'Preview identity');
     await f.tap(tester, 'Import this identity');
+    expect(await f.store.read(), isNull);
+    await f.tap(tester, 'Back up and continue');
     expect((await f.store.read())!.pubkey, f.keys.public);
     expect((await f.store.read())!.backup, isNotNull);
     expect(f.requests.where((r) => r.url.path.endsWith('/recovery')), isEmpty);
@@ -1170,6 +1067,7 @@ void main() {
         // still be durable; resuming must not replay an acknowledged backup.
         f.beforeUploadReturn = () => f.flow.leave();
         await f.link(tester, 'one');
+        await f.tap(tester, 'Back up and continue');
         expect((await f.store.read())!.backup, isNotNull);
         f.beforeUploadReturn = null;
         // Production legal documents exceed the ordinary 64 KiB account limit.
@@ -1286,6 +1184,7 @@ void main() {
           expect(f.sent('/nsec-backups'), isEmpty);
           expect(await f.store.read(), isNull);
           await f.tap(tester, fullNpub(f.keys.public)!);
+          await f.tap(tester, 'Back up and continue');
         }
         final saved = (await f.store.read())!;
         expect(
@@ -1337,6 +1236,7 @@ void main() {
     await f.flow.signInAccount();
     await f.settle(tester);
     await f.tap(tester, fullNpub(f.keys.public)!);
+    await f.tap(tester, 'Back up and continue');
     return original;
   }
 
@@ -1350,6 +1250,7 @@ void main() {
       await f.restart(tester);
       await f.flow.signInAccount();
       await f.settle(tester);
+      await f.tap(tester, 'Back up and continue');
       // The saved choice skips selection and retries the same rejection.
       expect(f.flow.problem, HostedFlowProblem.requestRejected);
       await f.tap(tester, 'Choose a different identity');
@@ -1438,6 +1339,7 @@ void main() {
     await f.restart(tester);
     await f.flow.signInAccount();
     await f.settle(tester);
+    await f.tap(tester, 'Back up and continue');
     expect(f.flow.problem, HostedFlowProblem.requestRejected);
     expect(f.flow.canChooseDifferentIdentity, isTrue);
     keychain.sticky = null;
@@ -1500,6 +1402,7 @@ void main() {
     );
     await f.flow.retry();
     await f.settle(tester);
+    await f.tap(tester, 'Back up and continue');
     expect(f.flow.problem, HostedFlowProblem.requestRejected);
     expect(f.flow.canChooseDifferentIdentity, isFalse);
     expect(find.text('Choose a different identity'), findsNothing);
@@ -1532,10 +1435,12 @@ void main() {
       ..bindStatus = 409;
     await f.flow.retry();
     await f.settle(tester);
+    await f.tap(tester, 'Back up and continue');
     expect(f.flow.canChooseDifferentIdentity, isTrue);
     f.challengeStatus = 409;
     await f.flow.retry();
     await f.settle(tester);
+    await f.tap(tester, 'Back up and continue');
     // The earlier attempt's rejection is not reused.
     expect(f.flow.problem, HostedFlowProblem.requestRejected);
     expect(f.flow.canChooseDifferentIdentity, isFalse);
@@ -1580,7 +1485,7 @@ void main() {
       await f.tap(tester, 'Try again');
       expect(f.flow.stage, HostedFlowStage.idle);
       expect(f.probes, isEmpty);
-      expect(find.text('Signed in to BuilderLab'), findsOneWidget);
+      expect(find.text('Signed in as owner@example.com'), findsOneWidget);
       expect(find.text('Scan a QR code'), findsOneWidget);
       expect(find.text('Use pairing code'), findsNothing);
       f.rows.addAll([f.row('one'), f.row('two')]);

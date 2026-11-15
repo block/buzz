@@ -324,17 +324,19 @@ class DefaultAgentVoiceControl extends HookConsumerWidget {
     final recoveryLink = useMemoized(LayerLink.new);
     final recoveryAnchor = useMemoized(GlobalKey.new);
     final recovering = active && !recording.value;
+    final showRecovery =
+        recovering && !AgentNavigationOverlay.menuOpenOf(context);
     useEffect(() {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!context.mounted) return;
-        if (recovering) {
+        if (showRecovery) {
           recoveryPortal.show();
         } else {
           recoveryPortal.hide();
         }
       });
       return null;
-    }, [recovering]);
+    }, [showRecovery]);
     final pill = Semantics(
       key: const ValueKey('default-agent-voice-status'),
       value: recording.value

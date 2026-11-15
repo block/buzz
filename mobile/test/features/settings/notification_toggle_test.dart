@@ -98,7 +98,9 @@ void main() {
         (call) async => switch (call.method) {
           'enrollPush' => grant,
           'endpointGrants' => [grant],
-          'startRegistration' || 'syncPushSnapshot' => null,
+          'startRegistration' ||
+          'syncPushSnapshot' ||
+          'takePendingNotificationResponse' => null,
           _ => throw StateError('Unexpected native call ${call.method}'),
         },
       );

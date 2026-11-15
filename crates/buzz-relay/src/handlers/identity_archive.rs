@@ -437,7 +437,7 @@ mod tests {
 
     async fn test_pool() -> Option<sqlx::PgPool> {
         let url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".into());
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".into()); // sadscan:disable np.postgres.1 -- local test fixture
         sqlx::PgPool::connect(&url).await.ok()
     }
 
@@ -698,6 +698,59 @@ mod tests {
             "a stale publisher must converge on the canonical empty set, never \
              strand the unarchived identity in the authoritative 13535"
         );
+    }
+
+    mod postgres_tests {
+        use super::*;
+
+        /// NIP-IA: every snapshot's `created_at` is strictly past the previous
+        /// one's, even when publishers race on one head. Concurrent publishers
+        /// each read the head behind the replacement lock. RED-on-revert: with the
+        /// head read before the lock, publishers keep tying on head + 1 and one
+        /// exhausts its replacement attempts.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires Postgres and Redis"]
+        async fn concurrent_archival_publishers_stamp_strictly_increasing_snapshots() {
+            // Ignored, so it runs only where Postgres and Redis are provided: a
+            // missing one is a failure, never a silent pass.
+            let pool = test_pool().await.expect("Postgres for an ignored test");
+            let state = test_state(pool.clone())
+                .await
+                .expect("Redis for an ignored test");
+            let tenant = seed_test_community(&pool).await;
+
+            let publishers: Vec<_> = (0..16)
+                .map(|_| {
+                    let tenant = tenant.clone();
+                    let state = state.clone();
+                    tokio::spawn(async move { publish_nipia_archival_list(&tenant, &state).await })
+                })
+                .collect();
+            for publisher in publishers {
+                publisher
+                    .await
+                    .expect("join publisher")
+                    .expect("publisher succeeds");
+            }
+
+            // Superseded snapshots stay as soft-deleted rows, so every snapshot
+            // ever stored is visible here.
+            let stamps: Vec<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+                "SELECT created_at FROM events WHERE community_id = $1 AND kind = $2 \
+                 AND pubkey = $3 ORDER BY created_at",
+            )
+            .bind(tenant.community().as_uuid())
+            .bind(buzz_core::kind::KIND_IA_ARCHIVED_LIST as i32)
+            .bind(state.relay_keypair.public_key().to_bytes().as_slice())
+            .fetch_all(&pool)
+            .await
+            .expect("read stored snapshots");
+            assert_eq!(stamps.len(), 16, "every publisher stores its own snapshot");
+            assert!(
+                stamps.windows(2).all(|pair| pair[0] < pair[1]),
+                "snapshots must never share a created_at: {stamps:?}"
+            );
+        }
     }
 
     #[tokio::test]

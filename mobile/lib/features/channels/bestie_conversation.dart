@@ -12,6 +12,26 @@ import 'channel_detail_page.dart';
 import 'channels_provider.dart';
 import 'channel_management_provider.dart';
 
+/// The loaded direct conversation with the Bestie [pubkey], if any.
+Channel? cachedBestieConversation(WidgetRef ref, String pubkey) {
+  final channelState = ref.read(channelsProvider);
+  // AsyncValue may retain the previous community's list during reload.
+  final channels = channelState.isLoading || channelState.hasError
+      ? const <Channel>[]
+      : channelState.value ?? const <Channel>[];
+  final notifier = ref.read(channelsProvider.notifier);
+  return channels
+      .where(
+        (channel) => isActiveDirectConversation(
+          channel,
+          notifier.cachedMembersForChannel(channel.id),
+          ref.read(myPubkeyProvider),
+          pubkey,
+        ),
+      )
+      .firstOrNull;
+}
+
 /// The open whose conversation lookup is in flight.
 Object? _lookup;
 
@@ -33,22 +53,7 @@ Future<void> openBestieConversation(
 
   final scope = ref.read(meSyncProvider);
   try {
-    final channelState = ref.read(channelsProvider);
-    // AsyncValue may retain the previous community's list during reload.
-    final channels = channelState.isLoading || channelState.hasError
-        ? const <Channel>[]
-        : channelState.value ?? const <Channel>[];
-    final notifier = ref.read(channelsProvider.notifier);
-    final cached = channels
-        .where(
-          (channel) => isActiveDirectConversation(
-            channel,
-            notifier.cachedMembersForChannel(channel.id),
-            ref.read(myPubkeyProvider),
-            pubkey,
-          ),
-        )
-        .firstOrNull;
+    final cached = cachedBestieConversation(ref, pubkey);
     onResolving?.call(cached == null);
     final channel =
         cached ??

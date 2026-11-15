@@ -46,8 +46,10 @@ List<({String text, bool attachment})> messageBubbleSegments(
     final isAttachment =
         match != null &&
         (line.trim().startsWith('!') ||
-            // Content arrives with escapes shielded; imeta keys are plain.
-            imeta.containsKey(unshieldMarkdownEscapes(match.group(1)!)));
+            // CommonMark unescapes link destinations; imeta keys are plain.
+            imeta.containsKey(
+              unshieldMarkdownEscapes(shieldMarkdownEscapes(match.group(1)!)),
+            ));
     if (attachment != null &&
         isAttachment != attachment &&
         line.trim().isNotEmpty) {

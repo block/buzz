@@ -19,6 +19,7 @@ class _ChannelTile extends ConsumerWidget {
   final String? sectionId;
 
   const _ChannelTile({
+    super.key,
     required this.channel,
     required this.isUnread,
     required this.currentPubkey,

@@ -2,6 +2,9 @@
 //!
 //! Label values come only from the closed enums in this module. Callers must
 //! never derive labels from tenant data, events, SQL text, or query identifiers.
+//! The one exception is the advisory-lock `kind` label: the event kind of the
+//! locked coordinate, bounded by the kind registry
+//! (`buzz_core::kind::registered_kind_label`).
 
 use std::future::Future;
 use std::sync::Mutex;
@@ -539,7 +542,47 @@ pub(crate) async fn begin_transaction(
     Ok((transaction, TransactionTimer::start(operation)))
 }
 
+/// `kind` label of an advisory lock that no event kind keys.
+const UNKEYED_LOCK_KIND: &str = "none";
+
+/// Observe an advisory-lock wait whose key has no event kind; it records
+/// `kind="none"`. Locks keyed by an event coordinate, including every
+/// replacement lock, use [`observe_event_lock`].
 pub(crate) async fn observe_advisory_lock<T, F>(lock_type: LockType, future: F) -> sqlx::Result<T>
+where
+    F: Future<Output = sqlx::Result<T>>,
+{
+    debug_assert_ne!(
+        lock_type,
+        LockType::Replacement,
+        "replacement locks carry an event kind; use observe_event_lock"
+    );
+    observe_lock(lock_type, UNKEYED_LOCK_KIND.into(), future).await
+}
+
+/// Observe an advisory-lock wait on a coordinate of event `kind`. The `kind`
+/// label is the registered kind, or `other` for an unregistered one.
+pub(crate) async fn observe_event_lock<T, F>(
+    lock_type: LockType,
+    kind: i32,
+    future: F,
+) -> sqlx::Result<T>
+where
+    F: Future<Output = sqlx::Result<T>>,
+{
+    observe_lock(
+        lock_type,
+        buzz_core::kind::registered_kind_label(kind).into(),
+        future,
+    )
+    .await
+}
+
+async fn observe_lock<T, F>(
+    lock_type: LockType,
+    kind: metrics::SharedString,
+    future: F,
+) -> sqlx::Result<T>
 where
     F: Future<Output = sqlx::Result<T>>,
 {
@@ -552,12 +595,14 @@ where
     metrics::histogram!(
         "buzz_db_advisory_lock_wait_seconds",
         "lock_type" => lock_type.as_str(),
+        "kind" => kind.clone(),
         "outcome" => outcome.as_str(),
     )
     .record(started.elapsed().as_secs_f64());
     metrics::counter!(
         "buzz_db_advisory_lock_acquisitions_total",
         "lock_type" => lock_type.as_str(),
+        "kind" => kind,
         "outcome" => outcome.as_str(),
     )
     .increment(1);
@@ -606,9 +651,9 @@ impl Drop for TransactionTimer {
 mod tests {
     use super::{
         acquire_reader_with_legacy_metrics, acquire_writer, acquire_writer_with_legacy_metrics,
-        begin_transaction, observe_advisory_lock, record_pool_acquire, refresh_pool_waiters,
-        LockType, Outcome, PoolAcquireAttempt, PoolOperation, ReaderOperation,
-        TransactionOperation, TransactionTimer, WriterOperation,
+        begin_transaction, observe_advisory_lock, observe_event_lock, record_pool_acquire,
+        refresh_pool_waiters, LockType, Outcome, PoolAcquireAttempt, PoolOperation,
+        ReaderOperation, TransactionOperation, TransactionTimer, WriterOperation,
     };
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
     use std::collections::{BTreeMap, BTreeSet};
@@ -736,9 +781,18 @@ mod tests {
             Duration::from_millis(34),
             true,
         );
-        let lock_ok: sqlx::Result<()> =
-            observe_advisory_lock(LockType::Replacement, async { Ok(()) }).await;
+        let lock_ok: sqlx::Result<()> = observe_event_lock(
+            LockType::Replacement,
+            buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32,
+            async { Ok(()) },
+        )
+        .await;
         assert!(lock_ok.is_ok());
+        let unregistered_ok: sqlx::Result<()> =
+            observe_event_lock(LockType::Replacement, 30999, async { Ok(()) }).await;
+        assert!(unregistered_ok.is_ok());
+        // The fallback label lives in buzz-core; this file never names it.
+        let unregistered_kind = buzz_core::kind::registered_kind_label(30999);
         let lock_error: sqlx::Result<()> =
             observe_advisory_lock(LockType::Membership, async { Err(sqlx::Error::PoolClosed) })
                 .await;
@@ -788,30 +842,62 @@ mod tests {
         for expected in [
             (
                 "buzz_db_advisory_lock_wait_seconds",
-                [("lock_type", "replacement"), ("outcome", "success")],
+                &[
+                    ("lock_type", "replacement"),
+                    ("kind", "13534"),
+                    ("outcome", "success"),
+                ][..],
             ),
             (
                 "buzz_db_advisory_lock_wait_seconds",
-                [("lock_type", "membership"), ("outcome", "error")],
+                &[
+                    ("lock_type", "replacement"),
+                    ("kind", unregistered_kind.as_str()),
+                    ("outcome", "success"),
+                ],
+            ),
+            (
+                "buzz_db_advisory_lock_wait_seconds",
+                &[
+                    ("lock_type", "membership"),
+                    ("kind", "none"),
+                    ("outcome", "error"),
+                ],
             ),
             (
                 "buzz_db_advisory_lock_acquisitions_total",
-                [("lock_type", "replacement"), ("outcome", "success")],
+                &[
+                    ("lock_type", "replacement"),
+                    ("kind", "13534"),
+                    ("outcome", "success"),
+                ],
             ),
             (
                 "buzz_db_advisory_lock_acquisitions_total",
-                [("lock_type", "membership"), ("outcome", "error")],
+                &[
+                    ("lock_type", "replacement"),
+                    ("kind", unregistered_kind.as_str()),
+                    ("outcome", "success"),
+                ],
+            ),
+            (
+                "buzz_db_advisory_lock_acquisitions_total",
+                &[
+                    ("lock_type", "membership"),
+                    ("kind", "none"),
+                    ("outcome", "error"),
+                ],
             ),
             (
                 "buzz_db_transaction_duration_seconds",
-                [
+                &[
                     ("operation", "replace_parameterized_event"),
                     ("outcome", "success"),
                 ],
             ),
             (
                 "buzz_db_transaction_duration_seconds",
-                [
+                &[
                     ("operation", "accept_push_lease_event"),
                     ("outcome", "error"),
                 ],
@@ -819,8 +905,8 @@ mod tests {
         ] {
             let expected_labels = expected
                 .1
-                .into_iter()
-                .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                .iter()
+                .map(|&(key, value)| (key.to_owned(), value.to_owned()))
                 .collect::<BTreeMap<_, _>>();
             assert!(
                 keys.contains(&(expected.0.to_owned(), expected_labels)),
@@ -1761,8 +1847,9 @@ mod tests {
         let _guard = metrics::set_default_local_recorder(&recorder);
 
         let mut success_tx = pool.begin().await.expect("begin success transaction");
-        observe_advisory_lock(
+        observe_event_lock(
             LockType::Replacement,
+            buzz_core::kind::KIND_NIP29_GROUP_MEMBERS as i32,
             sqlx::query("SELECT pg_advisory_xact_lock($1)")
                 .bind(0x62757a7a6f627331_i64)
                 .execute(&mut *success_tx),
@@ -1888,6 +1975,16 @@ mod tests {
             contention.iter().any(|sample| *sample >= 0.04),
             "lock timer must include the holder wait: {contention:?}"
         );
+    }
+
+    /// A replacement lock must carry its kind. Mutation: drop the guard in
+    /// `observe_advisory_lock` → RED.
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    #[should_panic(expected = "replacement locks carry an event kind")]
+    async fn kindless_observer_rejects_replacement_locks() {
+        let _: sqlx::Result<()> =
+            observe_advisory_lock(LockType::Replacement, async { Ok(()) }).await;
     }
 
     mod postgres_tests {

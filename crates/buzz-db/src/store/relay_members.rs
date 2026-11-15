@@ -1082,8 +1082,9 @@ pub(crate) async fn write_nip43_membership_snapshot(
         pubkey_bytes.as_slice(),
         None,
     );
-    observability::observe_advisory_lock(
+    observability::observe_event_lock(
         observability::LockType::Membership,
+        kind_i32,
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(lock_key)
             .execute(tx.conn()),
@@ -1721,6 +1722,57 @@ mod postgres_tests {
 
     fn test_pubkey() -> String {
         format!("{:064x}", Uuid::new_v4().as_u128())
+    }
+
+    /// The roster write records its list lock under `membership` with the
+    /// roster's kind. Mutation: observe the list lock without its kind → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn membership_list_lock_records_the_roster_kind() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let pool = setup_pool().await;
+        let keys = nostr::Keys::generate();
+        let community = make_test_community(&pool).await;
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+
+        let mut tx = crate::begin_community_write_transaction(
+            &pool,
+            community,
+            observability::WriterOperation::Authorization,
+        )
+        .await
+        .expect("begin roster write");
+        write_nip43_membership_snapshot(&mut tx, &keys)
+            .await
+            .expect("write roster");
+        tx.commit().await.expect("commit roster");
+
+        let roster_kind = buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST.to_string();
+        let acquisitions = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, _, _, _)| {
+                let label = |name: &str| {
+                    key.key()
+                        .labels()
+                        .find(|label| label.key() == name)
+                        .map(|label| label.value().to_owned())
+                };
+                key.key().name() == "buzz_db_advisory_lock_acquisitions_total"
+                    && label("lock_type").as_deref()
+                        == Some(observability::LockType::Membership.as_str())
+                    && label("kind") == Some(roster_kind.clone())
+            })
+            .map(|(_, _, _, value)| match value {
+                DebugValue::Counter(count) => count,
+                other => panic!("acquisitions are a counter, got {other:?}"),
+            })
+            .sum::<u64>();
+        assert_eq!(acquisitions, 1, "one roster list lock per write");
     }
 
     async fn assert_role(pool: &PgPool, community: CommunityId, pubkey: &str, role: &str) {

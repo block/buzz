@@ -123,8 +123,9 @@ void main() {
             scopeIdentity,
           ) async {
             ref.watch(defaultAgentProvider);
-            if (discoveryFails)
+            if (discoveryFails) {
               throw const FileSystemException('Disk unavailable');
+            }
             return notes.keys
                 .where((key) => key.startsWith('$scopeIdentity:'))
                 .map((key) => key.substring(scopeIdentity.length + 1))

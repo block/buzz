@@ -1222,11 +1222,13 @@ mod postgres_tests {
                     &channel.to_string(),
                     text,
                     text,
+                    true,
                     &owner.public_key().to_hex(),
                     None,
                 )
                 .await
-                .expect("send workflow message");
+                .expect("send workflow message")
+                .event_id;
             let stored = state
                 .db
                 .get_event_by_id(
