@@ -857,9 +857,12 @@ class MessageContent extends HookConsumerWidget {
     // it continue on the same line.
     // The recognizer outlives this link when an edit removes it, so a tap or
     // hold already under way checks that the link is still on screen.
+    // A link nothing can open shows its actions on a tap, so it isn't dead
+    // for screen reader users, who can't reach the hold.
     final recognizer = recognizers.forLink(url, text)
       ..onTap = (() {
-        if (context.mounted) unawaited(openLink());
+        if (!context.mounted) return;
+        canOpen ? unawaited(openLink()) : showActions();
       })
       ..onHold = () {
         if (context.mounted) showActions();

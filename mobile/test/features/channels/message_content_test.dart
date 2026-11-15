@@ -800,6 +800,33 @@ void main() {
       expect(find.text('Open link'), findsNothing);
     });
 
+    testWidgets('tapping a link nothing can open shows its actions', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      await tester.pumpWidget(
+        _testable(
+          const MessageContent(
+            content: 'Write to [support](mailto:support@example.com)',
+          ),
+        ),
+      );
+      await tester.tapAt(linkCenter(tester, 'support'));
+      await tester.pumpAndSettle();
+      expect(find.text('Copy link'), findsOneWidget);
+      expect(find.text('Share link'), findsOneWidget);
+      expect(find.text('Open link'), findsNothing);
+
+      // A screen reader's activate reaches the same actions.
+      await tester.drag(find.text('Copy link'), const Offset(0, 500));
+      await tester.pumpAndSettle();
+      expect(find.text('Copy link'), findsNothing);
+      tester.semantics.tap(find.semantics.byLabel('support'));
+      await tester.pumpAndSettle();
+      expect(find.text('Copy link'), findsOneWidget);
+      semantics.dispose();
+    });
+
     for (final (platform, label) in [
       (TargetPlatform.iOS, 'report'),
       (TargetPlatform.android, 'report'),
