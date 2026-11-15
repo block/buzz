@@ -110,6 +110,16 @@ pub async fn get_channel_ancestors(
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
+    ancestors_on(&mut connection, community_id, channel_id).await
+}
+
+/// [`get_channel_ancestors`] on `connection`, for a caller inside a
+/// transaction.
+async fn ancestors_on(
+    connection: &mut sqlx::PgConnection,
+    community_id: CommunityId,
+    channel_id: Uuid,
+) -> Result<Vec<Ancestor>> {
     let row = sqlx::query(
         "SELECT p.id AS p_id, p.visibility::text AS p_visibility, p.join_role AS p_join_role, \
                 g.id AS g_id, g.visibility::text AS g_visibility, g.join_role AS g_join_role \
@@ -139,6 +149,32 @@ pub async fn get_channel_ancestors(
         });
     }
     Ok(ancestors)
+}
+
+/// The role `pubkey` holds in `channel_id` through its parents alone, read
+/// inside `tx`: the closest grant over the parents, as if the person had no
+/// row in the channel itself. `None` means the parents grant nothing.
+///
+/// The parents' membership rows are read, not locked: a removal from a
+/// parent that commits while `tx` is open is not seen. A caller that needs
+/// the answer to hold until commit must lock those rows itself.
+pub async fn inherited_role_in_transaction(
+    tx: &mut crate::AdmittedTx,
+    channel_id: Uuid,
+    pubkey: &[u8],
+) -> Result<Option<MemberRole>> {
+    let community_id = tx.community();
+    let ancestors = ancestors_on(tx.conn(), community_id, channel_id).await?;
+    let mut levels = vec![LevelGrant::Nothing];
+    for ancestor in &ancestors {
+        let role = direct_role(tx, ancestor.id, pubkey).await?;
+        let level = LevelGrant::of(role.as_deref(), &ancestor.visibility, &ancestor.join_role);
+        levels.push(level);
+        if level != LevelGrant::Nothing {
+            break;
+        }
+    }
+    Ok(closest_grant(levels))
 }
 
 /// SQL true when `$2`, a pubkey, can read channel alias `c` through its
