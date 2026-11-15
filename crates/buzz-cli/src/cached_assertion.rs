@@ -161,8 +161,9 @@ fn jws_claims(token: &str) -> Option<Claims> {
     })
 }
 
-/// `max(0, floor(exp − iat))`. Both are NumericDates, so either may be
-/// fractional; rounding down never stretches the token.
+/// `max(0, floor(exp − iat))`. `iat` is a NumericDate, so it may be
+/// fractional (`exp` is already an integer here); rounding down never
+/// stretches the token.
 fn lifetime(payload: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
     let exp = payload.get("exp")?.as_f64()?;
     let iat = payload.get("iat")?.as_f64()?;
