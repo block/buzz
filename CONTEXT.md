@@ -8,6 +8,18 @@ Shared terminology for Buzz product behavior. This glossary currently covers mob
 
 A notification directed to a user's mobile installation through the platform's push service.
 
+### Wake signal
+
+The fixed push a [push gateway](#push-gateway) sends to an installation, telling it to fetch new events from its relays. It carries nothing about any event.
+
+_Avoid_: Silent push, content push
+
+### Push gateway
+
+The service that holds one mobile app's platform push credentials (an [internal build](#internal-build), the [public build](#public-build) or a fork's app) and sends [wake signals](#wake-signal) to that app's installations on every platform. See [ADR 0004](docs/adr/0004-push-gateway-hides-device-platform.md).
+
+_Avoid_: Push server, APNs gateway
+
 ### Notification body
 
 The text a [mobile push notification](#mobile-push-notification) shows for a message: the message's text with its Markdown syntax removed, cut only where the platform would cut it. See [ADR 0002](docs/adr/0002-notification-message-text.md).
