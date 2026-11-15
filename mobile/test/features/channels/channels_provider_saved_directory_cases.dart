@@ -165,4 +165,37 @@ void _savedDirectoryCases() {
     await app.open();
     expect(app.reads().last, start + 120 - 60);
   });
+
+  test('a read dated in the future by a clock since set back is due', () async {
+    final app = await _SavedDirectoryHarness.create(
+      _FakeRelaySession(
+        memberships: const [],
+        metadata: [_meta(id: _channelA, name: 'general', createdAt: 100)],
+      ),
+    );
+    // Saved with the clock a year ahead.
+    app.now = DateTime.utc(2027, 1, 1);
+    await app.launch();
+    await app.open();
+    await app.expectSaved(['general']);
+
+    // Set back, the next reader still checks, and the full read is due.
+    app.now = DateTime.utc(2026, 1, 1);
+    await app.open();
+    expect(app.reads(), [null, null]);
+
+    // Saved a year ahead again, a relaunch with the clock set back reads the
+    // whole directory rather than catching up.
+    app.now = DateTime.utc(2027, 1, 1);
+    app.session.metadata = [
+      _meta(id: _channelA, name: 'renamed', createdAt: 200),
+    ];
+    await app.open();
+    expect(app.reads().last, isNull);
+    await app.expectSaved(['renamed']);
+    await app.relaunch();
+    app.now = DateTime.utc(2026, 1, 1);
+    await app.open();
+    expect(app.reads().last, isNull);
+  });
 }

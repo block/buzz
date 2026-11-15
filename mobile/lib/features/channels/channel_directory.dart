@@ -729,6 +729,12 @@ List<NostrEvent> _discoverableChannelEvents(List<NostrEvent> metas) => [
       event,
 ];
 
+/// Whether [elapsed] is less than [interval] and not negative. A negative
+/// elapsed time means the clock was set back since, so the interval counts as
+/// over rather than lasting until the clock catches up.
+bool _isWithin(Duration elapsed, Duration interval) =>
+    !elapsed.isNegative && elapsed < interval;
+
 /// The clock the saved directory's full-read and check intervals use.
 final channelDirectoryClockProvider = Provider<DateTime Function()>(
   (ref) => DateTime.now,
@@ -875,8 +881,9 @@ extension _ChannelsNotifierDirectory on ChannelsNotifier {
     if (inFlight != null) return inFlight;
     final now = _lifecycleRef.read(channelDirectoryClockProvider)();
     final checkedAt = _savedDirectory.checkedAt;
+    // A check dated in the future, by a clock since set back, is due.
     if (checkedAt != null &&
-        now.difference(checkedAt) < savedDirectoryCheckInterval) {
+        _isWithin(now.difference(checkedAt), savedDirectoryCheckInterval)) {
       return Future.value();
     }
     _savedDirectory.checkedAt = now;
@@ -893,10 +900,13 @@ extension _ChannelsNotifierDirectory on ChannelsNotifier {
 
   Future<void> _readSavedDirectoryChanges(DateTime now) async {
     final fullAt = _savedDirectory.fullAt;
+    // A full read dated in the future, by a clock since set back, is due.
     final fullReadDue =
         fullAt == null ||
-        now.millisecondsSinceEpoch ~/ 1000 - fullAt >=
-            savedDirectoryFullReadAge.inSeconds;
+        !_isWithin(
+          Duration(seconds: now.millisecondsSinceEpoch ~/ 1000 - fullAt),
+          savedDirectoryFullReadAge,
+        );
     int? since;
     if (!fullReadDue) {
       final newest = _directoryMetas.fold<int>(
