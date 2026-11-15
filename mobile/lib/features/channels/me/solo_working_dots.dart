@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 
 /// Desktop's three quiet opacity pulses. The containing row owns semantics.
 ///
@@ -9,44 +10,22 @@ import 'package:flutter/material.dart';
 /// animating at display rate. On Home each frame costs the app, backboardd
 /// and the kernel far more than painting the dots does, so the frame rate is
 /// the cost; sharing the clock also keeps rows in phase in the same frames.
-class SoloWorkingDots extends StatefulWidget {
+class SoloWorkingDots extends HookWidget {
   const SoloWorkingDots({super.key, required this.color});
 
   final Color color;
 
   @override
-  State<SoloWorkingDots> createState() => _SoloWorkingDotsState();
-}
-
-class _SoloWorkingDotsState extends State<SoloWorkingDots> {
-  bool _listening = false;
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    final animate =
-        TickerMode.valuesOf(context).enabled &&
-        !MediaQuery.disableAnimationsOf(context);
-    if (animate == _listening) return;
-    _listening = animate;
-    if (animate) {
-      _PulseClock.instance.add(_onStep);
-    } else {
-      _PulseClock.instance.remove(_onStep);
-    }
-  }
-
-  void _onStep() => setState(() {});
-
-  @override
-  void dispose() {
-    if (_listening) _PulseClock.instance.remove(_onStep);
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    final animate = TickerMode.valuesOf(context).enabled && !reducedMotion;
+    final step = useState(_PulseClock.instance.step);
+    useEffect(() {
+      if (!animate) return null;
+      void onStep() => step.value = _PulseClock.instance.step;
+      _PulseClock.instance.add(onStep);
+      return () => _PulseClock.instance.remove(onStep);
+    }, [animate]);
     final phase = _PulseClock.instance.step / _PulseClock.stepsPerCycle;
     return ExcludeSemantics(
       child: RepaintBoundary(
@@ -69,7 +48,7 @@ class _SoloWorkingDotsState extends State<SoloWorkingDots> {
                                 2,
                   child: DecoratedBox(
                     decoration: BoxDecoration(
-                      color: widget.color,
+                      color: color,
                       shape: BoxShape.circle,
                     ),
                     child: const SizedBox.square(dimension: 4),
