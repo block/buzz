@@ -3785,20 +3785,23 @@ mod desktop_throttle_tests {
         let jti = AtomicUsize::new(0);
         let signs = Arc::new(AtomicUsize::new(0));
         let n = signs.clone();
+        let keys = nostr::Keys::generate();
+        let pubkey = keys.public_key().to_hex();
+        let aud = relay.clone();
         let (c, _) = desktop(
             &relay,
-            &nostr::Keys::generate(),
+            &keys,
             move || {
-                use base64::Engine;
-                let token = dp::assertion(600);
-                let (header, _) = token.split_once('.').unwrap();
-                let claims = serde_json::json!({
-                    "exp": crate::cached_assertion::unix_now() + 600,
-                    "jti": jti.fetch_add(1, Ordering::SeqCst),
-                });
-                let claims =
-                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string());
-                let token = format!("{header}.{claims}.c2ln");
+                let now = crate::cached_assertion::unix_now();
+                let token = crate::federated_identity::test_support::jws(serde_json::json!({
+                    "iss": "https://adapter.example",
+                    "sub": "user-1",
+                    "aud": aud,
+                    "iat": now,
+                    "exp": now + 600,
+                    "jti": format!("jti-{}", jti.fetch_add(1, Ordering::SeqCst)),
+                    "nostr_pubkey": pubkey,
+                }));
                 log.lock().unwrap().push(token.clone());
                 token
             },

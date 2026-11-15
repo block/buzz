@@ -970,7 +970,7 @@ pub(crate) mod test_support {
         }))
     }
 
-    fn jws(claims: serde_json::Value) -> String {
+    pub(crate) fn jws(claims: serde_json::Value) -> String {
         let segment = |v: serde_json::Value| URL_SAFE_NO_PAD.encode(v.to_string());
         format!(
             "{}.{}.{}",
