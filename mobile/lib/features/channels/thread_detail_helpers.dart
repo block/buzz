@@ -195,8 +195,10 @@ List<TimelineMessage> _provisionalThreadMessages(
       if (!_isDeletedBy(liveChannelEvents, message.id)) message.id: message,
     for (final message in observed) message.id: message,
   };
+  // Same order as compareThreadRepliesChronologically, so replies don't
+  // move when the query lands.
   return byId.values.toList()..sort((a, b) {
-    final order = a.createdAt.compareTo(b.createdAt);
+    final order = a.createdAtMs.compareTo(b.createdAtMs);
     return order != 0 ? order : a.id.compareTo(b.id);
   });
 }
