@@ -90,8 +90,9 @@ async fn delete_workflow_in_transaction(
         owner_pubkey,
         Some(d_tag.as_bytes()),
     );
-    crate::observability::observe_advisory_lock(
+    crate::observability::observe_event_lock(
         crate::observability::LockType::Replacement,
+        KIND_WORKFLOW_DEF as i32,
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(lock_key)
             .execute(tx.conn()),

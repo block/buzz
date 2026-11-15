@@ -41,6 +41,39 @@ void main() {
     );
   });
 
+  test('reads bot roles from the member list without a second fetch', () async {
+    final relaySession = _MembershipRelaySessionNotifier([
+      _membershipEvent(role: 'bot'),
+    ]);
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => relaySession)],
+    );
+    addTearDown(container.dispose);
+    final members = container.listen(
+      channelMembersProvider(_channelId),
+      (_, _) {},
+      fireImmediately: true,
+    );
+    addTearDown(members.close);
+    final bots = container.listen(
+      channelBotPubkeysProvider(_channelId),
+      (_, _) {},
+      fireImmediately: true,
+    );
+    addTearDown(bots.close);
+
+    expect(await container.read(channelBotPubkeysProvider(_channelId).future), {
+      _agentPubkey,
+    });
+    expect(
+      (await container.read(
+        channelMembersProvider(_channelId).future,
+      )).single.role,
+      'bot',
+    );
+    expect(relaySession.fetchCount, 1);
+  });
+
   test('refreshes channel members from live membership updates', () async {
     final relaySession = _MembershipRelaySessionNotifier([
       _membershipEvent(role: 'bot'),
@@ -305,6 +338,7 @@ class _MembershipRelaySessionNotifier extends RelaySessionNotifier {
   final List<_LiveSubscription> _subscriptions = [];
   final Completer<void> _subscribed = Completer<void>();
   var unsubscribeCount = 0;
+  var fetchCount = 0;
   var _membershipIndex = 0;
 
   _MembershipRelaySessionNotifier(this._memberships, {this.subscribeError});
@@ -319,6 +353,7 @@ class _MembershipRelaySessionNotifier extends RelaySessionNotifier {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
+    fetchCount++;
     return [_memberships[_membershipIndex++]];
   }
 
