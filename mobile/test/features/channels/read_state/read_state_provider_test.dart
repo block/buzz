@@ -320,10 +320,11 @@ class _FakeRelaySession extends RelaySessionNotifier {
   }
 
   @override
-  Future<void Function()> subscribe(
+  Future<void Function()> subscribeWithStatus(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
   }) async {
     subscribeCount++;
     liveSubscriptions++;

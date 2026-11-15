@@ -5,7 +5,6 @@ import 'package:flutter/foundation.dart';
 import '../relay/nostr_models.dart';
 
 const readStateDTagPrefix = 'read-state:';
-const readStateFetchLimit = 500;
 const readStateHorizonSeconds = 30 * 24 * 60 * 60;
 const _maxContexts = 10000;
 const msgContextPrefix = 'msg:';

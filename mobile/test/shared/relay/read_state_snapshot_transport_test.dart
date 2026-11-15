@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:buzz/shared/auth/auth_provider.dart';
+import 'package:fake_async/fake_async.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/relay/read_state_snapshot.dart';
@@ -500,6 +501,96 @@ void main() {
       expect(await session.fetchReadStateSnapshot(), isEmpty);
       expect(created, 2);
       await stalled.close();
+    },
+  );
+
+  test(
+    'a rate-limited snapshot holds the next request until the gate opens',
+    () {
+      fakeAsync((async) {
+        var posts = 0;
+        var limited = true;
+        final session = RelaySessionNotifier(
+          httpClient: MockClient((request) async {
+            if (request.method == 'GET') return http.Response(discovery, 200);
+            posts++;
+            if (limited) {
+              limited = false;
+              return http.Response(
+                jsonEncode({'error': 'rate-limited: slow down, retry in 60s'}),
+                429,
+              );
+            }
+            return http.Response(jsonEncode(envelope()), 200);
+          }),
+        );
+        _container(session, _Config(keys.nsec));
+        async.flushMicrotasks();
+
+        Object? firstError;
+        session.fetchReadStateSnapshot().catchError((Object error) {
+          firstError = error;
+          return <NostrEvent>[];
+        });
+        async.flushMicrotasks();
+        expect(firstError, isA<RelayException>());
+        expect(posts, 1);
+
+        // Decoding runs on another isolate, so only the send time is checked.
+        session.fetchReadStateSnapshot().ignore();
+        async.elapse(const Duration(seconds: 59));
+        expect(posts, 1);
+        async.elapse(const Duration(seconds: 2));
+        expect(posts, 2);
+      });
+    },
+  );
+
+  test(
+    'a snapshot paused by the rate-limit gate signs after the wait',
+    () async {
+      late RelaySessionNotifier session;
+      var gets = 0;
+      var limited = true;
+      int? limitedAt;
+      final postSignedAt = <int>[];
+      session = RelaySessionNotifier(
+        httpClient: MockClient((request) async {
+          if (request.method == 'GET') {
+            // While this snapshot's discovery is in flight, another snapshot's
+            // POST trips the rate-limit gate.
+            if (++gets == 1) {
+              await expectLater(
+                session.fetchReadStateSnapshot(),
+                throwsA(isA<RelayException>()),
+              );
+            }
+            return http.Response(discovery, 200);
+          }
+          if (limited) {
+            limited = false;
+            limitedAt = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+            return http.Response(
+              jsonEncode({'error': 'rate-limited: slow down, retry in 2s'}),
+              429,
+            );
+          }
+          final auth = request.headers['Authorization']!;
+          final event =
+              jsonDecode(utf8.decode(base64.decode(auth.substring(6))))
+                  as Map<String, dynamic>;
+          postSignedAt.add(event['created_at'] as int);
+          return http.Response(jsonEncode(envelope()), 200);
+        }),
+      );
+      _container(session, _Config(keys.nsec));
+      await pumpEventQueue();
+
+      await session.fetchReadStateSnapshot();
+
+      // Signed after the two-second pause, not before it.
+      expect(postSignedAt, hasLength(1));
+      expect(postSignedAt.single, greaterThanOrEqualTo(limitedAt! + 2));
     },
   );
 }
