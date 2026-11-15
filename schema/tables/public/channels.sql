@@ -42,6 +42,9 @@ CREATE TABLE channels (
     -- channel listings for non-members. Matters only while the channel is open.
     unlisted        BOOLEAN NOT NULL DEFAULT FALSE,
     auto_join       BOOLEAN NOT NULL DEFAULT false,
+    -- The channel whose readers can also read this one (migration 0089).
+    -- The relay keeps the tree at most three deep and loop-free on write.
+    parent_id       UUID,
     PRIMARY KEY (community_id, id),
     CONSTRAINT chk_channels_id_not_nil CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid)
 );
@@ -54,6 +57,9 @@ CREATE UNIQUE INDEX idx_channels_dm_hash ON channels (community_id, participant_
 CREATE INDEX idx_channels_community_type ON channels (community_id, channel_type);
 CREATE INDEX idx_channels_community_visibility ON channels (community_id, visibility);
 CREATE INDEX idx_channels_created_by ON channels (community_id, created_by);
+-- Children of a parent, for access checks that walk down the tree.
+CREATE INDEX idx_channels_parent ON channels (community_id, parent_id)
+    WHERE parent_id IS NOT NULL;
 CREATE INDEX idx_channels_ttl_expiry ON channels (ttl_deadline)
     WHERE ttl_seconds IS NOT NULL AND archived_at IS NULL AND deleted_at IS NULL;
 -- Tenant-independent channel-id → community lookups (Db::communities_of_channels,
