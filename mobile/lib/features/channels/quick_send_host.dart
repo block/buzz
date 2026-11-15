@@ -9,7 +9,9 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/me/default_agent.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/relay/relay.dart';
+import '../activity/compose_drafts_provider.dart';
 import 'bestie_conversation.dart';
+import 'channel.dart';
 import 'channel_management_provider.dart';
 import 'send_message_provider.dart';
 
@@ -110,6 +112,9 @@ void _ensureScope(WidgetRef ref, String scope) {
 }
 
 /// Posts [content] in the direct conversation with [bestie].
+///
+/// When the send fails or Buzz can't tell whether it landed, the message is
+/// kept as that DM's composer draft so it isn't lost.
 Future<void> _quickSend(
   WidgetRef ref,
   String content,
@@ -120,10 +125,12 @@ Future<void> _quickSend(
   // Bound to this community: each refuses to act after a switch.
   final actions = ref.read(channelActionsProvider);
   final send = ref.read(sendMessageProvider);
+  final drafts = ref.read(composeDraftsProvider.notifier);
   if (content.isEmpty) throw const _QuickSendRefused('Say a message.');
   if (utf8.encode(content).length > 8192) {
     throw const _QuickSendRefused('That message is too long.');
   }
+  var dm = cachedBestieConversation(ref, bestie);
   // After its background grace period the session has closed the socket.
   // Reopen it for this send, then let the background pause start over.
   final session = ref.read(relaySessionProvider.notifier);
@@ -133,11 +140,27 @@ Future<void> _quickSend(
   };
   if (paused) session.onAppResumed();
   try {
-    await _connected(ref);
+    if (!await _connected(ref)) {
+      if (dm == null) {
+        throw const _QuickSendRefused(
+          "Buzz couldn't reach your community, so your message wasn't saved.",
+        );
+      }
+      _keepDraft(drafts, dm, content);
+      throw const _QuickSendRefused(
+        "Buzz couldn't reach your community. Your message is a draft in "
+        'your Bestie DM.',
+      );
+    }
     _ensureScope(ref, scope);
-    final dm =
-        cachedBestieConversation(ref, bestie) ??
-        await actions.openDm(pubkeys: [bestie], waitForChannelList: false);
+    try {
+      dm ??= await actions.openDm(pubkeys: [bestie], waitForChannelList: false);
+    } on Exception catch (failure) {
+      debugPrint('Quick send lookup failed: $failure');
+      throw const _QuickSendRefused(
+        "Buzz couldn't open your Bestie DM, so your message wasn't saved.",
+      );
+    }
     for (var attempt = 1; ; attempt++) {
       try {
         await send(channelId: dm.id, content: content, channel: dm);
@@ -146,7 +169,17 @@ Future<void> _quickSend(
         // Catching up after a reconnect can use the relay's write quota. The
         // relay turned that message away, so sending again can't duplicate
         // it; any other failure might have landed and isn't retried.
-        if (attempt == 3 || !'$failure'.contains('rate-limited:')) rethrow;
+        final limited = '$failure'.contains('rate-limited:');
+        if (limited && attempt < 3) continue;
+        debugPrint('Quick send failed: $failure');
+        _keepDraft(drafts, dm, content);
+        throw _QuickSendRefused(
+          limited
+              ? "Buzz couldn't send that yet. Your message is a draft in your "
+                    'Bestie DM.'
+              : "Buzz isn't sure that sent. Check your Bestie DM before "
+                    'trying again.',
+        );
       }
     }
   } finally {
@@ -156,9 +189,23 @@ Future<void> _quickSend(
   }
 }
 
+/// Keeps [content] in [dm]'s composer draft, after any text already there.
+void _keepDraft(ComposeDraftsNotifier drafts, Channel dm, String content) {
+  final key = composeDraftKey(dm.id);
+  final before = drafts.draftFor(key);
+  drafts.save(
+    key: key,
+    channelId: dm.id,
+    text: before == null ? content : '${before.text}\n\n$content',
+    mentionKeys: before?.mentionKeys ?? const {},
+  );
+}
+
 /// Waits briefly for the relay session a cold background launch is opening.
-Future<void> _connected(WidgetRef ref) async {
-  if (ref.read(relaySessionProvider).status == SessionStatus.connected) return;
+Future<bool> _connected(WidgetRef ref) async {
+  if (ref.read(relaySessionProvider).status == SessionStatus.connected) {
+    return true;
+  }
   final connected = Completer<void>();
   final subscription = ref.listenManual(
     relaySessionProvider.select((s) => s.status),
@@ -171,8 +218,9 @@ Future<void> _connected(WidgetRef ref) async {
   );
   try {
     await connected.future.timeout(const Duration(seconds: 10));
+    return true;
   } on TimeoutException {
-    throw const _QuickSendRefused("Buzz couldn't reach your community.");
+    return false;
   } finally {
     subscription.close();
   }

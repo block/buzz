@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:buzz/features/activity/compose_drafts_provider.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/quick_send_host.dart';
@@ -44,6 +45,9 @@ class _Relay extends RelaySessionNotifier {
 
   /// Rejects the next message the way an over-quota relay does.
   var rateLimitNextMessage = false;
+
+  /// Loses the next message's answer, so it may or may not have landed.
+  var timeOutNextMessage = false;
   final _stored = <NostrEvent>[];
   static const dmId = 'bestie-dm';
 
@@ -110,6 +114,10 @@ class _Relay extends RelaySessionNotifier {
     if (event.kind == 9 && rateLimitNextMessage) {
       rateLimitNextMessage = false;
       throw Exception('rate-limited: quota exceeded; retry in 0s');
+    }
+    if (event.kind == 9 && timeOutNextMessage) {
+      timeOutNextMessage = false;
+      throw TimeoutException('no OK');
     }
     published.add(event);
     if (event.kind != 41010) return event;
@@ -310,6 +318,15 @@ void main() {
     expect(first.getTagValue('h'), _Relay.dmId);
     expect(first.tags, contains(equals(['p', bestie.public])));
 
+    // A sent message leaves the DM's draft as it was.
+    final drafts = container.read(composeDraftsProvider.notifier);
+    drafts.save(
+      key: _Relay.dmId,
+      channelId: _Relay.dmId,
+      text: 'Half a @Sam',
+      mentionKeys: {'Sam': 'sam-pubkey'},
+    );
+
     // A second quick send goes to the same DM.
     final (_, again) = await siri('send', {
       'text': 'And buy milk',
@@ -323,6 +340,23 @@ void main() {
       'And buy milk',
     ]);
     expect(messages.map((e) => e.getTagValue('h')).toSet(), {_Relay.dmId});
+    expect(drafts.textFor(_Relay.dmId), 'Half a @Sam');
+
+    // When Buzz can't tell whether a send landed, the text stays in the DM's
+    // draft, after the person's own, and Siri says to check before resending.
+    relay.timeOutNextMessage = true;
+    final (_, unsure) = await siri('send', {
+      'text': 'Call back',
+      'bestie': bestie.public,
+      'scope': scope,
+    });
+    expect(
+      unsure?.message,
+      "Buzz isn't sure that sent. Check your Bestie DM before trying again.",
+    );
+    final kept = drafts.draftFor(_Relay.dmId)!;
+    expect(kept.text, 'Half a @Sam\n\nCall back');
+    expect(kept.mentionKeys, {'Sam': 'sam-pubkey'});
 
     // Leaving Home, for example on sign-out, takes the handler with it.
     await tester.pumpWidget(const SizedBox());

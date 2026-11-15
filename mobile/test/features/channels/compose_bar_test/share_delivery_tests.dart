@@ -143,6 +143,28 @@ void shareDeliveryTests() {
     await tester.pumpAndSettle();
     expect(find.byTooltip('Remove attachment'), findsOneWidget);
     expect(find.text('Couldn’t add some of what you shared.'), findsOneWidget);
+
+    // A quick send from Siri that fails keeps its text in the open
+    // composer's draft; the composer shows it rather than overwrite it.
+    if (find.byType(TextField).evaluate().isEmpty) {
+      await tester.tap(find.text('Still here'));
+      await tester.pumpAndSettle();
+    }
+    ProviderScope.containerOf(tester.element(find.byType(ComposeBar)))
+        .read(composeDraftsProvider.notifier)
+        .save(
+          key: 'channel-1',
+          channelId: 'channel-1',
+          text: 'Still here\n\nFrom Siri',
+        );
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller?.text,
+      'Still here\n\nFrom Siri',
+    );
+    await tester.enterText(find.byType(TextField), 'Still here\n\nFrom Siri!');
+    await tester.pumpAndSettle();
+    expect(draftText(), 'Still here\n\nFrom Siri!');
   });
 
   testWidgets('a share to the open conversation joins the composer on screen', (

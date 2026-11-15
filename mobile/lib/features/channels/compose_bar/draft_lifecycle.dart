@@ -182,7 +182,28 @@ void _useComposeDraftLifecycle({
     }
 
     controller.addListener(persistDraft);
-    return () => controller.removeListener(persistDraft);
+    // Another writer, such as a failed quick send from Siri, can save this
+    // draft while the composer is open; show its text rather than overwrite
+    // it with the next keystroke. Own saves match lastPersistedText.
+    final external = ref.listenManual(
+      composeDraftsProvider.select(
+        (drafts) => drafts.where((d) => d.key == draftKey).firstOrNull?.text,
+      ),
+      (_, text) {
+        if (!identical(currentOwner.value, owner)) return;
+        if (text == null ||
+            text == lastPersistedText ||
+            text == controller.text) {
+          return;
+        }
+        lastPersistedText = text;
+        controller.text = text;
+      },
+    );
+    return () {
+      controller.removeListener(persistDraft);
+      external.close();
+    };
   }, [controller, draftKey, draftIdentity, onDraftIdentityChanged]);
   _useComposerShareDelivery(
     context: context,
