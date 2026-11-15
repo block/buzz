@@ -157,6 +157,21 @@ pub(crate) const READABLE_THROUGH_PARENT_SQL: &str = "EXISTS ( \
            OR EXISTS (SELECT 1 FROM channel_members gm WHERE gm.community_id = g.community_id \
                       AND gm.channel_id = g.id AND gm.pubkey = $2 AND gm.removed_at IS NULL)))";
 
+/// Push [`READABLE_THROUGH_PARENT_SQL`] onto `query`, binding `pubkey` for
+/// each `$2`, for a query built with a [`sqlx::QueryBuilder`].
+pub(crate) fn push_readable_through_parent(
+    query: &mut sqlx::QueryBuilder<sqlx::Postgres>,
+    pubkey: &[u8],
+) {
+    let mut parts = READABLE_THROUGH_PARENT_SQL.split("$2").peekable();
+    while let Some(part) = parts.next() {
+        query.push(part);
+        if parts.peek().is_some() {
+            query.push_bind(pubkey.to_vec());
+        }
+    }
+}
+
 /// SQL selecting `id` for every live child and grandchild of the channels in
 /// `roots` (a subquery or CTE name yielding a column `id`), whose type passes
 /// `types` (a predicate on alias `d`). The parent between a grandchild and its

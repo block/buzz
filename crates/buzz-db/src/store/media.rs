@@ -314,8 +314,12 @@ pub(super) fn media_reference_query(
                          SELECT 1 FROM channel_members m WHERE m.community_id=c.community_id AND m.channel_id=c.id \
                          AND m.removed_at IS NULL AND m.pubkey="
             );
+    // A private channel is also readable through its parents.
     query
         .push_bind(pubkey)
+        .push(") OR (c.visibility = 'private' AND ");
+    crate::channel_tree::push_readable_through_parent(&mut query, pubkey);
+    query
         .push(format!(
             ")))) AND (e.kind <> 40003 OR EXISTS (SELECT 1 FROM events original \
                 WHERE original.community_id=e.community_id AND original.channel_id=e.channel_id \

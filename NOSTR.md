@@ -53,11 +53,11 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **Group creation (kind:9007)** | ✅ | NIP-29; include an `h` tag with the new channel id and a `name` tag, optional `visibility`, `channel_type`, label `t` and `unlisted` tags. The relay refuses a 9007 without `h`. It refuses a listed channel (open, not unlisted, stream or forum) whose name another listed channel already has, ignoring case and including archived ones: `invalid: an open channel named "<name>" already exists`. |
 | **Add user (kind:9000)** | ✅ | Open: any user, subject to target's `channel_add_policy` (`owner_only`/`nobody` can block). Private: owner/admin only. Self-add bypasses agent policy but not private-channel auth. A guest cannot add anyone. A new member with no role tag gets the channel's `join_role`; a non-member adding themselves may ask for `join_role` or a lower role. One event may name up to 100 people: one `p` tag each, with an optional role as the `p` tag's third element (NIP-29), falling back to the event's `role` tag. Each person is checked and added on their own. When the event names several people, the OK message is `members: ` followed by JSON listing the non-empty `added`, `updated` (role changed), `already_member` and `rejected` (`[{"reason", "pubkeys"}]`) results. The event is refused only when it is malformed or nobody it names may be added; then one person keeps the single-add error, and several get `invalid: members: {…}`. The event and its membership changes are stored together, so an `error:` rejection stores nothing and the same event can be resent; a resent stored event returns `duplicate:` without results. Re-adding someone at their current role posts no second `member_joined` notice. |
 | **Remove user (kind:9001)** | ✅ | Self-remove allowed (with last-owner guard). Removing others: owner/admin only. |
-| **Edit group metadata (kind:9002)** | ✅ | `name`/`about`/label `t`/`visibility`/`ttl`/`archived`/`join_role`/`unlisted` tags: owner/admin. `topic`/`purpose` tags: any member except a guest. `auto_join` tag: relay owner/admin (see [Default channels](#default-channels)). A relay operator may also send a 9002 that changes only `name` on a listed channel, archived ones included, whatever its channel role, so that duplicate names can be repaired; the channel stays archived. The relay refuses a `name`, `visibility` or `unlisted` change that leaves a listed channel with a name another listed channel already has: `invalid: an open channel named "<name>" already exists`. Buzz applies 9002 as a partial update: an absent tag leaves that setting unchanged. |
+| **Edit group metadata (kind:9002)** | ✅ | `name`/`about`/label `t`/`visibility`/`ttl`/`archived`/`join_role`/`unlisted` tags: owner/admin. `topic`/`purpose` tags: any member except a guest. `auto_join` tag: relay owner/admin (see [Default channels](#default-channels)). `parent` tag: on its own, with its own rule (see [Channel parents](#channel-parents)). A relay operator may also send a 9002 that changes only `name` on a listed channel, archived ones included, whatever its channel role, so that duplicate names can be repaired; the channel stays archived. The relay refuses a `name`, `visibility` or `unlisted` change that leaves a listed channel with a name another listed channel already has: `invalid: an open channel named "<name>" already exists`. Buzz applies 9002 as a partial update: an absent tag leaves that setting unchanged. |
 | **Admin delete event (kind:9005)** | ✅ | Event author can always delete own. Otherwise owner/admin required. Target must be in same channel. |
 | **Group deletion (kind:9008)** | ✅ | Owner only. |
 | **Leave group (kind:9022)** | ✅ | Any member. Last-owner guard prevents orphaned groups. |
-| **Group metadata (kind:39000)** | ✅ | Relay-signed; always `d`, `name`, `t`, `P`, `created_at`, `join_role`; `public` or `private`; `restricted` and `closed` per the access flags below; `unlisted` when the channel is unlisted; `about` only if description non-empty; `hidden` for DM channels and private system channels; `auto_join` while the channel is a default channel |
+| **Group metadata (kind:39000)** | ✅ | Relay-signed; always `d`, `name`, `t`, `P`, `created_at`, `join_role`; `public` or `private`; `restricted` and `closed` per the access flags below; `unlisted` when the channel is unlisted; `about` only if description non-empty; `hidden` for DM channels and private system channels; `auto_join` while the channel is a default channel; `parent` while the channel has a parent |
 | **Unlisted channels** | ✅ | kind:9002 `["unlisted", "true"\|"false"]`, owner/admin, or at creation on kind:9007. An unlisted open channel is left out of every read that does not name it, for non-members: channel lists, kind:39000 without `#d`, messages, COUNT, NIP-50 search and artifact queries. Naming it by `#h` (or `#d` on 39000–39003) reads it, and kind:9021 joins it, as for any open channel. See [Unlisted channels](#unlisted-channels). |
 | **Group admins (kind:39001)** | ✅ | Relay-signed; `d`, channel type `t` and creator `P` tags + `p` tags with roles (`owner`, `admin`) |
 | **Group members (kind:39002)** | ✅ | Relay-signed; `d`, channel type `t` and creator `P` tags + `p` tags for all members |
@@ -191,6 +191,45 @@ and join it, but it does not show up for people who are not members.
   and ignores `unlisted`, so a client must check for it before opening a
   channel as unlisted.
 - Unlisted is not an access control. Anyone with the id can read the channel.
+
+### Channel parents
+
+A stream or forum can sit under one **parent** channel, as a project's
+channels sit under the project. Anyone who can read the parent can read
+the child, without joining it.
+
+- Set it with kind:9002 `["parent", "<channel id>"]` and clear it with
+  `["parent", ""]`. The tag rides alone: a 9002 with `parent` and any other
+  metadata tag is refused. Setting takes a direct owner or admin role in the
+  child and a role that may post in the new parent. Clearing takes a direct
+  owner or admin role in the child or in its current parent.
+- Only streams and forums without a TTL take part, and a channel with a
+  parent or children cannot be given a TTL. A tree is at most three channels
+  deep (channel, parent, grandparent) and has no loops; the relay refuses a
+  change that breaks either. A new parent must not be archived.
+- **Reading.** A private child is readable by its members and by anyone who
+  can read its parent or grandparent: a member of it, or anyone when it is
+  open. Open children are readable by everyone anyway. Every read path
+  follows this: named and implicit REQs, live delivery, COUNT, NIP-50
+  search, artifact queries, kind:39000–39003 and huddles. Children of a
+  listed open parent are in the implicit scope; children of an unlisted open
+  parent are readable only by name, as the parent is.
+- **Writing.** The closest grant wins. Walking channel, parent, grandparent,
+  the first level where the person has a member row, or that is open, gives
+  the role: the row's role, or the open channel's `join_role`. A role that
+  comes from a parent caps at `member`; owner and admin powers come only from
+  a row in the channel itself. So under an announce parent, a non-member of
+  the parent reads the children as a guest.
+- Access through a parent never makes a member row. Membership lists,
+  kind:39002 and agent subscriptions are unchanged; an agent listens only
+  where it is a member.
+- An archived parent still grants access; a deleted one grants nothing.
+- Removal from a parent, a parent change and a visibility change take
+  effect at once, and live subscriptions of people who lost access close
+  with `restricted: channel access revoked`.
+- kind:39000 carries `["parent", "<channel id>"]` while the channel has one.
+- Relays that support it advertise `buzz-channel-parents` in NIP-11
+  `supported_extensions`.
 
 ### Default channels
 

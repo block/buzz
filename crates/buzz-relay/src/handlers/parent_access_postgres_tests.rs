@@ -613,3 +613,60 @@ async fn metadata_names_the_parent_and_a_tree_has_no_ttl() {
     .await
     .is_err());
 }
+
+/// An attachment posted in a private child loads for a project reader and
+/// not for an outsider.
+/// Mutation: drop the parent arm from `media_reference_query` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_project_reader_loads_a_childs_attachments() {
+    let t = Tree::new("parent-media").await;
+    let (state, tenant) = (&t.state, &t.tenant);
+    let hash = "c".repeat(64);
+    let event = EventBuilder::new(Kind::Custom(9), "media")
+        .tags([
+            Tag::parse(["h", &t.child.to_string()]).unwrap(),
+            Tag::parse([
+                "imeta",
+                &format!("url /media/{hash}.bin"),
+                &format!("x {hash}"),
+            ])
+            .unwrap(),
+        ])
+        .sign_with_keys(&t.owner)
+        .unwrap();
+    // Stored directly: the attachment's upload metadata is not under test.
+    state
+        .db
+        .insert_event(tenant.community(), &event, Some(t.child))
+        .await
+        .expect("store attachment");
+    let base = format!("https://{}/media", tenant.host());
+    let access = |keys: &Keys| {
+        let pubkey = keys.public_key().to_bytes();
+        let (state, base, hash) = (state.clone(), base.clone(), hash.clone());
+        async move {
+            state
+                .db
+                .media_access(
+                    tenant.community(),
+                    &hash,
+                    "bin",
+                    &base,
+                    &pubkey,
+                    false,
+                    |_, _| true,
+                )
+                .await
+                .expect("media access")
+        }
+    };
+    assert_eq!(
+        access(&t.reader).await,
+        buzz_db::media::MediaAccess::Allowed
+    );
+    assert_eq!(
+        access(&t.outsider).await,
+        buzz_db::media::MediaAccess::Restricted
+    );
+}

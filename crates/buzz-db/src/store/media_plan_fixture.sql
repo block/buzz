@@ -1,6 +1,6 @@
 CREATE SCHEMA media_access_plan;
 SET LOCAL search_path TO media_access_plan,public;
-CREATE TABLE media_access_plan.channels(community_id uuid,id uuid,deleted_at timestamptz,visibility text);
+CREATE TABLE media_access_plan.channels(community_id uuid,id uuid,deleted_at timestamptz,visibility text,parent_id uuid);
 CREATE TABLE media_access_plan.channel_members(community_id uuid,channel_id uuid,pubkey bytea,removed_at timestamptz);
 CREATE INDEX plan_members ON media_access_plan.channel_members(community_id,channel_id,pubkey);
 CREATE INDEX plan_channels ON media_access_plan.channels(community_id,id);

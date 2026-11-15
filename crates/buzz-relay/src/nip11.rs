@@ -265,6 +265,9 @@ impl RelayInfo {
             // without it ignores the tag beside `visibility`, so a client
             // checks this before opening a channel as unlisted.
             "buzz-unlisted-channels".to_string(),
+            // kind:9002 `parent` (NOSTR.md, Channel parents). An older relay
+            // refuses the tag, and reads a child by membership only.
+            "buzz-channel-parents".to_string(),
         ];
         let gif = gif_provider.map(|provider| {
             supported_extensions.push("buzz-gif".to_string());
@@ -834,6 +837,7 @@ mod tests {
         assert!(extensions.contains(&"nip-cl".to_string()));
         assert!(extensions.contains(&"buzz-search-sort".to_string()));
         assert!(extensions.contains(&"buzz-unlisted-channels".to_string()));
+        assert!(extensions.contains(&"buzz-channel-parents".to_string()));
     }
 
     /// NIP-WP → NIP-11 mirror: a set workspace icon is served in the standard
