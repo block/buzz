@@ -132,4 +132,37 @@ void _savedDirectoryCases() {
     expect(app.unjoined(), isEmpty);
     await app.expectSaved([]);
   });
+
+  test('a catch-up starts no later than the last read started', () async {
+    final app = await _SavedDirectoryHarness.create(
+      _FakeRelaySession(memberships: const []),
+    );
+    final start = app.nowSecs;
+    // A burst of joins has stamped the channel ten minutes ahead.
+    app.session.metadata = [
+      _meta(id: _channelA, name: 'busy', createdAt: start + 600),
+    ];
+    await app.launch();
+    await app.open();
+    expect(app.unjoined(), ['busy']);
+
+    // Two minutes on, a channel created meanwhile carries an earlier stamp
+    // than the newest saved one, and the catch-up still finds it.
+    app.now = app.now.add(const Duration(minutes: 2));
+    app.session.metadata = [
+      ...app.session.metadata,
+      _meta(id: _channelB, name: 'fresh', createdAt: start + 120),
+    ];
+    await app.open();
+    expect(app.reads().last, start - 60);
+    expect(app.unjoined(), ['busy', 'fresh']);
+    await app.expectSaved(['busy', 'fresh']);
+
+    // After a relaunch the saved read time still caps the cursor, now at the
+    // catch-up's start.
+    await app.relaunch();
+    app.now = app.now.add(const Duration(minutes: 1));
+    await app.open();
+    expect(app.reads().last, start + 120 - 60);
+  });
 }

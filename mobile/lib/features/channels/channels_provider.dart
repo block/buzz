@@ -425,8 +425,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // private channels and DMs below so discovery fails closed if that contract
     // ever regresses. The composite cursor preserves tied-timestamp rows.
     if (fetchDirectory) {
-      final metas = await _refreshCoordinator.loadDirectory(session, fence);
-      if (metas != null) _installDirectory(metas, fence.scope, full: true);
+      final read = await _refreshCoordinator.loadDirectory(session, fence);
+      if (read != null) _installFullRead(read, fence.scope);
     }
     final directoryMetas = _directoryMetas;
 

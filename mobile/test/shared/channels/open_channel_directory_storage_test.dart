@@ -39,6 +39,7 @@ void main() {
         SavedOpenChannelDirectory(
           metas: [_meta('a', 10), _meta('b', 20)],
           fullAt: 99,
+          readAt: 98,
         ),
       ),
       isTrue,
@@ -48,6 +49,7 @@ void main() {
     expect(await file.readAsString(), isNot(contains('signature')));
     final saved = await OpenChannelDirectoryStorage(Future.value(file)).read();
     expect(saved!.fullAt, 99);
+    expect(saved.readAt, 98);
     expect(
       saved.metas.map(
         (e) => [e.id, e.pubkey, e.createdAt, e.kind, e.tags, e.content],
@@ -108,7 +110,7 @@ void main() {
       final file = fileFor('community', 'abc');
       final storage = OpenChannelDirectoryStorage(Future.value(file));
       await storage.write(
-        SavedOpenChannelDirectory(metas: [_meta('a', 1)], fullAt: 1),
+        SavedOpenChannelDirectory(metas: [_meta('a', 1)], fullAt: 1, readAt: 1),
       );
 
       final written = await storage.write(
@@ -117,6 +119,7 @@ void main() {
             for (var i = 0; i <= maxSavedDirectoryChannels; i++) _meta('$i', 1),
           ],
           fullAt: 2,
+          readAt: 2,
         ),
       );
 
@@ -129,7 +132,7 @@ void main() {
     final file = fileFor('community', 'abc');
     final storage = OpenChannelDirectoryStorage(Future.value(file));
     final pending = storage.write(
-      SavedOpenChannelDirectory(metas: [_meta('a', 1)], fullAt: 1),
+      SavedOpenChannelDirectory(metas: [_meta('a', 1)], fullAt: 1, readAt: 1),
     );
     storage.close();
 
@@ -146,7 +149,13 @@ void main() {
     Future<void> save(String community, String signer) =>
         OpenChannelDirectoryStorage(
           Future.value(fileFor(community, signer)),
-        ).write(SavedOpenChannelDirectory(metas: [_meta('a', 1)], fullAt: 1));
+        ).write(
+          SavedOpenChannelDirectory(
+            metas: [_meta('a', 1)],
+            fullAt: 1,
+            readAt: 1,
+          ),
+        );
     await save('one', 'current');
     await save('one', 'signed-out');
     await save('two', 'current');

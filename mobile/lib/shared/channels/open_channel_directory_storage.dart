@@ -21,7 +21,11 @@ const maxSavedDirectoryBytes = 16 * 1024 * 1024;
 
 /// One community's saved open-channel directory.
 class SavedOpenChannelDirectory {
-  const SavedOpenChannelDirectory({required this.metas, required this.fullAt});
+  const SavedOpenChannelDirectory({
+    required this.metas,
+    required this.fullAt,
+    required this.readAt,
+  });
 
   /// The latest kind:39000 metadata per channel, without signatures: the
   /// relay signed them, and the copy is only a local cache of what it served.
@@ -29,6 +33,11 @@ class SavedOpenChannelDirectory {
 
   /// When the relay last served the whole directory, in Unix seconds.
   final int fullAt;
+
+  /// When the last read that changed [metas] started, by the device clock, in
+  /// Unix seconds. Catch-ups never start after it: the relay may stamp
+  /// [metas] ahead of when it served them.
+  final int readAt;
 }
 
 /// Saves one community and account's open-channel directory in a file.
@@ -129,10 +138,8 @@ class OpenChannelDirectoryStorage {
   Future<bool> _write(SavedOpenChannelDirectory directory) async {
     final file = await _file;
     if (file == null || _closed) return false;
-    final metas = directory.metas;
-    final fullAt = directory.fullAt;
     // Up to 20,000 channels: encode off the UI isolate.
-    final raw = await Isolate.run(() => _encode(metas, fullAt));
+    final raw = await Isolate.run(() => _encode(directory));
     if (_closed) return false;
     if (raw == null) {
       // An older, smaller copy no longer describes the directory.
@@ -165,13 +172,15 @@ class OpenChannelDirectoryStorage {
   }
 }
 
-/// The file's UTF-8 JSON, or null when [metas] exceed the bounds.
-Uint8List? _encode(List<NostrEvent> metas, int fullAt) {
+/// The file's UTF-8 JSON, or null when [directory] exceeds the bounds.
+Uint8List? _encode(SavedOpenChannelDirectory directory) {
+  final metas = directory.metas;
   if (metas.length > maxSavedDirectoryChannels) return null;
   final bytes = utf8.encode(
     jsonEncode({
       'v': _version,
-      'full_at': fullAt,
+      'full_at': directory.fullAt,
+      'read_at': directory.readAt,
       'metas': [
         for (final event in metas)
           {
@@ -195,6 +204,7 @@ SavedOpenChannelDirectory? _decode(Uint8List raw) {
     if (metas.length > maxSavedDirectoryChannels) return null;
     return SavedOpenChannelDirectory(
       fullAt: json['full_at'] as int,
+      readAt: json['read_at'] as int,
       metas: [
         for (final meta in metas.cast<Map<String, dynamic>>())
           NostrEvent(

@@ -409,6 +409,9 @@ class _ChannelRefreshCoordinator {
   /// Owns the externally observable directory load status.
   final ChannelDirectoryLoadNotifier Function() loadStatus;
 
+  /// The device clock, which dates when each directory read starts.
+  final DateTime Function() clock;
+
   int _generation = 0;
 
   /// Generation of the most recently issued or retired request.
@@ -428,6 +431,7 @@ class _ChannelRefreshCoordinator {
     required this.isMounted,
     required this.currentScope,
     required this.loadStatus,
+    required this.clock,
   });
 
   /// Binds the fence to a notifier's [Ref] so the provider needs one line.
@@ -442,6 +446,7 @@ class _ChannelRefreshCoordinator {
           ref.read(myPubkeyProvider),
         ),
         loadStatus: () => ref.read(channelDirectoryLoadStatusProvider.notifier),
+        clock: () => ref.read(channelDirectoryClockProvider)(),
       );
 
   /// Retires any in-flight request without starting a new one.
@@ -506,12 +511,13 @@ class _ChannelRefreshCoordinator {
   /// keeps showing the saved copy without a spinner; its failure is logged
   /// and retried the next time a reader opens.
   ///
-  /// Returns null when the request failed inside the current scope, which means
+  /// Returns the metadata with when the read started, or null when the
+  /// request failed inside the current scope, which means
   /// "retain the cached discovery", or when a newer directory load started,
   /// which then owns the directory and its status. The fence is re-checked
   /// after the await and before every write, on both the success and the
   /// failure path.
-  Future<List<NostrEvent>?> loadDirectory(
+  Future<_DirectoryRead?> loadDirectory(
     RelaySessionNotifier session,
     _DirectoryLoadFence fence, {
     int? since,
@@ -522,6 +528,7 @@ class _ChannelRefreshCoordinator {
         ? directoryGeneration
         : null;
     if (!quiet) loadStatus().markLoading(fence.scope);
+    final startedAt = clock();
     final List<NostrEvent> metas;
     try {
       metas = await _fetchChannelDirectoryMetas(session, since: since);
@@ -538,9 +545,12 @@ class _ChannelRefreshCoordinator {
     fence.ensureCurrent();
     if (directoryGeneration != _directoryGeneration) return null;
     loadStatus().markLoaded(fence.scope);
-    return metas;
+    return (metas: metas, startedAt: startedAt);
   }
 }
+
+/// A directory read's metadata, and when it started by the device clock.
+typedef _DirectoryRead = ({List<NostrEvent> metas, DateTime startedAt});
 
 Future<List<NostrEvent>> _fetchPaginatedChannelEvents(
   RelaySessionNotifier session, {
@@ -733,6 +743,12 @@ class _SavedDirectory {
   /// When the relay last served the whole directory, in Unix seconds.
   int? fullAt;
 
+  /// When the last read that changed the directory started, by the device
+  /// clock, in Unix seconds. It caps the catch-up cursor: the relay stamps a
+  /// channel's metadata at least one second past its previous revision, so a
+  /// burst of joins or edits can date it minutes ahead of when it was served.
+  int? readAt;
+
   /// When a reader last asked the relay for changes.
   DateTime? checkedAt;
 
@@ -748,6 +764,7 @@ class _SavedDirectory {
   void reset() {
     scope = null;
     fullAt = null;
+    readAt = null;
     checkedAt = null;
     checking = null;
     forgotten.clear();
@@ -761,34 +778,53 @@ class _SavedDirectory {
 /// repository-wide 1200-line file ceiling enforced by `just file-size-check`.
 extension _ChannelsNotifierDirectory on ChannelsNotifier {
   /// Installs the discoverable channels in [served] as this scope's
-  /// directory and saves them. A [full] read replaces the directory and
-  /// restarts its full-read age and check interval.
+  /// directory and saves them. A read started at [readStartedAt] dates
+  /// them; a [full] read replaces the directory and restarts its full-read
+  /// age and check interval.
   void _installDirectory(
     List<NostrEvent> served,
     String scope, {
+    DateTime? readStartedAt,
     bool full = false,
   }) {
     final now = _lifecycleRef.read(channelDirectoryClockProvider)();
     final metas = _directoryMetas = _discoverableChannelEvents(served);
     _savedDirectory.scope = scope;
+    if (readStartedAt != null) {
+      _savedDirectory.readAt = readStartedAt.millisecondsSinceEpoch ~/ 1000;
+    }
     if (full) {
       _savedDirectory
         ..fullAt = now.millisecondsSinceEpoch ~/ 1000
         ..checkedAt = now;
     }
-    final fullAt = _savedDirectory.fullAt;
-    if (fullAt == null) return;
+    final _SavedDirectory(:fullAt, :readAt) = _savedDirectory;
+    if (fullAt == null || readAt == null) return;
     // The scope fence was checked synchronously before this call, so the
     // storage read here belongs to the same community and account.
     _lifecycleRef
         .read(openChannelDirectoryStorageProvider)
-        ?.write(SavedOpenChannelDirectory(metas: metas, fullAt: fullAt))
+        ?.write(
+          SavedOpenChannelDirectory(
+            metas: metas,
+            fullAt: fullAt,
+            readAt: readAt,
+          ),
+        )
         .catchError((Object error) {
           // The copy is a cache: the next change or full read saves it again.
           debugPrint('[ChannelsNotifier] saving the directory failed: $error');
           return false;
         });
   }
+
+  /// Installs a read of the whole directory as this scope's directory.
+  void _installFullRead(_DirectoryRead read, String scope) => _installDirectory(
+    read.metas,
+    scope,
+    readStartedAt: read.startedAt,
+    full: true,
+  );
 
   /// Restores this scope's saved directory into the list, unless the
   /// notifier already holds it. Returns whether a directory is now held.
@@ -808,7 +844,8 @@ extension _ChannelsNotifierDirectory on ChannelsNotifier {
     _directoryMetas = saved.metas;
     _savedDirectory
       ..scope = scope
-      ..fullAt = saved.fullAt;
+      ..fullAt = saved.fullAt
+      ..readAt = saved.readAt;
     _refreshCoordinator.loadStatus().markLoaded(scope);
     _mergeDirectoryIntoList();
     return true;
@@ -866,17 +903,21 @@ extension _ChannelsNotifierDirectory on ChannelsNotifier {
         0,
         (newest, event) => max(newest, event.createdAt),
       );
-      since = max(0, newest - savedDirectoryCatchUpOverlap.inSeconds);
+      // Never later than the last read started: a channel created since
+      // then may carry an earlier stamp than the newest held one.
+      final cursor = min(newest, _savedDirectory.readAt ?? newest);
+      since = max(0, cursor - savedDirectoryCatchUpOverlap.inSeconds);
     }
     final fence = _refreshCoordinator.beginDirectoryOnly();
     try {
-      var metas = await _refreshCoordinator.loadDirectory(
+      final read = await _refreshCoordinator.loadDirectory(
         _lifecycleRef.read(relaySessionProvider.notifier),
         fence,
         since: since,
         quiet: true,
       );
-      if (metas == null) return;
+      if (read == null) return;
+      var metas = read.metas;
       final forgotten = _savedDirectory.forgotten;
       if (forgotten.isNotEmpty) {
         metas = [
@@ -885,7 +926,10 @@ extension _ChannelsNotifierDirectory on ChannelsNotifier {
         ];
       }
       if (since == null) {
-        _installDirectory(metas, fence.scope, full: true);
+        _installFullRead((
+          metas: metas,
+          startedAt: read.startedAt,
+        ), fence.scope);
       } else {
         // The overlap always brings back the newest saved event; a catch-up
         // that leaves the held events as they are changed nothing, so nothing
@@ -897,9 +941,11 @@ extension _ChannelsNotifierDirectory on ChannelsNotifier {
         ]);
         if (merged.length == held.length &&
             merged.every((event) => held.contains(event.id))) {
+          _savedDirectory.readAt =
+              read.startedAt.millisecondsSinceEpoch ~/ 1000;
           return;
         }
-        _installDirectory(merged, fence.scope);
+        _installDirectory(merged, fence.scope, readStartedAt: read.startedAt);
       }
     } on _StaleChannelRefresh {
       return;
@@ -936,12 +982,12 @@ extension _ChannelsNotifierDirectory on ChannelsNotifier {
   ) async {
     final fence = _refreshCoordinator.beginDirectoryOnly();
     try {
-      final metas = await _refreshCoordinator.loadDirectory(
+      final read = await _refreshCoordinator.loadDirectory(
         _lifecycleRef.read(relaySessionProvider.notifier),
         fence,
       );
-      if (metas == null) return null;
-      _installDirectory(metas, fence.scope, full: true);
+      if (read == null) return null;
+      _installFullRead(read, fence.scope);
     } on _StaleChannelRefresh {
       return null;
     }
