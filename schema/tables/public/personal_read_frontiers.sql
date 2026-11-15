@@ -8,7 +8,7 @@ CREATE TABLE personal_read_frontiers (
     -- The message whose arrival is through_timestamp; NULL before 0058.
     through_message_id BYTEA CHECK (octet_length(through_message_id) = 32),
     state TEXT NOT NULL DEFAULT 'default'
-        CHECK (state IN ('default', 'following', 'muted')),
+        CHECK (state IN ('default', 'muted')),
     -- Manual unread; the next mark_through clears it.
     marked_unread BOOLEAN NOT NULL DEFAULT false,
     -- personal_read_accounts.seq at the actor's last write to this row.

@@ -3063,7 +3063,7 @@ mod postgres_tests {
         assert!(activity.contains("ADD COLUMN engaged_at TIMESTAMPTZ"));
         let account_seq_column = "seq bigint not null default 0, ";
         let frontier_columns = "state text not null default 'default' \
-            check (state in ('default', 'following', 'muted')), \
+            check (state in ('default', 'muted')), \
             marked_unread boolean not null default false, \
             seq bigint not null default 0, engaged_at timestamptz, ";
         for (table, definition) in personal.tables {
