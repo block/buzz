@@ -431,7 +431,8 @@ void main() {
       requests.clear();
       tokenFor = (_) => 'push-stop-token';
       expect(await auth.headers(relay, background: true), {
-        'Nostr-Federated-Identity': 'Bearer push-stop-token',
+        'Nostr-Federated-Identity':
+            'Bearer ${testAssertion('push-stop-token')}',
       });
       expect(requests.last.headers['X-BB-Session-Credential'], 'org-secret');
       expect(await auth.headers(relay), isEmpty);
