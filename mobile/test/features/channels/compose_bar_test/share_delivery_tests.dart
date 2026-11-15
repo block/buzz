@@ -52,12 +52,14 @@ void shareDeliveryTests() {
     ).read(composeDraftsProvider.notifier).textFor('channel-1');
 
     String? sent;
+    Completer<void>? sending;
     await tester.pumpWidget(
       _buildComposeBar(
         uploadService: _testUploadService(nostr.Keys.generate().nsec),
         onSend:
             (content, mentions, {mediaTags = const <List<String>>[]}) async {
               sent = content;
+              await sending?.future;
             },
       ),
     );
@@ -150,13 +152,14 @@ void shareDeliveryTests() {
       await tester.tap(find.text('Still here'));
       await tester.pumpAndSettle();
     }
-    ProviderScope.containerOf(tester.element(find.byType(ComposeBar)))
-        .read(composeDraftsProvider.notifier)
-        .save(
-          key: 'channel-1',
-          channelId: 'channel-1',
-          text: 'Still here\n\nFrom Siri',
-        );
+    final drafts = ProviderScope.containerOf(
+      tester.element(find.byType(ComposeBar)),
+    ).read(composeDraftsProvider.notifier);
+    drafts.save(
+      key: 'channel-1',
+      channelId: 'channel-1',
+      text: 'Still here\n\nFrom Siri',
+    );
     await tester.pumpAndSettle();
     expect(
       tester.widget<TextField>(find.byType(TextField)).controller?.text,
@@ -165,6 +168,24 @@ void shareDeliveryTests() {
     await tester.enterText(find.byType(TextField), 'Still here\n\nFrom Siri!');
     await tester.pumpAndSettle();
     expect(draftText(), 'Still here\n\nFrom Siri!');
+
+    // Siri's text arriving while an ordinary send is still out survives that
+    // send failing: the composer doesn't put the sent text back over it.
+    await tester.tap(find.byTooltip('Remove attachment'));
+    await tester.pumpAndSettle();
+    sending = Completer<void>();
+    await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+    await tester.pump();
+    expect(sent, 'Still here\n\nFrom Siri!');
+    drafts.save(key: 'channel-1', channelId: 'channel-1', text: 'Again');
+    await tester.pump();
+    sending.completeError(Exception('offline'));
+    await tester.pumpAndSettle();
+    expect(draftText(), 'Again');
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller?.text,
+      'Again',
+    );
   });
 
   testWidgets('a share to the open conversation joins the composer on screen', (

@@ -48,6 +48,9 @@ class _Relay extends RelaySessionNotifier {
 
   /// Loses the next message's answer, so it may or may not have landed.
   var timeOutNextMessage = false;
+
+  /// Drops the socket just before the next message goes out.
+  var dropBeforeNextMessage = false;
   final _stored = <NostrEvent>[];
   static const dmId = 'bestie-dm';
 
@@ -114,6 +117,10 @@ class _Relay extends RelaySessionNotifier {
     if (event.kind == 9 && rateLimitNextMessage) {
       rateLimitNextMessage = false;
       throw Exception('rate-limited: quota exceeded; retry in 0s');
+    }
+    if (event.kind == 9 && dropBeforeNextMessage) {
+      dropBeforeNextMessage = false;
+      throw StateError('Relay session is not connected');
     }
     if (event.kind == 9 && timeOutNextMessage) {
       timeOutNextMessage = false;
@@ -357,6 +364,16 @@ void main() {
     final kept = drafts.draftFor(_Relay.dmId)!;
     expect(kept.text, 'Half a @Sam\n\nCall back');
     expect(kept.mentionKeys, {'Sam': 'sam-pubkey'});
+
+    // A socket that drops just before the message goes out keeps it too.
+    relay.dropBeforeNextMessage = true;
+    final (_, dropped) = await siri('send', {
+      'text': 'Then Sam',
+      'bestie': bestie.public,
+      'scope': scope,
+    });
+    expect(dropped?.message, contains('Check your Bestie DM'));
+    expect(drafts.textFor(_Relay.dmId), 'Half a @Sam\n\nCall back\n\nThen Sam');
 
     // Leaving Home, for example on sign-out, takes the handler with it.
     await tester.pumpWidget(const SizedBox());

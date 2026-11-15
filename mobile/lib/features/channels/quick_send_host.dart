@@ -146,6 +146,7 @@ Future<void> _quickSend(
           "Buzz couldn't reach your community, so your message wasn't saved.",
         );
       }
+      _ensureScope(ref, scope);
       _keepDraft(drafts, dm, content);
       throw const _QuickSendRefused(
         "Buzz couldn't reach your community. Your message is a draft in "
@@ -155,7 +156,7 @@ Future<void> _quickSend(
     _ensureScope(ref, scope);
     try {
       dm ??= await actions.openDm(pubkeys: [bestie], waitForChannelList: false);
-    } on Exception catch (failure) {
+    } catch (failure) {
       debugPrint('Quick send lookup failed: $failure');
       throw const _QuickSendRefused(
         "Buzz couldn't open your Bestie DM, so your message wasn't saved.",
@@ -165,13 +166,15 @@ Future<void> _quickSend(
       try {
         await send(channelId: dm.id, content: content, channel: dm);
         return;
-      } on Exception catch (failure) {
+      } catch (failure) {
         // Catching up after a reconnect can use the relay's write quota. The
         // relay turned that message away, so sending again can't duplicate
         // it; any other failure might have landed and isn't retried.
         final limited = '$failure'.contains('rate-limited:');
         if (limited && attempt < 3) continue;
         debugPrint('Quick send failed: $failure');
+        // A switch mid-send means this account's drafts are no longer here.
+        _ensureScope(ref, scope);
         _keepDraft(drafts, dm, content);
         throw _QuickSendRefused(
           limited

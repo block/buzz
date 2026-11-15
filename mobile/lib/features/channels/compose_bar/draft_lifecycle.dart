@@ -196,6 +196,8 @@ void _useComposeDraftLifecycle({
             text == controller.text) {
           return;
         }
+        // A newer draft: an ordinary send that fails must not restore over it.
+        draftRevision.value += 1;
         lastPersistedText = text;
         controller.text = text;
       },
