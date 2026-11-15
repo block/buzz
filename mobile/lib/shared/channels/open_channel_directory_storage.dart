@@ -74,7 +74,8 @@ class OpenChannelDirectoryStorage {
       );
 
   /// Deletes every saved directory under [root] except each retained
-  /// community's file for its current signer (community id to signer). A
+  /// community's file for its current signer (community id to signer), and
+  /// the pending copy a save of it may be writing. A
   /// failed delete is retried on the next call. Removed communities lose their
   /// whole directory to [MediaDiskCache.removeOrphans].
   static Future<void> removeOrphans(
@@ -85,7 +86,10 @@ class OpenChannelDirectoryStorage {
     if (!await communities.exists()) return;
     Set<String> keep() => {
       for (final MapEntry(key: id, value: signer) in retained().entries)
-        if (signer != null) fileFor(root, id, signer).path,
+        if (signer != null) ...{
+          fileFor(root, id, signer).path,
+          '${fileFor(root, id, signer).path}.pending',
+        },
     };
     await for (final community in communities.list(followLinks: false)) {
       if (community is! Directory) continue;
