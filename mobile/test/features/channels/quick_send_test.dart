@@ -107,6 +107,7 @@ class _Relay extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
     required void Function(RelaySubscriptionStatus status) onStatusChanged,
+    bool resumeSince = true,
   }) async => () {};
 
   @override
