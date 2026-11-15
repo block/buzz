@@ -33,6 +33,7 @@ mod model;
 mod read;
 mod writer;
 
+pub use fill::Warmed;
 pub use model::*;
 #[cfg(test)]
 pub(crate) use writer::flush;

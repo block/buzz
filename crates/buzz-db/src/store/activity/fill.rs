@@ -31,6 +31,37 @@ const MAX_THREAD_PROBES: i64 = 512;
 const REPAIRS_AT_ONCE: usize = 4;
 const REPAIR_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// Channels and threads [`Db::warm_activity`] reads per step, and how often
+/// it tries a batch that lost a row to a concurrent write.
+const WARM_PAGE: i64 = 1024;
+const WARM_ATTEMPTS: u8 = 4;
+/// The span of history one step of the thread pass covers.
+const WARM_WINDOW_HOURS: i64 = 24;
+
+/// A channel row `h` of channel `c` that is missing, behind the log, or names
+/// a deleted message. "Behind" is one index probe, pruned to the partitions
+/// after `seen_at`: is any stored event newer than the row accounts for?
+const CHANNEL_WANTING: &str = "(h.channel_id IS NULL
+    OR EXISTS (SELECT 1 FROM events n
+        WHERE n.community_id = c.community_id AND n.channel_id = c.id
+            AND n.created_at > COALESCE(h.seen_at, '-infinity')
+            AND n.created_at <= clock_timestamp())
+    OR (h.head_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM events e
+        WHERE e.community_id = h.community_id AND e.created_at = h.head_created_at
+            AND e.id = h.head_id AND e.deleted_at IS NULL)))";
+
+/// What [`Db::warm_activity`] rebuilt.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Warmed {
+    /// Conversation rows rebuilt.
+    pub channels: u64,
+    /// Thread rows rebuilt.
+    pub threads: u64,
+    /// Rows left as they were because their batch kept failing. A read
+    /// rebuilds them, and so does another run.
+    pub skipped: u64,
+}
+
 /// Shared rows a read found wanting.
 #[derive(Debug, Default)]
 pub(super) struct Wanting {
@@ -48,9 +79,6 @@ impl Wanting {
 /// The person's joined channels and listed threads whose shared row is missing,
 /// behind the log, or names a deleted message. `only_*` restrict the check to
 /// named rows.
-///
-/// "Behind" is one index probe per row, pruned to the partitions after
-/// `seen_at`: is any stored event newer than the row accounts for?
 pub(super) async fn wanting(
     conn: &mut PgConnection,
     community: CommunityId,
@@ -59,23 +87,16 @@ pub(super) async fn wanting(
     only_roots: Option<&[Vec<u8>]>,
 ) -> Result<Wanting> {
     let mut wanting = Wanting::default();
-    let rows = sqlx::query(
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"SELECT c.id FROM channel_members cm
             JOIN channels c ON c.community_id = cm.community_id AND c.id = cm.channel_id
             LEFT JOIN channel_heads h ON h.community_id = c.community_id AND h.channel_id = c.id
             WHERE cm.community_id = $1 AND cm.pubkey = $2 AND cm.removed_at IS NULL
                 AND c.deleted_at IS NULL
                 AND ($3::uuid[] IS NULL OR c.id = ANY($3))
-                AND (h.channel_id IS NULL
-                    OR EXISTS (SELECT 1 FROM events n
-                        WHERE n.community_id = c.community_id AND n.channel_id = c.id
-                            AND n.created_at > COALESCE(h.seen_at, '-infinity')
-                            AND n.created_at <= clock_timestamp())
-                    OR (h.head_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM events e
-                        WHERE e.community_id = h.community_id AND e.created_at = h.head_created_at
-                            AND e.id = h.head_id AND e.deleted_at IS NULL)))
-            ORDER BY c.id LIMIT $4"#,
-    )
+                AND {CHANNEL_WANTING}
+            ORDER BY c.id LIMIT $4"#
+    )))
     .bind(community.as_uuid())
     .bind(actor.as_slice())
     .bind(only_channels)
@@ -237,6 +258,143 @@ impl Db {
             tx.commit().await?;
         }
         Ok(true)
+    }
+
+    /// Build the shared rows a first read would otherwise rebuild: every
+    /// conversation's, and that of every thread with a reply within the
+    /// horizon. An operator runs it once, after the relays that keep the rows
+    /// up to date are deployed and before clients read the list.
+    ///
+    /// It only rebuilds rows that are missing or unverified, in the batches a
+    /// read uses, so it is safe to run while the relay serves and to run
+    /// again: a second run continues where a failed one stopped.
+    pub async fn warm_activity(&self, community: CommunityId) -> Result<Warmed> {
+        let mut warmed = Warmed::default();
+        let mut after: Option<Uuid> = None;
+        loop {
+            let channels: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT c.id FROM channels c \
+                 LEFT JOIN channel_heads h ON h.community_id = c.community_id \
+                    AND h.channel_id = c.id \
+                 WHERE c.community_id = $1 AND c.deleted_at IS NULL \
+                    AND ($2::uuid IS NULL OR c.id > $2) AND {CHANNEL_WANTING} \
+                 ORDER BY c.id LIMIT $3"
+            )))
+            .bind(community.as_uuid())
+            .bind(after)
+            .bind(WARM_PAGE)
+            .fetch_all(&self.pool)
+            .await?;
+            let Some(last) = channels.last().copied() else {
+                break;
+            };
+            after = Some(last);
+            let skipped = self.warm(community, &channels, &[]).await?;
+            warmed.channels += channels.len() as u64 - skipped;
+            warmed.skipped += skipped;
+        }
+        // Threads by the time of their replies, one window of history at a
+        // step, so no step reads more than a window of the reply index.
+        let now: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT now()")
+            .fetch_one(&self.pool)
+            .await?;
+        let mut from = now - chrono::Duration::seconds(HORIZON_SECONDS);
+        while from < now {
+            let to = (from + chrono::Duration::hours(WARM_WINDOW_HOURS)).min(now);
+            let mut after: Option<Vec<u8>> = None;
+            loop {
+                let rows = sqlx::query(
+                    "SELECT DISTINCT ON (tm.root_event_id) tm.channel_id, tm.root_event_id \
+                     FROM thread_metadata tm \
+                     LEFT JOIN thread_heads h ON h.community_id = $1 \
+                        AND h.root_id = tm.root_event_id \
+                     WHERE tm.community_id = $1 AND tm.event_created_at >= $2 \
+                        AND tm.event_created_at < $3 AND tm.depth >= 1 \
+                        AND tm.root_event_id IS NOT NULL \
+                        AND ($4::bytea IS NULL OR tm.root_event_id > $4) \
+                        AND (h.root_id IS NULL \
+                            OR EXISTS (SELECT 1 FROM thread_metadata n \
+                                WHERE n.community_id = $1 \
+                                    AND n.root_event_id = tm.root_event_id \
+                                    AND n.event_created_at > COALESCE(h.seen_at, '-infinity') \
+                                    AND n.event_created_at <= clock_timestamp()) \
+                            OR (h.activity_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM events e \
+                                WHERE e.community_id = $1 \
+                                    AND e.created_at = h.activity_created_at \
+                                    AND e.id = h.activity_id AND e.deleted_at IS NULL))) \
+                     ORDER BY tm.root_event_id LIMIT $5",
+                )
+                .bind(community.as_uuid())
+                .bind(from)
+                .bind(to)
+                .bind(after.as_deref())
+                .bind(WARM_PAGE)
+                .fetch_all(&self.pool)
+                .await?;
+                let threads = rows
+                    .iter()
+                    .map(|row| Ok((row.try_get("channel_id")?, row.try_get("root_event_id")?)))
+                    .collect::<Result<Vec<(Uuid, Vec<u8>)>>>()?;
+                let Some((_, last)) = threads.last().cloned() else {
+                    break;
+                };
+                after = Some(last);
+                let skipped = self.warm(community, &[], &threads).await?;
+                warmed.threads += threads.len() as u64 - skipped;
+                warmed.skipped += skipped;
+            }
+            from = to;
+        }
+        Ok(warmed)
+    }
+
+    /// Rebuild rows for [`Db::warm_activity`], a read's batch at a time, and
+    /// return how many were skipped. A batch can lose a row to the background
+    /// writer for a moment, so it is tried again; one that keeps failing is
+    /// counted and left for a read, so it cannot stop the run or a rerun.
+    async fn warm(
+        &self,
+        community: CommunityId,
+        channels: &[Uuid],
+        threads: &[(Uuid, Vec<u8>)],
+    ) -> Result<u64> {
+        let batches = channels
+            .chunks(FILL_BATCH)
+            .map(|batch| Wanting {
+                channels: batch.to_vec(),
+                threads: Vec::new(),
+            })
+            .chain(threads.chunks(FILL_BATCH).map(|batch| Wanting {
+                channels: Vec::new(),
+                threads: batch.to_vec(),
+            }));
+        let mut skipped = 0;
+        for wanting in batches {
+            let mut attempt = 1;
+            loop {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+                match self.rebuild(community, &wanting, deadline).await {
+                    Ok(true) => break,
+                    result if attempt < WARM_ATTEMPTS => {
+                        if let Err(error) = result {
+                            tracing::debug!(%error, attempt, "activity warm batch failed");
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            250 * u64::from(attempt),
+                        ))
+                        .await;
+                        attempt += 1;
+                    }
+                    result => {
+                        let rows = (wanting.channels.len() + wanting.threads.len()) as u64;
+                        tracing::warn!(error = ?result.err(), rows, "activity warm batch skipped");
+                        skipped += rows;
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(skipped)
     }
 
     async fn begin_repair(&self, community: CommunityId) -> Result<crate::AdmittedTx> {
