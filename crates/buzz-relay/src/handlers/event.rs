@@ -287,12 +287,27 @@ async fn check_fanout_access(
             recipients.iter().map(|(.., pubkey)| pubkey.clone()),
         )
         .await;
+    // Recipients who are not members may still read the channel through
+    // its parents. One bulk read per parent, and only when such a recipient
+    // exists, so a channel without a parent costs nothing more.
+    let outsiders: Vec<Vec<u8>> = recipients
+        .iter()
+        .map(|(.., pubkey)| pubkey)
+        .filter(|pubkey| {
+            !members.members.contains(*pubkey) && !members.unverified.contains(*pubkey)
+        })
+        .cloned()
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let inherited =
+        super::parent_access::inherited_readers(state, community_id, channel_id, outsiders).await;
     let mut allowed = Vec::with_capacity(recipients.len());
     let mut unverified = Vec::new();
     for (conn_id, sub_id, pubkey) in recipients {
-        if members.members.contains(&pubkey) {
+        if members.members.contains(&pubkey) || inherited.members.contains(&pubkey) {
             allowed.push((conn_id, sub_id));
-        } else if members.unverified.contains(&pubkey) {
+        } else if members.unverified.contains(&pubkey) || inherited.unverified.contains(&pubkey) {
             unverified.push((conn_id, sub_id));
         }
     }
