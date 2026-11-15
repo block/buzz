@@ -3962,9 +3962,15 @@ class _FakeRelaySession extends RelaySessionNotifier {
       if (ids == null) {
         throw StateError('Directory queries must use the HTTP query bridge');
       }
-      final snapshot = metadata
-          .where((e) => ids.contains(e.getTagValue('d')))
-          .toList();
+      final snapshot = metadata.where((e) {
+        if (!ids.contains(e.getTagValue('d'))) return false;
+        final until = filter.until;
+        final beforeId = filter.extensions['before_id'] as String?;
+        return until == null ||
+            e.createdAt < until ||
+            (e.createdAt == until &&
+                (beforeId == null || e.id.compareTo(beforeId) > 0));
+      }).toList();
       final paused = _pausedMemberMetadata;
       if (paused != null) {
         _claimedMemberMetadata = paused;
