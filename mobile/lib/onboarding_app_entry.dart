@@ -50,8 +50,13 @@ class OnboardingAppEntry extends HookConsumerWidget {
       Future<void> restore() async {
         await flow.initialize();
         if (!context.mounted) return;
-        if (addingCommunity && flow.stage == HostedFlowStage.complete) {
+        if (flow.stage == HostedFlowStage.complete) {
+          // The app-lifetime flow stays complete after an earlier entry; an
+          // entry mounted later starts from idle so it can discover communities.
           await flow.leave();
+          // The completed flow already restored this account. Re-checking it
+          // from the landing could only replace that landing with a failure.
+          if (!addingCommunity && flow.account.account != null) return;
         }
         if (context.mounted) await flow.signInAccount(openBrowser: false);
       }

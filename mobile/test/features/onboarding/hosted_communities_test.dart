@@ -328,6 +328,55 @@ void main() {
     },
     skip: HostedEnvironment.authDomains.isEmpty,
   );
+
+  testWidgets('signed-in landing finds communities after a completed add', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(440, 956));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    FlutterSecureStorage.setMockInitialValues({});
+    PendingDeepLinkNotifier.debugUriStreamOverride = const Stream<Uri>.empty();
+    addTearDown(() => PendingDeepLinkNotifier.debugUriStreamOverride = null);
+    final f = HostedCommunitiesFixture();
+    await f.initialize();
+    addTearDown(f.dispose);
+    f.rows = [f.row('one')];
+    // HostedAppGate initializes the app-lifetime flow at launch, and the flow
+    // keeps its completed stage after the added community opens.
+    await f.flow.initialize();
+    await f.flow.signInAccount();
+    f.flow.chooseLandingCommunity(f.rows.single['community_url'] as String);
+    await f.flow.addSelectedCommunities();
+    expect(f.flow.stage, HostedFlowStage.complete);
+
+    // Later, with no communities left, the signed-in landing mounts again
+    // while the account service is briefly unavailable.
+    f.unavailableAccount = true;
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        disableAnimations: true,
+        overrides: [hostedFlowProvider.overrideWithValue(f.flow)],
+        child: const HostedAppGate(
+          authenticated: false,
+          child: OnboardingAppEntry(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(f.flow.stage, HostedFlowStage.idle);
+    expect(find.text('Signed in as owner@example.com'), findsOneWidget);
+    expect(find.text('Create a community').hitTestable(), findsOneWidget);
+    expect(find.text('Find my communities'), findsOneWidget);
+
+    // Once the service recovers, discovery continues to the picker.
+    f.unavailableAccount = false;
+    await tester.tap(find.text('Find my communities'));
+    await tester.pumpAndSettle();
+    expect(f.flow.stage, HostedFlowStage.chooseCommunities);
+    expect(find.byType(CommunityGridOption), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpAndSettle();
+  }, skip: HostedEnvironment.authDomains.isEmpty);
 }
 
 Future<void> revealOptions(WidgetTester tester) async {
