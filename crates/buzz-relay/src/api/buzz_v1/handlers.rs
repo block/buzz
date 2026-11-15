@@ -20,18 +20,27 @@ use uuid::Uuid;
 #[serde(deny_unknown_fields)]
 pub(super) struct ActivityQuery {
     /// Comma-separated conversation and thread kinds, the whole list when
-    /// absent; or `mention` alone for the mention feed.
+    /// absent.
     kinds: Option<String>,
     /// Cursor of the next older page.
     before: Option<String>,
     /// Marker of an earlier read: only what changed.
     since: Option<String>,
     limit: Option<usize>,
-    /// Mention feed only: just the mentions not yet read.
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct MentionsQuery {
+    /// Cursor of the next older page.
+    before: Option<String>,
+    limit: Option<usize>,
+    /// Only the mentions not yet read.
     unread: Option<bool>,
 }
 
-/// Unique kinds in wire order; `None` when a name is unknown or repeated.
+/// Unique kinds in wire order; `None` when a name is unknown, repeated, or
+/// not a kind of the list.
 fn parse_kinds(value: Option<&str>) -> Option<Vec<RowKind>> {
     let Some(value) = value else {
         return Some(RowKind::LIST.to_vec());
@@ -40,7 +49,8 @@ fn parse_kinds(value: Option<&str>) -> Option<Vec<RowKind>> {
         .split(',')
         .map(RowKind::parse)
         .collect::<Option<BTreeSet<_>>>()?;
-    (kinds.len() == value.split(',').count()).then(|| kinds.into_iter().collect())
+    (kinds.len() == value.split(',').count() && !kinds.contains(&RowKind::Mention))
+        .then(|| kinds.into_iter().collect())
 }
 
 fn event_id(value: &str) -> Option<[u8; 32]> {
@@ -80,48 +90,48 @@ fn decode_cursor(value: &str, filter: &str) -> Option<Cursor> {
         .then_some(cursor)
 }
 
+fn parse_page(before: Option<String>, limit: Option<usize>, filter: &str) -> Option<Paging> {
+    let before = match before {
+        Some(before) => Some(decode_cursor(&before, filter)?),
+        None => None,
+    };
+    let limit = limit.map_or(Some(DEFAULT_LIMIT), |limit| {
+        (1..=MAX_LIMIT).contains(&limit).then_some(limit)
+    })?;
+    Some((before, limit))
+}
+
+type Paging = (Option<Cursor>, usize);
+
 fn parse_query(query: ActivityQuery) -> Option<(activity::Query, String)> {
     let kinds = parse_kinds(query.kinds.as_deref())?;
-    // Mentions are a feed of their own: never mixed with the list's kinds.
-    let mentions = kinds == [RowKind::Mention];
-    if kinds.contains(&RowKind::Mention) != mentions || (query.unread.is_some() && !mentions) {
-        return None;
-    }
-    let unread = query.unread.unwrap_or(false);
-    // An unread feed and a full one are different listings.
-    let filter = format!("{}{}", filter_tag(&kinds), if unread { "u" } else { "" });
-    let page = |before: Option<String>| {
-        let before = match before {
-            Some(before) => Some(decode_cursor(&before, &filter)?),
-            None => None,
-        };
-        let limit = query.limit.map_or(Some(DEFAULT_LIMIT), |limit| {
-            (1..=MAX_LIMIT).contains(&limit).then_some(limit)
-        })?;
-        Some((before, limit))
-    };
+    let filter = filter_tag(&kinds);
     let select = match (query.since, query.before) {
-        (Some(since), None) if query.limit.is_none() && !mentions => {
-            Select::Since(Marker::parse(&since)?)
-        }
-        (None, before) if mentions => {
-            let (before, limit) = page(before)?;
-            // A mention's cursor names an event.
-            if before.as_ref().is_some_and(|c| event_id(&c.id).is_none()) {
-                return None;
-            }
-            Select::Mentions {
-                before,
-                limit,
-                unread,
-            }
-        }
+        (Some(since), None) if query.limit.is_none() => Select::Since(Marker::parse(&since)?),
         (None, before) => {
-            let (before, limit) = page(before)?;
+            let (before, limit) = parse_page(before, query.limit, &filter)?;
             Select::Page { before, limit }
         }
         _ => return None,
     };
+    Some((activity::Query { kinds, select }, filter))
+}
+
+fn parse_mentions(query: MentionsQuery) -> Option<(activity::Query, &'static str)> {
+    let unread = query.unread.unwrap_or(false);
+    // An unread feed and a full one are different listings.
+    let filter = if unread { "mu" } else { "m" };
+    let (before, limit) = parse_page(query.before, query.limit, filter)?;
+    // A mention's cursor names an event.
+    if before.as_ref().is_some_and(|c| event_id(&c.id).is_none()) {
+        return None;
+    }
+    let select = Select::Mentions {
+        before,
+        limit,
+        unread,
+    };
+    let kinds = vec![RowKind::Mention];
     Some((activity::Query { kinds, select }, filter))
 }
 
@@ -169,6 +179,30 @@ pub(super) async fn activity(
         let page = read(&state, &headers, &principal, &query).await?;
         let since = matches!(query.select, Select::Since(_));
         auth::response(body(page, &filter, since))
+    })
+    .await
+    .map_err(|_| Error::unavailable())?
+}
+
+/// `GET /me/mentions`: the person's mentions, newest first.
+pub(super) async fn mentions(
+    State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+    query: Result<Query<MentionsQuery>, axum::extract::rejection::QueryRejection>,
+) -> Result<Response, Error> {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        let principal = auth::authorize(&state, &slot, &headers, &uri, "GET", None).await?;
+        let Query(query) = query.map_err(|_| Error::invalid())?;
+        let (query, filter) = parse_mentions(query).ok_or_else(Error::invalid)?;
+        let page = read(&state, &headers, &principal, &query).await?;
+        let mut body = body(page, filter, false);
+        // The feed has only rows and where they continue.
+        if let Some(fields) = body.as_object_mut() {
+            fields.retain(|name, _| name == "rows" || name == "next");
+        }
+        auth::response(body)
     })
     .await
     .map_err(|_| Error::unavailable())?
@@ -352,7 +386,14 @@ mod tests {
             before,
             since: None,
             limit: None,
-            unread: None,
+        }
+    }
+
+    fn feed(before: Option<String>, unread: bool) -> MentionsQuery {
+        MentionsQuery {
+            before,
+            limit: None,
+            unread: unread.then_some(true),
         }
     }
 
@@ -372,37 +413,32 @@ mod tests {
         ));
         assert!(parse_query(query(Some("thread"), Some(wire.clone()))).is_none());
         assert!(parse_query(query(None, Some(wire.clone()))).is_none());
-        assert!(parse_query(query(Some("mention"), Some(wire))).is_none());
+        assert!(parse_mentions(feed(Some(wire), false)).is_none());
     }
 
     #[test]
     fn mentions_are_a_feed_of_their_own() {
-        let parse = |kinds: Option<&str>, edit: fn(&mut ActivityQuery)| {
-            let mut q = query(kinds, None);
-            edit(&mut q);
-            parse_query(q)
-        };
-        // The list is conversations and threads; a mention is never mixed in.
-        let (list, _) = parse(None, |_| {}).unwrap();
+        // The list is conversations and threads; a mention is not one of its kinds.
+        let (list, _) = parse_query(query(None, None)).unwrap();
         assert_eq!(list.kinds, RowKind::LIST);
-        assert!(parse(Some("thread,mention"), |_| {}).is_none());
-        assert!(parse(Some("channel"), |q| q.unread = Some(true)).is_none());
-        assert!(parse(Some("mention"), |q| {
-            q.since = Some("3.1700000000000000".into())
-        })
-        .is_none());
+        assert!(parse_query(query(Some("mention"), None)).is_none());
+        assert!(parse_query(query(Some("thread,mention"), None)).is_none());
 
-        let (feed, all) = parse(Some("mention"), |q| q.limit = Some(50)).unwrap();
+        let (page, all) = parse_mentions(MentionsQuery {
+            limit: Some(50),
+            ..feed(None, false)
+        })
+        .unwrap();
         assert!(matches!(
-            feed.select,
+            page.select,
             Select::Mentions {
                 before: None,
                 limit: 50,
                 unread: false
             }
         ));
-        let (feed, unread) = parse(Some("mention"), |q| q.unread = Some(true)).unwrap();
-        assert!(matches!(feed.select, Select::Mentions { unread: true, .. }));
+        let (page, unread) = parse_mentions(feed(None, true)).unwrap();
+        assert!(matches!(page.select, Select::Mentions { unread: true, .. }));
         // A cursor of the full feed does not continue the unread one, and a
         // mention's cursor names an event.
         let cursor = Cursor {
@@ -410,19 +446,14 @@ mod tests {
             rank: 2,
             id: "ab".repeat(32),
         };
-        let wire = encode_cursor(&cursor, &all);
-        let mut q = query(Some("mention"), Some(wire.clone()));
-        assert!(parse_query(q).is_some());
-        q = query(Some("mention"), Some(wire));
-        q.unread = Some(true);
-        assert!(parse_query(q).is_none());
+        let wire = encode_cursor(&cursor, all);
+        assert!(parse_mentions(feed(Some(wire.clone()), false)).is_some());
+        assert!(parse_mentions(feed(Some(wire), true)).is_none());
         let channel = Cursor {
             id: Uuid::nil().to_string(),
             ..cursor
         };
-        let mut q = query(Some("mention"), Some(encode_cursor(&channel, &unread)));
-        q.unread = Some(true);
-        assert!(parse_query(q).is_none());
+        assert!(parse_mentions(feed(Some(encode_cursor(&channel, unread)), true)).is_none());
     }
 
     #[test]
