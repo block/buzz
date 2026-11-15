@@ -15,6 +15,7 @@ import 'shared/community/paired_community_landing.dart';
 import 'shared/community/community_loading_surface.dart';
 
 import 'package:app_badge_plus/app_badge_plus.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
@@ -451,6 +452,9 @@ class App extends HookConsumerWidget {
                 newChatAction: chat,
                 newWorkspaceAction: workspace,
               ),
+              backgroundHost: defaultTargetPlatform == TargetPlatform.iOS
+                  ? const QuickSendHost()
+                  : null,
               settingsPageBuilder: _buildSettingsPage,
               communityInvitePageBuilder: (_) => const CommunityInvitePage(),
               communityAppearancePageBuilder: (_) => const ThemePickerPage(),

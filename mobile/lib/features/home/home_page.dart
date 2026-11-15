@@ -25,7 +25,6 @@ import '../../shared/widgets/mobile_tab_footer_backdrop.dart';
 import '../activity/activity_page.dart';
 import '../activity/inbox_unread_provider.dart';
 import '../channels/channels_page.dart';
-import '../channels/me/me_page.dart';
 import '../search/search_page.dart';
 import 'home_screen_shortcut_host.dart';
 import 'messages_filters.dart';
@@ -40,6 +39,7 @@ class HomePage extends HookConsumerWidget {
     required this.openBestieConversation,
     this.communityInvitePageBuilder,
     this.mePageBuilder,
+    this.backgroundHost,
     this.communityAppearancePageBuilder,
     super.key,
   });
@@ -59,6 +59,9 @@ class HomePage extends HookConsumerWidget {
     ValueNotifier<VoidCallback?>,
   )?
   mePageBuilder;
+
+  /// An invisible widget that serves background work while Home is up.
+  final Widget? backgroundHost;
   final WidgetBuilder? communityInvitePageBuilder;
   final WidgetBuilder? communityAppearancePageBuilder;
 
@@ -394,8 +397,7 @@ class HomePage extends HookConsumerWidget {
                   openBestieConversation: openBestieConversation,
                 ),
               ),
-            if (defaultTargetPlatform == TargetPlatform.iOS)
-              const QuickSendHost(),
+            ?backgroundHost,
             MediaQueryOverride(
               transform: (media) => media.copyWith(
                 padding: media.padding.copyWith(

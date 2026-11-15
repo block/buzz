@@ -54,30 +54,49 @@ final class QuickSendBridge {
     }
   }
 
-  /// Sends [text] to the Bestie, or throws a message Siri can read.
+  /// Sends [text] to the Bestie once [confirm] accepts its name, or throws a
+  /// message Siri can read.
   @MainActor
-  func send(_ text: String, deadline: Duration = .seconds(20)) async throws {
+  func send(
+    _ text: String,
+    deadline: Duration = .seconds(20),
+    confirm: (_ bestieName: String?) async throws -> Void
+  ) async throws {
     // One at a time: each send starts its own Solo chat creation in Dart.
     guard !sending else { throw QuickSendError("Another message is still sending.") }
     sending = true
     defer { sending = false }
-    let start = ContinuousClock.now
-    guard await waitUntilReady(deadline), let channel else {
+    guard await waitUntilReady(deadline) else {
       throw QuickSendError("Open Buzz, then try again.")
     }
-    let failure: String? = await withCheckedContinuation { continuation in
-      channel.invokeMethod("send", arguments: text) { reply in
-        if let error = reply as? FlutterError {
-          continuation.resume(returning: error.message ?? "Buzz couldn't send that.")
-        } else if reply as? NSObject === FlutterMethodNotImplemented {
-          continuation.resume(returning: "Buzz isn't ready to send yet.")
-        } else {
-          continuation.resume(returning: nil)
-        }
-      }
+    let bestie = try await call("bestie") as? [String: Any]
+    guard let pubkey = bestie?["pubkey"] as? String else {
+      throw QuickSendError("Buzz couldn't find your Bestie.")
     }
-    Self.log.notice("send finished after \(ContinuousClock.now - start, privacy: .public), failed=\(failure != nil, privacy: .public)")
-    if let failure { throw QuickSendError(failure) }
+    try await confirm(bestie?["name"] as? String)
+    let start = ContinuousClock.now
+    do {
+      _ = try await call("send", arguments: ["text": text, "bestie": pubkey])
+      Self.log.notice("send finished after \(ContinuousClock.now - start, privacy: .public)")
+    } catch {
+      Self.log.notice("send failed after \(ContinuousClock.now - start, privacy: .public)")
+      throw error
+    }
+  }
+
+  @MainActor
+  private func call(_ method: String, arguments: Any? = nil) async throws -> Any? {
+    guard ready, let channel else { throw QuickSendError("Open Buzz, then try again.") }
+    let reply: Any? = await withCheckedContinuation { continuation in
+      channel.invokeMethod(method, arguments: arguments) { continuation.resume(returning: $0) }
+    }
+    if let error = reply as? FlutterError {
+      throw QuickSendError(error.message ?? "Buzz couldn't send that.")
+    }
+    if reply as? NSObject === FlutterMethodNotImplemented {
+      throw QuickSendError("Buzz isn't ready to send yet.")
+    }
+    return reply
   }
 }
 
@@ -100,11 +119,12 @@ struct MessageBestieIntent: AppIntent {
   func perform() async throws -> some IntentResult & ProvidesDialog {
     let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !text.isEmpty else { throw QuickSendError("Say a message to send.") }
-    try await requestConfirmation(
-      result: .result(dialog: "Send “\(text)” to your Bestie?"),
-      confirmationActionName: .send
-    )
-    try await QuickSendBridge.shared.send(text)
+    try await QuickSendBridge.shared.send(text) { name in
+      try await requestConfirmation(
+        result: .result(dialog: "Send “\(text)” to \(name ?? "your Bestie")?"),
+        confirmationActionName: .send
+      )
+    }
     return .result(dialog: "Sent.")
   }
 }

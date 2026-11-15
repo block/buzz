@@ -84,6 +84,7 @@ class _Relay extends RelaySessionNotifier {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
+    if (filter.kinds.contains(0)) return [profile];
     final ds = filter.tags['#d'];
     return _stored.reversed
         .where(
@@ -213,16 +214,20 @@ void main() {
     await tester.pumpAndSettle();
     expect(platformCalls, ['ready'], reason: 'Siri can send once Home is up');
 
-    // The platform calls `send`; it gets the reply Siri will show.
-    Future<PlatformException?> siriSends(Object? text) async {
+    // Siri calls the host the way QuickSend.swift does and gets its reply.
+    Future<(Object?, PlatformException?)> siri(
+      String method, [
+      Object? arguments,
+    ]) async {
+      Object? result;
       PlatformException? failure;
       var replied = false;
       tester.binding.defaultBinaryMessenger.handlePlatformMessage(
         channel.name,
-        channel.codec.encodeMethodCall(MethodCall('send', text)),
+        channel.codec.encodeMethodCall(MethodCall(method, arguments)),
         (reply) {
           try {
-            channel.codec.decodeEnvelope(reply!);
+            result = channel.codec.decodeEnvelope(reply!);
           } on PlatformException catch (e) {
             failure = e;
           }
@@ -236,8 +241,8 @@ void main() {
           () => Future<void>.delayed(const Duration(milliseconds: 50)),
         );
       }
-      expect(replied, isTrue, reason: 'The send never answered');
-      return failure;
+      expect(replied, isTrue, reason: '$method never answered');
+      return (result, failure);
     }
 
     final container = ProviderScope.containerOf(
@@ -247,17 +252,24 @@ void main() {
     relay.connect();
     await tester.pump();
 
-    final noBestie = await siriSends('Remind me to call Sam');
+    final (_, noBestie) = await siri('bestie');
     expect(noBestie?.code, 'failed');
     expect(noBestie?.message, 'Choose a Bestie in Buzz first.');
-    expect(relay.published, isEmpty);
-
-    final blank = await siriSends('  \n ');
-    expect(blank?.code, 'empty');
-    expect(relay.published, isEmpty);
 
     chosenBestie = bestie.public;
     container.invalidate(defaultAgentProvider);
+    await tester.pump();
+    final (named, _) = await siri('bestie');
+    expect(named, {'pubkey': bestie.public, 'name': 'Bestie'});
+
+    final (_, blank) = await siri('send', {
+      'text': '  \n ',
+      'bestie': bestie.public,
+    });
+    expect(blank?.code, 'failed');
+    expect(blank?.message, 'Say a message.');
+    expect(relay.published, isEmpty);
+
     // Buzz sat in the background long enough for its socket to close.
     (container.read(appLifecycleProvider.notifier) as _Lifecycle).background();
     relay.state = const SessionState(status: SessionStatus.disconnected);
@@ -265,7 +277,11 @@ void main() {
     // Its catch-up used the write quota, so the first try is turned away.
     relay.rateLimitNextMessage = true;
     await tester.pumpAndSettle();
-    expect(await siriSends('  Remind me to call Sam  '), isNull);
+    final (_, failure) = await siri('send', {
+      'text': '  Remind me to call Sam  ',
+      'bestie': bestie.public,
+    });
+    expect(failure, isNull);
     expect(
       relay.pauses,
       pausesBefore + 1,

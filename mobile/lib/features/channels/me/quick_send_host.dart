@@ -22,15 +22,17 @@ class QuickSendHost extends HookConsumerWidget {
     ref.watch(defaultAgentProvider);
     useEffect(() {
       _quickSendChannel.setMethodCallHandler((call) async {
-        if (call.method != 'send') throw MissingPluginException();
-        final text = call.arguments;
-        if (text is! String || text.trim().isEmpty) {
-          throw PlatformException(code: 'empty', message: 'Say a message.');
-        }
         try {
-          await _quickSendToBestie(ref, text.trim());
+          return switch ((call.method, call.arguments)) {
+            ('bestie', _) => await _bestie(ref),
+            ('send', {'text': final String text, 'bestie': final String to}) =>
+              await _quickSend(ref, text.trim(), to),
+            _ => throw MissingPluginException(),
+          };
         } on _QuickSendRefused catch (failure) {
           throw PlatformException(code: 'failed', message: failure.message);
+        } on MissingPluginException {
+          rethrow;
         } catch (failure) {
           debugPrint('Quick send failed: $failure');
           throw PlatformException(
@@ -49,8 +51,28 @@ class QuickSendHost extends HookConsumerWidget {
   }
 }
 
-/// Starts a new Solo chat with the Bestie whose first message is [content].
-Future<void> _quickSendToBestie(WidgetRef ref, String content) async {
+/// The Bestie a quick send will go to, named so the person can confirm it.
+///
+/// This is the saved choice, which may predate a change made on another
+/// device that this one hasn't synced; naming it lets the person catch that.
+Future<Map<String, String?>> _bestie(WidgetRef ref) async {
+  final bestie = await ref
+      .read(defaultAgentProvider.future)
+      .timeout(const Duration(seconds: 10));
+  if (bestie == null) throw _QuickSendRefused('Choose a Bestie in Buzz first.');
+  if (ref.read(userCacheProvider)[bestie] == null) {
+    // Briefly: Siri can say "your Bestie" rather than keep the person waiting.
+    await ref
+        .read(userCacheProvider.notifier)
+        .preload([bestie])
+        .timeout(const Duration(seconds: 2), onTimeout: () => false);
+  }
+  return {'pubkey': bestie, 'name': ref.read(userCacheProvider)[bestie]?.label};
+}
+
+/// Starts a new Solo chat with [bestie] whose first message is [content].
+Future<void> _quickSend(WidgetRef ref, String content, String bestie) async {
+  if (content.isEmpty) throw _QuickSendRefused('Say a message.');
   if (utf8.encode(content).length > 8192) {
     throw _QuickSendRefused('That message is too long.');
   }
@@ -63,7 +85,7 @@ Future<void> _quickSendToBestie(WidgetRef ref, String content) async {
   };
   if (paused) session.onAppResumed();
   try {
-    await _sendToBestie(ref, content);
+    await _sendToBestie(ref, content, bestie);
   } finally {
     if (paused && ref.read(appLifecycleProvider) != AppLifecycleState.resumed) {
       session.onAppPaused();
@@ -71,16 +93,12 @@ Future<void> _quickSendToBestie(WidgetRef ref, String content) async {
   }
 }
 
-Future<void> _sendToBestie(WidgetRef ref, String content) async {
+Future<void> _sendToBestie(WidgetRef ref, String content, String bestie) async {
   await _connected(ref);
   final sync = ref.read(meSyncProvider);
   if (MeChatCreation.pending(sync) != null) {
     throw _QuickSendRefused('Open Buzz to finish a chat that was interrupted.');
   }
-  final bestie = await ref
-      .read(defaultAgentProvider.future)
-      .timeout(const Duration(seconds: 10));
-  if (bestie == null) throw _QuickSendRefused('Choose a Bestie in Buzz first.');
   final channelId = const Uuid().v4();
   for (var attempt = 1; ; attempt++) {
     try {
