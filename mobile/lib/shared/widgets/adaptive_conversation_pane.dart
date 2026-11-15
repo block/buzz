@@ -192,10 +192,12 @@ class AdaptiveConversationPane extends HookConsumerWidget {
         }
       };
     }, [ownerRoute, navigator]);
-    // The newest detail route, from its mount until its content unmounts.
+    // Each detail route from its mount until its content unmounts.
     // Not disposed with the pane: a detail unmounting with the pane reports
     // after the frame, once the pane is gone.
-    final detailRoute = useMemoized(() => ValueNotifier<_DetailRoute?>(null));
+    final detailRoute = useMemoized(
+      () => ValueNotifier(const _DetailRoutes([], covers: false)),
+    );
     return ConversationPaneScope(
       controller: controller,
       active: active && (ModalRoute.isCurrentOf(context) ?? true),
@@ -254,10 +256,7 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                       child: ValueListenableBuilder(
                         valueListenable: detailRoute,
                         builder: (context, detail, list) => Offstage(
-                          offstage:
-                              !wide &&
-                              selected != null &&
-                              (detail?.covers ?? false),
+                          offstage: !wide && selected != null && detail.covers,
                           child: list,
                         ),
                         child: _CoveredList(
@@ -294,12 +293,14 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                       width: detailWidth,
                       child: ValueListenableBuilder(
                         valueListenable: detailRoute,
-                        builder: (context, route, detail) {
-                          // A pop clears the selection as it starts. The
-                          // closing route keeps the detail painted and
-                          // ticking until its reverse transition ends.
+                        builder: (context, routes, detail) {
+                          // A pop clears the selection as it starts. Closing
+                          // routes keep the detail painted and ticking until
+                          // their reverse transitions end.
                           final shown =
-                              wide || selected != null || route != null;
+                              wide ||
+                              selected != null ||
+                              routes.alive.isNotEmpty;
                           return Offstage(
                             offstage: !shown,
                             child: TickerMode(enabled: shown, child: detail!),
@@ -487,14 +488,16 @@ class MediaQueryOverride extends StatelessWidget {
       MediaQuery(data: transform(MediaQuery.of(context)), child: child);
 }
 
-/// The pane's newest detail route, and whether it fully covers the list.
-class _DetailRoute {
-  const _DetailRoute(this.route, {required this.covers});
+/// The pane's mounted detail routes, and whether the newest fully covers the
+/// list.
+class _DetailRoutes {
+  const _DetailRoutes(this.alive, {required this.covers});
 
-  final Route<Object?> route;
+  /// Oldest first. A detail reopened over a closing one can unmount first.
+  final List<Route<Object?>> alive;
 
-  /// False while the route pushes, pops or follows a back swipe, so the
-  /// compact list stays painted beneath it.
+  /// False while the newest route pushes, pops or follows a back swipe, so
+  /// the compact list stays painted beneath it.
   final bool covers;
 }
 
@@ -503,7 +506,7 @@ class _DetailRoute {
 class _CoveringDetail extends HookWidget {
   const _CoveringDetail({required this.tracker, required this.builder});
 
-  final ValueNotifier<_DetailRoute?> tracker;
+  final ValueNotifier<_DetailRoutes> tracker;
   final WidgetBuilder builder;
 
   @override
@@ -514,15 +517,19 @@ class _CoveringDetail extends HookWidget {
       if (route == null) return null;
       var unmounted = false;
       void sync() {
-        // A detail reopened over this closing one owns the tracker.
-        if (unmounted || (!route.isCurrent && tracker.value?.route != route)) {
+        final alive = tracker.value.alive;
+        // A detail reopened over this closing one owns covering.
+        if (unmounted || (!route.isCurrent && alive.lastOrNull != route)) {
           return;
         }
         final settled =
             route.animation?.status != AnimationStatus.forward &&
             route.animation?.status != AnimationStatus.reverse &&
             !navigator.userGestureInProgress;
-        tracker.value = _DetailRoute(route, covers: settled && route.isCurrent);
+        tracker.value = _DetailRoutes([
+          ...alive.where((r) => r != route),
+          route,
+        ], covers: settled && route.isCurrent);
       }
 
       void syncStatus(AnimationStatus _) => sync();
@@ -537,7 +544,12 @@ class _CoveringDetail extends HookWidget {
         route.animation?.removeStatusListener(syncStatus);
         navigator.userGestureInProgressNotifier.removeListener(sync);
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (tracker.value?.route == route) tracker.value = null;
+          final routes = tracker.value;
+          if (!routes.alive.contains(route)) return;
+          tracker.value = _DetailRoutes(
+            routes.alive.where((r) => r != route).toList(),
+            covers: routes.covers && routes.alive.last != route,
+          );
         });
       };
     }, [route, navigator]);

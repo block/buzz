@@ -553,6 +553,22 @@ void main() {
     expect(controller.selectedId, 'chat');
     expect(chat, findsOneWidget);
     expect(list, findsNothing);
+
+    // A reopened chat closed quickly can finish first; the older chat keeps
+    // sliding and then unmounts.
+    await tester.tap(find.byType(BackButton));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    controller.open('chat', (_) => const _Conversation());
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 40));
+    await tester.tap(find.byType(BackButton).last);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(chat, findsOneWidget, reason: 'the older chat is still sliding');
+    await tester.pumpAndSettle();
+    expect(controller.selectedId, isNull);
+    expect(find.byType(_Conversation, skipOffstage: false), findsNothing);
     expect(tester.takeException(), isNull);
     debugDefaultTargetPlatformOverride = null;
   });
