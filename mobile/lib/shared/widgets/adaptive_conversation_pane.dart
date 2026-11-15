@@ -200,15 +200,11 @@ class AdaptiveConversationPane extends HookConsumerWidget {
     // Not disposed with the pane: a detail unmounting with the pane reports
     // after the frame, once the pane is gone.
     final mountedDetails = useMemoized(() => ValueNotifier(0));
-    final listenable = useMemoized(
-      () => Listenable.merge([controller, mountedDetails]),
-      [controller],
-    );
     return ConversationPaneScope(
       controller: controller,
       active: active && (ModalRoute.isCurrentOf(context) ?? true),
       child: ListenableBuilder(
-        listenable: listenable,
+        listenable: controller,
         builder: (context, _) => LayoutBuilder(
           builder: (context, constraints) {
             final stripWidth = strip?.width ?? 0;
@@ -222,8 +218,6 @@ class AdaptiveConversationPane extends HookConsumerWidget {
             final wide = usesConversationPanes(context, strip: strip);
             final book = wide ? bookDivisionOf(context) : null;
             final selected = controller.selectedId;
-            final detailShown =
-                wide || selected != null || mountedDetails.value > 0;
             if (ownerRoute != null) {
               _compactPaneNavigators[ownerRoute] =
                   active && !wide && selected != null ? navigator : null;
@@ -302,120 +296,122 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                       top: 0,
                       bottom: 0,
                       width: detailWidth,
-                      child: Offstage(
-                        offstage: !detailShown,
-                        child: TickerMode(
-                          enabled: detailShown,
-                          child: MediaQueryOverride(
-                            transform: (media) => media.copyWith(
-                              size: Size(detailWidth, constraints.maxHeight),
+                      child: ValueListenableBuilder<int>(
+                        valueListenable: mountedDetails,
+                        builder: (context, mounted, detail) {
+                          final shown = wide || selected != null || mounted > 0;
+                          return Offstage(
+                            offstage: !shown,
+                            child: TickerMode(enabled: shown, child: detail!),
+                          );
+                        },
+                        child: MediaQueryOverride(
+                          transform: (media) => media.copyWith(
+                            size: Size(detailWidth, constraints.maxHeight),
+                          ),
+                          child: DuoToolbarScope(
+                            strip: strip,
+                            leadingSlots: wide ? listToolbarSlots : 0,
+                            contentInsets: EdgeInsets.only(
+                              left: wide ? (book?.width ?? 0) / 2 : leftInset,
+                              right: rightInset,
                             ),
-                            child: DuoToolbarScope(
-                              strip: strip,
-                              leadingSlots: wide ? listToolbarSlots : 0,
-                              contentInsets: EdgeInsets.only(
-                                left: wide ? (book?.width ?? 0) / 2 : leftInset,
-                                right: rightInset,
-                              ),
-                              active:
-                                  active &&
-                                  selected != null &&
-                                  (ModalRoute.isCurrentOf(context) ?? true),
-                              child: Semantics(
-                                container: true,
-                                explicitChildNodes: true,
-                                child: PopScope<Object?>(
-                                  canPop:
-                                      !active ||
-                                      selected == null ||
-                                      (wide && persistentSelection),
-                                  onPopInvokedWithResult: (didPop, result) {
-                                    if (!didPop &&
-                                        active &&
-                                        selected != null &&
-                                        !(wide && persistentSelection)) {
-                                      navigator.currentState!.maybePop(result);
-                                    }
-                                  },
-                                  child: ExcludeFocus(
-                                    excluding: selected == null,
-                                    child: NavigatorPopHandler<Object?>(
-                                      enabled: wide && persistentSelection,
-                                      onPopWithResult: (result) =>
-                                          navigator.currentState!.pop(result),
-                                      child: Navigator(
-                                        requestFocus: selected != null,
-                                        key: navigator,
-                                        observers: [routeObserver],
-                                        pages: [
-                                          if (!(wide &&
-                                              persistentSelection &&
-                                              selected != null))
-                                            MaterialPage<void>(
-                                              key: const ValueKey(
-                                                'conversation-placeholder',
-                                              ),
-                                              // Compact panes show the list
-                                              // through this page while a
-                                              // detail pushes or pops.
-                                              child: !wide
-                                                  ? const SizedBox.shrink()
-                                                  : Material(
-                                                      color: context
-                                                          .colors
-                                                          .surface,
-                                                      child: Center(
-                                                        child:
-                                                            emptyContent ??
-                                                            Text(
-                                                              emptyLabel,
-                                                              textAlign:
-                                                                  TextAlign
-                                                                      .center,
-                                                              style: Theme.of(context)
-                                                                  .textTheme
-                                                                  .bodyLarge
-                                                                  ?.copyWith(
-                                                                    color: Theme.of(
-                                                                      context,
-                                                                    ).colorScheme.onSurfaceVariant,
-                                                                    decoration:
-                                                                        TextDecoration
-                                                                            .none,
-                                                                  ),
-                                                            ),
-                                                      ),
-                                                    ),
+                            active:
+                                active &&
+                                selected != null &&
+                                (ModalRoute.isCurrentOf(context) ?? true),
+                            child: Semantics(
+                              container: true,
+                              explicitChildNodes: true,
+                              child: PopScope<Object?>(
+                                canPop:
+                                    !active ||
+                                    selected == null ||
+                                    (wide && persistentSelection),
+                                onPopInvokedWithResult: (didPop, result) {
+                                  if (!didPop &&
+                                      active &&
+                                      selected != null &&
+                                      !(wide && persistentSelection)) {
+                                    navigator.currentState!.maybePop(result);
+                                  }
+                                },
+                                child: ExcludeFocus(
+                                  excluding: selected == null,
+                                  child: NavigatorPopHandler<Object?>(
+                                    enabled: wide && persistentSelection,
+                                    onPopWithResult: (result) =>
+                                        navigator.currentState!.pop(result),
+                                    child: Navigator(
+                                      requestFocus: selected != null,
+                                      key: navigator,
+                                      observers: [routeObserver],
+                                      pages: [
+                                        if (!(wide &&
+                                            persistentSelection &&
+                                            selected != null))
+                                          MaterialPage<void>(
+                                            key: const ValueKey(
+                                              'conversation-placeholder',
                                             ),
-                                          if (selected != null)
-                                            if (controller.animateSelection)
-                                              MaterialPage<void>(
-                                                key: controller.selectionKey,
-                                                child: _CoveringDetail(
-                                                  covering: coveringDetail,
-                                                  mounted: mountedDetails,
-                                                  builder:
-                                                      controller.detailBuilder!,
-                                                ),
-                                              )
-                                            else
-                                              _ImmediateDetailPage(
-                                                key: controller.selectionKey,
-                                                builder: (_) => _CoveringDetail(
-                                                  covering: coveringDetail,
-                                                  mounted: mountedDetails,
-                                                  builder:
-                                                      controller.detailBuilder!,
-                                                ),
+                                            // Compact panes show the list
+                                            // through this page while a
+                                            // detail pushes or pops.
+                                            child: !wide
+                                                ? const SizedBox.shrink()
+                                                : Material(
+                                                    color:
+                                                        context.colors.surface,
+                                                    child: Center(
+                                                      child:
+                                                          emptyContent ??
+                                                          Text(
+                                                            emptyLabel,
+                                                            textAlign: TextAlign
+                                                                .center,
+                                                            style: Theme.of(context)
+                                                                .textTheme
+                                                                .bodyLarge
+                                                                ?.copyWith(
+                                                                  color: Theme.of(
+                                                                    context,
+                                                                  ).colorScheme.onSurfaceVariant,
+                                                                  decoration:
+                                                                      TextDecoration
+                                                                          .none,
+                                                                ),
+                                                          ),
+                                                    ),
+                                                  ),
+                                          ),
+                                        if (selected != null)
+                                          if (controller.animateSelection)
+                                            MaterialPage<void>(
+                                              key: controller.selectionKey,
+                                              child: _CoveringDetail(
+                                                covering: coveringDetail,
+                                                mounted: mountedDetails,
+                                                builder:
+                                                    controller.detailBuilder!,
                                               ),
-                                        ],
-                                        onDidRemovePage: (page) {
-                                          if (page.key ==
-                                              controller.selectionKey) {
-                                            controller.clear();
-                                          }
-                                        },
-                                      ),
+                                            )
+                                          else
+                                            _ImmediateDetailPage(
+                                              key: controller.selectionKey,
+                                              builder: (_) => _CoveringDetail(
+                                                covering: coveringDetail,
+                                                mounted: mountedDetails,
+                                                builder:
+                                                    controller.detailBuilder!,
+                                              ),
+                                            ),
+                                      ],
+                                      onDidRemovePage: (page) {
+                                        if (page.key ==
+                                            controller.selectionKey) {
+                                          controller.clear();
+                                        }
+                                      },
                                     ),
                                   ),
                                 ),
