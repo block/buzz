@@ -254,6 +254,9 @@ void main() {
       expect(names(container), isEmpty);
       session.resumePausedDirectoryQuery();
       await _settle();
+      // The shared full read advanced the full-read age, so this was a
+      // catch-up from the newest saved change.
+      expect(reads().last, 150 - 60);
       expect(names(container), ['late']);
       await expectSaved(['late']);
     },
