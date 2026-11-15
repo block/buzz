@@ -115,10 +115,6 @@ const searchChannelResultLimit = 8;
 /// Most people rows one query shows.
 const searchPeopleShown = 8;
 
-/// How long a loaded open-channel directory serves searches before the next
-/// search reads it again, as desktop's `PUBLIC_CHANNEL_PAGE_TTL` does.
-const searchDirectoryMaxAge = Duration(seconds: 30);
-
 /// Ranks [channels] for a search [query] with the same rules as desktop
 /// (buzz-app `SearchResults.tsx` and `store.ts` `searchPublic`): name match
 /// rank first, an archived channel half a step behind a live one, then joined
@@ -195,9 +191,9 @@ class SearchNotifier extends Notifier<SearchState> {
     _directoryAttempted = false;
     // Channel rows are ranked once per query, so live channel events never
     // reorder rows under a finger: they only update the shown rows' content.
-    // Rows are ranked again when the set of channels changes (the first
-    // load, a directory install); the directory status for this community
-    // also drives the spinner.
+    // Rows are ranked again when the set of channels or their names change
+    // (the first load, a directory install, a rename); the directory status
+    // for this community also drives the spinner.
     ref.listen(channelsProvider, (previous, next) {
       final channels = next.asData?.value;
       if (channels == null) return;
@@ -305,8 +301,7 @@ class SearchNotifier extends Notifier<SearchState> {
     final load = _directoryLoad = Object();
     _directoryAttempted = true;
     final channels = ref.read(channelsProvider.notifier);
-    Future<void> ensure() =>
-        channels.ensureDirectoryLoaded(maxAge: searchDirectoryMaxAge);
+    Future<void> ensure() => channels.ensureDirectoryLoaded();
     unawaited(
       ensure()
           .then((_) {
@@ -401,9 +396,17 @@ class SearchNotifier extends Notifier<SearchState> {
     state = state.copyWith(userResults: users, isLoading: _isLoading);
   }
 
-  static bool _sameChannels(List<Channel> a, List<Channel> b) =>
-      a.length == b.length &&
-      a.map((c) => c.id).toSet().containsAll(b.map((c) => c.id));
+  /// Whether [a] and [b] hold the same channels under the same names, so a
+  /// query would match the same ones. A rename, as a directory check can
+  /// install, changes the matches.
+  static bool _sameChannels(List<Channel> a, List<Channel> b) {
+    if (a.length != b.length) return false;
+    final names = {for (final channel in a) channel.id: channel.name};
+    return b.every(
+      (channel) =>
+          names.containsKey(channel.id) && names[channel.id] == channel.name,
+    );
+  }
 
   /// Shows each shown channel's latest content (membership, member count,
   /// name) in the rows' existing order.

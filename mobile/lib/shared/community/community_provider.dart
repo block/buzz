@@ -16,6 +16,7 @@ import '../push/dev_push_lease.dart';
 import '../push/push_bridge.dart';
 import '../push/push_lease_revocation_outbox.dart';
 import '../push/push_subscription.dart';
+import '../channels/open_channel_directory_storage.dart';
 import '../relay/media_disk_cache.dart';
 import '../relay/signed_event_relay.dart';
 import '../relay/relay_provider.dart' show RelayConfig, pubkeyFromNsec;
@@ -427,9 +428,10 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     ]);
   }
 
-  /// Deletes the image caches of communities no longer in the list, and of
-  /// accounts a community no longer signs in as. A failure, or a
-  /// write that lands after the delete, is swept on the next launch.
+  /// Deletes the image caches and saved channel directories of communities no
+  /// longer in the list, and of accounts a community no longer signs in as. A
+  /// failure, or a write that lands after the delete, is swept on the next
+  /// launch.
   ///
   /// Sweeps run one at a time, each keeping what the community list holds
   /// when it starts, so an older sweep can never delete a newer account's
@@ -447,14 +449,17 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
           state.isLoading ? fallback ?? state.value : state.value;
       var communities = current();
       if (communities == null) return;
-      await MediaDiskCache.removeOrphans(root, () {
+      Map<String, String?> retained() {
         // A list briefly unavailable mid-sweep keeps the last one seen.
         communities = current() ?? communities;
         return {
           for (final community in communities!)
             community.id: _channelSnapshotPubkey(community)?.toLowerCase(),
         };
-      });
+      }
+
+      await MediaDiskCache.removeOrphans(root, retained);
+      await OpenChannelDirectoryStorage.removeOrphans(root, retained);
     } catch (error, stackTrace) {
       developer.log(
         'Media cache deletion failed; the next launch will retry',

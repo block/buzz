@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
 import 'package:buzz/shared/channels/channel_list_snapshot.dart';
+import 'package:buzz/shared/channels/open_channel_directory_storage.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
@@ -527,8 +528,18 @@ void main() {
         return directory;
       }
 
+      Future<File> seedDirectory(String communityId, String signer) async {
+        final file = OpenChannelDirectoryStorage.fileFor(
+          mediaRoot,
+          communityId,
+          signer,
+        );
+        await file.create(recursive: true);
+        return file;
+      }
+
       // Media sweeps run in the background.
-      Future<bool> eventuallyExists(Directory directory) async {
+      Future<bool> eventuallyExists(FileSystemEntity directory) async {
         for (var i = 0; i < 50 && await directory.exists(); i++) {
           await Future<void>.delayed(const Duration(milliseconds: 10));
         }
@@ -583,6 +594,8 @@ void main() {
       final newMedia = await seedMedia(
         MediaDiskCache.directoryFor(mediaRoot, community.id, newKeys.public),
       );
+      final oldDirectory = await seedDirectory(community.id, oldKeys.public);
+      final newDirectory = await seedDirectory(community.id, newKeys.public);
       // Two quick replacements: the first one's sweep must not delete the
       // newest account's cache.
       await notifier.addCommunity(community.copyWith(nsec: midKeys.nsec));
@@ -592,6 +605,8 @@ void main() {
       expect(await cache.write(oldToken, snapshot), isFalse);
       expect(await eventuallyExists(oldMedia), isFalse);
       expect(await newMedia.exists(), isTrue);
+      expect(await eventuallyExists(oldDirectory), isFalse);
+      expect(await newDirectory.exists(), isTrue);
       final newToken = cache.capture(newKeys.public, community.relayUrl);
       await cache.write(newToken, snapshot);
       await communityStorage.saveActiveId(community.id);
