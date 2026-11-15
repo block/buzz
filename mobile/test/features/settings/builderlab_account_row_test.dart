@@ -12,9 +12,15 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   Future<List<Uri>> pumpSettings(
     WidgetTester tester, {
+    bool wide = false,
     bool opens = true,
     bool throws = false,
   }) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = wide
+        ? const Size(1000, 800)
+        : const Size(390, 844);
+    addTearDown(tester.view.reset);
     PackageInfo.setMockInitialValues(
       appName: 'Buzz',
       packageName: 'xyz.block.buzz',
@@ -53,29 +59,33 @@ void main() {
 
   final row = find.byKey(const Key('settings-builderlab-account'));
 
-  testWidgets('opens the public Builderlab dashboard in the browser', (
-    tester,
-  ) async {
-    final opened = await pumpSettings(tester);
-    await tester.scrollUntilVisible(row, 200);
-    await tester.tap(row);
-    await tester.pumpAndSettle();
-    expect(opened, [HostedEnvironment.origin]);
-    expect(find.text('Couldn’t open Builderlab.'), findsNothing);
-  }, skip: !HostedEnvironment.enabled);
-
-  for (final throws in [false, true]) {
-    testWidgets(
-      'says so when the browser ${throws ? 'throws' : 'does not open'}',
-      (tester) async {
-        await pumpSettings(tester, opens: false, throws: throws);
-        await tester.scrollUntilVisible(row, 200);
-        await tester.tap(row);
+  for (final wide in [false, true]) {
+    Future<void> openAccount(WidgetTester tester) async {
+      if (wide) {
+        await tester.tap(find.text('Account'));
         await tester.pumpAndSettle();
+      }
+      await tester.ensureVisible(row);
+      await tester.tap(row);
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('opens the public dashboard (wide=$wide)', (tester) async {
+      final opened = await pumpSettings(tester, wide: wide);
+      await openAccount(tester);
+      expect(opened, [HostedEnvironment.origin]);
+      expect(find.text('Couldn’t open Builderlab.'), findsNothing);
+    }, skip: !HostedEnvironment.enabled);
+
+    for (final throws in [false, true]) {
+      testWidgets('reports browser failure (throws=$throws, wide=$wide)', (
+        tester,
+      ) async {
+        await pumpSettings(tester, wide: wide, opens: false, throws: throws);
+        await openAccount(tester);
         expect(find.text('Couldn’t open Builderlab.'), findsOneWidget);
-      },
-      skip: !HostedEnvironment.enabled,
-    );
+      }, skip: !HostedEnvironment.enabled);
+    }
   }
 
   testWidgets('is absent outside a public build', (tester) async {

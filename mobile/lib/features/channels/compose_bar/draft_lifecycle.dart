@@ -72,6 +72,8 @@ Future<void> _sendTextOnlyDraft({
 }
 
 void _useComposeDraftLifecycle({
+  required BuildContext context,
+  required ObjectRef<_ComposerVoiceNote> voiceNote,
   required ObjectRef<Map<String, MentionCandidate>> mentionMap,
   required WidgetRef ref,
   required _MarkdownEditingController controller,
@@ -182,6 +184,16 @@ void _useComposeDraftLifecycle({
     controller.addListener(persistDraft);
     return () => controller.removeListener(persistDraft);
   }, [controller, draftKey, draftIdentity, onDraftIdentityChanged]);
+  _useComposerShareDelivery(
+    context: context,
+    ref: ref,
+    draftKey: draftKey,
+    controller: controller,
+    attachments: attachments,
+    draftRevision: draftRevision,
+    voiceNote: voiceNote,
+    uploadError: uploadError,
+  );
 }
 
 // Report aggregate work independently of rebuilds, including sub-frame failures.

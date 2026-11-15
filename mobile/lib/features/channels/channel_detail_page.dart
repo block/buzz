@@ -1,14 +1,17 @@
+import '../../shared/widgets/duo_toolbar.dart';
 import 'composer_geometry.dart';
 import 'message_author_visibility.dart';
 
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'message_swipe_reply.dart';
 import 'bestie_welcome.dart';
 import 'bestie_welcome_storage.dart';
 import 'agent_reply_handoff.dart';
 import 'huddle_timeline.dart';
 import '../../shared/widgets/confirmation_dialog.dart';
+import '../../shared/share/share_suggestions.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
 import 'message_footer_layout.dart';
@@ -113,6 +116,7 @@ import 'sticky_date_header.dart';
 import 'date_header_scroll_activity.dart';
 import 'thread_detail_page.dart';
 import 'thread_replies_provider.dart';
+import 'open_channel_routes.dart';
 import 'reading_marks.dart';
 import 'timeline_message.dart';
 
@@ -127,6 +131,7 @@ part 'channel_detail_page/system_rows.dart';
 part 'channel_detail_page/thread_working.dart';
 part 'channel_detail_page/activity_members_sheet.dart';
 part 'channel_detail_page/huddle_sheet.dart';
+part 'channel_detail_page/huddle_history.dart';
 part 'channel_detail_page/huddle_agent_connection.dart';
 part 'channel_detail_page/huddle_call_avatar.dart';
 part 'channel_detail_page/huddle_participant_cluster.dart';
@@ -163,6 +168,11 @@ enum InitialThreadRouteBehavior {
   /// Replace the temporary channel route so Back returns to its origin.
   replaceCurrentRoute,
 }
+
+double _conversationHeaderHeight(
+  BuildContext context, {
+  double titleContentHeight = 0,
+}) => frostedAppBarHeight(context, titleContentHeight: titleContentHeight);
 
 class _ResolvedChannelDetailPage extends HookConsumerWidget {
   final Channel channel;
@@ -510,6 +520,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       final session = ref.read(relaySessionProvider.notifier);
       return session.registerVisibleChannel(channel.id);
     }, [channel.id]);
+    useOpenChannelRoute(ref, channel.id);
 
     useEffect(
       () {
@@ -539,7 +550,8 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     // it reads through it when it is shown again.
     final openReadActive =
         isAppInUse(useAppLifecycleState()) &&
-        (ModalRoute.of(context)?.isCurrent ?? true);
+        (ModalRoute.of(context)?.isCurrent ?? true) &&
+        ConversationPaneScope.isActiveOf(context);
     useEffect(() {
       if (!readState.isReady || !openReadActive || openReadTimestamp == null) {
         return null;
@@ -660,6 +672,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     );
 
     return FrostedScaffold(
+      extendHeaderUnderRail: true,
       foreground:
           !resolvedChannel.isForum &&
               timelineEntries.isNotEmpty &&
@@ -671,7 +684,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                   left: 0,
                   right: 0,
                   top:
-                      frostedAppBarHeight(
+                      _conversationHeaderHeight(
                         context,
                         titleContentHeight: appBarTitleContentHeight,
                       ) +
@@ -688,6 +701,15 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       resizeToAvoidBottomInset:
           !usesFixedAndroidImeViewport || resolvedChannel.isForum,
       appBar: FrostedAppBar(
+        nativeTitleInsets: duoContentInsetsOf(context),
+        automaticallyImplyLeading:
+            !ConversationPaneScope.isBaseRouteOf(context) ||
+            !usesConversationPanes(
+              context,
+              windowSize:
+                  View.of(context).physicalSize /
+                  View.of(context).devicePixelRatio,
+            ),
         alwaysFrosted: true,
         nativeViewSuppressed: messageActionBackdropActive,
         nativeTitle: dmHeader.label,
@@ -766,7 +788,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                                   null)
                             Positioned(
                               top:
-                                  frostedAppBarHeight(
+                                  _conversationHeaderHeight(
                                     context,
                                     titleContentHeight:
                                         appBarTitleContentHeight,
@@ -812,7 +834,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                           loading: SizedBox.shrink,
                           error: (e, _) => Padding(
                             padding: EdgeInsets.only(
-                              top: frostedAppBarHeight(
+                              top: _conversationHeaderHeight(
                                 context,
                                 titleContentHeight: appBarTitleContentHeight,
                               ),
@@ -947,12 +969,21 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                                   mentionPubkeys,
                                 );
                               }
+                              final donate = activeShareSuggestionDonor(ref);
+                              final displayName = resolvedChannel.displayLabel(
+                                currentPubkey: ref.read(myPubkeyProvider),
+                              );
                               await sendMessage.call(
                                 channelId: channel.id,
                                 content: content,
                                 mentionPubkeys: recipients,
                                 channel: resolvedChannel,
                                 mediaTags: mediaTags,
+                              );
+                              donate(
+                                channelId: channel.id,
+                                displayName: displayName,
+                                recipientCount: resolvedChannel.memberCount - 1,
                               );
                             },
                       ),

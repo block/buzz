@@ -64,6 +64,31 @@ void main() {
         find.byKey(const ValueKey('navigation-header-avatar-settings')),
       );
       expect(settingsOpened, 1);
+      await tester.pumpWidget(
+        _testApp(
+          home: const MediaQuery(
+            data: MediaQueryData(),
+            child: SizedBox(
+              width: 951,
+              height: 128,
+              child: IosNavigationBar(
+                title: 'Alice',
+                centerTitleInPane: true,
+                titleAvatars: [IosNavigationAction(label: 'Alice')],
+              ),
+            ),
+          ),
+        ),
+      );
+      final paneParams =
+          tester.widget<UiKitView>(find.byType(UiKitView)).creationParams!
+              as Map;
+      expect(paneParams['portraitTopPadding'], 12);
+      expect(
+        tester.getTopLeft(find.byType(DmHeaderPortrait)).dy -
+            tester.getTopLeft(find.byType(UiKitView)).dy,
+        12,
+      );
       await tester.pumpWidget(const SizedBox());
       debugDefaultTargetPlatformOverride = null;
     },
@@ -353,6 +378,41 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     });
   }
+
+  testWidgets('scrolling does not rebuild the native bar', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final controller = ScrollController();
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(
+      _testApp(
+        home: FrostedScaffold(
+          appBar: const FrostedAppBar(title: Text('Conversation')),
+          body: ListView(
+            controller: controller,
+            children: [
+              for (var i = 0; i < 40; i++)
+                SizedBox(height: 60, child: Text('Message $i')),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final before = tester.widget<IosNavigationBar>(
+      find.byType(IosNavigationBar),
+    );
+    controller.jumpTo(300);
+    await tester.pumpAndSettle();
+    // The same widget instance is not rebuilt, so its native payload is not
+    // encoded again for every scrolled frame.
+    expect(
+      tester.widget<IosNavigationBar>(find.byType(IosNavigationBar)),
+      same(before),
+    );
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
 
   testWidgets('native material follows live theme surface changes', (
     tester,

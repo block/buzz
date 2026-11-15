@@ -1,6 +1,6 @@
 # Buzz domain language
 
-Shared terminology for Buzz product behavior. This glossary currently covers mobile [push suppression](#push-suppression), the [notification body](#notification-body) and [mobile builds](#mobile-builds); it is not a complete model of Buzz.
+Shared terminology for Buzz product behavior. This glossary currently covers mobile [push suppression](#push-suppression), the [notification body](#notification-body), [mobile builds](#mobile-builds) and [sharing](#sharing); it is not a complete model of Buzz.
 
 ## Notifications
 
@@ -69,3 +69,17 @@ _Avoid_: Dogfood build, enterprise build, org build
 The mobile app distributed through the App Store and TestFlight. It uses only the public Builderlab and cannot reach any organization's community.
 
 _Avoid_: App Store build, external build
+
+## Sharing
+
+### Share
+
+Bringing content such as a screenshot, screen recording, URL or text from another app into a Buzz conversation through the system share sheet. A share ends in that conversation's composer, where the person adds their own text and sends it.
+
+_Avoid_: Forward, post
+
+### Share target
+
+A conversation offered among the share sheet's suggested destinations: an existing channel or DM, or a new Solo chat. Share targets are learned from top-level messages a person sends in a conversation; thread replies and incoming messages never count.
+
+_Avoid_: Recipient, contact, suggestion

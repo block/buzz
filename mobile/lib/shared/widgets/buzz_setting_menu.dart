@@ -153,8 +153,8 @@ class BuzzSettingMenu<T> extends StatelessWidget {
                         horizontal: Grid.twelve,
                       ),
                     ),
-                    // A trailing check keeps labels flush with the menu's edge.
-                    trailingIcon: option.value == value
+                    // Keep selection beside the label, matching other checked menus.
+                    leadingIcon: option.value == value
                         ? Icon(
                             Icons.check,
                             size: 20,

@@ -1,3 +1,7 @@
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
+import 'package:buzz/shared/widgets/frosted_scaffold.dart';
+import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/identity_archives/identity_archives.dart';
 import 'package:buzz/shared/widgets/buzz_agent_icon.dart';
 import 'package:buzz/features/channels/channel.dart';
@@ -28,6 +32,86 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../helpers/widget_helpers.dart';
 
 void main() {
+  testWidgets(
+    'Search Close survives result selection without overlapping detail actions',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(951, 669);
+      tester.view.padding = const FakeViewPadding(right: 76);
+      tester.view.viewPadding = tester.view.padding;
+      addTearDown(tester.view.reset);
+      final controller = ConversationPaneController();
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [
+            searchProvider.overrideWith(
+              () => _FakeSearchNotifier(const SearchState.initial()),
+            ),
+            recentSearchesProvider.overrideWith(
+              () => _FakeRecentSearchesNotifier(const []),
+            ),
+            profileProvider.overrideWith(() => _FakeProfileNotifier()),
+          ],
+          child: Builder(
+            builder: (context) => TextButton(
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => AdaptiveConversationDestination(
+                    controller: controller,
+                    listToolbarSlots: 1,
+                    child: const SearchPage(),
+                  ),
+                ),
+              ),
+              child: const Text('Open Search'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Open Search'));
+      await tester.pumpAndSettle();
+      controller.open(
+        'result',
+        (_) => FrostedScaffold(
+          appBar: FrostedAppBar(
+            nativeTitle: 'Result',
+            automaticallyImplyLeading: false,
+            nativeActions: [
+              IosNavigationAction(
+                label: 'Result options',
+                symbol: 'ellipsis',
+                onPressed: () {},
+              ),
+            ],
+          ),
+          body: const Text('Selected result'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final close = find.byKey(const ValueKey('duo-toolbar-Close search'));
+      final options = find.byKey(const ValueKey('duo-toolbar-Result options'));
+      expect(close, findsOneWidget);
+      expect(
+        tester.getRect(close).bottom,
+        lessThanOrEqualTo(tester.getRect(options).top),
+      );
+      tester
+          .widget<IosNavigationBar>(
+            find.descendant(of: close, matching: find.byType(IosNavigationBar)),
+          )
+          .leading!
+          .onPressed!();
+      await tester.pumpAndSettle();
+      expect(find.text('Open Search'), findsOneWidget);
+      expect(find.text('Selected result'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
   for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
     for (final scale in [1.0, 2.0]) {
       testWidgets('search controls stay fixed on $platform at scale $scale', (

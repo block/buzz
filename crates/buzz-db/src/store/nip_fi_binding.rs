@@ -257,6 +257,13 @@ impl Db {
             return Ok(0);
         }
         let ids: Vec<uuid::Uuid> = communities.iter().map(|id| *id.as_uuid()).collect();
+        // Lock in community-id order; `Uuid` and Postgres `uuid` both order bytewise.
+        let mut sorted = communities.to_vec();
+        sorted.sort_unstable();
+        let lock_keys: Vec<String> = sorted
+            .into_iter()
+            .map(crate::deletion::community_deletion_lock_key)
+            .collect();
         let connection = crate::observability::acquire_writer(
             &self.pool,
             crate::observability::WriterOperation::Authorization,
@@ -264,10 +271,10 @@ impl Db {
         .await?;
         let mut tx = Transaction::begin(connection, None).await?;
         sqlx::query(
-            "SELECT pg_advisory_xact_lock_shared(community_deletion_lock_key(id)) \
-             FROM unnest($1::uuid[]) AS id ORDER BY id",
+            "SELECT pg_advisory_xact_lock_shared(hashtextextended(key, 0)) \
+             FROM unnest($1::text[]) WITH ORDINALITY AS k(key, ord) ORDER BY ord",
         )
-        .bind(&ids)
+        .bind(&lock_keys)
         .execute(&mut *tx)
         .await?;
         sqlx::query("SELECT 1 FROM communities WHERE id = ANY($1) ORDER BY id FOR NO KEY UPDATE")
@@ -724,8 +731,8 @@ mod postgres_tests {
             .fetch_one(&mut *deletion)
             .await
             .expect("pid");
-        sqlx::query("SELECT pg_advisory_xact_lock(community_deletion_lock_key($1))")
-            .bind(id.as_uuid())
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(crate::deletion::community_deletion_lock_key(id))
             .execute(&mut *deletion)
             .await
             .expect("exclusive deletion lock");

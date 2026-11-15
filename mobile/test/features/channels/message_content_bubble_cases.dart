@@ -353,10 +353,7 @@ void editedMarkerTests() {
 
     // Prose: inline after the last line, in the muted metadata colour.
     await show('First\n\nHi how are ya.');
-    expect(
-      plainTexts(tester),
-      anyElement(endsWith('\nHi how are ya. (edited)')),
-    );
+    expect(plainTexts(tester), contains('Hi how are ya. (edited)'));
     final context = tester.element(find.byType(MessageContent));
     expect(markerSpan(tester)?.style?.color, context.colors.onSurfaceVariant);
 

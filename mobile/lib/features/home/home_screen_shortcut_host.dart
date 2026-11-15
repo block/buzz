@@ -8,6 +8,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/me/default_agent.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/shortcuts/home_screen_shortcuts.dart';
+import '../../shared/widgets/adaptive_conversation_pane.dart';
 
 /// Publishes Home's app icon quick actions and runs a tapped one.
 ///
@@ -30,6 +31,12 @@ class HomeScreenShortcutHost extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Signing out removes Home; a tap still waiting must not run in the next
+    // account's Home. Declared before the pending tap's listener, so its
+    // cleanup runs after that listener is gone.
+    useEffect(() {
+      return () => pendingHomeScreenShortcut.value = null;
+    }, const []);
     final startChat = useValueListenable(newChat);
     final startDm = useValueListenable(newDm);
     final bestie = ref.watch(defaultAgentProvider);
@@ -117,7 +124,8 @@ class HomeScreenShortcutHost extends HookConsumerWidget {
               (route) =>
                   route.isFirst ||
                   (route is ModalRoute &&
-                      route.popDisposition == RoutePopDisposition.doNotPop),
+                      route.popDisposition == RoutePopDisposition.doNotPop &&
+                      !popCompactConversationDestination(route)),
             );
           }
           // Drop the tap when a screen kept Home covered or opened over it

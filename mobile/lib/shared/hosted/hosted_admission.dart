@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
+import 'package:buzz/shared/http/app_http_client.dart';
 
 import '../community/community.dart';
 import '../deeplink/deep_link.dart';
@@ -26,7 +27,7 @@ class HostedAdmission {
     Future<bool> Function(HostedJoinPolicy)? confirmPolicy,
     Future<void> Function(Community)? probe,
   }) : _confirmPolicy = confirmPolicy ?? ((_) async => false),
-       _http = client ?? http.Client(),
+       _http = client ?? newAppHttpClient(),
        _probe = probe;
   final HostedRelayAuth relayAuth;
   final BuilderlabAccountClient account;

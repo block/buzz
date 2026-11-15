@@ -94,10 +94,12 @@ class _ChannelSkeletonSection extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: _kChannelLabelGap),
-                SkeletonBar(
-                  key: Key('channels-skeleton-row-label-$index'),
-                  width: widths[index],
-                  height: 16,
+                Flexible(
+                  child: SkeletonBar(
+                    key: Key('channels-skeleton-row-label-$index'),
+                    width: widths[index],
+                    height: 16,
+                  ),
                 ),
               ],
             ),

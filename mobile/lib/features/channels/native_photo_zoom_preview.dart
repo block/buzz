@@ -7,6 +7,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
 import '../../shared/relay/media_image.dart';
+import '../../shared/widgets/ios_navigation_metrics.dart';
 
 /// Message-scoped actions shared with the Flutter gallery.
 class NativePhotoActions {
@@ -82,6 +83,7 @@ class NativePhotoZoomPreview {
       if (!context.mounted) return false;
       final configuration = createLocalImageConfiguration(context);
       final reduceMotion = MediaQuery.disableAnimationsOf(context);
+      final railMetrics = IosNavigationMetrics.of(context);
       final loads = _PhotoWindow(configuration, initialIndex, (
         index,
         bytes,
@@ -172,6 +174,9 @@ class NativePhotoZoomPreview {
         'canMore': actions != null,
         'canDelete': actions?.canDelete ?? false,
         'reduceMotion': reduceMotion,
+        'railCenterX': railMetrics.railCenterX,
+        'railWindowWidth': railMetrics.windowSize?.width,
+        'railWindowHeight': railMetrics.windowSize?.height,
       });
       if (posterLoad != null && !cachedPoster) {
         unawaited(

@@ -114,6 +114,7 @@ String _channelMemberSnapshotKey({
 
 class _ChannelMembersSnapshotCache {
   final _membersByKey = <String, List<ChannelMember>>{};
+  final _latestReadByKey = <String, int>{};
 
   List<ChannelMember>? read({
     required String relayBaseUrl,
@@ -126,19 +127,35 @@ class _ChannelMembersSnapshotCache {
         channelId: channelId,
       )];
 
+  /// Starts a roster read for this scope and returns its generation. A later
+  /// call supersedes it, so its [write] is then ignored.
+  int beginRead({
+    required String relayBaseUrl,
+    required String? pubkey,
+    required String channelId,
+  }) {
+    final key = _channelMemberSnapshotKey(
+      relayBaseUrl: relayBaseUrl,
+      pubkey: pubkey,
+      channelId: channelId,
+    );
+    return _latestReadByKey[key] = (_latestReadByKey[key] ?? 0) + 1;
+  }
+
   void write({
     required String relayBaseUrl,
     required String? pubkey,
     required String channelId,
+    required int generation,
     required List<ChannelMember> members,
   }) {
-    _membersByKey[_channelMemberSnapshotKey(
+    final key = _channelMemberSnapshotKey(
       relayBaseUrl: relayBaseUrl,
       pubkey: pubkey,
       channelId: channelId,
-    )] = List.unmodifiable(
-      members,
     );
+    if (_latestReadByKey[key] != generation) return;
+    _membersByKey[key] = List.unmodifiable(members);
   }
 }
 
@@ -384,6 +401,14 @@ final channelMembersProvider = FutureProvider.autoDispose
       final relayBaseUrl = ref.watch(relayConfigProvider).baseUrl;
       final pubkey = ref.watch(myPubkeyProvider)?.toLowerCase();
       final snapshotCache = ref.read(_channelMembersSnapshotCacheProvider);
+      // A read superseded by a later one (a roster update arriving mid-read)
+      // must not overwrite the snapshot the newer read already wrote. A read
+      // torn down with nothing newer still writes: it has the latest roster.
+      final generation = snapshotCache.beginRead(
+        relayBaseUrl: relayBaseUrl,
+        pubkey: pubkey,
+        channelId: channelId,
+      );
       // Re-fetch only after reconnect completes. During the disconnected
       // interval this provider has no session dependency, so its current value
       // remains visible to every consumer rather than becoming AsyncData([]).
@@ -409,6 +434,7 @@ final channelMembersProvider = FutureProvider.autoDispose
             relayBaseUrl: relayBaseUrl,
             pubkey: pubkey,
             channelId: channelId,
+            generation: generation,
             members: channelListMembers,
           );
           return channelListMembers;
@@ -424,6 +450,7 @@ final channelMembersProvider = FutureProvider.autoDispose
           relayBaseUrl: relayBaseUrl,
           pubkey: pubkey,
           channelId: channelId,
+          generation: generation,
           members: const [],
         );
         return const [];
@@ -446,6 +473,7 @@ final channelMembersProvider = FutureProvider.autoDispose
         relayBaseUrl: relayBaseUrl,
         pubkey: pubkey,
         channelId: channelId,
+        generation: generation,
         members: members,
       );
       return members;
