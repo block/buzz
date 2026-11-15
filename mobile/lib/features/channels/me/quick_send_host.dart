@@ -26,7 +26,10 @@ class QuickSendHost extends HookConsumerWidget {
         } catch (failure) {
           throw PlatformException(
             code: 'failed',
-            message: failure.toString().replaceFirst('Bad state: ', ''),
+            message: failure.toString().replaceFirst(
+              RegExp(r'^(Bad state|Exception): '),
+              '',
+            ),
           );
         }
       });
@@ -43,6 +46,24 @@ Future<void> quickSendToBestie(WidgetRef ref, String content) async {
   if (utf8.encode(content).length > 8192) {
     throw StateError('That message is too long.');
   }
+  // After its background grace period the session has closed the socket.
+  // Reopen it for this send, then let the background pause start over.
+  final session = ref.read(relaySessionProvider.notifier);
+  final paused = switch (ref.read(appLifecycleProvider)) {
+    AppLifecycleState.paused || AppLifecycleState.detached => true,
+    _ => false,
+  };
+  if (paused) session.onAppResumed();
+  try {
+    await _sendToBestie(ref, content);
+  } finally {
+    if (paused && ref.read(appLifecycleProvider) != AppLifecycleState.resumed) {
+      session.onAppPaused();
+    }
+  }
+}
+
+Future<void> _sendToBestie(WidgetRef ref, String content) async {
   await _connected(ref);
   final sync = ref.read(meSyncProvider);
   if (MeChatCreation.pending(sync) != null) {
@@ -52,15 +73,26 @@ Future<void> quickSendToBestie(WidgetRef ref, String content) async {
       .read(defaultAgentProvider.future)
       .timeout(const Duration(seconds: 10));
   if (bestie == null) throw StateError('Choose a Bestie in Buzz first.');
-  await _createMeChat(
-    ref,
-    sync,
-    const Uuid().v4(),
-    startingMeChatTitle(content),
-    bestie,
-    null,
-    initialContent: content,
-  );
+  final channelId = const Uuid().v4();
+  for (var attempt = 1; ; attempt++) {
+    try {
+      // A retry resumes the saved creation, with the same first message.
+      await _createMeChat(
+        ref,
+        sync,
+        channelId,
+        startingMeChatTitle(content),
+        bestie,
+        null,
+        initialContent: content,
+      );
+      return;
+    } catch (failure) {
+      // Catching up after a reconnect can briefly use the relay's write quota.
+      if (attempt == 3 || !'$failure'.contains('rate-limited:')) rethrow;
+      await Future<void>.delayed(Duration(seconds: attempt));
+    }
+  }
 }
 
 /// Waits briefly for the relay session a cold background launch is opening.

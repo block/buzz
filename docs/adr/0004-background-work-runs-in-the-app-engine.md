@@ -14,4 +14,4 @@ When iOS wakes the mobile app in the background, for example for a [quick send](
 
 ## Consequences
 
-Background work must not depend on a window or on the widget tree having built: it reads state and acts through providers directly. A background wake pays the cost of starting the app's Dart code.
+A background launch still builds the widget tree, so background work can live in a widget that Home always builds and act through providers. It must not assume the app is in the foreground: once the app has been in the background past its grace period, the relay session has closed its socket, so background work reopens the session for its duration and then lets the background pause start over. A background wake pays the cost of starting the app's Dart code.
