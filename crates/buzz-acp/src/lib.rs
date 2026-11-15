@@ -838,8 +838,9 @@ impl QueuedNormalListenerEvent {
         }
         let rest_client = rest_client.clone();
         let event_id = self.reaction_target_id.clone();
+        let channel_id = self.scope.channel_id().to_string();
         tokio::spawn(async move {
-            pool::reaction_add(&rest_client, &event_id, "👀").await;
+            pool::reaction_add(&rest_client, &event_id, "👀", &channel_id).await;
         });
     }
 

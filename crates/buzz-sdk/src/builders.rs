@@ -537,14 +537,24 @@ pub fn build_vote(
 }
 
 /// Build a NIP-25 reaction event (kind 7). Emoji max 64 chars.
+///
+/// `channel_id`, when the caller knows the channel the target event lives in,
+/// rides along as the `h` tag. The relay derives a reaction's channel from its
+/// target event on its own, so the tag changes nothing about where the
+/// reaction lands; it is what lets a client that routes by the `h` tag show
+/// the reaction live instead of waiting for a refetch.
 pub fn build_reaction(
     target_event_id: nostr::EventId,
     emoji: &str,
+    channel_id: Option<&str>,
 ) -> Result<EventBuilder, SdkError> {
     if emoji.chars().count() > 64 {
         return Err(SdkError::EmojiTooLong);
     }
-    let tags = vec![tag(&["e", &target_event_id.to_hex()])?];
+    let mut tags = vec![tag(&["e", &target_event_id.to_hex()])?];
+    if let Some(channel_id) = channel_id {
+        tags.push(tag(&["h", channel_id])?);
+    }
     Ok(EventBuilder::new(Kind::Custom(7), emoji).tags(tags))
 }
 
@@ -3442,9 +3452,28 @@ mod tests {
     #[test]
     fn reaction_happy_path() {
         let eid = event_id();
-        let ev = sign(build_reaction(eid, "👍").unwrap());
+        let ev = sign(build_reaction(eid, "👍", None).unwrap());
         assert_eq!(ev.kind.as_u16(), 7);
         assert_eq!(ev.content, "👍");
+        // Without a channel the event carries only the target, as before.
+        assert_eq!(ev.tags.len(), 1);
+    }
+
+    /// The channel tag is what a client routing live events by channel reads,
+    /// and it never replaces the target tag.
+    #[test]
+    fn reaction_carries_channel_when_known() {
+        let eid = event_id();
+        let channel = "11111111-2222-3333-4444-555555555555";
+        let ev = sign(build_reaction(eid, "👀", Some(channel)).unwrap());
+        let tags: Vec<Vec<String>> = ev.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+        assert_eq!(
+            tags,
+            vec![
+                vec!["e".to_string(), eid.to_hex()],
+                vec!["h".to_string(), channel.to_string()],
+            ]
+        );
     }
 
     #[test]
@@ -3452,7 +3481,7 @@ mod tests {
         let eid = event_id();
         let long_emoji = "a".repeat(65);
         assert!(matches!(
-            build_reaction(eid, &long_emoji),
+            build_reaction(eid, &long_emoji, None),
             Err(SdkError::EmojiTooLong)
         ));
     }
@@ -3461,7 +3490,7 @@ mod tests {
     fn reaction_emoji_max_len_ok() {
         let eid = event_id();
         let max_emoji = "a".repeat(64);
-        assert!(build_reaction(eid, &max_emoji).is_ok());
+        assert!(build_reaction(eid, &max_emoji, None).is_ok());
     }
 
     #[test]
