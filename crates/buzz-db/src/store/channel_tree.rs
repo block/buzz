@@ -351,7 +351,66 @@ async fn subtree_height(tx: &mut crate::AdmittedTx, channel_id: Uuid) -> Result<
     })
 }
 
+/// Refuse, on `tx`, giving `channel_id` a TTL while it has a parent or a
+/// live child: only channels without a TTL take part in a tree. The caller
+/// holds `channel_id`'s row lock, and a parent change locks the new parent
+/// too, so neither can slip past the other.
+pub(crate) async fn refuse_ttl_in_tree(tx: &mut crate::AdmittedTx, channel_id: Uuid) -> Result<()> {
+    let community_id = tx.community();
+    let in_tree: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM channels WHERE community_id = $1 AND id = $2 \
+                        AND parent_id IS NOT NULL) \
+             OR EXISTS (SELECT 1 FROM channels WHERE community_id = $1 AND parent_id = $2 \
+                        AND deleted_at IS NULL)",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_one(tx.conn())
+    .await?;
+    if in_tree {
+        return Err(DbError::InvalidData(
+            "a channel with a parent or children cannot have a TTL".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// The live private channels under `channel_id`, children and grandchildren.
+/// Their readers through `channel_id` change when its access does.
+pub async fn get_private_descendant_ids(
+    pool: &sqlx::PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+) -> Result<Vec<Uuid>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    let sql = format!(
+        "WITH roots AS (SELECT $2::uuid AS id), d AS ({}) \
+         SELECT c.id FROM channels c JOIN d ON d.id = c.id \
+         WHERE c.community_id = $1 AND c.visibility = 'private'",
+        descendants_sql("roots", "TRUE")
+    );
+    // Every part of `sql` is a literal; the ids are bound.
+    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+        .bind(community_id.as_uuid())
+        .bind(channel_id)
+        .fetch_all(&mut *connection)
+        .await?)
+}
+
 impl crate::Db {
+    /// See [`get_private_descendant_ids`].
+    pub async fn get_private_descendant_ids(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+    ) -> Result<Vec<Uuid>> {
+        get_private_descendant_ids(&self.pool, community_id, channel_id).await
+    }
+
     /// See [`get_channel_ancestors`].
     pub async fn get_channel_ancestors(
         &self,

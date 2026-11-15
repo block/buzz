@@ -159,6 +159,8 @@ pub(crate) async fn apply_kick_live_side_effects(
             return Err(e.into());
         }
     }
+    // The fence is released, so the channels under this one can be read.
+    evict_departed_descendant_reader(tenant, state, channel_id, target_pubkey).await;
 
     // The removal is committed: refresh the channel's discovery roster, then
     // tell the kicked member, as a kind:9001 removal does. The notice tells a
@@ -332,15 +334,30 @@ pub(crate) async fn evict_conn_channel_subscriptions(
     }
 }
 
-/// Revoke live channel subscriptions held by connections whose authenticated
-/// pubkey is not a current member. Used when an open channel flips to private:
-/// non-members could have subscribed while it was open. Fan-out now re-checks
-/// membership per event as the delivery-time safety net; this eviction closes
-/// subscriptions promptly so clients stop treating the channel as live.
-async fn evict_non_member_channel_subscriptions(
+/// Revoke live subscriptions to private channel `channel_id` held by
+/// connections whose authenticated pubkey can no longer read it: neither a
+/// current member nor a reader through its parents. Used when a channel
+/// becomes private, and when a channel's parent or a parent's access changes:
+/// people could have subscribed while they could read it. Fan-out re-checks
+/// access per event as the delivery-time safety net; this eviction closes
+/// subscriptions promptly so clients stop treating the channel as live. A
+/// reader whose parent access could not be checked keeps the subscription,
+/// and the fan-out gate decides.
+async fn evict_non_reader_channel_subscriptions(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     channel_id: Uuid,
+) -> anyhow::Result<()> {
+    evict_non_readers(tenant, state, channel_id, None).await
+}
+
+/// [`evict_non_reader_channel_subscriptions`], limited to `only`'s
+/// connections when given.
+async fn evict_non_readers(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    only: Option<&[u8]>,
 ) -> anyhow::Result<()> {
     let members = state
         .db
@@ -349,19 +366,86 @@ async fn evict_non_member_channel_subscriptions(
     let member_pubkeys: std::collections::HashSet<Vec<u8>> =
         members.into_iter().map(|m| m.pubkey).collect();
 
+    let mut outsiders = Vec::new();
     for conn_id in state
         .sub_registry
         .channel_subscriber_conns_scoped(tenant.community(), channel_id)
     {
-        let is_member = match state.conn_manager.pubkey_for_conn(conn_id) {
-            Some(pubkey) => member_pubkeys.contains(&pubkey),
-            None => false,
-        };
-        if !is_member {
+        match state.conn_manager.pubkey_for_conn(conn_id) {
+            Some(pubkey) if member_pubkeys.contains(&pubkey) => {}
+            Some(pubkey) if only.is_some_and(|only| only != pubkey.as_slice()) => {}
+            pubkey => outsiders.push((conn_id, pubkey)),
+        }
+    }
+    if outsiders.is_empty() {
+        return Ok(());
+    }
+    let pubkeys: std::collections::HashSet<Vec<u8>> = outsiders
+        .iter()
+        .filter_map(|(_, pubkey)| pubkey.clone())
+        .collect();
+    let readers = super::parent_access::inherited_readers(
+        state,
+        tenant.community(),
+        channel_id,
+        pubkeys.into_iter().collect(),
+    )
+    .await;
+    for (conn_id, pubkey) in outsiders {
+        let keep = pubkey.is_some_and(|pubkey| {
+            readers.members.contains(&pubkey) || readers.unverified.contains(&pubkey)
+        });
+        if !keep {
             evict_conn_channel_subscriptions(tenant, state, channel_id, conn_id).await;
         }
     }
     Ok(())
+}
+
+/// [`evict_non_reader_channel_subscriptions`] for every private channel under
+/// `channel_id`, whose readers through it may have changed.
+async fn evict_non_reader_descendant_subscriptions(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+) {
+    evict_descendant_non_readers(tenant, state, channel_id, None).await;
+}
+
+/// After `pubkey` leaves `channel_id`, close their live subscriptions to the
+/// private channels under it that they can no longer read through it. Run
+/// outside any membership fence: it reads the database.
+async fn evict_departed_descendant_reader(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    pubkey: &[u8],
+) {
+    evict_descendant_non_readers(tenant, state, channel_id, Some(pubkey)).await;
+}
+
+async fn evict_descendant_non_readers(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    only: Option<&[u8]>,
+) {
+    let descendants = match state
+        .db
+        .get_private_descendant_ids(tenant.community(), channel_id)
+        .await
+    {
+        Ok(descendants) => descendants,
+        Err(e) => {
+            warn!(channel = %channel_id, error = %e, "descendant read for eviction failed");
+            return;
+        }
+    };
+    for descendant in descendants {
+        if let Err(e) = evict_non_readers(tenant, state, descendant, only).await {
+            warn!(channel = %descendant, error = %e, "descendant subscription eviction failed");
+        }
+    }
 }
 
 /// Close every live subscription on a channel, for all subscribers, sending
@@ -726,8 +810,35 @@ pub async fn validate_admin_event(
                 .any(|t| is_metadata_tag(&t.kind().to_string()));
             if !has_recognized {
                 return Err(anyhow::anyhow!(
-                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, t, join_role, unlisted, auto_join)"
+                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, t, join_role, unlisted, auto_join, parent)"
                 ));
+            }
+
+            // `parent` is changed on its own: its rule differs from every
+            // other tag's (a parent's owner or admin may clear it), and the
+            // store decides it under the channel's locks
+            // (`buzz_db::channel_tree::decide_parent_change`). Only its
+            // syntax is checked here.
+            let parent_tags: Vec<_> = event
+                .tags
+                .iter()
+                .filter(|t| t.kind().to_string() == "parent")
+                .collect();
+            if !parent_tags.is_empty() {
+                let only_parent = parent_tags.len() == 1
+                    && event
+                        .tags
+                        .iter()
+                        .map(|t| t.kind().to_string())
+                        .filter(|kind| is_metadata_tag(kind))
+                        .all(|kind| kind == "parent");
+                if !only_parent {
+                    return Err(anyhow::anyhow!(
+                        "a parent tag must be the only metadata tag in its kind:9002"
+                    ));
+                }
+                parse_parent_tag(parent_tags[0].content(), channel_id)?;
+                return Ok(());
             }
 
             // Validate archived and unlisted values before storage. Both are
@@ -1475,11 +1586,38 @@ const MEMBER_METADATA_TAGS: &[&str] = &["topic", "purpose"];
 /// channel role.
 const RELAY_ROLE_METADATA_TAGS: &[&str] = &["auto_join"];
 
+/// The kind:9002 tag that sets or clears a channel's parent. Its own rule:
+/// see `buzz_db::channel_tree::decide_parent_change`.
+const PARENT_METADATA_TAG: &str = "parent";
+
 /// True when `kind` is a kind:9002 tag that changes channel metadata.
 fn is_metadata_tag(kind: &str) -> bool {
     PRIVILEGED_METADATA_TAGS.contains(&kind)
         || MEMBER_METADATA_TAGS.contains(&kind)
         || RELAY_ROLE_METADATA_TAGS.contains(&kind)
+        || kind == PARENT_METADATA_TAG
+}
+
+/// The parent change a kind:9002 `["parent", <value>]` tag asks for: a
+/// channel UUID sets it, an empty value clears it. A channel cannot be its
+/// own parent.
+fn parse_parent_tag(
+    value: Option<&str>,
+    channel_id: Uuid,
+) -> anyhow::Result<buzz_db::channel_tree::ParentChange> {
+    match value {
+        Some("") => Ok(None),
+        Some(v) => match Uuid::parse_str(v) {
+            Ok(parent) if parent != channel_id => Ok(Some(parent)),
+            Ok(_) => Err(anyhow::anyhow!("a channel cannot be its own parent")),
+            Err(_) => Err(anyhow::anyhow!(
+                "invalid parent value: {v} (must be a channel id, or empty to clear)"
+            )),
+        },
+        None => Err(anyhow::anyhow!(
+            "parent tag must have a value (a channel id, or empty string to clear)"
+        )),
+    }
 }
 
 /// True when a relay operator sends `event` and it only renames `channel`, a
@@ -2276,6 +2414,7 @@ async fn handle_remove_user(
         .await?;
     state.invalidate_membership(tenant, channel_id, &target_pubkey);
     evict_live_channel_subscriptions(tenant, state, channel_id, &target_pubkey).await;
+    evict_departed_descendant_reader(tenant, state, channel_id, &target_pubkey).await;
     disable_departed_member_workflows(tenant, state, channel_id, &target_pubkey).await;
 
     let actor_hex = hex::encode(&actor_bytes);
@@ -2380,6 +2519,11 @@ pub(crate) async fn persist_edit_metadata(
                 "false" => edit.archived = Some(false),
                 _ => {} // refused during authorization
             },
+            "parent" => {
+                // Validated during authorization; parse again so a bad value
+                // can never reach the column.
+                edit.columns.parent_id = Some(parse_parent_tag(Some(val), channel_id)?);
+            }
             "unlisted" => {
                 // Validated during authorization; fail closed so a bad value
                 // can never reach the column.
@@ -2460,6 +2604,7 @@ pub(crate) async fn persist_edit_metadata(
 
     let new_visibility = edit.columns.visibility.clone();
     let unlisted_changed = edit.columns.unlisted.is_some();
+    let parent_changed = edit.columns.parent_id.is_some();
     let unarchived = edit.archived == Some(false);
     let write = state
         .db
@@ -2492,11 +2637,27 @@ pub(crate) async fn persist_edit_metadata(
         // for an immediate CLOSED on this node. The fan-out access
         // filter is the cluster-wide correctness backstop.
         if write.previous_visibility == "open" && visibility == "private" {
-            if let Err(e) = evict_non_member_channel_subscriptions(tenant, state, channel_id).await
+            if let Err(e) = evict_non_reader_channel_subscriptions(tenant, state, channel_id).await
             {
-                warn!(channel = %channel_id, error = %e, "non-member subscription eviction failed");
+                warn!(channel = %channel_id, error = %e, "non-reader subscription eviction failed");
+            }
+            // Channels under it are no longer readable through an open
+            // parent.
+            evict_non_reader_descendant_subscriptions(tenant, state, channel_id).await;
+        }
+    }
+    if parent_changed {
+        // A parent change changes who can read this channel and every
+        // channel under it, so every person's accessible channels are
+        // cleared. Only a private channel's readers depend on its parents.
+        state.invalidate_all_accessible_channels(tenant);
+        if write.previous_visibility == "private" {
+            if let Err(e) = evict_non_reader_channel_subscriptions(tenant, state, channel_id).await
+            {
+                warn!(channel = %channel_id, error = %e, "non-reader subscription eviction failed");
             }
         }
+        evict_non_reader_descendant_subscriptions(tenant, state, channel_id).await;
     }
     for message in &system_messages {
         fan_out_system_message(tenant, state, channel_id, message).await;
@@ -3285,6 +3446,7 @@ async fn handle_leave_request(
         .await?;
     state.invalidate_membership(tenant, channel_id, &actor_bytes);
     evict_live_channel_subscriptions(tenant, state, channel_id, &actor_bytes).await;
+    evict_departed_descendant_reader(tenant, state, channel_id, &actor_bytes).await;
     disable_departed_member_workflows(tenant, state, channel_id, &actor_bytes).await;
 
     let actor_hex = hex::encode(&actor_bytes);

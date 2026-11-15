@@ -3188,6 +3188,25 @@ async fn check_membership_for_admission(
         .is_member_cached(tenant.community(), lifecycle_parent_id, pubkey_bytes)
         .await
         .map_err(AdmissionRefusal::Dependency)?;
+    // A non-member of a private scope may still hold a role there through
+    // its parents; joining takes one that may post, as for a member.
+    let scope_inherited = if scope_member || write_scope.visibility == "open" {
+        None
+    } else {
+        crate::handlers::parent_access::inherited_role(
+            state,
+            tenant.community(),
+            write_scope,
+            pubkey_bytes,
+        )
+        .await
+        .map_err(AdmissionRefusal::Dependency)?
+    };
+    if scope_inherited.is_some_and(|role| !role.can_post()) {
+        return Err(AdmissionRefusal::Denied(
+            "only members can join huddles in this channel",
+        ));
+    }
     if (scope_member || write_scope.visibility == "open")
         && !crate::handlers::ingest::may_post(
             state,
@@ -3245,12 +3264,22 @@ async fn check_membership_for_admission(
         });
     }
 
-    // Auto-add path: private ephemeral channel + caller is member of parent.
+    // A private channel read through its parents: no member row is made.
+    if channel_id == lifecycle_parent_id && scope_inherited.is_some() {
+        return Ok(MembershipAdmission::Existing {
+            parent_channel_id: lifecycle_parent_id,
+        });
+    }
+
+    // Auto-add path: private ephemeral channel + caller may write in the
+    // parent, as a member or through the parent's own parents.
     if channel.ttl_seconds.is_some() {
-        let parent_member = state
-            .is_member_cached(tenant.community(), lifecycle_parent_id, pubkey_bytes)
-            .await
-            .map_err(AdmissionRefusal::Dependency)?;
+        let parent_member = scope_member
+            || scope_inherited.is_some()
+            || state
+                .is_member_cached(tenant.community(), lifecycle_parent_id, pubkey_bytes)
+                .await
+                .map_err(AdmissionRefusal::Dependency)?;
 
         if parent_member {
             return Ok(MembershipAdmission::AutoAddRequired {

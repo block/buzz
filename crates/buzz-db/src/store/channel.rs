@@ -840,7 +840,8 @@ pub const GROUP_ADMIN_ROLES: [MemberRole; 2] = [MemberRole::Owner, MemberRole::A
 /// changes listings while the channel is open. `auto_join` is published only
 /// while the column is set and the channel is open and unarchived: a stale
 /// `true` on a private or archived channel is not published, so what
-/// kind:39000 says is what the relay does.
+/// kind:39000 says is what the relay does. A channel with a parent carries
+/// `["parent", <id>]`.
 pub fn group_metadata_tags(channel: &ChannelRecord, members: &[MemberRecord]) -> Vec<Vec<String>> {
     let tag = |parts: &[&str]| parts.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>();
     let mut tags = vec![
@@ -917,6 +918,10 @@ pub fn group_metadata_tags(channel: &ChannelRecord, members: &[MemberRecord]) ->
     }
     if let Some(deadline) = channel.ttl_deadline {
         tags.push(tag(&["ttl_deadline", &deadline.to_rfc3339()]));
+    }
+    // The channel this one sits under, whose readers can read it too.
+    if let Some(parent) = channel.parent_id {
+        tags.push(tag(&["parent", &parent.to_string()]));
     }
     tags
 }
@@ -1736,8 +1741,12 @@ pub(crate) async fn apply_channel_metadata_event(
             ));
         }
     }
-    // A parent change is decided here, under the channel's locks, so every
-    // check sees the state it commits against (`crate::channel_tree`).
+    // A parent change, or a TTL on a channel in a tree, is decided here,
+    // under the channel's locks, so every check sees the state it commits
+    // against (`crate::channel_tree`).
+    if matches!(edit.columns.ttl_seconds, Some(Some(_))) {
+        crate::channel_tree::refuse_ttl_in_tree(locked.tx(), channel_id).await?;
+    }
     if let Some(change) = edit.columns.parent_id {
         crate::channel_tree::decide_parent_change(
             locked.tx(),
