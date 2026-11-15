@@ -506,6 +506,13 @@ void main() {
       await sync.synchronize();
       expect((await storage.loadAll()).single.id, 'B');
       expect((await storage.loadAll()).single.nsec, b.nsec);
+      // The removed identity's key stays saved for a later rejoin.
+      expect(
+        (await AccountIdentityStore().identities()).map(
+          (saved) => saved.pubkey,
+        ),
+        [nostr.Keys('1'.padLeft(64, '0')).public],
+      );
       expect(await sync.pendingRemovals('A'), isEmpty);
       expect(
         backend.edits.every(

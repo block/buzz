@@ -94,6 +94,7 @@ Future<bool> showSelfHostedEntry(
             savedPubkey: pubkey,
             nsec: nsec,
             create: create,
+            alongsideSaved: create,
             isCurrent: current,
           );
           if (!current()) return;
@@ -166,6 +167,7 @@ class SelfHostedEntrySheet extends HookConsumerWidget {
           savedPubkey: pubkey,
           nsec: nsec,
           create: create,
+          alongsideSaved: create,
           isCurrent: current,
         );
         if (!current()) return;
@@ -238,7 +240,11 @@ class SelfHostedEntrySheet extends HookConsumerWidget {
       relay,
     );
     final identitySubtitle =
-        'Join $destination. ${saved.length == 1 ? 'Use this identity or import a Nostr key.' : 'Choose an identity or import a Nostr key.'}';
+        'Join $destination. ${saved.isEmpty
+            ? 'Create a new identity or import a Nostr key.'
+            : saved.length == 1
+            ? 'Use this identity, create a new one or import a Nostr key.'
+            : 'Choose an identity, create a new one or import a Nostr key.'}';
     final identityCards = <Widget>[
       for (final identity in saved)
         SavedIdentityCard(
@@ -277,16 +283,18 @@ class SelfHostedEntrySheet extends HookConsumerWidget {
                 },
           child: const Text('Import a Nostr key'),
         ),
-        if (saved.isEmpty && choices.data?.complete == true)
-          button(
-            primary: true,
-            onPressed: busy.value ? null : () => select(create: true),
-            child: const Text('Create an identity and join'),
+        button(
+          primary: saved.isEmpty,
+          onPressed: busy.value ? null : () => select(create: true),
+          child: Text(
+            saved.isEmpty && choices.data?.complete == true
+                ? 'Create an identity and join'
+                : 'Create a new identity and join',
           ),
-        if (saved.isEmpty && choices.data?.complete == true)
-          const Text(
-            'Export a backup in Settings after joining. This device will hold your only copy until you back it up.',
-          ),
+        ),
+        const Text(
+          'Export a backup in Settings after joining. This device will hold your only copy until you back it up.',
+        ),
       ],
       if (busy.value)
         const Padding(
@@ -305,7 +313,7 @@ class SelfHostedEntrySheet extends HookConsumerWidget {
           children: [
             if (choices.hasError || choices.data?.complete == false)
               const Text(
-                'Some saved identities could not be read. You can use an available identity or import a key.',
+                'Some saved identities could not be read. You can use an available identity, create a new one or import a key.',
               ),
             if (!fullScreen) ...[
               Text(identitySubtitle, style: context.textTheme.bodyMedium),

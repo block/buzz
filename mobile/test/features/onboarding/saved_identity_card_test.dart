@@ -106,14 +106,24 @@ void main() {
 
     expect(find.text('View identity details'), findsNothing);
     expect(
-      tester.getBottomRight(find.text('Import a Nostr key')).dy,
+      tester
+          .getBottomRight(find.textContaining('Export a backup in Settings'))
+          .dy,
       greaterThan(750),
+    );
+    expect(
+      tester.getBottomRight(find.text('Import a Nostr key')).dy,
+      lessThan(
+        tester.getTopLeft(find.text('Create a new identity and join')).dy,
+      ),
     );
     expect(
       tester.getTopLeft(find.byType(SavedIdentityCard)).dy -
           tester
               .getBottomLeft(
-                find.textContaining('Use this identity or import a Nostr key.'),
+                find.textContaining(
+                  'Use this identity, create a new one or import a Nostr key.',
+                ),
               )
               .dy,
       24,

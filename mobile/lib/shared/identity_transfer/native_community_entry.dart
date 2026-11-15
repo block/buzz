@@ -70,9 +70,8 @@ abstract final class NativeCommunityEntry {
                   NsecTransfer.preview(nsec) != previewed) {
                 throw AccountIdentityFailure.invalidKey;
               }
-            } else if (create
-                ? choices.isNotEmpty
-                : !choices.any((choice) => choice.pubkey == pubkey)) {
+            } else if (!create &&
+                !choices.any((choice) => choice.pubkey == pubkey)) {
               return {'error': 'Choose an identity to continue.'};
             }
             await connect(pubkey, nsec, create, current);

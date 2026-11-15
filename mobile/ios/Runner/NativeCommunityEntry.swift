@@ -247,10 +247,12 @@ private final class NativeCommunityEntryController: UIViewController, UITextFiel
           }
         }
         addButton("Import a Nostr key") { [weak self] in self?.showImport() }
-        if choices.isEmpty {
-          addButton("Create an identity and join", primary: true) { [weak self] in
-            self?.request("join", ["create": true])
-          }
+        // This sheet opens only for a complete inventory, so empty means none.
+        addButton(
+          choices.isEmpty ? "Create an identity and join" : "Create a new identity and join",
+          primary: choices.isEmpty
+        ) { [weak self] in
+          self?.request("join", ["create": true])
         }
       }
     }
