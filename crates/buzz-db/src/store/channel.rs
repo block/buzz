@@ -1102,6 +1102,9 @@ impl ChannelUpdate {
 ///
 /// At least one field must be provided; returns `InvalidData` otherwise.
 /// Returns the updated `ChannelRecord` on success.
+///
+/// It has no sender, so it does not apply the private-to-open rule that
+/// kind:9002 enforces (`apply_channel_metadata_event`); user edits go there.
 pub async fn update_channel(
     pool: &PgPool,
     community_id: CommunityId,
@@ -1636,6 +1639,34 @@ pub struct ChannelMetadataWrite {
     pub previous_visibility: String,
 }
 
+/// The refusal of a private-to-open change on a channel that holds, or once
+/// held, someone besides the sender and the sender's own agents.
+const PRIVATE_TO_OPEN_REFUSAL: &str =
+    "a private channel with other members cannot be made open; create a new open channel instead";
+
+/// Whether the locked channel has a member, current or removed, that is neither
+/// `sender` nor an agent whose NIP-OA owner is `sender`. Removed members count:
+/// their posts stay in the history that opening would publish.
+async fn has_member_besides_sender_and_agents(
+    w: &mut ChannelSettingsWriter<'_>,
+    sender: &[u8],
+) -> Result<bool> {
+    let channel_id = w.channel_id;
+    let tx = w.tx();
+    let community_id = tx.community();
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM channel_members m \
+         LEFT JOIN users u ON u.community_id = m.community_id AND u.pubkey = m.pubkey \
+         WHERE m.community_id = $1 AND m.channel_id = $2 \
+         AND m.pubkey <> $3 AND u.agent_owner_pubkey IS DISTINCT FROM $3)",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(sender)
+    .fetch_one(tx.conn())
+    .await?)
+}
+
 pub(crate) async fn apply_channel_metadata_event(
     pool: &PgPool,
     push_enqueue: Option<crate::runtime::push_enqueue::PushEnqueue>,
@@ -1692,6 +1723,18 @@ pub(crate) async fn apply_channel_metadata_event(
         (false, Some(false)) => {
             return Err(DbError::AccessDenied("channel is not archived".to_string()));
         }
+    }
+    // Opening a private channel changes the admission rules under everyone
+    // who joined it, so only a channel that holds nobody but the sender and
+    // the sender's own agents (NIP-OA) may be opened, for example a Solo
+    // chat. A visibility change holds the membership lock
+    // (`lock_channel_for_settings_write`), so the member set read here stays
+    // the same until commit.
+    if edit.columns.visibility.as_deref() == Some(ChannelVisibility::Open.as_str())
+        && locked.previous_visibility() == ChannelVisibility::Private.as_str()
+        && has_member_besides_sender_and_agents(&mut locked, &event.pubkey.to_bytes()).await?
+    {
+        return Err(DbError::AccessDenied(PRIVATE_TO_OPEN_REFUSAL.to_string()));
     }
     // `auto_join` only makes sense where a kind:9021 self-join would work:
     // an open, unarchived channel. Decide it here, under the row lock and
@@ -2167,7 +2210,8 @@ impl Db {
         .await
     }
 
-    /// Updates a channel's name and/or description.
+    /// Updates a channel's name and/or description. It does not apply the
+    /// private-to-open rule; user edits go through kind:9002.
     #[datastore_span(name = "update_channel", system = "postgresql")]
     pub async fn update_channel(
         &self,
@@ -2206,6 +2250,39 @@ impl Db {
     #[datastore_span(name = "archive_channel", system = "postgresql")]
     pub async fn archive_channel(&self, community_id: CommunityId, channel_id: Uuid) -> Result<()> {
         archive_channel(&self.pool, community_id, channel_id).await
+    }
+
+    /// Archive only while the caller still owns the lifecycle decision.
+    /// Recheck after acquiring channel locks and before commit, so a queued
+    /// write cannot act on authority retired while it waited. False means
+    /// nothing was written: authority was lost (rolled back), or the channel
+    /// was already archived. Admission uses the same row lock and cannot
+    /// interleave.
+    #[datastore_span(name = "archive_channel_if", system = "postgresql")]
+    pub async fn archive_channel_if<Fut>(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        authorized: impl Fn() -> Fut + Send,
+    ) -> Result<bool>
+    where
+        Fut: std::future::Future<Output = Result<bool>> + Send,
+    {
+        let mut tx = self.begin_event_write_transaction(community_id).await?;
+        let mut locked =
+            lock_channel_for_settings_write(&mut tx, channel_id, &ChannelUpdate::default()).await?;
+        if locked.archived {
+            return Ok(false);
+        }
+        if !authorized().await? {
+            return Ok(false);
+        }
+        set_archived_on(&mut locked, true).await?;
+        if !authorized().await? {
+            return Ok(false);
+        }
+        tx.commit().await?;
+        Ok(true)
     }
 
     /// Unarchives a channel.
@@ -2625,6 +2702,98 @@ mod postgres_tests {
         )
         .await
         .is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn conditional_archive_rechecks_authority_before_committing() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let owner = random_pubkey();
+        ensure_user(&pool, community, &owner).await.unwrap();
+        let channel = create_test_channel(
+            &pool,
+            community_uuid,
+            "conditional-archive",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .unwrap();
+        let db = Db::from_pool(pool.clone());
+        // An old owner's archive queues behind a channel writer; ownership
+        // retires before the lock becomes available.
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query(
+            "SELECT id FROM channels WHERE community_id = $1 AND id = $2 FOR NO KEY UPDATE",
+        )
+        .bind(community.as_uuid())
+        .bind(channel.id)
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+        let authorized = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let authorization = authorized.clone();
+        let queued_db = Db::from_pool(pool.clone());
+        let queued = tokio::spawn(async move {
+            queued_db
+                .archive_channel_if(community, channel.id, || async {
+                    Ok(authorization.load(std::sync::atomic::Ordering::SeqCst))
+                })
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()",
+                ).fetch_one(&pool).await.unwrap();
+                if waiting > 0 { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        authorized.store(false, std::sync::atomic::Ordering::SeqCst);
+        blocker.rollback().await.unwrap();
+        assert!(!queued.await.unwrap().unwrap());
+        assert!(db
+            .get_channel(community, channel.id)
+            .await
+            .unwrap()
+            .archived_at
+            .is_none());
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        // Authority is lost after the update, before commit: it must roll back.
+        assert!(!db
+            .archive_channel_if(community, channel.id, || async {
+                Ok(checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0)
+            })
+            .await
+            .unwrap());
+        assert!(db
+            .get_channel(community, channel.id)
+            .await
+            .unwrap()
+            .archived_at
+            .is_none());
+        assert!(db
+            .archive_channel_if(community, channel.id, || async { Ok(true) })
+            .await
+            .unwrap());
+        assert!(db
+            .get_channel(community, channel.id)
+            .await
+            .unwrap()
+            .archived_at
+            .is_some());
+        // Already archived (the creator ended the Huddle first) is terminal:
+        // nothing to write, not an error.
+        assert!(!db
+            .archive_channel_if(community, channel.id, || async { Ok(true) })
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
