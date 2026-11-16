@@ -3,7 +3,8 @@
 image:
   tag: ""
   digest: ""
-# Optional routing input, required only when httpRoute.enabled=true.
+# Required: the canonical public HTTPS origin. Management assertions are bound
+# to it, and it is the HTTPRoute hostname when the route is enabled.
 gatewayOrigin: ""
 application:
   appAttestAppId: ""
