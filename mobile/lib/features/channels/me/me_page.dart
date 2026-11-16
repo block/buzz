@@ -202,6 +202,7 @@ class MePage extends HookConsumerWidget {
                 channelId: channel.id,
                 name: channel.name,
                 isUnread: unreadIds.contains(channel.id),
+                canArchive: channel.isPersonalChat(viewer, legacyChannels),
                 onLongPress: () => showChannelDetailsSheet(
                   context: context,
                   channel: channel,

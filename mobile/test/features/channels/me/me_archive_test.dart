@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:ui' as ui;
 
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/me/me_page.dart';
 import 'package:buzz/shared/me/default_agent.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
@@ -38,6 +39,7 @@ class _ArchiveRelay extends RelaySessionNotifier {
     'legacy': 'Legacy chat',
     'ordinary': 'General',
     'archived': 'Old chat',
+    'shared': 'Shared chat',
   };
 
   @override
@@ -53,7 +55,7 @@ class _ArchiveRelay extends RelaySessionNotifier {
           kind: 39002,
           tags: [
             ['d', id],
-            ['p', owner, '', 'owner'],
+            ['p', owner, '', id == 'shared' ? 'member' : 'owner'],
           ],
           content: '',
           sig: '',
@@ -71,7 +73,7 @@ class _ArchiveRelay extends RelaySessionNotifier {
               ['name', entry.value],
               ['t', 'stream'],
               ['private'],
-              ['P', owner],
+              ['P', entry.key == 'shared' ? 'someone-else' : owner],
               if (entry.key != 'legacy' && entry.key != 'ordinary')
                 ['t', 'buzz.solo'],
               if (archived.contains(entry.key)) ['archived', 'true'],
@@ -175,6 +177,32 @@ void main() {
       await tester.pumpAndSettle();
       final context = tester.element(find.byType(MePage));
       final container = ProviderScope.containerOf(context);
+      final shared = find.text('Shared chat');
+      expect(shared, findsOneWidget);
+      expect(
+        find.ancestor(of: shared, matching: find.byType(Dismissible)),
+        findsNothing,
+      );
+      final sharedActions = tester
+          .getSemantics(find.bySemanticsLabel('Shared chat'))
+          .getSemanticsData()
+          .customSemanticsActionIds;
+      expect(
+        (sharedActions ?? const <int>[]).map(
+          (id) => CustomSemanticsAction.getAction(id)!.label,
+        ),
+        isNot(contains('Archive chat')),
+      );
+      await tester.drag(shared, const Offset(-700, 0));
+      await tester.pumpAndSettle();
+      expect(relay.submitted, isEmpty);
+      expect(shared.hitTestable(), findsOneWidget);
+      await tester.tap(shared);
+      await tester.pumpAndSettle();
+      expect(find.byType(ChannelDetailPage), findsOneWidget);
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      expect(shared.hitTestable(), findsOneWidget);
       expect(find.byType(Dismissible), findsNWidgets(3));
       expect(find.text('General'), findsNothing);
       expect(find.text('Old chat'), findsNothing);

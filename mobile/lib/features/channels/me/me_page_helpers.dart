@@ -22,10 +22,12 @@ class _MeChatRow extends HookConsumerWidget {
     required this.onTap,
     required this.onLongPress,
     required this.isUnread,
+    required this.canArchive,
   });
   final String channelId;
   final String name;
   final bool isUnread;
+  final bool canArchive;
   final VoidCallback onTap;
   final VoidCallback onLongPress;
 
@@ -33,7 +35,7 @@ class _MeChatRow extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final archiving = useState(false);
     Future<void> archive() async {
-      if (archiving.value) return;
+      if (!canArchive || archiving.value) return;
       archiving.value = true;
       try {
         await ref.read(channelActionsProvider).archiveChannel(channelId);
@@ -56,6 +58,60 @@ class _MeChatRow extends HookConsumerWidget {
         : working.isEmpty
         ? ''
         : ', ${working.join(', ')} working';
+    final row = Semantics(
+      label: '${isUnread ? '$name, unread' : name}$status',
+      liveRegion: archiving.value,
+      onTap: onTap,
+      onLongPress: onLongPress,
+      customSemanticsActions: {
+        if (canArchive && !archiving.value)
+          const CustomSemanticsAction(label: 'Archive chat'): archive,
+      },
+      excludeSemantics: true,
+      button: true,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(Radii.md),
+        onTap: onTap,
+        onLongPress: onLongPress,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: Grid.xxs,
+            vertical: Grid.inventoryRowInset,
+          ),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 24,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Icon(BuzzIcons.messageCircle, size: 20, color: color),
+                ),
+              ),
+              const SizedBox(width: Grid.inventoryLabelGap),
+              Expanded(
+                child: Text(
+                  name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: navigationChatTitleTextStyle.copyWith(
+                    color: color,
+                    fontWeight: isUnread ? FontWeight.w600 : FontWeight.w400,
+                  ),
+                ),
+              ),
+              if (archiving.value) ...[
+                const SizedBox(width: Grid.xs),
+                const BuzzLoadingIndicator(size: 20),
+              ] else if (working.isNotEmpty) ...[
+                const SizedBox(width: Grid.xs),
+                SoloWorkingDots(color: color),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+    if (!canArchive) return row;
     return Dismissible(
       key: ValueKey('archive-solo-$channelId'),
       // Keep the axis stable while confirmDismiss is pending. Dismissible
@@ -100,63 +156,7 @@ class _MeChatRow extends HookConsumerWidget {
           ),
         ),
       ),
-      child: Semantics(
-        label: '${isUnread ? '$name, unread' : name}$status',
-        liveRegion: archiving.value,
-        onTap: onTap,
-        onLongPress: onLongPress,
-        customSemanticsActions: {
-          if (!archiving.value)
-            const CustomSemanticsAction(label: 'Archive chat'): archive,
-        },
-        excludeSemantics: true,
-        button: true,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(Radii.md),
-          onTap: onTap,
-          onLongPress: onLongPress,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: Grid.xxs,
-              vertical: Grid.inventoryRowInset,
-            ),
-            child: Row(
-              children: [
-                SizedBox(
-                  width: 24,
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: Icon(
-                      BuzzIcons.messageCircle,
-                      size: 20,
-                      color: color,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: Grid.inventoryLabelGap),
-                Expanded(
-                  child: Text(
-                    name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: navigationChatTitleTextStyle.copyWith(
-                      color: color,
-                      fontWeight: isUnread ? FontWeight.w600 : FontWeight.w400,
-                    ),
-                  ),
-                ),
-                if (archiving.value) ...[
-                  const SizedBox(width: Grid.xs),
-                  const BuzzLoadingIndicator(size: 20),
-                ] else if (working.isNotEmpty) ...[
-                  const SizedBox(width: Grid.xs),
-                  SoloWorkingDots(color: color),
-                ],
-              ],
-            ),
-          ),
-        ),
-      ),
+      child: row,
     );
   }
 }
