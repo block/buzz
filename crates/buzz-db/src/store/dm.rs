@@ -106,6 +106,21 @@ pub async fn create_dm(
     participants: &[&[u8]],
     created_by: &[u8],
 ) -> Result<ChannelRecord> {
+    create_dm_if_missing(pool, community_id, participants, created_by)
+        .await
+        .map(|(channel, _)| channel)
+}
+
+/// Atomically create or reuse a DM without changing participant visibility.
+///
+/// The boolean is true only when this call inserted the channel. Concurrent
+/// callers for the same participant set reuse the winner's committed channel.
+pub async fn create_dm_if_missing(
+    pool: &PgPool,
+    community_id: CommunityId,
+    participants: &[&[u8]],
+    created_by: &[u8],
+) -> Result<(ChannelRecord, bool)> {
     if participants.len() < 2 {
         return Err(DbError::InvalidData(
             "DM requires at least 2 participants".to_string(),
@@ -134,33 +149,6 @@ pub async fn create_dm(
     )
     .await?;
 
-    // Idempotency check inside the transaction.
-    let existing = sqlx::query(
-        r#"
-        SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
-               description, canvas,
-               created_by, created_at, updated_at, archived_at, deleted_at,
-               nip29_group_id, topic_required, max_members,
-               topic, topic_set_by, topic_set_at,
-               purpose, purpose_set_by, purpose_set_at, labels, join_role, unlisted, auto_join
-        FROM channels
-        WHERE community_id = $1
-          AND participant_hash = $2
-          AND channel_type = 'dm'
-          AND deleted_at IS NULL
-        LIMIT 1
-        "#,
-    )
-    .bind(community_id.as_uuid())
-    .bind(hash.as_slice())
-    .fetch_optional(tx.conn())
-    .await?;
-
-    if let Some(row) = existing {
-        tx.commit().await?;
-        return row_to_channel_record(row);
-    }
-
     // Name the DM based on participant count.
     let name = if participants.len() == 2 {
         "DM".to_string()
@@ -170,11 +158,15 @@ pub async fn create_dm(
 
     let id = Uuid::new_v4();
 
-    sqlx::query(
+    let was_created = sqlx::query(
         r#"
         INSERT INTO channels
             (id, community_id, name, channel_type, visibility, created_by, participant_hash)
         VALUES ($1, $2, $3, 'dm', 'private', $4, $5)
+        ON CONFLICT (community_id, participant_hash)
+            WHERE participant_hash IS NOT NULL
+        DO NOTHING
+        RETURNING id
         "#,
     )
     .bind(id)
@@ -182,28 +174,31 @@ pub async fn create_dm(
     .bind(&name)
     .bind(created_by)
     .bind(hash.as_slice())
-    .execute(tx.conn())
-    .await?;
+    .fetch_optional(tx.conn())
+    .await?
+    .is_some();
 
-    // Add all participants as members with role='member'.
-    for pk in participants {
-        sqlx::query(
-            r#"
-            INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
-            VALUES ($1, $2, $3, 'member', $4)
-            ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
-                sync_modified_at = CASE WHEN channel_members.removed_at IS NOT NULL THEN clock_timestamp() ELSE channel_members.sync_modified_at END,
-                removed_at = NULL,
-                removed_by = NULL,
-                role = EXCLUDED.role
-            "#,
-        )
-        .bind(community_id.as_uuid())
-        .bind(id)
-        .bind(*pk)
-        .bind(created_by)
-        .execute(tx.conn())
-        .await?;
+    if was_created {
+        // Add all participants as members with role='member'.
+        for pk in participants {
+            sqlx::query(
+                    r#"
+                    INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
+                    VALUES ($1, $2, $3, 'member', $4)
+                    ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
+                        sync_modified_at = CASE WHEN channel_members.removed_at IS NOT NULL THEN clock_timestamp() ELSE channel_members.sync_modified_at END,
+                        removed_at = NULL,
+                        removed_by = NULL,
+                        role = EXCLUDED.role
+                    "#,
+                )
+                .bind(community_id.as_uuid())
+                .bind(id)
+                .bind(*pk)
+                .bind(created_by)
+                .execute(tx.conn())
+                .await?;
+        }
     }
 
     let row = sqlx::query(
@@ -214,17 +209,18 @@ pub async fn create_dm(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at, labels, join_role, unlisted, auto_join
-        FROM channels WHERE community_id = $1 AND id = $2
+        FROM channels
+        WHERE community_id = $1 AND participant_hash = $2 AND deleted_at IS NULL
         "#,
     )
     .bind(community_id.as_uuid())
-    .bind(id)
+    .bind(hash.as_slice())
     .fetch_one(tx.conn())
     .await?;
 
     let record = row_to_channel_record(row)?;
     tx.commit().await?;
-    Ok(record)
+    Ok((record, was_created))
 }
 
 /// List all DM conversations for a given user, ordered by most recent activity.
@@ -390,9 +386,13 @@ pub async fn open_dm(
     }
 
     // Create new DM.
-    let channel = create_dm(pool, community_id, &all, created_by).await?;
-
-    Ok((channel, true))
+    let (channel, was_created) = create_dm_if_missing(pool, community_id, &all, created_by).await?;
+    if !was_created {
+        // A concurrent opener won after the fast-path lookup. This is still
+        // an interactive open, so retain the same visibility semantics.
+        unhide_dm(pool, community_id, channel.id, created_by).await?;
+    }
+    Ok((channel, was_created))
 }
 
 // -- Hide / unhide ------------------------------------------------------------
@@ -564,6 +564,17 @@ impl Db {
         crate::dm::create_dm(&self.pool, community_id, participants, created_by).await
     }
 
+    /// Create or reuse a DM without unhiding it; true only for the creator.
+    #[datastore_span(name = "create_dm_if_missing", system = "postgresql")]
+    pub async fn create_dm_if_missing(
+        &self,
+        community_id: CommunityId,
+        participants: &[&[u8]],
+        created_by: &[u8],
+    ) -> Result<(ChannelRecord, bool)> {
+        crate::dm::create_dm_if_missing(&self.pool, community_id, participants, created_by).await
+    }
+
     /// List all DMs for a user.
     #[datastore_span(name = "list_dms_for_user", system = "postgresql")]
     pub async fn list_dms_for_user(
@@ -664,3 +675,7 @@ mod tests {
         assert_eq!(h.len(), 32);
     }
 }
+
+#[cfg(test)]
+#[path = "dm_postgres_tests.rs"]
+mod postgres_tests;

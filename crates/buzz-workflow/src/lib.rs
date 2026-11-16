@@ -183,7 +183,7 @@ impl WorkflowEngine {
     /// - the owner must still be an active member of the workflow's channel,
     ///   in a role that can write (a guest cannot);
     /// - if the definition contains an exfiltration-capable action
-    ///   (`call_webhook`), the owner must currently hold the `owner` or
+    ///   (`call_webhook` or `send_dm`), the owner must currently hold the `owner` or
     ///   `admin` role;
     /// - the owner, or the human owner of an agent owner, must not be banned
     ///   from the community. Bans leave channel membership in place, so the
@@ -2024,6 +2024,45 @@ steps:
         ))
         .expect("parse hook");
         assert!(hook.requires_elevated_authority());
+    }
+
+    #[test]
+    fn send_dm_requires_elevated_authority_and_validates_recipients() {
+        let pubkey = nostr::Keys::generate().public_key().to_hex();
+        for (to, valid) in [
+            (pubkey.as_str(), true),
+            ("{{trigger.author}}", true),
+            ("{{trigger.text}}", false),
+            ("{{steps.previous.output.pubkey}}", false),
+            ("prefix{{trigger.author}}", false),
+            ("not-a-key", false),
+            ("", false),
+        ] {
+            let definition = serde_json::json!({
+                "name": "dm", "trigger": {"on": "message_posted"},
+                "steps": [{"id": "send", "action": "send_dm", "to": to, "text": "hi"}],
+            });
+            let def: WorkflowDef = serde_json::from_value(definition).expect("definition");
+            assert_eq!(def.validate().is_ok(), valid, "recipient: {to}");
+            let trigger = executor::TriggerContext {
+                author: pubkey.clone(),
+                ..Default::default()
+            };
+            assert_eq!(
+                executor::resolve_step_templates(&def.steps[0], &trigger, &HashMap::new()).is_ok(),
+                valid,
+                "stored recipient: {to}"
+            );
+            assert!(def.requires_elevated_authority());
+            assert!(!owner_authority_allows(
+                Some("member"),
+                def.requires_elevated_authority()
+            ));
+            assert!(owner_authority_allows(
+                Some("admin"),
+                def.requires_elevated_authority()
+            ));
+        }
     }
 
     // -- SEC-006: event-path regression (requires Postgres) ----------------

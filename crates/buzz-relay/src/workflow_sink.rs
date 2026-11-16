@@ -208,6 +208,129 @@ impl RelayActionSink {
 }
 
 impl ActionSink for RelayActionSink {
+    fn send_dm(
+        &self,
+        community_id: CommunityId,
+        recipient_pubkey: &str,
+        text: &str,
+        authored_text: &str,
+        may_direct_agents: bool,
+        author_pubkey: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<SentMessage, ActionSinkError>> + Send + '_>> {
+        let recipient = nostr::PublicKey::from_hex(recipient_pubkey)
+            .map_err(|e| ActionSinkError::InvalidInput(format!("invalid recipient pubkey: {e}")));
+        let author = nostr::PublicKey::from_hex(author_pubkey)
+            .map_err(|e| ActionSinkError::InvalidInput(format!("invalid author pubkey: {e}")));
+        let text = text.to_owned();
+        let authored_text = authored_text.to_owned();
+        Box::pin(async move {
+            use crate::handlers::side_effects::{
+                emit_group_discovery_events, emit_membership_notification,
+                publish_dm_visibility_snapshot,
+            };
+            let recipient = recipient?.to_bytes();
+            let author = author?.to_bytes();
+            if text.trim().is_empty() {
+                return Err(ActionSinkError::EmptyContent);
+            }
+            if recipient == author {
+                return Err(ActionSinkError::InvalidInput(
+                    "DM requires another participant".into(),
+                ));
+            }
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+            let host = state
+                .db
+                .lookup_community_host(community_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .ok_or_else(|| {
+                    ActionSinkError::Database("workflow community has no host".into())
+                })?;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+            if state
+                .db
+                .get_user(community_id, &recipient)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .is_none()
+                || state
+                    .db
+                    .moderation_restriction_state(community_id, &recipient)
+                    .await
+                    .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                    .banned
+            {
+                return Err(ActionSinkError::InvalidInput(
+                    "DM recipient must be an existing, unbanned community user".into(),
+                ));
+            }
+            // Check attachment access before creating a conversation or notices.
+            // Use the same relay signature and owner attribution as send_message;
+            // the destination h-tag is not part of media publication authorization.
+            let preflight = EventBuilder::new(Kind::from(KIND_STREAM_MESSAGE as u16), &text)
+                .tags([
+                    Tag::parse(["p", &hex::encode(author), "", "owner"])
+                        .map_err(|e| ActionSinkError::EventBuild(e.to_string()))?,
+                    Tag::parse(["buzz:workflow", "true"])
+                        .map_err(|e| ActionSinkError::EventBuild(e.to_string()))?,
+                ])
+                .sign_with_keys(&state.relay_keypair)
+                .map_err(|e| ActionSinkError::EventBuild(e.to_string()))?;
+            crate::handlers::media_access::validate_media_references(&tenant, &state, &preflight)
+                .await
+                .map_err(|e| {
+                    ActionSinkError::InvalidInput(format!("media reference denied: {e:?}"))
+                })?;
+            let participants = vec![author.to_vec(), recipient.to_vec()];
+            // Sending to an existing DM must not reopen a conversation the
+            // owner hid. Only the interactive open command changes visibility.
+            let (channel, was_created) = state
+                .db
+                .create_dm_if_missing(community_id, &[&author, &recipient], &author)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            // Refresh on every attempt: a prior attempt may have persisted the
+            // channel but failed before publishing its discovery events.
+            for participant in &participants {
+                state.invalidate_membership(&tenant, channel.id, participant);
+            }
+            emit_group_discovery_events(&tenant, &state, channel.id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            publish_dm_visibility_snapshot(&tenant, &state, &author)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            if was_created {
+                for participant in &participants {
+                    emit_membership_notification(
+                        &tenant,
+                        &state,
+                        channel.id,
+                        participant,
+                        &author,
+                        buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION,
+                    )
+                    .await
+                    .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+                }
+            }
+            self.send_message(
+                community_id,
+                &channel.id.to_string(),
+                &text,
+                &authored_text,
+                may_direct_agents,
+                &hex::encode(author),
+                None,
+            )
+            .await
+        })
+    }
+
     fn send_message(
         &self,
         community_id: CommunityId,
@@ -513,6 +636,30 @@ impl ActionSink for RelayActionSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn send_dm_rejects_invalid_inputs_before_accessing_storage() {
+        let sink = RelayActionSink { state: Weak::new() };
+        let community = CommunityId::from_uuid(Uuid::new_v4());
+        let author = nostr::Keys::generate().public_key().to_hex();
+        let recipient = nostr::Keys::generate().public_key().to_hex();
+        for (to, from) in [
+            ("invalid", author.as_str()),
+            (recipient.as_str(), "invalid"),
+            (author.as_str(), author.as_str()),
+        ] {
+            assert!(matches!(
+                sink.send_dm(community, to, "hello", "hello", false, from)
+                    .await,
+                Err(ActionSinkError::InvalidInput(_))
+            ));
+        }
+        assert!(matches!(
+            sink.send_dm(community, &recipient, "  ", "  ", false, &author)
+                .await,
+            Err(ActionSinkError::EmptyContent)
+        ));
+    }
 
     fn m(name: &str, pubkey: &str) -> (String, String) {
         (name.to_string(), pubkey.to_string())
@@ -855,6 +1002,7 @@ mod postgres_tests {
         agent_mentions: buzz_workflow::AgentMentions,
     ) -> Arc<AppState> {
         let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
+        config.media_read_mode = crate::api::media_access::MediaReadMode::Enforce;
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
@@ -1049,6 +1197,276 @@ mod postgres_tests {
         .expect("execute workflow");
 
         result.step_outputs["send"].clone()
+    }
+
+    async fn check_workflow_send_dm(mode: buzz_workflow::AgentMentions) {
+        let state = test_state_with_agent_mentions(mode).await;
+        let owner = nostr::Keys::generate().public_key();
+        let recipient = nostr::Keys::generate().public_key();
+        let host = format!("wf-dm-{}.example.org", Uuid::new_v4().simple());
+        let community = match state
+            .db
+            .create_community_with_owner(&host, &owner.to_hex(), &nostr::Keys::generate())
+            .await
+            .expect("create community")
+            .outcome
+        {
+            CreateCommunityWithOwnerResult::Created(rec) => rec.id,
+            other => panic!("expected new community: {other:?}"),
+        };
+        for key in [owner, recipient] {
+            state
+                .db
+                .ensure_user(community, &key.to_bytes())
+                .await
+                .expect("ensure user");
+        }
+        state
+            .db
+            .update_user_profile(
+                community,
+                &recipient.to_bytes(),
+                Some("Receiver"),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("recipient name");
+        let sink = RelayActionSink::new(&state);
+        let unknown = nostr::Keys::generate().public_key();
+        assert!(matches!(
+            sink.send_dm(
+                community,
+                &unknown.to_hex(),
+                "hi",
+                "hi",
+                false,
+                &owner.to_hex()
+            )
+            .await,
+            Err(ActionSinkError::InvalidInput(_))
+        ));
+        state
+            .db
+            .ban_community_member(
+                community,
+                &recipient.to_bytes(),
+                &owner.to_bytes(),
+                None,
+                None,
+            )
+            .await
+            .expect("ban recipient");
+        assert!(matches!(
+            sink.send_dm(
+                community,
+                &recipient.to_hex(),
+                "hi",
+                "hi",
+                false,
+                &owner.to_hex()
+            )
+            .await,
+            Err(ActionSinkError::InvalidInput(_))
+        ));
+        state
+            .db
+            .unban_community_member(community, &recipient.to_bytes(), &owner.to_bytes())
+            .await
+            .expect("unban recipient");
+        // The publication cap rejects before touching media storage, so this
+        // regression needs neither an S3 service nor seeded upload sidecars.
+        let oversized = serde_json::to_string(
+            &(0..513)
+                .map(|n| format!("http://{host}/media/{n:064x}.bin"))
+                .collect::<Vec<_>>(),
+        )
+        .expect("attachment list");
+        assert!(
+            matches!(sink.send_dm(community, &recipient.to_hex(), &oversized, &oversized, false, &owner.to_hex()).await,
+            Err(ActionSinkError::InvalidInput(message)) if message.contains("too many attachment"))
+        );
+        assert!(
+            state
+                .db
+                .list_dms_for_user(community, &owner.to_bytes(), 10, None)
+                .await
+                .expect("DM list")
+                .is_empty(),
+            "rejected sends must not create empty DMs"
+        );
+        let definition = serde_json::json!({
+            "name": "dm-test", "trigger": {"on": "message_posted"},
+            "steps": [{"id": "send", "action": "send_dm",
+                       "to": "{{trigger.author}}", "text": "Notice: {{trigger.text}} @Receiver"}],
+            "enabled": true,
+        });
+        let workflow_id = state
+            .db
+            .create_workflow(
+                community,
+                None,
+                &owner.to_bytes(),
+                "dm-test",
+                &definition.to_string(),
+                &[0; 32],
+            )
+            .await
+            .expect("create workflow");
+        state
+            .workflow_engine
+            .set_action_sink(Arc::new(RelayActionSink::new(&state)));
+        let def: buzz_workflow::WorkflowDef = serde_json::from_value(
+            state
+                .db
+                .get_workflow(community, workflow_id)
+                .await
+                .expect("workflow")
+                .definition,
+        )
+        .expect("definition");
+        let mut channel_id = None;
+        for text in ["first", "second"] {
+            if let Some(channel) = channel_id {
+                state
+                    .db
+                    .hide_dm(community, channel, &owner.to_bytes())
+                    .await
+                    .expect("hide DM");
+            }
+            // Catch a repeated notice even if it would deduplicate against a
+            // first-send notice signed in the same second.
+            let mut notices = (text == "second")
+                .then(|| crate::handlers::side_effects::notice_barrier::install(&owner.to_bytes()));
+            let trigger = buzz_workflow::executor::TriggerContext {
+                author: recipient.to_hex(),
+                text: text.into(),
+                ..Default::default()
+            };
+            let run_id = state
+                .db
+                .create_workflow_run(
+                    community,
+                    workflow_id,
+                    None,
+                    None,
+                    &buzz_db::workflow::RunCause::Webhook,
+                )
+                .await
+                .expect("create run");
+            let execution = buzz_workflow::executor::execute_run(
+                &state.workflow_engine,
+                community,
+                run_id,
+                &def,
+                &trigger,
+            );
+            let result = if let Some(barrier) = notices.as_mut() {
+                tokio::select! {
+                    result = execution => result,
+                    _ = barrier.next() => panic!("existing DM send must not emit member-added notices"),
+                }
+            } else {
+                execution.await
+            }.expect("execute DM workflow");
+            assert_eq!(result.step_outputs["send"]["sent"], true);
+            let id = nostr::EventId::from_hex(
+                result.step_outputs["send"]["event_id"]
+                    .as_str()
+                    .expect("event id"),
+            )
+            .expect("parse id");
+            let stored = state
+                .db
+                .get_event_by_id_for_event_write(community, id.as_bytes())
+                .await
+                .expect("load event")
+                .expect("persisted DM");
+            assert_eq!(stored.event.content, format!("Notice: {text} @Receiver"));
+            assert_eq!(stored.event.kind, Kind::from(KIND_STREAM_MESSAGE as u16));
+            assert_eq!(stored.event.pubkey, state.relay_keypair.public_key());
+            stored.event.verify().expect("valid signature");
+            let secure = mode == buzz_workflow::AgentMentions::Owner;
+            assert_eq!(
+                stored
+                    .event
+                    .tags
+                    .iter()
+                    .any(|tag| tag.as_slice().first().map(String::as_str)
+                        == Some("buzz:workflow-mention")),
+                !secure
+            );
+            assert_eq!(
+                result.step_outputs["send"].get("agent_mentions").is_some(),
+                secure
+            );
+            let channel = stored.channel_id.expect("DM channel");
+            if let Some(previous) = channel_id {
+                assert_eq!(channel, previous, "reuse the two-party DM");
+            }
+            channel_id = Some(channel);
+            if text == "second" {
+                assert!(
+                    state
+                        .db
+                        .list_hidden_dms(community, &owner.to_bytes())
+                        .await
+                        .expect("hidden DMs")
+                        .contains(&channel),
+                    "sending must preserve hidden state"
+                );
+            }
+            let mut query = buzz_db::event::EventQuery::for_community(community);
+            query.kinds = Some(vec![buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION as i32]);
+            assert_eq!(
+                state
+                    .db
+                    .query_events_for_event_write(&query)
+                    .await
+                    .expect("notices")
+                    .len(),
+                2
+            );
+            let row = state
+                .db
+                .get_channel_for_event_write(community, channel)
+                .await
+                .expect("channel");
+            assert_eq!(row.channel_type, "dm");
+            assert_eq!(row.visibility, "private");
+            let members = state
+                .db
+                .get_members_for_event_write(community, channel)
+                .await
+                .expect("members");
+            assert_eq!(members.len(), 2);
+            for key in [owner, recipient] {
+                assert!(members.iter().any(|m| m.pubkey == key.to_bytes()));
+            }
+            assert!(stored
+                .event
+                .tags
+                .iter()
+                .any(|t| t.as_slice() == ["buzz:workflow", "true"]));
+            assert!(stored
+                .event
+                .tags
+                .iter()
+                .any(|t| t.as_slice() == ["buzz:workflow-owner", &owner.to_hex()]));
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_send_dm_resolves_templates_and_reuses_private_channel() {
+        check_workflow_send_dm(buzz_workflow::AgentMentions::Any).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_send_dm_respects_owner_only_agent_mentions() {
+        check_workflow_send_dm(buzz_workflow::AgentMentions::Owner).await;
     }
 
     #[tokio::test]
