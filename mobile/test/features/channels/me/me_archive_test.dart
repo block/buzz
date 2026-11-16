@@ -200,7 +200,7 @@ void main() {
       await tester.tap(shared);
       await tester.pumpAndSettle();
       expect(find.byType(ChannelDetailPage), findsOneWidget);
-      await tester.pageBack();
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).pop();
       await tester.pumpAndSettle();
       expect(shared.hitTestable(), findsOneWidget);
       expect(find.byType(Dismissible), findsNWidgets(3));
@@ -234,6 +234,16 @@ void main() {
       expect(relay.submitted.single.sig, isNotEmpty);
       expect(relay.archived, isNot(contains('grouped')));
       expect(find.text('Archiving…').hitTestable(), findsOneWidget);
+      final pendingActions = tester
+          .getSemantics(find.bySemanticsLabel('Project chat, archiving'))
+          .getSemanticsData()
+          .customSemanticsActionIds;
+      expect(
+        (pendingActions ?? const <int>[]).map(
+          (id) => CustomSemanticsAction.getAction(id)!.label,
+        ),
+        isNot(contains('Archive chat')),
+      );
       await tester.drag(
         find.byKey(const ValueKey('archive-solo-grouped')),
         const Offset(-700, 0),
