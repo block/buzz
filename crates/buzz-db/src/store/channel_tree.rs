@@ -18,8 +18,23 @@
 //! Walk from the channel up through its parents. At each channel, a person's
 //! member row grants its role, and otherwise an open channel grants its
 //! `join_role`. The first grant found decides ([`closest_grant`]); no grant
-//! anywhere means no access. Roles found above the channel itself are capped
-//! at member, so owner and admin powers come only from a direct row.
+//! anywhere means no access.
+//!
+//! ## What a channel takes from its parents
+//!
+//! Each channel's `parent_access` ([`ParentAccess`]) caps what the walk may
+//! bring down to it from above:
+//!
+//! - `member`, the default: roles found above are capped at member, so owner
+//!   and admin powers come only from a direct row.
+//! - `guest`: roles found above are capped at guest, so the parent's people
+//!   read the channel but cannot post in it.
+//! - `none`: the walk stops at the channel. Only its own rows and, while it
+//!   is open, its own `join_role` grant anything. Its children are cut off
+//!   from the channels above it too.
+//!
+//! Each step up passes the cap of the channel it leaves, so a grandparent's
+//! grant reaches a grandchild only through both caps, and the narrower wins.
 //!
 //! Because the channel itself is the first level, an open channel or a direct
 //! row decides exactly as it did before parents existed. A parent matters only
@@ -64,26 +79,96 @@ impl LevelGrant {
     }
 }
 
-/// The role a person holds in a channel, given the grants of the channel and
-/// then each of its parents, nearest first. See the module docs.
-pub fn closest_grant(levels: impl IntoIterator<Item = LevelGrant>) -> Option<MemberRole> {
-    for (depth, level) in levels.into_iter().enumerate() {
-        match level {
-            LevelGrant::Row(role) if depth == 0 => return Some(role),
-            LevelGrant::Row(role) => return Some(inherited(role)),
-            LevelGrant::Open(join_role) => return Some(join_role.member_role()),
-            LevelGrant::Nothing => {}
-        }
-    }
-    None
+/// What a channel's parents may grant in it: its `parent_access` column. See
+/// the module docs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentAccess {
+    /// Roles from above cap at member. The default.
+    Member,
+    /// Roles from above cap at guest: read, never post.
+    Guest,
+    /// Nothing from above reaches the channel or its children.
+    NoAccess,
 }
 
-/// A role found on a parent, as it applies to the child.
-fn inherited(role: MemberRole) -> MemberRole {
-    match role {
-        MemberRole::Owner | MemberRole::Admin => MemberRole::Member,
-        other => other,
+impl ParentAccess {
+    /// The stored and published value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Member => "member",
+            Self::Guest => "guest",
+            Self::NoAccess => "none",
+        }
     }
+
+    /// A stored value. An unknown one fails closed to [`Self::NoAccess`].
+    pub fn parse_fail_closed(value: &str) -> Self {
+        value.parse().unwrap_or(Self::NoAccess)
+    }
+
+    /// The narrower of two caps.
+    fn narrower(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::NoAccess, _) | (_, Self::NoAccess) => Self::NoAccess,
+            (Self::Guest, _) | (_, Self::Guest) => Self::Guest,
+            (Self::Member, Self::Member) => Self::Member,
+        }
+    }
+
+    /// `role`, found above a channel with this cap, as it applies there.
+    fn cap(self, role: MemberRole) -> Option<MemberRole> {
+        match (self, role) {
+            (Self::NoAccess, _) => None,
+            (Self::Guest, _) => Some(MemberRole::Guest),
+            (Self::Member, MemberRole::Owner | MemberRole::Admin) => Some(MemberRole::Member),
+            (Self::Member, other) => Some(other),
+        }
+    }
+}
+
+impl std::str::FromStr for ParentAccess {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "member" => Ok(Self::Member),
+            "guest" => Ok(Self::Guest),
+            "none" => Ok(Self::NoAccess),
+            other => Err(format!(
+                "invalid parent_access value: {other} (must be \"member\", \"guest\" or \"none\")"
+            )),
+        }
+    }
+}
+
+/// The role a person holds in a channel, given the channel and then each of
+/// its parents, nearest first: each level's grant, and that level's own
+/// [`ParentAccess`]. See the module docs.
+pub fn closest_grant(
+    levels: impl IntoIterator<Item = (LevelGrant, ParentAccess)>,
+) -> Option<MemberRole> {
+    // `None` until the walk leaves the channel itself, whose grants are
+    // never capped.
+    let mut cap: Option<ParentAccess> = None;
+    for (grant, parent_access) in levels {
+        let role = match grant {
+            LevelGrant::Row(role) => Some(role),
+            LevelGrant::Open(join_role) => Some(join_role.member_role()),
+            LevelGrant::Nothing => None,
+        };
+        if let Some(role) = role {
+            return match cap {
+                None => Some(role),
+                Some(cap) => cap.cap(role),
+            };
+        }
+        let next = cap.map_or(parent_access, |cap| cap.narrower(parent_access));
+        if next == ParentAccess::NoAccess {
+            return None;
+        }
+        cap = Some(next);
+    }
+    None
 }
 
 /// One parent of a channel, nearest first.
@@ -95,16 +180,41 @@ pub struct Ancestor {
     pub visibility: String,
     /// Its `join_role`.
     pub join_role: String,
+    /// Its own `parent_access`, which caps what its parents grant.
+    pub parent_access: ParentAccess,
 }
 
-/// The live parents of `channel_id`, nearest first, at most
-/// [`MAX_ANCESTORS`]. The walk stops at a deleted parent, which grants
-/// nothing.
+/// A channel's own `parent_access` and its live parents, nearest first.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Lineage {
+    /// The channel's own `parent_access`. `None` for a channel not found.
+    pub parent_access: Option<ParentAccess>,
+    /// Its live parents, nearest first, at most [`MAX_ANCESTORS`].
+    pub ancestors: Vec<Ancestor>,
+}
+
+impl Lineage {
+    /// The parents whose grants can reach the channel: the walk stops above
+    /// any channel whose `parent_access` is `none`.
+    pub fn reachable(&self) -> impl Iterator<Item = &Ancestor> {
+        let mut gate = self.parent_access.unwrap_or(ParentAccess::NoAccess);
+        self.ancestors.iter().map_while(move |ancestor| {
+            if gate == ParentAccess::NoAccess {
+                return None;
+            }
+            gate = ancestor.parent_access;
+            Some(ancestor)
+        })
+    }
+}
+
+/// `channel_id`'s [`Lineage`]. The walk stops at a deleted parent, which
+/// grants nothing.
 pub async fn get_channel_ancestors(
     pool: &sqlx::PgPool,
     community_id: CommunityId,
     channel_id: Uuid,
-) -> Result<Vec<Ancestor>> {
+) -> Result<Lineage> {
     let mut connection = crate::observability::acquire_writer(
         pool,
         crate::observability::WriterOperation::Authorization,
@@ -119,10 +229,13 @@ async fn ancestors_on(
     connection: &mut sqlx::PgConnection,
     community_id: CommunityId,
     channel_id: Uuid,
-) -> Result<Vec<Ancestor>> {
+) -> Result<Lineage> {
     let row = sqlx::query(
-        "SELECT p.id AS p_id, p.visibility::text AS p_visibility, p.join_role AS p_join_role, \
-                g.id AS g_id, g.visibility::text AS g_visibility, g.join_role AS g_join_role \
+        "SELECT c.parent_access AS c_parent_access, \
+                p.id AS p_id, p.visibility::text AS p_visibility, p.join_role AS p_join_role, \
+                p.parent_access AS p_parent_access, \
+                g.id AS g_id, g.visibility::text AS g_visibility, g.join_role AS g_join_role, \
+                g.parent_access AS g_parent_access \
          FROM channels c \
          LEFT JOIN channels p ON p.community_id = c.community_id AND p.id = c.parent_id \
               AND p.deleted_at IS NULL \
@@ -135,7 +248,11 @@ async fn ancestors_on(
     .fetch_optional(&mut *connection)
     .await?;
     let Some(row) = row else {
-        return Ok(Vec::new());
+        return Ok(Lineage::default());
+    };
+    let parent_access = |prefix: &str| -> Result<ParentAccess> {
+        let value: String = row.try_get(format!("{prefix}_parent_access").as_str())?;
+        Ok(ParentAccess::parse_fail_closed(&value))
     };
     let mut ancestors = Vec::with_capacity(MAX_ANCESTORS);
     for prefix in ["p", "g"] {
@@ -146,9 +263,13 @@ async fn ancestors_on(
             id,
             visibility: row.try_get(format!("{prefix}_visibility").as_str())?,
             join_role: row.try_get(format!("{prefix}_join_role").as_str())?,
+            parent_access: parent_access(prefix)?,
         });
     }
-    Ok(ancestors)
+    Ok(Lineage {
+        parent_access: Some(parent_access("c")?),
+        ancestors,
+    })
 }
 
 /// The role `pubkey` holds in `channel_id` through its parents alone, read
@@ -164,12 +285,15 @@ pub async fn inherited_role_in_transaction(
     pubkey: &[u8],
 ) -> Result<Option<MemberRole>> {
     let community_id = tx.community();
-    let ancestors = ancestors_on(tx.conn(), community_id, channel_id).await?;
-    let mut levels = vec![LevelGrant::Nothing];
-    for ancestor in &ancestors {
+    let lineage = ancestors_on(tx.conn(), community_id, channel_id).await?;
+    let Some(parent_access) = lineage.parent_access else {
+        return Ok(None);
+    };
+    let mut levels = vec![(LevelGrant::Nothing, parent_access)];
+    for ancestor in lineage.reachable() {
         let role = direct_role(tx, ancestor.id, pubkey).await?;
         let level = LevelGrant::of(role.as_deref(), &ancestor.visibility, &ancestor.join_role);
-        levels.push(level);
+        levels.push((level, ancestor.parent_access));
         if level != LevelGrant::Nothing {
             break;
         }
@@ -181,15 +305,18 @@ pub async fn inherited_role_in_transaction(
 /// parents, given when an open parent grants (`$parent_open` on alias `p`,
 /// `$grandparent_open` on alias `g`): `c` has a live parent that `$2` is a
 /// member of or that grants, or a live grandparent reached through that
-/// parent that is or does.
+/// parent that is or does. A `parent_access` of `none` stops the walk: on
+/// `c`, nothing above grants; on `p`, the grandparent does not. Reading needs
+/// any grant, so a `guest` cap does not matter here.
 macro_rules! through_parent_sql {
     ($parent_open:literal, $grandparent_open:literal) => {
         concat!(
             "EXISTS ( \
     SELECT 1 FROM channels p \
     LEFT JOIN channels g ON g.community_id = p.community_id AND g.id = p.parent_id \
-         AND g.deleted_at IS NULL \
+         AND g.deleted_at IS NULL AND p.parent_access <> 'none' \
     WHERE p.community_id = c.community_id AND p.id = c.parent_id AND p.deleted_at IS NULL \
+      AND c.parent_access <> 'none' \
       AND ((",
             $parent_open,
             ") \
@@ -264,16 +391,29 @@ pub(crate) fn push_through_parent(
 /// `roots` (a subquery or CTE name yielding a column `id`), whose type passes
 /// `types` (a predicate on alias `d`). The parent between a grandchild and its
 /// root must be live too.
-pub(crate) fn descendants_sql(roots: &str, types: &str) -> String {
+///
+/// With `reached`, only the ones a root's grants reach: no channel on the
+/// way down, the descendant included, has `parent_access` `none`. Without
+/// it, every descendant, for callers that must find all of them, such as
+/// subscription eviction.
+pub(crate) fn descendants_sql(roots: &str, types: &str, reached: bool) -> String {
+    let (child_gate, grandchild_gate) = if reached {
+        (
+            " AND d.parent_access <> 'none'",
+            " AND d.parent_access <> 'none' AND m.parent_access <> 'none'",
+        )
+    } else {
+        ("", "")
+    };
     format!(
         "SELECT d.id FROM channels d JOIN {roots} r ON d.parent_id = r.id \
-         WHERE d.community_id = $1 AND d.deleted_at IS NULL AND {types} \
+         WHERE d.community_id = $1 AND d.deleted_at IS NULL AND {types}{child_gate} \
          UNION \
          SELECT d.id FROM channels d \
          JOIN channels m ON m.community_id = d.community_id AND m.id = d.parent_id \
               AND m.deleted_at IS NULL \
          JOIN {roots} r ON m.parent_id = r.id \
-         WHERE d.community_id = $1 AND d.deleted_at IS NULL AND {types}"
+         WHERE d.community_id = $1 AND d.deleted_at IS NULL AND {types}{grandchild_gate}"
     )
 }
 
@@ -348,7 +488,7 @@ pub(crate) async fn decide_parent_change(
     // Lock the new parent's chain, nearest first, and collect each level's
     // grant for the actor.
     let mut chain: Vec<Uuid> = Vec::with_capacity(MAX_ANCESTORS + 1);
-    let mut grants: Vec<LevelGrant> = Vec::with_capacity(MAX_ANCESTORS + 1);
+    let mut grants: Vec<(LevelGrant, ParentAccess)> = Vec::with_capacity(MAX_ANCESTORS + 1);
     let mut next = Some(parent);
     while let Some(id) = next {
         if id == child || chain.contains(&id) {
@@ -364,7 +504,8 @@ pub(crate) async fn decide_parent_change(
         }
         let row = sqlx::query(
             "SELECT channel_type::text AS channel_type, ttl_seconds, archived_at IS NOT NULL \
-                    AS archived, visibility::text AS visibility, join_role, parent_id \
+                    AS archived, visibility::text AS visibility, join_role, parent_id, \
+                    parent_access \
              FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL \
              FOR NO KEY UPDATE",
         )
@@ -390,8 +531,12 @@ pub(crate) async fn decide_parent_change(
         }
         let visibility: String = row.try_get("visibility")?;
         let join_role: String = row.try_get("join_role")?;
+        let parent_access: String = row.try_get("parent_access")?;
         let role = direct_role(tx, id, actor).await?;
-        grants.push(LevelGrant::of(role.as_deref(), &visibility, &join_role));
+        grants.push((
+            LevelGrant::of(role.as_deref(), &visibility, &join_role),
+            ParentAccess::parse_fail_closed(&parent_access),
+        ));
         chain.push(id);
         next = row.try_get("parent_id")?;
     }
@@ -413,6 +558,28 @@ pub(crate) async fn decide_parent_change(
         ));
     }
     Ok(())
+}
+
+/// Decide, on `tx`, whether `actor` may change `channel_id`'s
+/// `parent_access`: only a direct owner or admin row may. The caller holds
+/// the channel's row lock. Either direction changes who reads the channel
+/// and its children, so neither is open to a parent's admin.
+pub(crate) async fn decide_parent_access_change(
+    tx: &mut crate::AdmittedTx,
+    channel_id: Uuid,
+    actor: &[u8],
+) -> Result<()> {
+    let elevated = direct_role(tx, channel_id, actor)
+        .await?
+        .and_then(|role| role.parse::<MemberRole>().ok())
+        .is_some_and(|role| role.is_elevated());
+    if elevated {
+        Ok(())
+    } else {
+        Err(DbError::AccessDenied(
+            "only an owner or admin of the channel may change what its parents grant".into(),
+        ))
+    }
 }
 
 /// The actor's active, direct role in `channel_id`, as stored.
@@ -494,7 +661,7 @@ pub async fn get_private_descendant_ids(
         "WITH roots AS (SELECT $2::uuid AS id), d AS ({}) \
          SELECT c.id FROM channels c JOIN d ON d.id = c.id \
          WHERE c.community_id = $1 AND c.visibility = 'private'",
-        descendants_sql("roots", "TRUE")
+        descendants_sql("roots", "TRUE", false)
     );
     // Every part of `sql` is a literal; the ids are bound.
     Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
@@ -519,7 +686,7 @@ impl crate::Db {
         &self,
         community_id: CommunityId,
         channel_id: Uuid,
-    ) -> Result<Vec<Ancestor>> {
+    ) -> Result<Lineage> {
         get_channel_ancestors(&self.pool, community_id, channel_id).await
     }
 }
@@ -532,15 +699,21 @@ mod tests {
 
     const ALL_ROLES: [MemberRole; 5] = [Owner, Admin, Member, Guest, Bot];
 
+    /// [`closest_grant`] over levels that all take what their parents grant
+    /// up to member, the default.
+    fn walk(levels: &[LevelGrant]) -> Option<MemberRole> {
+        closest_grant(levels.iter().map(|level| (*level, ParentAccess::Member)))
+    }
+
     #[test]
     fn a_channel_without_parents_decides_as_before() {
         for role in ALL_ROLES {
-            assert_eq!(closest_grant([Row(role)]), Some(role), "direct {role:?}");
+            assert_eq!(walk(&[Row(role)]), Some(role), "direct {role:?}");
         }
-        assert_eq!(closest_grant([Open(ChannelJoinRole::Member)]), Some(Member));
-        assert_eq!(closest_grant([Open(ChannelJoinRole::Guest)]), Some(Guest));
-        assert_eq!(closest_grant([Nothing]), None);
-        assert_eq!(closest_grant([]), None);
+        assert_eq!(walk(&[Open(ChannelJoinRole::Member)]), Some(Member));
+        assert_eq!(walk(&[Open(ChannelJoinRole::Guest)]), Some(Guest));
+        assert_eq!(walk(&[Nothing]), None);
+        assert_eq!(walk(&[]), None);
     }
 
     #[test]
@@ -553,12 +726,12 @@ mod tests {
             (Bot, Bot),
         ] {
             assert_eq!(
-                closest_grant([Nothing, Row(role)]),
+                walk(&[Nothing, Row(role)]),
                 Some(expected),
                 "parent {role:?}"
             );
             assert_eq!(
-                closest_grant([Nothing, Nothing, Row(role)]),
+                walk(&[Nothing, Nothing, Row(role)]),
                 Some(expected),
                 "grandparent {role:?}"
             );
@@ -568,37 +741,31 @@ mod tests {
     #[test]
     fn the_closest_grant_wins() {
         // A direct row beats everything above, guest included.
-        assert_eq!(closest_grant([Row(Guest), Row(Owner)]), Some(Guest));
+        assert_eq!(walk(&[Row(Guest), Row(Owner)]), Some(Guest));
         assert_eq!(
-            closest_grant([Row(Guest), Open(ChannelJoinRole::Member)]),
+            walk(&[Row(Guest), Open(ChannelJoinRole::Member)]),
             Some(Guest)
         );
         // An open channel's join role is the grant at that level, so an
         // announce channel stays read-only for a project member.
         assert_eq!(
-            closest_grant([Open(ChannelJoinRole::Guest), Row(Member)]),
+            walk(&[Open(ChannelJoinRole::Guest), Row(Member)]),
             Some(Guest)
         );
         assert_eq!(
-            closest_grant([Open(ChannelJoinRole::Member), Row(Guest)]),
+            walk(&[Open(ChannelJoinRole::Member), Row(Guest)]),
             Some(Member)
         );
         // A guest row on the parent stops the walk before the grandparent.
-        assert_eq!(
-            closest_grant([Nothing, Row(Guest), Row(Member)]),
-            Some(Guest)
-        );
+        assert_eq!(walk(&[Nothing, Row(Guest), Row(Member)]), Some(Guest));
         // An open announce parent makes a child's readers guests.
+        assert_eq!(walk(&[Nothing, Open(ChannelJoinRole::Guest)]), Some(Guest));
         assert_eq!(
-            closest_grant([Nothing, Open(ChannelJoinRole::Guest)]),
-            Some(Guest)
-        );
-        assert_eq!(
-            closest_grant([Nothing, Open(ChannelJoinRole::Member), Row(Guest)]),
+            walk(&[Nothing, Open(ChannelJoinRole::Member), Row(Guest)]),
             Some(Member)
         );
         // Private all the way up grants nothing.
-        assert_eq!(closest_grant([Nothing, Nothing, Nothing]), None);
+        assert_eq!(walk(&[Nothing, Nothing, Nothing]), None);
     }
 
     #[test]
@@ -617,5 +784,139 @@ mod tests {
             Open(ChannelJoinRole::Guest)
         );
         assert_eq!(LevelGrant::of(None, "private", "member"), Nothing);
+    }
+
+    #[test]
+    fn a_guest_cap_makes_inherited_readers_guests() {
+        use ParentAccess::Guest as ViewOnly;
+        // Whatever the parent grants, the child gives guest.
+        for role in ALL_ROLES {
+            assert_eq!(
+                closest_grant([(Nothing, ViewOnly), (Row(role), ParentAccess::Member)]),
+                Some(Guest),
+                "parent {role:?}"
+            );
+        }
+        assert_eq!(
+            closest_grant([
+                (Nothing, ViewOnly),
+                (Open(ChannelJoinRole::Member), ParentAccess::Member)
+            ]),
+            Some(Guest)
+        );
+        // A direct row still decides, in either direction.
+        assert_eq!(
+            closest_grant([(Row(Member), ViewOnly), (Row(Admin), ParentAccess::Member)]),
+            Some(Member)
+        );
+        assert_eq!(closest_grant([(Row(Admin), ViewOnly)]), Some(Admin));
+        // The cap carries up: a grandparent's grant passes the child's cap.
+        assert_eq!(
+            closest_grant([
+                (Nothing, ViewOnly),
+                (Nothing, ParentAccess::Member),
+                (Row(Owner), ParentAccess::Member)
+            ]),
+            Some(Guest)
+        );
+        // And a middle channel's cap binds its children.
+        assert_eq!(
+            closest_grant([
+                (Nothing, ParentAccess::Member),
+                (Nothing, ViewOnly),
+                (Row(Member), ParentAccess::Member)
+            ]),
+            Some(Guest)
+        );
+    }
+
+    #[test]
+    fn no_access_stops_the_walk() {
+        use ParentAccess::NoAccess;
+        for role in ALL_ROLES {
+            assert_eq!(
+                closest_grant([(Nothing, NoAccess), (Row(role), ParentAccess::Member)]),
+                None,
+                "parent {role:?}"
+            );
+            // A restricted middle channel cuts its children off from the
+            // grandparent, but not from itself.
+            assert_eq!(
+                closest_grant([
+                    (Nothing, ParentAccess::Member),
+                    (Nothing, NoAccess),
+                    (Row(role), ParentAccess::Member)
+                ]),
+                None,
+                "grandparent {role:?}"
+            );
+        }
+        assert_eq!(
+            closest_grant([
+                (Nothing, ParentAccess::Member),
+                (Row(Member), NoAccess),
+                (Row(Owner), ParentAccess::Member)
+            ]),
+            Some(Member)
+        );
+        assert_eq!(
+            closest_grant([
+                (Nothing, NoAccess),
+                (Open(ChannelJoinRole::Member), ParentAccess::Member)
+            ]),
+            None
+        );
+        // The channel's own grants are untouched.
+        assert_eq!(closest_grant([(Row(Guest), NoAccess)]), Some(Guest));
+        assert_eq!(
+            closest_grant([(Open(ChannelJoinRole::Member), NoAccess)]),
+            Some(Member)
+        );
+    }
+
+    #[test]
+    fn lineage_reaches_parents_up_to_a_none() {
+        let ancestor = |n: u128, parent_access| Ancestor {
+            id: Uuid::from_u128(n),
+            visibility: "private".into(),
+            join_role: "member".into(),
+            parent_access,
+        };
+        let ids = |lineage: &Lineage| {
+            lineage
+                .reachable()
+                .map(|a| a.id.as_u128())
+                .collect::<Vec<_>>()
+        };
+        let two = |child, middle| Lineage {
+            parent_access: Some(child),
+            ancestors: vec![ancestor(1, middle), ancestor(2, ParentAccess::Member)],
+        };
+        assert_eq!(
+            ids(&two(ParentAccess::Member, ParentAccess::Member)),
+            [1, 2]
+        );
+        assert_eq!(ids(&two(ParentAccess::Guest, ParentAccess::Guest)), [1, 2]);
+        assert_eq!(ids(&two(ParentAccess::Member, ParentAccess::NoAccess)), [1]);
+        assert!(ids(&two(ParentAccess::NoAccess, ParentAccess::Member)).is_empty());
+        assert!(ids(&Lineage::default()).is_empty());
+    }
+
+    #[test]
+    fn parent_access_values_round_trip_and_fail_closed() {
+        for access in [
+            ParentAccess::Member,
+            ParentAccess::Guest,
+            ParentAccess::NoAccess,
+        ] {
+            assert_eq!(access.as_str().parse::<ParentAccess>(), Ok(access));
+            assert_eq!(ParentAccess::parse_fail_closed(access.as_str()), access);
+        }
+        assert!("bogus".parse::<ParentAccess>().is_err());
+        assert!("".parse::<ParentAccess>().is_err());
+        assert_eq!(
+            ParentAccess::parse_fail_closed("bogus"),
+            ParentAccess::NoAccess
+        );
     }
 }

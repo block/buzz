@@ -692,3 +692,263 @@ async fn an_archived_project_still_grants_its_children() {
         .await
         .is_empty());
 }
+
+/// Set `channel`'s `parent_access` to `value` as `actor`.
+async fn set_parent_access(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    actor: &Keys,
+    channel: Uuid,
+    value: &str,
+) -> Result<(), String> {
+    edit_channel(state, tenant, actor, channel, &[&["parent_access", value]]).await
+}
+
+/// The kind:39000 events `reader` gets for a REQ naming `channel`.
+async fn metadata_named(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    reader: &Keys,
+    channel: Uuid,
+) -> usize {
+    req_event_ids(
+        state,
+        tenant,
+        reader,
+        serde_json::json!({"kinds": [39000], "#d": [channel.to_string()]}),
+    )
+    .await
+    .len()
+}
+
+/// A "Project can view" child: the project reads it, by name and implicitly,
+/// but cannot post; a direct member row still posts; metadata says so.
+/// Mutation: drop the guest cap from `closest_grant` → RED (the reader
+/// posts).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_view_only_child_lets_the_project_read_but_not_post() {
+    let t = Tree::new("parent-access-guest").await;
+    let (state, tenant) = (&t.state, &t.tenant);
+    set_parent_access(state, tenant, &t.owner, t.child, "guest")
+        .await
+        .expect("narrow to guest");
+    let message = post(state, tenant, &t.owner, t.child).await.unwrap();
+
+    assert_eq!(
+        read_named(state, tenant, &t.reader, t.child).await,
+        vec![message.clone()]
+    );
+    assert!(read_implicit(state, tenant, &t.reader)
+        .await
+        .contains(&message));
+    assert!(post(state, tenant, &t.reader, t.child).await.is_err());
+
+    let direct = Keys::generate();
+    add(state, tenant, &t.owner, t.project, &direct, "member").await;
+    add(state, tenant, &t.owner, t.child, &direct, "member").await;
+    post(state, tenant, &direct, t.child)
+        .await
+        .expect("a direct member posts");
+
+    let tags = group_state_tags(state, tenant, t.child, 39000).await;
+    assert!(
+        tags.contains(&vec!["parent_access".to_string(), "guest".to_string()]),
+        "{tags:?}"
+    );
+    assert_eq!(role_in(state, tenant, t.child, &t.reader).await, None);
+
+    // Back to the default: the project posts again, and the tag is gone.
+    set_parent_access(state, tenant, &t.owner, t.child, "member")
+        .await
+        .expect("widen to member");
+    post(state, tenant, &t.reader, t.child)
+        .await
+        .expect("the project posts again");
+    let tags = group_state_tags(state, tenant, t.child, 39000).await;
+    assert!(
+        !tags.iter().any(|tag| tag[0] == "parent_access"),
+        "{tags:?}"
+    );
+}
+
+/// An "Only people you add" child is hidden from the project: no named or
+/// implicit read, no count, no metadata, no post, with every cache warmed
+/// first. Direct rows still win, including for someone outside the project.
+/// Mutation: drop the `c.parent_access` gate from `through_parent_sql`, or
+/// the gate from `descendants_sql` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_restricted_child_is_hidden_from_the_project() {
+    let t = Tree::new("parent-access-none").await;
+    let (state, tenant) = (&t.state, &t.tenant);
+    let message = post(state, tenant, &t.owner, t.child).await.unwrap();
+    assert!(read_implicit(state, tenant, &t.reader)
+        .await
+        .contains(&message));
+    assert_eq!(metadata_named(state, tenant, &t.reader, t.child).await, 1);
+
+    set_parent_access(state, tenant, &t.owner, t.child, "none")
+        .await
+        .expect("restrict");
+
+    assert!(read_named(state, tenant, &t.reader, t.child)
+        .await
+        .is_empty());
+    assert!(!read_implicit(state, tenant, &t.reader)
+        .await
+        .contains(&message));
+    assert!(matches!(
+        count_named(state, tenant, &t.reader, t.child).await,
+        None | Some(0)
+    ));
+    assert_eq!(metadata_named(state, tenant, &t.reader, t.child).await, 0);
+    assert!(post(state, tenant, &t.reader, t.child).await.is_err());
+
+    // A direct row, as guest, reads; an outsider added directly posts.
+    add(state, tenant, &t.owner, t.child, &t.reader, "guest").await;
+    assert_eq!(
+        read_named(state, tenant, &t.reader, t.child).await,
+        vec![message.clone()]
+    );
+    assert!(post(state, tenant, &t.reader, t.child).await.is_err());
+    add(state, tenant, &t.owner, t.child, &t.outsider, "member").await;
+    post(state, tenant, &t.outsider, t.child)
+        .await
+        .expect("a directly added outsider posts");
+    assert!(read_named(state, tenant, &t.outsider, t.project)
+        .await
+        .is_empty());
+}
+
+/// A restricted channel cuts its children off from the project: a task
+/// conversation under it is readable by the channel's own members, not by
+/// the project's.
+/// Mutation: drop the `p.parent_access` gate on the grandparent arm of
+/// `through_parent_sql`, or the middle gate from `descendants_sql`, or stop
+/// `Lineage::reachable` at the child only → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_restricted_channel_cuts_off_its_task_conversations() {
+    let t = Tree::new("parent-access-grandchild").await;
+    let (state, tenant) = (&t.state, &t.tenant);
+    let task = create_channel(state, tenant, &t.owner, &[&["visibility", "private"]]).await;
+    set_parent(state, tenant, &t.owner, task, Some(t.child))
+        .await
+        .expect("file the task");
+    let channel_member = Keys::generate();
+    add(state, tenant, &t.owner, t.child, &channel_member, "member").await;
+    let message = post(state, tenant, &t.owner, task).await.unwrap();
+    assert_eq!(
+        read_named(state, tenant, &t.reader, task).await,
+        vec![message.clone()]
+    );
+
+    set_parent_access(state, tenant, &t.owner, t.child, "none")
+        .await
+        .expect("restrict the channel");
+
+    assert!(read_named(state, tenant, &t.reader, task).await.is_empty());
+    assert!(!read_implicit(state, tenant, &t.reader)
+        .await
+        .contains(&message));
+    assert!(post(state, tenant, &t.reader, task).await.is_err());
+    assert_eq!(
+        read_named(state, tenant, &channel_member, task).await,
+        vec![message.clone()]
+    );
+    assert!(read_implicit(state, tenant, &channel_member)
+        .await
+        .contains(&message));
+    post(state, tenant, &channel_member, task)
+        .await
+        .expect("the channel's member posts in its task");
+
+    // A view-only channel caps its task's project readers at guest too.
+    set_parent_access(state, tenant, &t.owner, t.child, "guest")
+        .await
+        .expect("narrow to guest");
+    assert_eq!(read_named(state, tenant, &t.reader, task).await.len(), 2);
+    assert!(post(state, tenant, &t.reader, task).await.is_err());
+    post(state, tenant, &channel_member, task)
+        .await
+        .expect("the channel's own member is not capped");
+}
+
+/// Only the channel's own owner or admin changes `parent_access`: not the
+/// project's admin, not a channel member. Bad values and mixing it with
+/// other metadata are refused; it may ride with `parent`.
+/// Mutation: skip `decide_parent_access_change` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn only_the_channels_own_admin_changes_parent_access() {
+    let t = Tree::new("parent-access-authz").await;
+    let (state, tenant) = (&t.state, &t.tenant);
+    let project_admin = Keys::generate();
+    add(state, tenant, &t.owner, t.project, &project_admin, "admin").await;
+    let channel_member = Keys::generate();
+    add(state, tenant, &t.owner, t.child, &channel_member, "member").await;
+    let channel_admin = Keys::generate();
+    add(state, tenant, &t.owner, t.child, &channel_admin, "admin").await;
+
+    for actor in [&project_admin, &channel_member, &t.reader] {
+        assert!(
+            set_parent_access(state, tenant, actor, t.child, "none")
+                .await
+                .is_err(),
+            "a non-admin of the channel may not restrict it"
+        );
+    }
+    for bad in ["", "admin", "None"] {
+        assert!(set_parent_access(state, tenant, &t.owner, t.child, bad)
+            .await
+            .is_err());
+    }
+    assert!(edit_channel(
+        state,
+        tenant,
+        &t.owner,
+        t.child,
+        &[&["parent_access", "none"], &["about", "x"]]
+    )
+    .await
+    .is_err());
+    assert!(edit_channel(
+        state,
+        tenant,
+        &t.owner,
+        t.child,
+        &[&["parent_access", "none"], &["parent_access", "guest"]]
+    )
+    .await
+    .is_err());
+    // Nothing changed so far.
+    post(state, tenant, &t.reader, t.child)
+        .await
+        .expect("still open to the project");
+
+    set_parent_access(state, tenant, &channel_admin, t.child, "none")
+        .await
+        .expect("the channel's admin restricts it");
+    assert!(read_named(state, tenant, &t.reader, t.child)
+        .await
+        .is_empty());
+
+    // Filed and narrowed in one event.
+    let chat = create_channel(state, tenant, &t.owner, &[&["visibility", "private"]]).await;
+    edit_channel(
+        state,
+        tenant,
+        &t.owner,
+        chat,
+        &[
+            &["parent", &t.project.to_string()],
+            &["parent_access", "guest"],
+        ],
+    )
+    .await
+    .expect("file and narrow together");
+    let note = post(state, tenant, &t.owner, chat).await.unwrap();
+    assert_eq!(read_named(state, tenant, &t.reader, chat).await, vec![note]);
+    assert!(post(state, tenant, &t.reader, chat).await.is_err());
+}

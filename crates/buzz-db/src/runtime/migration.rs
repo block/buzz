@@ -902,7 +902,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 89);
+        assert_eq!(migrations.len(), 90);
         assert!(migrations[83]
             .sql
             .as_str()
@@ -932,6 +932,14 @@ mod postgres_tests {
         assert!(parents.contains("CREATE INDEX idx_channels_parent"));
         assert!(!parents.contains("CONCURRENTLY"));
         assert!(!parents.to_ascii_uppercase().contains("UPDATE "));
+        // Parent access (0090): a constant default, so no rewrite and no
+        // backfill, under bounded locks.
+        let parent_access = strip_sql_comments(migrations[89].sql.as_str());
+        assert!(parent_access.contains("SET LOCAL lock_timeout = '1s';"));
+        assert!(parent_access.contains("SET LOCAL statement_timeout = '5s';"));
+        assert!(parent_access
+            .contains("ADD COLUMN IF NOT EXISTS parent_access TEXT NOT NULL DEFAULT 'member'"));
+        assert!(!parent_access.to_ascii_uppercase().contains("UPDATE "));
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }

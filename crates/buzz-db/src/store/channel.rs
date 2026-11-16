@@ -96,6 +96,9 @@ pub struct ChannelRecord {
     /// The channel whose readers can also read this one, if any. See
     /// [`crate::channel_tree`].
     pub parent_id: Option<Uuid>,
+    /// What this channel's parents' people get in it: `"member"`, `"guest"`
+    /// or `"none"` ([`crate::channel_tree::ParentAccess`]).
+    pub parent_access: String,
 }
 
 impl ChannelRecord {
@@ -191,7 +194,7 @@ pub async fn create_channel(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, parent_id
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, parent_id, parent_access
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -254,7 +257,7 @@ pub async fn create_channel_with_id(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, parent_id
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, parent_id, parent_access
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -544,7 +547,7 @@ async fn select_channel(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, parent_id
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, parent_id, parent_access
         FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
     )
@@ -633,7 +636,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, parent_id
+                   ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, parent_id, parent_access
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL AND visibility::text = $2
             ORDER BY created_at DESC
@@ -653,7 +656,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, parent_id
+                   ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, parent_id, parent_access
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL
             ORDER BY created_at DESC
@@ -694,7 +697,7 @@ pub async fn list_auto_join_channels(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, parent_id
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, parent_id, parent_access
         FROM channels
         WHERE community_id = $1 AND auto_join AND channel_type = 'stream'
           AND visibility = 'open' AND archived_at IS NULL AND deleted_at IS NULL
@@ -802,6 +805,7 @@ pub(crate) fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<Channe
         unlisted: row.try_get("unlisted")?,
         auto_join: row.try_get("auto_join")?,
         parent_id: row.try_get("parent_id")?,
+        parent_access: row.try_get("parent_access")?,
     })
 }
 
@@ -841,7 +845,8 @@ pub const GROUP_ADMIN_ROLES: [MemberRole; 2] = [MemberRole::Owner, MemberRole::A
 /// while the column is set and the channel is open and unarchived: a stale
 /// `true` on a private or archived channel is not published, so what
 /// kind:39000 says is what the relay does. A channel with a parent carries
-/// `["parent", <id>]`.
+/// `["parent", <id>]`, and a channel whose `parent_access` is not the default
+/// carries `["parent_access", <value>]`.
 pub fn group_metadata_tags(channel: &ChannelRecord, members: &[MemberRecord]) -> Vec<Vec<String>> {
     let tag = |parts: &[&str]| parts.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>();
     let mut tags = vec![
@@ -922,6 +927,14 @@ pub fn group_metadata_tags(channel: &ChannelRecord, members: &[MemberRecord]) ->
     // The channel this one sits under, whose readers can read it too.
     if let Some(parent) = channel.parent_id {
         tags.push(tag(&["parent", &parent.to_string()]));
+    }
+    // What the parents' people get here, when it is narrower than the
+    // default. Published with or without a parent, since it applies as soon
+    // as one is set.
+    let parent_access =
+        crate::channel_tree::ParentAccess::parse_fail_closed(&channel.parent_access);
+    if parent_access != crate::channel_tree::ParentAccess::Member {
+        tags.push(tag(&["parent_access", parent_access.as_str()]));
     }
     tags
 }
@@ -1089,6 +1102,10 @@ pub struct ChannelUpdate {
     /// it, `Some(Some(id))` sets it. `apply_channel_metadata_event` decides
     /// it with [`crate::channel_tree::decide_parent_change`] under the locks.
     pub parent_id: Option<Option<Uuid>>,
+    /// New `parent_access`, or `None` to leave it unchanged.
+    /// `apply_channel_metadata_event` needs a direct owner or admin row for
+    /// it, under the locks.
+    pub parent_access: Option<crate::channel_tree::ParentAccess>,
 }
 
 impl ChannelUpdate {
@@ -1103,12 +1120,17 @@ impl ChannelUpdate {
             && self.unlisted.is_none()
             && self.auto_join.is_none()
             && self.parent_id.is_none()
+            && self.parent_access.is_none()
     }
 
     /// True when the update changes a setting that decides admission:
-    /// visibility, `join_role`, or the parent that readers inherit from.
+    /// visibility, `join_role`, the parent that readers inherit from, or
+    /// what they inherit.
     pub fn changes_admission(&self) -> bool {
-        self.visibility.is_some() || self.join_role.is_some() || self.parent_id.is_some()
+        self.visibility.is_some()
+            || self.join_role.is_some()
+            || self.parent_id.is_some()
+            || self.parent_access.is_some()
     }
 }
 
@@ -1362,6 +1384,10 @@ async fn update_channel_on(
         set_parts.push(format!("parent_id = ${param_idx}"));
         param_idx += 1;
     }
+    if updates.parent_access.is_some() {
+        set_parts.push(format!("parent_access = ${param_idx}"));
+        param_idx += 1;
+    }
     if let Some(ref ttl) = updates.ttl_seconds {
         // Set ttl_seconds, then reset the deadline from now (or clear both).
         set_parts.push(format!("ttl_seconds = ${param_idx}"));
@@ -1406,6 +1432,9 @@ async fn update_channel_on(
     if let Some(parent_id) = updates.parent_id {
         q = q.bind(parent_id);
     }
+    if let Some(parent_access) = updates.parent_access {
+        q = q.bind(parent_access.as_str());
+    }
     if let Some(ref ttl) = updates.ttl_seconds {
         q = q.bind(*ttl);
     }
@@ -1417,17 +1446,20 @@ async fn update_channel_on(
 
     // The current name is what a visibility or unlisted change that
     // [`LISTED_NAME_INDEX`] refuses would have listed.
-    // A parent change changes who can read the channel, so it is an access
-    // policy change for artifact syncs, like a visibility change.
+    // A parent or `parent_access` change changes who can read the channel and
+    // its children, so it is an access policy change for artifact syncs, like
+    // a visibility change.
     let (policy_changed, current_name) = if updates.visibility.is_some()
         || updates.ttl_seconds.is_some()
         || updates.unlisted.is_some()
         || updates.parent_id.is_some()
+        || updates.parent_access.is_some()
     {
-        sqlx::query_as::<_,(bool, String)>("SELECT (($3::text IS NOT NULL AND visibility::text IS DISTINCT FROM $3) OR ($4 AND ttl_seconds IS DISTINCT FROM $5::int) OR ($6::bool IS NOT NULL AND unlisted IS DISTINCT FROM $6) OR ($7 AND parent_id IS DISTINCT FROM $8::uuid)), name FROM channels WHERE community_id=$1 AND id=$2")
+        sqlx::query_as::<_,(bool, String)>("SELECT (($3::text IS NOT NULL AND visibility::text IS DISTINCT FROM $3) OR ($4 AND ttl_seconds IS DISTINCT FROM $5::int) OR ($6::bool IS NOT NULL AND unlisted IS DISTINCT FROM $6) OR ($7 AND parent_id IS DISTINCT FROM $8::uuid) OR ($9::text IS NOT NULL AND parent_access IS DISTINCT FROM $9)), name FROM channels WHERE community_id=$1 AND id=$2")
             .bind(community_id.as_uuid()).bind(channel_id).bind(updates.visibility.as_deref())
             .bind(updates.ttl_seconds.is_some()).bind(updates.ttl_seconds.flatten()).bind(updates.unlisted)
             .bind(updates.parent_id.is_some()).bind(updates.parent_id.flatten())
+            .bind(updates.parent_access.map(|access| access.as_str()))
             .fetch_one(tx.conn()).await
             .map(|(changed, name)| (changed, Some(name)))?
     } else {
@@ -1752,6 +1784,14 @@ pub(crate) async fn apply_channel_metadata_event(
             locked.tx(),
             channel_id,
             change,
+            &event.pubkey.to_bytes(),
+        )
+        .await?;
+    }
+    if edit.columns.parent_access.is_some() {
+        crate::channel_tree::decide_parent_access_change(
+            locked.tx(),
+            channel_id,
             &event.pubkey.to_bytes(),
         )
         .await?;
@@ -2327,6 +2367,7 @@ mod group_metadata_tag_tests {
             unlisted: false,
             auto_join: false,
             parent_id: None,
+            parent_access: "member".into(),
         }
     }
 
