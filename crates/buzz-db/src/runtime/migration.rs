@@ -890,7 +890,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 94);
+        assert_eq!(migrations.len(), 95);
         assert_eq!(migrations[89].version, 90);
         assert!(migrations[89]
             .sql
@@ -921,25 +921,25 @@ mod postgres_tests {
         let retire_floor = strip_sql_comments(migrations[88].sql.as_str());
         assert!(retire_floor.contains("DROP TRIGGER IF EXISTS events_created_at_floor ON events;"));
         assert!(retire_floor.contains("DROP FUNCTION IF EXISTS events_created_at_floor_guard();"));
-        // Channel parents (0092): a nullable column and a partial index built
+        // Channel parents (0093): a nullable column and a partial index built
         // inline under bounded locks, as 0083 does.
-        let parents = strip_sql_comments(migrations[91].sql.as_str());
+        let parents = strip_sql_comments(migrations[92].sql.as_str());
         assert!(parents.contains("SET LOCAL lock_timeout = '1s';"));
         assert!(parents.contains("SET LOCAL statement_timeout = '5s';"));
         assert!(parents.contains("ADD COLUMN IF NOT EXISTS parent_id UUID;"));
         assert!(parents.contains("CREATE INDEX idx_channels_parent"));
         assert!(!parents.contains("CONCURRENTLY"));
         assert!(!parents.to_ascii_uppercase().contains("UPDATE "));
-        // Parent access (0093): a constant default, so no rewrite and no
+        // Parent access (0094): a constant default, so no rewrite and no
         // backfill, under bounded locks.
-        let parent_access = strip_sql_comments(migrations[92].sql.as_str());
+        let parent_access = strip_sql_comments(migrations[93].sql.as_str());
         assert!(parent_access.contains("SET LOCAL lock_timeout = '1s';"));
         assert!(parent_access.contains("SET LOCAL statement_timeout = '5s';"));
         assert!(parent_access
             .contains("ADD COLUMN IF NOT EXISTS parent_access TEXT NOT NULL DEFAULT 'member'"));
         assert!(!parent_access.to_ascii_uppercase().contains("UPDATE "));
-        // Artifact conversations (0094): one additive enum value.
-        let artifact_type = strip_sql_comments(migrations[93].sql.as_str());
+        // Artifact conversations (0095): one additive enum value.
+        let artifact_type = strip_sql_comments(migrations[94].sql.as_str());
         assert_eq!(
             artifact_type.trim(),
             "ALTER TYPE channel_type ADD VALUE IF NOT EXISTS 'artifact';"
@@ -3126,6 +3126,7 @@ mod postgres_tests {
 
         for table in [
             "media_uploaders",
+            "audit_log",
             "media_publications",
             "relay_members",
             "relay_admin_actions",
