@@ -583,8 +583,8 @@ async fn android_enrollment_derives_platform_from_the_attestation_and_rejects_ba
         StatusCode::BAD_REQUEST
     );
 
-    // The attestation must bind this exact transcript, prove a P-256 point and
-    // stay within the chain bounds.
+    // The attestation must bind this exact transcript, prove an uncompressed
+    // P-256 point and stay within the chain bounds.
     let other_transcript = enroll_transcript(&ch, ROTATED_FCM_TOKEN);
     let mut wrong_binding = good.clone();
     wrong_binding["android_attestation"] = phone.chain(&other_transcript).into();
@@ -593,10 +593,17 @@ async fn android_enrollment_derives_platform_from_the_attestation_and_rejects_ba
         STANDARD.encode([4u8; 65]),
         STANDARD.encode(Sha256::digest(enroll_transcript(&ch, FCM_TOKEN).as_bytes())),
     ]);
+    // One key has one id: the same key as a compressed point would get a
+    // second id, and a second rate-limit bucket.
+    let mut compressed = good.clone();
+    compressed["android_attestation"] = json!([
+        STANDARD.encode(phone.key.verifying_key().to_sec1_point(true).as_ref()),
+        STANDARD.encode(Sha256::digest(enroll_transcript(&ch, FCM_TOKEN).as_bytes())),
+    ]);
     let mut long_chain = good.clone();
     long_chain["android_attestation"] =
         vec![STANDARD.encode(b"c"); MAX_ANDROID_CHAIN_CERTIFICATES + 1].into();
-    for body in [wrong_binding, not_a_point, long_chain] {
+    for body in [wrong_binding, not_a_point, compressed, long_chain] {
         assert_eq!(enroll_status(&g, body).await, StatusCode::UNAUTHORIZED);
     }
 

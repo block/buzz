@@ -185,6 +185,8 @@ struct Pki {
     /// A copy of the attestation extension on the intermediate.
     extension_on_intermediate: bool,
     leaf_p384: bool,
+    /// The leaf certificate encodes its key as a compressed point.
+    leaf_compressed: bool,
 }
 
 fn ec_key(nid: Nid) -> PKey<Private> {
@@ -323,6 +325,11 @@ fn generate(spec: &Spec, pki: &Pki, transcript: &[u8]) -> Generated {
     } else {
         Nid::X9_62_PRIME256V1
     });
+    let leaf_key = if pki.leaf_compressed {
+        compressed(&leaf_key)
+    } else {
+        leaf_key
+    };
     let other_signer = ec_key(Nid::X9_62_PRIME256V1);
     let leaf = certificate(
         LEAF_SERIAL,
@@ -347,6 +354,27 @@ fn generate(spec: &Spec, pki: &Pki, transcript: &[u8]) -> Generated {
             .collect(),
         root_pem: String::from_utf8(trusted_root.to_pem().unwrap()).unwrap(),
     }
+}
+
+/// The same P-256 key, parsed from an ECPrivateKey that encodes its public
+/// key as a compressed point, so a certificate built from it keeps that form.
+fn compressed(key: &PKey<Private>) -> PKey<Private> {
+    let ec = key.ec_key().unwrap();
+    let mut context = openssl::bn::BigNumContext::new().unwrap();
+    let point = ec
+        .public_key()
+        .to_bytes(
+            ec.group(),
+            openssl::ec::PointConversionForm::COMPRESSED,
+            &mut context,
+        )
+        .unwrap();
+    // SEQUENCE { 1, OCTET STRING d, [0] prime256v1, [1] BIT STRING point }
+    let mut der = hex::decode("30570201010420").unwrap();
+    der.extend_from_slice(&ec.private_key().to_vec_padded(32).unwrap());
+    der.extend_from_slice(&hex::decode("a00a06082a8648ce3d030107a124032200").unwrap());
+    der.extend_from_slice(&point);
+    PKey::from_ec_key(EcKey::private_key_from_der(&der).unwrap()).unwrap()
 }
 
 fn fresh_list(revoked: &[u32]) -> Arc<RevocationList> {
@@ -461,24 +489,34 @@ fn accepted_attestations_prove_the_leaf_key() {
     }
 }
 
+/// The proven key is the leaf's key as an uncompressed point, however the
+/// certificate encodes it, so one key always has one key id.
 #[test]
 fn the_proven_key_is_the_leaf_key() {
-    let generated = generate(&Spec::default(), &Pki::default(), TRANSCRIPT);
-    let proven = verifier(&generated, policy(), fresh_list(&[]))
-        .check(&generated.chain, TRANSCRIPT)
-        .unwrap();
-    let leaf = X509::from_der(&generated.chain[0]).unwrap();
-    let ec = leaf.public_key().unwrap().ec_key().unwrap();
-    let mut context = openssl::bn::BigNumContext::new().unwrap();
-    let expected = ec
-        .public_key()
-        .to_bytes(
-            ec.group(),
-            openssl::ec::PointConversionForm::UNCOMPRESSED,
-            &mut context,
-        )
-        .unwrap();
-    assert_eq!(proven.public_key, expected);
+    for (compressed, spki_len) in [(false, 91), (true, 59)] {
+        let pki = Pki {
+            leaf_compressed: compressed,
+            ..Pki::default()
+        };
+        let generated = generate(&Spec::default(), &pki, TRANSCRIPT);
+        let proven = verifier(&generated, policy(), fresh_list(&[]))
+            .check(&generated.chain, TRANSCRIPT)
+            .unwrap();
+        let leaf = X509::from_der(&generated.chain[0]).unwrap();
+        let public = leaf.public_key().unwrap();
+        assert_eq!(public.public_key_to_der().unwrap().len(), spki_len);
+        let ec = public.ec_key().unwrap();
+        let mut context = openssl::bn::BigNumContext::new().unwrap();
+        let expected = ec
+            .public_key()
+            .to_bytes(
+                ec.group(),
+                openssl::ec::PointConversionForm::UNCOMPRESSED,
+                &mut context,
+            )
+            .unwrap();
+        assert_eq!(proven.public_key, expected, "compressed: {compressed}");
+    }
 }
 
 #[test]
