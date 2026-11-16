@@ -6,9 +6,13 @@ CREATE TABLE operator_listener_pubkeys (
     listener_pubkey BYTEA NOT NULL CHECK (length(listener_pubkey) = 32),
     target_pubkey   BYTEA NOT NULL CHECK (length(target_pubkey) = 32),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    member_channels BOOLEAN NOT NULL DEFAULT false,
     PRIMARY KEY (listener_pubkey, target_pubkey)
 );
 CREATE INDEX operator_listener_pubkeys_target
     ON operator_listener_pubkeys (target_pubkey, listener_pubkey);
 CREATE INDEX operator_listener_pubkeys_created_at
     ON operator_listener_pubkeys (created_at);
+CREATE INDEX operator_listener_pubkeys_member_channels
+    ON operator_listener_pubkeys (target_pubkey, listener_pubkey)
+    WHERE member_channels;

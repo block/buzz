@@ -1,6 +1,6 @@
 //! Deployment-global operator-listener mention registrations and delivery outbox.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, TimeDelta, Utc};
@@ -88,11 +88,24 @@ fn event_targets(event: &Event) -> Vec<Vec<u8>> {
     targets
 }
 
-/// Insert one outbox row for each registered listener matching the event's
-/// `p` tags. The caller owns the transaction and must commit it with the event.
+/// A target's registration with one deployment-global listener.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListenerRegistration {
+    /// Registered target identity.
+    pub target_pubkey: Vec<u8>,
+    /// Also deliver events in channels the target is a current member of,
+    /// not only events that `p`-tag it.
+    pub member_channels: bool,
+}
+
+/// Insert one outbox row for each registered listener whose target the event
+/// `p`-tags, or, for `member_channels` registrations, whose target is a
+/// current member of the event's channel and not its author. The caller owns
+/// the transaction and must commit it with the event.
 pub(crate) async fn enqueue_mentions_in_transaction(
     tx: &mut AdmittedTx,
     event: &Event,
+    channel_id: Option<Uuid>,
 ) -> Result<u64> {
     let community_id = tx.community();
     let kind = u32::from(event.kind.as_u16());
@@ -100,59 +113,70 @@ pub(crate) async fn enqueue_mentions_in_transaction(
         return Ok(0);
     }
     let targets = event_targets(event);
-    if targets.is_empty() {
+    if targets.is_empty() && channel_id.is_none() {
         return Ok(0);
     }
     let event_created_at = DateTime::from_timestamp(event.created_at.as_secs() as i64, 0).ok_or(
         crate::error::DbError::InvalidTimestamp(event.created_at.as_secs() as i64),
     )?;
 
-    let mut query = QueryBuilder::<Postgres>::new(
+    Ok(sqlx::query(
         "INSERT INTO operator_listener_outbox \
          (listener_pubkey, target_pubkey, community_id, event_id, event_kind, event_created_at) \
-         SELECT r.listener_pubkey, r.target_pubkey, ",
-    );
-    query
-        .push_bind(community_id.as_uuid())
-        .push(", ")
-        .push_bind(event.id.as_bytes().as_slice())
-        .push(", ")
-        .push_bind(kind as i32)
-        .push(", ")
-        .push_bind(event_created_at)
-        .push(" FROM operator_listener_pubkeys r WHERE r.target_pubkey IN (");
-    let mut separated = query.separated(", ");
-    for target in &targets {
-        separated.push_bind(target.as_slice());
-    }
-    separated.push_unseparated(") ON CONFLICT DO NOTHING");
-
-    Ok(query.build().execute(tx.conn()).await?.rows_affected())
+         SELECT d.listener_pubkey, d.target_pubkey, $1, $2, $3, $4 FROM ( \
+             SELECT r.listener_pubkey, r.target_pubkey \
+             FROM operator_listener_pubkeys r \
+             WHERE r.target_pubkey = ANY($5) \
+             UNION \
+             SELECT r.listener_pubkey, r.target_pubkey \
+             FROM channel_members m \
+             JOIN channels c ON c.community_id = m.community_id AND c.id = m.channel_id \
+                 AND c.deleted_at IS NULL \
+             JOIN operator_listener_pubkeys r ON r.target_pubkey = m.pubkey \
+                 AND r.member_channels \
+             WHERE m.community_id = $1 AND m.channel_id = $6 AND m.removed_at IS NULL \
+               AND m.pubkey <> $7 \
+         ) d \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(community_id.as_uuid())
+    .bind(event.id.as_bytes().as_slice())
+    .bind(kind as i32)
+    .bind(event_created_at)
+    .bind(&targets)
+    .bind(channel_id)
+    .bind(event.pubkey.as_bytes().as_slice())
+    .execute(tx.conn())
+    .await?
+    .rows_affected())
 }
 
-/// Register target pubkeys for one deployment-global listener.
+/// Register targets for one deployment-global listener, replacing the scope
+/// and refreshing the retention clock of any already registered.
 pub async fn register_pubkeys(
     pool: &PgPool,
     listener_pubkey: &[u8],
-    target_pubkeys: &[Vec<u8>],
+    registrations: &[ListenerRegistration],
 ) -> Result<u64> {
-    if target_pubkeys.is_empty() {
+    if registrations.is_empty() {
         return Ok(0);
     }
-    let mut seen = HashSet::with_capacity(target_pubkeys.len());
-    let unique_target_pubkeys: Vec<&[u8]> = target_pubkeys
+    let latest: HashMap<&[u8], &ListenerRegistration> = registrations
         .iter()
-        .filter_map(|target| seen.insert(target.as_slice()).then_some(target.as_slice()))
+        .map(|registration| (registration.target_pubkey.as_slice(), registration))
         .collect();
     let mut connection = acquire_maintenance_writer(pool).await?;
     let mut query = QueryBuilder::<Postgres>::new(
-        "INSERT INTO operator_listener_pubkeys (listener_pubkey, target_pubkey) ",
+        "INSERT INTO operator_listener_pubkeys (listener_pubkey, target_pubkey, member_channels) ",
     );
-    query.push_values(unique_target_pubkeys, |mut bind, target| {
-        bind.push_bind(listener_pubkey).push_bind(target);
+    query.push_values(latest.values(), |mut bind, registration| {
+        bind.push_bind(listener_pubkey)
+            .push_bind(registration.target_pubkey.as_slice())
+            .push_bind(registration.member_channels);
     });
     query.push(
-        " ON CONFLICT (listener_pubkey, target_pubkey) DO UPDATE SET created_at = EXCLUDED.created_at",
+        " ON CONFLICT (listener_pubkey, target_pubkey) DO UPDATE \
+         SET created_at = EXCLUDED.created_at, member_channels = EXCLUDED.member_channels",
     );
     Ok(query
         .build()
@@ -419,14 +443,14 @@ pub async fn reap_deliveries(pool: &PgPool) -> Result<u64> {
 }
 
 impl Db {
-    /// Register target pubkeys for one configured operator listener.
+    /// Register targets for one configured operator listener.
     #[datastore_span(name = "register_operator_listener_pubkeys", system = "postgresql")]
     pub async fn register_operator_listener_pubkeys(
         &self,
         listener_pubkey: &[u8],
-        target_pubkeys: &[Vec<u8>],
+        registrations: &[ListenerRegistration],
     ) -> Result<u64> {
-        register_pubkeys(&self.pool, listener_pubkey, target_pubkeys).await
+        register_pubkeys(&self.pool, listener_pubkey, registrations).await
     }
 
     /// Remove target pubkeys for one configured operator listener.
@@ -559,6 +583,16 @@ mod postgres_tests {
     use nostr::{EventBuilder, Keys, Kind, Tag};
     use sqlx::PgPool;
 
+    fn mentions_only(targets: &[Vec<u8>]) -> Vec<ListenerRegistration> {
+        targets
+            .iter()
+            .map(|target| ListenerRegistration {
+                target_pubkey: target.clone(),
+                member_channels: false,
+            })
+            .collect()
+    }
+
     async fn setup_pool() -> PgPool {
         PgPool::connect(&crate::test_support::database_url())
             .await
@@ -586,7 +620,7 @@ mod postgres_tests {
         register_pubkeys(
             &pool,
             listener.public_key().as_bytes(),
-            std::slice::from_ref(&target_pubkey),
+            &mentions_only(std::slice::from_ref(&target_pubkey)),
         )
         .await
         .expect("register listener target");
@@ -664,7 +698,7 @@ mod postgres_tests {
             register_pubkeys(
                 &pool,
                 listener.public_key().as_bytes(),
-                std::slice::from_ref(&target_pubkey),
+                &mentions_only(std::slice::from_ref(&target_pubkey)),
             )
             .await
             .expect("register matching listener target");
@@ -672,7 +706,7 @@ mod postgres_tests {
         register_pubkeys(
             &pool,
             unrelated_listener.public_key().as_bytes(),
-            std::slice::from_ref(&unrelated_pubkey),
+            &mentions_only(std::slice::from_ref(&unrelated_pubkey)),
         )
         .await
         .expect("register unrelated listener target");
@@ -767,7 +801,7 @@ mod postgres_tests {
         register_pubkeys(
             &pool,
             listener.public_key().as_bytes(),
-            std::slice::from_ref(&target_pubkey),
+            &mentions_only(std::slice::from_ref(&target_pubkey)),
         )
         .await
         .expect("register listener target");
@@ -831,7 +865,7 @@ mod postgres_tests {
         register_pubkeys(
             &pool,
             &listener_pubkey,
-            std::slice::from_ref(&target_pubkey),
+            &mentions_only(std::slice::from_ref(&target_pubkey)),
         )
         .await
         .expect("register listener target");
@@ -851,7 +885,7 @@ mod postgres_tests {
         register_pubkeys(
             &pool,
             &listener_pubkey,
-            std::slice::from_ref(&target_pubkey),
+            &mentions_only(std::slice::from_ref(&target_pubkey)),
         )
         .await
         .expect("renew listener target");
@@ -1044,7 +1078,7 @@ mod postgres_tests {
         register_pubkeys(
             &pool,
             &listener_pubkey,
-            &[old_target_pubkey.clone(), recent_target_pubkey.clone()],
+            &mentions_only(&[old_target_pubkey.clone(), recent_target_pubkey.clone()]),
         )
         .await
         .expect("register test targets");
@@ -1207,7 +1241,7 @@ mod postgres_tests {
         register_pubkeys(
             &pool,
             &listener_pubkey,
-            std::slice::from_ref(&target_pubkey),
+            &mentions_only(std::slice::from_ref(&target_pubkey)),
         )
         .await
         .expect("register target");
@@ -1436,5 +1470,180 @@ mod postgres_tests {
         .await
         .expect("remove registration");
         assert!(load(open_channel).await.is_none(), "removed registration");
+    }
+
+    struct MemberChannelFixture {
+        pool: PgPool,
+        _scratch: crate::test_support::ScratchDb,
+        community: CommunityId,
+        channel: Uuid,
+        listener: Keys,
+    }
+
+    impl MemberChannelFixture {
+        async fn new(name: &str) -> Self {
+            let (pool, scratch) = crate::test_support::ScratchDb::migrated(
+                &crate::test_support::database_url(),
+                name,
+            )
+            .await;
+            let community = CommunityId::from_uuid(Uuid::new_v4());
+            let channel = Uuid::new_v4();
+            Self::insert_community_channel(&pool, community, channel).await;
+            Self {
+                pool,
+                _scratch: scratch,
+                community,
+                channel,
+                listener: Keys::generate(),
+            }
+        }
+
+        async fn insert_community_channel(pool: &PgPool, community: CommunityId, channel: Uuid) {
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community.as_uuid())
+                .bind(format!(
+                    "member-channels-{}.example",
+                    community.as_uuid().simple()
+                ))
+                .execute(pool)
+                .await
+                .expect("insert test community");
+            sqlx::query(
+                "INSERT INTO channels (community_id, id, name, channel_type, created_by) \
+                 VALUES ($1, $2, 'general', 'stream', $3)",
+            )
+            .bind(community.as_uuid())
+            .bind(channel)
+            .bind(vec![0u8; 32])
+            .execute(pool)
+            .await
+            .expect("insert test channel");
+        }
+
+        async fn join(&self, community: CommunityId, channel: Uuid, member: &Keys) {
+            sqlx::query(
+                "INSERT INTO channel_members (community_id, channel_id, pubkey, role) \
+                 VALUES ($1, $2, $3, 'member')",
+            )
+            .bind(community.as_uuid())
+            .bind(channel)
+            .bind(member.public_key().to_bytes().as_slice())
+            .execute(&self.pool)
+            .await
+            .expect("insert channel member");
+        }
+
+        async fn register(&self, target: &Keys, member_channels: bool) {
+            register_pubkeys(
+                &self.pool,
+                self.listener.public_key().as_bytes(),
+                &[ListenerRegistration {
+                    target_pubkey: target.public_key().to_bytes().to_vec(),
+                    member_channels,
+                }],
+            )
+            .await
+            .expect("register target");
+        }
+
+        async fn post(&self, author: &Keys, mentions: &[&Keys]) -> Vec<Vec<u8>> {
+            let event = EventBuilder::new(Kind::Custom(9), "hello")
+                .tags(mentions.iter().map(|m| Tag::public_key(m.public_key())))
+                .sign_with_keys(author)
+                .expect("sign test event");
+            crate::event::insert_event(&self.pool, self.community, &event, Some(self.channel))
+                .await
+                .expect("insert event");
+            let mut targets: Vec<Vec<u8>> = sqlx::query_scalar(
+                "SELECT target_pubkey FROM operator_listener_outbox \
+                 WHERE community_id = $1 AND event_id = $2 ORDER BY target_pubkey",
+            )
+            .bind(self.community.as_uuid())
+            .bind(event.id.as_bytes().as_slice())
+            .fetch_all(&self.pool)
+            .await
+            .expect("read outbox targets");
+            targets.sort();
+            targets
+        }
+    }
+
+    fn sorted_pubkeys(keys: &[&Keys]) -> Vec<Vec<u8>> {
+        let mut pubkeys: Vec<Vec<u8>> = keys
+            .iter()
+            .map(|key| key.public_key().to_bytes().to_vec())
+            .collect();
+        pubkeys.sort();
+        pubkeys
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn member_channel_registrations_receive_unmentioned_channel_events() {
+        let fixture = MemberChannelFixture::new("listener_member_channels").await;
+        let author = Keys::generate();
+        let member = Keys::generate();
+        let mentioned_member = Keys::generate();
+        let non_member = Keys::generate();
+        let removed_member = Keys::generate();
+        let mentions_only_member = Keys::generate();
+        let other_community_member = Keys::generate();
+
+        let other_community = CommunityId::from_uuid(Uuid::new_v4());
+        MemberChannelFixture::insert_community_channel(
+            &fixture.pool,
+            other_community,
+            fixture.channel,
+        )
+        .await;
+        for member_keys in [
+            &author,
+            &member,
+            &mentioned_member,
+            &removed_member,
+            &mentions_only_member,
+        ] {
+            fixture
+                .join(fixture.community, fixture.channel, member_keys)
+                .await;
+        }
+        fixture
+            .join(other_community, fixture.channel, &other_community_member)
+            .await;
+        sqlx::query("UPDATE channel_members SET removed_at = now() WHERE pubkey = $1")
+            .bind(removed_member.public_key().to_bytes().as_slice())
+            .execute(&fixture.pool)
+            .await
+            .expect("remove member");
+        for ambient in [
+            &author,
+            &member,
+            &mentioned_member,
+            &non_member,
+            &removed_member,
+            &other_community_member,
+        ] {
+            fixture.register(ambient, true).await;
+        }
+        fixture.register(&mentions_only_member, false).await;
+
+        assert_eq!(
+            fixture.post(&author, &[&mentioned_member]).await,
+            sorted_pubkeys(&[&member, &mentioned_member]),
+            "members get the event once; author, non-members and mentions-only targets do not"
+        );
+        assert_eq!(
+            fixture.post(&member, &[&non_member]).await,
+            sorted_pubkeys(&[&author, &mentioned_member, &non_member]),
+            "a p-tagged non-member keeps today's mention delivery"
+        );
+
+        fixture.register(&member, false).await;
+        assert_eq!(
+            fixture.post(&author, &[]).await,
+            sorted_pubkeys(&[&mentioned_member]),
+            "re-registering without the scope stops ambient delivery"
+        );
     }
 }
