@@ -155,8 +155,11 @@ Alerting rules ship as an opt-in prometheus-operator `PrometheusRule` (`promethe
 Relay push is an explicit deployment opt-in through `BUZZ_PUSH_ENABLED=true`;
 the established strict boolean parser rejects unknown values and the default is
 false. When enabled, `BUZZ_PUSH_GATEWAY_DELIVERY_URL` is required and must be an
-exact HTTP(S) `/v1/deliveries` URL. The older `/v1/deliveries/apns` URL is
-still accepted, so existing relays keep working until they move over.
+exact HTTP(S) URL whose path is `/v1/deliveries/apns` or `/v1/deliveries`.
+Use `/v1/deliveries` only with a gateway that already serves it; the public
+gateway at `push.buzz.xyz` does not yet. A gateway that does not answer on the
+configured path (404 or 403) fails each delivery permanently, so the
+notification is dropped rather than retried.
 Credentials, query and fragment are not accepted. The relay signs and sends the same configured URL. An absent or explicitly empty URL while
 enabled is a startup error. Only an enabled relay
 advertises its host-scoped NIP-PL descriptor, accepts leases, and starts the
