@@ -21,7 +21,7 @@ pub(super) async fn ensure(conn: &mut PgConnection) -> Result<()> {
     .fetch_one(conn)
     .await?;
     if !ready {
-        return Err(invalid("event reference index missing, invalid or wrong definition; apply migration 0092; see docs/event-reference-index-deployment.md"));
+        return Err(invalid("event reference index missing, invalid or wrong definition; apply migration 0093; see docs/event-reference-index-deployment.md"));
     }
     Ok(())
 }

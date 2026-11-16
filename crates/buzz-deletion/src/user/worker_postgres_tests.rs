@@ -1,6 +1,11 @@
 use super::*;
 use buzz_db::Db;
 
+#[path = "worker_postgres_tests/fixture.rs"]
+mod media_fixture;
+#[path = "worker_postgres_tests/media_retry.rs"]
+mod media_retry_postgres_tests;
+
 async fn fixture() -> (EntityDeletionStore, Uuid, sqlx::PgPool) {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
@@ -35,6 +40,7 @@ fn options() -> RunOptions {
     RunOptions {
         next_step: false,
         db: None,
+        media: None,
         delete: false,
         relay_pubkey: None,
         batch_size: 100,
@@ -67,6 +73,7 @@ async fn assert_completed(store: &EntityDeletionStore, id: Uuid) {
         actual,
         vec![
             ("gate_user", None),
+            ("purge_media", None),
             ("purge_content", b.clone()),
             ("purge_agents", b),
             ("purge_content", c.clone()),
@@ -125,10 +132,10 @@ async fn next_step_advances_one_handler_at_a_time_through_completion() {
     assert_eq!(paused.request.status, "running");
     assert!(paused.execution.lease_owner.is_none());
     assert_eq!(paused.stage_history.len(), 2);
-    assert_eq!(paused.stage_history[1].stage, "purge_content");
+    assert_eq!(paused.stage_history[1].stage, "purge_media");
     assert_eq!(paused.stage_history[1].status, "pending");
     let gate = serde_json::to_value(&paused.stage_history[0]).unwrap();
-    for completed_handlers in 2..=5 {
+    for completed_handlers in 2..=6 {
         run(&store, id, "worker-b", &one, &CancellationToken::new())
             .await
             .unwrap();
@@ -142,13 +149,13 @@ async fn next_step_advances_one_handler_at_a_time_through_completion() {
                 .count(),
             completed_handlers
         );
-        if completed_handlers < 5 {
+        if completed_handlers < 6 {
             assert_eq!(after.stage_history.len(), completed_handlers + 1);
             let current = after.stage_history.iter().find(|s| s.is_current).unwrap();
             assert_eq!(current.status, "pending");
             assert!(current.started_at.is_none());
         } else {
-            assert_eq!(after.stage_history.len(), 5);
+            assert_eq!(after.stage_history.len(), 6);
             assert!(!after.stage_history.iter().any(|s| s.is_current));
         }
     }
@@ -182,10 +189,10 @@ async fn dummy_executor_failure_retries_same_community_stage() {
         .as_deref()
         .unwrap()
         .contains("injected dummy failure"));
-    assert_eq!(failed.stage_history.len(), 2);
-    let stage_id = failed.stage_history[1].id;
-    let started = failed.stage_history[1].started_at;
-    assert_eq!(failed.stage_history[1].status, "failed");
+    assert_eq!(failed.stage_history.len(), 3);
+    let stage_id = failed.stage_history[2].id;
+    let started = failed.stage_history[2].started_at;
+    assert_eq!(failed.stage_history[2].status, "failed");
     assert!(run(
         &store,
         id,
@@ -208,8 +215,8 @@ async fn dummy_executor_failure_retries_same_community_stage() {
     .unwrap();
     assert_completed(&store, id).await;
     let after = store.inspect(id).await.unwrap();
-    assert_eq!(after.stage_history[1].id, stage_id);
-    assert_eq!(after.stage_history[1].started_at, started);
+    assert_eq!(after.stage_history[2].id, stage_id);
+    assert_eq!(after.stage_history[2].started_at, started);
 }
 
 #[tokio::test]
@@ -393,18 +400,21 @@ async fn restart_after_handler_resumes_saved_branch_without_rerunning_action() {
     assert!(after_gate.stage_history[0].is_current);
     let gate_finished = after_gate.stage_history[0].finished_at;
 
+    execute_without_transition(&store, id, &options()).await;
+    let media_finished = store.inspect(id).await.unwrap().stage_history[1].finished_at;
+
     let branch = RunOptions {
         no_agents_in: vec![Uuid::from_u128(11)],
         ..options()
     };
     execute_without_transition(&store, id, &branch).await;
     let after_db = store.inspect(id).await.unwrap();
-    assert_eq!(after_db.stage_history.len(), 2);
+    assert_eq!(after_db.stage_history.len(), 3);
     assert_eq!(
-        after_db.stage_history[1].metadata_json["result"]["has_agents"],
+        after_db.stage_history[2].metadata_json["result"]["has_agents"],
         false
     );
-    let db_finished = after_db.stage_history[1].finished_at;
+    let db_finished = after_db.stage_history[2].finished_at;
     // No skip flag on restart: routing must use the persisted result, not new options.
     run(
         &store,
@@ -417,11 +427,12 @@ async fn restart_after_handler_resumes_saved_branch_without_rerunning_action() {
     .unwrap();
     let completed = store.inspect(id).await.unwrap();
     assert_eq!(completed.request.status, "completed");
-    assert_eq!(completed.stage_history.len(), 4);
+    assert_eq!(completed.stage_history[1].finished_at, media_finished);
+    assert_eq!(completed.stage_history.len(), 5);
     assert_eq!(completed.stage_history[0].finished_at, gate_finished);
-    assert_eq!(completed.stage_history[1].finished_at, db_finished);
+    assert_eq!(completed.stage_history[2].finished_at, db_finished);
     assert_eq!(
-        completed.stage_history[1].metadata_json["transition"]["kind"],
+        completed.stage_history[2].metadata_json["transition"]["kind"],
         "community_complete"
     );
     assert!(!completed

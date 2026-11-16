@@ -1,6 +1,6 @@
 # Event-reference index deployment
 
-Migration 0092 adds `idx_events_reference_ids` for content-deletion planning
+Migration 0093 adds `idx_events_reference_ids` for content-deletion planning
 and final reference checks. It indexes valid hexadecimal `e` IDs in lowercase.
 Signed event rows and the existing tag index remain unchanged. The index adds
 storage and event-insert work; it avoids expanding community history while a
@@ -14,7 +14,7 @@ before taking the exclusive community write lock.
 
 ## Small databases and automatic migration
 
-Migration 0092 builds the missing index inline, including on populated tables,
+Migration 0093 builds the missing index inline, including on populated tables,
 with a one-second lock timeout and five-second statement timeout. A valid
 prebuilt index is verified without requesting the table lock for index creation.
 Desired-state installations declare the same ordinary GIN index in
@@ -34,7 +34,7 @@ parent, builds each missing partition index concurrently, and attaches the
 children. Concurrent builds have a 30-minute statement budget and may wait for
 old snapshots; short metadata operations retain a one-second lock budget.
 Completion validates the exact parent definition and ready/live/valid flags.
-Then apply migration 0092 through the ordinary migration runner.
+Then apply migration 0093 through the ordinary migration runner.
 
 For an existing database managed with `pgschema`, run the same prebuild before
 `pgschema plan` or `pgschema apply`. PostgreSQL cannot build an index on a
@@ -61,7 +61,7 @@ FROM pg_index i
 WHERE i.indexrelid = 'public.idx_events_reference_ids'::regclass;
 ```
 
-All three flags must be true and the definition must match migration 0092.
+All three flags must be true and the definition must match migration 0093.
 Check `EXPLAIN (ANALYZE, BUFFERS)` for the shipped final-reference query on
 representative history; populated partitions should use the normalized GIN
 index for selective absence checks. Do not force planner settings to obtain

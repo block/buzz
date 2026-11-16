@@ -9,6 +9,8 @@ use uuid::Uuid;
 pub enum Command {
     /// Inspect or delete one human's community content with relay/workers stopped.
     ContentBatches(content_batches::Args),
+    /// Run the media handler directly, without a workflow request.
+    MediaBatches(media::Args),
     /// Print real current memberships as JSON; does not save or execute a request.
     Inventory {
         /// Demo fixture (default), hex public key, or npub. Current memberships only.
@@ -90,6 +92,7 @@ pub enum Command {
 pub async fn run(command: Command) -> Result<i32> {
     let command = match command {
         Command::ContentBatches(args) => return content_batches::run_command(args).await,
+        Command::MediaBatches(args) => return media::run(args).await,
         other => other,
     };
     let db = if matches!(command, Command::Inventory { .. }) {
@@ -109,7 +112,9 @@ pub async fn run(command: Command) -> Result<i32> {
     };
     let store = db.entity_deletion_store();
     match command {
-        Command::ContentBatches(_) => anyhow::bail!("direct command was already dispatched"),
+        Command::ContentBatches(_) | Command::MediaBatches(_) => {
+            anyhow::bail!("direct command was already dispatched")
+        }
         Command::Inventory { pubkey } => {
             crate::print_json(&inventory::generate(&db, &pubkey).await?)?;
         }
@@ -166,6 +171,7 @@ pub async fn run(command: Command) -> Result<i32> {
                 &executor_id.unwrap_or_else(crate::default_executor_id),
                 &worker::RunOptions {
                     next_step,
+                    media: None,
                     db: is_real.then(|| buzz_db::Db::from_pool(db.pool().clone())),
                     delete,
                     relay_pubkey,
@@ -190,6 +196,8 @@ pub async fn run(command: Command) -> Result<i32> {
 mod content_batches;
 mod handlers;
 mod inventory;
+/// Direct upload-only media cleanup and its workflow handler.
+pub mod media;
 /// Standalone delegation of an owned community to community deletion.
 pub mod owned_community;
 /// Read-only summaries of locally saved request progress and external waits.

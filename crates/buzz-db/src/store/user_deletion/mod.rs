@@ -5,6 +5,7 @@ use sqlx::PgPool;
 pub mod content_batches;
 mod discovery;
 mod inventory;
+mod media;
 mod requests;
 pub use discovery::normalize_user_deletion_pubkey;
 pub use inventory::UserDeletionInventory;

@@ -21,17 +21,61 @@ pub(super) async fn dispatch(
     if !target.starts_with("demo:") {
         return match row.stage.as_str() {
             "purge_content" => purge_content(store, lease, row, options).await,
+            "purge_media" => purge_media(store, lease, row, options).await,
             name => bail!("real handler {name} is not implemented"),
         };
     }
     match row.stage.as_str() {
+        "purge_media" => dummy_action(store, lease, row, options, "would purge user media").await,
         "gate_user" => gate_user(store, lease, row, options).await,
         "purge_content" => {
             dummy_action(store, lease, row, options, "would purge user content").await
         }
         "purge_agents" => purge_agents(store, lease, row, options).await,
-        name => bail!("unknown dummy stage {name}"),
+        name => bail!("unknown workflow stage {name}"),
     }
+}
+
+async fn purge_media(
+    store: &EntityDeletionStore,
+    lease: &EntityLease,
+    row: &EntityStage,
+    options: &RunOptions,
+) -> Result<()> {
+    if !options.delete {
+        bail!("media deletion requires --delete; use media-batches --read-only for observation");
+    }
+    store.start_stage(lease, row.id).await?;
+    let result = async {
+        let target = row.metadata_json["inputs"]["target"]
+            .as_str()
+            .context("missing target input")?;
+        let db = options
+            .db
+            .as_ref()
+            .context("media handler requires database")?;
+        let configured;
+        let storage = match options.media.as_deref() {
+            Some(storage) => storage,
+            None => {
+                configured = super::media::configured_storage()?;
+                &configured
+            }
+        };
+        // Keep workflow stdout a single inspection JSON document.
+        super::media::handle_with_storage(db, storage, target, true, &mut std::io::stderr()).await
+    }
+    .await;
+    match result {
+        Ok(result) => store.save_stage_success(lease, row.id, result).await?,
+        Err(error) => {
+            store
+                .fail_stage(lease, row.id, &format!("{error:#}"), RETRY_DELAY)
+                .await?;
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 async fn gate_user(

@@ -890,7 +890,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 92);
+        assert_eq!(migrations.len(), 93);
         assert_eq!(migrations[89].version, 90);
         assert!(migrations[89]
             .sql
@@ -3103,6 +3103,7 @@ mod postgres_tests {
 
         for table in [
             "media_uploaders",
+            "audit_log",
             "media_publications",
             "relay_members",
             "relay_admin_actions",
@@ -4193,9 +4194,9 @@ mod postgres_tests {
                 .await
                 .unwrap();
             if prebuilt {
-                // Only 0086 is prebuilt here. Later migrations may build
-                // indexes or retire triggers and need the writer lock released.
-                run_migrations_through(&pool, 86)
+                // Stop at 0088: later trigger retirements take ACCESS
+                // EXCLUSIVE on events, which this held writer lock blocks.
+                run_migrations_through(&pool, 88)
                     .await
                     .expect("verified prebuild does not request an index-build lock");
                 writer.rollback().await.unwrap();

@@ -14,6 +14,8 @@ use crate::{StageOutcome, DEFAULT_LEASE_DURATION, HEARTBEAT_INTERVAL};
 pub(super) struct RunOptions {
     pub next_step: bool,
     pub db: Option<buzz_db::Db>,
+    // Optional preconfigured storage client; otherwise load BUZZ_S3_* at media execution.
+    pub media: Option<std::sync::Arc<buzz_media::MediaStorage>>,
     pub delete: bool,
     pub relay_pubkey: Option<String>,
     pub batch_size: u16,
