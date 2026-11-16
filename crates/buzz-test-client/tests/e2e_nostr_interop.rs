@@ -1932,6 +1932,50 @@ async fn test_channel_window_rows_overlays_and_exact_multiple_exhaustion() {
     );
 }
 
+/// A thread summary counts `audience=agents` replies apart, so a client can
+/// show only the replies a person reads.
+#[tokio::test]
+#[ignore]
+async fn test_channel_window_summary_counts_agent_audience_replies() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+    let root_id = send_rest_message(&keys, &channel, "agent audience root").await;
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+    for (index, audience) in [None, Some("agents"), Some("agents")]
+        .into_iter()
+        .enumerate()
+    {
+        let mut tags = vec![
+            Tag::parse(["h", &channel]).unwrap(),
+            Tag::parse(["e", &root_id, "", "reply"]).unwrap(),
+        ];
+        tags.extend(audience.map(|value| Tag::parse(["audience", value]).unwrap()));
+        let reply = EventBuilder::new(Kind::Custom(9), format!("agent audience reply {index}"))
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .expect("sign reply");
+        let ok = client.send_event(reply).await.expect("send reply");
+        assert!(ok.accepted, "relay rejected reply: {}", ok.message);
+    }
+
+    let window = query_channel_window(&keys, &channel, 10, None).await;
+    let (_, summaries, _, _) = partition_window(&window);
+    let summary = summaries
+        .iter()
+        .find(|s| {
+            s["tags"].as_array().is_some_and(|tags| {
+                tags.iter()
+                    .any(|t| t[0].as_str() == Some("e") && t[1].as_str() == Some(root_id.as_str()))
+            })
+        })
+        .unwrap_or_else(|| panic!("no 39005 for root. summaries: {summaries:?}"));
+    let content: serde_json::Value =
+        serde_json::from_str(summary["content"].as_str().unwrap()).expect("summary content JSON");
+    assert_eq!(content["descendant_count"].as_i64(), Some(3));
+    assert_eq!(content["agent_descendant_count"].as_i64(), Some(2));
+}
+
 /// The window cursor is composite by contract: `until` without `before_id`
 /// (or vice versa) is a deterministic 400, never a silent timestamp-only
 /// fallback. And client-submitted 39005/39006 are rejected at ingest —

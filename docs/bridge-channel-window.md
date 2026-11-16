@@ -98,12 +98,46 @@ Clients **partition by kind before any cursor math**:
 ### `kind:39005` — thread summary overlay
 
 - tags: `["e", <root-id>]`, `["d", <root-id>]`, `["h", <channel-id>]`
-- content: `{"reply_count":n,"descendant_count":n,"last_reply_at":ts|null,"participants":["<hex-pubkey>",...]}`
+- content: `{"reply_count":n,"descendant_count":n,"agent_descendant_count":n,"last_reply_at":ts|null,"participants":["<hex-pubkey>",...]}`
   (participants: up to 10 from the newest 1000 replies, deleted ones included, most recent first)
 - Signed by the relay keypair. Synthesized at query time, **never stored**.
   Clients treat it as replace-by-target metadata keyed by the `e`/`d` tag
   (the `d` tag gives parameterized-replaceable semantics natively); it is
   never a row, never a cursor input, never durable timeline history.
+
+#### Agent-audience reply counts
+
+`agent_descendant_count` is how many of `descendant_count` are live replies
+whose signed tags hold a tag starting `["audience", "agents"]`: agent
+coordination that clients fold into collapsed agent activity. Clients that show
+the replies a person reads display `descendant_count - agent_descendant_count`,
+and keep using `reply_count`/`descendant_count` to decide whether a thread
+exists. The tag test matches the one clients use to fold these messages
+(buzz-app `agentAudience`, mobile `isQuietAgentMessage`).
+
+The relay keeps the count in `thread_agent_reply_counts`, one row per thread
+root that has had an agent-audience reply; no row means 0. The reply insert
+(`insert_event_with_thread_metadata_tx`) and every soft delete
+(`soft_delete_event_and_update_thread_in_tx`, which NIP-09, kind 9005 and admin
+deletes share) adjust it in the same transaction as `descendant_count`.
+
+It is a table, not a `thread_metadata` column, because adding a column to
+`thread_metadata` takes an `ACCESS EXCLUSIVE` lock on a table every reply
+writes. That migration queues behind ingestion, which
+[database.md](database.md) Rule 6 forbids, and
+`migration_schema_thread_window_prebuild_does_not_queue_behind_writer` fails.
+`CREATE TABLE` takes no lock on `thread_metadata`. The cost is one extra upsert
+per agent-audience reply and one primary-key lookup per summary.
+
+Roots written before migration 0089 have no row and report 0 until
+`scripts/maintenance/repair_thread_agent_descendant_counts.sh` recounts them.
+Until then such a thread shows every reply, the behavior before this field.
+Deleting an agent-audience reply stored before 0089 decrements the count while
+its insert never incremented it, so an unrepaired thread can undercount its
+agent replies (show more replies than it should) until the repair runs.
+During a rolling deploy an older relay stores and deletes replies without
+updating the table, so the count can also run high; clients clamp the visible
+count at 0, and the repair, run after the rollout, corrects both.
 
 ### `kind:39006` — window bounds overlay
 
