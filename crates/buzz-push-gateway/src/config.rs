@@ -19,6 +19,21 @@ pub struct ApplicationConfig {
     pub apns_environment: ApnsEnvironment,
 }
 
+/// The Android application and its Firebase Cloud Messaging identity. All four
+/// settings are supplied together or not at all; without them the gateway
+/// accepts no Android enrollment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AndroidConfig {
+    /// Exact Android application package the attestation must name.
+    pub package_name: String,
+    /// Accepted SHA-256 digests of the app's signing certificate.
+    pub signing_cert_digests: Vec<[u8; 32]>,
+    /// Firebase project that owns the app's FCM registration tokens.
+    pub fcm_project_id: String,
+    /// Mounted service account key JSON the gateway uses to call FCM HTTP v1.
+    pub fcm_service_account_path: PathBuf,
+}
+
 /// Apple App Attest environment, independent of the APNs transport environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppAttestEnvironment {
@@ -45,6 +60,8 @@ pub struct Config {
     pub endpoint_quota_max_deliveries: i64,
     /// Server-owned application identity and APNs transport.
     pub application: ApplicationConfig,
+    /// Android identity and FCM credentials, when this gateway serves Android.
+    pub android: Option<AndroidConfig>,
     pub database_url: String,
     pub app_attest_root_cert_path: PathBuf,
     /// Ordered current key first, followed by decrypt-only predecessors.
@@ -144,6 +161,61 @@ fn parse_application(e: &HashMap<String, String>) -> Result<ApplicationConfig, C
     })
 }
 
+const ANDROID_SETTINGS: [&str; 4] = [
+    "BUZZ_PUSH_ANDROID_PACKAGE_NAME",
+    "BUZZ_PUSH_ANDROID_SIGNING_CERT_DIGESTS",
+    "BUZZ_PUSH_FCM_PROJECT_ID",
+    "BUZZ_PUSH_FCM_SERVICE_ACCOUNT_PATH",
+];
+
+fn valid_android_package_name(name: &str) -> bool {
+    let segments: Vec<&str> = name.split('.').collect();
+    segments.len() >= 2
+        && segments.iter().all(|segment| {
+            segment
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic())
+                && segment
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+}
+
+fn parse_android(e: &HashMap<String, String>) -> Result<Option<AndroidConfig>, ConfigError> {
+    // A partial configuration is a mistake, not a request to disable Android.
+    if ANDROID_SETTINGS.iter().all(|key| !e.contains_key(*key)) {
+        return Ok(None);
+    }
+    let required = |key: &'static str| {
+        e.get(key)
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or(ConfigError::Missing(key))
+    };
+    let package_key = ANDROID_SETTINGS[0];
+    let digests_key = ANDROID_SETTINGS[1];
+    let package_name = required(package_key)?;
+    if !valid_android_package_name(package_name) {
+        return Err(ConfigError::Invalid(package_key));
+    }
+    let signing_cert_digests = required(digests_key)?
+        .split(',')
+        .map(|digest| {
+            hex::decode(digest)
+                .ok()
+                .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+                .ok_or(ConfigError::Invalid(digests_key))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(AndroidConfig {
+        package_name: package_name.to_owned(),
+        signing_cert_digests,
+        fcm_project_id: required(ANDROID_SETTINGS[2])?.to_owned(),
+        fcm_service_account_path: PathBuf::from(required(ANDROID_SETTINGS[3])?),
+    }))
+}
+
 impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
         Self::from_map(&std::env::vars().collect())
@@ -197,6 +269,7 @@ impl Config {
         let endpoint_quota_max_deliveries =
             bounded_positive("BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES", 10, 10_000)?;
         let application = parse_application(e)?;
+        let android = parse_android(e)?;
         let bind_addr = e
             .get("BUZZ_PUSH_BIND_ADDR")
             .map(String::as_str)
@@ -217,6 +290,7 @@ impl Config {
             endpoint_quota_window_seconds,
             endpoint_quota_max_deliveries,
             application,
+            android,
             database_url: req(e, "DATABASE_URL")?.to_owned(),
             app_attest_root_cert_path: req(e, "BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH")?.into(),
             grant_keys,
@@ -402,6 +476,60 @@ mod tests {
                 expected.to_string(),
                 "{label} must render decimal integer text"
             );
+        }
+    }
+
+    fn android_env() -> HashMap<String, String> {
+        let mut env = base();
+        env.extend([
+            (
+                "BUZZ_PUSH_ANDROID_PACKAGE_NAME".into(),
+                "com.example.buzz".into(),
+            ),
+            (
+                "BUZZ_PUSH_ANDROID_SIGNING_CERT_DIGESTS".into(),
+                format!("{},{}", "ab".repeat(32), "CD".repeat(32)),
+            ),
+            ("BUZZ_PUSH_FCM_PROJECT_ID".into(), "example-project".into()),
+            (
+                "BUZZ_PUSH_FCM_SERVICE_ACCOUNT_PATH".into(),
+                "/fcm/service-account.json".into(),
+            ),
+        ]);
+        env
+    }
+
+    #[test]
+    fn android_is_disabled_unless_fully_configured() {
+        assert_eq!(Config::from_map(&base()).unwrap().android, None);
+        let android = Config::from_map(&android_env()).unwrap().android.unwrap();
+        assert_eq!(android.package_name, "com.example.buzz");
+        assert_eq!(android.signing_cert_digests, vec![[0xab; 32], [0xcd; 32]]);
+        assert_eq!(android.fcm_project_id, "example-project");
+        for variable in ANDROID_SETTINGS {
+            let mut env = android_env();
+            env.remove(variable);
+            assert!(
+                matches!(Config::from_map(&env), Err(ConfigError::Missing(key)) if key == variable),
+                "accepted partial Android configuration without {variable}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_android_configuration_fails_startup() {
+        for (key, value) in [
+            ("BUZZ_PUSH_ANDROID_PACKAGE_NAME", "buzz"),
+            ("BUZZ_PUSH_ANDROID_PACKAGE_NAME", "com..buzz"),
+            ("BUZZ_PUSH_ANDROID_PACKAGE_NAME", "com.1buzz"),
+            ("BUZZ_PUSH_ANDROID_SIGNING_CERT_DIGESTS", ""),
+            ("BUZZ_PUSH_ANDROID_SIGNING_CERT_DIGESTS", "abcd"),
+            ("BUZZ_PUSH_ANDROID_SIGNING_CERT_DIGESTS", "zz"),
+            ("BUZZ_PUSH_FCM_PROJECT_ID", ""),
+        ] {
+            let mut env = android_env();
+            env.insert(key.into(), value.into());
+            assert!(Config::from_map(&env).is_err(), "accepted {key}={value}");
         }
     }
 
