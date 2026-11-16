@@ -1,48 +1,66 @@
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 
-type KlipyAsset = {
-  height?: number;
-  size?: number;
-  url?: string;
-  width?: number;
+/**
+ * One GIPHY rendition. GIPHY encodes every dimension and size as a string
+ * (for example `"320"`), so these fields are typed loosely and parsed later.
+ */
+type GiphyRendition = {
+  height?: unknown;
+  size?: unknown;
+  url?: unknown;
+  webp?: unknown;
+  webp_size?: unknown;
+  width?: unknown;
 };
 
-type KlipyFileSet = {
-  gif?: KlipyAsset;
-  jpg?: KlipyAsset;
-  webp?: KlipyAsset;
+type GiphyImages = {
+  downsized?: GiphyRendition;
+  downsized_still?: GiphyRendition;
+  fixed_width?: GiphyRendition;
+  fixed_width_small?: GiphyRendition;
+  fixed_width_small_still?: GiphyRendition;
+  fixed_width_still?: GiphyRendition;
+  original?: GiphyRendition;
+  original_still?: GiphyRendition;
 };
 
-type KlipyRawGif = {
-  file?: {
-    hd?: KlipyFileSet;
-    md?: KlipyFileSet;
-    sm?: KlipyFileSet;
-    xs?: KlipyFileSet;
-  };
-  id?: number;
-  slug?: string;
-  title?: string;
-  type?: string;
+type GiphyRawGif = {
+  alt_text?: unknown;
+  id?: unknown;
+  images?: GiphyImages;
+  slug?: unknown;
+  title?: unknown;
+  type?: unknown;
 };
 
-export type KlipyResponse = {
-  data?: {
-    data?: KlipyRawGif[];
-  };
-  result?: boolean;
+/** The relay forwards GIPHY's `data` array and drops `meta` and `pagination`. */
+export type GiphyResponse = {
+  data?: GiphyRawGif[];
 };
 
-export type KlipyGif = {
-  id: number | null;
-  original: Required<KlipyAsset>;
+export type GiphyAsset = {
+  height: number;
+  size: number;
+  url: string;
+  width: number;
+};
+
+export type GiphyImage = {
+  height: number;
+  url: string;
+  width: number;
+};
+
+export type GiphyGif = {
+  id: string;
+  original: GiphyAsset;
   /**
-   * Static (non-animated) poster for the GIF, when KLIPY exposes a `jpg`
-   * asset. Rendered in place of the animated preview under
+   * Static (non-animated) poster for the GIF, when GIPHY exposes a `*_still`
+   * rendition. Rendered in place of the animated preview under
    * `prefers-reduced-motion: reduce`.
    */
-  poster: Required<KlipyAsset> | null;
-  preview: Required<KlipyAsset>;
+  poster: GiphyImage | null;
+  preview: GiphyImage;
   slug: string;
   title: string;
 };
@@ -51,14 +69,12 @@ export type RelayGifSearchInfo = {
   gif?: {
     provider?: string;
     search?: string;
-    share?: string;
   };
   supported_extensions?: string[];
 };
 
-export type RelayKlipyCapability = {
+export type RelayGiphyCapability = {
   searchPath: string;
-  sharePath: string;
 };
 
 function safeRelayPath(path: unknown): path is string {
@@ -74,108 +90,143 @@ function safeRelayPath(path: unknown): path is string {
   );
 }
 
-/** The safe relay-relative KLIPY endpoints advertised by NIP-11, if any. */
-export function relayKlipyCapability(
+/** The safe relay-relative GIPHY search endpoint advertised by NIP-11, if any. */
+export function relayGiphyCapability(
   info: RelayGifSearchInfo,
-): RelayKlipyCapability | null {
+): RelayGiphyCapability | null {
   const searchPath = info.gif?.search;
-  const sharePath = info.gif?.share;
   if (
     info.supported_extensions?.includes("buzz-gif") === true &&
-    info.gif?.provider === "klipy" &&
-    safeRelayPath(searchPath) &&
-    safeRelayPath(sharePath)
+    info.gif?.provider === "giphy" &&
+    safeRelayPath(searchPath)
   ) {
-    return { searchPath, sharePath };
+    return { searchPath };
   }
   return null;
 }
 
-function isCompleteAsset(
-  asset: KlipyAsset | undefined,
-): asset is Required<KlipyAsset> {
-  return (
-    typeof asset?.url === "string" &&
-    asset.url.length > 0 &&
-    typeof asset.width === "number" &&
-    typeof asset.height === "number" &&
-    typeof asset.size === "number"
-  );
+/** Parse a GIPHY string dimension such as `"320"` to an integer, or null. */
+function parseIntegerField(value: unknown): number | null {
+  if (typeof value !== "string" || !/^\d+$/.test(value)) return null;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
-function firstCompleteAsset(
-  ...assets: Array<KlipyAsset | undefined>
-): Required<KlipyAsset> | null {
-  return assets.find(isCompleteAsset) ?? null;
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+/** A rendition image with a URL and positive integer dimensions, or null. */
+function completeImage(
+  rendition: GiphyRendition | undefined,
+  url: unknown = rendition?.url,
+): GiphyImage | null {
+  if (!rendition || !nonEmptyString(url)) return null;
+  const width = parseIntegerField(rendition.width);
+  const height = parseIntegerField(rendition.height);
+  if (width === null || height === null || width <= 0 || height <= 0) {
+    return null;
+  }
+  return { height, url, width };
+}
+
+/** A sendable rendition: a complete image that also carries a byte size. */
+function completeAsset(
+  rendition: GiphyRendition | undefined,
+): GiphyAsset | null {
+  const image = completeImage(rendition);
+  if (!image) return null;
+  const size = parseIntegerField(rendition?.size);
+  if (size === null || size < 0) return null;
+  return { ...image, size };
+}
+
+function firstImage(
+  ...candidates: Array<GiphyImage | null>
+): GiphyImage | null {
+  return candidates.find((candidate) => candidate !== null) ?? null;
 }
 
 /**
- * Normalize KLIPY's mixed media response to GIF-only results. The API can
- * interleave ad/content records without a file payload; those are intentionally
- * omitted until Buzz has an explicit third-party ad surface.
+ * Normalize GIPHY search results to the GIF shape the picker renders. GIPHY
+ * dimensions arrive as strings, and some GIFs lack some renditions, so each
+ * rendition is validated and the first usable one in a fixed order wins.
+ * Items without a sendable asset or an animated preview are omitted.
  */
-export function normalizeKlipyGifs(items: KlipyRawGif[]): KlipyGif[] {
-  const gifs: KlipyGif[] = [];
+export function normalizeGiphyGifs(items: GiphyRawGif[]): GiphyGif[] {
+  const gifs: GiphyGif[] = [];
 
   for (const item of items) {
-    if (item.type !== "gif" || !item.file || !item.slug) continue;
+    if (
+      item.type !== "gif" ||
+      !nonEmptyString(item.id) ||
+      !nonEmptyString(item.slug) ||
+      typeof item.images !== "object" ||
+      item.images === null
+    ) {
+      continue;
+    }
+    const { images } = item;
 
-    const original = firstCompleteAsset(
-      item.file.md?.gif,
-      item.file.hd?.gif,
-      item.file.sm?.gif,
-      item.file.xs?.gif,
-    );
-    const preview = firstCompleteAsset(
-      item.file.sm?.webp,
-      item.file.sm?.gif,
-      item.file.xs?.webp,
-      item.file.xs?.gif,
-      item.file.md?.webp,
-      original ?? undefined,
-    );
-    if (!original || !preview) continue;
+    const original =
+      completeAsset(images.downsized) ??
+      completeAsset(images.original) ??
+      completeAsset(images.fixed_width);
+    if (!original) continue;
 
-    const poster = firstCompleteAsset(
-      item.file.sm?.jpg,
-      item.file.xs?.jpg,
-      item.file.md?.jpg,
-      item.file.hd?.jpg,
+    const preview = firstImage(
+      completeImage(images.fixed_width, images.fixed_width?.webp),
+      completeImage(images.fixed_width),
+      completeImage(images.fixed_width_small, images.fixed_width_small?.webp),
+      completeImage(images.fixed_width_small),
+      { height: original.height, url: original.url, width: original.width },
     );
+    if (!preview) continue;
+
+    const poster = firstImage(
+      completeImage(images.fixed_width_still),
+      completeImage(images.fixed_width_small_still),
+      completeImage(images.downsized_still),
+      completeImage(images.original_still),
+    );
+
+    const title = typeof item.title === "string" ? item.title.trim() : "";
+    const altText =
+      typeof item.alt_text === "string" ? item.alt_text.trim() : "";
 
     gifs.push({
-      id: item.id ?? null,
+      id: item.id,
       original,
       poster,
       preview,
       slug: item.slug,
-      title: item.title?.trim() || "GIF",
+      title: title || altText || "GIF",
     });
   }
 
   return gifs;
 }
 
-export function klipyGifFilename(gif: KlipyGif): string {
+export function giphyGifFilename(gif: GiphyGif): string {
   const safeSlug = gif.slug
     .toLowerCase()
     .replace(/[^a-z0-9-]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 80);
-  return `${safeSlug || "klipy-gif"}.gif`;
+  return `${safeSlug || "giphy-gif"}.gif`;
 }
 
 /**
- * Represent a selected KLIPY GIF as externally hosted media. The empty hash
+ * Represent a selected GIPHY GIF as externally hosted media. The empty hash
  * marks it as content-only media: the outgoing builder appends the image URL
  * to the message body but deliberately omits an imeta tag, since Buzz relays
  * only accept verified local `/media/` entries in imeta.
  */
-export function klipyGifAttachment(gif: KlipyGif): ImetaMedia {
+export function giphyGifAttachment(gif: GiphyGif): ImetaMedia {
   return {
     dim: `${gif.original.width}x${gif.original.height}`,
     displayLabel: gif.title,
-    filename: klipyGifFilename(gif),
+    filename: giphyGifFilename(gif),
     sha256: "",
     size: gif.original.size,
     type: "image/gif",

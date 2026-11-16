@@ -1963,26 +1963,19 @@ test("relay GIF capability gates the composer picker", async ({ page }) => {
   await expect(page.getByRole("tab", { name: "GIFs" })).toHaveCount(0);
 });
 
-test("relay GIF search selects content-only media and reports the share", async ({
-  page,
-}) => {
+test("relay GIF search selects content-only media", async ({ page }) => {
   const searchBodies: Array<{
     customer_id: string;
     locale: string;
     query: string;
   }> = [];
-  const shareBodies: Array<{ customer_id: string; slug: string }> = [];
-  const gifUrl = "https://static.klipy.com/e2e-ship-it.gif";
-  const previewUrl = "https://static.klipy.com/e2e-ship-it.webp";
+  const gifUrl = "https://media1.giphy.com/media/e2eShipIt/giphy-downsized.gif";
+  const previewUrl = "https://media1.giphy.com/media/e2eShipIt/200w.webp";
 
   await page.route("http://localhost:3000/info", (route) =>
     route.fulfill({
       body: JSON.stringify({
-        gif: {
-          provider: "klipy",
-          search: "/gifs/search",
-          share: "/gifs/share",
-        },
+        gif: { provider: "giphy", search: "/gifs/search" },
         supported_extensions: ["buzz-gif"],
       }),
       contentType: "application/nostr+json",
@@ -1992,39 +1985,35 @@ test("relay GIF search selects content-only media and reports the share", async 
     searchBodies.push(JSON.parse(route.request().postData() ?? "{}"));
     await route.fulfill({
       body: JSON.stringify({
-        result: true,
-        data: {
-          data: [
-            {
-              id: null,
-              file: {
-                md: {
-                  gif: { height: 180, size: 42, url: gifUrl, width: 320 },
-                },
-                sm: {
-                  webp: {
-                    height: 90,
-                    size: 12,
-                    url: previewUrl,
-                    width: 160,
-                  },
-                },
+        data: [
+          {
+            id: "e2eShipIt",
+            images: {
+              downsized: {
+                height: "180",
+                size: "42",
+                url: gifUrl,
+                width: "320",
               },
-              slug: "e2e-ship-it",
-              title: "Ship it",
-              type: "gif",
+              fixed_width: {
+                height: "90",
+                size: "12",
+                url: "https://media1.giphy.com/media/e2eShipIt/200w.gif",
+                webp: previewUrl,
+                webp_size: "8",
+                width: "160",
+              },
             },
-          ],
-        },
+            slug: "ship-it-e2eShipIt",
+            title: "Ship it",
+            type: "gif",
+          },
+        ],
       }),
       contentType: "application/json",
     });
   });
-  await page.route("http://localhost:3000/gifs/share", async (route) => {
-    shareBodies.push(JSON.parse(route.request().postData() ?? "{}"));
-    await route.fulfill({ status: 204 });
-  });
-  await page.route("https://static.klipy.com/e2e-ship-it.*", (route) =>
+  await page.route("https://media1.giphy.com/media/e2eShipIt/*", (route) =>
     route.fulfill({
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="#7c3aed"/></svg>',
       contentType: "image/svg+xml",
@@ -2043,21 +2032,13 @@ test("relay GIF search selects content-only media and reports the share", async 
     page.getByRole("button", { name: "Choose Ship it" }),
   ).toBeVisible();
 
-  await page.getByRole("searchbox", { name: "Search KLIPY" }).fill("celebrate");
+  await page.getByRole("searchbox", { name: "Search GIPHY" }).fill("celebrate");
   await expect
     .poll(() => searchBodies.map(({ query }) => query))
     .toContain("celebrate");
   await page.getByRole("button", { name: "Choose Ship it" }).click();
 
   await expect(page.getByTestId("composer-media-attachment")).toBeVisible();
-  await expect
-    .poll(() => shareBodies)
-    .toEqual([
-      {
-        customer_id: searchBodies.at(-1)?.customer_id,
-        slug: "e2e-ship-it",
-      },
-    ]);
 
   await page.getByTestId("send-message").click();
   await expect(page.getByTestId("composer-media-attachment")).toHaveCount(0);
@@ -2099,15 +2080,20 @@ test("relay GIF search selects content-only media and reports the share", async 
 async function routeGifMocks(page: import("@playwright/test").Page) {
   const gifs = [
     {
-      animated: "https://static.klipy.com/e2e-party.gif",
-      poster: "https://static.klipy.com/e2e-party.jpg",
-      slug: "e2e-party",
+      animated: "https://media1.giphy.com/media/e2eParty/giphy-downsized.gif",
+      id: "e2eParty",
+      poster: "https://media1.giphy.com/media/e2eParty/200w_s.gif",
+      preview: "https://media1.giphy.com/media/e2eParty/200w.webp",
+      slug: "party-parrot-e2eParty",
       title: "Party parrot",
     },
     {
-      animated: "https://static.klipy.com/e2e-thumbs-up.gif",
-      poster: "https://static.klipy.com/e2e-thumbs-up.jpg",
-      slug: "e2e-thumbs-up",
+      animated:
+        "https://media1.giphy.com/media/e2eThumbsUp/giphy-downsized.gif",
+      id: "e2eThumbsUp",
+      poster: "https://media1.giphy.com/media/e2eThumbsUp/200w_s.gif",
+      preview: "https://media1.giphy.com/media/e2eThumbsUp/200w.webp",
+      slug: "thumbs-up-e2eThumbsUp",
       title: "Thumbs up",
     },
   ];
@@ -2115,11 +2101,7 @@ async function routeGifMocks(page: import("@playwright/test").Page) {
   await page.route("http://localhost:3000/info", (route) =>
     route.fulfill({
       body: JSON.stringify({
-        gif: {
-          provider: "klipy",
-          search: "/gifs/search",
-          share: "/gifs/share",
-        },
+        gif: { provider: "giphy", search: "/gifs/search" },
         supported_extensions: ["buzz-gif"],
       }),
       contentType: "application/nostr+json",
@@ -2128,37 +2110,34 @@ async function routeGifMocks(page: import("@playwright/test").Page) {
   await page.route("http://localhost:3000/gifs/search", (route) =>
     route.fulfill({
       body: JSON.stringify({
-        result: true,
-        data: {
-          data: gifs.map((gif) => ({
-            id: null,
-            file: {
-              md: {
-                gif: { height: 180, size: 42, url: gif.animated, width: 320 },
-              },
-              sm: {
-                jpg: { height: 90, size: 8, url: gif.poster, width: 160 },
-                webp: {
-                  height: 90,
-                  size: 12,
-                  url: `${gif.animated.replace(/\.gif$/, ".webp")}`,
-                  width: 160,
-                },
-              },
+        data: gifs.map((gif) => ({
+          id: gif.id,
+          images: {
+            downsized: {
+              height: "180",
+              size: "42",
+              url: gif.animated,
+              width: "320",
             },
-            slug: gif.slug,
-            title: gif.title,
-            type: "gif",
-          })),
-        },
+            fixed_width: {
+              height: "90",
+              size: "12",
+              url: gif.animated.replace(/giphy-downsized\.gif$/, "200w.gif"),
+              webp: gif.preview,
+              webp_size: "8",
+              width: "160",
+            },
+            fixed_width_still: { height: "90", url: gif.poster, width: "160" },
+          },
+          slug: gif.slug,
+          title: gif.title,
+          type: "gif",
+        })),
       }),
       contentType: "application/json",
     }),
   );
-  await page.route("http://localhost:3000/gifs/share", (route) =>
-    route.fulfill({ status: 204 }),
-  );
-  await page.route("https://static.klipy.com/e2e-*", (route) =>
+  await page.route("https://media1.giphy.com/media/**", (route) =>
     route.fulfill({
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="#7c3aed"/></svg>',
       contentType: "image/svg+xml",
@@ -2173,7 +2152,7 @@ async function openGifGrid(page: import("@playwright/test").Page) {
   await page.getByTestId("channel-general").click();
   await page.getByTestId("composer-emoji-button").click();
   await page.getByRole("tab", { name: "GIFs" }).click();
-  await expect(page.getByTestId("klipy-gif-grid")).toBeVisible();
+  await expect(page.getByTestId("giphy-gif-grid")).toBeVisible();
 }
 
 test("reduced-motion GIF grid renders static posters, not animated previews", async ({
@@ -2183,7 +2162,7 @@ test("reduced-motion GIF grid renders static posters, not animated previews", as
   const gifs = await routeGifMocks(page);
   await openGifGrid(page);
 
-  const grid = page.getByTestId("klipy-gif-grid");
+  const grid = page.getByTestId("giphy-gif-grid");
   // Each GIF stays identifiable and selectable by its accessible name.
   for (const gif of gifs) {
     await expect(
@@ -2211,64 +2190,53 @@ test("reduced-motion GIF grid falls back to a named static placeholder", async (
   await page.route("http://localhost:3000/info", (route) =>
     route.fulfill({
       body: JSON.stringify({
-        gif: {
-          provider: "klipy",
-          search: "/gifs/search",
-          share: "/gifs/share",
-        },
+        gif: { provider: "giphy", search: "/gifs/search" },
         supported_extensions: ["buzz-gif"],
       }),
       contentType: "application/nostr+json",
     }),
   );
-  // A GIF with no jpg asset: reduced motion must not fall back to animation.
+  // A GIF with no *_still rendition: reduced motion must not fall back to
+  // animation.
   await page.route("http://localhost:3000/gifs/search", (route) =>
     route.fulfill({
       body: JSON.stringify({
-        result: true,
-        data: {
-          data: [
-            {
-              id: null,
-              file: {
-                md: {
-                  gif: {
-                    height: 180,
-                    size: 42,
-                    url: "https://static.klipy.com/e2e-no-poster.gif",
-                    width: 320,
-                  },
-                },
-                sm: {
-                  webp: {
-                    height: 90,
-                    size: 12,
-                    url: "https://static.klipy.com/e2e-no-poster.webp",
-                    width: 160,
-                  },
-                },
+        data: [
+          {
+            id: "e2eNoPoster",
+            images: {
+              downsized: {
+                height: "180",
+                size: "42",
+                url: "https://media1.giphy.com/media/e2eNoPoster/giphy-downsized.gif",
+                width: "320",
               },
-              slug: "e2e-no-poster",
-              title: "No poster clip",
-              type: "gif",
+              fixed_width: {
+                height: "90",
+                size: "12",
+                url: "https://media1.giphy.com/media/e2eNoPoster/200w.gif",
+                webp: "https://media1.giphy.com/media/e2eNoPoster/200w.webp",
+                webp_size: "8",
+                width: "160",
+              },
             },
-          ],
-        },
+            slug: "no-poster-clip-e2eNoPoster",
+            title: "No poster clip",
+            type: "gif",
+          },
+        ],
       }),
       contentType: "application/json",
     }),
   );
-  await page.route("http://localhost:3000/gifs/share", (route) =>
-    route.fulfill({ status: 204 }),
-  );
 
   await openGifGrid(page);
 
-  const grid = page.getByTestId("klipy-gif-grid");
+  const grid = page.getByTestId("giphy-gif-grid");
   await expect(
     grid.getByRole("button", { name: "Choose No poster clip" }),
   ).toBeVisible();
-  await expect(grid.getByTestId("klipy-gif-static-placeholder")).toHaveText(
+  await expect(grid.getByTestId("giphy-gif-static-placeholder")).toHaveText(
     "No poster clip",
   );
   await expect(grid.locator("img")).toHaveCount(0);
@@ -2280,12 +2248,12 @@ test("normal-motion GIF grid renders animated previews", async ({ page }) => {
   await openGifGrid(page);
 
   const sources = await page
-    .getByTestId("klipy-gif-grid")
+    .getByTestId("giphy-gif-grid")
     .locator("img")
     .evaluateAll((imgs) =>
       imgs.map((img) => (img as HTMLImageElement).getAttribute("src")),
     );
-  // Animated `.webp` previews are used; static jpg posters stay out of the DOM.
+  // Animated `.webp` previews are used; static posters stay out of the DOM.
   expect(sources.every((src) => src?.endsWith(".webp"))).toBe(true);
   for (const gif of gifs) {
     expect(sources).not.toContain(gif.poster);
@@ -2304,7 +2272,7 @@ test("selected GIFs keep distinct accessible names in the composer and lightbox"
     await page.getByTestId("composer-emoji-button").click();
     await page.getByRole("tab", { name: "GIFs" }).click();
     await page
-      .getByTestId("klipy-gif-grid")
+      .getByTestId("giphy-gif-grid")
       .getByRole("button", { name: `Choose ${gif.title}` })
       .click();
   }

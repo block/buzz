@@ -547,8 +547,8 @@ impl Credentials {
 
 /// Derive a stable, relay-scoped anonymous `customer_id` from secret key material.
 ///
-/// KLIPY requires a per-installation identifier that is stable and anonymous.
-/// Using SHA-256 of the *public* key would be stable but NOT anonymous — the
+/// GIPHY accepts a per-user `customer_id` that must be stable and anonymous.
+/// Using SHA-256 of the *public* key would be stable but NOT anonymous. The
 /// input is public, so the ID is computable by any observer, and the same value
 /// would appear across all relays (cross-relay linkability).
 ///
@@ -561,7 +561,7 @@ impl Credentials {
 /// - **stateless**: no file I/O, no storage.
 ///
 /// The first 16 bytes (32 hex chars) give 128 bits of uniqueness, ample for
-/// KLIPY's per-installation needs.
+/// GIPHY's per-user `customer_id` needs.
 fn customer_id(secret_key_bytes: &[u8], relay_url: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(secret_key_bytes);

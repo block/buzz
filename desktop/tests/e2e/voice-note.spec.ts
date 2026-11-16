@@ -877,11 +877,7 @@ test("keeps emoji available but blocks GIFs beside a queued voice note", async (
   await page.route("http://localhost:3000/info", (route) =>
     route.fulfill({
       body: JSON.stringify({
-        gif: {
-          provider: "klipy",
-          search: "/gifs/search",
-          share: "/gifs/share",
-        },
+        gif: { provider: "giphy", search: "/gifs/search" },
         supported_extensions: ["buzz-gif"],
       }),
       contentType: "application/nostr+json",

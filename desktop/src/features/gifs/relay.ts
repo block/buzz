@@ -1,22 +1,22 @@
 import {
-  type KlipyGif,
-  type KlipyResponse,
-  normalizeKlipyGifs,
-  relayKlipyCapability,
-  type RelayKlipyCapability,
+  type GiphyGif,
+  type GiphyResponse,
+  normalizeGiphyGifs,
+  relayGiphyCapability,
+  type RelayGiphyCapability,
   type RelayGifSearchInfo,
 } from "@/features/gifs/api";
 import { relayHttpFromWs } from "@/shared/api/inviteHelpers";
 import { signRelayEvent } from "@/shared/api/tauri";
 
-const KLIPY_CUSTOMER_ID_STORAGE_KEY_PREFIX = "buzz:klipy-customer-id:v1:";
+const GIPHY_CUSTOMER_ID_STORAGE_KEY_PREFIX = "buzz:giphy-customer-id:v1:";
 const NIP98_KIND = 27235;
 
 function customerId(relayUrl: string): string {
   if (typeof window === "undefined") return globalThis.crypto.randomUUID();
 
   try {
-    const storageKey = `${KLIPY_CUSTOMER_ID_STORAGE_KEY_PREFIX}${relayUrl}`;
+    const storageKey = `${GIPHY_CUSTOMER_ID_STORAGE_KEY_PREFIX}${relayUrl}`;
     const existing = window.localStorage.getItem(storageKey);
     if (existing) return existing;
 
@@ -86,15 +86,14 @@ async function relayPost<T>(
     };
     throw new Error(gifErrorMessage(json.error, response.status));
   }
-  if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
 }
 
-/** The selected relay's advertised KLIPY endpoints, when supported. */
-export async function relayKlipyEndpoints(
+/** The selected relay's advertised GIPHY endpoints, when supported. */
+export async function relayGiphyEndpoints(
   relayUrl: string,
   signal?: AbortSignal,
-): Promise<RelayKlipyCapability | null> {
+): Promise<RelayGiphyCapability | null> {
   const url = `${relayHttpFromWs(relayUrl).replace(/\/+$/, "")}/info`;
   const response = await fetch(url, {
     headers: { Accept: "application/nostr+json" },
@@ -103,17 +102,17 @@ export async function relayKlipyEndpoints(
   if (!response.ok)
     throw new Error(`Could not read relay capabilities (${response.status})`);
   const info = (await response.json()) as RelayGifSearchInfo;
-  return relayKlipyCapability(info);
+  return relayGiphyCapability(info);
 }
 
-/** Search KLIPY through the selected relay without exposing its provider key. */
-export async function fetchKlipyGifs(
+/** Search GIPHY through the selected relay without exposing its provider key. */
+export async function fetchGiphyGifs(
   relayUrl: string,
   searchPath: string,
   query: string,
   signal?: AbortSignal,
-): Promise<KlipyGif[]> {
-  const response = await relayPost<KlipyResponse>(
+): Promise<GiphyGif[]> {
+  const response = await relayPost<GiphyResponse>(
     relayUrl,
     searchPath,
     {
@@ -123,20 +122,5 @@ export async function fetchKlipyGifs(
     },
     signal,
   );
-  if (response.result === false) {
-    throw new Error("GIF search failed");
-  }
-  return normalizeKlipyGifs(response.data?.data ?? []);
-}
-
-/** Report a selected GIF so KLIPY can update the anonymous user's Recents. */
-export async function reportKlipyShare(
-  relayUrl: string,
-  sharePath: string,
-  slug: string,
-): Promise<void> {
-  await relayPost<void>(relayUrl, sharePath, {
-    customer_id: customerId(relayUrl),
-    slug,
-  });
+  return normalizeGiphyGifs(Array.isArray(response.data) ? response.data : []);
 }

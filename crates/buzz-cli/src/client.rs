@@ -1061,9 +1061,9 @@ impl BuzzClient {
 
     /// POST a JSON body to a relay-relative path with NIP-98 authentication.
     ///
-    /// Used by `buzz gifs search` and `buzz gifs share` to reach the relay's
-    /// KLIPY proxy endpoints.  Returns the raw response body as a string (may
-    /// be empty for 204 No Content responses).
+    /// Used by `buzz gifs search` to reach the relay's GIPHY proxy endpoint.
+    /// Returns the raw response body as a string (may be empty for 204 No
+    /// Content responses).
     pub async fn post_json_authed(
         &self,
         path: &str,

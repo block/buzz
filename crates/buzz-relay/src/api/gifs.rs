@@ -1,13 +1,13 @@
-//! Relay-owned KLIPY GIF metadata/search proxy.
+//! Relay-owned GIPHY GIF metadata/search proxy.
 //!
-//! KLIPY requires a provider credential, but desktop applications cannot keep
-//! build-time credentials secret. These narrow endpoints keep the key on the
-//! operator's relay while returning only KLIPY-hosted media URLs and metadata;
+//! GIPHY requires a provider credential, but desktop applications cannot keep
+//! build-time credentials secret. This narrow endpoint keeps the key on the
+//! operator's relay while returning only GIPHY-hosted media URLs and metadata;
 //! GIF bytes are never downloaded, cached, or stored by Buzz.
 //!
-//! Search and share reporting are the only relay endpoints. Sending a selected
-//! GIF is a normal message containing its CDN URL, and clients render that URL
-//! through the existing image path. No GIF bytes transit the relay.
+//! Search is the only relay endpoint. Sending a selected GIF is a normal
+//! message containing its CDN URL, and clients render that URL through the
+//! existing image path. No GIF bytes transit the relay.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,17 +27,19 @@ use buzz_auth::LimitType;
 
 use super::{api_error, bridge, internal_error};
 
-const KLIPY_API_ROOT: &str = "https://api.klipy.com/api/v1/";
+const GIPHY_API_ROOT: &str = "https://api.giphy.com/v1/gifs/";
 pub(crate) const SEARCH_PATH: &str = "/gifs/search";
-pub(crate) const SHARE_PATH: &str = "/gifs/share";
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_UPSTREAM_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+/// GIPHY caps the `q` parameter at 50 characters.
+const MAX_QUERY_CHARS: usize = 50;
+const RESULTS_PER_PAGE: &str = "24";
 
-/// Build the dedicated KLIPY client. Redirects are disabled: the API key rides
-/// in the request path, so following a provider 3xx could replay a key-bearing
-/// URL to an attacker-chosen host. With no redirect policy, a 3xx comes back as
-/// a non-success status that the handlers map to a generic `502`, and the
-/// `Location` target is never read or forwarded.
+/// Build the dedicated GIPHY client. Redirects are disabled: the API key rides
+/// in the request query string, so following a provider 3xx could replay a
+/// key-bearing URL to an attacker-chosen host. With no redirect policy, a 3xx
+/// comes back as a non-success status that the handler maps to a generic
+/// `502`, and the `Location` target is never read or forwarded.
 pub fn build_gif_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(UPSTREAM_TIMEOUT)
@@ -47,23 +49,15 @@ pub fn build_gif_http_client() -> reqwest::Client {
 }
 
 #[derive(Debug, Deserialize)]
-/// Client-owned search context forwarded to KLIPY by the relay.
+/// Client-owned search context forwarded to GIPHY by the relay.
 pub struct SearchRequest {
     /// Empty means trending; otherwise this is the user's search text.
     query: String,
-    /// Stable anonymous installation identifier required by KLIPY.
+    /// Stable anonymous installation identifier, forwarded as GIPHY `customer_id`.
     customer_id: String,
-    /// Desktop locale used to localize provider results.
+    /// Desktop locale (BCP-47, for example `en-US`). The relay derives the
+    /// two-letter GIPHY `lang` code from its first subtag.
     locale: String,
-}
-
-#[derive(Debug, Deserialize)]
-/// Client-owned share context forwarded to KLIPY by the relay.
-pub struct ShareRequest {
-    /// Provider slug for the selected GIF.
-    slug: String,
-    /// Stable anonymous installation identifier required by KLIPY.
-    customer_id: String,
 }
 
 fn validate_text(
@@ -85,37 +79,39 @@ fn validate_text(
     Ok(())
 }
 
-fn klipy_url(
+/// Derive the GIPHY `lang` value (ISO 639-1, two ASCII letters) from a BCP-47
+/// locale such as `en-US` or `pt_BR`. Returns `None` when the first subtag is
+/// not a two-letter code, so the relay omits `lang` instead of sending junk.
+fn giphy_lang(locale: &str) -> Option<String> {
+    let first = locale.trim().split(['-', '_']).next().unwrap_or_default();
+    if first.len() == 2 && first.chars().all(|c| c.is_ascii_alphabetic()) {
+        Some(first.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+/// Build a GIPHY request URL. The credential is appended as the `api_key`
+/// query parameter, as GIPHY requires, so the caller must never log the URL.
+fn giphy_url(
     api_key: &str,
-    path: &[&str],
+    endpoint: &str,
     query: &[(&str, &str)],
 ) -> Result<url::Url, (StatusCode, Json<Value>)> {
-    let mut url = url::Url::parse(KLIPY_API_ROOT)
-        .map_err(|_| internal_error("invalid static KLIPY API root"))?;
+    let mut url = url::Url::parse(GIPHY_API_ROOT)
+        .map_err(|_| internal_error("invalid static GIPHY API root"))?;
     {
         let mut segments = url
             .path_segments_mut()
-            .map_err(|_| internal_error("invalid static KLIPY API root"))?;
-        segments.pop_if_empty().push(api_key);
-        for segment in path {
-            segments.push(segment);
-        }
+            .map_err(|_| internal_error("invalid static GIPHY API root"))?;
+        segments.pop_if_empty().push(endpoint);
     }
-    if !query.is_empty() {
-        url.query_pairs_mut().extend_pairs(query.iter().copied());
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.append_pair("api_key", api_key);
+        pairs.extend_pairs(query.iter().copied());
     }
     Ok(url)
-}
-
-fn klipy_share_request(
-    client: &reqwest::Client,
-    api_key: &str,
-    request: &ShareRequest,
-) -> Result<reqwest::RequestBuilder, (StatusCode, Json<Value>)> {
-    let url = klipy_url(api_key, &["gifs", "share", request.slug.trim()], &[])?;
-    Ok(client
-        .post(url)
-        .json(&serde_json::json!({ "customer_id": request.customer_id })))
 }
 
 async fn send_upstream(
@@ -128,7 +124,7 @@ async fn send_upstream(
         .map_err(|error| {
             tracing::warn!(
                 timeout = error.is_timeout(),
-                "KLIPY upstream request failed"
+                "GIPHY upstream request failed"
             );
             api_error(StatusCode::BAD_GATEWAY, "GIF provider is unavailable")
         })
@@ -202,19 +198,34 @@ async fn limited_json(response: reqwest::Response) -> Result<Value, (StatusCode,
     })
 }
 
+/// Reduce a GIPHY envelope to `{ "data": [...] }`.
+///
+/// GIPHY reports success through `meta.status`. Only the `data` array is
+/// forwarded; `meta` (which carries a `response_id`) and `pagination` are
+/// dropped so provider diagnostics never cross the relay boundary.
 fn successful_search_payload(upstream: &Value) -> Result<Value, (StatusCode, Json<Value>)> {
-    if upstream.get("result").and_then(Value::as_bool) != Some(true) {
-        tracing::warn!("KLIPY search returned an unsuccessful result");
+    let meta_status = upstream
+        .get("meta")
+        .and_then(|meta| meta.get("status"))
+        .and_then(Value::as_u64);
+    if meta_status.is_some_and(|status| status != 200) {
+        tracing::warn!("GIPHY search returned an unsuccessful meta status");
         return Err(api_error(
             StatusCode::BAD_GATEWAY,
             "GIF provider rejected the search request",
         ));
     }
-    let data = upstream.get("data").cloned().unwrap_or(Value::Null);
-    Ok(serde_json::json!({ "result": true, "data": data }))
+    let Some(data) = upstream.get("data").filter(|data| data.is_array()) else {
+        tracing::warn!("GIPHY search returned no data array");
+        return Err(api_error(
+            StatusCode::BAD_GATEWAY,
+            "GIF provider returned an invalid response",
+        ));
+    };
+    Ok(serde_json::json!({ "data": data }))
 }
 
-/// Search or browse trending KLIPY GIF metadata for an authenticated member.
+/// Search or browse trending GIPHY GIF metadata for an authenticated member.
 pub async fn search(
     State(state): State<Arc<AppState>>,
     slot: crate::access::AccessSlot,
@@ -239,7 +250,7 @@ async fn search_inner(
     let (tenant, pubkey) =
         bridge::authenticate_member_post(&state, &slot, &headers, SEARCH_PATH, &body).await?;
 
-    let Some(config) = state.config.klipy.as_ref() else {
+    let Some(config) = state.config.giphy.as_ref() else {
         return Err(
             api_error(StatusCode::NOT_FOUND, "GIF search is not configured").into_response(),
         );
@@ -247,7 +258,8 @@ async fn search_inner(
     let request: SearchRequest = serde_json::from_slice(&body).map_err(|_| {
         api_error(StatusCode::BAD_REQUEST, "invalid GIF search JSON").into_response()
     })?;
-    validate_text("query", &request.query, 200, true).map_err(|e| e.into_response())?;
+    let query_text = request.query.trim();
+    validate_text("query", query_text, MAX_QUERY_CHARS, true).map_err(|e| e.into_response())?;
     validate_text("customer_id", &request.customer_id, 128, false)
         .map_err(|e| e.into_response())?;
     validate_text("locale", &request.locale, 32, false).map_err(|e| e.into_response())?;
@@ -255,27 +267,29 @@ async fn search_inner(
         .await
         .map_err(|e| e.into_response())?;
 
-    let endpoint = if request.query.trim().is_empty() {
+    let endpoint = if query_text.is_empty() {
         "trending"
     } else {
         "search"
     };
+    let lang = giphy_lang(&request.locale);
     let mut query = vec![
-        ("page", "1"),
-        ("per_page", "24"),
+        ("limit", RESULTS_PER_PAGE),
+        ("offset", "0"),
         ("customer_id", request.customer_id.as_str()),
-        ("locale", request.locale.as_str()),
     ];
-    if !request.query.trim().is_empty() {
-        query.push(("q", request.query.trim()));
+    if !query_text.is_empty() {
+        query.push(("q", query_text));
+        if let Some(lang) = lang.as_deref() {
+            query.push(("lang", lang));
+        }
     }
-    let url =
-        klipy_url(config.api_key(), &["gifs", endpoint], &query).map_err(|e| e.into_response())?;
+    let url = giphy_url(config.api_key(), endpoint, &query).map_err(|e| e.into_response())?;
     let response = send_upstream(state.gif_http_client.get(url))
         .await
         .map_err(|e| e.into_response())?;
     if !response.status().is_success() {
-        tracing::warn!(status = response.status().as_u16(), "KLIPY search failed");
+        tracing::warn!(status = response.status().as_u16(), "GIPHY search failed");
         return Err(api_error(
             StatusCode::BAD_GATEWAY,
             "GIF provider rejected the search request",
@@ -283,69 +297,14 @@ async fn search_inner(
         .into_response());
     }
 
-    // Never forward the provider response wholesale. KLIPY may report an
-    // application-level failure with HTTP 200 and include request details in
-    // its error fields. Allowlist only successful result data so credentials
-    // and provider diagnostics cannot cross the relay boundary.
+    // Never forward the provider response wholesale. Allowlist only the
+    // `data` array so provider diagnostics cannot cross the relay boundary.
     let upstream = limited_json(response)
         .await
         .map_err(|e| e.into_response())?;
     Ok(Json(
         successful_search_payload(&upstream).map_err(|e| e.into_response())?,
     ))
-}
-
-/// Report a selected GIF to KLIPY so the provider can update Recents.
-pub async fn share(
-    State(state): State<Arc<AppState>>,
-    slot: crate::access::AccessSlot,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> Response {
-    share_inner(state, slot, headers, body)
-        .await
-        .into_response()
-}
-
-#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
-async fn share_inner(
-    state: Arc<AppState>,
-    slot: crate::access::AccessSlot,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> Result<StatusCode, Response> {
-    // Admission first: NIP-98 + NIP-FI must fire before provider availability
-    // check. [FI-TRACE-HTTP-INGRESS]
-    bridge::authenticate_member_post(&state, &slot, &headers, SHARE_PATH, &body).await?;
-
-    let Some(config) = state.config.klipy.as_ref() else {
-        return Err(
-            api_error(StatusCode::NOT_FOUND, "GIF search is not configured").into_response(),
-        );
-    };
-    let request: ShareRequest = serde_json::from_slice(&body).map_err(|_| {
-        api_error(StatusCode::BAD_REQUEST, "invalid GIF share JSON").into_response()
-    })?;
-    validate_text("slug", &request.slug, 200, false).map_err(|e| e.into_response())?;
-    validate_text("customer_id", &request.customer_id, 128, false)
-        .map_err(|e| e.into_response())?;
-
-    let response = send_upstream(
-        klipy_share_request(&state.gif_http_client, config.api_key(), &request)
-            .map_err(|e| e.into_response())?,
-    )
-    .await
-    .map_err(|e| e.into_response())?;
-    if !response.status().is_success() {
-        tracing::warn!(status = response.status().as_u16(), "KLIPY share failed");
-        return Err(api_error(
-            StatusCode::BAD_GATEWAY,
-            "GIF provider rejected the share request",
-        )
-        .into_response());
-    }
-
-    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]
@@ -361,7 +320,7 @@ mod tests {
 
     async fn unconfigured_test_state() -> Arc<AppState> {
         let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
-        config.klipy = None;
+        config.giphy = None;
         config.redis_url = "redis://127.0.0.1:1".to_string();
 
         let pool = sqlx::postgres::PgPoolOptions::new()
@@ -450,70 +409,78 @@ mod tests {
     }
 
     #[test]
-    fn klipy_url_encodes_credentials_as_a_path_segment() {
-        let url = klipy_url(
-            "key/with spaces",
-            &["gifs", "search"],
-            &[("customer_id", "customer")],
+    fn giphy_url_sends_credentials_as_an_encoded_query_parameter() {
+        let url = giphy_url(
+            "key/with spaces&more",
+            "search",
+            &[("q", "cheese burgers"), ("customer_id", "customer")],
         )
         .expect("static URL is valid");
 
         assert_eq!(
             url.as_str(),
-            "https://api.klipy.com/api/v1/key%2Fwith%20spaces/gifs/search?customer_id=customer"
+            "https://api.giphy.com/v1/gifs/search?api_key=key%2Fwith+spaces%26more&q=cheese+burgers&customer_id=customer"
         );
     }
 
     #[test]
-    fn klipy_share_request_uses_slug_path_and_customer_body() {
-        let request = ShareRequest {
-            slug: " ship/it ".to_string(),
-            customer_id: "customer-123".to_string(),
-        };
-        let built = klipy_share_request(&reqwest::Client::new(), "secret-key", &request)
-            .expect("share request builds")
-            .build()
-            .expect("share request is valid");
+    fn giphy_url_selects_the_trending_endpoint() {
+        let url =
+            giphy_url("secret-key", "trending", &[("limit", "24")]).expect("static URL is valid");
+        assert_eq!(
+            url.as_str(),
+            "https://api.giphy.com/v1/gifs/trending?api_key=secret-key&limit=24"
+        );
+    }
 
-        assert_eq!(built.method(), reqwest::Method::POST);
-        assert_eq!(
-            built.url().as_str(),
-            "https://api.klipy.com/api/v1/secret-key/gifs/share/ship%2Fit"
-        );
-        assert_eq!(
-            built.body().and_then(reqwest::Body::as_bytes),
-            Some(br#"{"customer_id":"customer-123"}"#.as_slice())
-        );
+    #[test]
+    fn giphy_lang_uses_the_first_two_letter_subtag_only() {
+        assert_eq!(giphy_lang("en-US").as_deref(), Some("en"));
+        assert_eq!(giphy_lang("pt_BR").as_deref(), Some("pt"));
+        assert_eq!(giphy_lang("DE").as_deref(), Some("de"));
+        assert_eq!(giphy_lang("zh-Hant-TW").as_deref(), Some("zh"));
+        assert_eq!(giphy_lang("eng-US"), None);
+        assert_eq!(giphy_lang("1a-XX"), None);
+        assert_eq!(giphy_lang(""), None);
     }
 
     #[test]
     fn validation_bounds_provider_control_fields() {
-        assert!(validate_text("query", "", 200, true).is_ok());
+        assert!(validate_text("query", "", MAX_QUERY_CHARS, true).is_ok());
+        assert!(
+            validate_text("query", &"x".repeat(MAX_QUERY_CHARS), MAX_QUERY_CHARS, true).is_ok()
+        );
+        assert!(validate_text(
+            "query",
+            &"x".repeat(MAX_QUERY_CHARS + 1),
+            MAX_QUERY_CHARS,
+            true
+        )
+        .is_err());
         assert!(validate_text("customer_id", "", 128, false).is_err());
-        assert!(validate_text("query", &"x".repeat(201), 200, true).is_err());
     }
 
     #[test]
-    fn successful_payload_strips_provider_errors_and_unknown_fields() {
+    fn successful_payload_forwards_only_the_data_array() {
         let payload = successful_search_payload(&serde_json::json!({
-            "result": true,
-            "data": { "data": [] },
-            "errors": { "message": ["request used secret-key"] },
-            "debug": "secret-key"
+            "data": [{ "id": "abc", "type": "gif" }],
+            "pagination": { "total_count": 1, "count": 1, "offset": 0 },
+            "meta": { "status": 200, "msg": "OK", "response_id": "secret-response-id" }
         }))
         .expect("successful payload");
 
         assert_eq!(
             payload,
-            serde_json::json!({ "result": true, "data": { "data": [] } })
+            serde_json::json!({ "data": [{ "id": "abc", "type": "gif" }] })
         );
+        assert!(!payload.to_string().contains("secret-response-id"));
     }
 
     #[test]
-    fn unsuccessful_payload_is_rejected_without_provider_details() {
+    fn unsuccessful_meta_status_is_rejected_without_provider_details() {
         let (status, body) = successful_search_payload(&serde_json::json!({
-            "result": false,
-            "errors": { "message": ["request used secret-key"] }
+            "data": [],
+            "meta": { "status": 429, "msg": "request used secret-key", "response_id": "x" }
         }))
         .expect_err("unsuccessful provider payload must be rejected");
 
@@ -522,9 +489,24 @@ mod tests {
         assert!(!serialized.contains("secret-key"));
     }
 
+    #[test]
+    fn payload_without_a_data_array_is_rejected() {
+        let (status, _) = successful_search_payload(&serde_json::json!({
+            "data": { "data": [] },
+            "meta": { "status": 200 }
+        }))
+        .expect_err("object data must be rejected");
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+
+        let (status, _) =
+            successful_search_payload(&serde_json::json!({ "meta": { "status": 200 } }))
+                .expect_err("missing data must be rejected");
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+    }
+
     /// A provider 3xx must never cause a second connection, and the error
     /// surfaced past the shared send/reject path must leak neither the API key
-    /// (carried in the request path) nor the redirect target.
+    /// (carried in the request query string) nor the redirect target.
     ///
     /// Mutation check: swapping `build_gif_http_client`'s redirect policy back
     /// to the default makes the client follow the 302, the redirect listener
@@ -533,7 +515,7 @@ mod tests {
     async fn gif_client_refuses_provider_redirects_without_leaking_secrets() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        const SECRET_KEY: &str = "super-secret-klipy-key";
+        const SECRET_KEY: &str = "super-secret-giphy-key";
 
         // Second listener: the redirect target. It must never be reached.
         let redirect_hits = Arc::new(AtomicUsize::new(0));
@@ -557,7 +539,7 @@ mod tests {
             .expect("serve redirect target");
         });
 
-        // Fake upstream: answers the key-bearing path with a 302 whose Location
+        // Fake upstream: answers the key-bearing URL with a 302 whose Location
         // points at the second listener, exactly the disclosure vector.
         let redirect_location = format!("http://{redirect_addr}/leaked");
         let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -569,7 +551,7 @@ mod tests {
             axum::serve(
                 upstream_listener,
                 Router::new().route(
-                    &format!("/{SECRET_KEY}/gifs/search"),
+                    "/v1/gifs/search",
                     get(move || {
                         let location = location_header.clone();
                         async move {
@@ -587,17 +569,18 @@ mod tests {
         });
 
         let client = build_gif_http_client();
-        let response =
-            send_upstream(client.get(format!("http://{upstream_addr}/{SECRET_KEY}/gifs/search")))
-                .await
-                .expect("request completes without following the redirect");
+        let response = send_upstream(client.get(format!(
+            "http://{upstream_addr}/v1/gifs/search?api_key={SECRET_KEY}"
+        )))
+        .await
+        .expect("request completes without following the redirect");
 
         // The redirect was not followed: the client surfaces the 3xx itself.
         assert!(response.status().is_redirection());
         assert!(!response.status().is_success());
         assert_eq!(redirect_hits.load(Ordering::SeqCst), 0);
 
-        // The shared reject path (both handlers gate on `!is_success`) returns a
+        // The shared reject path (the handler gates on `!is_success`) returns a
         // static generic error carrying no key and no redirect target.
         let (status, body) = api_error(
             StatusCode::BAD_GATEWAY,
