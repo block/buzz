@@ -104,6 +104,20 @@ void main() {
             1000,
       ),
     );
+
+    // A message stamped earlier than one already shown (clock skew or
+    // delivery order) still notifies, once.
+    final older = relay.message(
+      first,
+      friend,
+      'five',
+      age: const Duration(minutes: 10),
+    );
+    expect(older.createdAt, lessThan(d.createdAt));
+    expect((await fixture.wake()).notifications.map((n) => n.eventId), [
+      older.id,
+    ]);
+    expect((await fixture.wake()).notifications, isEmpty);
   });
 
   test('every community notifies, each from its own relay', () async {
