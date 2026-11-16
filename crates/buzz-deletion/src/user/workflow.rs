@@ -31,6 +31,12 @@ const RULES: &[Rule] = &[
     Rule {
         name: "gate_user",
         community_scope: false,
+        allowed: &[Decision::Stage("purge_media"), Decision::EnterCommunities],
+        decide: |_| Ok(Decision::Stage("purge_media")),
+    },
+    Rule {
+        name: "purge_media",
+        community_scope: false,
         allowed: &[Decision::EnterCommunities],
         decide: |_| Ok(Decision::EnterCommunities),
     },
@@ -88,7 +94,17 @@ pub(super) fn decision(stage: &EntityStage) -> Result<Decision> {
         .metadata_json
         .get("result")
         .ok_or_else(|| invalid("completed stage has no saved result"))?;
-    let next = (rule.decide)(result)?;
+    // The validated saved target also identifies legacy demo histories whose
+    // gate result predates media cleanup; do not infer it from a new result field.
+    let next = if stage.stage == "gate_user"
+        && stage.metadata_json["inputs"]["target"]
+            .as_str()
+            .is_some_and(|target| target.starts_with("demo:"))
+    {
+        Decision::EnterCommunities
+    } else {
+        (rule.decide)(result)?
+    };
     if !rule.allowed.contains(&next) {
         return Err(invalid("stage selected a disallowed transition"));
     }
@@ -241,6 +257,23 @@ impl Progress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gating_always_precedes_global_media() {
+        assert_eq!(INITIAL_STAGE, "gate_user");
+        let gate = rule(INITIAL_STAGE).unwrap();
+        assert!(!gate.community_scope);
+        assert_eq!(
+            (gate.decide)(&serde_json::json!({})).unwrap(),
+            Decision::Stage("purge_media")
+        );
+        let media = rule("purge_media").unwrap();
+        assert!(!media.community_scope);
+        assert_eq!(
+            (media.decide)(&serde_json::json!({})).unwrap(),
+            Decision::EnterCommunities
+        );
+    }
 
     #[test]
     fn stage_options_follow_the_workflow_definition() {

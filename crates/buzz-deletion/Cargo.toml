@@ -21,9 +21,10 @@ nostr = { workspace = true }
 redis = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sqlx = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-sqlx = { workspace = true }
+url = { workspace = true }

@@ -1063,3 +1063,9 @@ export const setPreventSleepActive = (active: boolean) =>
 export function isAutoUpdateSupported(): Promise<boolean> {
   return invokeTauri<boolean>("is_auto_update_supported");
 }
+
+/** Returns this install's key in the new Buzz app's installer manifest
+ *  (e.g. `macos-arm64`), or null when no installer is published for it. */
+export function getNewAppInstallerTarget(): Promise<string | null> {
+  return invokeTauri<string | null>("new_app_installer_target");
+}

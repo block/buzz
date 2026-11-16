@@ -32,9 +32,7 @@ async fn post_as(
         .custom_created_at(nostr::Timestamp::from(at))
         .sign_with_keys(author)
         .unwrap();
-    db.insert_event(community, &event, Some(channel))
-        .await
-        .unwrap();
+    crate::test_support::insert_historical_event(&db.pool, community, &event, channel).await;
     event
 }
 

@@ -1,6 +1,9 @@
 import Flutter
 import UIKit
 
+// UIKit 9127.0.85 is the iOS 27.1 SDK with Duo APIs. SDK checks must
+// surround runtime availability checks: older SDKs cannot resolve these symbols.
+
 final class NativeProfileTextEditorCoordinator: NSObject,
   UIAdaptivePresentationControllerDelegate
 {
@@ -28,6 +31,12 @@ final class NativeProfileTextEditorCoordinator: NSObject,
     _ call: FlutterMethodCall,
     result: @escaping FlutterResult
   ) {
+    if call.method == "presentStatus", let arguments = call.arguments as? [String: Any] {
+      DispatchQueue.main.async { [weak self] in
+        self?.presentStatus(arguments, result: result)
+      }
+      return
+    }
     guard call.method == "present" || call.method == "presentChannel" || call.method == "presentProject" else {
       result(FlutterMethodNotImplemented)
       return
@@ -76,6 +85,39 @@ final class NativeProfileTextEditorCoordinator: NSObject,
         isProjectEditor: call.method == "presentProject",
         result: result
       )
+    }
+  }
+
+  @MainActor
+  private func presentStatus(_ arguments: [String: Any], result: @escaping FlutterResult) {
+    guard presentedController == nil else {
+      result(FlutterError(code: "already_presented", message: "An editor is already open.", details: nil))
+      return
+    }
+    guard let presenter = topViewController(from: parentViewController ?? activeWindowRootViewController()) else {
+      result(FlutterError(code: "presentation_failed", message: "Unable to present status editor.", details: nil))
+      return
+    }
+    let editor = NativeStatusEditorViewController(
+      configuration: arguments,
+      onChooseEmoji: { [weak self] completion in
+        self?.channel.invokeMethod("chooseStatusEmoji", arguments: nil) { value in
+          completion(value as? String)
+        }
+      },
+      onCancel: { [weak self] in self?.finish(value: nil) },
+      onSet: { [weak self] value in self?.finish(value: value) }
+    )
+    let navigation = UINavigationController(rootViewController: editor)
+    navigation.overrideUserInterfaceStyle = arguments["brightness"] as? String == "dark" ? .dark : .light
+    if UIDevice.current.userInterfaceIdiom == .pad {
+      navigation.modalPresentationStyle = .formSheet
+    }
+    configureDuoPlacement(navigation, presenter: presenter)
+    pendingResult = result
+    presentedController = navigation
+    presenter.present(navigation, animated: true) { [weak self] in
+      navigation.presentationController?.delegate = self
     }
   }
 
@@ -157,11 +199,23 @@ final class NativeProfileTextEditorCoordinator: NSObject,
       navigationController.sheetPresentationController?.detents = [.large()]
     }
 
+    configureDuoPlacement(navigationController, presenter: presenter)
     pendingResult = result
     presentedController = navigationController
     presenter.present(navigationController, animated: true) { [weak self] in
       navigationController.presentationController?.delegate = self
     }
+  }
+
+  @MainActor
+  private func configureDuoPlacement(_ navigation: UINavigationController, presenter: UIViewController) {
+    #if canImport(UIKit, _version: 9127.0.85)
+    guard #available(iOS 27.1, *) else { return }
+    let insets = presenter.view.safeAreaInsets
+    guard insets.top == 0, insets.left > 0 || insets.right > 0 else { return }
+    navigation.sheetPresentationController?.preferredPlacement =
+      presenter.view.effectiveUserInterfaceLayoutDirection == .rightToLeft ? .leading : .trailing
+    #endif
   }
 
   @MainActor
@@ -216,7 +270,7 @@ final class NativeProfileTextEditorCoordinator: NSObject,
   }
 }
 
-private final class NativeProfileTextEditorViewController:
+final class NativeProfileTextEditorViewController:
   UITableViewController,
   UITextFieldDelegate,
   UITextViewDelegate
@@ -352,6 +406,12 @@ private final class NativeProfileTextEditorViewController:
       target: self,
       action: #selector(setTapped)
     )
+    #if canImport(UIKit, _version: 9127.0.85)
+    if #available(iOS 27.1, *) {
+      navigationItem.leftBarButtonItem?.axisBehavior = .verticalPreferred
+      navigationItem.rightBarButtonItem?.axisBehavior = .verticalPreferred
+    }
+    #endif
     updateNavigation()
   }
 

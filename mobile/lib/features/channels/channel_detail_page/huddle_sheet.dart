@@ -350,7 +350,13 @@ class _HuddleJoinSurface extends ConsumerWidget {
     final canJoin =
         isMember && !isArchived && !ended && !stale && !blockedByOtherHuddle;
 
-    final label = unavailable
+    final historyState = (ended || stale) && !isThisSession;
+    final viewHistory =
+        historyState &&
+        ref.watch(channelViewerIsMemberProvider(ephemeralChannelId));
+    final label = viewHistory
+        ? 'View'
+        : unavailable
         ? 'Start new'
         : switch ((isThisSession, session.phase, ended || stale)) {
             (true, HuddleSessionPhase.connected, _) => 'Open',
@@ -383,7 +389,7 @@ class _HuddleJoinSurface extends ConsumerWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    ended || stale || unavailable
+                    historyState || unavailable
                         ? 'Huddle ended'
                         : 'Huddle in progress',
                     style: context.textTheme.labelLarge?.copyWith(
@@ -405,9 +411,15 @@ class _HuddleJoinSurface extends ConsumerWidget {
             const SizedBox(width: Grid.xxs),
             FilledButton.tonal(
               key: ValueKey('huddle-$label-$ephemeralChannelId'),
-              onPressed:
-                  (canJoin || isThisSession) &&
-                      session.phase != HuddleSessionPhase.leaving
+              onPressed: viewHistory
+                  ? () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) =>
+                            _HuddleHistoryPage(channelId: ephemeralChannelId),
+                      ),
+                    )
+                  : (canJoin || isThisSession) &&
+                        session.phase != HuddleSessionPhase.leaving
                   ? () => unavailable
                         ? unawaited(
                             _startMobileHuddleFromChannel(

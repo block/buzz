@@ -53,7 +53,7 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **Group creation (kind:9007)** | ✅ | NIP-29; include an `h` tag with the new channel id and a `name` tag, optional `visibility`, `channel_type`, label `t` and `unlisted` tags. The relay refuses a 9007 without `h`. It refuses a listed channel (open, not unlisted, stream or forum) whose name another listed channel already has, ignoring case and including archived ones: `invalid: an open channel named "<name>" already exists`. |
 | **Add user (kind:9000)** | ✅ | Open: any user, subject to target's `channel_add_policy` (`owner_only`/`nobody` can block). Private: owner/admin only. Self-add bypasses agent policy but not private-channel auth. A guest cannot add anyone. A new member with no role tag gets the channel's `join_role`; a non-member adding themselves may ask for `join_role` or a lower role. One event may name up to 100 people: one `p` tag each, with an optional role as the `p` tag's third element (NIP-29), falling back to the event's `role` tag. Each person is checked and added on their own. When the event names several people, the OK message is `members: ` followed by JSON listing the non-empty `added`, `updated` (role changed), `already_member` and `rejected` (`[{"reason", "pubkeys"}]`) results. The event is refused only when it is malformed or nobody it names may be added; then one person keeps the single-add error, and several get `invalid: members: {…}`. The event and its membership changes are stored together, so an `error:` rejection stores nothing and the same event can be resent; a resent stored event returns `duplicate:` without results. Re-adding someone at their current role posts no second `member_joined` notice. |
 | **Remove user (kind:9001)** | ✅ | Self-remove allowed (with last-owner guard). Removing others: owner/admin only. |
-| **Edit group metadata (kind:9002)** | ✅ | `name`/`about`/label `t`/`visibility`/`ttl`/`archived`/`join_role`/`unlisted` tags: owner/admin. `topic`/`purpose` tags: any member except a guest. `auto_join` tag: relay owner/admin (see [Default channels](#default-channels)). A relay operator may also send a 9002 that changes only `name` on a listed channel, archived ones included, whatever its channel role, so that duplicate names can be repaired; the channel stays archived. The relay refuses a `name`, `visibility` or `unlisted` change that leaves a listed channel with a name another listed channel already has: `invalid: an open channel named "<name>" already exists`. Buzz applies 9002 as a partial update: an absent tag leaves that setting unchanged. |
+| **Edit group metadata (kind:9002)** | ✅ | `name`/`about`/label `t`/`visibility`/`ttl`/`archived`/`join_role`/`unlisted` tags: owner/admin. `topic`/`purpose` tags: any member except a guest. `auto_join` tag: relay owner/admin (see [Default channels](#default-channels)). A relay operator may also send a 9002 that changes only `name` on a listed channel, archived ones included, whatever its channel role, so that duplicate names can be repaired; the channel stays archived. The relay refuses a `name`, `visibility` or `unlisted` change that leaves a listed channel with a name another listed channel already has: `invalid: an open channel named "<name>" already exists`. The relay refuses a private-to-open `visibility` change while the channel has, or once had, a member who is neither the sender nor an agent the sender owns (NIP-OA); removed members count, because their posts stay in its history: `invalid: a private channel with other members cannot be made open; create a new open channel instead`. Buzz applies 9002 as a partial update: an absent tag leaves that setting unchanged. |
 | **Admin delete event (kind:9005)** | ✅ | Event author can always delete own. Otherwise owner/admin required. Target must be in same channel. |
 | **Group deletion (kind:9008)** | ✅ | Owner only. |
 | **Leave group (kind:9022)** | ✅ | Any member. Last-owner guard prevents orphaned groups. |
@@ -374,6 +374,37 @@ workflow that mentions its owner also carries a plain `["p", <owner>]`, which
 of the channel's messages: `buzz:workflow-owner` also names the owner. A
 marked `p` tag on any other event, for example a kind:39002 member list role,
 matches `#p` normally. See `docs/buzz-push.md` for the push rules.
+
+### Workflow Mentions
+
+A workflow message may carry `["buzz:workflow-mention", <pubkey>]` tags. Each
+one names a channel member whom the workflow's owner named in the stored text of
+the step, as opposed to text substituted into it when the step ran. The relay adds
+a plain `["p", <pubkey>]` for every member that the rendered text mentions, and a
+`buzz:workflow-mention` tag only for members that the stored text also names.
+
+A `buzz:workflow-mention` tag is the relay's statement that the message may
+direct the named agent on the owner's behalf. An agent acts on a workflow
+message only if all of these hold:
+
+- the message is signed by the relay key that the active community advertises;
+- a `buzz:workflow-mention` tag names the agent;
+- the workflow principal that `buzz:workflow-owner` names passes the receiving
+  client's rule for whom the agent accepts work from: its owner, or an agent
+  that its owner has attested.
+
+`buzz:workflow-owner` is attribution. It does not by itself authorize anything.
+A plain `p` tag on a workflow message notifies the member but does not direct
+an agent.
+
+A relay may leave out `buzz:workflow-mention` tags under a policy. The message
+still posts with its `p` tags, and an agent that no tag names does not act on
+it. A relay's NIP-11 document MUST carry `workflow_agent_mentions`: `"any"`
+when every run may carry the tags, or `"owner"` when only runs the workflow's
+owner or a timer started, on a definition of only `send_message` and `delay`
+steps, carry them; a client MUST treat a missing field as an older relay whose
+policy is unknown. For Buzz's owner-only agent mentions, see
+[docs/operator-workflow-agent-mentions.md](docs/operator-workflow-agent-mentions.md).
 
 ### Sending Messages
 

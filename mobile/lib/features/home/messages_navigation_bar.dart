@@ -18,7 +18,9 @@ class MessagesNavigationBar extends HookWidget {
     required this.onSearch,
     required this.creationActions,
     required this.agent,
+    this.axis = Axis.horizontal,
   });
+  final Axis axis;
   final VoidCallback onSearch;
   final Widget agent;
   final List<({String label, String symbol, VoidCallback? onPressed})>
@@ -27,6 +29,68 @@ class MessagesNavigationBar extends HookWidget {
   @override
   Widget build(BuildContext context) {
     final menuOpen = useState(false);
+    useEffect(() {
+      menuOpen.value = false;
+      return null;
+    }, [axis]);
+    if (axis == Axis.vertical) {
+      return SizedBox(
+        width: 56,
+        height: 168 + Grid.xs * 2,
+        child: Stack(
+          children: [
+            IosMessageCreateButton(
+              key: const ValueKey('vertical-create-menu'),
+              mergingNavigation: true,
+              navigationAxis: Axis.vertical,
+              onMenuVisibilityChanged: (visible) => menuOpen.value = visible,
+              actions: creationActions,
+              dividerBefore: const {2},
+              sectionTitles: const {0: 'Solo', 2: 'Team'},
+              accessibilityLabel: 'New',
+              width: 56,
+              height: 168 + Grid.xs * 2,
+              plain: false,
+            ),
+            Positioned(
+              top: 0,
+              width: 56,
+              height: 56 + Grid.xs / 2,
+              child: ClipRect(
+                child: Align(
+                  alignment: Alignment.topCenter,
+                  child: _MenuNudge(
+                    axis: Axis.vertical,
+                    offset: menuOpen.value ? 56 + Grid.xs : 0,
+                    menuOpen: menuOpen.value,
+                    alignment: Alignment.center,
+                    child: _search(context),
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              bottom: 0,
+              width: 56,
+              height: 56 + Grid.xs / 2,
+              child: ClipRect(
+                child: Align(
+                  alignment: Alignment.bottomCenter,
+                  child: _MenuNudge(
+                    axis: Axis.vertical,
+                    offset: menuOpen.value ? -56 - Grid.xs : 0,
+                    menuOpen: menuOpen.value,
+                    alignment: Alignment.center,
+                    child: NavigationGlassGroup(child: agent),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     if (defaultTargetPlatform == TargetPlatform.iOS) {
       return SizedBox(
         width: 256,
@@ -34,6 +98,7 @@ class MessagesNavigationBar extends HookWidget {
         child: Stack(
           children: [
             IosMessageCreateButton(
+              key: const ValueKey('horizontal-create-menu'),
               mergingNavigation: true,
               onMenuVisibilityChanged: (visible) => menuOpen.value = visible,
               actions: creationActions,
@@ -120,11 +185,13 @@ class MessagesNavigationBar extends HookWidget {
 class _MenuNudge extends StatelessWidget {
   const _MenuNudge({
     required this.offset,
+    this.axis = Axis.horizontal,
     required this.menuOpen,
     required this.alignment,
     required this.child,
   });
   final double offset;
+  final Axis axis;
   final bool menuOpen;
   final Alignment alignment;
   final Widget child;
@@ -143,8 +210,11 @@ class _MenuNudge extends StatelessWidget {
           duration: duration,
           curve: Curves.easeOutCubic,
           transformAlignment: alignment,
-          transform: Matrix4.translationValues(offset, 0, 0)
-            ..scaleByDouble(scale, scale, 1, 1),
+          transform: Matrix4.translationValues(
+            axis == Axis.horizontal ? offset : 0,
+            axis == Axis.vertical ? offset : 0,
+            0,
+          )..scaleByDouble(scale, scale, 1, 1),
           child: child,
         ),
       ),

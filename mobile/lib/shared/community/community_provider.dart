@@ -1,3 +1,6 @@
+import '../hosted/known_community_sync.dart';
+import '../hosted/known_community_sync_provider.dart';
+import '../hosted/builderlab_account.dart';
 import '../hosted/hosted_relay_auth.dart';
 
 import 'dart:async';
@@ -16,6 +19,7 @@ import '../push/dev_push_lease.dart';
 import '../push/push_bridge.dart';
 import '../push/push_lease_revocation_outbox.dart';
 import '../push/push_subscription.dart';
+import '../channels/open_channel_directory_storage.dart';
 import '../relay/media_disk_cache.dart';
 import '../relay/signed_event_relay.dart';
 import '../relay/relay_provider.dart' show RelayConfig, pubkeyFromNsec;
@@ -279,6 +283,8 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
   /// Add a community. If one with the same relay URL already exists, update
   /// its credentials instead. Returns the effective community ID.
   Future<String> addCommunity(Community community) async {
+    final sync = ref.read(knownCommunitySyncProvider);
+    community = await sync?.prepareAddition(community) ?? community;
     await CommunityEntryRequirements.verify(
       community,
       ref.read(builderlabAccountProvider),
@@ -296,6 +302,8 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       final updated = existing.copyWith(
         pubkey: community.pubkey,
         nsec: community.nsec,
+        accountSyncOwner: community.accountSyncOwner,
+        accountSyncRevision: community.accountSyncRevision,
       );
       final identityChanged =
           _channelSnapshotPubkey(existing)?.toLowerCase() !=
@@ -310,6 +318,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       if (identityChanged) unawaited(_removeOrphanMediaCaches());
       await _removeOrphanChannelListSnapshots(updatedList);
       await syncCommunitySnapshot(ref, updatedList);
+      sync?.trigger();
       return existing.id;
     }
 
@@ -318,10 +327,24 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     state = AsyncData(updatedList);
     await _removeOrphanChannelListSnapshots(updatedList);
     await syncCommunitySnapshot(ref, updatedList);
+    sync?.trigger();
     return community.id;
   }
 
-  Future<void> removeCommunity(String id) {
+  /// Removes a saved identity without letting awaited cleanup change the account
+  /// that confirmed its remote edit. An explicit null confirmation is local-only.
+  Future<void> removeCommunity(
+    String id, {
+    String? confirmedSubject,
+    bool accountConfirmed = false,
+  }) async {
+    final account = ref.read(builderlabAccountProvider);
+    final sync = ref.read(knownCommunitySyncProvider);
+    final subject = sync == null
+        ? null
+        : accountConfirmed
+        ? confirmedSubject
+        : await account.localEditSubject();
     return ref.read(communityTransitionProvider).runExclusive(() async {
       var revocationJournaled = false;
       final storage = ref.read(communityStorageProvider);
@@ -333,6 +356,9 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       final removedIndex = current.indexWhere(
         (community) => community.id == id,
       );
+      if (sync != null && await account.localEditSubject() != subject) {
+        throw AccountFailure.differentAccount;
+      }
       if (removedIndex >= 0) {
         await _removeChannelListSnapshot(current[removedIndex]);
         // Persist every remote-cleanup dependency before erasing credentials.
@@ -342,7 +368,21 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
           communityPushLeaseRevocationEnqueuerProvider,
         )(current[removedIndex]);
       }
-      await storage.remove(id);
+      // A durable revocation commits this removal to its confirmed account.
+      // Finish local deletion even if the account changed during journaling;
+      // aborting now would leave a saved community with a revoked push lease.
+      if (!revocationJournaled &&
+          sync != null &&
+          await account.localEditSubject() != subject) {
+        throw AccountFailure.differentAccount;
+      }
+      await storage.remove(
+        id,
+        accountSyncOwner: subject == null
+            ? null
+            : '${account.accountOrigin.origin}\n$subject',
+      );
+      ref.read(knownCommunitySyncProvider)?.trigger();
 
       final updatedList = current.where((w) => w.id != id).toList();
       await _removeOrphanChannelListSnapshots(updatedList);
@@ -427,9 +467,10 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     ]);
   }
 
-  /// Deletes the image caches of communities no longer in the list, and of
-  /// accounts a community no longer signs in as. A failure, or a
-  /// write that lands after the delete, is swept on the next launch.
+  /// Deletes the image caches and saved channel directories of communities no
+  /// longer in the list, and of accounts a community no longer signs in as. A
+  /// failure, or a write that lands after the delete, is swept on the next
+  /// launch.
   ///
   /// Sweeps run one at a time, each keeping what the community list holds
   /// when it starts, so an older sweep can never delete a newer account's
@@ -447,14 +488,17 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
           state.isLoading ? fallback ?? state.value : state.value;
       var communities = current();
       if (communities == null) return;
-      await MediaDiskCache.removeOrphans(root, () {
+      Map<String, String?> retained() {
         // A list briefly unavailable mid-sweep keeps the last one seen.
         communities = current() ?? communities;
         return {
           for (final community in communities!)
             community.id: _channelSnapshotPubkey(community)?.toLowerCase(),
         };
-      });
+      }
+
+      await MediaDiskCache.removeOrphans(root, retained);
+      await OpenChannelDirectoryStorage.removeOrphans(root, retained);
     } catch (error, stackTrace) {
       developer.log(
         'Media cache deletion failed; the next launch will retry',

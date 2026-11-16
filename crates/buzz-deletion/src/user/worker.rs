@@ -13,6 +13,7 @@ use crate::{StageOutcome, DEFAULT_LEASE_DURATION, HEARTBEAT_INTERVAL};
 /// Real execution controls and demo-only failure/delay options.
 pub(super) struct RunOptions {
     pub db: Option<buzz_db::Db>,
+    pub media: Option<std::sync::Arc<buzz_media::MediaStorage>>,
     pub delete: bool,
     pub batch_size: u16,
     pub max_items: u32,

@@ -83,6 +83,13 @@ pub async fn mint_community_invite(
                 "community not found",
             )
         })?;
+    if !crate::single_community::serves_host(&state.config, &host) {
+        return Err(coded_api_error(
+            StatusCode::FORBIDDEN,
+            "community_not_served",
+            "community is not served in single-community mode",
+        ));
+    }
     slot.in_community(community);
     // The mint checks the actor's role and restriction, and the community's
     // deletion state, in one transaction. It does not re-check archiving: an

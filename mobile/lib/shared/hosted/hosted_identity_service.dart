@@ -9,6 +9,7 @@ import 'device_identity_source.dart';
 enum HostedIdentityState {
   ready,
   needsSelection,
+  needsConsent,
   needsSetup,
   needsBinding,
   needsBackup,
@@ -23,10 +24,14 @@ class HostedIdentityResult {
     this.pubkey,
     this.choices = const [],
     this.canCreate = false,
+    this.generated = false,
   });
   final HostedIdentityState state;
   final String? pubkey;
   final bool canCreate;
+
+  /// True only when this resolution confirmed generating the key itself.
+  final bool generated;
   final List<DeviceIdentityChoice> choices;
 }
 
@@ -44,13 +49,23 @@ class HostedIdentityService {
   final BuilderlabAccountClient account;
   final AccountIdentityStore store;
 
+  /// [canAdopt] may require consent before a local key occupies the account slot.
+  /// Cloud recovery already has a receipt and does not export a local secret.
   Future<HostedIdentityResult> resolve({
     bool Function()? isCurrent,
     String? selectedPubkey,
     bool createNew = false,
     Set<String> offered = const {},
     String? importNsec,
-  }) => _resolve(isCurrent, selectedPubkey, createNew, offered, importNsec);
+    bool Function(String pubkey)? canAdopt,
+  }) => _resolve(
+    isCurrent,
+    selectedPubkey,
+    createNew,
+    offered,
+    importNsec,
+    canAdopt,
+  );
 
   Future<HostedIdentityResult> _resolve(
     bool Function()? isCurrent,
@@ -58,6 +73,7 @@ class HostedIdentityService {
     bool createNew,
     Set<String> offered,
     String? importNsec,
+    bool Function(String pubkey)? canAdopt,
   ) async {
     void checkCurrent() {
       if (isCurrent != null && !isCurrent()) throw AccountFailure.unavailable;
@@ -105,6 +121,12 @@ class HostedIdentityService {
       }
       if (bound != null && bound != pubkey) {
         throw AccountIdentityFailure.mismatch;
+      }
+      if (canAdopt != null && !canAdopt(pubkey)) {
+        return HostedIdentityResult(
+          HostedIdentityState.needsConsent,
+          pubkey: pubkey,
+        );
       }
       final imported = await store.create(
         importNsec,
@@ -163,6 +185,12 @@ class HostedIdentityService {
             canCreate: unclaimed,
           );
         }
+        if (canAdopt != null && !canAdopt(chosen!)) {
+          return HostedIdentityResult(
+            HostedIdentityState.needsConsent,
+            pubkey: chosen,
+          );
+        }
         void checkSelection() {
           _sameAccount(subject);
           checkCurrent();
@@ -191,7 +219,9 @@ class HostedIdentityService {
           canCreate: true,
         );
       }
+      var generatedNow = false;
       final generated = await store.generateIfAbsent(
+        onGenerated: () => generatedNow = true,
         authorize: () async {
           _sameAccount(subject);
           checkCurrent();
@@ -211,7 +241,7 @@ class HostedIdentityService {
           ? const HostedIdentityResult(
               HostedIdentityState.needsAuthoritativeAbsence,
             )
-          : _result(generated, bound, subject);
+          : _result(generated, bound, subject, generated: generatedNow);
     }
 
     final recovered = await account.post('/v1/buzz/nsec-backups/recovery', {});
@@ -336,8 +366,9 @@ class HostedIdentityService {
   HostedIdentityResult _result(
     AccountIdentitySnapshot local,
     String? bound,
-    String subject,
-  ) {
+    String subject, {
+    bool generated = false,
+  }) {
     _sameAccount(subject);
     if (bound != null && bound != local.pubkey) {
       return HostedIdentityResult(
@@ -349,6 +380,7 @@ class HostedIdentityService {
       return HostedIdentityResult(
         HostedIdentityState.needsBinding,
         pubkey: local.pubkey,
+        generated: generated,
       );
     }
     return HostedIdentityResult(

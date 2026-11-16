@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
+import 'package:duo_kit/duo_kit.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
@@ -8,6 +9,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:image/image.dart' as image;
 
 import '../theme/theme.dart';
+import 'duo_toolbar.dart';
 import 'buzz_loading_indicator.dart';
 import 'frosted_app_bar.dart';
 import 'frosted_scaffold.dart';
@@ -39,7 +41,6 @@ class ProfileAvatarCropPage extends HookWidget {
     final dimensions = dimensionsData == null
         ? null
         : _ImageDimensions(dimensionsData[0], dimensionsData[1]);
-    final initializedForSize = useRef<Size?>(null);
     final cropGeometry = useRef<_CropGeometry?>(null);
     final displaySize = useRef<Size?>(null);
     final isClampingTransform = useRef(false);
@@ -97,12 +98,60 @@ class ProfileAvatarCropPage extends HookWidget {
       return () => disposed = true;
     }, [imageBytes]);
 
+    final canCrop =
+        !isCropping.value && preparedBytes.value != null && dimensions != null;
+    Future<void> finishCrop() async {
+      if (isCropping.value ||
+          dimensions == null ||
+          preparedBytes.value == null) {
+        return;
+      }
+      isCropping.value = true;
+      unawaited(HapticFeedback.lightImpact());
+      try {
+        if (!context.mounted) return;
+        final geometry = cropGeometry.value;
+        if (geometry == null) return;
+        final cropped = await compute(
+          _cropAvatar,
+          _CropRequest(
+            bytes: preparedBytes.value!,
+            sourceWidth: dimensions.width,
+            sourceHeight: dimensions.height,
+            canvasWidth: geometry.canvasWidth,
+            canvasHeight: geometry.canvasHeight,
+            cropDiameter: geometry.cropDiameter,
+            transform: List<double>.from(controller.value.storage),
+          ),
+        );
+        if (context.mounted) {
+          Navigator.pop(context, cropped);
+        }
+      } finally {
+        if (context.mounted) isCropping.value = false;
+      }
+    }
+
+    final strip = defaultTargetPlatform == TargetPlatform.iOS
+        ? (DuoToolbarScope.maybeOf(context)?.strip ??
+              FoldGeometry.of(context).strip)
+        : null;
     return Theme(
       data: AppTheme.dark(),
       child: FrostedScaffold(
         backgroundColor: Colors.black,
         appBar: FrostedAppBar(
-          useNativeNavigation: false,
+          nativeLeading: IosNavigationAction(
+            label: strip == null ? 'Back' : 'Cancel photo positioning',
+            symbol: strip == null ? 'chevron.backward' : 'xmark',
+            onPressed: isCropping.value ? null : () => Navigator.pop(context),
+          ),
+          nativeActions: [
+            IosNavigationAction(
+              label: isCropping.value ? 'Saving…' : 'Done',
+              onPressed: canCrop ? finishCrop : null,
+            ),
+          ],
           horizontalInset: 0,
           alwaysFrosted: true,
           iconColor: Colors.white,
@@ -115,19 +164,22 @@ class ProfileAvatarCropPage extends HookWidget {
               fontWeight: FontWeight.w600,
             ),
           ),
-          leading: Padding(
-            padding: const EdgeInsets.only(left: Grid.gutter),
-            child: Align(
-              widthFactor: 1,
-              alignment: Alignment.centerLeft,
-              child: _CropHeaderButton(
-                label: 'Back',
-                onPressed: isCropping.value
-                    ? null
-                    : () => Navigator.pop(context),
-              ),
-            ),
-          ),
+          automaticallyImplyLeading: false,
+          leading: strip != null
+              ? null
+              : Padding(
+                  padding: const EdgeInsets.only(left: Grid.gutter),
+                  child: Align(
+                    widthFactor: 1,
+                    alignment: Alignment.centerLeft,
+                    child: _CropHeaderButton(
+                      label: 'Back',
+                      onPressed: isCropping.value
+                          ? null
+                          : () => Navigator.pop(context),
+                    ),
+                  ),
+                ),
           actions: [
             Padding(
               padding: const EdgeInsets.only(right: Grid.gutter),
@@ -135,45 +187,13 @@ class ProfileAvatarCropPage extends HookWidget {
                 key: const ValueKey('avatar-crop-use-photo'),
                 label: 'Done',
                 loading: isCropping.value,
-                onPressed:
-                    isCropping.value ||
-                        preparedBytes.value == null ||
-                        dimensions == null
-                    ? null
-                    : () async {
-                        isCropping.value = true;
-                        unawaited(HapticFeedback.lightImpact());
-                        try {
-                          if (!context.mounted) return;
-                          final geometry = cropGeometry.value;
-                          if (geometry == null) return;
-                          final cropped = await compute(
-                            _cropAvatar,
-                            _CropRequest(
-                              bytes: preparedBytes.value!,
-                              sourceWidth: dimensions.width,
-                              sourceHeight: dimensions.height,
-                              canvasWidth: geometry.canvasWidth,
-                              canvasHeight: geometry.canvasHeight,
-                              cropDiameter: geometry.cropDiameter,
-                              transform: List<double>.from(
-                                controller.value.storage,
-                              ),
-                            ),
-                          );
-                          if (context.mounted) Navigator.pop(context, cropped);
-                        } finally {
-                          if (context.mounted) isCropping.value = false;
-                        }
-                      },
+                onPressed: canCrop ? finishCrop : null,
               ),
             ),
           ],
         ),
         body: Padding(
-          padding: EdgeInsets.only(
-            top: frostedAppBarHeight(context, useNativeNavigation: false),
-          ),
+          padding: EdgeInsets.only(top: frostedAppBarHeight(context)),
           child: loadError.value || dimensionsSnapshot.hasError
               ? const Center(
                   child: Text(
@@ -193,6 +213,7 @@ class ProfileAvatarCropPage extends HookWidget {
                     final canvasWidth = constraints.maxWidth;
                     final canvasHeight = math.max(1.0, constraints.maxHeight);
                     final cropDiameter = math.min(canvasWidth, canvasHeight);
+                    final previousGeometry = cropGeometry.value;
                     cropGeometry.value = _CropGeometry(
                       canvasWidth: canvasWidth,
                       canvasHeight: canvasHeight,
@@ -206,9 +227,7 @@ class ProfileAvatarCropPage extends HookWidget {
                         ? cropDiameter
                         : cropDiameter / aspect;
                     displaySize.value = Size(displayWidth, displayHeight);
-                    final canvasSize = Size(canvasWidth, canvasHeight);
-                    if (initializedForSize.value != canvasSize) {
-                      initializedForSize.value = canvasSize;
+                    if (previousGeometry == null) {
                       controller.value = Matrix4.identity()
                         ..translateByDouble(
                           (canvasWidth - displayWidth) / 2,
@@ -216,6 +235,28 @@ class ProfileAvatarCropPage extends HookWidget {
                           0,
                           1,
                         );
+                    } else if (previousGeometry.canvasWidth != canvasWidth ||
+                        previousGeometry.canvasHeight != canvasHeight ||
+                        previousGeometry.cropDiameter != cropDiameter) {
+                      // Display dimensions scale with the crop diameter. Keep
+                      // the same source-image point under the crop center and
+                      // retain zoom, so the selected source rectangle survives.
+                      final ratio =
+                          cropDiameter / previousGeometry.cropDiameter;
+                      final matrix = controller.value.clone();
+                      matrix.storage[12] =
+                          canvasWidth / 2 -
+                          (previousGeometry.canvasWidth / 2 -
+                                  matrix.storage[12]) *
+                              ratio;
+                      matrix.storage[13] =
+                          canvasHeight / 2 -
+                          (previousGeometry.canvasHeight / 2 -
+                                  matrix.storage[13]) *
+                              ratio;
+                      // The listener clamps against the new geometry. Scale is
+                      // unchanged, so cropScale remains synchronized as well.
+                      controller.value = matrix;
                     }
                     void movePhoto(Offset delta) {
                       unawaited(HapticFeedback.selectionClick());

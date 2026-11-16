@@ -122,6 +122,7 @@ void main() {
               ),
               home: HomePage(
                 onAgents: showAgents,
+                openBestieConversation: (_, _, _) async {},
                 defaultAgentBuilder: (context) => DefaultAgentLauncher(
                   onChooseAgent: () => showAgents(context),
                 ),

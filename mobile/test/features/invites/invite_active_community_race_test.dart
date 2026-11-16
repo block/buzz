@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
 import 'package:buzz/features/invites/invite_join_provider.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
@@ -12,6 +14,8 @@ import 'package:nostr/nostr.dart' as nostr;
 import '../../shared/community/community_storage_test.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  setUp(() => FlutterSecureStorage.setMockInitialValues({}));
   for (final finishReadBeforeJoin in [false, true]) {
     test('first invite setup succeeds when old active read finishes '
         '${finishReadBeforeJoin ? 'before' : 'after'} new selection', () async {

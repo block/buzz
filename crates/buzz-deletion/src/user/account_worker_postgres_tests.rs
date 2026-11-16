@@ -72,7 +72,7 @@ impl Fixture {
         let transition = UserDeletionTransition::new(&store);
         // Save explicit prerequisites through the storage APIs. Do not run or
         // pretend to test the unimplemented gate/content handlers.
-        for name in ["gate_user", "purge_content"] {
+        for name in ["gate_user", "purge_media", "purge_content"] {
             let NextStage::Stage(row) = transition.get_next_stage(&lease, None).await.unwrap()
             else {
                 panic!("expected prerequisite stage");
@@ -103,6 +103,7 @@ impl Fixture {
     fn options(&self, max_items: u32) -> RunOptions {
         RunOptions {
             db: Some(Db::from_pool(self.pool.clone())),
+            media: None,
             delete: true,
             batch_size: 2,
             max_items,
@@ -151,7 +152,7 @@ impl Fixture {
         assert_eq!(state.execution.retry_count, 0);
         assert!(state.execution.last_error.is_none());
         assert!(state.execution.next_attempt_at.is_none());
-        assert_eq!(state.stage_history.len(), 4);
+        assert_eq!(state.stage_history.len(), 5);
         let account = state
             .stage_history
             .iter()

@@ -11,8 +11,10 @@
 //! deliveries at once, and closing their recipients then would send the whole
 //! fleet back to that database at the same moment (Review-Proven Rule 9).
 //!
-//! An event is dropped on this node when its worker's queue is full, or when
-//! the dispatcher lags the broadcast and skips it. Both are counted, and the
+//! An event is dropped on this node when its worker's queue is full, when one
+//! delivery attempt runs past [`MAX_DELIVERY_ATTEMPT`] (a database connection
+//! that stops answering would otherwise hold its worker forever), or when the
+//! dispatcher lags the broadcast and skips it. Both are counted, and the
 //! syncs the dropped events would have reached get `CLOSED "resync: ..."`
 //! (NIP-AR Sync rule 5). A plain subscription is not told. Its client may
 //! replay the event when it next reconnects, but only if later deliveries did
@@ -20,6 +22,7 @@
 //! slack.
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
+use std::time::Duration;
 
 use buzz_core::event::StoredEvent;
 use buzz_core::CommunityId;
@@ -35,6 +38,12 @@ use crate::state::AppState;
 pub const WORKERS: usize = 16;
 /// Events each worker may hold before the dispatcher drops new ones.
 pub const WORKER_QUEUE: usize = 1024;
+/// How long a worker spends on one delivery before dropping it. Measured
+/// from when the worker starts the delivery, so time spent waiting in the
+/// queue never counts: a stall delays a backlog instead of dropping it. The
+/// bound only cuts off a delivery that hangs, such as an access-gate read on
+/// a database connection that stopped answering.
+pub const MAX_DELIVERY_ATTEMPT: Duration = Duration::from_secs(30);
 /// The resync reason for a sync whose live entry was dropped here.
 const LAG_RESYNC: &str = "resync: live delivery lagged";
 
@@ -57,8 +66,28 @@ pub fn spawn(
 /// Delivers one worker's queue in order.
 async fn run_worker(state: Arc<AppState>, mut queue: mpsc::Receiver<Queued>) {
     while let Some((community_id, stored)) = queue.recv().await {
-        deliver_pubsub_event(&state, community_id, &stored).await;
+        let delivery = deliver_pubsub_event(&state, community_id, &stored);
+        if tokio::time::timeout(MAX_DELIVERY_ATTEMPT, delivery)
+            .await
+            .is_err()
+        {
+            drop_event(&state, community_id, &stored, "stale");
+        }
     }
+}
+
+/// Count a dropped event and resync the syncs it would have reached. A
+/// delivery cut off partway may have reached some of them; a resync costs
+/// them a re-read, never a gap. No connection is closed.
+fn drop_event(
+    state: &AppState,
+    community_id: CommunityId,
+    stored: &StoredEvent,
+    reason: &'static str,
+) {
+    metrics::counter!("buzz_multinode_fanout_dropped_total", "reason" => reason).increment(1);
+    let matches = state.sub_registry.fan_out_scoped(community_id, stored);
+    state.artifact_syncs.resync_matches(&matches, LAG_RESYNC);
 }
 
 /// Routes broadcast events to worker queues.
@@ -105,10 +134,7 @@ impl Dispatcher {
             | TrySendError::Closed((community_id, stored)),
         ) = queue.try_send(queued)
         {
-            metrics::counter!("buzz_multinode_fanout_dropped_total", "reason" => "queue_full")
-                .increment(1);
-            let matches = state.sub_registry.fan_out_scoped(community_id, &stored);
-            state.artifact_syncs.resync_matches(&matches, LAG_RESYNC);
+            drop_event(state, community_id, &stored, "queue_full");
         }
     }
 
@@ -345,5 +371,89 @@ mod tests {
         };
         let v: serde_json::Value = serde_json::from_str(&text).expect("frame JSON");
         assert_eq!(v[2]["id"], id);
+    }
+
+    /// A delivery that hangs (here on a database that accepts the connection
+    /// but never answers) is cut off at the bound: it is counted, the sync it
+    /// matched resyncs, no connection closes, and the next event queued on
+    /// the same worker is delivered.
+    #[tokio::test(start_paused = true)]
+    async fn hung_delivery_is_dropped_at_the_bound_and_the_worker_moves_on() {
+        let silent_db = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!(
+            "postgres://buzz@{}/buzz",
+            silent_db.local_addr().expect("addr")
+        );
+        let state = crate::state::tests::test_state_with_database_url_and_pool_options(
+            &url,
+            sqlx::postgres::PgPoolOptions::new().acquire_timeout(Duration::from_secs(3600)),
+        )
+        .await;
+        let channel_id = Uuid::new_v4();
+        let (conn, mut frames, cancel) = subscriber(&state, STORED);
+        state.sub_registry.register(
+            conn,
+            "channel".to_string(),
+            vec![Filter::new().kind(Kind::Custom(STORED))],
+            Some(channel_id),
+        );
+        state.artifact_syncs.insert_idle(conn, "channel");
+        let hangs = ChannelEvent {
+            topic: EventTopic::Channel(channel_id),
+            ..event(STORED, 0)
+        };
+        let next = event(STORED, 1);
+        let next_id = next.event.id.to_hex();
+
+        let (dispatcher, mut queues) = Dispatcher::new(1, 8);
+        dispatcher.dispatch(&state, hangs);
+        dispatcher.dispatch(&state, next);
+        drop(dispatcher);
+
+        // The worker drains both events, then ends because the queue closed.
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let started = tokio::time::Instant::now();
+        WithRecorder {
+            recorder: &recorder,
+            future: Box::pin(run_worker(Arc::clone(&state), queues.pop().expect("queue"))),
+        }
+        .await;
+        assert_eq!(
+            started.elapsed(),
+            MAX_DELIVERY_ATTEMPT,
+            "cut off at the bound"
+        );
+        let Ok(Message::Text(text)) = frames.try_recv() else {
+            panic!("expected the next event");
+        };
+        let v: serde_json::Value = serde_json::from_str(&text).expect("frame JSON");
+        assert_eq!(v[2]["id"], next_id, "the hung event was not delivered");
+        assert!(frames.try_recv().is_err());
+        assert_eq!(dropped(&snapshotter, "stale"), 1);
+        assert_eq!(
+            state.artifact_syncs.pending_resync(conn, "channel"),
+            Some(LAG_RESYNC)
+        );
+        assert!(!cancel.is_cancelled());
+    }
+
+    /// Polls `future` with `recorder` as the local metrics recorder, so a
+    /// task's metrics are visible to the test that awaits it.
+    struct WithRecorder<'a, F> {
+        recorder: &'a metrics_util::debugging::DebuggingRecorder,
+        future: std::pin::Pin<Box<F>>,
+    }
+
+    impl<F: std::future::Future> std::future::Future for WithRecorder<'_, F> {
+        type Output = F::Output;
+
+        fn poll(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<F::Output> {
+            let this = &mut *self;
+            metrics::with_local_recorder(this.recorder, || this.future.as_mut().poll(cx))
+        }
     }
 }

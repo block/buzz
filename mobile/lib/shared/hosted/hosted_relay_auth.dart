@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:math' show max;
 
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
+import 'package:buzz/shared/http/app_http_client.dart';
 
 import '../relay/relay_provider.dart';
 import 'builderlab_account.dart';
@@ -67,11 +70,13 @@ final hostedRelayAuthProvider = Provider<HostedRelayAuth>((ref) {
 });
 
 /// Each transport owns its client lifetime; configuration and auth are shared.
-final hostedHttpClientFactoryProvider = Provider<http.Client Function()>((ref) {
-  final auth = ref.watch(hostedRelayAuthProvider);
-  final config = ref.watch(relayConfigProvider);
-  return () => HostedRelayHttpClient(auth, config);
-});
+final hostedHttpClientFactoryProvider =
+    Provider<http.Client Function({HttpTraffic traffic})>((ref) {
+      final auth = ref.watch(hostedRelayAuthProvider);
+      final config = ref.watch(relayConfigProvider);
+      return ({HttpTraffic traffic = HttpTraffic.api}) =>
+          HostedRelayHttpClient(auth, config, inner: newAppHttpClient(traffic));
+    });
 
 /// The build's one Builderlab session, with a short-lived assertion for the
 /// current relay/key. A public build's hosted communities use [account] when
@@ -86,12 +91,23 @@ class HostedRelayAuth extends ChangeNotifier {
     this.organizationRelay = OrganizationEnvironment.protects,
     this.enabled = configured,
     DateTime Function()? now,
+    Duration Function()? elapsed,
     NipFiRequirementFetch? discover,
   }) : _now = now ?? DateTime.now,
+       // Deadlines run on a monotonic clock. A test that injects only [now]
+       // drives both clocks with it.
+       _elapsed =
+           elapsed ??
+           (now == null
+               ? _monotonic
+               : () => Duration(microseconds: now().microsecondsSinceEpoch)),
        _discover = discover ?? _fetchRequirement;
 
+  static final _stopwatch = Stopwatch()..start();
+  static Duration _monotonic() => _stopwatch.elapsed;
+
   static Future<bool> _fetchRequirement(Uri origin) async {
-    final client = http.Client();
+    final client = newAppHttpClient();
     try {
       return await fetchNipFiRequirement(client, origin);
     } finally {
@@ -110,6 +126,7 @@ class HostedRelayAuth extends ChangeNotifier {
   final bool Function(Uri relay) organizationRelay;
   final bool enabled;
   final DateTime Function() _now;
+  final Duration Function() _elapsed;
   final NipFiRequirementFetch _discover;
   // NIP-FI discovery per hosted relay origin: the read in flight, shared by
   // concurrent callers, and the last result. The issuer refuses hosts that have
@@ -122,7 +139,7 @@ class HostedRelayAuth extends ChangeNotifier {
   final _cached =
       <
         ({String relay, String pubkey}),
-        ({String token, DateTime expiry, BuilderlabAccount account})
+        ({String token, CachedReceipt receipt, BuilderlabAccount account})
       >{};
   // Per account client, so a stalled issuer never delays an unrelated one.
   // Waiters share account restoration, but only a recorded issuance for their
@@ -140,6 +157,20 @@ class HostedRelayAuth extends ChangeNotifier {
   String? failedRelay;
   String? failedPubkey;
   AccountFailure? failure;
+
+  /// How many minutes the device clock looked off when the issuer refused
+  /// the current [failure], from that refusal's `Date`; null when not far
+  /// enough to explain it, or once the account session that was refused
+  /// has changed.
+  int? get failureClockHint =>
+      identical(_hintSession, _hintAccount?.account) ? _clockHint : null;
+  int? _clockHint;
+  BuilderlabAccountClient? _hintAccount;
+  BuilderlabAccount? _hintSession;
+
+  /// Issuance attempts per acquisition before a token that arrives with no
+  /// local lifetime left is reported instead of retried.
+  static const _acquireAttempts = 3;
 
   bool protects(RelayConfig config) => _accountFor(config) != null;
 
@@ -179,7 +210,7 @@ class HostedRelayAuth extends ChangeNotifier {
         )];
     if (cached == null ||
         !identical(cached.account, client.account) ||
-        !cached.expiry.isAfter(_now())) {
+        !cached.receipt.usable(_elapsed(), _now())) {
       return null;
     }
     return {'Nostr-Federated-Identity': 'Bearer ${cached.token}'};
@@ -284,7 +315,7 @@ class HostedRelayAuth extends ChangeNotifier {
           : _cached[(relay: relay, pubkey: pubkey)];
       if (cached != null &&
           identical(cached.account, client.account) &&
-          cached.expiry.isAfter(_now())) {
+          cached.receipt.usable(_elapsed(), _now())) {
         return {'Nostr-Federated-Identity': 'Bearer ${cached.token}'};
       }
       final pending = _pending[client];
@@ -332,6 +363,19 @@ class HostedRelayAuth extends ChangeNotifier {
     String relay,
     String pubkey,
     bool background,
+  ) => BuilderlabAccountClient.observingRefusals(
+    (clockHint) =>
+        _acquire(config, account, relay, pubkey, background, clockHint),
+  );
+
+  // Only a refusal to this acquisition's own requests supplies [clockHint].
+  Future<String?> _acquire(
+    RelayConfig config,
+    BuilderlabAccountClient account,
+    String relay,
+    String pubkey,
+    bool background,
+    int? Function() clockHint,
   ) async {
     final started = ++_sequence;
     try {
@@ -375,32 +419,56 @@ class HostedRelayAuth extends ChangeNotifier {
       } else if (identity is! Map || identity['pubkey_hex'] != pubkey) {
         throw AccountFailure.denied;
       }
-      final value = await account.relayAssertion(
-        relay,
-        config.nsec!,
-        expectedSubject: session.subject,
-      );
-      final (:token, :expiry) = _token(value, pubkey);
-      final now = _now().millisecondsSinceEpoch ~/ 1000;
-      final expires = DateTime.fromMillisecondsSinceEpoch(
-        expiry * 1000,
-        isUtc: true,
-      );
-      if (_disposed) throw AccountFailure.unavailable;
+      String? token;
+      late Duration receipt;
+      late Duration deadline;
+      for (var attempt = 0; token == null; attempt++) {
+        if (attempt == _acquireAttempts) throw AccountFailure.unavailable;
+        // Sampled before the request, so time in flight counts against the
+        // token's life.
+        final requestStart = _elapsed();
+        final value = await account.relayAssertion(
+          relay,
+          config.nsec!,
+          expectedSubject: session.subject,
+        );
+        final issued = _token(value, pubkey);
+        final iat = issuedAt(issued.token);
+        if (iat == null) throw AccountFailure.invalidResponse;
+        receipt = _elapsed();
+        deadline = localDeadline(
+          requestStart: requestStart,
+          receipt: receipt,
+          wallAtReceipt: _now().millisecondsSinceEpoch ~/ 1000,
+          exp: issued.expiry,
+          iat: iat,
+        );
+        // A token with no local lifetime left is never sent: ask again.
+        if (deadline > receipt) token = issued.token;
+        if (_disposed) throw AccountFailure.unavailable;
+      }
+      final remaining = (deadline - receipt).inSeconds;
       if (!identical(session, account.account)) {
         return null;
       }
       // A background caller may be removing this community: it must not clear
       // recovery, back up a discarded key or seed the shared cache.
       if (background) return token;
-      _cached.removeWhere((_, entry) => !entry.expiry.isAfter(_now()));
+      final wall = _now();
+      _cached.removeWhere((_, entry) => !entry.receipt.usable(receipt, wall));
+      final refreshAt =
+          deadline - Duration(seconds: remaining > 60 ? 30 : remaining ~/ 2);
       _cached[(relay: relay, pubkey: pubkey)] = (
         token: token,
-        expiry: expires.subtract(
-          Duration(seconds: (expiry - now) > 60 ? 30 : (expiry - now) ~/ 2),
-        ),
+        receipt: CachedReceipt(receipt, wall, refreshAt - receipt),
         account: session,
       );
+      if (_clockHint != null &&
+          failedRelay == config.baseUrl &&
+          failedPubkey == pubkey) {
+        _clockHint = null;
+        notifyListeners();
+      }
       // Issuance alone cannot prove admission after a relay refusal.
       if (failure != AccountFailure.denied) connected(config);
       if (identical(account, organization)) {
@@ -416,9 +484,33 @@ class HostedRelayAuth extends ChangeNotifier {
       if (!background &&
           !_disposed &&
           !(otherScope && _failureSequence > started)) {
-        _record(config.baseUrl, pubkey, error, started);
+        _record(
+          config.baseUrl,
+          pubkey,
+          error,
+          started,
+          clockHint: error == AccountFailure.denied ? clockHint() : null,
+          account: account,
+        );
       }
       rethrow;
+    }
+  }
+
+  /// The `iat` claim of a compact JWS, or null when it has none or it is
+  /// unreadable. A NumericDate, so it may be fractional.
+  @visibleForTesting
+  static num? issuedAt(String token) {
+    final parts = token.split('.');
+    if (parts.length != 3) return null;
+    try {
+      final claims = jsonDecode(
+        utf8.decode(base64Url.decode(base64Url.normalize(parts[1]))),
+      );
+      final iat = claims is Map ? claims['iat'] : null;
+      return iat is num && iat.isFinite ? iat : null;
+    } on FormatException {
+      return null;
     }
   }
 
@@ -449,6 +541,7 @@ class HostedRelayAuth extends ChangeNotifier {
     failure = null;
     failedRelay = null;
     failedPubkey = null;
+    _clockHint = null;
     notifyListeners();
   }
 
@@ -473,12 +566,17 @@ class HostedRelayAuth extends ChangeNotifier {
     String relay,
     String? pubkey,
     AccountFailure error,
-    int sequence,
-  ) {
+    int sequence, {
+    int? clockHint,
+    BuilderlabAccountClient? account,
+  }) {
     failedRelay = relay;
     failedPubkey = pubkey;
     failure = error;
     _failureSequence = sequence;
+    _clockHint = clockHint;
+    _hintAccount = account;
+    _hintSession = account?.account;
     notifyListeners();
   }
 
@@ -500,7 +598,7 @@ class HostedRelayHttpClient extends http.BaseClient {
     this.config, {
     http.Client? inner,
     this.canSend,
-  }) : _inner = inner ?? http.Client();
+  }) : _inner = inner ?? newAppHttpClient();
   final HostedRelayAuth auth;
   final RelayConfig config;
   final http.Client _inner;
@@ -526,4 +624,44 @@ class HostedRelayHttpClient extends http.BaseClient {
 
   @override
   void close() => _inner.close();
+}
+
+/// When a cached assertion arrived, on the monotonic and the wall clock, and
+/// how long it may be reused.
+@visibleForTesting
+class CachedReceipt {
+  const CachedReceipt(this.monotonic, this.wall, this.budget);
+  final Duration monotonic;
+  final DateTime wall;
+  final Duration budget;
+
+  /// Still reusable at [now] and [wallNow]. The monotonic clock stops while
+  /// the device sleeps, so the wall clock bounds it too; a wall clock set
+  /// back counts as no time passed.
+  bool usable(Duration now, DateTime wallNow) {
+    final byWall = wallNow.difference(wall);
+    final elapsed = now - monotonic;
+    return (byWall > elapsed ? byWall : elapsed) < budget;
+  }
+}
+
+/// The local monotonic deadline of an assertion requested at [requestStart]
+/// and received at [receipt], with the wall clock at [wallAtReceipt] (Unix
+/// seconds): the issuer's lifetime (`exp − iat`) counted from before the
+/// request was sent, capped by [exp] against the local wall clock. The first
+/// bound keeps a skewed phone clock from stretching the token; the second
+/// keeps a short session-capped token from outliving its `exp`. A deadline
+/// at or before [receipt] means no lifetime is left.
+@visibleForTesting
+Duration localDeadline({
+  required Duration requestStart,
+  required Duration receipt,
+  required int wallAtReceipt,
+  required int exp,
+  required num iat,
+}) {
+  final byExp = receipt + Duration(seconds: max(0, exp - wallAtReceipt));
+  final byLifetime =
+      requestStart + Duration(seconds: max(0, (exp - iat).floor()));
+  return byLifetime < byExp ? byLifetime : byExp;
 }

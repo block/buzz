@@ -1,6 +1,6 @@
 //! User inventory, offline account cleanup and persisted deletion workflows.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use buzz_db::user_deletion::ExecutionMode;
 use clap::Subcommand;
 use uuid::Uuid;
@@ -8,6 +8,8 @@ use uuid::Uuid;
 /// Inspect user data, run account cleanup or execute persisted workflows.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Run media cleanup directly, without a workflow request.
+    MediaBatches(media::Args),
     /// Print account-table batches for one community; --delete executes offline.
     AccountBatches(account_batches::Args),
     /// Capture frozen human/agent inputs across stored communities, read-only.
@@ -92,6 +94,10 @@ pub enum Command {
 
 /// Run the selected user-deletion command against PostgreSQL.
 pub async fn run(command: Command) -> Result<i32> {
+    let command = match command {
+        Command::MediaBatches(args) => return media::run(args).await,
+        command => command,
+    };
     if let Command::AccountBatches(args) = command {
         let mode = if args.delete {
             ExecutionMode::Delete
@@ -138,6 +144,7 @@ pub async fn run(command: Command) -> Result<i32> {
     };
     let store = db.entity_deletion_store();
     match command {
+        Command::MediaBatches(_) => bail!("direct media command dispatched above"),
         Command::AccountBatches(_) => anyhow::bail!("account command dispatched above"),
         Command::AccountScope { pubkey } => {
             crate::print_json(
@@ -201,6 +208,7 @@ pub async fn run(command: Command) -> Result<i32> {
                 &executor_id.unwrap_or_else(crate::default_executor_id),
                 &worker::RunOptions {
                     db: real.then(|| buzz_db::Db::from_pool(db.pool().clone())),
+                    media: None,
                     delete,
                     batch_size,
                     max_items,
@@ -224,6 +232,8 @@ pub async fn run(command: Command) -> Result<i32> {
 mod account_batches;
 mod handlers;
 mod inventory;
+/// Direct upload-only media cleanup and its workflow handler.
+pub mod media;
 /// Standalone delegation of an owned community to community deletion.
 pub mod owned_community;
 /// Read-only summaries of locally saved request progress and external waits.

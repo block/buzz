@@ -1,3 +1,5 @@
+import 'package:buzz/shared/hosted/known_community_sync.dart';
+import '../community/community_storage_test.dart' show FakeSecureStorage;
 import 'dart:async';
 
 import 'hosted_http_fixture.dart';
@@ -5,6 +7,7 @@ import 'hosted_http_fixture.dart';
 import 'dart:convert';
 
 import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/storage/serial_queue.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -18,6 +21,70 @@ void main() {
       .toIso8601String();
   final verifier = List.filled(43, 'a').join();
   setUp(() => FlutterSecureStorage.setMockInitialValues({}));
+
+  test(
+    'same-subject setup completion resumes a parked account removal',
+    () async {
+      var needsSetup = true;
+      var removals = 0;
+      final client = BuilderlabAccountClient(
+        storage: FakeSecureStorage(),
+        httpClient: MockClient((request) async {
+          if (request.url.path.endsWith('/exchange')) {
+            return http.Response(
+              jsonEncode({
+                'session_credential': 'same-credential',
+                'expires_at': expiry,
+              }),
+              200,
+            );
+          }
+          if (request.url.path.endsWith('/me')) {
+            return http.Response(
+              jsonEncode({
+                'subject': 'same-owner',
+                'expires_at': expiry,
+                'account_status': needsSetup
+                    ? 'ACCOUNT_STATUS_NEEDS_DETAILS'
+                    : 'ACCOUNT_STATUS_ACTIVE',
+              }),
+              200,
+            );
+          }
+          removals++;
+          return http.Response('{}', needsSetup ? 403 : 200);
+        }),
+      );
+      await client.exchange(code: 'first', verifier: verifier);
+      final sync = KnownCommunitySync(
+        account: client,
+        storage: FakeSecureStorage(),
+        localCommunities: () async => [],
+      );
+      addTearDown(() {
+        sync.dispose();
+        client.dispose();
+      });
+      await sync.remove('wss://team.example');
+      await sync.synchronize();
+      expect(sync.failure, AccountFailure.accountSetupRequired);
+      expect(removals, 1);
+      await client.restore();
+      await sync.synchronize();
+      expect(
+        removals,
+        1,
+        reason: 'ordinary restore must not bypass the parked session',
+      );
+      needsSetup = false;
+      await client.exchange(code: 'setup-completed', verifier: verifier);
+      await sync.synchronize();
+      expect(client.account!.subject, 'same-owner');
+      expect(removals, 2);
+      expect(await sync.pendingRemovals('same-owner'), isEmpty);
+      expect(sync.failure, isNull);
+    },
+  );
 
   test(
     'real client exchanges PKCE code, verifies, persists and restores session',
@@ -185,7 +252,8 @@ void main() {
             onError: (Object error) => failure = error,
           ),
     );
-    unawaited(client.clearLocalSession().then((_) => cleared = true));
+    // Any queued account request waits for the deadline.
+    unawaited(client.restore().then((_) => cleared = true));
     await tester.pump();
     await tester.pump(const Duration(seconds: 20));
     await tester.pump(const Duration(seconds: 5));
@@ -307,6 +375,141 @@ void main() {
     // A later restore still re-verifies, so expiry is detected on retry.
     await client.restore();
     expect(verifications, 2);
+  });
+
+  test('a sign-out is never undone by a pending session check', () async {
+    FlutterSecureStorage.setMockInitialValues({
+      storageKey: record('account-1', 'old'),
+    });
+    final storage = _SessionStorage();
+    var check = Completer<void>();
+    final client = BuilderlabAccountClient(
+      storage: storage,
+      httpClient: MockClient((request) async {
+        await check.future;
+        return http.Response(
+          jsonEncode({'subject': 'account-1', 'expires_at': expiry}),
+          200,
+        );
+      }),
+    );
+    // A check already pending when sign-out starts doesn't hold it up.
+    final early = client.restore();
+    await pumpEventQueue();
+    await client.clearLocalSession();
+    check.complete();
+    expect(await early, isNull);
+    expect(client.account, isNull);
+
+    // Nor does a check that starts while the session is being deleted.
+    FlutterSecureStorage.setMockInitialValues({
+      storageKey: record('account-1', 'old'),
+    });
+    check = Completer<void>();
+    final deleted = Completer<void>();
+    storage.holdDelete = deleted.future;
+    final clearing = client.clearLocalSession();
+    final late = client.restore();
+    await pumpEventQueue();
+    deleted.complete();
+    await clearing;
+    check.complete();
+    expect(await late, isNull);
+    expect(client.account, isNull);
+    expect(await stored(), isNull);
+  });
+
+  test('an exchange queued before a sign-out cannot sign back in', () async {
+    FlutterSecureStorage.setMockInitialValues({
+      storageKey: record('account-1', 'old'),
+    });
+    final entered = Completer<void>();
+    final release = Completer<void>();
+    final client = BuilderlabAccountClient(
+      httpClient: MockClient((request) async {
+        if (request.url.path.endsWith('/exchange')) {
+          return http.Response(
+            jsonEncode({'session_credential': 'new', 'expires_at': expiry}),
+            200,
+          );
+        }
+        if (request.headers['X-BB-Session-Credential'] == 'old') {
+          if (!entered.isCompleted) entered.complete();
+          await release.future;
+        }
+        return http.Response(
+          jsonEncode({'subject': 'account-1', 'expires_at': expiry}),
+          200,
+        );
+      }),
+    );
+    addTearDown(() {
+      if (!release.isCompleted) release.complete();
+      client.dispose();
+    });
+    final restoring = client.restore();
+    await entered.future;
+    final exchanging = client
+        .exchange(code: 'code', verifier: verifier)
+        .then<Object?>((value) => value, onError: (Object error) => error);
+    await client.clearLocalSession();
+    release.complete();
+    await restoring;
+    expect(await exchanging, AccountFailure.unavailable);
+    expect(client.account, isNull);
+    expect(await stored(), isNull);
+  });
+
+  test('signing out leaves the extension without the session', () async {
+    FlutterSecureStorage.setMockInitialValues({
+      storageKey: record('account-1', 'old'),
+    });
+    // Extension writes land in call order, as the iOS bridge does.
+    final writes = SerialQueue();
+    var shareFails = true;
+    String? shared = 'old';
+    final unshareStarted = Completer<void>();
+    final releaseUnshare = Completer<void>();
+    final client = BuilderlabAccountClient(
+      httpClient: MockClient(
+        (request) async => http.Response(
+          jsonEncode({'subject': 'account-1', 'expires_at': expiry}),
+          200,
+        ),
+      ),
+      onSessionChanged: (credential) => writes.run(() async {
+        if (credential == null) {
+          if (!unshareStarted.isCompleted) unshareStarted.complete();
+          await releaseUnshare.future;
+        } else if (shareFails) {
+          throw StateError('keychain unavailable');
+        }
+        shared = credential;
+      }),
+    );
+    addTearDown(() {
+      if (!releaseUnshare.isCompleted) releaseUnshare.complete();
+      client.dispose();
+    });
+    // The first share fails, so the credential waits to be shared again.
+    await client.restore();
+    await pumpEventQueue();
+    shareFails = false;
+    final clearing = client.clearLocalSession();
+    await unshareStarted.future;
+    // An account request arriving mid-removal must not share it again.
+    final request = client.currentIdentity().then<Object?>(
+      (value) => value,
+      onError: (Object error) => error,
+    );
+    await pumpEventQueue();
+    releaseUnshare.complete();
+    await clearing;
+    await request;
+    await writes.run(() async {});
+    expect(client.account, isNull);
+    expect(await stored(), isNull);
+    expect(shared, isNull);
   });
 
   test('login for another account keeps the existing session', () async {
@@ -459,6 +662,7 @@ void main() {
 
 class _SessionStorage extends FlutterSecureStorage {
   bool failDelete = false;
+  Future<void>? holdDelete;
 
   @override
   Future<void> delete({
@@ -471,6 +675,7 @@ class _SessionStorage extends FlutterSecureStorage {
     WindowsOptions? wOptions,
   }) async {
     if (failDelete) throw StateError('storage unavailable');
+    await holdDelete;
     await super.delete(key: key);
   }
 }

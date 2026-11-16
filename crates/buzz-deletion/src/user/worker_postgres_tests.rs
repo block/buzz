@@ -34,6 +34,7 @@ async fn fixture() -> (EntityDeletionStore, Uuid, sqlx::PgPool) {
 fn options() -> RunOptions {
     RunOptions {
         db: None,
+        media: None,
         delete: false,
         batch_size: 100,
         max_items: 100_000,
@@ -450,3 +451,8 @@ async fn execute_without_transition(store: &EntityDeletionStore, id: Uuid, optio
         .unwrap();
     store.release(&lease).await.unwrap();
 }
+
+#[path = "worker_postgres_tests/fixture.rs"]
+mod media_fixture;
+#[path = "worker_postgres_tests/media_retry.rs"]
+mod media_retry_postgres_tests;

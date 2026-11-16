@@ -796,7 +796,7 @@ which buzz-app also uses), even where a payload is documented only in code.
 cd mobile
 dart format --output=none --set-exit-if-changed .
 flutter analyze
-flutter test --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
+flutter test
 ```
 
 Or from repo root: `just mobile-fmt` (auto-fix), `just mobile-check` (lint + fmt check), `just mobile-test` (tests).

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:ui' show ImageFilter;
 
+import 'package:duo_kit/duo_kit.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
@@ -19,6 +20,7 @@ import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/concentric_sheet_surface.dart';
 import '../../shared/widgets/page_indicator.dart';
+import '../../shared/widgets/duo_toolbar.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/ios_navigation_bar.dart';
 import '../../shared/widgets/navigation_backdrop.dart';
@@ -465,6 +467,13 @@ class MediaImageViewerPage extends HookConsumerWidget {
       onMore?.call(context, images[currentIndex.value].url);
     }
 
+    final toolbarScope = DuoToolbarScope.maybeOf(context);
+    final strip = defaultTargetPlatform == TargetPlatform.iOS
+        ? (toolbarScope == null
+              ? FoldGeometry.of(context).strip
+              : toolbarScope.strip)
+        : null;
+    final inRail = strip != null;
     final viewportHeight = MediaQuery.sizeOf(context).height;
     final dragProgress = (dragOffset.value / viewportHeight).clamp(0.0, 1.0);
     final imageScale = 1 - (dragProgress * 0.1);
@@ -487,7 +496,37 @@ class MediaImageViewerPage extends HookConsumerWidget {
           ),
         ),
         body: Stack(
+          fit: StackFit.expand,
           children: [
+            Theme(
+              data: ThemeData.dark(),
+              child: DuoToolbarPortal(
+                strip: strip,
+                active:
+                    (toolbarScope?.active ?? true) &&
+                    (ModalRoute.isCurrentOf(context) ?? true),
+                actions: [
+                  IosNavigationAction(
+                    label: 'Close image viewer',
+                    symbol: 'xmark',
+                    onPressed: () => unawaited(dismiss()),
+                  ),
+                  if (onReply != null)
+                    IosNavigationAction(
+                      label: 'Reply in thread',
+                      symbol: 'arrowshape.turn.up.left',
+                      onPressed: () => unawaited(replyInThread()),
+                    ),
+                  if (onMore != null)
+                    IosNavigationAction(
+                      label: 'More image actions',
+                      symbol: 'ellipsis',
+                      onPressed: showMoreActions,
+                    ),
+                ],
+                child: const SizedBox.shrink(),
+              ),
+            ),
             Positioned.fill(
               child: Transform.translate(
                 offset: Offset(0, dragOffset.value),
@@ -504,7 +543,9 @@ class MediaImageViewerPage extends HookConsumerWidget {
                     itemBuilder: (context, index) {
                       final image = images[index];
                       return Padding(
-                        padding: _mediaViewerPadding(context),
+                        padding: inRail
+                            ? EdgeInsets.zero
+                            : _mediaViewerPadding(context),
                         child: LayoutBuilder(
                           builder: (context, constraints) {
                             final viewerSize = _imageViewerSize(
@@ -590,6 +631,7 @@ class MediaImageViewerPage extends HookConsumerWidget {
                 opacity: chromeOpacity,
                 child: SafeArea(
                   child: _MediaViewerBottomControls(
+                    showActions: !inRail,
                     images: images,
                     currentIndex: currentIndex.value,
                     onSelect: (index) {
@@ -612,7 +654,9 @@ class MediaImageViewerPage extends HookConsumerWidget {
                 ),
               ),
             ),
-            if (defaultTargetPlatform == TargetPlatform.iOS)
+            if (inRail)
+              const SizedBox.shrink()
+            else if (defaultTargetPlatform == TargetPlatform.iOS)
               Positioned(
                 top: 0,
                 left: 0,

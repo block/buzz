@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/dm_header_portrait.dart';
 import 'package:buzz/shared/widgets/preset_agent_avatar.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:flutter/material.dart';
@@ -56,6 +57,50 @@ class _Player extends VideoPlayerPlatform {
 }
 
 void main() {
+  testWidgets(
+    'DM header plays transparent agent artwork and honors reduced motion',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final original = VideoPlayerPlatform.instance;
+      final player = _Player();
+      VideoPlayerPlatform.instance = player;
+      addTearDown(() => VideoPlayerPlatform.instance = original);
+      Widget surface({bool reduced = false}) => ProviderScope(
+        child: MaterialApp(
+          home: MediaQuery(
+            data: MediaQueryData(disableAnimations: reduced),
+            child: const Center(
+              child: DmHeaderPortrait(
+                imageUrl:
+                    'https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-13.png',
+                isAgent: true,
+                initial: 'A',
+                size: 64,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpWidget(surface());
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('video')), findsOneWidget);
+      expect(player.playing, isTrue);
+      expect(
+        find.descendant(
+          of: find.byType(DmHeaderPortrait),
+          matching: find.byType(DecoratedBox),
+        ),
+        findsNothing,
+      );
+      await tester.pumpWidget(surface(reduced: true));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('video')), findsNothing);
+      expect(find.byType(AvatarImageContent), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
   testWidgets(
     'preset plays silently, pauses when hidden, and respects reduced motion',
     (tester) async {

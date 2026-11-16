@@ -4,6 +4,18 @@ import Testing
 
 @testable import BuzzPushKit
 
+/// An assertion issued when the tests start, with a 300 s lifetime.
+private let testAssertionIssuedAt = Int(Date().timeIntervalSince1970)
+private let testAssertion: String = {
+  let claims = try! JSONSerialization.data(withJSONObject: [
+    "iat": testAssertionIssuedAt, "exp": testAssertionIssuedAt + 300,
+  ])
+  let payload = claims.base64EncodedString()
+    .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+    .replacingOccurrences(of: "=", with: "")
+  return "e30.\(payload).c2ln"
+}()
+
 @Suite("Native notification avatar decoding")
 struct BuzzNotificationAvatarLoaderTests {
   @Test("Avatar proofs preserve IPv6 brackets and explicit ports")
@@ -160,7 +172,7 @@ struct BuzzNotificationAvatarLoaderTests {
     let request = try #require(requests.first)
     #expect(
       request.value(forHTTPHeaderField: "Nostr-Federated-Identity")
-        == "Bearer header.payload.signature")
+        == "Bearer \(testAssertion)")
     #expect(request.value(forHTTPHeaderField: "Authorization") != nil)
   }
 
@@ -203,7 +215,7 @@ struct BuzzNotificationAvatarLoaderTests {
     }
 
     #expect(requests.all.map { $0.value(forHTTPHeaderField: "Nostr-Federated-Identity") }
-      == [nil, "Bearer header.payload.signature"])
+      == [nil, "Bearer \(testAssertion)"])
     #expect(requests.all.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") != nil })
   }
 
@@ -297,8 +309,8 @@ private final class HostedIssuanceStub: URLProtocol, @unchecked Sendable {
       request.url?.path == "/api/goose/v1/buzz/nostr-identities/current"
       ? ["identity": ["pubkey_hex": account]]
       : [
-        "assertion": "header.payload.signature", "nostr_pubkey": account,
-        "expires_at": Int(Date().timeIntervalSince1970) + 300,
+        "assertion": testAssertion, "nostr_pubkey": account,
+        "expires_at": testAssertionIssuedAt + 300,
       ]
     let body = try! JSONSerialization.data(withJSONObject: value)
     let response = HTTPURLResponse(
@@ -320,9 +332,9 @@ private final class AssertionIssuanceStub: URLProtocol, @unchecked Sendable {
   override func startLoading() {
     Self.onRequest?()
     let body = try! JSONSerialization.data(withJSONObject: [
-      "assertion": "header.payload.signature",
+      "assertion": testAssertion,
       "nostr_pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-      "expires_at": Int(Date().timeIntervalSince1970) + 300,
+      "expires_at": testAssertionIssuedAt + 300,
     ])
     let response = HTTPURLResponse(
       url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
