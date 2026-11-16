@@ -1113,7 +1113,16 @@ class _DetailRoutes extends NavigatorObserver {
   }
 
   @override
-  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) =>
+      _arrive(route);
+
+  @override
+  void didReplace({Route<dynamic>? newRoute, Route<dynamic>? oldRoute}) {
+    _above.remove(oldRoute);
+    if (newRoute != null) _arrive(newRoute);
+  }
+
+  void _arrive(Route<dynamic> route) {
     // Declarative pages are the pane's own selection and placeholder.
     if (route.settings is Page) return;
     _above.add(route);

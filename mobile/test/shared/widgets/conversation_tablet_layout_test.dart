@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:buzz/features/channels/media_viewer_page.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
@@ -464,6 +466,24 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(MediaImageViewerPage), findsOneWidget);
     expect(find.text('Thread content'), findsOneWidget);
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.byType(MediaImageViewerPage), findsNothing);
+    expect(find.text('Thread content'), findsOneWidget);
+    // A viewer that replaces another still takes Back before the thread.
+    await tester.tap(find.text('Open image'));
+    await tester.pumpAndSettle();
+    unawaited(
+      Navigator.of(
+        tester.element(find.byType(MediaImageViewerPage)),
+      ).pushReplacement(
+        buildImageViewerRoute(
+          imageUrl: 'https://example.org/other.png',
+          heroTag: 'tablet-other',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
     await tester.binding.handlePopRoute();
     await tester.pumpAndSettle();
     expect(find.byType(MediaImageViewerPage), findsNothing);
