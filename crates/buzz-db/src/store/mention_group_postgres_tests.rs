@@ -122,7 +122,7 @@ fn applied(write: super::mention_group::GroupWrite) -> StoredEvent {
 async fn mention_group_lifecycle_keeps_receipts_and_live_tombstones() {
     let f = Fixture::new().await;
     let id = Uuid::new_v4();
-    let mut members: Vec<String> = (0..40)
+    let mut members: Vec<String> = (0..19)
         .map(|_| Keys::generate().public_key().to_hex())
         .collect();
     members.push(f.relay.public_key().to_hex());

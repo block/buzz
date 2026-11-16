@@ -511,35 +511,17 @@ async fn persist_snapshot(tx: &mut AdmittedTx, event: Event) -> Result<StoredEve
     let pubkey = event.pubkey.to_bytes();
     let coordinate = crate::event::extract_d_tag(&event)
         .ok_or_else(|| DbError::InvalidData("mention group state missing coordinate".into()))?;
-    let seconds = i64::try_from(event.created_at.as_secs())
-        .map_err(|_| DbError::InvalidTimestamp(i64::MAX))?;
-    let created_at =
-        DateTime::from_timestamp(seconds, 0).ok_or(DbError::InvalidTimestamp(seconds))?;
-    let received_at = Utc::now();
     sqlx::query(superseded_with_mentions_sql!(
         "UPDATE events SET deleted_at=NOW() WHERE community_id=$1 AND kind=$2 AND pubkey=$3 AND d_tag=$4 AND deleted_at IS NULL"
     )).bind(community.as_uuid()).bind(kind).bind(pubkey.as_slice()).bind(&coordinate).execute(tx.conn()).await?;
-    sqlx::query(
-        "INSERT INTO events (community_id,id,pubkey,created_at,kind,tags,content,sig,received_at,channel_id,d_tag) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NULL,$10)",
-    ).bind(community.as_uuid()).bind(event.id.as_bytes().as_slice()).bind(pubkey.as_slice())
-        .bind(created_at).bind(kind).bind(serde_json::to_value(&event.tags)?).bind(&event.content)
-        .bind(event.sig.serialize().as_slice()).bind(received_at).bind(&coordinate).execute(tx.conn()).await?;
+    let (stored, inserted) = crate::event::insert_event_in_transaction(tx, &event, None).await?;
+    if !inserted {
+        return Err(DbError::InvalidData(
+            "mention group state already exists".into(),
+        ));
+    }
     crate::insert_mentions_in_transaction(tx, &event, None).await?;
-    crate::store::event_follow_up::after_admitted_insert(
-        tx,
-        event.id.as_bytes(),
-        created_at,
-        kind,
-        None,
-    )
-    .await?;
-    Ok(StoredEvent::with_received_at(
-        event,
-        received_at,
-        None,
-        true,
-    ))
+    Ok(stored)
 }
 
 async fn record_receipt(

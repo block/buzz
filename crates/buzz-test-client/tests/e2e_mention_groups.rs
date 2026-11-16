@@ -188,6 +188,8 @@ async fn http_commands_ws_live_delivery_and_tombstone_reads_share_one_authoritat
         "isolated open relay required"
     );
     assert_eq!(info["mention_groups"]["default_manage"], "everyone");
+    assert_eq!(info["mention_groups"]["version"], 1);
+    assert_eq!(info["mention_groups"]["max_members"], 20);
     let relay = PublicKey::from_hex(info["self"].as_str().expect("relay signing key")).unwrap();
     let actor = Keys::generate();
     let outsider = Keys::generate();
@@ -198,6 +200,45 @@ async fn http_commands_ws_live_delivery_and_tombstone_reads_share_one_authoritat
     let sub = format!("mg-{id}");
     let mut writer = BuzzTestClient::connect(&ws, &actor).await.unwrap();
     let mut reader = BuzzTestClient::connect(&ws, &outsider).await.unwrap();
+    let bounded_id = Uuid::new_v4();
+    let bounded_name = format!("mg-limit-{bounded_id}");
+    let bounded_members: Vec<_> = (0..21).map(|_| Keys::generate().public_key()).collect();
+    let oversized = put_with_defaults(&actor, bounded_id, 0, &bounded_name, &bounded_members, &[]);
+    let refusal = "invalid: a group can have at most 20 members";
+    let (status, body) = post(&http, &actor, "/events", &json!(oversized)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], refusal);
+    let ack = writer.send_event(oversized).await.unwrap();
+    assert!(!ack.accepted, "{ack:?}");
+    assert_eq!(ack.message, refusal);
+    let boundary = put_with_defaults(
+        &actor,
+        bounded_id,
+        0,
+        &bounded_name,
+        &bounded_members[..20],
+        &[],
+    );
+    let (status, body) = post(&http, &actor, "/events", &json!(boundary)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["accepted"], true);
+    let heads = query_state(
+        &http,
+        &actor,
+        relay,
+        KIND_MENTION_GROUP_STATE,
+        &bounded_id.to_string(),
+    )
+    .await;
+    assert_eq!(heads.len(), 1);
+    assert_eq!(
+        heads[0]
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice()[0] == "p")
+            .count(),
+        20
+    );
     assert!(
         query_state(&http, &actor, relay, KIND_MENTION_GROUP_STATE, "settings")
             .await

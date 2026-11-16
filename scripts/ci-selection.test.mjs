@@ -218,6 +218,11 @@ const scenarios = [
   ],
   ["mobile lockfile", ["mobile/pubspec.lock"], ["mobile"]],
   [
+    "mobile push gate shared with mention groups",
+    ["mobile/lib/shared/push/push_subscription.dart"],
+    ["mobile", "rust"],
+  ],
+  [
     "mobile release source helper",
     ["scripts/mobile-release-source.sh"],
     ["mobile"],

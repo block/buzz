@@ -100,7 +100,7 @@ pre-push:
       run: ./scripts/without-git-env.sh just file-size-check
     rust-tests:
       files: git diff --name-only origin/main...HEAD
-      glob: ["crates/**", "migrations/**", "schema/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml", "scripts/run-tests.sh", "Justfile"]
+      glob: ["crates/**", "mobile/lib/shared/push/push_subscription.dart", "migrations/**", "schema/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml", "scripts/run-tests.sh", "Justfile"]
       env:
         # Lanes run under a pty; with agent shells' TERM=dumb, nextest's
         # progress bar swallows every FAIL line, panic, and summary.

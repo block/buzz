@@ -20,6 +20,11 @@ use crate::kind::{
 pub const SETTINGS_D_TAG: &str = "settings";
 /// Maximum number of Unicode scalar values in a normalized group name.
 pub const MAX_NAME_CHARS: usize = 120;
+/// Maximum distinct members in a group replacement. Keep in sync with
+/// `buzzPushHellthreadParticipantLimit` in
+/// `mobile/lib/shared/push/push_subscription.dart` so one group fits the mobile
+/// push recipient gate. Clients discover this value through NIP-11.
+pub const MAX_MEMBERS: usize = 20;
 /// Maximum distinct default channels in a group replacement.
 pub const MAX_DEFAULT_CHANNELS: usize = 32;
 const MAX_CLIENT_ID_UTF16: usize = 128;
@@ -127,6 +132,9 @@ pub fn parse_command(event: &Event) -> Result<Command, String> {
                 let key = PublicKey::from_hex(value)
                     .map_err(|_| "member must be a 64-character hex public key")?;
                 members.insert(key.to_hex());
+                if members.len() > MAX_MEMBERS {
+                    return Err(format!("a group can have at most {MAX_MEMBERS} members"));
+                }
             }
             Some("channel") if put => {
                 let id = crate::artifact::canonical_uuid(pair(parts)?).map_err(str::to_owned)?;
@@ -430,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn names_use_unicode_scalar_limits_and_groups_can_exceed_send_recipient_limits() {
+    fn names_use_unicode_scalar_limits_and_groups_bound_distinct_members() {
         for (name, accepted) in [
             ("夜".repeat(120), true),
             ("夜".repeat(121), false),
@@ -449,12 +457,47 @@ mod tests {
             );
         }
         let mut tags = put_tags();
-        for _ in 0..40 {
+        for _ in 0..20 {
             tags.push(vec!["p".into(), Keys::generate().public_key().to_hex()]);
         }
+        tags.push(vec!["p".into(), tags[3][1].to_uppercase()]);
         assert!(
-            matches!(parse_command(&event(RELAY_ADMIN_PUT_MENTION_GROUP, tags)).unwrap().operation,
-            Operation::Put { members, .. } if members.len() == 40)
+            matches!(parse_command(&event(RELAY_ADMIN_PUT_MENTION_GROUP, tags.clone())).unwrap().operation,
+            Operation::Put { members, .. } if members.len() == 20)
+        );
+        tags.push(vec!["p".into(), Keys::generate().public_key().to_hex()]);
+        assert_eq!(
+            parse_command(&event(RELAY_ADMIN_PUT_MENTION_GROUP, tags)).unwrap_err(),
+            "a group can have at most 20 members"
+        );
+    }
+
+    #[test]
+    fn group_member_limit_matches_mobile_push_gate() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../mobile/lib/shared/push/push_subscription.dart"
+        ))
+        .expect("read the mobile push contract");
+        let initializer = source
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("const "))
+            .filter_map(|declaration| declaration.split_once('='))
+            .find_map(|(name, value)| {
+                (name.split_whitespace().last() == Some("buzzPushHellthreadParticipantLimit"))
+                    .then_some(value)
+            })
+            .expect("mobile push participant limit must be declared");
+        let mobile_limit: usize = initializer
+            .split_once(';')
+            .expect("mobile push participant limit must end with a semicolon")
+            .0
+            .trim()
+            .parse()
+            .expect("mobile push participant limit must be an integer");
+        assert_eq!(
+            MAX_MEMBERS, mobile_limit,
+            "group members and the mobile push recipient gate must have the same limit"
         );
     }
 

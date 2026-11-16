@@ -492,6 +492,7 @@ pub(crate) async fn nip11_document(
             "settings_d": buzz_core::mention_group::SETTINGS_D_TAG,
             "default_manage": "everyone",
             "membership": if state.config.require_relay_membership { "roster" } else { "open" },
+            "max_members": buzz_core::mention_group::MAX_MEMBERS,
             "max_default_channels": buzz_core::mention_group::MAX_DEFAULT_CHANNELS,
         }));
         info.supported_extensions

@@ -47,7 +47,8 @@ A supporting relay advertises `nip-mg` in NIP-11 `supported_extensions` and:
     "set_manage_kind": 47002,
     "state_kind": 39010,
     "default_manage": "everyone",
-    "membership": "roster"
+    "membership": "roster",
+    "max_members": 20
   }
 }
 ```
@@ -119,16 +120,20 @@ Validation and normalization:
   and internal spaces are preserved. Active names are unique per community
   under the database's `lower(name)` collation, not full Unicode case folding.
 - Each `p` has exactly two elements and a 64-character hexadecimal public key.
-  Normalize keys to lowercase, sorted and deduplicated. Zero members is valid.
+  Normalize keys to lowercase, sorted and deduplicated. Zero members is valid;
+  at most 20 distinct members are allowed, advertised as `max_members` in NIP-11.
   The signer is included only when explicitly tagged. Builders that suppress
   signer `p` tags must disable that behavior for this protocol.
 - Each `channel` has exactly two elements and a canonical non-nil UUID. Sort and
   deduplicate them; at most 32 distinct defaults are allowed. The relay validates
   channel eligibility within the community. Core wire validation performs no
   channel or membership lookup.
-- Stored group size is independent of any send-recipient limit. Reject a command
-  when its resulting signed state exceeds the advertised message-size bound;
-  never truncate members or channels.
+- The member limit matches the mobile push recipient gate. Larger audiences
+  should use a channel. A put over the limit is refused with
+  `invalid: a group can have at most 20 members`. A message combining groups or
+  other mentions remains subject to the push recipient gate for the whole
+  message. Also reject a command when its resulting signed state exceeds the
+  advertised message-size bound; never truncate members or channels.
 
 The only optional transport annotations are one each of:
 
