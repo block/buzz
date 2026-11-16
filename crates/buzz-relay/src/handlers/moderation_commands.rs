@@ -330,6 +330,7 @@ async fn handle_timeout(
         .await
         .map_err(|e| error(format!("database error: {e}")))?;
     state.invalidate_restrictions(tenant);
+    super::channel_access::announce_restriction_changed(tenant, state, &target);
 
     let action_id = insert_audit(
         state,
@@ -394,6 +395,7 @@ async fn handle_untimeout(
         return Err(invalid("member is not timed out"));
     }
     state.invalidate_restrictions(tenant);
+    super::channel_access::announce_restriction_changed(tenant, state, &target);
 
     insert_audit(state, tenant, actor, "untimeout", Some(&target), None, None).await?;
 

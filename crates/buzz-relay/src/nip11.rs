@@ -278,9 +278,10 @@ impl RelayInfo {
             // sync includes auto-archiving channels.
             "buzz-artifact-conversations".to_string(),
             // `POST /query` answers `{"access":"channels"}` with what the
-            // signer may do in each named channel, and kind:20004 tells a
-            // channel's live subscribers to ask again (NOSTR.md, Channel
-            // access).
+            // signer may do in each named channel or one page of those it
+            // can reach; kind:20004 tells a channel's live subscribers, and
+            // kind:20005 one timed-out pubkey, to ask again (NOSTR.md,
+            // Channel access).
             "buzz-channel-access".to_string(),
         ];
         let gif = gif_provider.map(|provider| {

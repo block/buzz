@@ -1,6 +1,6 @@
 //! `POST /query` with `[{"access":"channels","ids":[...]}]`: what the signer
-//! may do in each named channel, or, without `ids`, in every channel it can
-//! reach (NOSTR.md, Channel access).
+//! may do in each named channel, or, without `ids`, one page of the channels
+//! it can reach (NOSTR.md, Channel access).
 
 use axum::{http::StatusCode, Json};
 use buzz_core::TenantContext;
@@ -23,39 +23,60 @@ pub(super) fn requested(filters: &[Value]) -> bool {
 enum Asked {
     /// The named channels, in request order.
     Named(Vec<Uuid>),
-    /// Every channel the signer can reach.
-    Reachable,
+    /// One page of the channels the signer can reach.
+    Reachable { after: Option<Uuid>, limit: usize },
 }
 
-/// Exactly one filter with exactly `access` set to `channels`, and either no
-/// `ids` or `ids` holding 1 to [`MAX_IDS`] distinct canonical channel ids.
+/// A canonical (lowercase, hyphenated) channel id.
+fn channel_id(value: &Value) -> Option<Uuid> {
+    let s = value.as_str()?;
+    Uuid::parse_str(s).ok().filter(|id| id.to_string() == s)
+}
+
+/// Exactly one filter with `access` set to `channels` and either `ids`
+/// holding 1 to [`MAX_IDS`] distinct canonical channel ids, or no `ids` and
+/// optionally `after` (a canonical channel id) and `limit` (1 to
+/// [`MAX_IDS`], default [`MAX_IDS`]).
 fn asked(filters: &[Value]) -> Result<Asked, &'static str> {
-    const SHAPE: &str = "channel access requires one filter with exactly \
-                         {\"access\":\"channels\"} and optionally \
-                         \"ids\":[1 to 100 distinct lowercase channel ids]";
+    const SHAPE: &str = "channel access requires one filter with \
+                         {\"access\":\"channels\"} and either \
+                         \"ids\":[1 to 100 distinct lowercase channel ids] \
+                         or optionally \"after\":<channel id> and \"limit\":<1 to 100>";
     let [Value::Object(filter)] = filters else {
         return Err(SHAPE);
     };
     if filter.get("access").and_then(Value::as_str) != Some("channels") {
         return Err(SHAPE);
     }
-    match (filter.len(), filter.get("ids")) {
-        (1, None) => return Ok(Asked::Reachable),
-        (2, Some(Value::Array(_))) => {}
-        _ => return Err(SHAPE),
-    }
-    let Some(Value::Array(raw)) = filter.get("ids") else {
+    let Some(raw) = filter.get("ids") else {
+        if filter
+            .keys()
+            .any(|key| !matches!(key.as_str(), "access" | "after" | "limit"))
+        {
+            return Err(SHAPE);
+        }
+        let after = match filter.get("after") {
+            None => None,
+            Some(value) => Some(channel_id(value).ok_or(SHAPE)?),
+        };
+        let limit = match filter.get("limit") {
+            None => MAX_IDS,
+            Some(value) => value
+                .as_u64()
+                .filter(|limit| (1..=MAX_IDS as u64).contains(limit))
+                .ok_or(SHAPE)? as usize,
+        };
+        return Ok(Asked::Reachable { after, limit });
+    };
+    let Value::Array(raw) = raw else {
         return Err(SHAPE);
     };
-    if raw.is_empty() || raw.len() > MAX_IDS {
+    if filter.len() != 2 || raw.is_empty() || raw.len() > MAX_IDS {
         return Err(SHAPE);
     }
     let mut ids = Vec::with_capacity(raw.len());
     for value in raw {
-        let id = value
-            .as_str()
-            .and_then(|s| Uuid::parse_str(s).ok().filter(|id| id.to_string() == s))
-            .ok_or(SHAPE)?;
+        let id = channel_id(value).ok_or(SHAPE)?;
         if ids.contains(&id) {
             return Err(SHAPE);
         }
@@ -74,27 +95,25 @@ pub(super) async fn query(
     let (community, pubkey) = (tenant.community(), viewer.to_bytes());
     let answered = tokio::time::timeout(DEADLINE, async {
         match asked {
-            Asked::Named(ids) => answer(state, community, &pubkey, &ids).await.map(Some),
-            Asked::Reachable => reachable(state, community, &pubkey).await,
+            Asked::Named(ids) => answer(state, community, &pubkey, &ids)
+                .await
+                .map(serde_json::to_value),
+            Asked::Reachable { after, limit } => reachable(state, community, &pubkey, after, limit)
+                .await
+                .map(serde_json::to_value),
         }
     })
     .await
     .map_err(|_| "timed out".to_string())
     .and_then(|answered| answered.map_err(|e| e.to_string()));
-    let answers = answered.map_err(|e| {
+    let encoded = answered.map_err(|e| {
         tracing::warn!(error = %e, "channel access lookup failed");
         api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "error: channel access lookup failed; retry",
         )
     })?;
-    let answers = answers.ok_or_else(|| {
-        api_error(
-            StatusCode::BAD_REQUEST,
-            "too many reachable channels; ask about channels by ids",
-        )
-    })?;
-    Ok(Json(serde_json::to_value(answers).map_err(|_| {
+    Ok(Json(encoded.map_err(|_| {
         api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "error: channel access encoding failed",
@@ -122,7 +141,17 @@ mod tests {
         );
         assert_eq!(
             asked(&[json!({"access":"channels"})]).unwrap(),
-            Asked::Reachable
+            Asked::Reachable {
+                after: None,
+                limit: MAX_IDS
+            }
+        );
+        assert_eq!(
+            asked(&[json!({"access":"channels","after":A,"limit":1})]).unwrap(),
+            Asked::Reachable {
+                after: Some(Uuid::parse_str(A).unwrap()),
+                limit: 1
+            }
         );
         let too_many: Vec<String> = (0..=MAX_IDS).map(|_| Uuid::new_v4().to_string()).collect();
         for refused in [
@@ -140,6 +169,14 @@ mod tests {
             json!([{"access":"channels","kinds":[9]}]),
             json!([{"access":"channels","ids":null}]),
             json!([{"access":"channels"}, {"access":"channels"}]),
+            json!([{"access":"channels","limit":0}]),
+            json!([{"access":"channels","limit":101}]),
+            json!([{"access":"channels","limit":"5"}]),
+            json!([{"access":"channels","limit":2.5}]),
+            json!([{"access":"channels","after":A.to_uppercase()}]),
+            json!([{"access":"channels","after":null}]),
+            json!([{"access":"channels","ids":[A],"after":B}]),
+            json!([{"access":"channels","ids":[A],"limit":1}]),
         ] {
             let filters: Vec<Value> = serde_json::from_value(refused.clone()).unwrap();
             assert!(asked(&filters).is_err(), "{refused}");

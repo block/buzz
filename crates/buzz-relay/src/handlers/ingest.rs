@@ -2438,7 +2438,7 @@ fn allowed_while_timed_out(kind: u32) -> bool {
 }
 
 /// The write-path verdict for a restriction snapshot, or `None` to admit.
-fn write_restriction_denial(
+pub(crate) fn write_restriction_denial(
     kind: u32,
     restriction: &buzz_db::moderation::RestrictionState,
     now: chrono::DateTime<Utc>,

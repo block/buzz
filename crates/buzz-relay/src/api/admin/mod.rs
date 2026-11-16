@@ -1349,6 +1349,7 @@ async fn untimeout_member(
         return Err(ApiError::conflict("no active timeout for this member"));
     }
     state.invalidate_restrictions(&tenant);
+    crate::handlers::channel_access::announce_restriction_changed(&tenant, &state, &target_bytes);
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }

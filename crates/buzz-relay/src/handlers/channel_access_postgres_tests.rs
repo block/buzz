@@ -21,7 +21,7 @@ use crate::handlers::artifact_conversation_postgres_tests::{create_task, open, s
 use crate::handlers::group_state_postgres_tests::{community, create_channel, edit_channel};
 use crate::handlers::parent_access_postgres_tests::{add, post, set_parent};
 use crate::state::AppState;
-use buzz_core::kind::KIND_CHANNEL_ACCESS_CHANGED;
+use buzz_core::kind::{KIND_CHANNEL_ACCESS_CHANGED, KIND_VIEWER_ACCESS_CHANGED};
 
 /// `POST /query` asking what `viewer` may do in `ids`, signed with a payload
 /// tag unless `payload` is false.
@@ -109,7 +109,30 @@ async fn ask_one(
 }
 
 fn entry(id: Uuid, post: bool, joined: bool, role: &str) -> Value {
-    json!({"id": id, "read": true, "post": post, "joined": joined, "role": role})
+    json!({"id": id, "read": true, "post": post, "joined": joined, "role": role, "archived": false})
+}
+
+/// `entry` for a channel that is itself archived.
+fn archived(mut entry: Value) -> Value {
+    entry["archived"] = json!(true);
+    entry
+}
+
+/// One page of the list form: its entries and its `next`.
+async fn page(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    viewer: &Keys,
+    body: Value,
+) -> (Vec<Value>, Option<Uuid>) {
+    let (status, body) = query(state, tenant, viewer, &json!([body]), true).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let entries = body["channels"].as_array().expect("channels").clone();
+    let next = match &body["next"] {
+        Value::Null => None,
+        next => Some(next.as_str().expect("next id").parse().expect("uuid")),
+    };
+    (entries, next)
 }
 
 /// A private project, a private child under it whose owner made it, and a
@@ -157,8 +180,8 @@ impl Fixture {
 /// left out, the order is the request's, archiving closes posting, and a
 /// conversation follows its home. A proof without a payload tag is refused,
 /// and a client cannot send the push itself.
-/// Mutation: report every channel as joined, ignore `closed_by_archive`, or
-/// ignore an open channel's `join_role` → RED.
+/// Mutation: report every channel as joined, ignore `closed_by_archive`,
+/// ignore an open channel's `join_role`, or never report `archived` → RED.
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
 async fn a_viewer_learns_what_they_may_do_in_each_channel() {
@@ -229,7 +252,7 @@ async fn a_viewer_learns_what_they_may_do_in_each_channel() {
     assert_eq!(
         ask(state, tenant, &member, &[f.child, f.conversation]).await,
         vec![
-            entry(f.child, false, false, "member"),
+            archived(entry(f.child, false, false, "member")),
             entry(f.conversation, false, false, "member"),
         ],
         "an archived home closes itself and its conversation to posts"
@@ -263,7 +286,8 @@ async fn a_viewer_learns_what_they_may_do_in_each_channel() {
 
 /// Without `ids`, a viewer learns about every channel they can reach, in id
 /// order: what they joined, listed open channels, and what those hold. A
-/// task conversation and a private channel they can't read stay out.
+/// task conversation and a private channel they can't read stay out, and an
+/// archived channel is listed as archived.
 /// Mutation: drop the parents' children from the list, or answer the raw
 /// list without filtering → RED.
 #[tokio::test]
@@ -301,19 +325,21 @@ async fn a_viewer_lists_every_channel_they_can_reach() {
     )
     .await
     .expect("join as guest");
+    edit_channel(
+        state,
+        tenant,
+        &f.owner,
+        grandchild,
+        &[&["archived", "true"]],
+    )
+    .await
+    .expect("archive the grandchild");
     let reach = |viewer: &Keys| {
         let viewer = viewer.clone();
         async move {
-            let (status, body) = query(
-                state,
-                tenant,
-                &viewer,
-                &json!([{"access": "channels"}]),
-                true,
-            )
-            .await;
-            assert_eq!(status, StatusCode::OK, "{body}");
-            body.as_array().expect("answer array").clone()
+            let (entries, next) = page(state, tenant, &viewer, json!({"access": "channels"})).await;
+            assert_eq!(next, None, "one page holds them all");
+            entries
         }
     };
     let sorted = |mut entries: Vec<Value>| {
@@ -326,7 +352,7 @@ async fn a_viewer_lists_every_channel_they_can_reach() {
         sorted(vec![
             entry(f.project, true, true, "member"),
             entry(f.child, true, false, "member"),
-            entry(grandchild, true, false, "member"),
+            archived(entry(grandchild, false, false, "member")),
             entry(open_channel, false, false, "guest"),
         ]),
         "a project member reaches its tree and the open channel, not the conversation or the walled channel"
@@ -609,4 +635,338 @@ async fn joining_and_leaving_are_announced() {
         pushes(state, &mut rx, Duration::from_secs(3)).await,
         vec![f.conversation]
     );
+}
+
+/// Walking the list form page by page, a viewer who can reach more than 500
+/// channels gets each exactly once and in id order, at the default page
+/// size and at a small one, and the last page says there are no more.
+/// Mutation: start a page at `after` inclusive, or end the walk at a fixed
+/// count → RED.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn a_viewer_walks_every_reachable_channel_page_by_page() {
+    let state = live_state().await;
+    let tenant = community(&state, "access-pages").await;
+    let owner = Keys::generate();
+    let viewer = Keys::generate();
+    let mut made = Vec::new();
+    for _ in 0..523 {
+        made.push(create_channel(&state, &tenant, &owner, &[]).await);
+    }
+    made.sort();
+
+    for limit in [None, Some(37)] {
+        let mut seen = Vec::new();
+        let mut after: Option<Uuid> = None;
+        let mut pages = 0;
+        loop {
+            let mut body = json!({"access": "channels"});
+            if let Some(after) = after {
+                body["after"] = json!(after);
+            }
+            if let Some(limit) = limit {
+                body["limit"] = json!(limit);
+            }
+            let (entries, next) = page(&state, &tenant, &viewer, body).await;
+            assert!(entries.len() <= limit.unwrap_or(100));
+            seen.extend(
+                entries
+                    .iter()
+                    .map(|e| e["id"].as_str().unwrap().parse::<Uuid>().unwrap()),
+            );
+            pages += 1;
+            match next {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(seen, made, "each channel once, in id order ({limit:?})");
+        assert_eq!(pages, 523usize.div_ceil(limit.unwrap_or(100)), "{limit:?}");
+    }
+}
+
+/// A full page under nested projects answers well inside the deadline:
+/// 100 private grandchildren, each read through two levels of parents.
+/// Mutation: make each answer wait 100ms → RED.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn a_full_page_under_nested_projects_answers_quickly() {
+    let state = live_state().await;
+    let tenant = community(&state, "access-cost").await;
+    let owner = Keys::generate();
+    let member = Keys::generate();
+    let private: &[&[&str]] = &[&["visibility", "private"]];
+    let project = create_channel(&state, &tenant, &owner, private).await;
+    add(&state, &tenant, &owner, project, &member, "member").await;
+    let mut grandchildren = Vec::new();
+    for _ in 0..10 {
+        let child = create_channel(&state, &tenant, &owner, private).await;
+        set_parent(&state, &tenant, &owner, child, Some(project))
+            .await
+            .expect("file the child");
+        for _ in 0..10 {
+            let grandchild = create_channel(&state, &tenant, &owner, private).await;
+            set_parent(&state, &tenant, &owner, grandchild, Some(child))
+                .await
+                .expect("file the grandchild");
+            grandchildren.push(grandchild);
+        }
+    }
+
+    let started = std::time::Instant::now();
+    let answers = ask(&state, &tenant, &member, &grandchildren).await;
+    let named = started.elapsed();
+    assert_eq!(answers.len(), 100);
+    assert!(answers
+        .iter()
+        .all(|a| a["post"] == true && a["role"] == "member"));
+
+    let started = std::time::Instant::now();
+    let (entries, next) = page(&state, &tenant, &member, json!({"access": "channels"})).await;
+    let listed = started.elapsed();
+    assert_eq!(entries.len(), 100, "a full page of the 111 reachable");
+    assert!(next.is_some());
+
+    let budget = Duration::from_secs(2);
+    assert!(named < budget, "named form took {named:?}");
+    assert!(listed < budget, "list form took {listed:?}");
+}
+
+/// Listen on `viewer`'s connection for the relay's per-viewer push, as a
+/// client's `{"kinds":[20005],"#p":[<self>]}` REQ does. With `p` false the
+/// filter names no `#p`, as a REQ the relay would refuse; fan-out must still
+/// deliver nothing that names someone else.
+fn subscribe_viewer(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    viewer: &Keys,
+    p: bool,
+) -> tokio::sync::mpsc::Receiver<Message> {
+    let (conn_id, rx) = subscribe(state, tenant, viewer, &[]);
+    let filter = if p {
+        json!({"kinds": [KIND_VIEWER_ACCESS_CHANGED], "#p": [viewer.public_key().to_hex()]})
+    } else {
+        json!({"kinds": [KIND_VIEWER_ACCESS_CHANGED]})
+    };
+    state.sub_registry.register_scoped(
+        tenant.community(),
+        conn_id,
+        "viewer".to_string(),
+        vec![serde_json::from_value(filter).expect("filter")],
+        None,
+    );
+    rx
+}
+
+/// The pubkeys named by relay-signed per-viewer pushes in `rx` within `wait`.
+async fn viewer_pushes(
+    state: &AppState,
+    rx: &mut tokio::sync::mpsc::Receiver<Message>,
+    wait: Duration,
+) -> Vec<String> {
+    let mut named = Vec::new();
+    let deadline = tokio::time::Instant::now() + wait;
+    while let Ok(Some(frame)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        let Message::Text(text) = frame else { continue };
+        let frame: Value = serde_json::from_str(&text).expect("frame");
+        if frame[0] != "EVENT" {
+            continue;
+        }
+        let event: nostr::Event = serde_json::from_value(frame[2].clone()).expect("event");
+        if event.kind != Kind::Custom(KIND_VIEWER_ACCESS_CHANGED as u16) {
+            continue;
+        }
+        assert_eq!(event.pubkey, state.relay_keypair.public_key());
+        assert!(event.content.is_empty());
+        event.verify().expect("valid signature");
+        let tags: Vec<Vec<String>> = event.tags.iter().map(|t| t.clone().to_vec()).collect();
+        assert_eq!(tags.len(), 1, "only the p tag: {tags:?}");
+        assert_eq!(tags[0][0], "p");
+        named.push(tags[0][1].clone());
+    }
+    named
+}
+
+/// Apply a moderation command signed by `actor` against `target`.
+async fn moderate(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    actor: &Keys,
+    kind: u32,
+    target: &Keys,
+    until: Option<i64>,
+) {
+    let mut tags = vec![Tag::public_key(target.public_key())];
+    if let Some(until) = until {
+        tags.push(Tag::parse(["expiration", &until.to_string()]).unwrap());
+    }
+    let event = EventBuilder::new(Kind::Custom(kind as u16), "")
+        .tags(tags)
+        .sign_with_keys(actor)
+        .unwrap();
+    crate::handlers::moderation_commands::handle_moderation_command(tenant, state, &event)
+        .await
+        .unwrap_or_else(|e| panic!("kind {kind} must apply: {e:?}"));
+}
+
+/// A timed-out person, and an agent they own, are told they may not post
+/// anywhere and until when, matching the post gate. The timeout and its
+/// lifting are each pushed to that person and their agent, and to no one
+/// else. A timeout that runs out lifts on time with no push.
+/// Mutation: leave the restriction out of `post`, drop `timed_out_until`,
+/// drop the push from 9042 or 9043, skip the owner's agents, or deliver the
+/// push without the p gate → RED.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn a_timeout_closes_posting_and_is_pushed_to_that_person_only() {
+    let f = Fixture::new(live_state().await, "access-timeout").await;
+    let (state, tenant) = (&f.state, &f.tenant);
+    let (member, agent, bystander) = (Keys::generate(), Keys::generate(), Keys::generate());
+    for (keys, role) in [
+        (&f.owner, "owner"),
+        (&member, "member"),
+        (&bystander, "member"),
+    ] {
+        state
+            .db
+            .add_relay_member(
+                tenant.community(),
+                &keys.public_key().to_hex(),
+                role,
+                None,
+                &Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("relay member");
+    }
+    for keys in [&member, &agent] {
+        state
+            .db
+            .ensure_user(tenant.community(), keys.public_key().as_bytes())
+            .await
+            .expect("user row");
+    }
+    assert!(state
+        .db
+        .set_agent_owner(
+            tenant.community(),
+            agent.public_key().as_bytes(),
+            member.public_key().as_bytes(),
+        )
+        .await
+        .expect("own the agent"));
+    for keys in [&member, &agent] {
+        add(state, tenant, &f.owner, f.project, keys, "member").await;
+    }
+    state
+        .pubsub
+        .retain_topic(tenant, buzz_pubsub::EventTopic::Global)
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut member_rx = subscribe_viewer(state, tenant, &member, true);
+    let mut agent_rx = subscribe_viewer(state, tenant, &agent, true);
+    let mut snoop_rx = subscribe_viewer(state, tenant, &bystander, false);
+    let channels = [f.project, f.child, f.conversation];
+    let open_to_post = |id| entry(id, true, id == f.project, "member");
+    for keys in [&member, &agent] {
+        assert_eq!(
+            ask(state, tenant, keys, &channels).await,
+            channels.map(open_to_post).to_vec()
+        );
+    }
+
+    let until = (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp();
+    moderate(
+        state,
+        tenant,
+        &f.owner,
+        buzz_core::kind::KIND_MODERATION_TIMEOUT,
+        &member,
+        Some(until),
+    )
+    .await;
+    let member_hex = member.public_key().to_hex();
+    let agent_hex = agent.public_key().to_hex();
+    assert_eq!(
+        viewer_pushes(state, &mut member_rx, Duration::from_secs(3)).await,
+        vec![member_hex.clone()]
+    );
+    assert_eq!(
+        viewer_pushes(state, &mut agent_rx, Duration::from_secs(1)).await,
+        vec![agent_hex.clone()]
+    );
+    assert!(
+        viewer_pushes(state, &mut snoop_rx, Duration::from_millis(500))
+            .await
+            .is_empty(),
+        "no one else learns of the timeout"
+    );
+    for keys in [&member, &agent] {
+        let closed: Vec<Value> = channels
+            .map(|id| {
+                let mut e = entry(id, false, id == f.project, "member");
+                e["timed_out_until"] = json!(until);
+                e
+            })
+            .to_vec();
+        assert_eq!(ask(state, tenant, keys, &channels).await, closed);
+        assert!(post(state, tenant, keys, f.child).await.is_err());
+    }
+
+    moderate(
+        state,
+        tenant,
+        &f.owner,
+        buzz_core::kind::KIND_MODERATION_UNTIMEOUT,
+        &member,
+        None,
+    )
+    .await;
+    assert_eq!(
+        viewer_pushes(state, &mut member_rx, Duration::from_secs(3)).await,
+        vec![member_hex]
+    );
+    assert_eq!(
+        viewer_pushes(state, &mut agent_rx, Duration::from_secs(1)).await,
+        vec![agent_hex]
+    );
+    assert!(
+        viewer_pushes(state, &mut snoop_rx, Duration::from_millis(500))
+            .await
+            .is_empty()
+    );
+    for keys in [&member, &agent] {
+        assert_eq!(
+            ask(state, tenant, keys, &channels).await,
+            channels.map(open_to_post).to_vec()
+        );
+        assert!(post(state, tenant, keys, f.child).await.is_ok());
+    }
+
+    // A short timeout lifts on its own, and the answer follows the clock.
+    let soon = chrono::Utc::now().timestamp() + 3;
+    moderate(
+        state,
+        tenant,
+        &f.owner,
+        buzz_core::kind::KIND_MODERATION_TIMEOUT,
+        &member,
+        Some(soon),
+    )
+    .await;
+    let entry = ask_one(state, tenant, &member, f.child).await.unwrap();
+    assert_eq!(
+        (entry["post"].clone(), entry["timed_out_until"].clone()),
+        (json!(false), json!(soon))
+    );
+    tokio::time::sleep(Duration::from_millis(
+        u64::try_from(soon * 1000 - chrono::Utc::now().timestamp_millis()).unwrap_or(0) + 500,
+    ))
+    .await;
+    assert_eq!(
+        ask_one(state, tenant, &member, f.child).await,
+        Some(open_to_post(f.child))
+    );
+    assert!(post(state, tenant, &member, f.child).await.is_ok());
 }

@@ -65,6 +65,7 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **Presence (kind:20001)** | ✅ | Ephemeral; arbitrary status string (truncated to 128 chars); writes to Redis (`set_presence`/`clear_presence` on `"offline"`), then fan-out to local subscribers. In multi-community mode presence is scoped to the connected community. |
 | **Agent presence (kind:20003)** | ✅ | Ephemeral; an owner's presence for the agents it owns, named by `p` tags (at most 256); `online`/`away` set and `offline` clears each agent's presence as its own kind:20001 would. Not fanned out. |
 | **Channel access changed (kind:20004)** | ✅ | Ephemeral, relay-signed and relay-only: tells a channel's live subscribers to ask again what they may do there (see [Channel access](#channel-access)). A client may not send it. |
+| **Viewer access changed (kind:20005)** | ✅ | Ephemeral, relay-signed, relay-only and `#p`-gated: tells one pubkey, when its community timeout starts or is lifted, to ask again what it may do in every channel (see [Channel access](#channel-access)). A client may not send it. |
 | **Typing indicators (kind:20002)** | ✅ | Ephemeral, not stored; published via Redis pub/sub (multi-node capable unlike presence fan-out) |
 | **NIP-42 authentication** | ✅ | Proactive challenge; optional pubkey allowlist |
 | **NIP-11 relay info** | ✅ | `GET /` with `Accept: application/nostr+json` |
@@ -318,27 +319,35 @@ channels the signer has not joined all get the same answer.
   `[{"access":"channels","ids":[<channel id>, ...]}]`: 1 to 100 distinct
   lowercase channel IDs. The NIP-98 proof must carry a `payload` tag. Any
   other shape is refused with 400.
-- **Listing.** Without `ids`, `[{"access":"channels"}]` answers for every
-  channel the signer can reach, ordered by channel ID: the channels they
+- **Listing.** Without `ids`, `[{"access":"channels"}]` lists the
+  channels the signer can reach, ordered by channel ID: the channels they
   joined, listed open channels, and the children and grandchildren of
   both that the parents' grants reach. These are the channels a read that
   names no channel covers, so conversations and unlisted channels stay
-  out. Past 500 such channels the request is refused with 400, and the
-  client names channels instead.
-- **Answer.** A JSON array with one entry per readable channel, in request
-  order:
-  `{"id":<channel id>,"read":true,"post":<bool>,"joined":<bool>,"role":<role>}`.
+  out. It is paged: optional `"limit"` (1 to 100, default 100) and
+  `"after":<channel id>`, and no other keys. The answer is
+  `{"channels":[<entry>, ...],"next":<channel id or null>}`. A page looks
+  at up to `limit` candidates after `after` and leaves out the ones the
+  signer cannot read, so it can hold fewer than `limit` and still have a
+  `next`. To read the next page, send `next` as `after`; `null` means
+  there are no more. Walking every page lists each channel once.
+- **Answer.** For `ids`, a JSON array with one entry per readable channel,
+  in request order:
+  `{"id":<channel id>,"read":true,"post":<bool>,"joined":<bool>,"role":<role>,"archived":<bool>}`.
   `joined` is whether the signer has a member row. `role` is the one they
   act with: their row's (`owner`, `admin`, `member` or `guest`; a bot acts
   as `member`), else an open channel's `join_role`, else what the parents
-  give, capped at `member`. `post` is whether a kind:9 from them would pass
-  the post gates now: false for a `guest` role, an archived channel, or a
-  conversation whose home is archived. A channel left out cannot be read:
+  give, capped at `member`. `archived` is whether the channel itself is
+  archived. `post` is whether a kind:9 from them would be accepted now:
+  false for a `guest` role, an archived channel, a conversation whose home
+  is archived, and a community ban or timeout of the signer or of the
+  agent's owner, by the same check the post itself meets. While the signer
+  is timed out, every entry also carries `"timed_out_until":<unix
+  seconds>`; ask again then. A channel left out cannot be read:
   it is private to them, deleted or missing. If any channel cannot be
   answered, the whole request fails with 503 and is retried; a channel is
   only ever left out of a complete answer. The answer is a snapshot, and
-  every post is still checked when it arrives: `post` does not reflect a
-  community ban or timeout, which refuse the post itself.
+  every post is still checked when it arrives.
 - **Ask again.** After a committed change to who may read or post in a
   channel, the relay sends an ephemeral kind:20004, signed by the relay,
   with empty content and only `["h", <channel id>]`, to that channel and to
@@ -352,6 +361,13 @@ channels the signer has not joined all get the same answer.
   huddle's auto-archive or auto-join. It carries no answer: ask again. It
   is best effort, so a client also asks again when it reconnects and when
   a post is refused.
+- **Ask again everywhere.** When a community timeout of a pubkey starts or
+  is lifted, the relay sends an ephemeral kind:20005, signed by the relay,
+  with empty content and only `["p", <pubkey>]`, to that pubkey and to each
+  agent it owns. Subscribe with `{"kinds":[20005],"#p":[<own pubkey>]}`;
+  the kind is `#p`-gated, so it reaches no one else. It carries no answer:
+  ask again about every channel. A timeout that runs out sends nothing;
+  `timed_out_until` says when to ask.
 - Relays that support this advertise `buzz-channel-access` in NIP-11
   `supported_extensions`. Without it, a client cannot learn whether it may
   post in a channel it has not joined.
