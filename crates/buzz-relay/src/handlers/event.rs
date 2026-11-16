@@ -379,12 +379,26 @@ pub(crate) async fn fan_out_event_to_local_subscribers(
 
 /// Fan out one event received from Redis pub/sub to this relay's local subscribers.
 #[tracing::instrument(skip_all)]
-pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pubsub::ChannelEvent) {
+pub async fn fan_out_pubsub_event(
+    state: &Arc<AppState>,
+    channel_event: buzz_pubsub::ChannelEvent,
+) -> PubsubDelivery {
     if take_local_echo(state, &channel_event) {
-        return;
+        return PubsubDelivery::Complete;
     }
     let community_id = channel_event.community_id;
-    deliver_pubsub_event(state, community_id, &pubsub_stored_event(channel_event)).await;
+    deliver_pubsub_event(state, community_id, &pubsub_stored_event(channel_event)).await
+}
+
+/// How far one Redis event got through this relay's local subscribers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PubsubDelivery {
+    /// Matched against every local subscription.
+    Complete,
+    /// A reaction whose derived recipients could not be read: only the
+    /// subscriptions its own tags match were considered, so a `#p`
+    /// subscriber of the derived recipient missed it.
+    RecipientsUnread,
 }
 
 /// Report whether `channel_event` is the Redis echo of an event this relay
@@ -423,57 +437,57 @@ pub(crate) fn pubsub_stored_event(channel_event: buzz_pubsub::ChannelEvent) -> S
 /// The recipients a reaction from Redis is indexed under, so that `#p`
 /// subscriptions match it as they do on the node that accepted it. Redis
 /// carries only the event, so the derived recipient is read back from the
-/// database. A failed read leaves the reaction matching its `p` tags only.
+/// database. `Ok(None)` for an event that is not a reaction.
 async fn pubsub_reaction_recipients(
     state: &AppState,
     community_id: CommunityId,
     stored: &StoredEvent,
-) -> Option<Vec<String>> {
+) -> buzz_db::Result<Option<Vec<String>>> {
     if stored.event.kind != nostr::Kind::Reaction {
-        return None;
+        return Ok(None);
     }
-    match state
+    state
         .db
         .get_reaction_recipients(community_id, stored.event.id.as_bytes())
         .await
-    {
-        Ok(recipients) => Some(recipients),
+        .map(Some)
+}
+
+/// Deliver one Redis event that is not a local echo to this relay's local
+/// subscribers, through the access gate. A reaction whose derived recipients
+/// cannot be read still reaches the subscriptions its own tags match, and
+/// the caller is told the rest missed it.
+pub(crate) async fn deliver_pubsub_event(
+    state: &Arc<AppState>,
+    community_id: CommunityId,
+    stored: &StoredEvent,
+) -> PubsubDelivery {
+    let with_recipients;
+    let (stored, delivery) = match pubsub_reaction_recipients(state, community_id, stored).await {
+        Ok(Some(recipients)) => {
+            with_recipients = stored.clone().with_derived_recipients(recipients);
+            (&with_recipients, PubsubDelivery::Complete)
+        }
+        Ok(None) => (stored, PubsubDelivery::Complete),
         Err(error) => {
             tracing::warn!(
                 event_id = %stored.event.id.to_hex(),
                 "multi-node fan-out: reaction recipient read failed: {error}"
             );
-            None
+            (stored, PubsubDelivery::RecipientsUnread)
         }
-    }
-}
-
-/// Deliver one Redis event that is not a local echo to this relay's local
-/// subscribers, through the access gate.
-pub(crate) async fn deliver_pubsub_event(
-    state: &Arc<AppState>,
-    community_id: CommunityId,
-    stored: &StoredEvent,
-) {
-    let with_recipients;
-    let stored = match pubsub_reaction_recipients(state, community_id, stored).await {
-        Some(recipients) => {
-            with_recipients = stored.clone().with_derived_recipients(recipients);
-            &with_recipients
-        }
-        None => stored,
     };
     let matches = state.sub_registry.fan_out_scoped(community_id, stored);
     let matches = route_fanout_matches(state, community_id, stored, matches, None).await;
     metrics::counter!("buzz_multinode_fanout_total").increment(1);
     if matches.is_empty() {
-        return;
+        return delivery;
     }
     let event_json = match serde_json::to_string(&stored.event) {
         Ok(json) => json,
         Err(e) => {
             tracing::error!("Failed to serialize event for multi-node fan-out: {e}");
-            return;
+            return delivery;
         }
     };
     let frames = fanout_frame_cache(
@@ -494,6 +508,7 @@ pub(crate) async fn deliver_pubsub_event(
             "multi-node fan-out: {drop_count} connection(s) dropped"
         );
     }
+    delivery
 }
 
 /// Schedule post-commit delivery/side effects for a stored event.
