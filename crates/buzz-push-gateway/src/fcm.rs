@@ -186,7 +186,9 @@ impl TokenSource {
         let due = {
             let state = self.state.lock().await;
             let now = (self.now)();
-            state.token.as_ref().is_none_or(|t| t.refresh_at <= now)
+            // A request that just failed (for example a waiting caller's,
+            // while this task queued on `fetch`) starts the backoff.
+            !state.recently_failed() && state.token.as_ref().is_none_or(|t| t.refresh_at <= now)
         };
         if due {
             // A failure keeps the cached token and is recorded in
@@ -748,6 +750,56 @@ mod tests {
             }
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn queued_background_refresh_honors_foreground_failure_backoff() {
+        use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+        static CLOCK: AtomicI64 = AtomicI64::new(NOW);
+        fn clock() -> i64 {
+            CLOCK.load(Ordering::SeqCst)
+        }
+        let requests = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route(
+                "/token",
+                post(|State(requests): State<Arc<AtomicUsize>>| async move {
+                    if requests.fetch_add(1, Ordering::SeqCst) == 0 {
+                        (
+                            Status::OK,
+                            r#"{"access_token":"access-1","expires_in":3600}"#,
+                        )
+                    } else {
+                        (Status::SERVICE_UNAVAILABLE, "{}")
+                    }
+                }),
+            )
+            .with_state(requests.clone());
+        let (transport, server) = serve(app, clock).await;
+        assert_eq!(
+            transport.tokens.access_token().await.ok().unwrap(),
+            "access-1"
+        );
+        CLOCK.store(NOW + 3540, Ordering::SeqCst);
+        // These ready operations run before the spawned background task is polled.
+        assert_eq!(
+            transport.tokens.access_token().await.ok().unwrap(),
+            "access-1"
+        );
+        transport.tokens.discard("access-1").await;
+        // The foreground request acquires fetch first; the background task queues.
+        assert!(matches!(
+            transport.tokens.access_token().await,
+            Err(TokenFault::Unavailable)
+        ));
+        // Wait for the queued background task to finish.
+        drop(transport.tokens.fetch.lock().await);
+        let observed = requests.load(Ordering::SeqCst);
+        server.abort();
+        assert_eq!(
+            observed, 2,
+            "queued background refresh must respect the just-recorded failure"
+        );
     }
 
     #[tokio::test]
