@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:buzz/shared/push/push_wake_resolver.dart';
 
 import 'package:buzz/shared/push/push_wake_runner.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../helpers/push_wake_fixture.dart';
@@ -207,6 +209,46 @@ void main() {
       final next = await fixture.wake(timeouts: timeouts);
       expect(next.incomplete, isFalse);
       expect(next.notifications.map((n) => n.eventId), [slowMessage.id]);
+
+      // A relay that answers with more than a wake will buffer, inflate or
+      // verify costs only its own community, and its messages are still
+      // there once it behaves.
+      final hostile = fixture.addCommunity();
+      final hostileMessage = hostile.message(
+        hostile.dmChannel(),
+        hostile.person('Friend'),
+        'hostile',
+      );
+      final signed = jsonEncode(hostileMessage.toJson());
+      final hostileAnswers = <String, http.Response Function()>{
+        // Tiny on the wire, huge once inflated.
+        'a gzip bomb': () => http.Response.bytes(
+          gzip.encode(utf8.encode('[${' ' * (pushWakeMaxResponseBytes + 1)}]')),
+          200,
+          headers: {'content-type': 'application/json'},
+        ),
+        'an oversized body': () => http.Response(
+          '[${' ' * (pushWakeMaxResponseBytes + 1)}]',
+          200,
+          headers: {'content-type': 'application/json'},
+        ),
+        'more events than asked for': () => http.Response(
+          '[${List.filled(1000, signed).join(',')}]',
+          200,
+          headers: {'content-type': 'application/json'},
+        ),
+      };
+      for (final MapEntry(:key, :value) in hostileAnswers.entries) {
+        hostile.hostileResponse = value;
+        final attempt = await fixture.wake(timeouts: timeouts);
+        expect(attempt.failedCommunityIds, [hostile.communityId], reason: key);
+        expect(attempt.notifications, isEmpty, reason: key);
+      }
+      hostile.hostileResponse = null;
+      final recovered = await fixture.wake(timeouts: timeouts);
+      expect(recovered.notifications.map((n) => n.eventId), [
+        hostileMessage.id,
+      ]);
     });
 
     test('with nothing found say so, so the caller can fall back', () async {
@@ -219,9 +261,11 @@ void main() {
       expect(result.incomplete, isTrue);
     });
 
-    test('the whole wake stops at its total budget', () async {
+    test('the whole wake stops at its total budget, claims included', () async {
       final relay = fixture.addCommunity()..silent = true;
-      relay.message(relay.dmChannel(), relay.person('Friend'), 'hi');
+      final first = relay
+          .message(relay.dmChannel(), relay.person('Friend'), 'hi')
+          .id;
       const patient = PushWakeTimeouts(
         request: Duration(seconds: 30),
         total: Duration(milliseconds: 300),
@@ -232,6 +276,47 @@ void main() {
 
       expect(watch.elapsed, lessThan(const Duration(seconds: 2)));
       expect(result.failedCommunityIds, [relay.communityId]);
+
+      // Slow storage and a slow name lookup spend the budget too. Messages
+      // not yet claimed stay unclaimed for the next wake, and those already
+      // claimed are returned, not lost.
+      relay.silent = false;
+      final friend = relay.person('Friend');
+      final sent = [
+        first,
+        for (var i = 0; i < 3; i++)
+          for (final channel in [relay.dmChannel()])
+            for (var j = 0; j < 6; j++)
+              relay.message(channel, friend, 'message $i $j').id,
+      ];
+      const tight = PushWakeTimeouts(
+        request: Duration(seconds: 30),
+        metadata: Duration(seconds: 30),
+        total: Duration(milliseconds: 700),
+      );
+      final slowStore = SlowShownMessageStore(
+        fixture.openStore(),
+        const Duration(milliseconds: 100),
+      );
+      final stopped = Stopwatch()..start();
+      final partial = await fixture.wake(store: slowStore, timeouts: tight);
+      expect(stopped.elapsed, lessThan(const Duration(seconds: 2)));
+      expect(partial.incomplete, isTrue);
+      expect(partial.notifications, isNotEmpty);
+      expect(partial.notifications.length, lessThan(sent.length));
+      final rest = await fixture.wake();
+      expect(rest.incomplete, isFalse);
+      expect(
+        [...partial.notifications, ...rest.notifications].map((n) => n.eventId),
+        unorderedEquals(sent),
+      );
+
+      relay.slowProfiles = const Duration(seconds: 30);
+      final late = relay.message(relay.dmChannel(), friend, 'late names');
+      final lookup = Stopwatch()..start();
+      final unnamed = await fixture.wake(timeouts: tight);
+      expect(lookup.elapsed, lessThan(const Duration(seconds: 2)));
+      expect(unnamed.notifications.map((n) => n.eventId), [late.id]);
     });
   });
 

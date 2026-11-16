@@ -88,6 +88,13 @@ class FakePushRelay {
   /// Refuses connections.
   bool unreachable = false;
 
+  /// Answers every query with this body instead of the stored events, as a
+  /// hostile relay would.
+  http.Response Function()? hostileResponse;
+
+  /// Delays answers to queries for profiles, as a slow metadata lookup.
+  Duration? slowProfiles;
+
   String get host => 'relay-$index.example.org';
   String get communityId => 'community-$index';
 
@@ -203,6 +210,12 @@ class FakePushRelay {
     queries.add(filters);
     if (silent) await Completer<void>().future;
     await hold?.future;
+    final hostile = hostileResponse;
+    if (hostile != null) return hostile();
+    if (slowProfiles != null &&
+        filters.any((f) => (f['kinds'] as List?)?.contains(0) ?? false)) {
+      await Future<void>.delayed(slowProfiles!);
+    }
     final result = <String, NostrEvent>{};
     for (final filter in filters) {
       final matches = events.where((e) => _matches(filter, e)).toList()
@@ -243,5 +256,27 @@ class FakePushRelay {
       }
     }
     return true;
+  }
+}
+
+/// A store whose claims take [delay], as slow storage would.
+class SlowShownMessageStore implements ShownMessageStore {
+  SlowShownMessageStore(this._inner, this.delay);
+
+  final ShownMessageStore _inner;
+  final Duration delay;
+
+  @override
+  Future<DateTime?> newestShown(String community) =>
+      _inner.newestShown(community);
+
+  @override
+  Future<bool> claim(
+    String community,
+    String eventId,
+    DateTime createdAt,
+  ) async {
+    await Future<void>.delayed(delay);
+    return _inner.claim(community, eventId, createdAt);
   }
 }
