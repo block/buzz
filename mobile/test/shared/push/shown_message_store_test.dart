@@ -52,5 +52,27 @@ void main() {
     expect(await claim(2, const Duration(minutes: 1)), isTrue);
     // The first marker is now older than the window and has been deleted.
     expect(await claim(1, const Duration(minutes: 20)), isFalse);
+
+    // A message dated in the future is kept as long as the fetch window can
+    // still return it, not only as long as the present it was capped to.
+    expect(await claim(6, const Duration(minutes: -10)), isTrue);
+    final later = now.add(const Duration(minutes: 20));
+    final afterwards = DirectoryShownMessageStore(directory, now: () => later);
+    expect(
+      await afterwards.claim(
+        'community',
+        _id(7),
+        later.subtract(const Duration(minutes: 1)),
+      ),
+      isTrue,
+    );
+    expect(
+      await afterwards.claim(
+        'community',
+        _id(6),
+        now.add(const Duration(minutes: 10)),
+      ),
+      isFalse,
+    );
   });
 }

@@ -36,11 +36,16 @@ abstract interface class ShownMessageStore {
 ///
 /// Creating a file exclusively is atomic across isolates and processes, with
 /// no lock to take, so [claim] needs nothing else. The marker's name carries
-/// the message's time, so [newestShown] needs no second file whose concurrent
-/// read-modify-write could move it backwards.
+/// two times, so [newestShown] needs no second file whose concurrent
+/// read-modify-write could move it backwards: the watermark, which is the
+/// message's time capped at the present and moves the fetch cursor, and the
+/// message's own time, which decides how long the marker is kept.
 ///
-/// Markers older than the reorder window before the newest one can never be
-/// claimed again, so they are deleted.
+/// Markers whose message is older than the reorder window before the newest
+/// watermark can never be claimed again, so they are deleted. Retention
+/// follows the message's own time, not the capped watermark: a future-dated
+/// message still matches the fetch window after its watermark has aged out, so
+/// its marker must outlive that.
 class DirectoryShownMessageStore implements ShownMessageStore {
   DirectoryShownMessageStore(this._root, {DateTime Function()? now})
     : _now = now ?? DateTime.now;
@@ -60,9 +65,14 @@ class DirectoryShownMessageStore implements ShownMessageStore {
     return seconds < now ? seconds : now;
   }
 
-  static final _marker = RegExp(r'^([0-9]{12})-([0-9a-f]{64})$');
+  static const _maxMarkerSeconds = 999999999999;
 
-  Future<List<({int watermark, File file})>> _markers(
+  static String _digits(int seconds) =>
+      seconds.clamp(0, _maxMarkerSeconds).toString().padLeft(12, '0');
+
+  static final _marker = RegExp(r'^([0-9]{12})-([0-9]{12})-([0-9a-f]{64})$');
+
+  Future<List<({int watermark, int created, File file})>> _markers(
     Directory directory,
   ) async {
     if (!await directory.exists()) return const [];
@@ -70,7 +80,11 @@ class DirectoryShownMessageStore implements ShownMessageStore {
       await for (final entry in directory.list())
         if (entry is File)
           if (_marker.firstMatch(entry.uri.pathSegments.last) case final match?)
-            (watermark: int.parse(match.group(1)!), file: entry),
+            (
+              watermark: int.parse(match.group(1)!),
+              created: int.parse(match.group(2)!),
+              file: entry,
+            ),
     ];
   }
 
@@ -94,6 +108,10 @@ class DirectoryShownMessageStore implements ShownMessageStore {
     final directory = _directory(community);
     await directory.create(recursive: true);
     final watermark = _watermark(createdAt);
+    final created = (createdAt.millisecondsSinceEpoch ~/ 1000).clamp(
+      0,
+      _maxMarkerSeconds,
+    );
     // An existing marker for this message may carry another watermark if the
     // clock moved, so look for it by id.
     final markers = await _markers(directory);
@@ -101,7 +119,7 @@ class DirectoryShownMessageStore implements ShownMessageStore {
       return false;
     }
     final file = File(
-      '${directory.path}/${watermark.toString().padLeft(12, '0')}-$eventId',
+      '${directory.path}/${_digits(watermark)}-${_digits(created)}-$eventId',
     );
     try {
       await file.create(exclusive: true);
@@ -117,7 +135,7 @@ class DirectoryShownMessageStore implements ShownMessageStore {
     final newest = all.map((m) => m.watermark).reduce(_max);
     final cutoff = newest - shownMessageReorderWindow.inSeconds;
     for (final marker in all) {
-      if (marker.watermark < cutoff) {
+      if (marker.created < cutoff) {
         try {
           await marker.file.delete();
         } on PathNotFoundException {
@@ -125,7 +143,7 @@ class DirectoryShownMessageStore implements ShownMessageStore {
         }
       }
     }
-    return watermark >= cutoff;
+    return created >= cutoff;
   }
 }
 
