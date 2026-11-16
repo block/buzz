@@ -207,29 +207,19 @@ class AddChannelMembersSheet extends HookConsumerWidget {
       submitError.value = null;
     }
 
-    // Agents join a DM with its history, as on desktop; adding a person asks.
-    // Only an agent with a verified owner counts: the relay treats anyone
-    // else as a person, so a directory listing alone still asks.
-    // The relay joins anyone to this DM only with the history tag. A DM of at
-    // most one person and their agents never gains a person: adding one
-    // starts a new DM without asking.
+    // The relay decides who is an agent: an add first asks it, and only a
+    // person joining a DM of two or more people needs the history choice.
     Future<bool?> askIncludeHistory(List<MentionCandidate> users) async {
-      if (users.every((user) => user.isAgent && user.ownerPubkey != null)) {
-        return true;
+      try {
+        return await showDmHistoryChoice(
+          context: context,
+          title: users.length == 1
+              ? 'Add ${labelFor(users.single)}?'
+              : 'Add ${users.length} members?',
+        );
+      } finally {
+        if (context.mounted) resync.value++;
       }
-      // Nothing is asked in a DM of one person and their agents: the relay
-      // adds an agent to it and starts a new DM for a person, whatever this
-      // side thinks they are.
-      final people = existingPubkeys
-          .where((pubkey) => userCache[pubkey]?.isAgent != true)
-          .length;
-      if (people < 2) return true;
-      return showDmHistoryChoice(
-        context: context,
-        title: users.length == 1
-            ? 'Add ${labelFor(users.single)}?'
-            : 'Add ${users.length} members?',
-      );
     }
 
     Future<void> addSelectedMembers() async {
@@ -246,22 +236,28 @@ class AddChannelMembersSheet extends HookConsumerWidget {
           onAddedToDm?.call(dm);
           return;
         }
-        final bool? includeHistory;
-        try {
-          includeHistory = isDm
-              ? await askIncludeHistory(submittedUsers)
-              : null;
-        } finally {
-          if (context.mounted) resync.value++;
-        }
-        if (isDm && (includeHistory == null || !context.mounted)) return;
         isSubmitting.value = true;
-        if (includeHistory != null) {
-          final dm = await actions.addToDm(
-            channelId: channelId,
-            pubkeys: submittedUsers.map((user) => user.pubkey).toList(),
-            includeHistory: includeHistory,
-          );
+        if (isDm) {
+          final pubkeys = submittedUsers.map((user) => user.pubkey).toList();
+          Channel dm;
+          try {
+            dm = await actions.addToDm(
+              channelId: channelId,
+              pubkeys: pubkeys,
+              history: DmHistory.ask,
+            );
+          } on DmNeedsHistoryChoice {
+            if (!context.mounted) return;
+            isSubmitting.value = false;
+            final includeHistory = await askIncludeHistory(submittedUsers);
+            if (includeHistory == null || !context.mounted) return;
+            isSubmitting.value = true;
+            dm = await actions.addToDm(
+              channelId: channelId,
+              pubkeys: pubkeys,
+              history: includeHistory ? DmHistory.include : DmHistory.startNew,
+            );
+          }
           if (!context.mounted) return;
           Navigator.of(context).pop(true);
           onAddedToDm?.call(dm);

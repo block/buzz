@@ -242,15 +242,17 @@ class ChannelActions {
   }
 
   /// Adds [pubkeys] to the DM [channelId] (kind:41011) and returns the DM
-  /// they ended up in. With [includeHistory] they join this DM and can read
+  /// they ended up in. With [DmHistory.include] they join this DM and can read
   /// it, unless the grown group already has a DM, which is returned instead.
-  /// Without it, or when a person joins a DM of at most one person, they
-  /// start a new DM of its people and them. When that other DM cannot be
-  /// confirmed yet, throws [DmAddUnconfirmed] with its id.
+  /// With [DmHistory.startNew], or when a person joins a DM of at most one
+  /// person, they start a new DM of its people and them. [DmHistory.ask]
+  /// throws [DmNeedsHistoryChoice] when a person would join a DM of two or
+  /// more people. When that other DM cannot be confirmed yet, throws
+  /// [DmAddUnconfirmed] with its id.
   Future<Channel> addToDm({
     required String channelId,
     required List<String> pubkeys,
-    required bool includeHistory,
+    required DmHistory history,
   }) async {
     _ensureCommunityValid();
     final NostrEvent result;
@@ -261,14 +263,25 @@ class ChannelActions {
         tags: [
           ['h', channelId],
           for (final pubkey in pubkeys) ['p', pubkey],
-          if (includeHistory) ['history', 'include'],
+          if (history != DmHistory.startNew)
+            ['history', history == DmHistory.ask ? 'ask' : 'include'],
         ],
       );
     } on StateError {
       rethrow;
-    } catch (_) {
-      // Retrying cannot help the most common refusal, a DM that is full.
-      throw Exception(dmAdditionFailedMessage);
+    } catch (error) {
+      final reason = _relayErrorMessage(error);
+      // A relay from before "ask" refuses it by name; it needs the choice too.
+      if (history == DmHistory.ask &&
+          (reason == 'needs-choice: history' ||
+              reason == 'invalid: history must be "include", got "ask"')) {
+        throw const DmNeedsHistoryChoice();
+      }
+      throw Exception(
+        reason.contains('at most 9 people')
+            ? dmAdditionFailedMessage
+            : 'Couldn’t add them. Try again.',
+      );
     }
     _ensureCommunityValid();
     final id = parseCommandResponse(result.content)?['channel_id'] as String?;

@@ -49,14 +49,16 @@ class _Actions extends Fake implements ChannelActions {
     if (failBob) throw AddMembersException({_bob: 'Try again'});
   }
 
-  final dmCalls = <bool>[];
+  final dmCalls = <DmHistory>[];
   @override
   Future<Channel> addToDm({
     required String channelId,
     required List<String> pubkeys,
-    required bool includeHistory,
+    required DmHistory history,
   }) async {
-    dmCalls.add(includeHistory);
+    dmCalls.add(history);
+    // A person joining a DM of two people needs the history choice.
+    if (history == DmHistory.ask) throw const DmNeedsHistoryChoice();
     return Channel(
       id: channelId,
       name: channelId,
@@ -398,9 +400,9 @@ void main() {
           expect(states.last['selected'] as List, hasLength(1));
         }
         expect(states.last['error'], isNotNull);
-        expect(actions.dmCalls, isEmpty);
+        expect(actions.dmCalls, [DmHistory.ask, DmHistory.ask]);
         await _event(tester, session, 'submit');
-        expect(actions.dmCalls, [true]);
+        expect(actions.dmCalls.last, DmHistory.include);
         expect(methods.last, 'dismiss');
       } finally {
         await tester.pumpWidget(const SizedBox());
