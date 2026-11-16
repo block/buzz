@@ -46,9 +46,11 @@ class _MentionSuggestions extends StatelessWidget {
     return Material(
       key: const ValueKey('mention-suggestions-popover'),
       type: MaterialType.card,
-      color: appPopoverColor(context),
+      color: _ComposerGlassScope.of(context)
+          ? Colors.transparent
+          : appPopoverColor(context),
       surfaceTintColor: Colors.transparent,
-      elevation: appPopoverElevation,
+      elevation: _ComposerGlassScope.of(context) ? 0 : appPopoverElevation,
       shadowColor: appPopoverShadowColor(context),
       shape: appPopoverShape(context),
       clipBehavior: Clip.hardEdge,
@@ -254,9 +256,11 @@ class _ChannelSuggestions extends StatelessWidget {
     return Material(
       key: const ValueKey('channel-suggestions-popover'),
       type: MaterialType.card,
-      color: appPopoverColor(context),
+      color: _ComposerGlassScope.of(context)
+          ? Colors.transparent
+          : appPopoverColor(context),
       surfaceTintColor: Colors.transparent,
-      elevation: appPopoverElevation,
+      elevation: _ComposerGlassScope.of(context) ? 0 : appPopoverElevation,
       shadowColor: appPopoverShadowColor(context),
       shape: appPopoverShape(context),
       clipBehavior: Clip.hardEdge,

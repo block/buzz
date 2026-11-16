@@ -11,6 +11,9 @@ import '../theme/theme.dart';
 
 /// The navigation glyph displayed by [IosGlassNavigationButton].
 enum IosGlassNavigationIcon {
+  plus,
+  send,
+  microphone,
   back,
   close,
   check,
@@ -56,9 +59,11 @@ class IosGlassNavigationButton extends HookWidget {
     this.width = 48,
     this.height = 48,
     this.controlSize = 40,
+    this.iconSize = 24,
     this.fillWidth = false,
     this.buttonCenterX,
     this.foregroundColor,
+    this.backgroundColor,
     this.swatchColor,
     this.isBusy = false,
     this.isSelected = false,
@@ -90,6 +95,9 @@ class IosGlassNavigationButton extends HookWidget {
   /// Diameter of the visual glass control inside its hit target.
   final double controlSize;
 
+  /// Size of the glyph inside the visual control.
+  final double iconSize;
+
   /// Whether the native visual control fills the available width.
   final bool fillWidth;
 
@@ -98,6 +106,9 @@ class IosGlassNavigationButton extends HookWidget {
 
   /// Optional foreground tint for the native control and Flutter fallback.
   final Color? foregroundColor;
+
+  /// Optional solid fill instead of the default glass surface.
+  final Color? backgroundColor;
 
   /// Optional inset color swatch used by [IosGlassNavigationIcon.colorSwatch].
   final Color? swatchColor;
@@ -125,6 +136,7 @@ class IosGlassNavigationButton extends HookWidget {
     final onPressedRef = useRef(onPressed)..value = onPressed;
     final brightness = context.theme.brightness.name;
     final effectiveForeground = foregroundColor ?? context.colors.primary;
+    final backgroundValue = backgroundColor?.toARGB32();
     final foregroundValue = effectiveForeground.toARGB32();
     final swatchColorValue = swatchColor?.toARGB32();
     final enabled = onPressed != null;
@@ -151,6 +163,7 @@ class IosGlassNavigationButton extends HookWidget {
             channel.invokeMethod<void>('setAppearance', <String, Object>{
               'brightness': brightness,
               'foregroundColor': foregroundValue,
+              'backgroundColor': backgroundValue ?? 0,
               'enabled': enabled,
               'busy': isBusy,
               'selected': isSelected,
@@ -165,6 +178,7 @@ class IosGlassNavigationButton extends HookWidget {
         nativeChannel.value,
         brightness,
         foregroundValue,
+        backgroundValue,
         enabled,
         isBusy,
         isSelected,
@@ -178,13 +192,14 @@ class IosGlassNavigationButton extends HookWidget {
       if (channel != null) {
         final content = <String, Object>{
           'icon': icon.name,
+          'iconSize': iconSize,
           'accessibilityLabel': semanticLabel,
         };
         if (label != null) content['label'] = label!;
         unawaited(channel.invokeMethod<void>('setContent', content));
       }
       return null;
-    }, [nativeChannel.value, icon, label, semanticLabel]);
+    }, [nativeChannel.value, icon, iconSize, label, semanticLabel]);
 
     Widget buildControl({required bool suppressNativeView}) {
       if (suppressNativeView) {
@@ -207,7 +222,9 @@ class IosGlassNavigationButton extends HookWidget {
                   height: controlSize,
                   child: DecoratedBox(
                     decoration: BoxDecoration(
-                      color: context.colors.surface.withValues(alpha: 0.72),
+                      color:
+                          backgroundColor ??
+                          context.colors.surface.withValues(alpha: 0.72),
                       shape: BoxShape.circle,
                       border: Border.all(
                         color: context.colors.inverseSurface.withValues(
@@ -246,6 +263,10 @@ class IosGlassNavigationButton extends HookWidget {
                           )
                         : Icon(
                             switch (icon) {
+                              IosGlassNavigationIcon.plus => BuzzIcons.plus,
+                              IosGlassNavigationIcon.send => BuzzIcons.arrowUp,
+                              IosGlassNavigationIcon.microphone =>
+                                BuzzIcons.mic,
                               IosGlassNavigationIcon.more => BuzzIcons.ellipsis,
                               IosGlassNavigationIcon.bell => BuzzIcons.bell,
                               IosGlassNavigationIcon.trash => BuzzIcons.trash2,
@@ -278,7 +299,7 @@ class IosGlassNavigationButton extends HookWidget {
                             },
                             size: icon == IosGlassNavigationIcon.shutter
                                 ? controlSize * 0.72
-                                : 24,
+                                : iconSize,
                             color: icon == IosGlassNavigationIcon.colorSwatch
                                 ? swatchColor
                                 : effectiveForeground,
@@ -292,10 +313,12 @@ class IosGlassNavigationButton extends HookWidget {
       }
       final creationParams = <String, Object>{
         'icon': icon.name,
+        'iconSize': iconSize,
         'accessibilityLabel': semanticLabel,
         'accessibilityHidden': false,
         'brightness': brightness,
         'foregroundColor': foregroundValue,
+        'backgroundColor': backgroundValue ?? 0,
         'enabled': enabled,
         'busy': isBusy,
         'selected': isSelected,

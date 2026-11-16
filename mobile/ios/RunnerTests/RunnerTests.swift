@@ -9,6 +9,99 @@ import XCTest
 class RunnerTests: XCTestCase {
 
   @MainActor
+  func testAttachmentDismissalReleasesOwnerWithoutDelegateCallbackOnce() throws {
+    guard #available(iOS 26.0, *) else { throw XCTSkip("Requires iOS 26") }
+    let controller = NativeAttachmentPopoverViewController(
+      channel: FlutterMethodChannel(
+        name: "attachment-dismissal-test", binaryMessenger: NavigationTestMessenger()
+      ),
+      expandedWidth: 320
+    )
+    var dismissals = 0
+    controller.onDismiss = { dismissals += 1 }
+    controller.viewDidDisappear(true)
+    XCTAssertEqual(dismissals, 1)
+    controller.presentationControllerDidDismiss(
+      UIPresentationController(presentedViewController: controller, presenting: nil)
+    )
+    controller.viewDidDisappear(true)
+    XCTAssertEqual(dismissals, 1)
+  }
+
+  @MainActor
+  func testAttachmentZoomUsesVisibleButton() {
+    let host = UIView(frame: CGRect(x: 0, y: 0, width: 400, height: 800))
+    let button = UIButton(frame: CGRect(x: 16, y: 500, width: 44, height: 44))
+    host.addSubview(button)
+    XCTAssertTrue(
+      NativeAttachmentPopoverPresentationLayout.transitionSource(
+        in: host, sourceRect: button.frame
+      ) === button
+    )
+    XCTAssertNil(
+      NativeAttachmentPopoverPresentationLayout.transitionSource(
+        in: host, sourceRect: CGRect(x: 100, y: 500, width: 44, height: 44)
+      )
+    )
+  }
+
+
+  @MainActor
+  func testComposerActionKeepsGlyphsAcrossAppearanceUpdatesAndReversal() throws {
+    let messenger = NavigationTestMessenger()
+    let platform = NavigationGlassButtonPlatformView(
+      frame: CGRect(x: 0, y: 0, width: 44, height: 44), viewIdentifier: 999995,
+      arguments: ["icon": "microphone", "iconSize": 20, "controlSize": 44,
+        "foregroundColor": 0xFF000000, "backgroundColor": 0], messenger: messenger)
+    let views = descendants(of: platform.view())
+    let button = try XCTUnwrap(views.compactMap { $0 as? UIButton }.first)
+    let mic = try XCTUnwrap(views.first { $0.accessibilityIdentifier == "composer-microphone-glyph" })
+    let send = try XCTUnwrap(views.first { $0.accessibilityIdentifier == "composer-send-glyph" })
+    UIView.setAnimationsEnabled(false)
+    defer { UIView.setAnimationsEnabled(true) }
+    for fill in [0xFF000000, 0xFF2463EB] {
+      messenger.invoke("setAppearance", arguments: ["backgroundColor": fill,
+        "foregroundColor": 0xFFFFFFFF, "enabled": true]) { _ in }
+      messenger.invoke("setContent", arguments: ["icon": "send", "iconSize": 18]) { _ in }
+      // A later appearance refresh must leave the arrow visible in the same view.
+      messenger.invoke("setAppearance", arguments: ["backgroundColor": fill,
+        "foregroundColor": 0xFFFFFFFF, "enabled": true]) { _ in }
+      XCTAssertEqual(send.alpha, 1)
+      XCTAssertEqual(send.transform, .identity)
+      XCTAssertEqual(mic.alpha, 0)
+      XCTAssertNil(button.configuration?.image)
+      XCTAssertEqual(button.configuration?.baseBackgroundColor?.cgColor.alpha, 1)
+      messenger.invoke("setContent", arguments: ["icon": "microphone", "iconSize": 20]) { _ in }
+      XCTAssertEqual(mic.alpha, 1)
+      XCTAssertEqual(mic.transform, .identity)
+      XCTAssertEqual(send.alpha, 0)
+    }
+  }
+
+  @MainActor
+  func testMenuActionsSurviveEveryDismissalOrdering() async {
+    for ordering in 0..<3 {
+      let button = NavigationGlassButton(frame: .zero)
+      let interaction = UIContextMenuInteraction(delegate: button)
+      let configuration = UIContextMenuConfiguration(identifier: nil, previewProvider: nil)
+      let animator = MenuDismissalTestAnimator()
+      let delivered = expectation(description: "Action delivered for ordering \(ordering)")
+      delivered.assertForOverFulfill = true
+      var count = 0
+      let select = { count += 1; delivered.fulfill() }
+      button.contextMenuInteraction(interaction, willDisplayMenuFor: configuration, animator: nil)
+      if ordering == 0 { button.afterMenuDismissal(select) }
+      button.contextMenuInteraction(interaction, willEndFor: configuration, animator: animator)
+      if ordering == 1 { button.afterMenuDismissal(select) }
+      XCTAssertEqual(count, 0)
+      animator.complete()
+      if ordering == 2 { button.afterMenuDismissal(select) }
+      await fulfillment(of: [delivered], timeout: 1)
+      XCTAssertEqual(count, 1)
+    }
+  }
+
+  @MainActor
   func testSectionMenuKeepsDisabledSelectionAndDestructiveAttributes() throws {
     let platform = NavigationGlassButtonFactory(messenger: NavigationTestMessenger()).create(
       withFrame: CGRect(x: 0, y: 0, width: 44, height: 44), viewIdentifier: 999996,
@@ -1563,16 +1656,15 @@ class RunnerTests: XCTestCase {
     )
   }
 
-  func testDuoCameraAnchorMovesToComposerCenter() {
+  func testExpandedAttachmentAnchorKeepsTriggerHorizontalPosition() {
     let anchor = CGRect(x: 0, y: 0, width: 44, height: 44)
     XCTAssertEqual(
       NativeAttachmentPopoverAnchorLayout.sourceRect(
         anchorBounds: anchor,
         keyboardDismissalOffset: 200,
-        isExpanded: true,
-        horizontalOffset: 180
+        isExpanded: true
       ),
-      anchor.offsetBy(dx: 180, dy: 240)
+      anchor.offsetBy(dx: 0, dy: 240)
     )
   }
 
@@ -2496,4 +2588,12 @@ extension XCTestCase {
       window.isKeyWindow && root.viewIfLoaded?.window === window
     }, object: nil)
   }
+}
+
+private final class MenuDismissalTestAnimator: NSObject, UIContextMenuInteractionAnimating {
+  var previewViewController: UIViewController? { nil }
+  private var completions: [() -> Void] = []
+  func addAnimations(_ animations: @escaping () -> Void) { animations() }
+  func addCompletion(_ completion: @escaping () -> Void) { completions.append(completion) }
+  func complete() { completions.forEach { $0() }; completions.removeAll() }
 }

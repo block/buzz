@@ -113,6 +113,7 @@ class _ComposerDockFrame extends HookWidget {
 }
 
 class _ComposerOverlayPortal extends StatelessWidget {
+  final bool suppressed;
   final OverlayPortalController controller;
   final ValueListenable<_AttachmentSurface> attachmentSurface;
   final bool reducedMotion;
@@ -121,6 +122,7 @@ class _ComposerOverlayPortal extends StatelessWidget {
   final Widget child;
 
   const _ComposerOverlayPortal({
+    this.suppressed = false,
     required this.controller,
     required this.attachmentSurface,
     required this.reducedMotion,
@@ -134,6 +136,7 @@ class _ComposerOverlayPortal extends StatelessWidget {
     return OverlayPortal.overlayChildLayoutBuilder(
       controller: controller,
       overlayChildBuilder: (context, layoutInfo) {
+        if (suppressed) return const SizedBox.shrink();
         final composerOrigin = MatrixUtils.transformPoint(
           layoutInfo.childPaintTransform,
           Offset.zero,

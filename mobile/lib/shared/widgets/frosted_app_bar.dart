@@ -692,6 +692,9 @@ IosNavigationAction? _nativeAction(Widget? widget) {
   }
   if (widget is IosGlassNavigationButton) {
     final symbol = switch (widget.icon) {
+      IosGlassNavigationIcon.plus => 'plus',
+      IosGlassNavigationIcon.send => 'arrow.up',
+      IosGlassNavigationIcon.microphone => 'mic',
       IosGlassNavigationIcon.more => 'ellipsis',
       IosGlassNavigationIcon.bell => 'bell',
       IosGlassNavigationIcon.trash => 'trash',

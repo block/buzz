@@ -66,6 +66,7 @@ void _useComposerKeyboardMetrics({
   required ObjectRef<Timer?> androidImeFallbackTimer,
   required ValueNotifier<bool> androidImeTransitionStarted,
   required VoidCallback collapseComposer,
+  bool Function()? keepKeyboardSpace,
 }) {
   final appView = View.of(context);
   useEffect(() {
@@ -80,6 +81,7 @@ void _useComposerKeyboardMetrics({
         if (defaultTargetPlatform == TargetPlatform.android) {
           androidImeTransitionStarted.value = false;
         }
+        if (keepKeyboardSpace?.call() ?? false) return;
         voiceNote.onKeyboardHidden();
         collapseComposer();
         focusNode.unfocus();
@@ -181,6 +183,7 @@ void _chooseComposerAttachment(
   ValueNotifier<_AttachmentSurface> attachmentSurface,
   ValueNotifier<String?> uploadError,
   Future<void> Function() choose, {
+  ValueNotifier<_InputTool?>? inputTool,
   String? errorMessage,
 }) {
   attachmentSurface.value = _AttachmentSurface.closed;
@@ -190,6 +193,12 @@ void _chooseComposerAttachment(
     } catch (error) {
       if (context.mounted) {
         uploadError.value = errorMessage ?? _formatUploadError(error);
+      }
+    } finally {
+      if (context.mounted &&
+          inputTool?.value == _InputTool.attachments &&
+          attachmentSurface.value == _AttachmentSurface.closed) {
+        attachmentSurface.value = _AttachmentSurface.menu;
       }
     }
   }());
@@ -280,7 +289,7 @@ Widget _composerSuggestionPanel({
       )
     : const SizedBox.shrink(key: ValueKey('no-suggestions'));
 
-Widget _composerAttachmentPanel({
+_AttachmentSurfacePanel _composerAttachmentPanel({
   required _AttachmentSurface surface,
   required Widget suggestionPanel,
   required VoidCallback onBack,
@@ -808,4 +817,41 @@ class _OutgoingMentions {
       );
     }
   }
+}
+
+VoidCallback _composerEmojiAction(
+  BuildContext context,
+  FocusNode focusNode,
+  ValueNotifier<_InputTool?> inputTool,
+  ValueNotifier<_AttachmentSurface> attachmentSurface,
+  ValueNotifier<bool> isEmojiPickerOpen,
+  ValueChanged<String> insertEmoji,
+) => () {
+  if (isEmojiPickerOpen.value) return;
+  _dismissComposerKeyboard(focusNode);
+  inputTool.value = null;
+  attachmentSurface.value = _AttachmentSurface.closed;
+  isEmojiPickerOpen.value = true;
+  _showComposerEmojiPicker(context, insertEmoji, () {
+    if (!context.mounted) return;
+    isEmojiPickerOpen.value = false;
+    focusNode.requestFocus();
+    // Native sheets can hide the keyboard without removing Flutter focus.
+    // Wait for an unfocused draft to reconnect before showing its keyboard.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!context.mounted || !focusNode.hasFocus) return;
+      unawaited(SystemChannels.textInput.invokeMethod<void>('TextInput.show'));
+    });
+  });
+};
+
+OverlayPortalController _useComposerSuggestionPortal(BuildContext context) {
+  final controller = useMemoized(OverlayPortalController.new);
+  useEffect(() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (context.mounted) controller.show();
+    });
+    return null;
+  }, [controller]);
+  return controller;
 }
