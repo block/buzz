@@ -33,10 +33,18 @@ type GiphyRawGif = {
   type?: unknown;
 };
 
-/** The relay forwards GIPHY's `data` array and drops `meta` and `pagination`. */
+/**
+ * The relay forwards GIPHY's `data` array and drops `meta` and `pagination`.
+ * Array entries are untrusted: the relay forwards them as GIPHY sent them,
+ * so an entry may be `null` or a non-object.
+ */
 export type GiphyResponse = {
-  data?: GiphyRawGif[];
+  data?: unknown[];
 };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 export type GiphyAsset = {
   height: number;
@@ -151,12 +159,15 @@ function firstImage(
  * Normalize GIPHY search results to the GIF shape the picker renders. GIPHY
  * dimensions arrive as strings, and some GIFs lack some renditions, so each
  * rendition is validated and the first usable one in a fixed order wins.
- * Items without a sendable asset or an animated preview are omitted.
+ * Items without a sendable asset or an animated preview are omitted, as are
+ * entries that are not objects (for example `null`).
  */
-export function normalizeGiphyGifs(items: GiphyRawGif[]): GiphyGif[] {
+export function normalizeGiphyGifs(items: unknown[]): GiphyGif[] {
   const gifs: GiphyGif[] = [];
 
-  for (const item of items) {
+  for (const entry of items) {
+    if (!isRecord(entry)) continue;
+    const item = entry as GiphyRawGif;
     if (
       item.type !== "gif" ||
       !nonEmptyString(item.id) ||

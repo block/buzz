@@ -47,9 +47,46 @@ handles the message, including pasted GIF URLs on relays that do not advertise
 
 ## Provider terms
 
-GIPHY's API documentation states that search and trending calls should be made
-from the client side. Buzz proxies them through the relay on purpose, so the
-API key never ships inside a desktop build. The operator who holds the GIPHY
-key is responsible for confirming that this server-side use, and the
-"Powered by GIPHY" attribution shown in the picker, satisfy GIPHY's current API
-terms for their key tier.
+GIPHY's published API best practices
+(https://developers.giphy.com/docs/api/best-practices/) list these prohibited
+practices:
+
+- "Do not proxy requests to GIPHY, either API calls or media URL loads. All
+  requests to GIPHY should be made directly from the client side."
+- "Do not cache API responses or media URLs or cache or store copies of GIPHY's
+  media assets."
+
+This route proxies the search and trending API calls through the relay on
+purpose, so the API key never ships inside a desktop build. That is in direct
+tension with the first rule. Media URL loads are not proxied: clients load
+GIPHY CDN URLs directly, and the relay stores no API responses, media URLs or
+media bytes.
+
+Enabling `BUZZ_GIPHY_API_KEY` does not settle this tension. Before an operator
+enables the route, they must obtain written confirmation from GIPHY that
+server-side API calls are permitted for their key, or accept the risk that
+GIPHY revokes the key. The picker shows "Powered by GIPHY" text; GIPHY's
+attribution guidelines ask for its official marks, which Buzz does not ship.
+
+## Upgrading from the KLIPY integration
+
+Buzz relays before this change proxied KLIPY. The cutover is not transparent
+to every client, so operators should read these notes before deploying.
+
+- The environment variable is now `BUZZ_GIPHY_API_KEY`. `BUZZ_KLIPY_API_KEY`
+  is ignored. A relay with only the old variable set stops advertising
+  `buzz-gif` and returns 404 from `/gifs/search`. The Helm chart reads the new
+  key name from the `buzz-secrets` secret.
+- The NIP-11 `gif.provider` value changes from `klipy` to `giphy`, and the
+  `gif.share` path is gone. The `POST /gifs/share` route and the `buzz gifs
+  share` CLI command are removed.
+- Clients gate the picker on the provider name. The deprecated Buzz 0.X desktop
+  client in this repository and the `buzz` CLI accept `giphy`. The active Buzz
+  1.0 client in block/buzz-app still requires `klipy`
+  (`src/features/relay/gif-capability.ts`) and parses the KLIPY response shape
+  (`src/features/relay/gifs.ts`), so its GIF picker disappears on a relay that
+  has cut over. Deploy this relay change only after block/buzz-app ships GIPHY
+  support, or accept that 1.0 users lose GIF search until it does.
+- The search response is `{ "data": [GifObject, ...] }` with GIPHY's string
+  dimensions. Any client that parsed the KLIPY `result` and `data.data` shape
+  must be updated.

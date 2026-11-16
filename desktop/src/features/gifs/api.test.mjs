@@ -275,6 +275,23 @@ test("normalizeGiphyGifs skips non-gif, id-less, slug-less and image-less items"
   assert.deepEqual(gifs, []);
 });
 
+test("normalizeGiphyGifs skips null and non-object entries and keeps valid neighbours", () => {
+  const gifs = normalizeGiphyGifs([
+    null,
+    rawGif({ id: "first", slug: "first-gif" }),
+    undefined,
+    "gif",
+    42,
+    ["gif"],
+    rawGif({ id: "second", slug: "second-gif" }),
+  ]);
+
+  assert.deepEqual(
+    gifs.map((gif) => gif.id),
+    ["first", "second"],
+  );
+});
+
 test("normalizeGiphyGifs title falls back to alt_text, then GIF", () => {
   const titles = normalizeGiphyGifs([
     rawGif({ title: "  Party  ", alt_text: "A parrot" }),

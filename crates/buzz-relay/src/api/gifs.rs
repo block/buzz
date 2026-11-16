@@ -2,8 +2,12 @@
 //!
 //! GIPHY requires a provider credential, but desktop applications cannot keep
 //! build-time credentials secret. This narrow endpoint keeps the key on the
-//! operator's relay while returning only GIPHY-hosted media URLs and metadata;
-//! GIF bytes are never downloaded, cached, or stored by Buzz.
+//! operator's relay and forwards GIPHY's `data` array of GIF objects (ids,
+//! slugs, titles and rendition URLs) unchanged. The relay does not download,
+//! cache or store GIF bytes. Clients validate the item fields they use.
+//!
+//! GIPHY's published best practices ask integrators not to proxy API calls.
+//! Operators who enable this route accept that tension; see docs/gif-search.md.
 //!
 //! Search is the only relay endpoint. Sending a selected GIF is a normal
 //! message containing its CDN URL, and clients render that URL through the
@@ -200,16 +204,18 @@ async fn limited_json(response: reqwest::Response) -> Result<Value, (StatusCode,
 
 /// Reduce a GIPHY envelope to `{ "data": [...] }`.
 ///
-/// GIPHY reports success through `meta.status`. Only the `data` array is
-/// forwarded; `meta` (which carries a `response_id`) and `pagination` are
-/// dropped so provider diagnostics never cross the relay boundary.
+/// GIPHY reports success through a numeric `meta.status`, which must be
+/// exactly 200. A missing, non-numeric or non-200 status is rejected. Only the
+/// `data` array is forwarded; `meta` (which carries a `response_id`) and
+/// `pagination` are dropped so provider diagnostics never cross the relay
+/// boundary.
 fn successful_search_payload(upstream: &Value) -> Result<Value, (StatusCode, Json<Value>)> {
     let meta_status = upstream
         .get("meta")
         .and_then(|meta| meta.get("status"))
         .and_then(Value::as_u64);
-    if meta_status.is_some_and(|status| status != 200) {
-        tracing::warn!("GIPHY search returned an unsuccessful meta status");
+    if meta_status != Some(200) {
+        tracing::warn!("GIPHY search returned a missing or unsuccessful meta status");
         return Err(api_error(
             StatusCode::BAD_GATEWAY,
             "GIF provider rejected the search request",
@@ -487,6 +493,21 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         let serialized = serde_json::to_string(&body.0).expect("serialize generic error");
         assert!(!serialized.contains("secret-key"));
+    }
+
+    #[test]
+    fn missing_or_non_numeric_meta_status_is_rejected() {
+        for upstream in [
+            serde_json::json!({ "data": [] }),
+            serde_json::json!({ "data": [], "meta": {} }),
+            serde_json::json!({ "data": [], "meta": { "status": "200" } }),
+            serde_json::json!({ "data": [], "meta": { "status": null } }),
+            serde_json::json!({ "data": [], "meta": { "status": -200 } }),
+        ] {
+            let (status, _) = successful_search_payload(&upstream)
+                .expect_err("payload without a numeric 200 meta status must be rejected");
+            assert_eq!(status, StatusCode::BAD_GATEWAY, "{upstream}");
+        }
     }
 
     #[test]
