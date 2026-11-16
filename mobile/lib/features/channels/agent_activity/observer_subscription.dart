@@ -9,6 +9,7 @@ import '../../../shared/crypto/nip44.dart';
 import '../../../shared/relay/relay.dart';
 import 'observer_models.dart';
 import 'transcript_builder.dart';
+import 'work_snapshot.dart';
 
 /// Maximum observer events to keep per agent.
 const _maxObserverEvents = 800;
@@ -23,16 +24,19 @@ class ObserverState {
   final ObserverConnectionState connection;
   final List<TranscriptItem> transcript;
   final String? errorMessage;
+  final List<WorkSnapshot> workSnapshots;
 
   const ObserverState({
     required this.connection,
     required this.transcript,
     this.errorMessage,
+    this.workSnapshots = const [],
   });
 
   const ObserverState.initial()
     : connection = ObserverConnectionState.idle,
       transcript = const [],
+      workSnapshots = const [],
       errorMessage = null;
 }
 
@@ -208,7 +212,7 @@ class ObserverRelayNotifier extends Notifier<ObserverRelayState> {
   }
 
   bool _storeFrame(String normalizedAgent, ObserverFrame frame) {
-    final dedupeKey = '${frame.seq}:${frame.timestamp}';
+    final dedupeKey = '${frame.turnId}:${frame.seq}:${frame.timestamp}';
     final dedupeKeys = _dedupeKeysByAgent.putIfAbsent(
       normalizedAgent,
       () => <String>{},
@@ -227,7 +231,9 @@ class ObserverRelayNotifier extends Notifier<ObserverRelayState> {
     if (frames.length > _maxObserverEvents) {
       final removeCount = frames.length - _maxObserverEvents;
       for (final removed in frames.take(removeCount)) {
-        dedupeKeys.remove('${removed.seq}:${removed.timestamp}');
+        dedupeKeys.remove(
+          '${removed.turnId}:${removed.seq}:${removed.timestamp}',
+        );
       }
       frames.removeRange(0, removeCount);
     }
@@ -369,6 +375,11 @@ final observerSubscriptionProvider =
       return ObserverState(
         connection: relayState.connection,
         transcript: buildTranscript(channelFrames),
+        workSnapshots: [
+          for (final frame in channelFrames)
+            if (frame.channelId == key.channelId)
+              ?WorkSnapshot.fromFrame(frame),
+        ],
         errorMessage: relayState.errorMessage,
       );
     });

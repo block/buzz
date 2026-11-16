@@ -1,8 +1,15 @@
+import 'package:buzz/features/channels/agent_activity/work_snapshot.dart';
+import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/message_author_visibility.dart';
+import 'package:buzz/features/channels/agent_activity/observer_models.dart';
+import 'package:buzz/features/channels/agent_activity/observer_subscription.dart';
 import 'package:buzz/features/channels/channel_identity_names_provider.dart';
 import 'package:buzz/features/channels/agent_typing_bubble.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/features/channels/channel_typing_provider.dart';
 import 'package:buzz/features/channels/inline_agent_typing.dart';
+import 'package:buzz/features/channels/inline_agent_activity.dart';
+import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/features/channels/typing_motion_preview.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
@@ -32,14 +39,26 @@ class DemoProfiles extends UserCacheNotifier {
 }
 
 Widget surface({
+  List<TimelineMessage>? history,
+  bool inheritLiveExpansion = true,
   bool preview = false,
   bool reduced = false,
   bool typing = true,
   bool bot = true,
+  bool pair = false,
+  ObserverState activity = const ObserverState.initial(),
   List<TypingEntry>? entries,
   double textScale = 1,
 }) => ProviderScope(
   overrides: [
+    currentPubkeyProvider.overrideWithValue('viewer'),
+    confirmedConversationPairProvider(
+      'chat',
+    ).overrideWithValue(pair ? ('viewer', agent) : null),
+    observerSubscriptionProvider((
+      channelId: 'chat',
+      agentPubkey: agent,
+    )).overrideWithValue(activity),
     agentMentionPubkeysProvider(
       'chat',
     ).overrideWithValue(bot ? {agent} : <String>{}),
@@ -52,11 +71,23 @@ Widget surface({
     theme: AppTheme.light(),
     home: MediaQuery(
       data: MediaQueryData(
+        size: const Size(800, 600),
         disableAnimations: reduced,
         textScaler: TextScaler.linear(textScale),
       ),
       child: Scaffold(
-        body: preview
+        body: history != null
+            ? InlineAgentActivity(
+                channelId: 'chat',
+                messages: history,
+                liveEntries: typing
+                    ? (entries ??
+                          const [TypingEntry(pubkey: agent, expiresAtMs: 8000)])
+                    : const [],
+                inheritLiveExpansion: inheritLiveExpansion,
+                messageBuilder: (message) => Text(message.content),
+              )
+            : preview
             ? const TypingMotionPreview(channelId: 'chat')
             : InlineAgentTyping(
                 channelId: 'chat',
@@ -72,6 +103,181 @@ Widget surface({
   ),
 );
 void main() {
+  testWidgets('open live activity stays open as posted updates arrive', (
+    tester,
+  ) async {
+    TimelineMessage update(String id) => TimelineMessage(
+      id: id,
+      pubkey: agent,
+      createdAt: 1,
+      content: 'Posted $id',
+      tags: const [
+        ['audience', 'agents'],
+      ],
+    );
+    await tester.pumpWidget(surface());
+    await tester.tap(find.byType(AgentTypingBubble));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 220));
+    expect(
+      tester
+          .getSize(find.byKey(const ValueKey('activity-message-width')))
+          .width,
+      lessThanOrEqualTo(800 * messageTextMaxWidthFraction),
+    );
+    await tester.pumpWidget(surface(typing: false));
+    await tester.pump();
+    await tester.pumpWidget(surface(history: [update('first')]));
+    await tester.pump();
+    expect(find.text('Posted first'), findsOneWidget);
+    expect(
+      tester
+          .getSize(find.byKey(const ValueKey('activity-message-width')))
+          .width,
+      lessThanOrEqualTo(800 * messageTextMaxWidthFraction),
+    );
+    await tester.pumpWidget(
+      surface(
+        history: [update('first'), update('second')],
+        activity: ObserverState(
+          connection: ObserverConnectionState.open,
+          transcript: const [],
+          workSnapshots: [
+            WorkSnapshot(
+              turnId: 'ongoing',
+              threadRootId: null,
+              startedAt: DateTime.now().millisecondsSinceEpoch,
+              updatedAt: DateTime.now().millisecondsSinceEpoch,
+              steps: const ['Live tool after posted update'],
+            ),
+          ],
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('Posted second'), findsOneWidget);
+    expect(find.text('Live tool after posted update'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 220));
+    await tester.tap(find.text('Collapse'));
+    await tester.pump();
+    expect(find.text('Posted first'), findsNothing);
+  });
+
+  testWidgets('older history does not consume the live disclosure', (
+    tester,
+  ) async {
+    final old = TimelineMessage(
+      id: 'old',
+      pubkey: agent,
+      createdAt: 1,
+      content: 'Older update',
+      tags: const [
+        ['audience', 'agents'],
+      ],
+    );
+    await tester.pumpWidget(surface());
+    await tester.tap(find.byType(AgentTypingBubble));
+    await tester.pump();
+    await tester.pumpWidget(
+      surface(history: [old], inheritLiveExpansion: false),
+    );
+    await tester.pump();
+    expect(find.text('Older update'), findsNothing);
+  });
+
+  testWidgets(
+    'collapsed disclosure preserves original bubble and clear hit area',
+    (tester) async {
+      await tester.pumpWidget(surface(bot: false));
+      final original = tester.getSize(find.byType(AgentTypingBubble));
+      await tester.pumpWidget(surface());
+      expect(tester.getSize(find.byType(AgentTypingBubble)), original);
+      final material = find
+          .ancestor(
+            of: find.byType(AgentTypingBubble),
+            matching: find.byType(Material),
+          )
+          .first;
+      expect(tester.widget<Material>(material).color, Colors.transparent);
+      final target = find.byType(InkWell).first;
+      expect(tester.getSize(target).height, greaterThanOrEqualTo(48));
+      await tester.tapAt(tester.getTopLeft(target) + const Offset(2, 2));
+      await tester.pump();
+      expect(find.text('Collapse'), findsOneWidget);
+    },
+  );
+
+  testWidgets('working dots expand live updates and collapse inline', (
+    tester,
+  ) async {
+    final activity = ObserverState(
+      connection: ObserverConnectionState.open,
+      transcript: const [],
+      workSnapshots: [
+        WorkSnapshot(
+          turnId: 'turn',
+          threadRootId: null,
+          startedAt: DateTime.now().millisecondsSinceEpoch,
+          updatedAt: DateTime.now().millisecondsSinceEpoch,
+          steps: const ['Checking the build'],
+        ),
+      ],
+    );
+    await tester.pumpWidget(surface(activity: activity));
+    expect(find.text('Checking the build'), findsNothing);
+    await tester.tap(find.byType(AgentTypingBubble));
+    await tester.pump();
+    expect(find.text('Checking the build'), findsOneWidget);
+    expect(find.text('Assistant'), findsNothing);
+    expect(find.byType(BottomSheet), findsNothing);
+    await tester.pump(const Duration(milliseconds: 220));
+    await tester.tap(find.text('Collapse'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 90));
+    expect(find.text('Checking the build'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pump();
+    expect(find.text('Checking the build'), findsNothing);
+  });
+
+  testWidgets('working dots never substitute an unscoped transcript', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      surface(
+        activity: ObserverState(
+          connection: ObserverConnectionState.open,
+          transcript: [
+            MessageItem(
+              id: 'old',
+              role: 'assistant',
+              title: '',
+              text: 'Unscoped history',
+              timestamp: '',
+            ),
+          ],
+        ),
+      ),
+    );
+    await tester.tap(find.byType(AgentTypingBubble));
+    await tester.pump();
+    expect(find.text('Waiting for live activity…'), findsOneWidget);
+    expect(find.text('Unscoped history'), findsNothing);
+  });
+
+  testWidgets(
+    'confirmed two-person chat hides typing avatar but keeps the name',
+    (tester) async {
+      await tester.pumpWidget(surface(pair: true));
+      expect(find.byType(AvatarImage), findsNothing);
+      expect(find.text('Test agent'), findsOneWidget);
+      expect(find.byType(AgentTypingBubble), findsOneWidget);
+      await tester.pumpWidget(surface(pair: true, bot: false));
+      expect(find.byType(AvatarImage), findsNothing);
+      expect(find.byType(AgentTypingBubble), findsOneWidget);
+    },
+  );
+
   testWidgets('one to two keeps the gentle straight repositioning', (
     tester,
   ) async {

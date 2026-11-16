@@ -1,5 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+
+import 'package:buzz/features/channels/agent_activity/work_snapshot.dart';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -10,6 +13,82 @@ import 'package:buzz/shared/crypto/nip44.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
+  test(
+    'decrypts a desktop-native signed snapshot and scopes live progress',
+    () async {
+      final fixture =
+          jsonDecode(
+                File(
+                  'test/fixtures/desktop_activity_snapshot.json',
+                ).readAsStringSync(),
+              )
+              as Map<String, dynamic>;
+      final owner = nostr.Keys(fixture['ownerSecret'] as String);
+      final wire = fixture['event'] as Map<String, dynamic>;
+      final relay = _RecordingRelaySession();
+      final container = ProviderContainer(
+        overrides: [
+          relaySessionProvider.overrideWith(() => relay),
+          relayConfigProvider.overrideWith(
+            () => _FakeRelayConfigNotifier(nsec: owner.nsec),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      final key = (
+        channelId: 'fixture-channel',
+        agentPubkey: wire['pubkey'] as String,
+      );
+      container.read(observerSubscriptionProvider(key));
+      await Future<void>.delayed(Duration.zero);
+      relay.emit(NostrEvent.fromJson(wire));
+      final state = container.read(observerSubscriptionProvider(key));
+      expect(state.errorMessage, isNull);
+      final snapshot = state.workSnapshots.single;
+      expect(snapshot.steps, ['Read', 'WebSearch']);
+      expect(
+        currentWorkSnapshot(state.workSnapshots, {
+          null,
+        }, snapshot.updatedAt)?.steps,
+        ['Read', 'WebSearch'],
+      );
+      expect(
+        currentWorkSnapshot(state.workSnapshots, {
+          'another-thread',
+        }, snapshot.updatedAt),
+        isNull,
+      );
+      expect(
+        currentWorkSnapshot(state.workSnapshots, {
+          null,
+        }, snapshot.updatedAt + 15001),
+        isNull,
+      );
+      expect(
+        container
+            .read(
+              observerSubscriptionProvider((
+                channelId: 'other-channel',
+                agentPubkey: key.agentPubkey,
+              )),
+            )
+            .workSnapshots,
+        isEmpty,
+      );
+      expect(
+        container
+            .read(
+              observerSubscriptionProvider((
+                channelId: key.channelId,
+                agentPubkey: '0' * 64,
+              )),
+            )
+            .workSnapshots,
+        isEmpty,
+      );
+    },
+  );
+
   test('provider initializes without circular dependency error', () {
     // Regression test: reading the provider should NOT throw
     // "Bad state: Tried to read the state of an uninitialized provider".

@@ -52,3 +52,56 @@ Widget _welcomeMessages(
   ),
   child: Column(children: children),
 );
+
+// Keep the empty, welcome and typing-only states together.
+extension on _MessageList {
+  Widget _buildEmptyTimeline(
+    BuildContext context,
+    Widget? hiddenHistory,
+    List<TypingEntry> displayedTyping,
+    Set<String> workingAgents,
+  ) {
+    if (welcomeAgent == null &&
+        (displayedTyping.isNotEmpty || TypingMotionPreview.enabled)) {
+      return Align(
+        alignment: Alignment.bottomCenter,
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(
+            Grid.gutter,
+            0,
+            Grid.gutter,
+            composerBottomInset,
+          ),
+          child: _aboveHiddenHistory(
+            hiddenHistory,
+            TypingMotionPreview.enabled
+                ? TypingMotionPreview(channelId: channelId)
+                : InlineAgentTyping(
+                    channelId: channelId,
+                    entries: displayedTyping,
+                    knownAgents: workingAgents,
+                  ),
+          ),
+        ),
+      );
+    }
+    if (welcomeAgent != null) {
+      return _welcomeMessages(
+        context,
+        appBarTitleContentHeight: appBarTitleContentHeight,
+        composerBottomInset: composerBottomInset,
+        children: [
+          BestieWelcome(agent: welcomeAgent!),
+          ?hiddenHistory,
+          if (displayedTyping.isNotEmpty)
+            InlineAgentTyping(
+              channelId: channelId,
+              entries: displayedTyping,
+              knownAgents: workingAgents,
+            ),
+        ],
+      );
+    }
+    return hiddenHistory ?? const _EmptyMessages();
+  }
+}
