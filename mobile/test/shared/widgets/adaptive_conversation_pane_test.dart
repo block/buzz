@@ -513,15 +513,47 @@ void main() {
     expect(controller.selectedId, 'chat');
     expect(list, findsNothing);
 
+    final chat = find.byType(_Conversation);
     await tester.tap(find.byType(BackButton));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
     expect(list, findsOneWidget, reason: 'the list stays beneath a pop');
     expect(placeholder, findsNothing);
+    expect(chat, findsOneWidget, reason: 'the chat slides away, not vanishes');
     await tester.pumpAndSettle();
     expect(controller.selectedId, isNull);
+    expect(chat, findsNothing);
     await tester.tap(list);
     expect(listTaps, 1);
+
+    // A completed back swipe also slides the chat away.
+    controller.open('chat', (_) => const _Conversation());
+    await tester.pumpAndSettle();
+    final release = await tester.startGesture(const Offset(5, 400));
+    await release.moveBy(const Offset(150, 0));
+    await tester.pump();
+    await release.moveBy(const Offset(150, 0));
+    await tester.pump();
+    await release.up();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(chat, findsOneWidget, reason: 'the swiped chat finishes sliding');
+    await tester.pumpAndSettle();
+    expect(controller.selectedId, isNull);
+    expect(chat, findsNothing);
+
+    // Reopening while the chat slides away shows the reopened chat.
+    controller.open('chat', (_) => const _Conversation());
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(BackButton));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    controller.open('chat', (_) => const _Conversation());
+    await tester.pumpAndSettle();
+    expect(controller.selectedId, 'chat');
+    expect(chat, findsOneWidget);
+    expect(list, findsNothing);
+    expect(tester.takeException(), isNull);
     debugDefaultTargetPlatformOverride = null;
   });
 
