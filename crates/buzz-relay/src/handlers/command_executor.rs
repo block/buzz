@@ -412,18 +412,36 @@ async fn announce_dm_created(
     }
 }
 
-/// Whether `event` carries `["history", "include"]`: the caller has agreed to
-/// share an existing DM's history with whoever joins it. Without it, DM
-/// commands behave as before members could join in place.
-fn history_opt_in(event: &Event) -> Result<bool, IngestError> {
+/// A DM command's `history` tag.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum History {
+    /// No tag: DM commands behave as before members could join in place.
+    Untagged,
+    /// `["history", "include"]`: the caller has agreed to share an existing
+    /// DM's history with whoever joins it.
+    Include,
+    /// `["history", "ask"]` (kind:41011 only): join as with `include` when the
+    /// relay needs no choice, and refuse with [`NEEDS_HISTORY_CHOICE`] when
+    /// people would join a DM of two or more people.
+    Ask,
+}
+
+fn history_tag(event: &Event, ask_allowed: bool) -> Result<History, IngestError> {
     match extract_tag(event, "history").as_deref() {
-        None => Ok(false),
-        Some("include") => Ok(true),
+        None => Ok(History::Untagged),
+        Some("include") => Ok(History::Include),
+        Some("ask") if ask_allowed => Ok(History::Ask),
         Some(other) => Err(IngestError::Rejected(format!(
             "invalid: history must be \"include\", got \"{other}\""
         ))),
     }
 }
+
+/// Why an add tagged `["history", "ask"]` was refused: people would join a DM
+/// of two or more people, so the caller must choose whether they see its
+/// history and send the add again tagged `include`, or untagged. Clients
+/// match this exact text.
+const NEEDS_HISTORY_CHOICE: &str = "needs-choice: history";
 
 /// Why the relay's moderation DM cannot take anyone else.
 const MODERATION_DM_REFUSAL: &str = "invalid: this DM cannot be changed";
@@ -467,7 +485,7 @@ async fn handle_dm_open(
     auth: &IngestAuth,
 ) -> Result<IngestResult, IngestError> {
     let self_bytes = auth.pubkey().to_bytes().to_vec();
-    let include_history = history_opt_in(event)?;
+    let include_history = history_tag(event, false)? == History::Include;
 
     // 1. Decode the other participants from `p` tags (deduplicated).
     let mut others: Vec<Vec<u8>> = Vec::new();
@@ -591,14 +609,14 @@ async fn grow_with_agents(
     let policy = agent_add_policy(actor);
     match state
         .db
-        .grow_dm(tenant.community(), channel_id, actor, &refs, &policy)
+        .grow_dm(tenant.community(), channel_id, actor, &refs, &policy, false)
         .await
         .map_err(dm_write_error)?
     {
         DmGrowth::Grown { added } => Ok(added),
-        DmGrowth::Existing(_) | DmGrowth::PeopleStartNewDm => Err(IngestError::Internal(
-            "error: adding agents changed the DM's people".into(),
-        )),
+        DmGrowth::Existing(_) | DmGrowth::PeopleStartNewDm | DmGrowth::NeedsChoice => Err(
+            IngestError::Internal("error: adding agents changed the DM's people".into()),
+        ),
     }
 }
 
@@ -609,7 +627,10 @@ async fn grow_with_agents(
 /// if a DM of those people already exists, that DM is returned instead and
 /// nothing changes here. Without the tag, everyone starts a new DM of exactly
 /// its members (no history), as before. So do people added to a DM of at most
-/// one person, even with the tag. An agent cannot send the tag.
+/// one person, even with the tag. With `["history", "ask"]`, the relay adds
+/// agents alone and people to a DM of at most one person as with `include`,
+/// and refuses people joining any other DM with [`NEEDS_HISTORY_CHOICE`],
+/// changing nothing. An agent cannot send either tag.
 async fn handle_dm_add_member(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -630,7 +651,8 @@ async fn handle_dm_add_member(
             "invalid: must specify at least 1 new participant in p tags".into(),
         ));
     }
-    let include_history = history_opt_in(event)?;
+    let history = history_tag(event, true)?;
+    let include_history = history != History::Untagged;
 
     // 2. Validate caller is member of existing DM
     let is_member = state
@@ -718,6 +740,7 @@ async fn handle_dm_add_member(
                     &self_bytes,
                     &addition_refs,
                     &policy,
+                    history == History::Ask,
                 )
                 .await
                 .map_err(dm_write_error)?,
@@ -726,6 +749,11 @@ async fn handle_dm_add_member(
         None
     };
     let (target, was_created, added, moved_elsewhere, participants) = match growth {
+        // Dropping `tx` uncommitted forgets this command, so the add can be
+        // sent again with the caller's choice.
+        Some(DmGrowth::NeedsChoice) => {
+            return Err(IngestError::Rejected(NEEDS_HISTORY_CHOICE.into()));
+        }
         Some(DmGrowth::Grown { added }) => (channel_id, false, added, false, Vec::new()),
         // These people already have a DM: the agents join them there.
         Some(DmGrowth::Existing(other)) => {

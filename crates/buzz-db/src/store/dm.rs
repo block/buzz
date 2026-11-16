@@ -592,6 +592,10 @@ pub enum DmGrowth {
     /// two or more. Such a DM never gains people in place; the caller starts
     /// a DM of everyone instead. Nothing was written.
     PeopleStartNewDm,
+    /// People would join this DM of two or more people, and the caller asked
+    /// first: they choose whether those people see its history. Nothing was
+    /// written.
+    NeedsChoice,
 }
 
 /// Add `additions` to the DM `channel_id` in place, keeping its history.
@@ -610,6 +614,11 @@ pub enum DmGrowth {
 /// ([`release_dm_identity`]) takes a new one only when people join. Each agent
 /// that joins needs `policy`'s permission ([`check_joining_agents`]).
 ///
+/// With `ask`, people joining a DM of two or more people are not added: that
+/// is [`DmGrowth::NeedsChoice`], so the caller can ask whether they see its
+/// history. Agents alone still join, and a DM of at most one person still
+/// starts a new DM.
+///
 /// `actor` must be an active member. The DM must be live and not archived, and
 /// may hold at most [`MAX_DM_PEOPLE`] people afterwards. Re-adding members is
 /// a no-op, so a retry after a lost commit acknowledgement is safe.
@@ -625,6 +634,7 @@ pub async fn grow_dm(
     actor: &[u8],
     additions: &[&[u8]],
     policy: AgentAddPolicy<'_>,
+    ask: bool,
 ) -> Result<DmGrowth> {
     for pk in additions {
         if pk.len() != 32 {
@@ -675,12 +685,16 @@ pub async fn grow_dm(
         tx.rollback().await?;
         return Ok(DmGrowth::PeopleStartNewDm);
     }
+    let people_join = count_people(&grown, &agents) != count_people(&current, &agents);
+    if ask && people_join {
+        tx.rollback().await?;
+        return Ok(DmGrowth::NeedsChoice);
+    }
 
     // The DM takes the grown set's identity: its people's, or all its members'
     // when it has at most one person. If another DM has it, people meet there;
     // agents join this DM in place, which keeps the identity it has.
     let hash = dm_identity_hash(&grown, &agents);
-    let people_join = count_people(&grown, &agents) != count_people(&current, &agents);
     let moves = match &stored {
         Some(stored) => stored.as_slice() != hash.as_slice(),
         None => people_join,
@@ -1175,6 +1189,7 @@ impl Db {
         actor: &[u8],
         additions: &[&[u8]],
         policy: AgentAddPolicy<'_>,
+        ask: bool,
     ) -> Result<DmGrowth> {
         crate::dm::grow_dm(
             &self.pool,
@@ -1183,6 +1198,7 @@ impl Db {
             actor,
             additions,
             policy,
+            ask,
         )
         .await
     }
