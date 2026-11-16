@@ -286,6 +286,8 @@ bool isValidReadStateDTag(String? value, {bool unread = false}) {
   }
 
   final slotId = value.substring(prefix.length);
+  // Version 2 admits only the 32 lowercase hex slots it publishes.
+  if (unread) return RegExp(r'^[0-9a-f]{32}$').hasMatch(slotId);
   if (slotId.isEmpty || slotId.length > 64) {
     return false;
   }

@@ -13,15 +13,27 @@ extension ReadStateJournal on ReadStateManager {
       _clientId = journal['clientId'] as String;
       _effectiveState.addAll(contexts(journal['observed']));
       _localContexts.addAll(contexts(journal['local']));
-      _expiryWatermark = (journal['expiryWatermark'] as int?) ?? 0;
+      _expiryWatermark = _savedExpiryWatermark =
+          (journal['expiryWatermark'] as int?) ?? 0;
       // Overrides from before the unread record are not v2 intent (no
       // import): only a journal that has the record loads them.
       if (journal['unreadSlot'] case final String slot) {
         _unreadSlot = slot;
         _unreadPublished = contexts(journal['unreadPublished']);
-        _mergeOverrides({
-          ...contexts(journal['observed']),
-          ...contexts(journal['overrides']),
+        _hydrateOverrides(
+          channelOverrideRegisters({
+            ...contexts(journal['observed']),
+            ...contexts(journal['overrides']),
+          }),
+        );
+        _hydrateOverrides({
+          for (final MapEntry(:key, :value)
+              in ((journal['deferredOverrides'] as Map?) ?? const {}).entries)
+            key as String: (
+              s: (value as List)[0] as int,
+              c: value[1] as int,
+              b: value[2] as int,
+            ),
         });
       }
       _followSlots.addAll(
@@ -140,7 +152,11 @@ extension ReadStateJournal on ReadStateManager {
         ),
         'unreadSlot': _unreadSlot,
         'unreadPublished': _unreadPublished,
-        'expiryWatermark': _expiryWatermark,
+        'expiryWatermark': _savedExpiryWatermark = _expiryNow,
+        'deferredOverrides': {
+          for (final MapEntry(:key, value: r) in _deferredOverrides.entries)
+            key: [r.s, r.c, r.b],
+        },
         'followSlots': _followSlots,
         'followPlacement': [
           for (final keys in _followPlacement) keys.toList()..sort(),

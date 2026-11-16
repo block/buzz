@@ -940,6 +940,97 @@ void main() {
       expect(phone.activeChannelOverrides, {channel, other});
     });
 
+    test('a held-back own group survives an unrelated flush and restart, '
+        'and upkeep resolves it', () async {
+      final phone = await device('phone');
+      phone.markContextRead(channel, clock - 100);
+      final marked = clock;
+      expect(phone.markChannelUnread(channel), isTrue);
+      await phone.flush();
+      final published = Map.of(ownUnread(phone));
+
+      clock = marked - 700;
+      final rolledBack = await device('phone');
+      expect(rolledBack.activeChannelOverrides, isEmpty);
+      rolledBack.markContextRead('${channel}b', clock);
+      await rolledBack.flush();
+      expect(ownUnread(rolledBack), published);
+
+      relay.offline = true;
+      final restarted = await device('phone');
+      clock = marked;
+      restarted.maintainOverrideClock();
+      expect(restarted.activeChannelOverrides, {channel});
+    });
+
+    test('a clear refused by a held-back group fails visibly', () async {
+      final phone = await device('phone');
+      phone.markContextRead(channel, clock - 100);
+      expect(phone.markChannelUnread(channel), isTrue);
+      final other = '${channel}b';
+      relay.retained['${readStateUnreadDTagPrefix}peer'] = _readStateEvent(
+        unread: true,
+        keys: keys,
+        crypto: crypto,
+        clientId: 'peer',
+        slot: 'peer',
+        contexts: {
+          other: clock - 100,
+          'ov_s:$other': clock + 700,
+          'ov_c:$other': 0,
+          'ov_b:$other': clock - 100,
+        },
+        createdAt: clock - 10,
+      );
+      await reconnect(phone);
+      expect(phone.clearChannelOverride(channel), isFalse);
+      expect(phone.failedClears, {channel});
+      expect(phone.activeChannelOverrides, {channel});
+    });
+
+    for (final (offset, kept) in [
+      (lifetime + 1, true),
+      (lifetime + 600, true),
+      (lifetime + 601, false),
+    ]) {
+      test('a restart at marked+$offset ${kept ? 'keeps' : 'discards'} the '
+          'dead group', () async {
+        final phone = await device('phone');
+        phone.markContextRead(channel, clock - 100);
+        final marked = clock;
+        expect(phone.markChannelUnread(channel), isTrue);
+        await phone.flush();
+        relay.offline = true;
+        clock = marked + offset;
+        final restarted = await device('phone');
+        relay.offline = false;
+        await reconnect(restarted);
+        await restarted.flush();
+        expect(
+          ownUnread(restarted),
+          kept ? {channel: marked - 100, 'ov_c:$channel': marked} : isEmpty,
+        );
+      });
+    }
+
+    test('an expiry seen only on display survives a crash and a one-second '
+        'rollback', () async {
+      final phone = await device('phone');
+      phone.markContextRead(channel, clock - 100);
+      final marked = clock;
+      expect(phone.markChannelUnread(channel), isTrue);
+      await phone.flush();
+
+      clock = marked + lifetime + 1;
+      expect(phone.activeChannelOverrides, isEmpty);
+      await pumpEventQueue();
+
+      clock = marked + lifetime;
+      relay.offline = true;
+      final restarted = await device('phone');
+      expect(restarted.activeChannelOverrides, isEmpty);
+    });
+
     test('a v1 override group is not imported', () async {
       relay.retained['read-state:old'] = _readStateEvent(
         keys: keys,
@@ -1037,7 +1128,12 @@ NostrEvent _readStateEvent({
   createdAt: createdAt,
   kind: EventKind.readState,
   tags: [
-    ['d', '${unread ? readStateUnreadDTagPrefix : readStateDTagPrefix}$slot'],
+    [
+      'd',
+      unread
+          ? '$readStateUnreadDTagPrefix${_unreadSlot(slot)}'
+          : '$readStateDTagPrefix$slot',
+    ],
     ['t', unread ? readStateUnreadTag : 'read-state'],
   ],
   content: crypto.encrypt(
@@ -1177,3 +1273,10 @@ class _MemoryRelay extends RelaySessionNotifier {
     );
   }
 }
+
+/// A conforming 32-lowercase-hex unread slot named after [name].
+String _unreadSlot(String name) => name.codeUnits
+    .map((c) => c.toRadixString(16))
+    .join()
+    .padRight(32, '0')
+    .substring(0, 32);

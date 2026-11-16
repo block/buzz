@@ -24,6 +24,14 @@ void main() {
   final unread = corpus['unreadV2'] as Map<String, dynamic>;
   OverrideRegister register(dynamic value) =>
       (s: value['s'] as int, c: value['c'] as int, b: value['b'] as int);
+  test('version-2 slots are exactly 32 lowercase hex', () {
+    bool valid(String slot) =>
+        isValidReadStateDTag('$readStateUnreadDTagPrefix$slot', unread: true);
+    expect(valid('0123456789abcdef' * 2), isTrue);
+    for (final slot in ['peer', 'A' * 32, 'a' * 31, 'a' * 33, 'g' * 32]) {
+      expect(valid(slot), isFalse, reason: slot);
+    }
+  });
   for (final vector in unread['liveness'] as List) {
     test('shared unread liveness: ${vector['id']}', () {
       final now = corpus['now'] as int;

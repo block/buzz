@@ -1094,16 +1094,18 @@ Device A MUST publish with `created_at` = 1700001501 (max_fetched + 1), not 1700
 
 ## Invalid Cases
 
+These cases apply to read-position coordinates (`read-state:` prefix, `read-state` tag, `v:1`). A client implementing Expiring unread state (version 2) validates `read-state-unread-v2:` events by that section instead: they carry `v:2`, a `d` tag of `read-state-unread-v2:` followed by exactly 32 lowercase hexadecimal characters, and exactly one `read-state-unread-v2` tag; any other version, prefix or slot form under that tag MUST be ignored.
+
 Clients MUST reject or discard each of the following:
 
 - A blob whose `content` does not decrypt to valid JSON — discard the entire event.
 - A blob with a missing `client_id` field — discard the entire event.
-- A blob with `v: 2` (unknown version) — ignore the entire event.
+- A read-position blob with any `v` other than `1` — ignore the entire event.
 - A blob with a non-integer timestamp for a context entry (e.g., `"ctx:AAA": "yesterday"`) — discard that context entry; process remaining entries.
 - A blob with a context ID exceeding 256 bytes — discard that context entry; process remaining entries.
 - A blob with more than 10,000 context entries — client MUST reject the entire blob.
 - An event with no `d` tag — ignore the entire event.
-- An event with a `d` tag value that does not begin with `read-state:` — ignore the entire event.
+- An event with a `d` tag value that begins with neither `read-state:` nor, for a version-2 client, `read-state-unread-v2:` — ignore the entire event.
 
 ## Privacy Considerations
 
@@ -1134,6 +1136,8 @@ that expose read activity to other users MUST require explicit user consent.
 This NIP introduces no changes to existing event kinds or relay-stored read-state logic. The baseline uses only standard NIP-01 event storage, NIP-33 addressable event semantics, NIP-44 encryption, and NIP-78 application data conventions. The optional Buzz Atomic Snapshot Extension adds explicitly discovered, versioned query/discovery envelopes; ordinary query arrays and WebSocket messages remain unchanged. Clients that do not implement this NIP are unaffected, as are clients that implement everything but the manual-unread override layer.
 
 The override layer is the exception, and it is a relay-compatibility one rather than a client one. Its paginated full-state load carries the completeness guarantee only against a relay that satisfies the ordering, capacity, floor, push, and barrier requirements enumerated in Full-State Load. A validated atomic snapshot supplies the alternative point-in-time guarantee described in Buzz Atomic Snapshot Extension, without asserting those WebSocket properties. Without either proof, every load resolves to *cannot prove complete* and the actions that depend on a complete load report as failed; against an undetectably nonconforming relay, a load may still return *complete*, and the completeness guarantee does not apply to that verdict. In either case the layer still runs and still merges, and frontier sync is unaffected.
+
+Expiring unread state (version 2) keeps read positions compatible: version-1 and version-2 clients publish and merge the same frontiers. Manual-unread state is not compatible across them. A version-2 client neither reads nor writes version-1 override keys, and a version-1 client ignores the version-2 record, so a mark made on one is not seen by the other.
 
 ## References
 

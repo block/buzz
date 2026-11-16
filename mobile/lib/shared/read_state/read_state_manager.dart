@@ -191,6 +191,9 @@ class ReadStateManager {
   // The durable, never-decreasing expiry clock; see [_expiryNow].
   int _expiryWatermark = 0;
 
+  /// The watermark the journal last saved.
+  int _savedExpiryWatermark = 0;
+
   // Synced thread follow choices. [_ownFollows] is this installation's own
   // entries (raw, so unknown fields are carried), placed into
   // [_followSlots] by [_followPlacement]. [_remoteFollows] is every follow
@@ -716,7 +719,9 @@ class ReadStateManager {
       return true;
     }
     if (placement.length > _slots.length) return true;
-    if (!mapEquals(_unreadPublished, _planUnread())) return true;
+    if (_unreadPublishable && !mapEquals(_unreadPublished, _planUnread())) {
+      return true;
+    }
     for (var index = 0; index < placement.length; index++) {
       final published = _published[_slots[index]] ?? const <String, int>{};
       if (!mapEquals(published, placement[index])) return true;
@@ -854,8 +859,9 @@ class ReadStateManager {
       }
       final unread = _planUnread();
       final unreadCoordinate = _unreadCoordinate;
-      if (!mapEquals(_unreadPublished, unread) ||
-          _pending.containsKey(unreadCoordinate)) {
+      if (_unreadPublishable &&
+          (!mapEquals(_unreadPublished, unread) ||
+              _pending.containsKey(unreadCoordinate))) {
         prepared[unreadCoordinate] = NostrEvent(
           id: '0' * 64,
           pubkey: pubkey,

@@ -154,7 +154,9 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
     _manager = manager;
     // Expiry is semantic even on an idle screen with no incoming events.
     final floorTimer = Timer.periodic(const Duration(minutes: 1), (_) {
-      if (_manager == manager) _emitManagerState(manager);
+      if (_manager != manager) return;
+      manager.maintainOverrideClock();
+      _emitManagerState(manager);
     });
 
     ref.onDispose(() {
@@ -170,6 +172,8 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
           next == AppLifecycleState.detached ||
           next == AppLifecycleState.hidden) {
         unawaited(manager.flush());
+      } else if (next == AppLifecycleState.resumed) {
+        manager.maintainOverrideClock();
       }
     });
 

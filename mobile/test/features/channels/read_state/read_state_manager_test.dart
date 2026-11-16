@@ -1609,7 +1609,7 @@ NostrEvent _readStateEvent({
     kind: EventKind.readState,
     tags: unread
         ? [
-            ['d', '$readStateUnreadDTagPrefix$slotId'],
+            ['d', '$readStateUnreadDTagPrefix${_unreadSlot(slotId)}'],
             ['t', readStateUnreadTag],
           ]
         : [
@@ -1720,3 +1720,10 @@ class _JournalRelaySession extends _FakeRelaySession {
     return event;
   }
 }
+
+/// A conforming 32-lowercase-hex unread slot named after [name].
+String _unreadSlot(String name) => name.codeUnits
+    .map((c) => c.toRadixString(16))
+    .join()
+    .padRight(32, '0')
+    .substring(0, 32);

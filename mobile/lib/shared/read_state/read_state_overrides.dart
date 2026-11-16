@@ -13,8 +13,16 @@ extension ReadStateOverrides on ReadStateManager {
 
   String get _unreadCoordinate => '$readStateUnreadDTagPrefix$_unreadSlot';
 
-  bool _isLive(String channelId, OverrideRegister register) =>
-      isOverrideActive(register, _frontierOf(channelId), now: _expiryNow);
+  bool _isLive(String channelId, OverrideRegister register) {
+    final frontier = _frontierOf(channelId);
+    final live = isOverrideActive(register, frontier, now: _expiryNow);
+    // An expiry seen here must survive a crash and a clock rollback.
+    if (!live &&
+        isOverrideActive(register, frontier, now: _savedExpiryWatermark)) {
+      _persistLocalState();
+    }
+    return live;
+  }
 
   /// A fresh action stamp above [register], or null when it would pass
   /// uint32 or run more than a minute ahead of the local clock.
@@ -70,11 +78,13 @@ extension ReadStateOverrides on ReadStateManager {
   /// false, setting [syncError], when no stamp can be allocated or the
   /// record cannot carry the clear.
   bool? _clearChannelOverride(String channelId) {
+    // Resolve held-back groups first: one may be this channel's.
+    final complete = _hasFullState;
     final register = _overrides[channelId];
-    if (register == null || !_hasFullState || !_isLive(channelId, register)) {
-      return null;
-    }
-    if (_allocateStamp(register) case final stamp?) {
+    if (register == null || !_isLive(channelId, register)) return null;
+    // An incomplete view refuses the clear, visibly.
+    final stamp = complete ? _allocateStamp(register) : null;
+    if (stamp != null) {
       _overrides[channelId] = (s: register.s, c: stamp, b: register.b);
       if (_primaryFits()) {
         _failedClears.remove(channelId);
@@ -88,9 +98,9 @@ extension ReadStateOverrides on ReadStateManager {
     return false;
   }
 
-  /// Merges received or journaled version-2 groups. An expired replay is
-  /// dropped before its baseline can enter a register; a group stamped too
-  /// far ahead is deferred until the clock reaches it.
+  /// Merges received version-2 groups. An expired replay is dropped before
+  /// its baseline can enter a register; a group stamped too far ahead is
+  /// deferred until the clock reaches it.
   void _mergeOverrides(Map<String, int> contexts) {
     for (final MapEntry(key: channelId, value: register)
         in channelOverrideRegisters(contexts).entries) {
@@ -98,8 +108,25 @@ extension ReadStateOverrides on ReadStateManager {
     }
   }
 
-  void _mergeRegister(String channelId, OverrideRegister register) {
-    if (isOverrideExpired(register, now: _expiryNow)) return;
+  /// Restores journaled groups. Local state keeps a dead group until the
+  /// discard guard passes, unlike an incoming replay.
+  void _hydrateOverrides(Map<String, OverrideRegister> registers) =>
+      registers.forEach(
+        (channelId, register) =>
+            _mergeRegister(channelId, register, local: true),
+      );
+
+  void _mergeRegister(
+    String channelId,
+    OverrideRegister register, {
+    bool local = false,
+  }) {
+    final now = _expiryNow;
+    if (local
+        ? isOverrideDiscardable(register, now: now)
+        : isOverrideExpired(register, now: now)) {
+      return;
+    }
     final target = isOverrideDeferred(register, now: _now())
         ? _deferredOverrides
         : _overrides;
@@ -115,9 +142,28 @@ extension ReadStateOverrides on ReadStateManager {
     if (_deferredOverrides.isEmpty) return true;
     final waiting = Map.of(_deferredOverrides);
     _deferredOverrides.clear();
-    waiting.forEach(_mergeRegister);
+    // Already admitted: only the discard guard can drop one now.
+    waiting.forEach(
+      (channelId, register) => _mergeRegister(channelId, register, local: true),
+    );
+    if (_deferredOverrides.length == waiting.length) return false;
+    _persistLocalState();
+    _onChanged();
+    _schedulePublish();
     return _deferredOverrides.isEmpty;
   }
+
+  /// Clock upkeep, on the display tick and on resume: merges held-back
+  /// groups the clock has reached and saves any expiry the tick shows.
+  void maintainOverrideClock() {
+    if (_disposed) return;
+    _resolveDeferred();
+    activeChannelOverrides;
+  }
+
+  /// Whether the unread record may be published: never while a held-back
+  /// group could be its only carrier.
+  bool get _unreadPublishable => _resolveDeferred();
 
   /// Drops dead groups past the discard guard, with their ceilings.
   void _discardOverrides() {
