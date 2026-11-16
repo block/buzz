@@ -902,8 +902,9 @@ fn check_distinct_targets(targets: &[MemberPut<'_>]) -> Result<()> {
 
 /// Add only new group members to configured public channels on the group's
 /// admitted transaction. Missing/deleted channels remain inert references;
-/// present nonpublic channels are invalid configuration. Closed public channels
-/// are retained but skipped. Existing active memberships never change role.
+/// newly configured nonpublic channels are invalid configuration. Saved defaults
+/// that have become nonpublic or closed are retained but skipped. Existing active
+/// memberships never change role.
 ///
 /// All channel membership locks precede TTL and row locks, in canonical order.
 /// Policy refusals are bounded accounting, while database failures abort the
@@ -911,6 +912,7 @@ fn check_distinct_targets(targets: &[MemberPut<'_>]) -> Result<()> {
 pub(crate) async fn put_group_default_members_in_transaction(
     tx: &mut AdmittedTx,
     channels: &[Uuid],
+    old_channels: &[Uuid],
     targets: &[Vec<u8>],
     actor: &[u8],
     membership_enforced: bool,
@@ -999,6 +1001,10 @@ pub(crate) async fn put_group_default_members_in_transaction(
             )
             || row.try_get::<bool, _>("unlisted")?
         {
+            if old_channels.contains(&channel) {
+                summary.skip("channel_closed", targets.len());
+                continue;
+            }
             return Err(DbError::InvalidData(
                 "mention group default channel must be a listed public stream or forum".into(),
             ));

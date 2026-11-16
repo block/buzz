@@ -4072,10 +4072,17 @@ mod postgres_tests {
             .validate_serving_catalog()
             .await
             .expect("new code must boot before the drop");
-        store
+        // Serving accepts the historical catalog, while destruction requires
+        // the current feature's expanded tenant catalog.
+        let error = store
             .validate_catalog()
             .await
-            .expect("deletion must accept the catalog before the drop");
+            .expect_err("feature deletion requires its expanded tenant catalog");
+        assert!(
+            matches!(&error, crate::DbError::DeletionSafety(reason)
+                if reason == "community deletion catalog drift (missing=mention_group_commands,mention_groups, unknown=)"),
+            "{error}"
+        );
         run_migrations(&pool).await.expect("apply all migrations");
         assert_eq!(present(&pool).await, (false, false));
         store

@@ -123,7 +123,7 @@ impl Db {
             return Ok(GroupWrite::without_snapshot(GroupOutcome::Forbidden));
         }
         let head = sqlx::query(
-            "SELECT name, members, version, deleted_at FROM mention_groups \
+            "SELECT name, members, channels, version, deleted_at FROM mention_groups \
              WHERE community_id=$1 AND id=$2 FOR UPDATE",
         )
         .bind(community.as_uuid())
@@ -197,6 +197,11 @@ impl Db {
                 hex::decode(key).map_err(|_| DbError::InvalidData("invalid member key".into()))
             })
             .collect::<Result<_>>()?;
+        let old_channels: Vec<Uuid> = head
+            .as_ref()
+            .map(|row| row.try_get("channels"))
+            .transpose()?
+            .unwrap_or_default();
         // Build and bound the final signed projection before changing any row.
         let state = build_snapshot(
             &mut tx,
@@ -210,6 +215,7 @@ impl Db {
             crate::channel_members::put_group_default_members_in_transaction(
                 &mut tx,
                 &channels,
+                &old_channels,
                 &added,
                 &event.pubkey.to_bytes(),
                 membership_enforced,
@@ -302,7 +308,7 @@ impl Db {
         tags.push(tag(["manage", manage])?);
         let state =
             build_snapshot(&mut tx, relay_keys, "settings", tags, max_message_length).await?;
-        sqlx::query("UPDATE communities SET mention_groups_manage=$2,mention_groups_version=$3,mention_groups_state_event_id=$4 WHERE id=$1")
+        sqlx::query("UPDATE communities SET mention_groups_manage=$2,mention_groups_version=$3,mention_groups_state_event_id=$4 WHERE id=$1 AND deletion_state = 'active'")
             .bind(community.as_uuid()).bind(manage).bind(version).bind(state.id.as_bytes().as_slice())
             .execute(tx.conn()).await?;
         let snapshot = persist_snapshot(&mut tx, state).await?;

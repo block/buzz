@@ -72,7 +72,8 @@ Changing the management policy requires an actual owner/admin role. If the
 community has no owner/admin row, any current member may change the setting.
 This exception permits stewardship on communities without an initial steward.
 It does not grant inherited admin authority to agents in a community that has a
-steward.
+steward. On an open community without a steward, any authenticated, unbanned key
+may therefore change the management policy.
 
 Commands use authenticated WS `EVENT` or HTTP `/events`. The signer must equal
 the authenticated actor. Existing tenant write fences, credential scope and
@@ -126,8 +127,10 @@ Validation and normalization:
   signer `p` tags must disable that behavior for this protocol.
 - Each `channel` has exactly two elements and a canonical non-nil UUID. Sort and
   deduplicate them; at most 32 distinct defaults are allowed. The relay validates
-  channel eligibility within the community. Core wire validation performs no
-  channel or membership lookup.
+  newly selected channels' eligibility within the community. A saved default
+  that later becomes private or unlisted remains an inert reference and does
+  not prevent other group edits. Core wire validation performs no channel or
+  membership lookup.
 - The member limit matches the mobile push recipient gate. Larger audiences
   should use a channel. A put over the limit is refused with
   `invalid: a group can have at most 20 members`. A message combining groups or
@@ -185,7 +188,8 @@ the stored member set are candidates for joining default channels. Replacing
 only the default-channel list does not retroactively join existing members.
 The relay uses the accepted replacement's defaults and existing channel-join
 policy; it skips identities that have left the community and channels that are
-gone or closed. Private-channel access is never acquired through a group.
+gone or closed, including saved defaults that became private or unlisted (counted
+as `channel_closed`). Private-channel access is never acquired through a group.
 Group deletion does not remove channel membership.
 
 Default-channel membership writes commit in the group transaction. When any

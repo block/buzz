@@ -616,4 +616,44 @@ async fn mention_group_default_joins_are_atomic_report_skips_and_never_replay() 
         .await
         .unwrap()
         .is_some());
+
+    // A saved default can become nonpublic. It must not prevent a rename or
+    // member removal, and re-adding a group member must not grant access.
+    let without_target: Vec<_> = open_members
+        .iter()
+        .filter(|key| **key != target.public_key().to_hex())
+        .cloned()
+        .collect();
+    let mut version = 3;
+    for (visibility, unlisted) in [("open", true), ("private", false)] {
+        f.db.update_channel(
+            f.community,
+            public,
+            crate::channel::ChannelUpdate {
+                visibility: Some(visibility.into()),
+                unlisted: Some(unlisted),
+                ..Default::default()
+            },
+            &f.actor.public_key().to_bytes(),
+        )
+        .await
+        .unwrap();
+        let rename = event(version, "Still editable", &without_target, &[public]);
+        let renamed = f.apply(&rename).await.unwrap();
+        assert_eq!(renamed.outcome, GroupOutcome::Applied);
+        assert_eq!(renamed.joins.joined, 0);
+        version += 1;
+        let add = event(version, "Still editable", &open_members, &[public]);
+        let added = f.apply(&add).await.unwrap();
+        assert_eq!(added.outcome, GroupOutcome::Applied);
+        assert_eq!(added.joins.skipped.get("channel_closed"), Some(&1));
+        assert_eq!(added.joins.joined, 0);
+        assert!(f
+            .db
+            .get_member_role(f.community, public, &target.public_key().to_bytes())
+            .await
+            .unwrap()
+            .is_none());
+        version += 1;
+    }
 }

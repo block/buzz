@@ -4064,6 +4064,7 @@ fn every_production_single_table_guard_writer_preserves_its_invariants() {
             "mark_logically_verified",
         ],
         vec![
+            "accept_mention_group_policy",
             "archive_community_owned_by",
             "ensure_configured_community_with_operation",
             "set_community_icon",

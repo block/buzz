@@ -4834,7 +4834,7 @@ pub(crate) mod postgres_tests {
         // never had universal fence objects, but current destruction requires
         // them. This isolated fixture does not rerun the embedded migrator.
         sqlx::raw_sql(include_str!(
-            "../../../../migrations/0093_mention_groups.sql"
+            "../../../../migrations/0097_mention_groups.sql"
         ))
         .execute(&db.pool)
         .await
@@ -4979,6 +4979,12 @@ DROP FUNCTION community_deletion_lock_key(UUID);
         crate::migration::run_migrations_through(&db.pool, 86)
             .await
             .expect("phase-one schema");
+        sqlx::raw_sql(include_str!(
+            "../../../../migrations/0097_mention_groups.sql"
+        ))
+        .execute(&db.pool)
+        .await
+        .expect("expand feature schema while preserving single-table guards");
         let community = db
             .ensure_configured_community("optional-guards.example")
             .await
@@ -5833,9 +5839,7 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
     }
 
     async fn contender_db(application_name: &str) -> Db {
-        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
-            .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1 -- local test-only credentials
+        let database_url = crate::test_support::database_url();
         let options = PgConnectOptions::from_str(&database_url)
             .expect("parse test database URL")
             .application_name(application_name);
@@ -8337,9 +8341,7 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
     /// disturb the shared test database. Returns the admin pool and the
     /// scratch database guard, which drops the database.
     async fn scratch_desired_state_database(prefix: &str) -> (PgPool, ScratchDb) {
-        let base_url = std::env::var("BUZZ_TEST_DATABASE_URL")
-            .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
+        let base_url = crate::test_support::database_url();
         let admin = PgPool::connect(&base_url)
             .await
             .expect("connect admin database");
@@ -9287,9 +9289,7 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         // scenario in a dedicated database so concurrent purge/verify tests
         // never observe the drifted surface; advisory locks are also
         // per-database, so the parked migration lock cannot stall them.
-        let base_url = std::env::var("BUZZ_TEST_DATABASE_URL")
-            .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
+        let base_url = crate::test_support::database_url();
         let probe_db = ScratchDb::create(&base_url, "buzz_lock_probe").await;
         let db = Db::new(&DbConfig {
             database_url: probe_db.url().to_owned(),
