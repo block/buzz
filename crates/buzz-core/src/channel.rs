@@ -152,6 +152,54 @@ pub fn channel_created_at_tag(unix_seconds: i64) -> Result<nostr::Tag, nostr::ev
     nostr::Tag::parse([CHANNEL_CREATED_AT_TAG, &unix_seconds.to_string()])
 }
 
+/// Live ancestry pointer carried by kind:9007 and relay-signed kind:39000.
+pub const CHANNEL_FORKED_FROM_TAG: &str = "forked_from";
+
+/// A source channel and its inclusive message cutoff. This grants no source access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChannelFork {
+    /// Source channel in the destination's community.
+    pub channel_id: uuid::Uuid,
+    /// Accepted source message at which inherited context ends, inclusively.
+    pub message_id: [u8; 32],
+}
+
+/// Parse the single optional ancestry tag, rejecting noncanonical identifiers.
+pub fn parse_channel_fork<'a>(
+    tags: impl IntoIterator<Item = &'a nostr::Tag>,
+) -> Result<Option<ChannelFork>, &'static str> {
+    let mut fork = None;
+    for tag in tags {
+        let parts = tag.as_slice();
+        if parts.first().map(String::as_str) != Some(CHANNEL_FORKED_FROM_TAG) {
+            continue;
+        }
+        if fork.is_some() || parts.len() != 3 {
+            return Err("forked_from requires exactly one source channel and cutoff message");
+        }
+        let channel_id = uuid::Uuid::parse_str(&parts[1])
+            .map_err(|_| "forked_from source must be a canonical channel UUID")?;
+        if channel_id.is_nil() || channel_id.to_string() != parts[1] {
+            return Err("forked_from source must be a canonical channel UUID");
+        }
+        if parts[2].len() != 64
+            || !parts[2]
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err("forked_from cutoff must be 64 lowercase hex characters");
+        }
+        let mut message_id = [0; 32];
+        hex::decode_to_slice(&parts[2], &mut message_id)
+            .map_err(|_| "forked_from cutoff must be 64 lowercase hex characters")?;
+        fork = Some(ChannelFork {
+            channel_id,
+            message_id,
+        });
+    }
+    Ok(fork)
+}
+
 /// Whether a channel is publicly visible or invite-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelVisibility {
@@ -552,6 +600,40 @@ mod tests {
         group_state_identity_tags, parse_channel_labels, ChannelJoinRole, ChannelLabelError,
         ChannelType, MemberRole, LEGACY_CHANNEL_TYPES, MAX_CHANNEL_LABELS, RESERVED_CHANNEL_LABELS,
     };
+
+    #[test]
+    fn fork_tag_accepts_only_one_canonical_pointer() {
+        use super::parse_channel_fork;
+        let source = "12345678-1234-1234-1234-123456789abc";
+        let cutoff = "ab".repeat(32);
+        let valid = nostr::Tag::parse(["forked_from", source, &cutoff]).unwrap();
+        let fork = parse_channel_fork([&valid]).unwrap().unwrap();
+        assert_eq!(fork.channel_id.to_string(), source);
+        assert_eq!(fork.message_id, [0xab; 32]);
+        assert_eq!(parse_channel_fork([]), Ok(None));
+        assert!(parse_channel_fork([&valid, &valid]).is_err());
+        for parts in [
+            vec!["forked_from", source],
+            vec!["forked_from", source, &cutoff, "extra"],
+            vec![
+                "forked_from",
+                "00000000-0000-0000-0000-000000000000",
+                &cutoff,
+            ],
+            vec!["forked_from", "12345678123412341234123456789abc", &cutoff],
+            vec![
+                "forked_from",
+                "12345678-1234-1234-1234-123456789ABC",
+                &cutoff,
+            ],
+            vec!["forked_from", source, "ab"],
+            vec!["forked_from", source, &"AB".repeat(32)],
+            vec!["forked_from", source, &"gg".repeat(32)],
+        ] {
+            let tag = nostr::Tag::parse(parts).unwrap();
+            assert!(parse_channel_fork([&tag]).is_err());
+        }
+    }
 
     #[test]
     fn channel_name_error_matches_the_column_limit() {

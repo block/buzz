@@ -1671,7 +1671,7 @@ async fn dispatch_group_members_event(
     }
 }
 
-/// Emit NIP-29 group discovery events (39000, 39001, 39002) signed by the relay keypair.
+/// Emit relay-signed kind:39000 metadata, including immutable ancestry.
 /// Called after group creation, metadata changes, or membership changes.
 /// Events are stored channel-scoped (`channel_id = Some(...)`) so that existing
 /// access control applies — private channel member lists are only visible to members.
@@ -1679,14 +1679,12 @@ async fn dispatch_group_members_event(
 /// NOTE: Channel-scoped storage means live global subscriptions (e.g. `{kinds:[39000]}`)
 /// won't receive these events via fan-out. Clients discover groups via historical REQ
 /// queries. Live push for open-channel discovery is a future enhancement.
-pub async fn emit_group_discovery_events(
+pub async fn emit_group_metadata(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     channel_id: Uuid,
 ) -> anyhow::Result<()> {
     let relay_pubkey_hex = hex::encode(state.relay_keypair.public_key().to_bytes());
-    let group_id = channel_id.to_string();
-
     emit_addressable_discovery_event(
         tenant,
         state,
@@ -1700,7 +1698,19 @@ pub async fn emit_group_discovery_events(
                 .collect::<Result<Vec<_>, _>>()?)
         },
     )
-    .await?;
+    .await
+}
+
+/// Publish the metadata, admins and members discovery state for a channel.
+pub async fn emit_group_discovery_events(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+) -> anyhow::Result<()> {
+    let relay_pubkey_hex = hex::encode(state.relay_keypair.public_key().to_bytes());
+    let group_id = channel_id.to_string();
+
+    emit_group_metadata(tenant, state, channel_id).await?;
 
     emit_addressable_discovery_event(
         tenant,

@@ -93,6 +93,10 @@ pub struct ChannelRecord {
     /// effective while the channel is open and unarchived; see
     /// [`group_metadata_tags`] and [`list_auto_join_channels`].
     pub auto_join: bool,
+    /// Live source channel; paired with `fork_source_message_id`. Never grants access.
+    pub fork_source_channel_id: Option<Uuid>,
+    /// Inclusive source message cutoff, exactly 32 bytes when present.
+    pub fork_source_message_id: Option<Vec<u8>>,
 }
 
 impl ChannelRecord {
@@ -188,7 +192,7 @@ pub async fn create_channel(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, fork_source_channel_id, fork_source_message_id
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -239,6 +243,7 @@ pub async fn create_channel_with_id(
             labels,
             unlisted: false,
             members: &[],
+            forked_from: None,
         },
     )
     .await?;
@@ -251,7 +256,7 @@ pub async fn create_channel_with_id(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, fork_source_channel_id, fork_source_message_id
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -286,6 +291,8 @@ pub struct NewChannel<'a> {
     /// 32-byte pubkeys added as ordinary members invited by the creator. The
     /// caller has authorized each addition.
     pub members: &'a [Vec<u8>],
+    /// Optional immutable Solo ancestry, authorized in the create transaction.
+    pub forked_from: Option<buzz_core::channel::ChannelFork>,
 }
 
 /// What [`Db::create_channel_with_event`] did.
@@ -366,6 +373,7 @@ async fn insert_channel_rows(
         labels,
         unlisted,
         members,
+        forked_from,
     } = channel;
     let community_id = tx.community();
     if created_by.len() != 32 {
@@ -388,9 +396,9 @@ async fn insert_channel_rows(
 
     let rows_affected = sqlx::query(
         r#"
-        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline, labels, unlisted)
+        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline, labels, unlisted, fork_source_channel_id, fork_source_message_id)
         VALUES ($1, $2, $3, $4::channel_type, $5::channel_visibility, $6, $7, $8,
-                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END, $9, $10)
+                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END, $9, $10, $11, $12)
         ON CONFLICT (community_id, id) DO NOTHING
         "#,
     )
@@ -404,6 +412,8 @@ async fn insert_channel_rows(
     .bind(ttl_seconds)
     .bind(labels)
     .bind(unlisted)
+    .bind(forked_from.map(|fork| fork.channel_id))
+    .bind(forked_from.map(|fork| fork.message_id.to_vec()))
     .execute(tx.conn())
     .await
     .map_err(|e| listed_name_taken(e, Some(name)))?
@@ -412,6 +422,51 @@ async fn insert_channel_rows(
     let was_created = rows_affected > 0;
 
     if was_created {
+        // Exact accepted retries take the conflict path above: access/content
+        // changes since the original create must not prevent confirmation.
+        if let Some(fork) = forked_from {
+            if channel_type != ChannelType::Stream
+                || visibility != ChannelVisibility::Private
+                || !labels.iter().any(|label| label == "buzz.solo")
+                || fork.channel_id == channel_id
+            {
+                return Err(DbError::InvalidData(
+                    "fork requires a distinct source and a private Solo destination".into(),
+                ));
+            }
+            // Same order as membership removal and channel admission changes.
+            crate::channel_members::acquire_channel_membership_lock(
+                tx.conn(),
+                community_id,
+                fork.channel_id,
+            )
+            .await?;
+            crate::channel_members::lock_channel_ttl_shared_in_transaction(tx, fork.channel_id)
+                .await?;
+            let accessible: Option<bool> = sqlx::query_scalar(
+                "SELECT visibility = 'open' OR EXISTS (SELECT 1 FROM channel_members m \
+                 WHERE m.community_id = c.community_id AND m.channel_id = c.id \
+                 AND m.pubkey = $3 AND m.removed_at IS NULL) FROM channels c \
+                 WHERE c.community_id = $1 AND c.id = $2 AND c.deleted_at IS NULL FOR NO KEY UPDATE",
+            )
+            .bind(community_id.as_uuid()).bind(fork.channel_id).bind(created_by)
+            .fetch_optional(tx.conn()).await?;
+            if accessible != Some(true) {
+                return Err(DbError::InvalidData("fork source is unavailable".into()));
+            }
+            let cutoff = sqlx::query(
+                "SELECT 1 FROM events WHERE community_id = $1 AND channel_id = $2 AND id = $3 \
+                 AND kind IN (9, 40002) AND deleted_at IS NULL LIMIT 1 FOR SHARE",
+            )
+            .bind(community_id.as_uuid())
+            .bind(fork.channel_id)
+            .bind(fork.message_id.as_slice())
+            .fetch_optional(tx.conn())
+            .await?;
+            if cutoff.is_none() {
+                return Err(DbError::InvalidData("fork cutoff is unavailable".into()));
+            }
+        }
         // Bootstrap the creator as owner.
         sqlx::query(
             r#"
@@ -541,7 +596,7 @@ async fn select_channel(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, fork_source_channel_id, fork_source_message_id
         FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
     )
@@ -630,7 +685,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
+                   ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, fork_source_channel_id, fork_source_message_id
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL AND visibility::text = $2
             ORDER BY created_at DESC
@@ -650,7 +705,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
+                   ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, fork_source_channel_id, fork_source_message_id
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL
             ORDER BY created_at DESC
@@ -691,7 +746,7 @@ pub async fn list_auto_join_channels(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, fork_source_channel_id, fork_source_message_id
         FROM channels
         WHERE community_id = $1 AND auto_join AND channel_type = 'stream'
           AND visibility = 'open' AND archived_at IS NULL AND deleted_at IS NULL
@@ -798,6 +853,8 @@ pub(crate) fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<Channe
         // Selected by every channel-record query, like `join_role`.
         unlisted: row.try_get("unlisted")?,
         auto_join: row.try_get("auto_join")?,
+        fork_source_channel_id: row.try_get("fork_source_channel_id")?,
+        fork_source_message_id: row.try_get("fork_source_message_id")?,
     })
 }
 
@@ -845,6 +902,16 @@ pub fn group_metadata_tags(channel: &ChannelRecord, members: &[MemberRecord]) ->
     ];
     if let Some(desc) = channel.description.as_deref().filter(|d| !d.is_empty()) {
         tags.push(tag(&["about", desc]));
+    }
+    if let (Some(source), Some(cutoff)) = (
+        channel.fork_source_channel_id,
+        &channel.fork_source_message_id,
+    ) {
+        tags.push(tag(&[
+            buzz_core::channel::CHANNEL_FORKED_FROM_TAG,
+            &source.to_string(),
+            &hex::encode(cutoff),
+        ]));
     }
     let open = channel.visibility == ChannelVisibility::Open.as_str();
     if open {
@@ -1029,9 +1096,11 @@ pub async fn lock_group_state_snapshot(
     } else {
         Vec::new()
     };
+    // Include tombstones: reusing a deleted event's timestamp can reproduce
+    // its exact ID and make metadata repair a deduplicated no-op.
     let latest_created_at: Option<DateTime<Utc>> = sqlx::query_scalar(
         "SELECT created_at FROM events WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
-         AND channel_id = $4 AND deleted_at IS NULL ORDER BY created_at DESC, id ASC LIMIT 1",
+         AND channel_id = $4 ORDER BY created_at DESC, id ASC LIMIT 1",
     )
     .bind(community_id.as_uuid())
     .bind(kind)
@@ -2286,6 +2355,8 @@ mod group_metadata_tag_tests {
             join_role: join_role.into(),
             unlisted: false,
             auto_join: false,
+            fork_source_channel_id: None,
+            fork_source_message_id: None,
         }
     }
 
@@ -2759,6 +2830,7 @@ mod postgres_tests {
             labels: &[],
             unlisted: false,
             members,
+            forked_from: None,
         }
     }
 

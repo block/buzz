@@ -40,7 +40,11 @@ async fn ingest(
     event: Event,
     keys: &Keys,
 ) -> Result<IngestResult, IngestError> {
-    ingest_event(state, tenant, event, http_auth(keys)).await
+    let mut auth = http_auth(keys);
+    if let crate::handlers::ingest::IngestAuth::Http { scopes, .. } = &mut auth {
+        scopes.push(buzz_auth::Scope::MessagesRead);
+    }
+    ingest_event(state, tenant, event, auth).await
 }
 
 async fn roles(
@@ -247,5 +251,184 @@ async fn resending_a_create_confirms_it() {
             .content
             .contains(&stranger.public_key().to_hex())),
         "the refused create announced nobody"
+    );
+}
+
+/// Creation persists live ancestry and retries repair signed metadata without
+/// copying source members. An inaccessible source or wrong cutoff writes nothing.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn solo_fork_preserves_authorized_pointer_and_confirms_exact_retry() {
+    let state = state().await;
+    let tenant = community(&state, "solo-fork").await;
+    let (creator, outsider, agent) = (Keys::generate(), Keys::generate(), Keys::generate());
+    let source = Uuid::new_v4();
+    assert!(
+        ingest(
+            &state,
+            &tenant,
+            create_event(&creator, source, &[&agent]),
+            &creator
+        )
+        .await
+        .unwrap()
+        .accepted
+    );
+    let cutoff = message_event(&creator, source);
+    assert!(
+        ingest(&state, &tenant, cutoff.clone(), &creator)
+            .await
+            .unwrap()
+            .accepted
+    );
+    let fork_create = |author: &Keys, destination: Uuid, message_id: String| {
+        EventBuilder::new(Kind::Custom(9007), "")
+            .tags([
+                Tag::parse(["h", &destination.to_string()]).unwrap(),
+                Tag::parse(["name", "fork"]).unwrap(),
+                Tag::parse(["visibility", "private"]).unwrap(),
+                Tag::parse(["channel_type", "stream"]).unwrap(),
+                Tag::parse(["forked_from", &source.to_string(), &message_id]).unwrap(),
+                Tag::parse(["t", "buzz.solo"]).unwrap(),
+            ])
+            .sign_with_keys(author)
+            .unwrap()
+    };
+    for (author, message_id) in [(&outsider, cutoff.id.to_hex()), (&creator, "ff".repeat(32))] {
+        let destination = Uuid::new_v4();
+        assert!(ingest(
+            &state,
+            &tenant,
+            fork_create(author, destination, message_id),
+            author
+        )
+        .await
+        .is_err());
+        assert!(state
+            .db
+            .get_channel(tenant.community(), destination)
+            .await
+            .is_err());
+    }
+    let destination = Uuid::new_v4();
+    let create = fork_create(&creator, destination, cutoff.id.to_hex());
+    // Fail the real signed-metadata insert, after the atomic create commits.
+    // This database belongs to this test, so the failure cannot affect another journey.
+    sqlx::query(
+        "ALTER TABLE events ADD CONSTRAINT solo_fork_metadata_failure \
+         CHECK (kind <> 39000) NOT VALID",
+    )
+    .execute(state.db.pool())
+    .await
+    .unwrap();
+    assert!(matches!(
+        ingest(&state, &tenant, create.clone(), &creator).await,
+        Err(IngestError::Internal(message)) if message.contains("fork metadata confirmation failed")
+    ));
+    let record = state
+        .db
+        .get_channel(tenant.community(), destination)
+        .await
+        .unwrap();
+    assert_eq!(record.fork_source_channel_id, Some(source));
+    assert_eq!(
+        record.fork_source_message_id,
+        Some(cutoff.id.as_bytes().to_vec())
+    );
+    assert_eq!(roles(&state, &tenant, destination).await.len(), 1);
+    let expected = vec![
+        "forked_from".to_owned(),
+        source.to_string(),
+        cutoff.id.to_hex(),
+    ];
+    sqlx::query("ALTER TABLE events DROP CONSTRAINT solo_fork_metadata_failure")
+        .execute(state.db.pool())
+        .await
+        .unwrap();
+    assert!(
+        ingest(&state, &tenant, create.clone(), &creator)
+            .await
+            .unwrap()
+            .accepted
+    );
+    assert!(group_state_tags(&state, &tenant, destination, 39000)
+        .await
+        .contains(&expected));
+    let notices_before = state
+        .db
+        .query_events(&EventQuery {
+            kinds: Some(vec![buzz_core::kind::KIND_SYSTEM_MESSAGE as i32]),
+            channel_id: Some(destination),
+            ..EventQuery::for_community(tenant.community())
+        })
+        .await
+        .unwrap()
+        .len();
+
+    // A missing derived metadata event is repaired by the exact create retry.
+    sqlx::query("UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND channel_id = $2 AND kind = 39000")
+        .bind(tenant.community().as_uuid()).bind(destination)
+        .execute(state.db.pool()).await.unwrap();
+    assert!(
+        ingest(&state, &tenant, create, &creator)
+            .await
+            .unwrap()
+            .accepted
+    );
+    assert!(group_state_tags(&state, &tenant, destination, 39000)
+        .await
+        .contains(&expected));
+    assert_eq!(
+        state
+            .db
+            .query_events(&EventQuery {
+                kinds: Some(vec![buzz_core::kind::KIND_SYSTEM_MESSAGE as i32]),
+                channel_id: Some(destination),
+                ..EventQuery::for_community(tenant.community())
+            })
+            .await
+            .unwrap()
+            .len(),
+        notices_before
+    );
+    let edit = EventBuilder::new(Kind::Custom(9002), "")
+        .tags([
+            Tag::parse(["h", &destination.to_string()]).unwrap(),
+            Tag::parse(["name", "renamed fork"]).unwrap(),
+            Tag::parse(["forked_from", &source.to_string(), &"ff".repeat(32)]).unwrap(),
+        ])
+        .sign_with_keys(&creator)
+        .unwrap();
+    assert!(ingest(&state, &tenant, edit, &creator).await.is_err());
+    assert_eq!(
+        state
+            .db
+            .get_channel(tenant.community(), destination)
+            .await
+            .unwrap()
+            .fork_source_message_id,
+        Some(cutoff.id.as_bytes().to_vec())
+    );
+    let other_tenant = community(&state, "solo-fork-other").await;
+    let cross_destination = Uuid::new_v4();
+    assert!(ingest(
+        &state,
+        &other_tenant,
+        fork_create(&creator, cross_destination, cutoff.id.to_hex()),
+        &creator
+    )
+    .await
+    .is_err());
+    assert!(state
+        .db
+        .get_channel(other_tenant.community(), cross_destination)
+        .await
+        .is_err());
+    let changed = fork_create(&creator, destination, "ff".repeat(32));
+    assert!(
+        !ingest(&state, &tenant, changed, &creator)
+            .await
+            .unwrap()
+            .accepted
     );
 }
