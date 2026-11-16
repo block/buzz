@@ -176,10 +176,23 @@ void main() {
     final actions = _DmAdds('dm-2');
     final movedTo = await _add(tester, actions, 'Robin', existing: {'self'});
 
+    // The relay starts the new DM for a person, even with the history tag.
     expect(find.text('Include history'), findsNothing);
     expect(actions.calls.single.pubkeys, [_person]);
-    expect(actions.calls.single.includeHistory, isFalse);
+    expect(actions.calls.single.includeHistory, isTrue);
     expect(movedTo.single.id, 'dm-2');
+  });
+
+  testWidgets('an agent without a verified owner joins a DM of one person', (
+    tester,
+  ) async {
+    final actions = _DmAdds(_dmId);
+    final movedTo = await _add(tester, actions, 'Wren', existing: {'self'});
+
+    expect(find.text('Include history'), findsNothing);
+    expect(actions.calls.single.pubkeys, [_unowned]);
+    expect(actions.calls.single.includeHistory, isTrue);
+    expect(movedTo.single.id, _dmId);
   });
 
   testWidgets('cancelling the choice adds no one', (tester) async {

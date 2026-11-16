@@ -217,10 +217,13 @@ class AddChannelMembersSheet extends HookConsumerWidget {
       if (users.every((user) => user.isAgent && user.ownerPubkey != null)) {
         return true;
       }
+      // Nothing is asked in a DM of one person and their agents: the relay
+      // adds an agent to it and starts a new DM for a person, whatever this
+      // side thinks they are.
       final people = existingPubkeys
           .where((pubkey) => userCache[pubkey]?.isAgent != true)
           .length;
-      if (people < 2) return false;
+      if (people < 2) return true;
       return showDmHistoryChoice(
         context: context,
         title: users.length == 1
