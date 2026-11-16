@@ -340,10 +340,11 @@ channels the signer has not joined all get the same answer.
   give, capped at `member`. `archived` is whether the channel itself is
   archived. `post` is whether a kind:9 from them would be accepted now:
   false for a `guest` role, an archived channel, a conversation whose home
-  is archived, and a community ban or timeout of the signer or of the
-  agent's owner, by the same check the post itself meets. While the signer
-  is timed out, every entry also carries `"timed_out_until":<unix
-  seconds>`; ask again then. A channel left out cannot be read:
+  is archived, and a community timeout of the signer or of the agent's
+  owner, by the same check the post itself meets. While the signer is
+  timed out, every entry also carries `"timed_out_until":<unix seconds>`;
+  ask again then. A banned signer, or an agent whose owner is banned, is
+  refused with 403 and the reason, as every request from them is. A channel left out cannot be read:
   it is private to them, deleted or missing. If any channel cannot be
   answered, the whole request fails with 503 and is retried; a channel is
   only ever left out of a complete answer. The answer is a snapshot, and

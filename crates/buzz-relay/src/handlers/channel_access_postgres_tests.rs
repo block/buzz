@@ -813,12 +813,11 @@ async fn moderate(
 /// anywhere and until when, matching the post gate. The timeout and its
 /// lifting are each pushed to that person and their agent, and to no one
 /// else. A timeout that runs out lifts on time with no push: the answer's
-/// `timed_out_until` is when to ask again. A banned person may not post and
-/// has no end to wait for.
+/// `timed_out_until` is when to ask again. A ban is pushed too, and the
+/// banned person and their agent are then refused with the reason.
 /// Mutation: leave the restriction out of `post`, drop `timed_out_until`,
-/// report it for a ban,
-/// drop the push from 9042 or 9043, skip the owner's agents, or deliver the
-/// push without the p gate → RED.
+/// drop the push from `restrictions_changed`, skip the owner's agents, or
+/// deliver the push without the p gate → RED.
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
 async fn a_timeout_closes_posting_and_is_pushed_to_that_person_only() {
@@ -1001,8 +1000,17 @@ async fn a_timeout_closes_posting_and_is_pushed_to_that_person_only() {
     assert!(viewer_pushes(state, &mut member_rx, Duration::from_secs(3))
         .await
         .contains(&member.public_key().to_hex()));
-    let banned = ask_one(state, tenant, &member, f.child).await.unwrap();
-    assert_eq!(banned["post"], json!(false), "{banned}");
-    assert!(banned.get("timed_out_until").is_none(), "{banned}");
-    assert!(post(state, tenant, &member, f.child).await.is_err());
+    // A banned person, and the agent restricted through them, are refused
+    // outright with the reason, as every HTTP request from them is.
+    for keys in [&member, &agent] {
+        let (status, refused) = ask_with(state, tenant, keys, &[f.child], true).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+        assert!(
+            refused["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("banned")),
+            "{refused}"
+        );
+        assert!(post(state, tenant, keys, f.child).await.is_err());
+    }
 }
