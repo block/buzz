@@ -532,8 +532,8 @@ pub mod relay_members {
 
     /// Extract NIP-OA owner from an auth tag without membership enforcement.
     ///
-    /// Used on open relays (`require_relay_membership = false`) to opportunistically
-    /// extract the owner pubkey for agent→owner backfill. The NIP-OA signature is
+    /// Extracts the owner pubkey for agent→owner recording on any admitted
+    /// request, whatever the relay mode. The NIP-OA signature is
     /// cryptographically self-proving, so no feature flag is needed. Temporal
     /// conditions are evaluated against `signed_auth_created_at`. Returns
     /// `None` if the tag, timestamp, or conditions are absent or invalid.

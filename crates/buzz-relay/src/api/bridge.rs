@@ -1465,16 +1465,13 @@ async fn submit_event_authed(
     )
     .await;
     let nip_oa_owner = match caller.admit_member(membership) {
+        // Any verified NIP-OA owner is recorded, whatever the relay mode.
         Ok(owner) => owner.or_else(|| {
-            if !state.config.require_relay_membership {
-                super::relay_members::extract_nip_oa_owner(
-                    &pubkey_bytes,
-                    auth_tag,
-                    signed_auth_created_at,
-                )
-            } else {
-                None
-            }
+            super::relay_members::extract_nip_oa_owner(
+                &pubkey_bytes,
+                auth_tag,
+                signed_auth_created_at,
+            )
         }),
         Err(e) => {
             return SubmitOutcome::Err {

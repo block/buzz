@@ -997,6 +997,108 @@ mod postgres_tests {
         assert!(!bystander_socket.cancellation_token().is_cancelled());
     }
 
+    /// An admin's kind 9031 removal of a member also removes the member's
+    /// recorded agent, even an admin-role one, and closes its socket. Directly
+    /// targeting an unrelated admin is still refused.
+    /// Mutation: drop the owned-agent delete from
+    /// `delete_member_with_acceptances` → the agent stays a member → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn admin_removal_takes_the_members_admin_agent() {
+        use crate::state::CommunityConnectionControl;
+        use tokio_util::sync::CancellationToken;
+
+        let host = format!("remove-agent-{}.example", uuid::Uuid::new_v4().simple());
+        let (state, tenant) = workspace_profile_test_state(&host, true).await;
+        let (owner, admin, member, agent, other_admin) = (
+            Keys::generate(),
+            Keys::generate(),
+            Keys::generate(),
+            Keys::generate(),
+            Keys::generate(),
+        );
+        for (keys, role) in [
+            (&owner, "owner"),
+            (&admin, "admin"),
+            (&member, "member"),
+            (&agent, "admin"),
+            (&other_admin, "admin"),
+        ] {
+            state
+                .db
+                .add_relay_member(
+                    tenant.community(),
+                    &keys.public_key().to_hex(),
+                    role,
+                    None,
+                    &nostr::Keys::generate(),
+                )
+                .await
+                .map(|write| write.outcome)
+                .expect("seed member");
+        }
+        for keys in [&member, &agent] {
+            state
+                .db
+                .ensure_user(tenant.community(), keys.public_key().as_bytes())
+                .await
+                .expect("ensure user");
+        }
+        assert!(state
+            .db
+            .set_agent_owner(
+                tenant.community(),
+                agent.public_key().as_bytes(),
+                member.public_key().as_bytes(),
+            )
+            .await
+            .expect("link agent"));
+        let control = CommunityConnectionControl::new(CancellationToken::new());
+        control.bind_pubkey(agent.public_key().to_bytes());
+        let _guard = state.community_connections.register(
+            uuid::Uuid::new_v4(),
+            tenant.community(),
+            control.clone(),
+        );
+        let removal = |target: &Keys| {
+            EventBuilder::new(Kind::Custom(RELAY_ADMIN_REMOVE_MEMBER as u16), "")
+                .tags(vec![Tag::public_key(target.public_key())])
+                .sign_with_keys(&admin)
+                .expect("sign 9031")
+        };
+        let is_member = |keys: &Keys| {
+            let (state, community, hex) = (
+                state.clone(),
+                tenant.community(),
+                keys.public_key().to_hex(),
+            );
+            async move {
+                state
+                    .db
+                    .get_relay_member(community, &hex)
+                    .await
+                    .expect("read member")
+                    .is_some()
+            }
+        };
+
+        assert!(
+            handle_relay_admin_event(&tenant, &state, &removal(&other_admin))
+                .await
+                .is_err(),
+            "an admin cannot directly remove another admin"
+        );
+        assert!(is_member(&other_admin).await);
+
+        handle_relay_admin_event(&tenant, &state, &removal(&member))
+            .await
+            .expect("admin removes member");
+        assert!(!is_member(&member).await);
+        assert!(!is_member(&agent).await, "the admin-role agent goes too");
+        assert!(control.cancellation_token().is_cancelled());
+        assert!(is_member(&other_admin).await);
+    }
+
     /// A kind:9030 add joins the new relay member to the community's
     /// effective default channels, once: the flagged open channel gains them
     /// as a member with one kind:44100; the unflagged channel does not. A
