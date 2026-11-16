@@ -2260,6 +2260,80 @@ test("normal-motion GIF grid renders animated previews", async ({ page }) => {
   }
 });
 
+test("GIF favorites persist on this device and render without GIPHY requests", async ({
+  page,
+}) => {
+  const gifs = await routeGifMocks(page);
+  let searchRequests = 0;
+  page.on("request", (request) => {
+    if (request.url() === "http://localhost:3000/gifs/search") {
+      searchRequests += 1;
+    }
+  });
+  await openGifGrid(page);
+
+  const grid = page.getByTestId("giphy-gif-grid");
+  const toggle = page.getByTestId("giphy-gif-favorites-toggle");
+  await expect(toggle).toHaveAccessibleName("Show favorites (0)");
+
+  // The heart is a sibling of the tile button, so saving never selects the GIF.
+  const favoriteButton = grid.getByRole("button", {
+    name: `Add ${gifs[0].title} to favorites`,
+  });
+  await favoriteButton.focus();
+  await favoriteButton.click();
+  await expect(page.getByTestId("composer-media-attachment")).toHaveCount(0);
+  await expect(
+    grid.getByRole("button", {
+      name: `Remove ${gifs[0].title} from favorites`,
+    }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(toggle).toHaveAccessibleName("Show favorites (1)");
+
+  // Favorites view shows only saved GIFs and filters them locally.
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    grid.getByRole("button", { name: `Choose ${gifs[0].title}` }),
+  ).toBeVisible();
+  await expect(
+    grid.getByRole("button", { name: `Choose ${gifs[1].title}` }),
+  ).toHaveCount(0);
+  const requestsBeforeFilter = searchRequests;
+  await page
+    .getByRole("searchbox", { name: "Search favorites" })
+    .fill("nothing matches");
+  await expect(page.getByTestId("giphy-gif-favorites-empty")).toHaveText(
+    "No favorites match your search.",
+  );
+  await page.waitForTimeout(700);
+  expect(searchRequests).toBe(requestsBeforeFilter);
+
+  // Favorites survive a reload and can still be sent from the favorites view.
+  await page.reload();
+  await openGifGrid(page);
+  await expect(toggle).toHaveAccessibleName("Show favorites (1)");
+  await toggle.click();
+  await grid.getByRole("button", { name: `Choose ${gifs[0].title}` }).click();
+  await expect(page.getByTestId("composer-media-attachment")).toBeVisible();
+
+  // Removing the last favorite returns the empty state.
+  await page.getByTestId("composer-emoji-button").click();
+  await page.getByRole("tab", { name: "GIFs" }).click();
+  await toggle.click();
+  await grid
+    .getByRole("button", { name: `Remove ${gifs[0].title} from favorites` })
+    .click();
+  await expect(page.getByTestId("giphy-gif-favorites-empty")).toHaveText(
+    "No favorite GIFs yet. Use the heart on any GIF to save it here.",
+  );
+  await toggle.click();
+  await expect(toggle).toHaveAccessibleName("Show favorites (0)");
+  await expect(
+    grid.getByRole("button", { name: `Choose ${gifs[1].title}` }),
+  ).toBeVisible();
+});
+
 test("selected GIFs keep distinct accessible names in the composer and lightbox", async ({
   page,
 }) => {
