@@ -92,7 +92,9 @@ BEGIN
             ORDER BY created_at, id DESC
             LIMIT 1;
 
-            PERFORM pg_advisory_xact_lock_shared(community_deletion_lock_key(current_community));
+            PERFORM pg_advisory_xact_lock_shared(
+                hashtextextended('buzz-community-deletion:' || current_community::text, 0)
+            );
 
             -- A new statement, so the community state is read after the lock.
             INSERT INTO event_mentions
