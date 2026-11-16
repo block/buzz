@@ -1667,24 +1667,25 @@ mod external_infra {
             StatusCode::FORBIDDEN
         );
         assert_eq!(f.set(&agent, "main", Some(&tag)).await.0, StatusCode::OK);
-        // Optional credential does not take direct authority away.
-        let absent_owner = Keys::generate();
+        // Optional credential does not take direct authority away. Its signer
+        // is recorded as the announcer's owner, so it is the human below.
         let own_tag =
-            buzz_sdk::nip_oa::compute_auth_tag(&absent_owner, &f.owner.public_key(), "").unwrap();
+            buzz_sdk::nip_oa::compute_auth_tag(&f.member, &f.owner.public_key(), "").unwrap();
         assert_eq!(
             f.set(&f.owner, "legacy", Some(&own_tag)).await.0,
             StatusCode::OK
         );
         // A human can administer a repository announced by their managed agent.
-        f.state
+        assert!(f
+            .state
             .db
-            .set_agent_owner(
+            .is_agent_owner(
                 f.tenant.community(),
                 f.owner.public_key().as_bytes(),
                 f.member.public_key().as_bytes(),
             )
             .await
-            .unwrap();
+            .unwrap());
         assert_eq!(f.set(&f.member, "main", None).await.0, StatusCode::OK);
         f.state
             .db
