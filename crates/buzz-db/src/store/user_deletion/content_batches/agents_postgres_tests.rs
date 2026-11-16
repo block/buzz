@@ -102,11 +102,61 @@ async fn owned_agents_share_bounded_batches_and_preserve_other_owners_and_commun
                 first_ids.push(event.id.to_bytes().to_vec());
             }
         }
-        let event = EventBuilder::new(Kind::Metadata, "{}")
-            .custom_created_at(timestamp)
-            .sign_with_keys(author)
+        // Shared definitions still belong to their signer. The same coordinate
+        // under another signer/community must survive, including stored history.
+        for kind in [30175, 30176, 30178, 30030, 30180, 30621] {
+            for revision in 0..2 {
+                let event = EventBuilder::new(Kind::Custom(kind), format!("revision {revision}"))
+                    .tags([
+                        Tag::parse(["d", "shared-definition"]).unwrap(),
+                        Tag::parse(["shared", "true"]).unwrap(),
+                        Tag::parse(["a", &format!("30617:{}:member-repo", bob.public_key())])
+                            .unwrap(),
+                    ])
+                    .custom_created_at(Timestamp::from(timestamp.as_secs() + revision))
+                    .sign_with_keys(author)
+                    .unwrap();
+                for community in [a, b] {
+                    db.insert_event(community, &event, None).await.unwrap();
+                    if revision == 0 {
+                        sqlx::query(
+                            "UPDATE events SET deleted_at=now() WHERE community_id=$1 AND id=$2",
+                        )
+                        .bind(community.as_uuid())
+                        .bind(event.id.as_bytes().as_slice())
+                        .execute(&pool)
+                        .await
+                        .unwrap();
+                    }
+                }
+                if index < 3 {
+                    selected.insert(event.id.to_hex());
+                }
+            }
+        }
+        // Identity, preferences, gift wraps and repository announcements/refs
+        // remain outside this expansion, even when signed by a target key.
+        for kind in [0, 1059, 10030, 30177, 30179, 30617, 30618] {
+            let event = EventBuilder::new(Kind::Custom(kind), "{}")
+                .tags([Tag::parse(["d", "member-repo"]).unwrap()])
+                .custom_created_at(timestamp)
+                .sign_with_keys(author)
+                .unwrap();
+            for community in [a, b] {
+                db.insert_event(community, &event, None).await.unwrap();
+            }
+        }
+        for community in [a, b] {
+            sqlx::query(
+                "INSERT INTO git_repo_names (community_id,repo_id,owner_pubkey) VALUES ($1,$2,$3)",
+            )
+            .bind(community.as_uuid())
+            .bind(format!("member-repo-{index}"))
+            .bind(author.public_key().to_hex())
+            .execute(&pool)
+            .await
             .unwrap();
-        db.insert_event(a, &event, None).await.unwrap();
+        }
     }
     // Actor wins over p; p is a fallback only for the trusted relay signer.
     for (signer, kind, tags, keep) in [
@@ -194,6 +244,7 @@ async fn owned_agents_share_bounded_batches_and_preserve_other_owners_and_commun
         "push_wake_outbox",
         "operator_listener_outbox",
         "users",
+        "git_repo_names",
     ];
     let mut before_a = Vec::new();
     let mut before_b = Vec::new();
@@ -224,7 +275,9 @@ async fn owned_agents_share_bounded_batches_and_preserve_other_owners_and_commun
     assert_eq!(records[0]["target_pubkeys"], json!(targets));
     assert_eq!(
         summary.excluded_event_kinds,
-        vec![json!({"kind":0,"count":3})]
+        [0, 1059, 10030, 30177, 30179, 30617, 30618]
+            .map(|kind| json!({"kind":kind,"count":3}))
+            .to_vec()
     );
     let items: Vec<_> = records
         .iter()
@@ -308,7 +361,7 @@ async fn owned_agents_share_bounded_batches_and_preserve_other_owners_and_commun
                 let owned = |field: &str| targets.contains(&hex_field(field));
                 match table {
                     "events" => !selected.contains(&hex_field("id")),
-                    "users" => true,
+                    "users" | "git_repo_names" => true,
                     "event_mentions" | "push_match_queue" => {
                         !selected.contains(&hex_field("event_id"))
                     }

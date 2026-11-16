@@ -24,6 +24,9 @@ const KINDS: &[i32] = &[
     5, 41010, 41011, 41012, 46020, 46030, 46031, 3, 10000, 10001, 10002, 10003, 30000, 30003,
     30315, 30078, 30300, 30174, 44200, 43001, 43002, 43003, 43004, 43005, 43006, 30620, 30350, 1,
     7, 9, 30023, 40001, 40002, 40003, 40004, 40005, 40006, 40007, 40008, 45001, 45002, 45003,
+    // Signer-owned definitions, including shared publications. Project membership
+    // grants no ownership over its repositories; their events remain excluded.
+    30175, 30176, 30178, 30030, 30180, 30621,
 ];
 const PAGE_SIZE: i64 = 100;
 const MAX_TARGETS: usize = 10_000;
@@ -252,8 +255,8 @@ async fn plan(
         "community_id": options.community, "host": host, "pubkey": subject,
         "target_pubkeys": target_pubkeys, "trusted_relay_pubkey": relay, "included_event_kinds": KINDS,
         "batch_size": options.batch_size, "max_items": options.max_items,
-        "scope": "user- and owned-agent-attributed events and reactions, owned subscriptions and notification delivery",
-        "preserved": "other users' events and reactions; workflow database records and other owners' delivery logs",
+        "scope": "user- and owned-agent-attributed events (including persona, team, emoji and project definitions) and reactions, owned subscriptions and notification delivery",
+        "preserved": "other users' events and reactions; member repositories; workflow database records and other owners' delivery logs",
         "relay_attribution": if relay.is_some() { "enabled" } else { "not included; supply --relay-pubkey for relay-authored history" },
         "execution": "preview only; --delete prints and commits batches after execution checks",
         "thread_repairs": "reported separately from row items; metadata mutations are not expanded",
