@@ -22,6 +22,7 @@ migration:
     limits: {cpu: 250m, memory: 128Mi}
 # Routing origin used only when httpRoute.enabled=true. Not passed to the binary.
 gatewayOrigin: ""
+trustedProxyCidrs: []
 maxGrantLifetimeSeconds: 2592000
 application:
   # Production MUST override this with the exact Apple TEAMID.bundle-id.

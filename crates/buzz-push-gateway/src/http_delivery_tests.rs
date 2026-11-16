@@ -44,6 +44,12 @@ fn now() -> i64 {
 }
 
 async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
+    fixture_with_transport(None).await
+}
+
+async fn fixture_with_transport(
+    transport: Option<Arc<dyn PushTransport>>,
+) -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
     let keys = Keys::generate();
     let authority = Arc::new(MemoryAuthorityStore::default());
     let token_keyring =
@@ -95,6 +101,7 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
         .unwrap();
     let sends = Arc::new(AtomicUsize::new(0));
     let (app, _) = router(AppState {
+        trusted_proxy_cidrs: Vec::new(),
         grant_keyring,
         authority,
         token_keyring,
@@ -106,7 +113,7 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
                 )
                 .unwrap(),
             ),
-            transport: Arc::new(TestTransport(sends.clone())),
+            transport: transport.unwrap_or_else(|| Arc::new(TestTransport(sends.clone()))),
         }),
         max_grant_lifetime_seconds: 600,
         max_installation_lifetime_seconds: 600,
@@ -367,4 +374,183 @@ async fn grant_signer_and_replay_checks_remain_enforced() {
         StatusCode::NOT_FOUND
     );
     assert_eq!(sends.load(Ordering::SeqCst), 1);
+}
+
+struct GatedTransport {
+    entered: Arc<tokio::sync::Semaphore>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+#[async_trait::async_trait]
+impl PushTransport for GatedTransport {
+    async fn send(&self, _: DeliveryAttempt, _: &str) -> DeliveryOutcome {
+        self.entered.add_permits(1);
+        self.release.acquire().await.unwrap().forget();
+        DeliveryOutcome::Accepted
+    }
+}
+
+#[tokio::test]
+async fn cancelled_deliveries_keep_capacity_and_leave_v1_challenge_and_revoke_lanes_free() {
+    let entered = Arc::new(tokio::sync::Semaphore::new(0));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let (app, keys, template, _) = fixture_with_transport(Some(Arc::new(GatedTransport {
+        entered: entered.clone(),
+        release: release.clone(),
+    })))
+    .await;
+    let mut admitted = 0;
+    for n in 0..128 {
+        let mut value: serde_json::Value = serde_json::from_slice(&template).unwrap();
+        value["request_id"] = Uuid::new_v4().to_string().into();
+        let body = serde_json::to_vec(&value).unwrap();
+        let auth = signed_header(&keys, DIRECT_URL, "POST", &body);
+        let mut req = request(DIRECT_URL, None, auth, body);
+        // Two requests per source; try another if its bucket is already full.
+        req.extensions_mut().insert(axum::extract::ConnectInfo(
+            format!("192.0.2.{}:1234", n / 2 + 1)
+                .parse::<std::net::SocketAddr>()
+                .unwrap(),
+        ));
+        let mut task = tokio::spawn(app.clone().oneshot(req));
+        let permit = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::select! {
+                permit = entered.acquire() => Some(permit.unwrap()),
+                response = &mut task => {
+                    let response = response.unwrap().unwrap();
+                    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+                    assert_eq!(response.headers()["retry-after"], "1");
+                    None
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let Some(permit) = permit else { continue };
+        permit.forget();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        admitted += 1;
+        if admitted == 8 {
+            break;
+        }
+    }
+    assert_eq!(admitted, 8);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/deliveries/apns")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.headers()["retry-after"], "1");
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/installations/challenges")
+                .body(Body::from(r#"{"v":1}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = app
+        .oneshot(
+            Request::post("/v1/delegations/revoke")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    release.add_permits(8);
+}
+
+#[tokio::test]
+async fn slow_enrollment_bodies_are_bounded_without_occupying_revocation_capacity() {
+    use std::{future::IntoFuture, time::Duration};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn headers(socket: &mut tokio::net::TcpStream) -> String {
+        let read = async {
+            let mut bytes = Vec::new();
+            while !bytes.ends_with(b"\r\n\r\n") {
+                assert!(bytes.len() < 8192);
+                bytes.push(socket.read_u8().await.unwrap());
+            }
+            String::from_utf8(bytes).unwrap()
+        };
+        tokio::time::timeout(Duration::from_secs(25), read)
+            .await
+            .unwrap()
+    }
+
+    let (app, _, _, _) = fixture().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .into_future(),
+    );
+    let mut stalled = Vec::new();
+    for _ in 0..2 {
+        let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+        socket.write_all(b"POST /v1/installations HTTP/1.1\r\nHost: push.example\r\nContent-Length: 100\r\nExpect: 100-continue\r\n\r\n").await.unwrap();
+        // Hyper sends Continue only when the handler starts reading the body:
+        // admission has happened, without a scheduling sleep or polling retry.
+        assert!(headers(&mut socket).await.starts_with("HTTP/1.1 100"));
+        stalled.push(socket);
+    }
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("http://{address}/v1/installations"))
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.headers()["retry-after"], "1");
+    assert_eq!(
+        client
+            .post(format!("http://{address}/v1/installations/challenges"))
+            .body(r#"{"v":1}"#)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        client
+            .post(format!("http://{address}/v1/delegations/revoke"))
+            .body("{}")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    // Exercise the unchanged production timeout, then prove its permits return.
+    for socket in &mut stalled {
+        assert!(headers(socket).await.starts_with("HTTP/1.1 408"));
+    }
+    assert_eq!(
+        client
+            .post(format!("http://{address}/v1/installations"))
+            .body("{}")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+    socket.write_all(b"POST /v1/installations HTTP/1.1\r\nHost: push.example\r\nContent-Length: 1048576\r\nExpect: 100-continue\r\n\r\n").await.unwrap();
+    assert!(headers(&mut socket).await.starts_with("HTTP/1.1 413"));
+    server.abort();
 }

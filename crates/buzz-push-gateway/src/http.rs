@@ -19,7 +19,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use nostr::{
@@ -33,7 +33,6 @@ use std::{
     },
     time::Duration,
 };
-use tower::limit::ConcurrencyLimitLayer;
 use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer};
 
 /// Verification and delivery services for this gateway's configured application.
@@ -45,6 +44,8 @@ pub struct ApplicationRuntime {
 
 #[derive(Clone)]
 pub struct AppState {
+    /// Only these TCP peer ranges may supply X-Buzz-Client-IP.
+    pub trusted_proxy_cidrs: Vec<(std::net::IpAddr, u8)>,
     pub grant_keyring: Arc<GrantKeyring>,
     pub authority: Arc<dyn AuthorityStore>,
     pub token_keyring: Arc<TokenKeyring>,
@@ -120,6 +121,15 @@ fn decode_challenge(value: &str) -> Option<[u8; 32]> {
         .decode(value)
         .ok()?;
     bytes.try_into().ok()
+}
+pub(crate) fn throttled(seconds: i64) -> Response {
+    let mut response = error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+    if let Ok(value) = seconds.clamp(1, 60).to_string().parse() {
+        response
+            .headers_mut()
+            .insert(axum::http::header::RETRY_AFTER, value);
+    }
+    response
 }
 fn authority_error(e: AuthorityError) -> Response {
     match e {
@@ -633,6 +643,7 @@ async fn revoke_installation(State(s): State<AppState>, body: Bytes) -> Response
 
 async fn deliver(
     State(s): State<AppState>,
+    Extension(work): Extension<Arc<crate::ingress::WorkPermit>>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     body: Bytes,
@@ -735,6 +746,9 @@ async fn deliver(
     // Admission already committed, so cancellation cannot undo either replay
     // fence. The detached task completes disposition bookkeeping.
     let delivery = tokio::spawn(async move {
+        // Keep global and source capacity through APNs and disposition, even
+        // after cancellation or the HTTP timeout drops the awaiting request.
+        let _work = work;
         let started = std::time::Instant::now();
         let outcome = transport.send(attempt, &endpoint).await;
         crate::metrics::record_apns_delivery(outcome, started.elapsed().as_secs_f64());
@@ -814,22 +828,59 @@ pub fn router_with_metrics(
     state: AppState,
     metrics_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
 ) -> (Router, Router) {
-    let enrollment = Router::new()
-        .route("/v1/installations", post(enroll))
-        .layer(RequestBodyLimitLayer::new(MAX_ENROLL_REQUEST_BYTES));
-    let standard_requests = Router::new()
+    // At most 18 requests hold database work, leaving the 20-connection pool
+    // headroom. No common semaphore lets delivery/enrollment use revocation slots.
+    let enrollment_lane = crate::ingress::Lane::new(2, 2, 20, state.trusted_proxy_cidrs.clone());
+    let management_lane = crate::ingress::Lane::new(2, 1, 120, state.trusted_proxy_cidrs.clone());
+    // One slow source must leave revocation capacity for other clients.
+    let revocation_lane = crate::ingress::Lane::new(4, 2, 120, state.trusted_proxy_cidrs.clone());
+    let delivery_lane = crate::ingress::Lane::new(8, 2, 1200, state.trusted_proxy_cidrs.clone());
+    // Anonymous challenges are also needed by v1 revocation. Enrollment
+    // bodies cannot occupy their slots; distributed challenge floods can still
+    // exhaust the existing durable issuance quota.
+    let challenge_lane = crate::ingress::Lane::new(2, 1, 60, state.trusted_proxy_cidrs.clone());
+    let challenges = Router::new()
         .route("/v1/installations/challenges", post(challenge))
+        .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BYTES))
+        .layer(axum::middleware::from_fn(move |request, next| {
+            challenge_lane.clone().admit(request, next)
+        }));
+    let enrollment = Router::new()
+        .route(
+            "/v1/installations",
+            post(enroll).layer(RequestBodyLimitLayer::new(MAX_ENROLL_REQUEST_BYTES)),
+        )
+        .layer(axum::middleware::from_fn(move |request, next| {
+            enrollment_lane.clone().admit(request, next)
+        }));
+    let management = Router::new()
         .route("/v1/delegations", post(delegate))
-        .route("/v1/delegations/revoke", post(revoke_delegation))
         .route("/v1/installations/endpoint", post(rotate_endpoint))
+        .layer(axum::middleware::from_fn(move |request, next| {
+            management_lane.clone().admit(request, next)
+        }));
+    let revocation = Router::new()
+        .route("/v1/delegations/revoke", post(revoke_delegation))
         .route("/v1/installations/revoke", post(revoke_installation))
-        .route(DELIVERY_PATH, post(deliver))
-        .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BYTES));
+        .layer(axum::middleware::from_fn(move |request, next| {
+            revocation_lane.clone().admit(request, next)
+        }));
+    let delivery =
+        Router::new()
+            .route(DELIVERY_PATH, post(deliver))
+            .layer(axum::middleware::from_fn(move |request, next| {
+                delivery_lane.clone().admit(request, next)
+            }));
     let public = Router::new()
         .merge(enrollment)
-        .merge(standard_requests)
+        .merge(challenges)
+        .merge(
+            management
+                .merge(revocation)
+                .merge(delivery)
+                .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BYTES)),
+        )
         .with_state(state.clone())
-        .layer(ConcurrencyLimitLayer::new(256))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(20),
@@ -890,6 +941,7 @@ mod request_limit_tests {
         )
         .expect("pinned Apple root fixture");
         AppState {
+            trusted_proxy_cidrs: Vec::new(),
             grant_keyring: Arc::new(
                 GrantKeyring::new(vec![GrantKey::new("test", &[1; 32]).unwrap()]).unwrap(),
             ),
