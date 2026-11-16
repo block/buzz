@@ -15,8 +15,9 @@ use uuid::Uuid;
 
 mod execute;
 mod grouped;
+mod legacy_replies;
 mod owned;
-mod reference_index;
+mod ownership;
 mod retention;
 mod rows;
 
@@ -36,7 +37,7 @@ const EVENT_COLUMNS: &str = "e.id,e.created_at,e.channel_id,e.kind,e.tags";
 pub struct ContentBatchOptions {
     /// Explicit tenant scope, including content from former memberships.
     pub community: Uuid,
-    /// Human public key, as npub or hex; includes directly owned agents.
+    /// Human public key, as npub or hex; includes agents owned in this community.
     pub pubkey: String,
     /// Optional trusted relay public key for historical actor/p attribution.
     pub relay_pubkey: Option<String>,
@@ -206,7 +207,6 @@ async fn plan(
     writer: &mut impl Write,
     collect: bool,
 ) -> Result<Plan> {
-    reference_index::ensure(conn).await?;
     if !(1..=100).contains(&options.batch_size) || !(1..=1_000_000).contains(&options.max_items) {
         return Err(invalid(
             "batch size must be 1–100 and max items must be 1–1,000,000",
@@ -223,21 +223,8 @@ async fn plan(
             "the human and trusted relay public keys must differ",
         ));
     }
-    // Same ownership lookup as media cleanup: discover directly owned keys
-    // across communities, but select content only in options.community.
-    let targets: Vec<Vec<u8>> = sqlx::query_scalar(
-        "SELECT key FROM (
-            SELECT decode($1, 'hex') AS key
-            UNION SELECT pubkey FROM users WHERE agent_owner_pubkey=decode($1, 'hex')
-         ) targets ORDER BY key LIMIT $2",
-    )
-    .bind(&subject)
-    .bind((MAX_TARGETS + 1) as i64)
-    .fetch_all(&mut *conn)
-    .await?;
-    if targets.len() > MAX_TARGETS {
-        return Err(invalid("content target key limit exceeded (10,000)"));
-    }
+    let targets = ownership::targets(conn, options.community, &subject, false).await?;
+    let excluded_agents = ownership::excluded(conn, options.community, &subject).await?;
     let target_pubkeys: Vec<String> = targets.iter().map(hex::encode).collect();
     if relay
         .as_ref()
@@ -253,6 +240,7 @@ async fn plan(
     let start = json!({
         "record": "preview_start", "version": 1, "read_only": true,
         "community_id": options.community, "host": host, "pubkey": subject,
+        "excluded_agents": excluded_agents,
         "target_pubkeys": target_pubkeys, "trusted_relay_pubkey": relay, "included_event_kinds": KINDS,
         "batch_size": options.batch_size, "max_items": options.max_items,
         "scope": "user- and owned-agent-attributed events (including persona, team, emoji and project definitions) and reactions, owned subscriptions and notification delivery",
@@ -369,4 +357,4 @@ mod agents_postgres_tests;
 mod scrub_postgres_tests;
 
 #[cfg(test)]
-mod reference_index_postgres_tests;
+mod safety_postgres_tests;

@@ -53,13 +53,13 @@ async fn execute_session(
     stage: Option<(&EntityLease, Uuid)>,
 ) -> Result<ContentBatchSummary> {
     let mut planning = session.begin().await?;
-    sqlx::query("SET statement_timeout='30s'")
+    sqlx::query("SET LOCAL statement_timeout='30s'")
         .execute(&mut *planning)
         .await?;
-    sqlx::query("SET lock_timeout='3s'")
+    sqlx::query("SET LOCAL lock_timeout='3s'")
         .execute(&mut *planning)
         .await?;
-    sqlx::query("SET TIME ZONE 'UTC'")
+    sqlx::query("SET LOCAL TIME ZONE 'UTC'")
         .execute(&mut *planning)
         .await?;
     // Selection, retention and fingerprints share one snapshot. The temporary
@@ -79,7 +79,7 @@ async fn execute_session(
         json!("print each batch, commit, then print batch_committed; rerun after interruption");
     line(writer, &plan.start)?;
     for batch in &plan.batches {
-        execute_owned_batch(session, options, batch, writer, stage).await?;
+        execute_owned_batch(session, options, &plan.start, batch, writer, stage).await?;
     }
     grouped::verify_remaining(&mut *session.acquire().await?, options, &plan.start).await?;
     plan.summary.record = "delete_complete";
@@ -110,21 +110,30 @@ pub(super) fn selection(item: &Value) -> Result<(&'static str, &'static str)> {
     })
 }
 
-async fn execute_owned_batch(
+pub(super) async fn execute_owned_batch(
     session: &sqlx::PgPool,
     options: &ContentBatchOptions,
+    start: &Value,
     batch: &Value,
     writer: &mut impl Write,
     stage: Option<(&EntityLease, Uuid)>,
 ) -> Result<()> {
+    // A blocked or failed output must never hold a community write lock.
+    line(writer, batch)?;
     let community = options.community;
     let mut tx = session.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
         .execute(&mut *tx)
         .await?;
-    // Check schema before blocking community writers, then keep the schema
-    // lock until this batch commits. Never fall back to scanning history.
-    reference_index::ensure(&mut tx).await?;
+    sqlx::query("SET LOCAL statement_timeout='3s'")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("SET LOCAL lock_timeout='3s'")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("SET LOCAL TIME ZONE 'UTC'")
+        .execute(&mut *tx)
+        .await?;
     // Serving writers already hold the shared form of this lock. Keep the
     // exclusive section short: at most one bounded batch, never the whole run.
     sqlx::query("SELECT pg_advisory_xact_lock(community_deletion_lock_key($1))")
@@ -133,6 +142,7 @@ async fn execute_owned_batch(
         .await?;
     crate::deletion::guard_community_write(&mut tx, crate::CommunityId::from_uuid(community))
         .await?;
+    ownership::recheck(&mut tx, options, start).await?;
     if let Some((lease, stage_id)) = stage {
         let request = crate::store::entity_deletion::lock_owned(&mut tx, lease).await?;
         crate::store::entity_deletion::validate_approved_inventory(&mut tx, &request).await?;
@@ -152,8 +162,6 @@ async fn execute_owned_batch(
         crate::CommunityId::from_uuid(community),
     )
     .await?;
-    // Output must succeed before any mutation in this transaction.
-    line(writer, batch)?;
     grouped::execute(&mut tx, batch).await?;
     if let Some((lease, _)) = stage {
         crate::store::entity_deletion::lock_owned(tx.conn(), lease).await?;

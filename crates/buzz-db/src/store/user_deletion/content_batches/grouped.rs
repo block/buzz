@@ -180,7 +180,15 @@ async fn erase_events(tx: &mut AdmittedTx, number: i64) -> Result<()> {
         .bind(number)
         .fetch_one(tx.conn())
         .await?;
-    if referenced {
+    let removed: Vec<(Vec<u8>, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT decode(row_key->>'id','hex'),(row_key->>'created_at')::timestamptz
+         FROM content_batch_work WHERE table_name='events' AND batch=$1 AND action='would_delete'",
+    )
+    .bind(number)
+    .fetch_all(tx.conn())
+    .await?;
+    let legacy = legacy_replies::needed(tx.conn(), community, &removed).await?;
+    if referenced || !legacy.is_empty() {
         return Err(invalid("new surviving references appeared; current batch rolled back; rerun to classify delete versus scrub"));
     }
     // Keep counters consistent in every committed prefix, including interruption.
@@ -190,11 +198,9 @@ async fn erase_events(tx: &mut AdmittedTx, number: i64) -> Result<()> {
         .execute(tx.conn())
         .await?;
     sqlx::query("UPDATE events e SET pubkey=''::bytea,content='',sig=''::bytea,
-        tags=COALESCE((SELECT jsonb_agg(CASE WHEN tag->>3 IN ('root','reply')
-            THEN jsonb_build_array('e',lower(tag->>1),'',tag->>3)
-            ELSE jsonb_build_array('e',lower(tag->>1)) END)
+        tags=COALESCE((SELECT jsonb_agg(jsonb_build_array('e',lower(tag->>1),'',tag->>3))
             FROM jsonb_array_elements(e.tags) tag WHERE tag->>0='e'
-              AND tag->>1 ~ '^[0-9a-fA-F]{64}$'),'[]'::jsonb),
+              AND tag->>3 IN ('root','reply') AND tag->>1 ~ '^[0-9a-fA-F]{64}$'),'[]'::jsonb),
         d_tag=NULL,not_before=NULL,delivered_at=NULL,
         deleted_at=COALESCE(deleted_at,clock_timestamp())
         FROM content_batch_work w WHERE w.table_name='events' AND w.batch=$2

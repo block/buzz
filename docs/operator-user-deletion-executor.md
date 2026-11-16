@@ -12,6 +12,35 @@ unimplemented; neither command proves full account erasure. Use a disposable
 database and versioned storage bucket when testing. Owned-community workflow
 execution is unsupported.
 
+## Content batches
+
+`content-batches` selects the user plus agents owned by that user **in the target
+community**. Ownership in another community does not authorize cleanup here.
+The start record reports excluded agent keys with missing or conflicting local
+ownership. Every batch rechecks ownership; a change aborts the batch. Former
+membership does not prevent cleanup of historical content.
+
+The handler preserves actual reply ancestry and other users' reactions by erasing
+selected messages into structural tombstones. Plain links, quotes and unmarked
+references do not require retaining their destinations. Other authors' signed
+messages remain unchanged. Reply parent/root lookups use existing
+`thread_metadata` indexes; no new permanent index or migration is required.
+
+Marked replies without thread metadata use the existing tags GIN index to find
+candidates, then the relay's shared parser resolves parent/root markers, including
+mixed-case IDs. This fallback runs during planning and before each batch that
+physically deletes events. It has a one-second SQL timeout and a 10,000-candidate
+limit. A timeout or overflow aborts cleanup, rather than risking reply loss;
+large histories with missing thread metadata may need metadata repair first.
+These bounds are safety limits, not measured production latency guarantees.
+
+Each batch installs transaction-local statement and lock timeouts before taking
+the community lock. Its planned output is written before locking; the commit
+receipt is written after commit. An output failure may leave earlier batches
+committed; retry replans the remaining records. A lost database session also
+loses the private worklist and causes execution to fail rather than continue
+with incomplete checks.
+
 ## Code map: worker, policy, and persistence
 
 The worker and user-specific routing live in `buzz-deletion`. PostgreSQL

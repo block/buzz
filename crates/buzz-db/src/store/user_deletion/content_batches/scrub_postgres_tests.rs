@@ -7,7 +7,7 @@ use crate::{
 };
 use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
-async fn setup() -> (Db, CommunityId, Uuid, Keys, Keys) {
+pub(super) async fn setup() -> (Db, CommunityId, Uuid, Keys, Keys) {
     let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
         .await
         .unwrap();
@@ -40,11 +40,11 @@ async fn setup() -> (Db, CommunityId, Uuid, Keys, Keys) {
     (db, community, channel, alice, bob)
 }
 
-fn timestamp(event: &nostr::Event) -> DateTime<Utc> {
+pub(super) fn timestamp(event: &nostr::Event) -> DateTime<Utc> {
     DateTime::from_timestamp(event.created_at.as_secs() as i64, 0).unwrap()
 }
 
-async fn message(
+pub(super) async fn message(
     db: &Db,
     community: CommunityId,
     channel: Uuid,
@@ -81,7 +81,7 @@ async fn message(
     e
 }
 
-fn options(community: CommunityId, alice: &Keys) -> ContentBatchOptions {
+pub(super) fn options(community: CommunityId, alice: &Keys) -> ContentBatchOptions {
     ContentBatchOptions {
         community: *community.as_uuid(),
         pubkey: alice.public_key().to_hex(),
@@ -137,7 +137,7 @@ async fn batch_crossing_selection_pages_removes_side_rows_before_events() {
     assert_eq!(remaining, 0);
 }
 
-async fn row(db: &Db, community: CommunityId, e: &nostr::Event) -> Value {
+pub(super) async fn row(db: &Db, community: CommunityId, e: &nostr::Event) -> Value {
     sqlx::query_scalar("SELECT to_jsonb(e) FROM events e WHERE community_id=$1 AND id=$2")
         .bind(community.as_uuid())
         .bind(e.id.as_bytes().as_slice())
@@ -148,7 +148,7 @@ async fn row(db: &Db, community: CommunityId, e: &nostr::Event) -> Value {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn references_without_thread_metadata_are_removed_children_first() {
+async fn plain_references_do_not_require_ancestor_retention() {
     let (db, c, ch, alice, _) = setup().await;
     let root = message(&db, c, ch, &alice, "root", None).await;
     // A signed edit can refer to an event while having an earlier timestamp.
@@ -393,10 +393,11 @@ async fn interruption_retries_without_losing_ancestry_or_decrementing_twice() {
     assert_eq!(row(&db, c, &survivor).await, before);
 }
 
-struct PauseAfterPlan {
-    line: Vec<u8>,
-    planned: Option<tokio::sync::oneshot::Sender<()>>,
-    resume: std::sync::mpsc::Receiver<()>,
+pub(super) struct PauseAfterPlan {
+    pub(super) record: &'static str,
+    pub(super) line: Vec<u8>,
+    pub(super) planned: Option<tokio::sync::oneshot::Sender<()>>,
+    pub(super) resume: std::sync::mpsc::Receiver<()>,
 }
 impl Write for PauseAfterPlan {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -404,7 +405,7 @@ impl Write for PauseAfterPlan {
             if *b == b'\n' {
                 let value: Value = serde_json::from_slice(&self.line).unwrap();
                 self.line.clear();
-                if value["record"] == "delete_start" {
+                if value["record"] == self.record && self.planned.is_some() {
                     self.planned.take().unwrap().send(()).unwrap();
                     tokio::task::block_in_place(|| {
                         self.resume
@@ -434,6 +435,7 @@ async fn reply_arriving_after_planning_requires_scrub_on_retry() {
     let store = db.user_deletion_store();
     let task = tokio::spawn(async move {
         let mut writer = PauseAfterPlan {
+            record: "delete_start",
             line: Vec::new(),
             planned: Some(planned_tx),
             resume: resume_rx,
@@ -482,7 +484,7 @@ fn reference_id(event: &nostr::Event, case: &str) -> String {
     }
 }
 
-async fn legacy_reference(
+pub(super) async fn legacy_reference(
     db: &Db,
     c: CommunityId,
     author: &Keys,
@@ -576,6 +578,7 @@ async fn late_legacy_references_block_deletion_for_every_hex_case() {
         let store = db.user_deletion_store();
         let task = tokio::spawn(async move {
             let mut writer = PauseAfterPlan {
+                record: "delete_start",
                 line: Vec::new(),
                 planned: Some(planned_tx),
                 resume: resume_rx,
@@ -609,65 +612,4 @@ async fn late_legacy_references_block_deletion_for_every_hex_case() {
         assert_eq!(row(&db, c, &root).await["content"], "");
         assert_eq!(row(&db, c, &survivor).await, before);
     }
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn reference_index_required_before_preview_or_deletion() {
-    let (db, c, ch, alice, _) = setup().await;
-    let root = message(&db, c, ch, &alice, "preserve until index ready", None).await;
-    let before = row(&db, c, &root).await;
-    for replacement in [
-        None,
-        Some("CREATE INDEX idx_events_reference_ids ON events(community_id)"),
-        Some("CREATE INDEX idx_events_reference_ids ON ONLY events USING GIN ((lower(jsonb_path_query_array(tags, 'strict $[*] ? (@[0] == \"e\" && @[1] like_regex \"^[0-9A-Fa-f]{64}$\")[1]', '{}'::jsonb, true)::text)::jsonb) jsonb_path_ops)"),
-    ] {
-        sqlx::query("DROP INDEX IF EXISTS idx_events_reference_ids")
-            .execute(db.pool()).await.unwrap();
-        if let Some(sql) = replacement {
-            sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_owned()))
-                .execute(db.pool()).await.unwrap();
-        }
-        for mode in [ExecutionMode::ReadOnly, ExecutionMode::Delete] {
-            let error = db.user_deletion_store()
-                .run_message_batches(&options(c, &alice), mode, None, &mut Vec::new())
-                .await.unwrap_err();
-            assert!(error.to_string().contains("event reference index"), "{error}");
-            assert_eq!(row(&db, c, &root).await, before);
-        }
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires Postgres"]
-async fn reference_index_removed_after_planning_refuses_batch() {
-    let (db, c, ch, alice, _) = setup().await;
-    let root = message(&db, c, ch, &alice, "preserve after plan", None).await;
-    let before = row(&db, c, &root).await;
-    let (planned_tx, planned_rx) = tokio::sync::oneshot::channel();
-    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
-    let opts = options(c, &alice);
-    let store = db.user_deletion_store();
-    let task = tokio::spawn(async move {
-        let mut writer = PauseAfterPlan {
-            line: Vec::new(),
-            planned: Some(planned_tx),
-            resume: resume_rx,
-        };
-        store
-            .run_message_batches(&opts, ExecutionMode::Delete, None, &mut writer)
-            .await
-    });
-    planned_rx.await.unwrap();
-    sqlx::query("DROP INDEX idx_events_reference_ids")
-        .execute(db.pool())
-        .await
-        .unwrap();
-    resume_tx.send(()).unwrap();
-    let error = task.await.unwrap().unwrap_err();
-    assert!(
-        error.to_string().contains("event reference index"),
-        "{error}"
-    );
-    assert_eq!(row(&db, c, &root).await, before);
 }

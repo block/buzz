@@ -74,7 +74,7 @@ async fn owned_agents_share_bounded_batches_and_preserve_other_owners_and_commun
             .unwrap();
         }
     }
-    // Ownership recorded only in B still discovers this key, like media cleanup.
+    // Ownership recorded only in B does not authorize deleting content in A.
     sqlx::query("UPDATE users SET agent_owner_pubkey=$2 WHERE community_id=$1 AND pubkey=$3")
         .bind(b.as_uuid())
         .bind(alice.public_key().as_bytes().as_slice())
@@ -95,7 +95,7 @@ async fn owned_agents_share_bounded_batches_and_preserve_other_owners_and_commun
             for community in [a, b] {
                 db.insert_event(community, &event, None).await.unwrap();
             }
-            if index < 3 {
+            if index < 2 {
                 selected.insert(event.id.to_hex());
             }
             if n == 0 {
@@ -129,7 +129,7 @@ async fn owned_agents_share_bounded_batches_and_preserve_other_owners_and_commun
                         .unwrap();
                     }
                 }
-                if index < 3 {
+                if index < 2 {
                     selected.insert(event.id.to_hex());
                 }
             }
@@ -161,7 +161,7 @@ async fn owned_agents_share_bounded_batches_and_preserve_other_owners_and_commun
     // Actor wins over p; p is a fallback only for the trusted relay signer.
     for (signer, kind, tags, keep) in [
         (&relay, 9, vec![("actor", &agent), ("p", &bob)], false),
-        (&relay, 9, vec![("p", &remote_agent)], false),
+        (&relay, 9, vec![("p", &remote_agent)], true),
         (&relay, 9, vec![("actor", &bob), ("p", &alice)], true),
         (&bob, 9, vec![("actor", &agent), ("p", &alice)], true),
         (&relay, 30174, vec![("actor", &agent)], true),
@@ -266,17 +266,20 @@ async fn owned_agents_share_bounded_batches_and_preserve_other_owners_and_commun
         .await
         .unwrap();
     let records = records(&output);
-    let mut targets = vec![
-        alice.public_key().to_hex(),
-        agent.public_key().to_hex(),
-        remote_agent.public_key().to_hex(),
-    ];
+    let mut targets = vec![alice.public_key().to_hex(), agent.public_key().to_hex()];
     targets.sort();
     assert_eq!(records[0]["target_pubkeys"], json!(targets));
     assert_eq!(
+        records[0]["excluded_agents"],
+        json!([{
+            "pubkey": remote_agent.public_key().to_hex(),
+            "reason": "no ownership evidence in target community"
+        }])
+    );
+    assert_eq!(
         summary.excluded_event_kinds,
         [0, 1059, 10030, 30177, 30179, 30617, 30618]
-            .map(|kind| json!({"kind":kind,"count":3}))
+            .map(|kind| json!({"kind":kind,"count":2}))
             .to_vec()
     );
     let items: Vec<_> = records
@@ -312,14 +315,13 @@ async fn owned_agents_share_bounded_batches_and_preserve_other_owners_and_commun
         );
         assert_eq!(snapshot_rows(&pool, b, table).await, before_b[index]);
     }
-    // Omitting the relay signer leaves the two attributed messages and their
-    // two mention rows outside the selection.
+    // Omitting the relay signer leaves the attributed message and its mention.
     options.relay_pubkey = None;
     let no_relay = store
         .run_message_batches(&options, ExecutionMode::ReadOnly, None, &mut Vec::new())
         .await
         .unwrap();
-    assert_eq!(no_relay.items + 4, summary.items);
+    assert_eq!(no_relay.items + 2, summary.items);
     options.relay_pubkey = Some(agent.public_key().to_hex());
     assert!(store
         .run_message_batches(&options, ExecutionMode::Delete, None, &mut Vec::new())
@@ -367,8 +369,9 @@ async fn owned_agents_share_bounded_batches_and_preserve_other_owners_and_commun
                     }
                     "reactions" => !owned("pubkey"),
                     "subscriptions" => !owned("owner_pubkey"),
-                    "delivery_log" => !["sub-0", "sub-1", "sub-2"]
-                        .contains(&row["subscription_id"].as_str().unwrap()),
+                    "delivery_log" => {
+                        !["sub-0", "sub-1"].contains(&row["subscription_id"].as_str().unwrap())
+                    }
                     "push_leases" | "push_wake_outbox" => !owned("author"),
                     "operator_listener_outbox" => {
                         !owned("target_pubkey") && !owned("listener_pubkey")
