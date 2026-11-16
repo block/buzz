@@ -17,8 +17,6 @@ pub enum DbConnectionStep {
     WriterPool,
     /// A physical connection has completed DNS/network/TLS/authentication.
     PhysicalConnect,
-    /// Install the created-at replica-fence floor.
-    CreatedAtFloor,
     /// Install lock, idle-transaction, and statement timeouts.
     SessionTimeouts,
     /// Verify READ COMMITTED transaction isolation.
@@ -29,10 +27,9 @@ pub enum DbConnectionStep {
 
 impl DbConnectionStep {
     /// Complete metric-label vocabulary.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 5] = [
         Self::WriterPool,
         Self::PhysicalConnect,
-        Self::CreatedAtFloor,
         Self::SessionTimeouts,
         Self::Isolation,
         Self::Ready,
@@ -43,7 +40,6 @@ impl DbConnectionStep {
         match self {
             Self::WriterPool => "writer_pool",
             Self::PhysicalConnect => "physical_connect",
-            Self::CreatedAtFloor => "created_at_floor",
             Self::SessionTimeouts => "session_timeouts",
             Self::Isolation => "isolation",
             Self::Ready => "ready",
@@ -77,18 +73,17 @@ impl DbConnectionOutcome {
 }
 
 /// Valid role/step pairs with an explicit start counter.
-pub const CONNECTION_STARTED_STEPS: [(DbPoolRole, DbConnectionStep); 4] = [
+pub const CONNECTION_STARTED_STEPS: [(DbPoolRole, DbConnectionStep); 3] = [
     (DbPoolRole::Writer, DbConnectionStep::WriterPool),
-    (DbPoolRole::Writer, DbConnectionStep::CreatedAtFloor),
     (DbPoolRole::Writer, DbConnectionStep::SessionTimeouts),
     (DbPoolRole::Writer, DbConnectionStep::Isolation),
 ];
 
 /// Valid role/step pairs with a duration histogram.
-pub const CONNECTION_DURATION_STEPS: [(DbPoolRole, DbConnectionStep); 4] = CONNECTION_STARTED_STEPS;
+pub const CONNECTION_DURATION_STEPS: [(DbPoolRole, DbConnectionStep); 3] = CONNECTION_STARTED_STEPS;
 
 /// Valid role/step/outcome terminal combinations.
-pub const CONNECTION_TERMINALS: [(DbPoolRole, DbConnectionStep, DbConnectionOutcome); 15] = [
+pub const CONNECTION_TERMINALS: [(DbPoolRole, DbConnectionStep, DbConnectionOutcome); 12] = [
     (
         DbPoolRole::Writer,
         DbConnectionStep::WriterPool,
@@ -113,21 +108,6 @@ pub const CONNECTION_TERMINALS: [(DbPoolRole, DbConnectionStep, DbConnectionOutc
         DbPoolRole::Writer,
         DbConnectionStep::PhysicalConnect,
         DbConnectionOutcome::Succeeded,
-    ),
-    (
-        DbPoolRole::Writer,
-        DbConnectionStep::CreatedAtFloor,
-        DbConnectionOutcome::Succeeded,
-    ),
-    (
-        DbPoolRole::Writer,
-        DbConnectionStep::CreatedAtFloor,
-        DbConnectionOutcome::Failed,
-    ),
-    (
-        DbPoolRole::Writer,
-        DbConnectionStep::CreatedAtFloor,
-        DbConnectionOutcome::Cancelled,
     ),
     (
         DbPoolRole::Writer,
@@ -166,8 +146,8 @@ pub const CONNECTION_TERMINALS: [(DbPoolRole, DbConnectionStep, DbConnectionOutc
     ),
 ];
 
-/// Four start counters + four 13-series histograms + fifteen terminal counters.
-pub const CONNECTION_RAW_SERIES_PER_POD: usize = 4 + (4 * 13) + 15;
+/// Three start counters + three 13-series histograms + twelve terminal counters.
+pub const CONNECTION_RAW_SERIES_PER_POD: usize = 3 + (3 * 13) + 12;
 
 pub(crate) struct DbConnectionStepAttempt {
     pool_role: DbPoolRole,
@@ -282,13 +262,12 @@ mod tests {
             [
                 "writer_pool",
                 "physical_connect",
-                "created_at_floor",
                 "session_timeouts",
                 "isolation",
                 "ready",
             ]
         );
-        assert_eq!(CONNECTION_RAW_SERIES_PER_POD, 71);
+        assert_eq!(CONNECTION_RAW_SERIES_PER_POD, 54);
     }
 
     #[test]
@@ -297,7 +276,7 @@ mod tests {
         let snapshotter = recorder.snapshotter();
         let _guard = metrics::set_default_local_recorder(&recorder);
         let attempt =
-            DbConnectionStepAttempt::start(DbPoolRole::Writer, DbConnectionStep::CreatedAtFloor);
+            DbConnectionStepAttempt::start(DbPoolRole::Writer, DbConnectionStep::SessionTimeouts);
         drop(attempt);
 
         let metrics = snapshotter.snapshot().into_vec();
@@ -309,7 +288,7 @@ mod tests {
                 .map(|label| (label.key(), label.value()))
                 .collect::<std::collections::BTreeMap<_, _>>();
             assert_eq!(labels.get("pool_role"), Some(&"writer"));
-            assert_eq!(labels.get("step"), Some(&"created_at_floor"));
+            assert_eq!(labels.get("step"), Some(&"session_timeouts"));
             assert!(!labels.contains_key("reason"));
             assert!(!labels.contains_key("connection_ordinal"));
             match value {
