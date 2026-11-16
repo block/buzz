@@ -241,6 +241,23 @@ struct EnrollTranscript<'a> {
     endpoint_epoch: i64,
     expires_at: i64,
 }
+
+/// Domain of the Android enrollment transcript, which the attestation
+/// challenge binds.
+const ANDROID_ENROLL_DOMAIN: &str = "buzz.push.enroll.android.v1";
+
+/// The Android enrollment transcript: the iOS one without `key_id`, since the
+/// key is generated after (and from) this transcript's digest.
+#[derive(serde::Serialize)]
+struct AndroidEnrollTranscript<'a> {
+    v: u8,
+    audience: &'a str,
+    challenge_id: uuid::Uuid,
+    challenge: &'a str,
+    endpoint: &'a str,
+    endpoint_epoch: i64,
+    expires_at: i64,
+}
 async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
     let r: InstallationEnrollRequest = match crate::strict_json::from_slice(&body) {
         Ok(r) => r,
@@ -268,18 +285,39 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         Some(v) => v,
         None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
     };
-    let t = EnrollTranscript {
-        v: r.v,
-        audience: ENROLL_AUDIENCE,
-        challenge_id: r.challenge_id,
-        challenge: &r.challenge,
-        key_id: &r.key_id,
+    // An Android key is generated with the attestation challenge as an input,
+    // so its transcript holds only values known before the key exists, and
+    // the gateway derives the key id from the attested key.
+    let signed = match (platform, r.key_id.as_deref()) {
+        (Platform::Ios, Some(key_id)) => transcript(
+            "buzz.push.enroll.v1",
+            &EnrollTranscript {
+                v: r.v,
+                audience: ENROLL_AUDIENCE,
+                challenge_id: r.challenge_id,
+                challenge: &r.challenge,
+                key_id,
 
-        endpoint: &r.endpoint,
-        endpoint_epoch: r.endpoint_epoch,
-        expires_at: r.expires_at,
+                endpoint: &r.endpoint,
+                endpoint_epoch: r.endpoint_epoch,
+                expires_at: r.expires_at,
+            },
+        ),
+        (Platform::Android, None) => transcript(
+            ANDROID_ENROLL_DOMAIN,
+            &AndroidEnrollTranscript {
+                v: r.v,
+                audience: ENROLL_AUDIENCE,
+                challenge_id: r.challenge_id,
+                challenge: &r.challenge,
+                endpoint: &r.endpoint,
+                endpoint_epoch: r.endpoint_epoch,
+                expires_at: r.expires_at,
+            },
+        ),
+        _ => None,
     };
-    let signed = match transcript("buzz.push.enroll.v1", &t) {
+    let signed = match signed {
         Some(v) => v,
         None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
     };
@@ -369,7 +407,7 @@ fn verify_enrollment_attestation(
         let verified = s
             .application
             .app_attest
-            .verify_attestation(attestation, &r.key_id, transcript)
+            .verify_attestation(attestation, r.key_id.as_deref()?, transcript)
             .ok()?;
         return Some(VerifiedKey {
             key_id: verified.key_id,
@@ -380,16 +418,14 @@ fn verify_enrollment_attestation(
     let chain = decode_android_chain(r.android_attestation.as_deref()?)?;
     let proven = android.attestation.verify(&chain, transcript).ok()?;
     use sha2::{Digest, Sha256};
-    // The key must be a P-256 point, and the transcript's key id must be its
-    // digest, so the signed transcript names exactly the key we store.
-    let key_id = Sha256::digest(&proven.public_key).to_vec();
+    // The key must be a P-256 point. Its id is its digest; the attestation
+    // challenge binds the key to this transcript.
     (proven.public_key.len() == 65
-        && p256::ecdsa::VerifyingKey::from_sec1_bytes(&proven.public_key).is_ok()
-        && STANDARD.encode(&key_id) == r.key_id)
-        .then_some(VerifiedKey {
-            key_id,
-            public_key: proven.public_key,
-        })
+        && p256::ecdsa::VerifyingKey::from_sec1_bytes(&proven.public_key).is_ok())
+    .then(|| VerifiedKey {
+        key_id: Sha256::digest(&proven.public_key).to_vec(),
+        public_key: proven.public_key,
+    })
 }
 
 /// Decode a bounded Key Attestation chain of base64 DER certificates.
@@ -1083,7 +1119,7 @@ mod request_limit_tests {
             v: WIRE_VERSION,
             challenge_id: uuid::Uuid::nil(),
             challenge: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0; 32]),
-            key_id: STANDARD.encode([0; 32]),
+            key_id: Some(STANDARD.encode([0; 32])),
             attestation: Some(STANDARD.encode(vec![0; MAX_APP_ATTESTATION_BYTES])),
             android_attestation: None,
 

@@ -72,8 +72,10 @@ pub struct InstallationChallengeResponse {
 /// derives the installation's platform from which one is present; there is no
 /// platform field. `attestation` is Apple's App Attest CBOR object. `android_attestation`
 /// is a Key Attestation certificate chain, leaf first, of base64 DER
-/// certificates. `key_id` is the App Attest key identifier on iOS and the
-/// base64 SHA-256 of the attested public key on Android. The attested key is
+/// certificates. `key_id` is the App Attest key identifier, required on iOS
+/// and absent on Android: a Keystore key is generated from the attestation
+/// challenge, so its id cannot be in the transcript that challenge binds, and
+/// the gateway takes it as the SHA-256 of the attested public key. The attested key is
 /// the installation authority; no second application signing key is introduced.
 /// `endpoint` is a lowercase-hex APNs token on iOS and an FCM registration
 /// token on Android.
@@ -83,7 +85,8 @@ pub struct InstallationEnrollRequest {
     pub v: u8,
     pub challenge_id: uuid::Uuid,
     pub challenge: String,
-    pub key_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attestation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

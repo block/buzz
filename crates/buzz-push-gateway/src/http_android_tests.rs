@@ -162,15 +162,16 @@ impl Phone {
     }
 }
 
-fn enroll_transcript(phone: &Phone, ch: &Challenge, endpoint: &str) -> String {
+/// The transcript whose digest the phone uses as the attestation challenge.
+/// It takes no key: a Keystore key is generated from this digest.
+fn enroll_transcript(ch: &Challenge, endpoint: &str) -> String {
     transcript(
-        "buzz.push.enroll.v1",
-        &EnrollTranscript {
+        ANDROID_ENROLL_DOMAIN,
+        &AndroidEnrollTranscript {
             v: 1,
             audience: ENROLL_AUDIENCE,
             challenge_id: ch.id,
             challenge: &ch.text,
-            key_id: &phone.key_id(),
             endpoint,
             endpoint_epoch: 1,
             expires_at: NOW + 600,
@@ -181,8 +182,8 @@ fn enroll_transcript(phone: &Phone, ch: &Challenge, endpoint: &str) -> String {
 
 fn enroll_body(phone: &Phone, ch: &Challenge, endpoint: &str) -> Value {
     json!({
-        "v": 1, "challenge_id": ch.id, "challenge": ch.text, "key_id": phone.key_id(),
-        "android_attestation": phone.chain(&enroll_transcript(phone, ch, endpoint)),
+        "v": 1, "challenge_id": ch.id, "challenge": ch.text,
+        "android_attestation": phone.chain(&enroll_transcript(ch, endpoint)),
         "endpoint": endpoint, "endpoint_epoch": 1, "expires_at": NOW + 600,
     })
 }
@@ -565,20 +566,29 @@ async fn android_enrollment_derives_platform_from_the_attestation_and_rejects_ba
         );
     }
 
-    // The attestation must bind this exact transcript, name the digest of its
-    // key as the key id, prove a P-256 point and stay within the chain bounds.
-    let other_transcript = enroll_transcript(&phone, &ch, ROTATED_FCM_TOKEN);
+    // The gateway derives the key id from the attested key, so an Android
+    // enrollment carries none.
+    let mut with_key_id = good.clone();
+    with_key_id["key_id"] = phone.key_id().into();
+    assert_eq!(
+        enroll_status(&g, with_key_id).await,
+        StatusCode::BAD_REQUEST
+    );
+
+    // The attestation must bind this exact transcript, prove a P-256 point and
+    // stay within the chain bounds.
+    let other_transcript = enroll_transcript(&ch, ROTATED_FCM_TOKEN);
     let mut wrong_binding = good.clone();
     wrong_binding["android_attestation"] = phone.chain(&other_transcript).into();
-    let mut wrong_key_id = good.clone();
-    wrong_key_id["key_id"] = Phone::new(9).key_id().into();
     let mut not_a_point = good.clone();
-    let junk = vec![4u8; 65];
-    not_a_point["key_id"] = STANDARD.encode(Sha256::digest(&junk)).into();
+    not_a_point["android_attestation"] = json!([
+        STANDARD.encode([4u8; 65]),
+        STANDARD.encode(Sha256::digest(enroll_transcript(&ch, FCM_TOKEN).as_bytes())),
+    ]);
     let mut long_chain = good.clone();
     long_chain["android_attestation"] =
         vec![STANDARD.encode(b"c"); MAX_ANDROID_CHAIN_CERTIFICATES + 1].into();
-    for body in [wrong_binding, wrong_key_id, not_a_point, long_chain] {
+    for body in [wrong_binding, not_a_point, long_chain] {
         assert_eq!(enroll_status(&g, body).await, StatusCode::UNAUTHORIZED);
     }
 
