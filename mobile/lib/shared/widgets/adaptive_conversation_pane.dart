@@ -1,11 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:duo_kit/duo_kit.dart';
 
 import 'duo_toolbar.dart';
 import 'app_route_observer.dart';
+import 'conversation_layout.dart';
+import 'conversation_sidebar.dart';
+import 'conversation_thread_divider.dart';
+import 'conversation_thread_pane.dart';
+import 'conversation_thread_scope.dart';
 import 'covered_route_keyboard_insets.dart';
 import 'ios_navigation_metrics.dart';
 import 'duo_workspace_scaffold.dart';
@@ -79,17 +85,32 @@ class ConversationPaneController extends ChangeNotifier {
   // when Navigator removes the previous page.
   LocalKey get selectionKey => ValueKey((selectedId, _request));
 
+  /// The thread a tablet pane shows beside, or over, the selected conversation.
+  WidgetBuilder? threadBuilder;
+  int _threadRequest = 0;
+
+  /// A fresh page identity for each opened thread.
+  LocalKey get threadKey => ValueKey(('thread', _threadRequest));
+
+  /// Whether a hidden tablet sidebar is drawn over the conversation.
+  bool sidebarOverlay = false;
+
   void open(
     String id,
     WidgetBuilder builder, {
     bool animate = true,
     bool reopen = false,
   }) {
-    if (id == selectedId && !reopen) return;
+    if (id == selectedId && !reopen) {
+      hideSidebarOverlay();
+      return;
+    }
     if (reopen) _request++;
     selectedId = id;
     detailBuilder = builder;
     animateSelection = animate;
+    threadBuilder = null;
+    sidebarOverlay = false;
     notifyListeners();
   }
 
@@ -97,6 +118,37 @@ class ConversationPaneController extends ChangeNotifier {
     if (selectedId == null) return;
     selectedId = null;
     detailBuilder = null;
+    threadBuilder = null;
+    sidebarOverlay = false;
+    notifyListeners();
+  }
+
+  /// Shows [builder] in the thread pane, replacing any thread already there.
+  void openThread(WidgetBuilder builder) {
+    _threadRequest++;
+    threadBuilder = builder;
+    sidebarOverlay = false;
+    notifyListeners();
+  }
+
+  /// Closes the thread pane.
+  void closeThread() {
+    if (threadBuilder == null) return;
+    threadBuilder = null;
+    notifyListeners();
+  }
+
+  /// Draws a hidden tablet sidebar over the selected conversation.
+  void showSidebarOverlay() {
+    if (sidebarOverlay || selectedId == null) return;
+    sidebarOverlay = true;
+    notifyListeners();
+  }
+
+  /// Dismisses a sidebar drawn over the conversation.
+  void hideSidebarOverlay() {
+    if (!sidebarOverlay) return;
+    sidebarOverlay = false;
     notifyListeners();
   }
 }
@@ -224,6 +276,33 @@ class AdaptiveConversationPane extends HookConsumerWidget {
     // Not disposed with the pane: a detail unmounting with the pane reports
     // after the frame, once the pane is gone.
     final mountedDetails = useMemoized(() => ValueNotifier(0));
+    final threadNavigator = useMemoized(() => GlobalKey<NavigatorState>());
+    final sidebarHidden = ref.watch(conversationSidebarHiddenProvider);
+    final threadWidth = ref.watch(conversationThreadWidthProvider);
+    // While the thread divider is dragged: whether the sidebar was docked.
+    final resizeHold = useState<bool?>(null);
+    // The overlay is modal: focus moves into the sidebar while it is open,
+    // so Escape reaches the pane, and returns to where it was afterwards.
+    final listFocus = useFocusNode(debugLabel: 'conversation-list');
+    useEffect(() {
+      var open = controller.sidebarOverlay;
+      FocusNode? previous;
+      void sync() {
+        if (controller.sidebarOverlay == open) return;
+        open = controller.sidebarOverlay;
+        if (open) {
+          previous = FocusManager.instance.primaryFocus;
+        }
+        final target = open ? listFocus : previous;
+        if (!open) previous = null;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (target != null && target.context != null) target.requestFocus();
+        });
+      }
+
+      controller.addListener(sync);
+      return () => controller.removeListener(sync);
+    }, [controller]);
     return ConversationPaneScope(
       controller: controller,
       active: active && (ModalRoute.isCurrentOf(context) ?? true),
@@ -239,15 +318,19 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                 ? stripWidth
                 : 0.0;
             final contentWidth = constraints.maxWidth - stripWidth;
+            final threadBuilder = controller.threadBuilder;
             final wide = usesConversationPanes(context, strip: strip);
             final book = wide ? bookDivisionOf(context) : null;
             final selected = controller.selectedId;
+            final threadOpen = selected != null && threadBuilder != null;
             if (ownerRoute != null) {
               _compactPaneNavigators[ownerRoute] =
                   active && !wide && selected != null ? navigator : null;
             }
             // Pane surfaces meet at the fold so their header backdrops remain
             // continuous. Content insets below keep controls out of its bounds.
+            // The default sidebar fits Home's 256 pt navigation bar inside
+            // the standard Grid.xs window margins.
             final listWidth = book != null
                 ? book.center.dx - leftInset
                 : wide
@@ -256,180 +339,281 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                               0.0,
                               (contentWidth - 1) / 2,
                             ) ??
-                            (contentWidth / 3).clamp(280.0, 360.0)
+                            (contentWidth / 3).clamp(256.0 + 2 * Grid.xs, 360.0)
                       : (contentWidth - 1) * listWidthFraction!
                 : constraints.maxWidth;
+            // An unfolded tablet window can hide its sidebar and show a thread
+            // beside the conversation. Duo keeps its hinge-bound panes, and a
+            // persistent selection (Settings) keeps its list as navigation.
+            final tablet =
+                wide && book == null && strip == null && !persistentSelection;
+            final layout = tablet
+                ? ConversationLayout.resolve(
+                    width: constraints.maxWidth,
+                    listWidth: listWidth,
+                    selected: selected != null,
+                    threadOpen: threadOpen,
+                    userHidden: sidebarHidden,
+                    overlayOpen: controller.sidebarOverlay,
+                    threadWidth: threadWidth,
+                    holdDocked: resizeHold.value,
+                  )
+                : null;
+            final docked =
+                layout == null ||
+                layout.sidebar == ConversationSidebarMode.docked;
+            // Once the sidebar docks, for example after rotating, a pending
+            // overlay request is spent; otherwise it would reappear later.
+            if (layout != null && docked && controller.sidebarOverlay) {
+              WidgetsBinding.instance.addPostFrameCallback(
+                (_) => controller.hideSidebarOverlay(),
+              );
+            }
             final detailLeft =
-                book?.center.dx ?? (wide ? listWidth + leftInset + 1 : 0.0);
-            return TweenAnimationBuilder<Offset>(
-              tween: Tween(end: Offset(listWidth, detailLeft)),
-              duration: wide && !MediaQuery.disableAnimationsOf(context)
+                layout?.detailLeft ??
+                book?.center.dx ??
+                (wide ? listWidth + leftInset + 1 : 0.0);
+            final detailWidth =
+                layout?.detailWidth ?? constraints.maxWidth - detailLeft;
+            void toggleSidebar() => ConversationSidebarScope.toggleFor(
+              mode: layout!.sidebar,
+              canDock: layout.canDock,
+              controller: controller,
+              hidden: ref.read(conversationSidebarHiddenProvider.notifier),
+            );
+            final pane = TweenAnimationBuilder<_PaneGeometry>(
+              tween: _PaneGeometryTween(
+                end: _PaneGeometry(
+                  listLeft:
+                      docked ||
+                          layout.sidebar == ConversationSidebarMode.overlay
+                      ? 0
+                      : -listWidth - 1,
+                  listWidth: listWidth,
+                  detailLeft: detailLeft,
+                  detailWidth: detailWidth,
+                  threadLeft: layout?.threadLeft ?? detailLeft,
+                  threadWidth: layout?.threadWidth ?? detailWidth,
+                ),
+              ),
+              duration:
+                  wide &&
+                      resizeHold.value == null &&
+                      !MediaQuery.disableAnimationsOf(context)
                   ? const Duration(milliseconds: 240)
                   : Duration.zero,
               curve: Curves.easeInOutCubic,
               builder: (context, geometry, _) {
-                final listWidth = geometry.dx;
-                final detailLeft = geometry.dy;
-                final detailWidth = constraints.maxWidth - detailLeft;
-                return Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    Positioned(
-                      left: 0,
-                      top: 0,
-                      bottom: 0,
-                      width: wide ? listWidth + leftInset : listWidth,
-                      child: ValueListenableBuilder(
-                        valueListenable: coveringDetail,
-                        builder: (context, covering, list) => Offstage(
-                          offstage:
-                              !wide &&
-                              selected != null &&
-                              (covering?.isActive ?? false),
-                          child: list,
+                final listWidth = geometry.listWidth;
+                final detailLeft = geometry.detailLeft;
+                final detailWidth = geometry.detailWidth;
+                // A hidden sidebar leaves input, focus and the semantics tree
+                // as soon as it starts to slide away, and stops painting once
+                // it is out of view.
+                final sidebarAway =
+                    layout != null &&
+                    layout.sidebar == ConversationSidebarMode.hidden;
+                final sidebarGone =
+                    sidebarAway && geometry.listLeft <= -listWidth;
+                final overlaid =
+                    layout != null &&
+                    !docked &&
+                    (layout.sidebar == ConversationSidebarMode.overlay ||
+                        geometry.listLeft > -listWidth) &&
+                    detailLeft <= 0.5;
+                final threadCovers =
+                    layout?.thread == ConversationThreadMode.covering ||
+                    (layout == null && threadOpen);
+                final listPane = Positioned(
+                  key: const ValueKey('conversation-list'),
+                  left: geometry.listLeft,
+                  top: 0,
+                  bottom: 0,
+                  width: wide ? listWidth + leftInset : listWidth,
+                  child: Focus(
+                    focusNode: listFocus,
+                    skipTraversal: true,
+                    child: Offstage(
+                      offstage: sidebarGone,
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          boxShadow: overlaid
+                              ? [
+                                  BoxShadow(
+                                    blurRadius: Grid.xs + Grid.xxs,
+                                    color: context.colors.shadow.withValues(
+                                      alpha: 0.25,
+                                    ),
+                                  ),
+                                ]
+                              : null,
                         ),
-                        child: _CoveredList(
-                          covered: !wide && selected != null,
-                          child: MediaQueryOverride(
-                            transform: (media) => media.copyWith(
-                              size: Size(listWidth, constraints.maxHeight),
-                            ),
-                            child: DuoToolbarScope(
-                              strip: strip,
-                              contentInsets: EdgeInsets.only(
-                                left: leftInset,
-                                right: wide
-                                    ? (book?.width ?? 0) / 2
-                                    : rightInset,
+                        child: ValueListenableBuilder(
+                          valueListenable: coveringDetail,
+                          builder: (context, covering, list) => Offstage(
+                            offstage:
+                                !wide &&
+                                selected != null &&
+                                (covering?.isActive ?? false),
+                            child: list,
+                          ),
+                          child: _CoveredList(
+                            covered: (!wide && selected != null) || sidebarAway,
+                            child: MediaQueryOverride(
+                              transform: (media) => media.copyWith(
+                                size: Size(listWidth, constraints.maxHeight),
                               ),
-                              active:
-                                  active &&
-                                  (selected == null ||
-                                      (wide &&
-                                          (persistentSelection ||
-                                              listToolbarSlots > 0))) &&
-                                  (ModalRoute.isCurrentOf(context) ?? true),
-                              child: list,
+                              child: DuoToolbarScope(
+                                strip: strip,
+                                contentInsets: EdgeInsets.only(
+                                  left: leftInset,
+                                  right: wide
+                                      ? (book?.width ?? 0) / 2
+                                      : rightInset,
+                                ),
+                                active:
+                                    active &&
+                                    (selected == null ||
+                                        (wide &&
+                                            (persistentSelection ||
+                                                listToolbarSlots > 0))) &&
+                                    (ModalRoute.isCurrentOf(context) ?? true),
+                                child: list,
+                              ),
                             ),
                           ),
                         ),
                       ),
                     ),
-                    Positioned(
-                      left: detailLeft,
-                      top: 0,
-                      bottom: 0,
-                      width: detailWidth,
-                      child: ValueListenableBuilder<int>(
-                        valueListenable: mountedDetails,
-                        builder: (context, mounted, detail) {
-                          final shown = wide || selected != null || mounted > 0;
-                          return Offstage(
-                            offstage: !shown,
-                            child: TickerMode(enabled: shown, child: detail!),
-                          );
-                        },
-                        child: MediaQueryOverride(
-                          transform: (media) => media.copyWith(
-                            size: Size(detailWidth, constraints.maxHeight),
-                          ),
-                          child: DuoToolbarScope(
-                            strip: strip,
-                            leadingSlots: wide ? listToolbarSlots : 0,
-                            contentInsets: EdgeInsets.only(
-                              left: wide ? (book?.width ?? 0) / 2 : leftInset,
-                              right: rightInset,
-                            ),
-                            active:
-                                active &&
-                                selected != null &&
-                                (ModalRoute.isCurrentOf(context) ?? true),
-                            child: Semantics(
-                              container: true,
-                              explicitChildNodes: true,
-                              child: PopScope<Object?>(
-                                canPop:
-                                    !active ||
-                                    selected == null ||
-                                    (wide && persistentSelection),
-                                onPopInvokedWithResult: (didPop, result) {
-                                  if (!didPop &&
-                                      active &&
-                                      selected != null &&
-                                      !(wide && persistentSelection)) {
-                                    navigator.currentState!.maybePop(result);
-                                  }
-                                },
-                                child: ExcludeFocus(
-                                  excluding: selected == null,
-                                  child: NavigatorPopHandler<Object?>(
-                                    enabled: wide && persistentSelection,
-                                    onPopWithResult: (result) =>
-                                        navigator.currentState!.pop(result),
-                                    child: Navigator(
-                                      requestFocus: selected != null,
-                                      key: navigator,
-                                      observers: [routeObserver],
-                                      pages: [
-                                        if (!(wide &&
-                                            persistentSelection &&
-                                            selected != null))
-                                          MaterialPage<void>(
-                                            key: const ValueKey(
-                                              'conversation-placeholder',
+                  ),
+                );
+                Widget detail = Navigator(
+                  requestFocus: selected != null,
+                  key: navigator,
+                  observers: [routeObserver],
+                  pages: [
+                    if (!(wide && persistentSelection && selected != null))
+                      MaterialPage<void>(
+                        key: const ValueKey('conversation-placeholder'),
+                        // Compact panes show the list through this page while
+                        // a detail pushes or pops.
+                        child: !wide
+                            ? const SizedBox.shrink()
+                            : Material(
+                                color: context.colors.surface,
+                                child: Center(
+                                  child:
+                                      emptyContent ??
+                                      Text(
+                                        emptyLabel,
+                                        textAlign: TextAlign.center,
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .bodyLarge
+                                            ?.copyWith(
+                                              color: Theme.of(
+                                                context,
+                                              ).colorScheme.onSurfaceVariant,
+                                              decoration: TextDecoration.none,
                                             ),
-                                            // Compact panes show the list
-                                            // through this page while a
-                                            // detail pushes or pops.
-                                            child: !wide
-                                                ? const SizedBox.shrink()
-                                                : Material(
-                                                    color:
-                                                        context.colors.surface,
-                                                    child: Center(
-                                                      child:
-                                                          emptyContent ??
-                                                          Text(
-                                                            emptyLabel,
-                                                            textAlign: TextAlign
-                                                                .center,
-                                                            style: Theme.of(context)
-                                                                .textTheme
-                                                                .bodyLarge
-                                                                ?.copyWith(
-                                                                  color: Theme.of(
-                                                                    context,
-                                                                  ).colorScheme.onSurfaceVariant,
-                                                                  decoration:
-                                                                      TextDecoration
-                                                                          .none,
-                                                                ),
-                                                          ),
-                                                    ),
-                                                  ),
-                                          ),
-                                        if (selected != null)
-                                          _ConversationDetailPage(
-                                            key: controller.selectionKey,
-                                            animate:
-                                                !wide &&
-                                                controller.animateSelection,
-                                            child: _CoveringDetail(
-                                              covering: coveringDetail,
-                                              mounted: mountedDetails,
-                                              builder:
-                                                  controller.detailBuilder!,
-                                            ),
-                                          ),
-                                      ],
-                                      onDidRemovePage: (page) {
-                                        if (page.key ==
-                                            controller.selectionKey) {
-                                          controller.clear();
-                                        }
-                                      },
-                                    ),
-                                  ),
+                                      ),
+                                ),
+                              ),
+                      ),
+                    if (selected != null)
+                      _ConversationDetailPage(
+                        key: controller.selectionKey,
+                        animate: !wide && controller.animateSelection,
+                        child: _CoveringDetail(
+                          covering: coveringDetail,
+                          mounted: mountedDetails,
+                          builder: controller.detailBuilder!,
+                        ),
+                      ),
+                  ],
+                  onDidRemovePage: (page) {
+                    if (page.key == controller.selectionKey) {
+                      controller.clear();
+                    }
+                  },
+                );
+                if (layout != null) {
+                  detail = ConversationSidebarScope(
+                    mode: layout.sidebar,
+                    canDock: layout.canDock,
+                    controller: controller,
+                    hidden: ref.read(
+                      conversationSidebarHiddenProvider.notifier,
+                    ),
+                    child: detail,
+                  );
+                }
+                final detailPane = Positioned(
+                  key: const ValueKey('conversation-detail'),
+                  left: detailLeft,
+                  top: 0,
+                  bottom: 0,
+                  width: detailWidth,
+                  child: ValueListenableBuilder<int>(
+                    valueListenable: mountedDetails,
+                    builder: (context, mounted, child) {
+                      final shown = wide || selected != null || mounted > 0;
+                      return Offstage(
+                        offstage: !shown,
+                        child: TickerMode(enabled: shown, child: child!),
+                      );
+                    },
+                    child: MediaQueryOverride(
+                      transform: (media) => media.copyWith(
+                        size: Size(detailWidth, constraints.maxHeight),
+                      ),
+                      child: DuoToolbarScope(
+                        strip: strip,
+                        leadingSlots: wide ? listToolbarSlots : 0,
+                        contentInsets: EdgeInsets.only(
+                          left: wide ? (book?.width ?? 0) / 2 : leftInset,
+                          right: rightInset,
+                        ),
+                        active:
+                            active &&
+                            selected != null &&
+                            !(threadCovers) &&
+                            (ModalRoute.isCurrentOf(context) ?? true),
+                        child: Semantics(
+                          container: true,
+                          explicitChildNodes: true,
+                          child: PopScope<Object?>(
+                            canPop:
+                                !active ||
+                                selected == null ||
+                                (wide && persistentSelection && !threadOpen),
+                            onPopInvokedWithResult: (didPop, result) {
+                              if (didPop || !active) return;
+                              if (overlaid) {
+                                controller.hideSidebarOverlay();
+                              } else if (threadOpen) {
+                                threadNavigator.currentState?.maybePop(result);
+                              } else if (selected != null &&
+                                  !(wide && persistentSelection)) {
+                                navigator.currentState!.maybePop(result);
+                              }
+                            },
+                            child: ExcludeFocus(
+                              excluding:
+                                  selected == null || threadCovers || overlaid,
+                              child: ExcludeSemantics(
+                                excluding: threadCovers || overlaid,
+                                child: NavigatorPopHandler<Object?>(
+                                  enabled: wide && persistentSelection,
+                                  // A disabled handler is still told about
+                                  // a blocked pop; the PopScope above owns
+                                  // Back then (overlay, thread, selection).
+                                  onPopWithResult: (result) {
+                                    if (wide && persistentSelection) {
+                                      navigator.currentState!.pop(result);
+                                    }
+                                  },
+                                  child: detail,
                                 ),
                               ),
                             ),
@@ -437,9 +621,18 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                         ),
                       ),
                     ),
-                    if (wide)
+                  ),
+                );
+                return Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    // Keys keep each pane's state while the list moves above
+                    // the conversation to draw over it.
+                    if (!overlaid) listPane,
+                    detailPane,
+                    if (wide && docked)
                       Positioned(
-                        left: listWidth + leftInset,
+                        left: detailLeft - 1,
                         top: 0,
                         bottom: 0,
                         width: 1,
@@ -449,15 +642,171 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                           ),
                         ),
                       ),
+                    if (threadOpen) ...[
+                      Positioned(
+                        key: const ValueKey('conversation-thread'),
+                        left: geometry.threadLeft,
+                        top: 0,
+                        bottom: 0,
+                        width: geometry.threadWidth,
+                        child: MediaQueryOverride(
+                          transform: (media) => media.copyWith(
+                            size: Size(
+                              geometry.threadWidth,
+                              constraints.maxHeight,
+                            ),
+                          ),
+                          child: DuoToolbarScope(
+                            strip: strip,
+                            active:
+                                active &&
+                                (ModalRoute.isCurrentOf(context) ?? true),
+                            child: ExcludeFocus(
+                              excluding: overlaid,
+                              child: ExcludeSemantics(
+                                excluding: overlaid,
+                                child: ConversationThreadPane(
+                                  controller: controller,
+                                  navigatorKey: threadNavigator,
+                                  covering: threadCovers,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      // Drawn above both panes so the handle straddles them.
+                      if (!threadCovers)
+                        Positioned(
+                          key: const ValueKey('conversation-thread-divider'),
+                          left:
+                              geometry.threadLeft -
+                              1 -
+                              (conversationThreadHandleWidth - 1) / 2,
+                          top: 0,
+                          bottom: 0,
+                          width: conversationThreadHandleWidth,
+                          child: ConversationThreadDivider(
+                            width: layout!.threadWidth,
+                            maxWidth: layout.threadMaxWidth,
+                            onDragStart: () => resizeHold.value =
+                                layout.sidebar ==
+                                ConversationSidebarMode.docked,
+                            onResize: ref
+                                .read(conversationThreadWidthProvider.notifier)
+                                .set,
+                            onDragEnd: () => resizeHold.value = null,
+                          ),
+                        ),
+                    ],
+                    if (overlaid)
+                      Positioned.fill(
+                        key: const ValueKey('conversation-sidebar-scrim'),
+                        child: Semantics(
+                          button: true,
+                          label: 'Close sidebar',
+                          onTap: controller.hideSidebarOverlay,
+                          excludeSemantics: true,
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: controller.hideSidebarOverlay,
+                            child: ColoredBox(
+                              color: context.colors.scrim.withValues(
+                                alpha:
+                                    0.25 *
+                                    ((geometry.listLeft + listWidth + 1) /
+                                            (listWidth + 1))
+                                        .clamp(0.0, 1.0),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    if (overlaid) listPane,
                   ],
                 );
               },
+            );
+            // Always present, so gaining bindings never remounts the panes.
+            return CallbackShortcuts(
+              bindings: {
+                if (layout != null && selected != null) ...{
+                  const SingleActivator(
+                    LogicalKeyboardKey.keyS,
+                    control: true,
+                    meta: true,
+                  ): toggleSidebar,
+                  if (layout.sidebar == ConversationSidebarMode.overlay)
+                    const SingleActivator(LogicalKeyboardKey.escape):
+                        controller.hideSidebarOverlay,
+                },
+              },
+              child: pane,
             );
           },
         ),
       ),
     );
   }
+}
+
+/// Animated tablet pane positions, in pane coordinates.
+@immutable
+class _PaneGeometry {
+  const _PaneGeometry({
+    required this.listLeft,
+    required this.listWidth,
+    required this.detailLeft,
+    required this.detailWidth,
+    required this.threadLeft,
+    required this.threadWidth,
+  });
+
+  final double listLeft;
+  final double listWidth;
+  final double detailLeft;
+  final double detailWidth;
+  final double threadLeft;
+  final double threadWidth;
+
+  static _PaneGeometry lerp(_PaneGeometry a, _PaneGeometry b, double t) {
+    double mix(double x, double y) => x + (y - x) * t;
+    return _PaneGeometry(
+      listLeft: mix(a.listLeft, b.listLeft),
+      listWidth: mix(a.listWidth, b.listWidth),
+      detailLeft: mix(a.detailLeft, b.detailLeft),
+      detailWidth: mix(a.detailWidth, b.detailWidth),
+      threadLeft: mix(a.threadLeft, b.threadLeft),
+      threadWidth: mix(a.threadWidth, b.threadWidth),
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is _PaneGeometry &&
+      other.listLeft == listLeft &&
+      other.listWidth == listWidth &&
+      other.detailLeft == detailLeft &&
+      other.detailWidth == detailWidth &&
+      other.threadLeft == threadLeft &&
+      other.threadWidth == threadWidth;
+
+  @override
+  int get hashCode => Object.hash(
+    listLeft,
+    listWidth,
+    detailLeft,
+    detailWidth,
+    threadLeft,
+    threadWidth,
+  );
+}
+
+class _PaneGeometryTween extends Tween<_PaneGeometry> {
+  _PaneGeometryTween({super.end});
+
+  @override
+  _PaneGeometry lerp(double t) => _PaneGeometry.lerp(begin!, end!, t);
 }
 
 /// Hides the compact list from input, focus and screen readers while a
@@ -622,6 +971,24 @@ Future<void> openConversationPane(
   } else {
     await Navigator.of(context).push(MaterialPageRoute<void>(builder: builder));
   }
+}
+
+/// Opens a thread beside its conversation on a tablet, or pushes it.
+///
+/// A thread opened from inside a thread pane stacks in that pane, and phones,
+/// Duo and destinations without a pane keep an ordinary pushed route.
+Future<void> openThreadPane(BuildContext context, WidgetBuilder builder) async {
+  final pane = ConversationPaneScope.maybeOf(context);
+  if (pane != null &&
+      pane.selectedId != null &&
+      !ConversationThreadScope.isInside(context) &&
+      // Only a tablet layout's conversation column carries the sidebar scope.
+      context.getInheritedWidgetOfExactType<ConversationSidebarScope>() !=
+          null) {
+    pane.openThread(builder);
+    return;
+  }
+  await Navigator.of(context).push(MaterialPageRoute<void>(builder: builder));
 }
 
 /// A list/detail workspace for destinations such as Search and Inbox.
