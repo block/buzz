@@ -30,7 +30,7 @@ impl Fixture {
             .await
             .unwrap();
         let mut state = (*state).clone();
-        // Use production after_connect policy (floor guard, isolation and
+        // Use production after_connect policy (isolation and
         // session timeouts), not raw SQLx pools that mask deployed failures.
         state.db = production_db(buzz_db::DbConfig::default()).await;
         Arc::make_mut(&mut state.config).require_auth_token = true;
