@@ -21,7 +21,7 @@ use uuid::Uuid;
 use buzz_core::kind::*;
 use buzz_core::tenant::{CommunityId, TenantContext};
 use buzz_datastore_tracing::datastore_span;
-use buzz_db::dm::{DmGrowth, MAX_DM_PEOPLE};
+use buzz_db::dm::{DmGrowth, DmOpen, MAX_DM_PEOPLE};
 use buzz_db::workflow::{ApprovalStatus, RunStatus};
 use buzz_db::DbError;
 use buzz_workflow::executor::TriggerContext;
@@ -445,6 +445,18 @@ fn history_tag(event: &Event) -> Result<History, IngestError> {
 /// text.
 const NEEDS_HISTORY_CHOICE: &str = "needs-choice: history";
 
+/// [`NEEDS_HISTORY_CHOICE`] for an open, followed by a space and the DM the
+/// caller already belongs to, with the named agents that would join it:
+/// `{"channel_id": "<uuid>", "joining": ["<hex pubkey>", ...]}`. Clients
+/// confirm by adding exactly those agents to exactly that DM.
+fn open_needs_choice(channel_id: Uuid, joining: &[Vec<u8>]) -> String {
+    let joining: Vec<String> = joining.iter().map(hex::encode).collect();
+    format!(
+        "{NEEDS_HISTORY_CHOICE} {}",
+        serde_json::json!({ "channel_id": channel_id.to_string(), "joining": joining })
+    )
+}
+
 /// Why the relay's moderation DM cannot take anyone else.
 const MODERATION_DM_REFUSAL: &str = "invalid: this DM cannot be changed";
 
@@ -551,14 +563,24 @@ async fn handle_dm_open(
     let all_refs: Vec<&[u8]> = all_bytes.iter().map(|b| b.as_slice()).collect();
     let policy = agent_add_policy(&self_bytes);
     let (channel, was_created) = if history == History::Ask {
-        // Dropping `tx` uncommitted forgets this command, so the open can be
-        // sent again with the caller's choice.
-        state
+        match state
             .db
             .open_dm_asking(tenant.community(), &all_refs, &self_bytes, &policy)
             .await
             .map_err(dm_write_error)?
-            .ok_or_else(|| IngestError::Rejected(NEEDS_HISTORY_CHOICE.into()))?
+        {
+            DmOpen::Opened(channel, created) => (channel, created),
+            // Dropping `tx` uncommitted forgets this command, so the open can
+            // be sent again with the caller's choice.
+            DmOpen::NeedsChoice {
+                channel_id,
+                joining,
+            } => {
+                return Err(IngestError::Rejected(open_needs_choice(
+                    channel_id, &joining,
+                )))
+            }
+        }
     } else {
         state
             .db

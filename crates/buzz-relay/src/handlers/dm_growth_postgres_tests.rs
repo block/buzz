@@ -1610,20 +1610,31 @@ async fn open_asking(
 }
 
 /// Asking, an open that would add a named agent to the DM of these people is
-/// refused with the exact reason and writes nothing: the agent does not join,
-/// the DM stays hidden, and the refused command is not remembered, so the same
-/// event is refused again. Sent again with `include`, the agent joins.
+/// refused with the exact reason, naming that DM and only the named agents not
+/// in it, and writes nothing: the agent does not join, the DM stays hidden,
+/// and the refused command is not remembered, so the same event is refused
+/// again. Sent again with `include`, the agent joins.
 /// Mutations: open as with `include` → the agent joins → RED; reopen before
 /// checking → the DM is shown again → RED; commit the command before refusing
-/// → the second send is a duplicate → RED.
+/// → the second send is a duplicate → RED; name every agent → `member` is
+/// listed → RED.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn asking_refuses_an_open_that_adds_an_agent_and_writes_nothing() {
     let state = state().await;
     let tenant = community(&state, "dm-ask-open").await;
-    let (a, b, agent) = (Keys::generate(), Keys::generate(), Keys::generate());
+    let (a, b, agent, member) = (
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+    );
     make_agent(&state, &tenant, &agent, &a, "anyone").await;
+    make_agent(&state, &tenant, &member, &a, "anyone").await;
     let dm = open(&state, &tenant, &a, &[&b]).await.expect("open");
+    add(&state, &tenant, &a, dm, &[&member], true)
+        .await
+        .expect("add member");
     let viewer = a.public_key().to_bytes();
     state
         .db
@@ -1635,6 +1646,7 @@ async fn asking_refuses_an_open_that_adds_an_agent_and_writes_nothing() {
         .tags(
             [
                 vec!["p".to_string(), hex(&b)],
+                vec!["p".into(), hex(&member)],
                 vec!["p".into(), hex(&agent)],
                 vec!["history".into(), "ask".into()],
             ]
@@ -1643,15 +1655,22 @@ async fn asking_refuses_an_open_that_adds_an_agent_and_writes_nothing() {
         )
         .sign_with_keys(&a)
         .expect("sign");
+    let expected = format!(
+        "needs-choice: history {}",
+        serde_json::json!({ "channel_id": dm.to_string(), "joining": [hex(&agent)] })
+    );
     for _ in 0..2 {
         match ingest_event(&state, &tenant, event.clone(), http_auth(&a)).await {
-            Err(IngestError::Rejected(message)) => assert_eq!(message, "needs-choice: history"),
+            Err(IngestError::Rejected(message)) => assert_eq!(message, expected),
             Err(other) => panic!("expected the history choice, got {other:?}"),
             Ok(result) => panic!("expected the history choice, got {:?}", result.message),
         }
     }
 
-    assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a, &b]));
+    assert_eq!(
+        members(&state, &tenant, dm).await,
+        set_of(&[&a, &b, &member])
+    );
     assert_eq!(
         state
             .db
@@ -1661,14 +1680,14 @@ async fn asking_refuses_an_open_that_adds_an_agent_and_writes_nothing() {
         vec![dm]
     );
     assert_eq!(
-        open_with_history(&state, &tenant, &a, &[&b, &agent])
+        add(&state, &tenant, &a, dm, &[&agent], true)
             .await
-            .expect("open with history"),
-        dm
+            .expect("confirm"),
+        (dm, false)
     );
     assert_eq!(
         members(&state, &tenant, dm).await,
-        set_of(&[&a, &b, &agent])
+        set_of(&[&a, &b, &member, &agent])
     );
 }
 
@@ -1689,10 +1708,14 @@ async fn asking_asks_for_the_peoples_dm_over_an_older_dm_of_the_named_members() 
     let old = open(&state, &tenant, &a, &[&b, &agent]).await.expect("old");
     assert_ne!(old, peoples);
 
+    let expected = format!(
+        "needs-choice: history {}",
+        serde_json::json!({ "channel_id": peoples.to_string(), "joining": [hex(&agent)] })
+    );
     for _ in 0..2 {
         rejected(
             open_asking(&state, &tenant, &a, &[&b, &agent]).await,
-            "needs-choice: history",
+            &expected,
         );
     }
     assert_eq!(members(&state, &tenant, peoples).await, set_of(&[&a, &b]));
