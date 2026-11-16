@@ -1,4 +1,6 @@
 import 'dart:async';
+
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'dart:convert';
 
 import 'package:buzz/app.dart';
@@ -24,6 +26,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  setUp(() => FlutterSecureStorage.setMockInitialValues({}));
   const appBadgeChannel = MethodChannel('app_badge_plus');
 
   tearDown(() {

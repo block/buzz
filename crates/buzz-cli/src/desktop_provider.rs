@@ -1699,6 +1699,7 @@ pub(crate) mod tests {
     async fn short_and_long_assertions_refresh_at_the_earlier_point() {
         use base64::Engine;
         for (lifetime, refresh) in [(20, 10), (300, 150)] {
+            crate::cached_assertion::test_clock::freeze(1_800_000_000);
             let (endpoint, seen) = provider(move |_, request| match request["method"].as_str() {
                 Some("federated_identity") => {
                     let b64 = |v: serde_json::Value| {

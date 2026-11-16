@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
+import 'package:buzz/shared/http/app_http_client.dart';
 
 import 'community_icon_cache.dart';
 import 'community_icon_artwork.dart';
@@ -10,12 +11,14 @@ import 'community_icon_artwork.dart';
 const _maximumIconBytes = 256 * 1024;
 const _lookupTimeout = Duration(seconds: 5);
 
-/// Supplies the unauthenticated client for public NIP-11 documents and icons.
-final communityIconHttpClientProvider = Provider<http.Client>((ref) {
-  final client = http.Client();
-  ref.onDispose(client.close);
-  return client;
-});
+/// Supplies the unauthenticated clients for public NIP-11 documents (API
+/// traffic) and icon images (media traffic).
+final communityIconHttpClientProvider =
+    Provider.family<http.Client, HttpTraffic>((ref, traffic) {
+      final client = newAppHttpClient(traffic);
+      ref.onDispose(client.close);
+      return client;
+    });
 
 /// Immediately presents saved artwork while a public metadata refresh runs.
 final communityIconPresentationProvider = Provider.autoDispose
@@ -36,7 +39,7 @@ final communityIconProvider = FutureProvider.autoDispose
       final key = uri.toString();
       final cache = ref.read(communityIconCacheProvider.notifier);
       final saved = ref.read(communityIconCacheProvider)[key];
-      final client = ref.read(communityIconHttpClientProvider);
+      final client = ref.read(communityIconHttpClientProvider(HttpTraffic.api));
       var disposed = false;
       final cancelled = Completer<void>();
       ref.onDispose(() {
@@ -68,7 +71,11 @@ final communityIconProvider = FutureProvider.autoDispose
           final imageUri = Uri.tryParse(icon);
           if (imageUri != null &&
               (imageUri.scheme == 'https' || imageUri.scheme == 'http')) {
-            final image = await _download(client, imageUri, cancelled.future);
+            final image = await _download(
+              ref.read(communityIconHttpClientProvider(HttpTraffic.media)),
+              imageUri,
+              cancelled.future,
+            );
             if (image != null && image.mimeType.startsWith('image/')) {
               artwork = Uri.dataFromBytes(
                 image.bytes,
