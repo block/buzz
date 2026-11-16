@@ -256,7 +256,14 @@ void main() {
       await tester.tap(find.text('Start a new DM'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Added. Tap Add again to open the DM.'), findsOneWidget);
+      final notice = find.text('Added. Tap Add again to open the DM.');
+      expect(notice, findsOneWidget);
+      // It says what to do next, not that something failed.
+      final context = tester.element(notice);
+      expect(
+        tester.widget<Text>(notice).style?.color,
+        Theme.of(context).colorScheme.onSurfaceVariant,
+      );
       expect(movedTo, isEmpty);
 
       // Add only looks for the DM again, until it shows.

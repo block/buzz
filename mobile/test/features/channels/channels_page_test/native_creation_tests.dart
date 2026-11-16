@@ -88,6 +88,8 @@ void registerNativeCreationTests(Widget Function(List<Override>) buildPage) {
       expect(states.last['error'], contains('Try again'));
       expect(states.last['selected'] as List, hasLength(8));
       expect(actions.calls.single, hasLength(8));
+      // The relay picks the DM of these people, and named agents join it.
+      expect(actions.history, [true]);
       await event('closed');
       expect(
         Navigator.of(tester.element(find.byType(ChannelsPage))).canPop(),
@@ -101,12 +103,15 @@ void registerNativeCreationTests(Widget Function(List<Override>) buildPage) {
 
 class _NativeDmActions implements ChannelActions {
   final calls = <List<String>>[];
+  final history = <bool>[];
   @override
   Future<Channel> openDm({
     required List<String> pubkeys,
     bool waitForChannelList = true,
+    bool includeHistory = false,
   }) async {
     calls.add(pubkeys);
+    history.add(includeHistory);
     throw StateError('Try again');
   }
 

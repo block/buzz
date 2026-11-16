@@ -104,6 +104,8 @@ class AddChannelMembersSheet extends HookConsumerWidget {
     final selectedUsers = useState<List<MentionCandidate>>([]);
     final isSubmitting = useState(false);
     final submitError = useState<String?>(null);
+    // Not a failure: what to do next, such as after an accepted add.
+    final submitNotice = useState<String?>(null);
     // The DM an accepted add landed in but that is not confirmed yet. Add
     // then opens it again instead of sending the add a second time.
     final acceptedDm = useState<String?>(null);
@@ -205,6 +207,7 @@ class AddChannelMembersSheet extends HookConsumerWidget {
       }
       opening.value++;
       submitError.value = null;
+      submitNotice.value = null;
     }
 
     // The relay decides who is an agent: an add first asks it, and only a
@@ -226,6 +229,7 @@ class AddChannelMembersSheet extends HookConsumerWidget {
       if (selectedUsers.value.isEmpty || isSubmitting.value) return;
       final submittedUsers = List<MentionCandidate>.of(selectedUsers.value);
       submitError.value = null;
+      submitNotice.value = null;
       try {
         final accepted = acceptedDm.value;
         if (accepted != null) {
@@ -271,7 +275,7 @@ class AddChannelMembersSheet extends HookConsumerWidget {
       } on DmAddUnconfirmed catch (error) {
         if (!context.mounted) return;
         acceptedDm.value = error.channelId;
-        submitError.value = error.toString();
+        submitNotice.value = error.toString();
       } on AddMembersException catch (error) {
         if (!context.mounted) return;
         final failedPubkeys = error.failures.keys
@@ -347,6 +351,7 @@ class AddChannelMembersSheet extends HookConsumerWidget {
           'loading': searching,
           'loadError': searchFailed,
           'error': submitError.value,
+          'notice': submitNotice.value,
           'submitting': isSubmitting.value,
           'selected': [for (final user in selectedUsers.value) row(user)],
           'users': [for (final user in availableUsers) row(user)],
@@ -510,6 +515,14 @@ class AddChannelMembersSheet extends HookConsumerWidget {
                   error,
                   style: context.textTheme.bodySmall?.copyWith(
                     color: context.colors.error,
+                  ),
+                ),
+              ] else if (submitNotice.value case final notice?) ...[
+                const SizedBox(height: Grid.xxs),
+                Text(
+                  notice,
+                  style: context.textTheme.bodySmall?.copyWith(
+                    color: context.colors.onSurfaceVariant,
                   ),
                 ),
               ],

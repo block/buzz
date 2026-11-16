@@ -127,6 +127,7 @@ class _ArchiveDmActions extends _FakeChannelActions {
   Future<Channel> openDm({
     required List<String> pubkeys,
     bool waitForChannelList = true,
+    bool includeHistory = false,
   }) async {
     onOpened();
     return dm;

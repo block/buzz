@@ -158,15 +158,24 @@ class ChannelActions {
   /// since a full reload can take many seconds on a large account or slow
   /// connection. Callers that depend on fresh list state, such as hidden-DM
   /// resurfacing, keep the default.
+  ///
+  /// With [includeHistory], as New Message opens, the relay picks the DM
+  /// these people already share, and named agents it lacks join it with its
+  /// history; the returned channel is that DM. A relay from before history
+  /// ignores the tag and opens the DM of exactly these members.
   Future<Channel> openDm({
     required List<String> pubkeys,
     bool waitForChannelList = true,
+    bool includeHistory = false,
   }) async {
     _ensureCommunityValid();
     final result = await _signedEventRelay.submit(
       kind: 41010,
       content: '',
-      tags: pubkeys.map((pk) => ['p', pk]).toList(),
+      tags: [
+        for (final pk in pubkeys) ['p', pk],
+        if (includeHistory) ['history', 'include'],
+      ],
     );
     _ensureCommunityValid();
     final response = parseCommandResponse(result.content);
