@@ -358,7 +358,12 @@ pub struct CliArgs {
     /// How ACP provider sessions are scoped in channels.
     /// channel (default): one provider session per channel (legacy behavior).
     /// thread: each canonical channel thread gets an isolated provider session;
-    /// direct messages stay conversation-scoped either way. Ships as `channel`
+    /// direct messages stay conversation-scoped.
+    /// author: like thread, but the session also belongs to one person — every
+    /// (thread, author pubkey) pair in a channel and every (conversation, author)
+    /// pair in a DM gets its own session, so two people in one thread or one
+    /// group DM no longer share a session. This multiplies the number of live
+    /// sessions by the number of people per thread. Ships as `channel`
     /// so thread scoping can be canaried and rolled back without code changes.
     #[arg(
         long,
@@ -2758,6 +2763,18 @@ channels = "ALL"
             "thread",
         ]);
         assert_eq!(args.session_policy, crate::scope::SessionPolicy::Thread);
+    }
+
+    #[test]
+    fn test_session_policy_author_flag_parses() {
+        let args = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &"0".repeat(64),
+            "--session-policy=author",
+        ]);
+        assert_eq!(args.session_policy, crate::scope::SessionPolicy::Author);
+        assert_eq!(args.session_policy.to_string(), "author");
     }
 
     #[test]

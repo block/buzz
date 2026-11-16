@@ -906,6 +906,7 @@ impl NormalListenerIngress {
             is_dm,
             &self.buzz_event.event,
             self.edit.as_ref(),
+            &self.effective_author,
         )
     }
 
@@ -3652,7 +3653,9 @@ async fn run_harness(
                                     // thread running in the same channel. Under
                                     // the default channel policy the scope is the
                                     // channel's sole conversation, so this is
-                                    // byte-for-byte the prior behavior.
+                                    // byte-for-byte the prior behavior. Under the
+                                    // `author` policy it cancels every person's
+                                    // turn in thread A.
                                     let scope = scope::SessionScope::derive(
                                         config.session_policy,
                                         buzz_event.channel_id,
@@ -3660,12 +3663,12 @@ async fn run_harness(
                                             .await,
                                         &buzz_event.event,
                                     );
-                                    let fired = signal_in_flight_task_for_scope(
+                                    let signaled = signal_in_flight_tasks_for_surface(
                                         &mut pool,
                                         &scope,
                                         ControlSignal::Cancel,
                                     );
-                                    if !fired {
+                                    if signaled.is_empty() {
                                         tracing::warn!(
                                             channel_id = %buzz_event.channel_id,
                                             scope = %scope.telemetry_label(),
@@ -3704,7 +3707,9 @@ async fn run_harness(
                                     // owner's !rotate belongs to. Under the
                                     // default channel policy the scope is the
                                     // channel's sole conversation, matching the
-                                    // prior channel-wide rotate.
+                                    // prior channel-wide rotate. Under the
+                                    // `author` policy every person's session in
+                                    // that thread rotates.
                                     let scope = scope::SessionScope::derive(
                                         config.session_policy,
                                         buzz_event.channel_id,
@@ -3712,20 +3717,25 @@ async fn run_harness(
                                             .await,
                                         &buzz_event.event,
                                     );
-                                    let fired = signal_in_flight_task_for_scope(
+                                    let signaled = signal_in_flight_tasks_for_surface(
                                         &mut pool,
                                         &scope,
                                         ControlSignal::Rotate,
                                     );
-                                    if fired {
+                                    // A signaled turn invalidates its own session
+                                    // when it returns. Every other session on the
+                                    // surface rotates now: under the `author`
+                                    // policy that covers other people's idle
+                                    // sessions in a thread whose turn is running.
+                                    let invalidated =
+                                        pool.invalidate_surface_sessions(&scope, &signaled);
+                                    if !signaled.is_empty() {
                                         tracing::info!(
                                             channel_id = %buzz_event.channel_id,
                                             scope = %scope.telemetry_label(),
                                             "!rotate received — cancelling in-flight turn and rotating session"
                                         );
                                     } else {
-                                        let invalidated =
-                                            pool.invalidate_scope_session(&scope);
                                         tracing::info!(
                                             channel_id = %buzz_event.channel_id,
                                             scope = %scope.telemetry_label(),
@@ -4536,30 +4546,61 @@ fn signal_in_flight_task(
 /// “whichever task the channel happens to have first” — otherwise two threads
 /// running concurrently in one channel could steer each other.
 ///
-/// Returns `true` if a signal was sent, `false` if no in-flight task matched.
+/// Returns `true` if a signal was delivered, `false` if no in-flight task
+/// matched or its turn had already ended.
 fn signal_in_flight_task_for_scope(
     pool: &mut AgentPool,
     scope: &scope::SessionScope,
     mode: ControlSignal,
 ) -> bool {
-    let entry = pool
-        .task_map_mut()
-        .values_mut()
-        .find(|m| m.scope.as_ref() == Some(scope));
+    !signal_in_flight_tasks(pool, mode, |target| target == scope).is_empty()
+}
 
-    if let Some(meta) = entry {
-        if let Some(tx) = meta.control_tx.take() {
-            tracing::info!(
-                channel = %scope.channel_id(),
-                scope = %scope.telemetry_label(),
-                ?mode,
-                "control signal sent to in-flight task (scope-exact)"
-            );
-            let _ = tx.send(mode);
-            return true;
+/// Send `mode` to every in-flight task on the same conversation surface as
+/// `scope` (same channel and thread root, any author). Owner controls
+/// (`!cancel`, `!rotate`) use this so that under the `author` session policy a
+/// control addressed to a thread reaches each person's session in it; under
+/// `channel`/`thread` policy the surface holds a single scope, so this signals
+/// exactly the task [`signal_in_flight_task_for_scope`] would. Mid-turn steers
+/// keep the scope-exact function — a steer must never merge one person's event
+/// into another person's session. Returns the scopes whose task received the
+/// signal.
+fn signal_in_flight_tasks_for_surface(
+    pool: &mut AgentPool,
+    scope: &scope::SessionScope,
+    mode: ControlSignal,
+) -> Vec<scope::SessionScope> {
+    signal_in_flight_tasks(pool, mode, |target| target.same_surface(scope))
+}
+
+/// Send `mode` to each in-flight task whose scope `targets` selects, consuming
+/// its control channel. Returns the scopes whose task received the signal; a
+/// task whose turn already ended (receiver dropped) is not counted, so a
+/// control that could not be sent is not reported as handled.
+fn signal_in_flight_tasks(
+    pool: &mut AgentPool,
+    mode: ControlSignal,
+    targets: impl Fn(&scope::SessionScope) -> bool,
+) -> Vec<scope::SessionScope> {
+    let mut signaled = Vec::new();
+    for meta in pool.task_map_mut().values_mut() {
+        let Some(scope) = meta.scope.as_ref().filter(|scope| targets(scope)) else {
+            continue;
+        };
+        let Some(tx) = meta.control_tx.take() else {
+            continue;
+        };
+        tracing::info!(
+            channel = %scope.channel_id(),
+            scope = %scope.telemetry_label(),
+            ?mode,
+            "control signal sent to in-flight task (scope-exact)"
+        );
+        if tx.send(mode.clone()).is_ok() {
+            signaled.push(scope.clone());
         }
     }
-    false
+    signaled
 }
 
 /// Attempt the non-cancelling (ACP) steer for a freshly-queued event.
@@ -5006,9 +5047,10 @@ fn dispatch_pending(
         };
         let channel_id = batch.channel_id;
         let scope = batch.scope.clone();
-        // Authoritative affinity, variant-gated and bounded: only a `Thread`
-        // scope whose session owner is checked out (busy on another turn) is
-        // held, and only until `HOLD_BUSY_OWNER_TIMEOUT` elapses. `Conversation`
+        // Authoritative affinity, variant-gated and bounded: only a thread
+        // scope (`Thread`, or `AuthorThread` under the `author` policy) whose
+        // session owner is checked out (busy on another turn) is held, and
+        // only until `HOLD_BUSY_OWNER_TIMEOUT` elapses. `Conversation`
         // scopes never hold — a busy owner there forks onto another idle worker,
         // so an active channel cannot starve a sibling channel on a shared
         // worker. A held thread that outwaits the window forks a fresh session
@@ -6867,6 +6909,61 @@ mod owner_control_command_tests {
         ));
     }
 
+    #[tokio::test]
+    async fn surface_signal_reaches_every_author_in_thread_but_steer_stays_exact() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let ch = Uuid::new_v4();
+        let root = "a".repeat(64);
+        let mk = |root: &str, who: &str| scope::SessionScope::AuthorThread {
+            channel_id: ch,
+            root_event_id: root.to_string(),
+            author: who.repeat(64),
+        };
+        let alice = mk(&root, "1");
+        let bob = mk(&root, "2");
+        let other = mk(&"b".repeat(64), "1");
+        let (tx_a, rx_a) = tokio::sync::oneshot::channel();
+        let (tx_b, rx_b) = tokio::sync::oneshot::channel();
+        let (tx_o, mut rx_o) = tokio::sync::oneshot::channel();
+        insert_task_meta(&mut pool, 0, alice.clone(), tx_a);
+        insert_task_meta(&mut pool, 1, bob.clone(), tx_b);
+        insert_task_meta(&mut pool, 2, other.clone(), tx_o);
+        // A third person whose turn just ended: its receiver is gone, so the
+        // signal is not delivered and must not be reported as handled (a
+        // `!rotate` would otherwise skip invalidating that session).
+        let dave = mk(&root, "4");
+        let (tx_d, rx_d) = tokio::sync::oneshot::channel();
+        drop(rx_d);
+        insert_task_meta(&mut pool, 3, dave, tx_d);
+
+        // An owner control in the thread reaches both live people's sessions...
+        let signaled: HashSet<_> =
+            signal_in_flight_tasks_for_surface(&mut pool, &alice, ControlSignal::Cancel)
+                .into_iter()
+                .collect();
+        assert_eq!(signaled, HashSet::from([alice.clone(), bob.clone()]));
+        assert_eq!(rx_a.await.unwrap(), ControlSignal::Cancel);
+        assert_eq!(rx_b.await.unwrap(), ControlSignal::Cancel);
+        // ...but not the sibling thread.
+        assert!(rx_o.try_recv().is_err());
+
+        // A scope-exact steer for a new person in the sibling thread must not
+        // touch the other person's in-flight task there.
+        let carol = mk(&"b".repeat(64), "3");
+        assert!(!signal_in_flight_task_for_scope(
+            &mut pool,
+            &carol,
+            ControlSignal::Steer
+        ));
+        assert!(rx_o.try_recv().is_err());
+        assert!(signal_in_flight_task_for_scope(
+            &mut pool,
+            &other,
+            ControlSignal::Steer
+        ));
+        assert_eq!(rx_o.await.unwrap(), ControlSignal::Steer);
+    }
+
     // Fix #1: a thread must not get a second provider session when the worker
     // that owns its session is busy on another turn.
     #[tokio::test]
@@ -7505,6 +7602,41 @@ mod author_gate_tests {
             ])
             .sign_with_keys(relay_keys)
             .expect("signed workflow event")
+    }
+
+    /// Under the `author` session policy a verified workflow dispatch belongs
+    /// to the owner it is attributed to, not to the relay key that signed it:
+    /// otherwise every owner's workflow in a thread would share one session.
+    #[test]
+    fn author_policy_binds_workflow_dispatch_to_its_attributed_owner() {
+        let relay_keys = nostr::Keys::generate();
+        let owner = nostr::Keys::generate().public_key().to_hex();
+        let agent = nostr::Keys::generate().public_key().to_hex();
+        let event = relay_signed_workflow_dispatch(&relay_keys, &owner, &agent);
+        let effective_author =
+            effective_prompt_author(&event, Some(&relay_keys.public_key().to_hex()), &agent);
+        assert_eq!(effective_author, owner);
+        let ingress = NormalListenerIngress {
+            buzz_event: relay::BuzzEvent {
+                connection_generation: 0,
+                channel_id: Uuid::new_v4(),
+                event,
+            },
+            effective_author,
+            prompt_tag: "@mention".into(),
+            edit: None,
+        };
+        for is_dm in [false, true] {
+            let scope = ingress.session_scope(scope::SessionPolicy::Author, is_dm);
+            assert_eq!(scope.author(), Some(owner.as_str()));
+        }
+        // Other policies ignore the author entirely.
+        assert_eq!(
+            ingress
+                .session_scope(scope::SessionPolicy::Thread, false)
+                .author(),
+            None
+        );
     }
 
     struct ListenerBoundaryScenario<'a> {

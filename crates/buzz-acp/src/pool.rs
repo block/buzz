@@ -381,7 +381,7 @@ pub struct AgentPool {
     /// First time each scope was held for a busy owner, so the bounded hold can
     /// expire and fork rather than starve behind an unbounded turn. Derived
     /// state: cleared on every dispatch/invalidation path, and only ever holds
-    /// `Thread` scopes (the sole variant [`hold_decision`](Self::hold_decision)
+    /// thread scopes (the only ones [`hold_decision`](Self::hold_decision)
     /// stamps).
     held_since: HashMap<SessionScope, tokio::time::Instant>,
 }
@@ -1017,8 +1017,9 @@ impl AgentPool {
     /// Gated on the scope variant, not the session policy: `Conversation` scopes
     /// (channel-policy channels and all DMs) never hold — a busy owner there means
     /// fork onto another idle worker, the pre-thread-sessions behavior. Only
-    /// `Thread` scopes hold, so a momentarily busy owner does not cause a
-    /// duplicate provider session for the same thread.
+    /// thread scopes (`Thread`, and `AuthorThread` under the `author` policy)
+    /// hold, so a momentarily busy owner does not cause a duplicate provider
+    /// session for the same thread.
     pub fn hold_decision(
         &mut self,
         scope: &SessionScope,
@@ -1368,6 +1369,41 @@ impl AgentPool {
         }
         self.session_owners.remove(scope);
         self.held_since.remove(scope);
+        count
+    }
+
+    /// Invalidate every cached session on the same conversation surface as
+    /// `scope` (same channel and thread root, any author), except the scopes in
+    /// `except`. Under `channel`/`thread` policy the surface is the single
+    /// scope, so with nothing excepted this is exactly
+    /// [`invalidate_scope_session`](Self::invalidate_scope_session); under
+    /// `author` policy an owner's `!rotate` in a thread must rotate every
+    /// person's session in that thread, not only the owner's own. `except`
+    /// names in-flight scopes that were signaled to rotate on return. Returns
+    /// the number of (worker, scope) sessions dropped.
+    pub fn invalidate_surface_sessions(
+        &mut self,
+        scope: &SessionScope,
+        except: &[SessionScope],
+    ) -> usize {
+        let targets: Vec<SessionScope> = std::iter::once(scope)
+            .chain(
+                self.agents
+                    .iter()
+                    .flatten()
+                    .flat_map(|agent| agent.state.sessions.keys()),
+            )
+            .chain(self.session_owners.keys())
+            .chain(self.held_since.keys())
+            .filter(|s| s.same_surface(scope) && !except.contains(s))
+            .cloned()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let mut count = 0;
+        for target in targets {
+            count += self.invalidate_scope_session(&target);
+        }
         count
     }
 
@@ -5690,6 +5726,67 @@ pub(crate) mod tests {
     /// (equivalent to the pre-thread-scoping channel key).
     fn conv(channel_id: Uuid) -> SessionScope {
         SessionScope::Conversation { channel_id }
+    }
+
+    #[tokio::test]
+    async fn invalidate_surface_sessions_drops_every_author_in_the_thread_only() {
+        let ch = Uuid::new_v4();
+        let root = "a".repeat(64);
+        let sibling_root = "b".repeat(64);
+        let mk = |root: &str, who: &str| SessionScope::AuthorThread {
+            channel_id: ch,
+            root_event_id: root.to_string(),
+            author: who.repeat(64),
+        };
+        // `alice` is in flight and was signaled; `bob` and `carol` are other
+        // people in the same thread; `bob_sibling` is bob in another thread.
+        let alice = mk(&root, "1");
+        let bob = mk(&root, "2");
+        let carol = mk(&root, "3");
+        let bob_sibling = mk(&sibling_root, "2");
+
+        // One idle worker holds bob's session in this thread and his session
+        // in the sibling thread.
+        let mut agent = idle_agent_with_session(0, bob.clone()).await;
+        agent
+            .state
+            .sessions
+            .insert(bob_sibling.clone(), "sess-sibling".into());
+        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+        for scope in [&bob, &bob_sibling] {
+            let generation = pool.record_scope_owner(scope.clone(), 0);
+            pool.agents[0]
+                .as_mut()
+                .expect("idle test agent")
+                .state
+                .set_scope_owner_generation(scope.clone(), generation);
+        }
+        // alice's turn runs on a checked-out worker; carol only has a pending
+        // hold for that busy worker.
+        pool.record_scope_owner(alice.clone(), 1);
+        pool.record_scope_owner(carol.clone(), 1);
+        pool.held_since
+            .insert(carol.clone(), tokio::time::Instant::now());
+        assert!(pool.has_session_for(&bob));
+        assert!(pool.has_session_for(&bob_sibling));
+
+        // Signaled `alice` rotates on return, so it is spared; everyone else in
+        // the thread rotates now.
+        let dropped = pool.invalidate_surface_sessions(&alice, std::slice::from_ref(&alice));
+        assert_eq!(dropped, 1, "only bob's idle session in this thread");
+        assert!(!pool.has_session_for(&bob));
+        assert!(!pool.session_owners.contains_key(&bob));
+        assert!(!pool.session_owners.contains_key(&carol));
+        assert!(!pool.held_since.contains_key(&carol));
+        assert!(pool.session_owners.contains_key(&alice));
+        // The sibling thread's session on the same worker survives.
+        assert!(pool.has_session_for(&bob_sibling));
+        assert!(pool.session_owners.contains_key(&bob_sibling));
+
+        // With nothing excepted the rest of the thread goes; the sibling stays.
+        assert_eq!(pool.invalidate_surface_sessions(&bob, &[]), 0);
+        assert!(!pool.session_owners.contains_key(&alice));
+        assert!(pool.has_session_for(&bob_sibling));
     }
 
     fn test_mcp_server() -> McpServer {
