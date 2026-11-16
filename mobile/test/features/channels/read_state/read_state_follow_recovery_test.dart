@@ -438,7 +438,9 @@ void main() {
     expect(await phone.setThreadFollow(channel, 'a' * 64, true), isFalse);
     expect(phone.threadFollows.containsKey(keyK), isFalse);
     store.failJournal = false;
-    await phone.reinitializeRemote();
+    // The next reconnect's ready reads the snapshot again.
+    relay.ready();
+    await pumpEventQueue();
     expect(await phone.setThreadFollow(channel, 'a' * 64, true), isTrue);
   });
 
@@ -660,12 +662,38 @@ class _HoldingRelay extends RelaySessionNotifier {
     return retained.values.toList();
   }
 
+  final List<void Function(RelaySubscriptionStatus)> _statusListeners = [];
+
+  /// Reports the live subscription ready again, as a reconnect's replay does.
+  void ready() {
+    for (final listener in List.of(_statusListeners)) {
+      listener(RelaySubscriptionStatus.ready);
+    }
+  }
+
+  @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
+    bool resumeSince = true,
+  }) async {
+    final unsubscribe = await subscribe(filter, onEvent, onClosed: onClosed);
+    _statusListeners.add(onStatusChanged);
+    return () {
+      _statusListeners.remove(onStatusChanged);
+      unsubscribe();
+    };
+  }
+
   @override
   Future<void Function()> subscribe(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
   }) async {
+    if (offline) throw TimeoutException('relay unreachable');
     _live.add(onEvent);
     return () => _live.remove(onEvent);
   }

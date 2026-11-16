@@ -332,11 +332,9 @@ void main() {
 
       expect(state().isForcedUnread(channelId), isFalse);
       expect(state().isForcedUnread(msgKey), isTrue);
-      // The synced group's frontier travels with it, at the floor.
-      expect(
-        state().contexts[channelId],
-        lessThanOrEqualTo(state().retentionFloor),
-      );
+      // A never-read channel stores no frontier; the floor still reads its
+      // old messages.
+      expect(state().contexts[channelId], isNull);
       expect(state().effectiveTimestamp(channelId), state().retentionFloor);
     },
   );

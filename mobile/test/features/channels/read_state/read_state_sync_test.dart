@@ -51,10 +51,19 @@ void main() {
     return manager;
   }
 
+  /// A reconnect: [device] reopens a lost subscription, and the replay's
+  /// ready reads the snapshot.
+  Future<void> reconnect(ReadStateManager device) async {
+    await device.reinitializeRemote();
+    relay.ready();
+    await pumpEventQueue();
+  }
+
   /// Publishes [from] and lets [to] read the relay, as a reconnect would.
   Future<void> sync(ReadStateManager from, ReadStateManager to) async {
     await from.flush();
-    await to.reinitializeRemote();
+    relay.ready();
+    await pumpEventQueue();
   }
 
   Iterable<Map<String, int>> readStateBlobs() => [
@@ -131,7 +140,7 @@ void main() {
       },
       createdAt: clock - 10,
     );
-    await phone.reinitializeRemote();
+    await reconnect(phone);
     phone.markContextRead(channel, clock - 5);
     await phone.flush();
 
@@ -309,7 +318,7 @@ void main() {
         content: crypto.encrypt('{"v":2}'),
         sig: 'sig',
       );
-      await phone.reinitializeRemote();
+      await reconnect(phone);
       expect(phone.threadFollowsIncomplete, isTrue);
     });
   });
@@ -429,7 +438,7 @@ void main() {
       );
       relay.retained['$threadFollowsDTagPrefix$ownSlot'] = unreadable(ownSlot);
       relay.retained['${threadFollowsDTagPrefix}peer'] = unreadable(slot);
-      await phone.reinitializeRemote();
+      await reconnect(phone);
       expect(phone.threadFollowsIncomplete, isTrue);
       phone.dispose(flushPending: false);
 
@@ -459,7 +468,7 @@ void main() {
         content: crypto.encrypt('{"v":2}'),
         sig: 'sig',
       );
-      await phone.reinitializeRemote();
+      await reconnect(phone);
       expect(phone.threadFollowsIncomplete, isTrue);
       phone.dispose(flushPending: false);
 
@@ -467,7 +476,7 @@ void main() {
       final restarted = await device('phone');
       expect(restarted.threadFollowsIncomplete, isTrue);
       relay.offline = false;
-      await restarted.reinitializeRemote();
+      await reconnect(restarted);
       expect(restarted.threadFollowsIncomplete, isTrue);
     });
 
@@ -588,7 +597,7 @@ void main() {
         expect(phone.markChannelUnread(channel), isTrue);
         await phone.flush();
         await overfill();
-        await phone.reinitializeRemote();
+        await reconnect(phone);
 
         phone.markContextRead(channel, clock - 1);
         await phone.flush();
@@ -606,7 +615,7 @@ void main() {
       expect(phone.markChannelUnread(channel), isTrue);
       await phone.flush();
       await overfill();
-      await phone.reinitializeRemote();
+      await reconnect(phone);
       expect(phone.clearChannelOverride(channel), isFalse);
       expect(phone.syncError, isNotNull);
       expect(phone.activeChannelOverrides, contains(channel));
@@ -638,12 +647,12 @@ void main() {
       expect(phone.markChannelUnread(channel), isTrue);
       await phone.flush();
       await overfill();
-      await phone.reinitializeRemote();
+      await reconnect(phone);
       expect(phone.clearChannelOverride(channel), isFalse);
 
       // Unrelated syncing, with nothing else to send, does not hide it.
       await phone.flush();
-      await phone.reinitializeRemote();
+      await reconnect(phone);
       await phone.flush();
       expect(phone.syncError, isNotNull);
       expect(phone.activeChannelOverrides, contains(channel));
@@ -774,7 +783,7 @@ void main() {
       expect(phone.markChannelUnread(stale), isTrue);
       await phone.flush();
       await overfill();
-      await phone.reinitializeRemote();
+      await reconnect(phone);
 
       clock += 3600;
       phone.markContextRead('${channel}c', clock - 1);
@@ -947,6 +956,32 @@ class _MemoryRelay extends RelaySessionNotifier {
   }) async {
     if (offline) throw TimeoutException('offline');
     return retained.values.toList();
+  }
+
+  final List<void Function(RelaySubscriptionStatus)> _statusListeners = [];
+
+  /// Reports every live subscription ready again, as a reconnect's replay
+  /// does.
+  void ready() {
+    for (final listener in List.of(_statusListeners)) {
+      listener(RelaySubscriptionStatus.ready);
+    }
+  }
+
+  @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
+    bool resumeSince = true,
+  }) async {
+    final unsubscribe = await subscribe(filter, onEvent, onClosed: onClosed);
+    _statusListeners.add(onStatusChanged);
+    return () {
+      _statusListeners.remove(onStatusChanged);
+      unsubscribe();
+    };
   }
 
   @override
