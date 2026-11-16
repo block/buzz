@@ -121,26 +121,36 @@ class DirectoryShownMessageStore implements ShownMessageStore {
     } on PathExistsException {
       return false;
     }
-    final now = _seconds(_now());
-    final watermark = created < now ? created : now;
-    await File('${directory.path}/w-${_digits(watermark)}-$eventId').create();
-    // Check the window only after the markers exist. A concurrent claim that
-    // advances the newest watermark may delete markers below its cutoff, and
-    // the newest watermark never moves backwards because it is the maximum of
-    // marker names and is never itself below a cutoff, so a message that was
-    // shown and then pruned is rejected here instead of being claimed again.
-    final all = await _markers(directory);
-    final cutoff = _newest(all)! - shownMessageReorderWindow.inSeconds;
-    for (final marker in all) {
-      if (marker.seconds < cutoff) {
-        try {
-          await marker.file.delete();
-        } on PathNotFoundException {
-          // Another claim pruned it first.
+    // The claim is won and can't be undone, so nothing after this may throw:
+    // a throw would leave a claim that no later wake can win, for a message
+    // never shown. If the bookkeeping fails, the message is shown. A missing
+    // watermark only makes later fetches start earlier, and a skipped prune
+    // runs again on the next claim.
+    try {
+      final now = _seconds(_now());
+      final watermark = created < now ? created : now;
+      await File('${directory.path}/w-${_digits(watermark)}-$eventId').create();
+      // Check the window only after the markers exist. A concurrent claim that
+      // advances the newest watermark may delete markers below its cutoff, and
+      // the newest watermark never moves backwards because it is the maximum
+      // of marker names and is never itself below a cutoff, so a message that
+      // was shown and then pruned is rejected here instead of being claimed
+      // again.
+      final all = await _markers(directory);
+      final cutoff = _newest(all)! - shownMessageReorderWindow.inSeconds;
+      for (final marker in all) {
+        if (marker.seconds < cutoff) {
+          try {
+            await marker.file.delete();
+          } on PathNotFoundException {
+            // Another claim pruned it first.
+          }
         }
       }
+      return created >= cutoff;
+    } on Object {
+      return true;
     }
-    return created >= cutoff;
   }
 }
 

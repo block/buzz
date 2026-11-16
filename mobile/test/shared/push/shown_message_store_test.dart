@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:buzz/shared/push/shown_message_store.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 String _id(int n) => n.toRadixString(16).padLeft(64, '0');
@@ -33,6 +34,20 @@ void main() {
         ).claim('community', _id(1), future),
     ]);
     expect(results.where((won) => won), hasLength(1));
+  });
+
+  test('a won claim whose bookkeeping fails is still shown, once', () async {
+    // A directory where the watermark file belongs makes writing it fail, as
+    // a full disk would, after the claim itself is won.
+    final at = now.subtract(const Duration(minutes: 1));
+    final seconds = (at.millisecondsSinceEpoch ~/ 1000).toString();
+    final community = sha256.convert('community'.codeUnits).toString();
+    Directory(
+      '${directory.path}/$community/w-${seconds.padLeft(12, '0')}-${_id(1)}',
+    ).createSync(recursive: true);
+
+    expect(await open().claim('community', _id(1), at), isTrue);
+    expect(await open().claim('community', _id(1), at), isFalse);
   });
 
   test('history is rejected, reordering and future dates are not', () async {
