@@ -890,7 +890,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 92);
+        assert_eq!(migrations.len(), 93);
         assert_eq!(migrations[89].version, 90);
         assert!(migrations[89]
             .sql
@@ -921,9 +921,9 @@ mod postgres_tests {
         let retire_floor = strip_sql_comments(migrations[88].sql.as_str());
         assert!(retire_floor.contains("DROP TRIGGER IF EXISTS events_created_at_floor ON events;"));
         assert!(retire_floor.contains("DROP FUNCTION IF EXISTS events_created_at_floor_guard();"));
-        // Channel parents (0092): a nullable column and a partial index built
+        // Channel parents (0093): a nullable column and a partial index built
         // inline under bounded locks, as 0083 does.
-        let parents = strip_sql_comments(migrations[91].sql.as_str());
+        let parents = strip_sql_comments(migrations[92].sql.as_str());
         assert!(parents.contains("SET LOCAL lock_timeout = '1s';"));
         assert!(parents.contains("SET LOCAL statement_timeout = '5s';"));
         assert!(parents.contains("ADD COLUMN IF NOT EXISTS parent_id UUID;"));
@@ -3112,6 +3112,7 @@ mod postgres_tests {
 
         for table in [
             "media_uploaders",
+            "audit_log",
             "media_publications",
             "relay_members",
             "relay_admin_actions",
