@@ -554,6 +554,10 @@ fn parse_operator_api_origin(raw: &str) -> Result<String, ConfigError> {
     Ok(raw.trim_end_matches('/').to_string())
 }
 
+/// The gateway's platform-neutral delivery route, and its APNs-named alias,
+/// which gateways keep serving until relays have moved to the neutral route.
+const PUSH_GATEWAY_DELIVERY_PATHS: [&str; 2] = ["/v1/deliveries", "/v1/deliveries/apns"];
+
 fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
     let url = url::Url::parse(raw.trim()).map_err(|e| {
         ConfigError::InvalidValue(format!(
@@ -565,12 +569,12 @@ fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
         || (url.scheme() == "https" && url.port().is_some())
         || !url.username().is_empty()
         || url.password().is_some()
-        || url.path() != "/v1/deliveries/apns"
+        || !PUSH_GATEWAY_DELIVERY_PATHS.contains(&url.path())
         || url.query().is_some()
         || url.fragment().is_some()
     {
         return Err(ConfigError::InvalidValue(
-            "BUZZ_PUSH_GATEWAY_DELIVERY_URL must be an exact HTTP(S) /v1/deliveries/apns URL without credentials, query, or fragment; explicit ports are supported only for HTTP"
+            "BUZZ_PUSH_GATEWAY_DELIVERY_URL must be an exact HTTP(S) /v1/deliveries (or the older /v1/deliveries/apns) URL without credentials, query, or fragment; explicit ports are supported only for HTTP"
                 .to_string(),
         ));
     }
@@ -2886,7 +2890,7 @@ mod tests {
 
         std::env::set_var(
             "BUZZ_PUSH_GATEWAY_DELIVERY_URL",
-            "https://push.example/v1/deliveries/apns",
+            "https://push.example/v1/deliveries",
         );
         let config = Config::from_env().expect("enabled push config");
         assert!(config.push_enabled);
@@ -2895,7 +2899,7 @@ mod tests {
                 .push_gateway_delivery_url
                 .as_ref()
                 .map(url::Url::as_str),
-            Some("https://push.example/v1/deliveries/apns")
+            Some("https://push.example/v1/deliveries")
         );
 
         std::env::set_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL", "");
@@ -2942,16 +2946,30 @@ mod tests {
 
     #[test]
     fn push_gateway_url_is_exact_and_fail_closed() {
-        assert!(parse_push_gateway_delivery_url("https://push.example/v1/deliveries/apns").is_ok());
-        let delivery_url = "http://push.example:8080/v1/deliveries/apns";
-        assert_eq!(
-            parse_push_gateway_delivery_url(delivery_url)
-                .unwrap()
-                .as_str(),
-            delivery_url
-        );
-        assert!(parse_push_gateway_delivery_url("http://push-gateway/v1/deliveries/apns").is_ok());
+        for delivery_url in [
+            "https://push.example/v1/deliveries",
+            "https://push.example/v1/deliveries/apns",
+            "http://push.example:8080/v1/deliveries",
+            "http://push.example:8080/v1/deliveries/apns",
+            "http://push-gateway/v1/deliveries",
+            "http://push-gateway/v1/deliveries/apns",
+        ] {
+            assert_eq!(
+                parse_push_gateway_delivery_url(delivery_url)
+                    .unwrap()
+                    .as_str(),
+                delivery_url
+            );
+        }
         for invalid in [
+            "http://push-gateway:8080/v1/deliveries?token=x",
+            "http://user@push-gateway:8080/v1/deliveries",
+            "http://push-gateway:8080/v1/deliveries#fragment",
+            "https://push.example:8443/v1/deliveries",
+            "https://push.example/v1/deliveries/",
+            "https://push.example/v1/deliveries?token=x",
+            "https://user@push.example/v1/deliveries",
+            "https://push.example/v1/deliveries/other",
             "ftp://push.example/v1/deliveries/apns",
             "http://push-gateway:8080/v1/deliveries/apns?token=x",
             "http://user@push-gateway:8080/v1/deliveries/apns",

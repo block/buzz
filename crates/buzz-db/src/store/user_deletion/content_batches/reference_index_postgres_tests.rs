@@ -1,7 +1,7 @@
 use sqlx::{Executor, PgPool};
 use std::{path::Path, process::Stdio, time::Duration};
 
-const MIGRATION: &str = include_str!("../../../../../../migrations/0089_event_reference_index.sql");
+const MIGRATION: &str = include_str!("../../../../../../migrations/0092_event_reference_index.sql");
 
 async fn catalog(pool: &PgPool) -> (String, bool, bool, bool) {
     sqlx::query_as("SELECT pg_get_indexdef(indexrelid),indisvalid,indisready,indislive FROM pg_index WHERE indexrelid='public.idx_events_reference_ids'::regclass")
