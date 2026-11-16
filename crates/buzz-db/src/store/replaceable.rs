@@ -1196,7 +1196,7 @@ mod postgres_tests {
                 "NIP-RS unread prefix with read-state tag",
                 Path::Parameterized,
                 buzz_core::kind::KIND_READ_STATE as u16,
-                Some(format!("read-state-unread-v2:{}", "a".repeat(32))),
+                Some(format!("read-state-unread-v2:{}", "b".repeat(32))),
                 vec![["t", "read-state"]],
                 people_p(),
                 false,
