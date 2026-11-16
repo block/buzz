@@ -48,6 +48,9 @@ pub struct RelayInfo {
     pub buzz_v1: Option<BuzzV1Descriptor>,
     /// NIP-AR artifact query transport and enforced resource limits.
     pub artifacts: serde_json::Value,
+    /// NIP-MG community groups, settings commands and effective membership rule.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mention_groups: Option<serde_json::Value>,
     /// Relay operator's public key (hex), if published.
     pub pubkey: Option<String>,
     /// Contact address for the relay operator.
@@ -293,6 +296,7 @@ impl RelayInfo {
             name: "Buzz Relay".to_string(),
             description: "Buzz — private team communication relay".to_string(),
             icon: icon.filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            mention_groups: None,
             read_state_snapshot: None,
             membership_snapshot: None,
             membership_public: None,
@@ -479,6 +483,20 @@ pub(crate) async fn nip11_document(
     info.workflow_agent_mentions = state.config.workflow_agent_mentions;
     info.artifacts["incremental"] = crate::api::artifact_sync::capability();
     if let Some(tenant) = tenant.as_ref() {
+        info.mention_groups = Some(serde_json::json!({
+            "version": 1,
+            "put_kind": buzz_core::kind::RELAY_ADMIN_PUT_MENTION_GROUP,
+            "delete_kind": buzz_core::kind::RELAY_ADMIN_DELETE_MENTION_GROUP,
+            "set_manage_kind": buzz_core::kind::RELAY_ADMIN_SET_MENTION_GROUP_POLICY,
+            "state_kind": buzz_core::kind::KIND_MENTION_GROUP_STATE,
+            "settings_d": buzz_core::mention_group::SETTINGS_D_TAG,
+            "default_manage": "everyone",
+            "membership": if state.config.require_relay_membership { "roster" } else { "open" },
+            "max_default_channels": buzz_core::mention_group::MAX_DEFAULT_CHANNELS,
+        }));
+        info.supported_extensions
+            .get_or_insert_default()
+            .push("nip-mg".to_owned());
         if let Some(profile) = crate::verified_profiles::discovery(state, tenant).await {
             if let Some(fi) = info.federated_identity.as_mut() {
                 fi["public_profile"] = profile;

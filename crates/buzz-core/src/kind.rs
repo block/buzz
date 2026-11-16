@@ -445,6 +445,12 @@ pub const RELAY_ADMIN_REMOVE_MEMBER: u32 = 9031;
 pub const RELAY_ADMIN_CHANGE_ROLE: u32 = 9032;
 /// Buzz: Set the workspace profile (icon). Admin/owner-signed command.
 pub const RELAY_ADMIN_SET_WORKSPACE_PROFILE: u32 = 9033;
+/// NIP-MG: Set the community mention-group management policy.
+pub const RELAY_ADMIN_SET_MENTION_GROUP_POLICY: u32 = 47002;
+/// NIP-MG: Create or replace a community mention group using a version precondition.
+pub const RELAY_ADMIN_PUT_MENTION_GROUP: u32 = 47000;
+/// NIP-MG: Delete a community mention group using a version precondition.
+pub const RELAY_ADMIN_DELETE_MENTION_GROUP: u32 = 47001;
 // NIP-43 relay membership announcement events (relay-signed)
 /// NIP-43: Relay membership list snapshot (relay-signed, replaceable by convention).
 pub const KIND_NIP43_MEMBERSHIP_LIST: u32 = 13534;
@@ -497,6 +503,9 @@ pub const KIND_MEMBERSHIP_SNAPSHOT: u32 = 39008;
 
 /// NIP-CL: request-bound public membership overlay; query-time only, never stored.
 pub const KIND_MEMBERSHIP_PUBLIC: u32 = 39009;
+
+/// NIP-MG: Relay-signed community mention-group state or management settings.
+pub const KIND_MENTION_GROUP_STATE: u32 = 39010;
 
 /// Workflow definition (parameterized replaceable, d=workflow_uuid).
 pub const KIND_WORKFLOW_DEF: u32 = 30620;
@@ -747,6 +756,9 @@ pub const ALL_KINDS: &[u32] = &[
     RELAY_ADMIN_REMOVE_MEMBER,
     RELAY_ADMIN_CHANGE_ROLE,
     RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    RELAY_ADMIN_SET_MENTION_GROUP_POLICY,
+    RELAY_ADMIN_PUT_MENTION_GROUP,
+    RELAY_ADMIN_DELETE_MENTION_GROUP,
     KIND_NIP43_MEMBERSHIP_LIST,
     KIND_NIP43_MEMBER_ADDED,
     KIND_NIP43_MEMBER_REMOVED,
@@ -765,6 +777,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_THREAD_WINDOW_BOUNDS,
     KIND_MEMBERSHIP_SNAPSHOT,
     KIND_MEMBERSHIP_PUBLIC,
+    KIND_MENTION_GROUP_STATE,
     KIND_PRESENCE_UPDATE,
     KIND_TYPING_INDICATOR,
     KIND_AGENT_PRESENCE,
@@ -881,7 +894,7 @@ pub const fn is_workflow_execution_kind(kind: u32) -> bool {
 }
 
 /// Returns `true` if `kind` is a NIP-43 relay membership admin command (9030–9032)
-/// or the Buzz workspace-profile admin command (9033).
+/// or a Buzz workspace-profile or mention-group command.
 pub const fn is_relay_admin_kind(kind: u32) -> bool {
     matches!(
         kind,
@@ -889,6 +902,9 @@ pub const fn is_relay_admin_kind(kind: u32) -> bool {
             | RELAY_ADMIN_REMOVE_MEMBER
             | RELAY_ADMIN_CHANGE_ROLE
             | RELAY_ADMIN_SET_WORKSPACE_PROFILE
+            | RELAY_ADMIN_SET_MENTION_GROUP_POLICY
+            | RELAY_ADMIN_PUT_MENTION_GROUP
+            | RELAY_ADMIN_DELETE_MENTION_GROUP
     )
 }
 
@@ -935,6 +951,7 @@ pub const fn is_relay_only_kind(kind: u32) -> bool {
             | KIND_THREAD_WINDOW_BOUNDS
             | KIND_MEMBERSHIP_SNAPSHOT
             | KIND_MEMBERSHIP_PUBLIC
+            | KIND_MENTION_GROUP_STATE
     )
 }
 

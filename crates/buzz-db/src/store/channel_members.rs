@@ -900,6 +900,171 @@ fn check_distinct_targets(targets: &[MemberPut<'_>]) -> Result<()> {
     }
 }
 
+/// Add only new group members to configured public channels on the group's
+/// admitted transaction. Missing/deleted channels remain inert references;
+/// present nonpublic channels are invalid configuration. Closed public channels
+/// are retained but skipped. Existing active memberships never change role.
+///
+/// All channel membership locks precede TTL and row locks, in canonical order.
+/// Policy refusals are bounded accounting, while database failures abort the
+/// entire group write. The caller publishes returned channel rosters after commit.
+pub(crate) async fn put_group_default_members_in_transaction(
+    tx: &mut AdmittedTx,
+    channels: &[Uuid],
+    targets: &[Vec<u8>],
+    actor: &[u8],
+    membership_enforced: bool,
+) -> Result<(
+    Vec<Uuid>,
+    Vec<(Uuid, Vec<u8>)>,
+    crate::mention_group::JoinSummary,
+)> {
+    use buzz_core::channel::{decide_channel_add_policy, ChannelAddPolicyDenied};
+    let community = tx.community();
+    let mut channels = channels.to_vec();
+    channels.sort_unstable();
+    channels.dedup();
+    for channel in &channels {
+        acquire_channel_membership_lock(tx.conn(), community, *channel).await?;
+    }
+    let mut summary = crate::mention_group::JoinSummary::default();
+    let policy_rows = if targets.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query(
+            "SELECT pubkey, channel_add_policy::text AS policy, agent_owner_pubkey FROM users \
+             WHERE community_id=$1 AND pubkey=ANY($2) ORDER BY pubkey FOR SHARE",
+        )
+        .bind(community.as_uuid())
+        .bind(targets)
+        .fetch_all(tx.conn())
+        .await?
+    };
+    let mut policies = std::collections::HashMap::new();
+    for row in policy_rows {
+        policies.insert(
+            row.try_get::<Vec<u8>, _>("pubkey")?,
+            (
+                row.try_get::<String, _>("policy")?,
+                row.try_get::<Option<Vec<u8>>, _>("agent_owner_pubkey")?,
+            ),
+        );
+    }
+    // Group membership is recipient data, not community admission. Hold the
+    // effective target/owner roster rows through commit so a concurrent removal
+    // either wins first and is skipped, or waits for this join to commit.
+    let admitted_targets: std::collections::HashSet<Vec<u8>> = if membership_enforced {
+        let mut keys: Vec<String> = targets.iter().map(hex::encode).collect();
+        keys.extend(
+            policies
+                .values()
+                .filter_map(|(_, owner)| owner.as_ref().map(hex::encode)),
+        );
+        keys.sort_unstable();
+        keys.dedup();
+        let admitted: Vec<String> = sqlx::query_scalar(
+            "SELECT pubkey FROM relay_members WHERE community_id=$1 AND pubkey=ANY($2) ORDER BY pubkey FOR SHARE",
+        ).bind(community.as_uuid()).bind(&keys).fetch_all(tx.conn()).await?;
+        let admitted: std::collections::HashSet<String> = admitted.into_iter().collect();
+        targets
+            .iter()
+            .filter(|target| {
+                admitted.contains(&hex::encode(target))
+                    || policies
+                        .get(*target)
+                        .and_then(|(_, owner)| owner.as_ref())
+                        .is_some_and(|owner| admitted.contains(&hex::encode(owner)))
+            })
+            .cloned()
+            .collect()
+    } else {
+        targets.iter().cloned().collect()
+    };
+    let mut changed = Vec::new();
+    let mut joined_members = Vec::new();
+    for channel in channels {
+        lock_channel_ttl_shared_in_transaction(tx, channel).await?;
+        let row = sqlx::query(
+            "SELECT visibility::text AS visibility, channel_type::text AS channel_type, unlisted, archived_at \
+             FROM channels WHERE community_id=$1 AND id=$2 AND deleted_at IS NULL FOR NO KEY UPDATE",
+        ).bind(community.as_uuid()).bind(channel).fetch_optional(tx.conn()).await?;
+        let Some(row) = row else {
+            summary.skip("channel_unavailable", targets.len());
+            continue;
+        };
+        if row.try_get::<String, _>("visibility")? != "open"
+            || !matches!(
+                row.try_get::<String, _>("channel_type")?.as_str(),
+                "stream" | "forum"
+            )
+            || row.try_get::<bool, _>("unlisted")?
+        {
+            return Err(DbError::InvalidData(
+                "mention group default channel must be a listed public stream or forum".into(),
+            ));
+        }
+        if row
+            .try_get::<Option<DateTime<Utc>>, _>("archived_at")?
+            .is_some()
+        {
+            summary.skip("channel_closed", targets.len());
+            continue;
+        }
+        let existing: Vec<Vec<u8>> = sqlx::query_scalar(
+            "SELECT pubkey FROM channel_members WHERE community_id=$1 AND channel_id=$2 AND pubkey=ANY($3) AND removed_at IS NULL",
+        ).bind(community.as_uuid()).bind(channel).bind(targets).fetch_all(tx.conn()).await?;
+        let existing: std::collections::HashSet<Vec<u8>> = existing.into_iter().collect();
+        let mut allowed = Vec::new();
+        for target in targets {
+            if !admitted_targets.contains(target) {
+                summary.skip("target_not_admitted", 1);
+                continue;
+            }
+            if existing.contains(target) {
+                summary.skip("already_member", 1);
+                continue;
+            }
+            if target != actor {
+                if let Some((policy, owner)) = policies.get(target) {
+                    if let Err(denial) = decide_channel_add_policy(policy, owner.as_deref(), actor)
+                    {
+                        summary.skip(
+                            match denial {
+                                ChannelAddPolicyDenied::OwnerMissing => "target_owner_missing",
+                                ChannelAddPolicyDenied::OwnerOnly => "target_owner_only",
+                                ChannelAddPolicyDenied::Nobody => "target_policy_nobody",
+                            },
+                            1,
+                        );
+                        continue;
+                    }
+                }
+            }
+            allowed.push(MemberPut {
+                pubkey: target,
+                requested: None,
+            });
+        }
+        let results = put_members_on(tx, channel, &allowed, Some(actor)).await?;
+        let mut did_change = false;
+        for result in results {
+            match result {
+                Ok(put) => {
+                    joined_members.push((channel, put.member.pubkey));
+                    summary.joined += 1;
+                    did_change = true;
+                }
+                Err(DbError::AccessDenied(_)) => summary.skip("membership_denied", 1),
+                Err(error) => return Err(error),
+            }
+        }
+        if did_change {
+            changed.push(channel);
+        }
+    }
+    Ok((changed, joined_members, summary))
+}
+
 /// The decisions and upsert of [`put_members`], on a transaction that holds
 /// `channel_id`'s [`lock_channel_for_member_put`] locks. The caller owns the
 /// commit.

@@ -90,6 +90,8 @@ pub const RELAY_ADMIN_TABLES: &[(&str, &str)] = &[
 /// approval and again before PostgreSQL purge. A new tenant table therefore
 /// blocks deletion until this manifest is intentionally updated.
 pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
+    "mention_group_commands",
+    "mention_groups",
     "nip_fi_profile_heads",
     "api_tokens",
     "archived_identities",
@@ -141,8 +143,6 @@ pub const PENDING_SCOPED_TABLES: &[&str] = &[
     "identity_retirement_actions",
     "identity_retirement_holds",
     "identity_retirement_workflows",
-    "mention_group_commands",
-    "mention_groups",
 ];
 
 /// Tenant tables an expand migration may add between a deletion's approval
@@ -180,6 +180,8 @@ const EXCLUDED_SCOPED_TABLES: &[&str] = &[
 /// not matter, but the list must stay complete ([`EXPECTED_SCOPED_TABLES`]
 /// gates it).
 pub const PURGE_SCOPED_TABLES: &[&str] = &[
+    "mention_group_commands",
+    "mention_groups",
     "nip_fi_profile_heads",
     "personal_read_frontiers",
     "personal_read_accounts",
@@ -4823,11 +4825,20 @@ pub(crate) mod postgres_tests {
         })
         .await
         .expect("connect isolated migration DB");
-        // Stop just before the retirement migration so every current table
-        // exists and the universal fence objects are still present.
+        // Stop before retirement so the legacy universal fence objects remain
+        // available for both states of this test.
         crate::migration::run_migrations_through(&db.pool, 89)
             .await
             .expect("migrate with fence objects present");
+        // Add the feature schema without running retirement: these tables
+        // never had universal fence objects, but current destruction requires
+        // them. This isolated fixture does not rerun the embedded migrator.
+        sqlx::raw_sql(include_str!(
+            "../../../../migrations/0093_mention_groups.sql"
+        ))
+        .execute(&db.pool)
+        .await
+        .expect("expand current feature schema while preserving legacy fences");
         let store = db.deletion_store();
         let community = db
             .ensure_configured_community("optional-fences.example")
@@ -9478,6 +9489,99 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         .fetch_one(&db.pool)
         .await
         .expect("count relay admin rows")
+    }
+
+    /// The feature tables use real admitted writers and are purged only for
+    /// the deleted tenant; a bystander's identical command and UUID survive.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn mention_groups_refuse_fenced_writes_and_purge_tenant_rows() {
+        use buzz_core::mention_group::parse_command;
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        let (db, store) = store().await;
+        let (request, inventory) = inventoried_request(&db, &store).await;
+        let bystander = db
+            .ensure_configured_community(&format!(
+                "mention-bystander-{}.example",
+                Uuid::new_v4().simple()
+            ))
+            .await
+            .expect("create bystander")
+            .id;
+        let actor = Keys::generate();
+        let relay = Keys::generate();
+        let group = Uuid::new_v4();
+        let event = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::RELAY_ADMIN_PUT_MENTION_GROUP as u16),
+            "",
+        )
+        .tags([
+            Tag::parse(["d", &group.to_string()]).expect("d tag"),
+            Tag::parse(["prev", "0"]).expect("prev tag"),
+            Tag::parse(["name", "Same group"]).expect("name tag"),
+        ])
+        .sign_with_keys(&actor)
+        .expect("sign command");
+        let command = parse_command(&event).expect("parse command");
+        for community in [request.community_id, bystander] {
+            db.accept_mention_group(community, &event, &command, &relay, 1_000_000, false)
+                .await
+                .expect("admitted group write");
+        }
+        store
+            .approve(request.id, "approver", None)
+            .await
+            .expect("approve");
+        let claim = store
+            .claim_specific(request.id, "executor", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim")
+            .expect("won claim");
+        store.begin_quiescing(&claim.lease).await.expect("quiesce");
+        assert!(
+            db.accept_mention_group(
+                request.community_id,
+                &event,
+                &command,
+                &relay,
+                1_000_000,
+                false
+            )
+            .await
+            .is_err(),
+            "even accepted receipts do not bypass the deletion fence"
+        );
+        let generation = store.fence(&claim.lease).await.expect("fence");
+        let token = LeaseToken {
+            fence_generation: Some(generation),
+            ..claim.lease
+        };
+        store
+            .freeze_destructive_storage_manifest(&token, &inventory.storage)
+            .await
+            .expect("storage manifest");
+        store.mark_drained(&token).await.expect("drain");
+        store
+            .mark_bindings_removed(&token, serde_json::json!({"keys": 0}))
+            .await
+            .expect("bindings");
+        let deleted = store.purge_postgres(&token).await.expect("purge");
+        assert_eq!(deleted.get("mention_groups"), Some(&1));
+        assert_eq!(deleted.get("mention_group_commands"), Some(&1));
+        store
+            .mark_cache_purged(&token, serde_json::json!({"keys": 0}))
+            .await
+            .expect("cache");
+        store
+            .verify_postgres_logically_deleted(&token)
+            .await
+            .expect("verify");
+        let kept: (i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM mention_groups WHERE community_id=$1), \
+                    (SELECT count(*) FROM mention_group_commands WHERE community_id=$1), \
+                    (SELECT count(*) FROM events WHERE community_id=$1 AND kind=39010 AND deleted_at IS NULL)",
+        ).bind(bystander.as_uuid()).fetch_one(&db.pool).await.expect("bystander rows");
+        assert_eq!(kept, (1, 1, 1));
     }
 
     /// A deletion inventoried before a later release's expand migration and

@@ -191,17 +191,17 @@ pub fn decide_channel_add_policy(
     owner: Option<&[u8]>,
     actor: &[u8],
 ) -> Result<(), ChannelAuthzError> {
-    match policy {
-        "owner_only" => {
-            let owner = owner.ok_or(ChannelAuthzError::PolicyOwnerOnlyNoOwner)?;
-            if actor != owner {
-                return Err(ChannelAuthzError::PolicyOwnerOnlyDenied);
+    buzz_core::channel::decide_channel_add_policy(policy, owner, actor).map_err(|denied| {
+        match denied {
+            buzz_core::channel::ChannelAddPolicyDenied::OwnerMissing => {
+                ChannelAuthzError::PolicyOwnerOnlyNoOwner
             }
-            Ok(())
+            buzz_core::channel::ChannelAddPolicyDenied::OwnerOnly => {
+                ChannelAuthzError::PolicyOwnerOnlyDenied
+            }
+            buzz_core::channel::ChannelAddPolicyDenied::Nobody => ChannelAuthzError::PolicyNobody,
         }
-        "nobody" => Err(ChannelAuthzError::PolicyNobody),
-        _ => Ok(()),
-    }
+    })
 }
 
 /// What authority `actor` holds to remove *somebody else* (kind:9001).

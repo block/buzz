@@ -171,3 +171,6 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 \i tables/public/media_uploaders.sql
 \i tables/public/media_publications.sql
+
+\i tables/public/mention_groups.sql
+\i tables/public/mention_group_commands.sql

@@ -492,6 +492,8 @@ pub enum IngestError {
     /// [`IngestError::Rejected`] so the HTTP bridge can map it to
     /// `409 CONFLICT` while generic client mistakes remain `400 BAD_REQUEST`.
     CanvasConflict(String),
+    /// Mention Group CAS or name collision — WS: OK false, HTTP: 409.
+    GroupConflict(String),
     /// Auth/scope error — WS: OK false, HTTP: 401/403.
     AuthFailed(String),
     /// Server error — WS: OK false, HTTP: 500.
@@ -596,6 +598,7 @@ fn map_push_accept_error(error: super::push_lease::AcceptError) -> IngestError {
 /// Returns `Err` for unknown kinds — the relay rejects them.
 fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static str> {
     match kind {
+        kind if super::mention_groups::is_command(kind) => Ok(Scope::UsersWrite),
         KIND_PROFILE => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM | buzz_core::kind::KIND_ARTIFACT => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
@@ -2639,6 +2642,19 @@ async fn ingest_event_inner(
         }
     }
     let event = std::sync::Arc::try_unwrap(event).unwrap_or_else(|arc| (*arc).clone());
+
+    if super::mention_groups::is_command(kind_u32) {
+        let result = super::mention_groups::accept(state, tenant, &event, &auth).await?;
+        emit(
+            tracer,
+            TraceAction::WriteInsertGlobal {
+                msg_id: msg_id_label(event.id.as_bytes()),
+                claimed_community: claimed_community_from_event(&event),
+            },
+            state_for_request(tenant, auth.pubkey()),
+        );
+        return Ok(result);
+    }
 
     if kind_u32 == buzz_core::kind::KIND_ARTIFACT
         && event.pubkey == *auth.pubkey()

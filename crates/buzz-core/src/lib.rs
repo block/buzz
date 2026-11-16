@@ -24,6 +24,8 @@ pub mod git_perms;
 pub mod invite;
 /// Buzz kind number registry — custom event type constants.
 pub mod kind;
+/// NIP-MG community mention-group command validation and normalized values.
+pub mod mention_group;
 /// Network utilities — SSRF-safe IP classification.
 pub mod network;
 /// NIP-10 thread-marker parsing — shared `root`/`reply` marker resolver.

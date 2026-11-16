@@ -129,3 +129,9 @@ pub mod media;
 mod media_postgres_tests;
 #[cfg(test)]
 mod message_edit_state_postgres_tests;
+
+/// Relay-owned community Mention Groups and policy acceptance.
+pub mod mention_group;
+
+#[cfg(test)]
+mod mention_group_postgres_tests;

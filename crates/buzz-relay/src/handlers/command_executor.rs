@@ -1717,8 +1717,8 @@ mod postgres_tests {
     fn rejection_message(result: Result<Option<Vec<u8>>, IngestError>) -> String {
         match result {
             Err(IngestError::Rejected(message)) => message,
-            Err(IngestError::CanvasConflict(message)) => {
-                panic!("unexpected canvas conflict: {message}")
+            Err(IngestError::CanvasConflict(message) | IngestError::GroupConflict(message)) => {
+                panic!("unexpected state conflict: {message}")
             }
             Err(IngestError::AuthFailed(message)) => panic!("unexpected auth failure: {message}"),
             Err(IngestError::Internal(message)) => panic!("unexpected internal failure: {message}"),

@@ -26,6 +26,9 @@ CREATE TABLE communities (
     deletion_state  TEXT NOT NULL DEFAULT 'active' CHECK (deletion_state IN ('active', 'quiescing', 'fenced', 'tombstone')),
     deletion_fence_generation BIGINT NOT NULL DEFAULT 0 CHECK (deletion_fence_generation >= 0),
     deleted_at      TIMESTAMPTZ,
+    mention_groups_manage TEXT NOT NULL DEFAULT 'everyone' CHECK (mention_groups_manage IN ('admins', 'everyone')),
+    mention_groups_version BIGINT NOT NULL DEFAULT 0 CHECK (mention_groups_version >= 0),
+    mention_groups_state_event_id BYTEA CHECK (length(mention_groups_state_event_id) = 32),
     artifact_policy_modified_at TIMESTAMPTZ NOT NULL DEFAULT 'epoch',
     CONSTRAINT chk_communities_id_not_nil CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid)
 );

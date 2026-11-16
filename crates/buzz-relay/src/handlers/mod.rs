@@ -40,6 +40,10 @@ pub mod ingest;
 pub mod media_access;
 #[cfg(test)]
 mod membership_notice_postgres_tests;
+/// Relay-owned community Mention Groups (NIP-MG).
+pub(crate) mod mention_groups;
+#[cfg(test)]
+mod mention_groups_postgres_tests;
 /// Community moderation authorization seam (capability helper).
 pub mod moderation_authz;
 /// Community moderation command handler (kinds 9040–9044).

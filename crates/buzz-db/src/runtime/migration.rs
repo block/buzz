@@ -879,7 +879,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 96);
+        assert_eq!(migrations.len(), 97);
         assert_eq!(migrations[89].version, 90);
         assert!(migrations[89]
             .sql
@@ -1520,6 +1520,8 @@ mod postgres_tests {
             "nip_fi_profile_heads",
             "media_uploaders",
             "media_publications",
+            "mention_groups",
+            "mention_group_commands",
         ];
         for table in crate::deletion::EXPECTED_SCOPED_TABLES
             .iter()
@@ -3101,6 +3103,8 @@ mod postgres_tests {
             .expect("apply migrations for schema parity");
 
         for table in [
+            "mention_groups",
+            "mention_group_commands",
             "media_uploaders",
             "audit_log",
             "media_publications",
@@ -3176,6 +3180,8 @@ mod postgres_tests {
         );
 
         for table in [
+            "mention_groups",
+            "mention_group_commands",
             "communities",
             "community_auth_upgrades",
             "entity_deletion_requests",
@@ -3921,6 +3927,8 @@ mod postgres_tests {
         let sql = migration_sql();
         let tables = create_tables(sql.as_str());
         for table in [
+            "mention_groups",
+            "mention_group_commands",
             "communities",
             "events",
             "channels",
@@ -3981,10 +3989,17 @@ mod postgres_tests {
             .validate_serving_catalog()
             .await
             .expect("new runtime must accept pre-retirement catalog");
-        store
+        // Serving accepts the historical fence shape, while destructive
+        // operations still require the new feature's expanded tenant catalog.
+        let error = store
             .validate_catalog()
             .await
-            .expect("deletion must accept pre-retirement catalog");
+            .expect_err("feature deletion requires its expanded tenant catalog");
+        assert!(
+            matches!(&error, crate::DbError::DeletionSafety(reason)
+                if reason == "community deletion catalog drift (missing=mention_group_commands,mention_groups, unknown=)"),
+            "{error}"
+        );
         run_migrations(&pool).await.expect("apply all migrations");
         let fence_triggers: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND tgname LIKE 'community_write_fence_%'",

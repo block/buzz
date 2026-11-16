@@ -1561,6 +1561,14 @@ async fn submit_event_authed(
                 response: api_error(StatusCode::BAD_REQUEST, &msg),
             }
         }
+        Err(IngestError::GroupConflict(msg)) => {
+            crate::handlers::ingest::reject_with_transport("http", "invalid");
+            SubmitOutcome::Rejected {
+                kind: kind_u32,
+                reason: "mention_group_conflict",
+                response: api_error(StatusCode::CONFLICT, &msg),
+            }
+        }
         Err(IngestError::CanvasConflict(msg)) => {
             // Canvas CAS precondition failures are a distinct HTTP 409 so the
             // CLI's reconciliation branch (which gates on `status == 409`) is

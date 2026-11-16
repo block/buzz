@@ -259,6 +259,41 @@ impl FromStr for ChannelJoinRole {
     }
 }
 
+/// Why an agent's channel-add policy refused a third-party add.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelAddPolicyDenied {
+    /// Owner-only admission was requested but no owner is recorded.
+    OwnerMissing,
+    /// The actor differs from the recorded owner.
+    OwnerOnly,
+    /// The target refuses all third-party channel additions.
+    Nobody,
+}
+
+/// Evaluate an agent's channel-add policy for a third-party add.
+///
+/// Callers bypass this check for self-adds and targets without a policy row.
+/// Unknown values preserve the existing allow behavior; the database enum
+/// constrains stored values. Both relay validation and admitted mutations use
+/// this decision so their policy rules cannot diverge.
+pub fn decide_channel_add_policy(
+    policy: &str,
+    owner: Option<&[u8]>,
+    actor: &[u8],
+) -> Result<(), ChannelAddPolicyDenied> {
+    match policy {
+        "owner_only" => {
+            let owner = owner.ok_or(ChannelAddPolicyDenied::OwnerMissing)?;
+            if actor != owner {
+                return Err(ChannelAddPolicyDenied::OwnerOnly);
+            }
+            Ok(())
+        }
+        "nobody" => Err(ChannelAddPolicyDenied::Nobody),
+        _ => Ok(()),
+    }
+}
+
 /// The facts a kind:9000 add or role change is decided on, for
 /// [`decide_member_put`]. Every field must come from one consistent read: the
 /// relay validator reads them for a fast, client-visible answer, and
@@ -561,6 +596,29 @@ impl FromStr for MemberRole {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn third_party_add_policy_requires_the_recorded_owner_only_when_requested() {
+        use super::{decide_channel_add_policy, ChannelAddPolicyDenied::*};
+        let actor = [1; 32];
+        let other = [2; 32];
+        for (policy, owner, expected) in [
+            ("owner_only", None, Err(OwnerMissing)),
+            ("owner_only", Some(other.as_slice()), Err(OwnerOnly)),
+            ("owner_only", Some(actor.as_slice()), Ok(())),
+            ("nobody", None, Err(Nobody)),
+            ("nobody", Some(actor.as_slice()), Err(Nobody)),
+            ("everyone", None, Ok(())),
+            ("everyone", Some(other.as_slice()), Ok(())),
+            ("unknown", None, Ok(())),
+        ] {
+            assert_eq!(
+                decide_channel_add_policy(policy, owner, &actor),
+                expected,
+                "{policy}"
+            );
+        }
+    }
+
     use super::{
         canonical_channel_name, channel_name_error, channel_type_from_group_state_tags,
         decide_member_put, group_state_identity_tags, parse_channel_labels, ChannelJoinRole,
