@@ -515,8 +515,8 @@ pub(super) async fn legacy_reference(
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn legacy_references_preserve_parents_for_every_hex_case() {
-    for case in ["lower", "upper", "mixed"] {
+async fn legacy_references_preserve_parents_for_lower_and_upper_hex() {
+    for case in ["lower", "upper"] {
         let (db, c, ch, alice, bob) = setup().await;
         let root = message(&db, c, ch, &alice, "root", None).await;
         let leaf = message(&db, c, ch, &alice, "unreferenced", None).await;
@@ -567,8 +567,8 @@ async fn legacy_references_preserve_parents_for_every_hex_case() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Postgres"]
-async fn late_legacy_references_block_deletion_for_every_hex_case() {
-    for case in ["lower", "upper", "mixed"] {
+async fn late_legacy_references_block_deletion_for_lower_and_upper_hex() {
+    for case in ["lower", "upper"] {
         let (db, c, ch, alice, bob) = setup().await;
         let root = message(&db, c, ch, &alice, "root", None).await;
         let root_before = row(&db, c, &root).await;

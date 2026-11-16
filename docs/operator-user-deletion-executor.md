@@ -26,13 +26,19 @@ references do not require retaining their destinations. Other authors' signed
 messages remain unchanged. Reply parent/root lookups use existing
 `thread_metadata` indexes; no new permanent index or migration is required.
 
-Marked replies without thread metadata use the existing tags GIN index to find
-candidates, then the relay's shared parser resolves parent/root markers, including
-mixed-case IDs. This fallback runs during planning and before each batch that
-physically deletes events. It has a one-second SQL timeout and a 10,000-candidate
-limit. A timeout or overflow aborts cleanup, rather than risking reply loss;
-large histories with missing thread metadata may need metadata repair first.
-These bounds are safety limits, not measured production latency guarantees.
+For replies without thread metadata, the handler probes the existing tags GIN
+index for each selected message ID in lowercase and uppercase. It then uses the
+relay's shared parser to distinguish actual replies from ordinary links. It does
+not search for all messages marked as replies. Mixed-case references without
+thread metadata may be missed; replies with thread metadata use binary IDs and
+remain covered regardless of spelling.
+
+This fallback runs during planning and before each batch that physically deletes
+events. All probes share one SQL statement with a one-second timeout and a
+10,000-match limit. A message matching several probes counts several times.
+A timeout or overflow aborts cleanup; unusually many references to the selected
+IDs may require metadata repair first. These bounds are safety limits, not
+measured production latency guarantees.
 
 Each batch installs transaction-local statement and lock timeouts before taking
 the community lock. Its planned output is written before locking; the commit

@@ -8,7 +8,7 @@ use nostr::{EventBuilder, Keys, Kind, Tag};
 async fn missing_metadata_lookup_can_use_existing_tags_index() {
     let (db, c, ch, alice, bob) = setup().await;
     let root = message(&db, c, ch, &alice, "root", None).await;
-    legacy_reference(&db, c, &bob, &root, "mixed").await;
+    legacy_reference(&db, c, &bob, &root, "lower").await;
     let mut tx = db.pool().begin().await.unwrap();
     // A tiny fixture normally favors a sequential scan. Verify the production
     // predicate has an index path without asserting a planner cost estimate.
@@ -21,13 +21,17 @@ async fn missing_metadata_lookup_can_use_existing_tags_index() {
         legacy_replies::CANDIDATES_SQL
     )))
     .bind(c.as_uuid())
+    .bind(json!([
+        [["e", root.id.to_hex()]],
+        [["e", root.id.to_hex().to_ascii_uppercase()]]
+    ]))
     .bind(10001_i64)
     .fetch_one(&mut *tx)
     .await
     .unwrap();
     let plan = explain.to_string();
     assert!(
-        plan.contains("Index Cond") && plan.contains("tags @>"),
+        plan.contains("Index Cond") && plan.contains("tags @> probe.tags"),
         "{plan}"
     );
     tx.rollback().await.unwrap();
@@ -52,11 +56,124 @@ async fn legacy_candidate_limit_refuses_incomplete_deletion() {
         assert!(
             error
                 .to_string()
-                .contains("too many replies without thread metadata"),
+                .contains("too many reference matches without thread metadata"),
             "{error}"
         );
         assert_eq!(row(&db, c, &root).await["content"], "keep on overflow");
     }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn unrelated_legacy_replies_do_not_exhaust_selected_id_lookup() {
+    let (db, c, ch, alice, bob) = setup().await;
+    let root = message(&db, c, ch, &alice, "retain for reply", None).await;
+    let leaf = message(&db, c, ch, &alice, "delete", None).await;
+    let unrelated = message(&db, c, ch, &bob, "unrelated root", None).await;
+    let survivor = legacy_reference(&db, c, &bob, &root, "lower").await;
+    let before = row(&db, c, &survivor).await;
+    // More unrelated replies than the old global candidate cap. Both preview
+    // and deletion must still find the one relevant reply and delete the leaf.
+    sqlx::query("INSERT INTO events (community_id,id,pubkey,created_at,kind,tags,content,sig)
+        SELECT $1,decode(lpad(to_hex(n),64,'0'),'hex'),$2,now(),1,$3,'unrelated',decode(repeat('00',64),'hex')
+        FROM generate_series(1,10001) n")
+        .bind(c.as_uuid()).bind(bob.public_key().as_bytes().as_slice())
+        .bind(json!([["e",unrelated.id.to_hex(),"","reply"]]))
+        .execute(db.pool()).await.unwrap();
+    let other = db
+        .ensure_configured_community(&format!("other-{}.example", Uuid::new_v4()))
+        .await
+        .unwrap()
+        .id;
+    db.ensure_user(other, bob.public_key().as_bytes())
+        .await
+        .unwrap();
+    // An exact match in another community must not preserve the leaf here.
+    let foreign = legacy_reference(&db, other, &bob, &leaf, "upper").await;
+    let foreign_before = row(&db, other, &foreign).await;
+    for mode in [ExecutionMode::ReadOnly, ExecutionMode::Delete] {
+        let summary = db
+            .user_deletion_store()
+            .run_message_batches(&options(c, &alice), mode, None, &mut Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(summary.scrubbed_events, 1);
+        assert_eq!(row(&db, c, &survivor).await, before);
+        assert_eq!(row(&db, other, &foreign).await, foreign_before);
+    }
+    assert_eq!(row(&db, c, &root).await["content"], "");
+    let remains: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM events WHERE community_id=$1 AND id=$2)")
+            .bind(c.as_uuid())
+            .bind(leaf.id.as_bytes().as_slice())
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert!(!remains);
+    let unrelated_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM events WHERE community_id=$1 AND content='unrelated'",
+    )
+    .bind(c.as_uuid())
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(unrelated_count, 10001);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn mixed_case_reply_with_metadata_preserves_parent() {
+    use super::scrub_postgres_tests::timestamp;
+    use crate::event::ThreadMetadataParams;
+
+    let (db, c, ch, alice, bob) = setup().await;
+    let root = message(&db, c, ch, &alice, "retain", None).await;
+    let mut reference = root.id.to_hex();
+    // Change one letter only; the saved metadata still uses the binary ID.
+    if let Some(index) = reference.find(|ch: char| ch.is_ascii_alphabetic()) {
+        reference[index..index + 1].make_ascii_uppercase();
+    }
+    assert_ne!(reference, reference.to_ascii_lowercase());
+    assert_ne!(reference, reference.to_ascii_uppercase());
+    let survivor = EventBuilder::new(Kind::Custom(9), "keep")
+        .tags([
+            Tag::parse(["h", &ch.to_string()]).unwrap(),
+            Tag::parse(["e", &reference, "", "reply"]).unwrap(),
+        ])
+        .sign_with_keys(&bob)
+        .unwrap();
+    db.insert_event_with_thread_metadata(
+        c,
+        &survivor,
+        Some(ch),
+        Some(ThreadMetadataParams {
+            event_id: survivor.id.as_bytes(),
+            event_created_at: timestamp(&survivor),
+            channel_id: ch,
+            parent_event_id: Some(root.id.as_bytes()),
+            parent_event_created_at: Some(timestamp(&root)),
+            root_event_id: Some(root.id.as_bytes()),
+            root_event_created_at: Some(timestamp(&root)),
+            depth: 1,
+            broadcast: false,
+        }),
+    )
+    .await
+    .unwrap();
+    let before = row(&db, c, &survivor).await;
+    let summary = db
+        .user_deletion_store()
+        .run_message_batches(
+            &options(c, &alice),
+            ExecutionMode::Delete,
+            None,
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(summary.scrubbed_events, 1);
+    assert_eq!(row(&db, c, &root).await["content"], "");
+    assert_eq!(row(&db, c, &survivor).await, before);
 }
 
 #[tokio::test]
