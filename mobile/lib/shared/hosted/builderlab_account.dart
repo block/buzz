@@ -116,6 +116,12 @@ class BuilderlabAccountClient {
   // already pending can still reach their relays for a short while.
   ({String credential, DateTime until})? _signedOut;
   final _queue = SerialQueue();
+  // Session storage changes, kept apart from [_queue] so signing out never
+  // waits behind a pending account request.
+  final _storageQueue = SerialQueue();
+  // Advances at each sign-out, so a request already in flight cannot adopt or
+  // save a session afterwards.
+  int _sessionEpoch = 0;
 
   /// How long after sign-out [pushStopAssertion] can still issue.
   static const pushStopWindow = Duration(minutes: 10);
@@ -127,6 +133,11 @@ class BuilderlabAccountClient {
   ValueListenable<String?> get subjectChanges => _subject;
   final _subject = ValueNotifier<String?>(null);
 
+  /// Changes whenever a verified session is adopted, including the same subject.
+  /// Consumers can retry work refused before reauthentication or account setup.
+  ValueListenable<int> get sessionChanges => _sessionGeneration;
+  final _sessionGeneration = ValueNotifier<int>(0);
+
   /// Runs operations one at a time in call order, so a callback exchange that
   /// arrives during startup restore waits instead of failing.
   Future<T> _serial<T>(Future<T> Function() operation) {
@@ -137,13 +148,31 @@ class BuilderlabAccountClient {
     return result;
   }
 
+  /// Locally retained account for recording offline edits only. This does not
+  /// authorize network requests; those still require a verified session.
+  Future<String?> retainedSubject() async {
+    if (_disposed) throw AccountFailure.unavailable;
+    final current = account;
+    if (current != null) return current.subject;
+    // Local edits must not queue behind a network restore that may be offline.
+    final generation = _sessionGeneration.value;
+    final record = await _readRecord();
+    if (_disposed) throw AccountFailure.unavailable;
+    if (generation != _sessionGeneration.value) return retainedSubject();
+    return record?.subject;
+  }
+
   /// Concurrent callers share one restore, so a second one cannot replace the
   /// account the first adopted while its callers still hold that session.
   Future<BuilderlabAccount?> restore() =>
       _restoring ??= _restore().whenComplete(() => _restoring = null);
   Future<BuilderlabAccount?>? _restoring;
   Future<BuilderlabAccount?> _restore() => _serial(() async {
-    final record = await _readRecord();
+    // Read behind any sign-out still clearing, so this never adopts the
+    // session it is deleting.
+    final (epoch, record) = await _storageQueue.run(
+      () async => (_sessionEpoch, await _readRecord()),
+    );
     if (record == null) {
       // Retries a removal that failed after an earlier sign-out.
       await _unshare();
@@ -151,13 +180,15 @@ class BuilderlabAccountClient {
     }
     try {
       final verified = await _verify(record.credential);
+      // Signed out while the check was pending.
+      if (epoch != _sessionEpoch) return null;
       if (verified.subject != record.subject) {
         throw AccountFailure.invalidResponse;
       }
       return _adopt(record.credential, verified);
     } on AccountFailure catch (failure) {
       if (failure == AccountFailure.signedOut) {
-        await _clear();
+        await _clearSince(epoch);
         return null;
       }
       rethrow;
@@ -172,51 +203,65 @@ class BuilderlabAccountClient {
     required String code,
     required String verifier,
     bool Function()? isCurrent,
-  }) => _serial(() async {
-    if (code.isEmpty ||
-        !RegExp(r'^[A-Za-z0-9._~-]{43,128}$').hasMatch(verifier)) {
-      throw AccountFailure.invalidResponse;
-    }
-    final stored = await _readRecord();
-    final result = await _request(
-      '/v1/auth/login/exchange',
-      body: {'code': code, 'code_verifier': verifier},
-    );
-    final credential = result['session_credential'];
-    if (credential is! String ||
-        credential.isEmpty ||
-        credential.length > 512) {
-      throw AccountFailure.invalidResponse;
-    }
-    final verified = await _verify(credential);
-    if (DateTime.tryParse(
-          result['expires_at'] is String ? result['expires_at'] as String : '',
-        ) !=
-        verified.expiresAt) {
-      throw AccountFailure.invalidResponse;
-    }
-    if (stored != null && stored.subject != verified.subject) {
-      throw AccountFailure.differentAccount;
-    }
-    if (_disposed || (isCurrent != null && !isCurrent())) {
-      throw AccountFailure.unavailable;
-    }
-    final record = jsonEncode({
-      'origin': accountOrigin.toString(),
-      'credential': credential,
-      'subject': verified.subject,
-      'expires_at': verified.expiresAt.toIso8601String(),
-    });
-    try {
-      await _storage.write(key: _storageKey, value: record);
-      if (await _storage.read(key: _storageKey) != record) {
-        throw AccountFailure.storage;
+  }) {
+    // Taken at the call, so an exchange queued before a sign-out can never
+    // sign back in after it.
+    final epoch = _sessionEpoch;
+    return _serial(() async {
+      if (epoch != _sessionEpoch) throw AccountFailure.unavailable;
+      if (code.isEmpty ||
+          !RegExp(r'^[A-Za-z0-9._~-]{43,128}$').hasMatch(verifier)) {
+        throw AccountFailure.invalidResponse;
       }
-    } catch (_) {
-      throw AccountFailure.storage;
-    }
-    return _adopt(credential, verified);
-  });
+      final stored = await _readRecord();
+      final result = await _request(
+        '/v1/auth/login/exchange',
+        body: {'code': code, 'code_verifier': verifier},
+      );
+      final credential = result['session_credential'];
+      if (credential is! String ||
+          credential.isEmpty ||
+          credential.length > 512) {
+        throw AccountFailure.invalidResponse;
+      }
+      final verified = await _verify(credential);
+      if (DateTime.tryParse(
+            result['expires_at'] is String
+                ? result['expires_at'] as String
+                : '',
+          ) !=
+          verified.expiresAt) {
+        throw AccountFailure.invalidResponse;
+      }
+      if (stored != null && stored.subject != verified.subject) {
+        throw AccountFailure.differentAccount;
+      }
+      final record = jsonEncode({
+        'origin': accountOrigin.toString(),
+        'credential': credential,
+        'subject': verified.subject,
+        'expires_at': verified.expiresAt.toIso8601String(),
+      });
+      // Saved and adopted as one storage change, so a sign-out lands wholly
+      // before or after it.
+      return _storageQueue.run(() async {
+        if (_disposed ||
+            epoch != _sessionEpoch ||
+            (isCurrent != null && !isCurrent())) {
+          throw AccountFailure.unavailable;
+        }
+        try {
+          await _storage.write(key: _storageKey, value: record);
+          if (await _storage.read(key: _storageKey) != record) {
+            throw AccountFailure.storage;
+          }
+        } catch (_) {
+          throw AccountFailure.storage;
+        }
+        return _adopt(credential, verified, reauthenticated: true);
+      });
+    });
+  }
 
   /// An unreadable record is a storage failure, never an absent session: its
   /// subject is unknown, so only an explicit [clearLocalSession] may drop it.
@@ -245,12 +290,21 @@ class BuilderlabAccountClient {
     throw AccountFailure.storage;
   }
 
-  BuilderlabAccount _adopt(String credential, BuilderlabAccount verified) {
+  BuilderlabAccount _adopt(
+    String credential,
+    BuilderlabAccount verified, {
+    bool reauthenticated = false,
+  }) {
     if (_disposed) throw AccountFailure.unavailable;
+    final changed =
+        reauthenticated ||
+        _credential != credential ||
+        _account?.needsAccountSetup != verified.needsAccountSetup;
     _credential = credential;
     // Assigned before notifying, so subject listeners see the new account.
     _account = verified;
     _subject.value = verified.subject;
+    if (changed) _sessionGeneration.value++;
     _unshared = credential;
     _share();
     return verified;
@@ -317,6 +371,21 @@ class BuilderlabAccountClient {
     if (result['error'] != null) throw AccountFailure.rejected;
   }
 
+  /// Edits only the account's saved destination list; relay membership and
+  /// credentials are unchanged. Both operations are idempotent.
+  Future<void> updateKnownCommunity(
+    String relay, {
+    required bool removed,
+    required String expectedSubject,
+  }) async {
+    final result = await post(
+      '/v1/buzz/known-communities/${removed ? 'remove' : 'add'}',
+      {'community_url': relay},
+      expectedSubject: expectedSubject,
+    );
+    if (result['error'] != null) throw AccountFailure.rejected;
+  }
+
   /// Authenticated JSON POST to a Buzz account route on the fixed origin. The
   /// credential never leaves this client. A 401 clears the stored session only
   /// when the session check also rejects it; otherwise it is [AccountFailure.denied].
@@ -341,6 +410,7 @@ class BuilderlabAccountClient {
       );
     }
     return _serial(() async {
+      final epoch = _sessionEpoch;
       final credential = _credential;
       if (credential == null) throw AccountFailure.signedOut;
       _share();
@@ -366,7 +436,7 @@ class BuilderlabAccountClient {
       try {
         await _verify(credential);
       } on AccountFailure catch (failure) {
-        if (failure == AccountFailure.signedOut) await _clear();
+        if (failure == AccountFailure.signedOut) await _clearSince(epoch);
         rethrow;
       }
       throw AccountFailure.denied;
@@ -418,8 +488,31 @@ class BuilderlabAccountClient {
         );
       });
 
-  Future<void> clearLocalSession() => _serial(_clear);
+  /// Runs at once, without waiting for pending account requests; none of them
+  /// can adopt or save a session after it.
+  Future<void> clearLocalSession() {
+    if (_disposed) return Future.error(AccountFailure.unavailable);
+    _sessionEpoch++;
+    return _storageQueue.run(_clear);
+  }
+
+  /// Ends a session a request found rejected, unless a sign-out already did.
+  Future<void> _clearSince(int epoch) => _storageQueue.run(() async {
+    if (epoch == _sessionEpoch) await _clear();
+  });
   Future<void> _clear() async {
+    // A session saved but not yet restored (an offline launch) still backs
+    // the push stops that follow, so read it before deleting it.
+    var signedOut = _credential;
+    if (signedOut == null) {
+      try {
+        signedOut = (await _readRecord())?.credential;
+      } on AccountFailure {
+        // Unreadable: there is no credential to keep.
+      }
+    }
+    // Nothing may share the credential again while it is being removed.
+    _unshared = null;
     // Attempt both removals so one failure never leaves the other copy live.
     var failed = false;
     try {
@@ -433,22 +526,32 @@ class BuilderlabAccountClient {
       failed = true;
     }
     if (failed) {
+      // The record may already be gone, so an unrestored session's credential
+      // must survive for the retry's push stops.
+      if (_credential == null && signedOut != null) {
+        _signedOut = (
+          credential: signedOut,
+          until: DateTime.now().add(pushStopWindow),
+        );
+      }
       // The account stays signed in, so the extension gets its copy back.
       _unshared = _credential;
       _share();
       throw AccountFailure.storage;
     }
-    final credential = _credential;
-    if (credential != null) {
+    if (signedOut != null) {
       _signedOut = (
-        credential: credential,
+        credential: signedOut,
         until: DateTime.now().add(pushStopWindow),
       );
     }
     _credential = null;
     _unshared = null;
     _account = null;
-    if (!_disposed) _subject.value = null;
+    if (!_disposed) {
+      _subject.value = null;
+      _sessionGeneration.value++;
+    }
   }
 
   Future<void> _unshare() async {
@@ -528,6 +631,7 @@ class BuilderlabAccountClient {
     _signedOut = null;
     _account = null;
     _subject.dispose();
+    _sessionGeneration.dispose();
     _http.close();
   }
 }

@@ -7,6 +7,7 @@ import 'package:buzz/shared/hosted/browser_auth.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_flow.dart';
 import 'package:buzz/shared/hosted/hosted_identity_service.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -29,8 +30,14 @@ class DiscoveryBrowser extends BrowserAuth {
 
   @override
   Future<void> initialize() async {}
+
+  /// Thrown by [clearIntent] while set, as unavailable storage would.
+  Object? clearIntentError;
   @override
-  Future<void> clearIntent() async {}
+  Future<void> clearIntent() async {
+    if (clearIntentError case final error?) throw error;
+  }
+
   @override
   Future<void> cancel() async {}
 }
@@ -92,75 +99,104 @@ class HostedCommunitiesFixture {
   bool rejectList = false;
   bool rejectCurrent = false;
   bool expired = false;
+  bool unavailable = false;
   String subject = 'owner';
   Future<void> Function(String)? beforeAdmission;
   Future<void> Function()? beforeList;
+  Future<void> Function()? beforeMe;
   Uri? opened;
 
   Map<String, dynamic> row(String name) => {
     'community_url': 'wss://$name.communities.buzz.xyz',
   };
 
-  Future<void> initialize({bool backup = true, bool widget = false}) async {
-    bound = keys.public;
+  Future<void> initialize({
+    bool backup = true,
+    bool widget = false,
+    bool withIdentity = true,
+    FlutterSecureStorage? accountStorage,
+    bool coldAccount = false,
+  }) async {
+    bound = withIdentity ? keys.public : null;
     final expiry = DateTime.now()
         .toUtc()
         .add(const Duration(hours: 1))
         .toIso8601String();
+    final client = MockClient((request) async {
+      final path = request.url.path;
+      requests.add(path);
+      if (path.endsWith('/exchange')) {
+        return http.Response(
+          jsonEncode({'session_credential': 'fixture', 'expires_at': expiry}),
+          200,
+        );
+      }
+      if (path.endsWith('/me')) {
+        await beforeMe?.call();
+        if (expired) return http.Response('{}', 401);
+        if (unavailable) return http.Response('{}', 503);
+        return http.Response(
+          jsonEncode({
+            'subject': subject,
+            'email': 'owner@example.com',
+            'expires_at': expiry,
+          }),
+          200,
+        );
+      }
+      if (path.endsWith('/current')) {
+        return http.Response(
+          jsonEncode({
+            'identity': bound == null ? null : {'pubkey_hex': bound},
+          }),
+          200,
+        );
+      }
+      if (path.endsWith('/nsec-backups/status')) {
+        return http.Response(
+          jsonEncode({
+            'backup_nostr_pubkeys': <String>[],
+            'current_nostr_pubkey': bound,
+          }),
+          200,
+        );
+      }
+      if (path.endsWith('/known-communities/list')) {
+        await beforeList?.call();
+        if (rejectList) return http.Response('{}', 503);
+        return http.Response(jsonEncode({'communities': rows}), 200);
+      }
+      if (path.endsWith('/known-communities/add')) {
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        return http.Response(
+          jsonEncode({
+            'community': {'community_url': body['community_url']},
+          }),
+          200,
+        );
+      }
+      return http.Response('{}', 503);
+    });
     account = BuilderlabAccountClient(
-      httpClient: MockClient((request) async {
-        final path = request.url.path;
-        requests.add(path);
-        if (path.endsWith('/exchange')) {
-          return http.Response(
-            jsonEncode({'session_credential': 'fixture', 'expires_at': expiry}),
-            200,
-          );
-        }
-        if (path.endsWith('/me')) {
-          if (expired) return http.Response('{}', 401);
-          return http.Response(
-            jsonEncode({
-              'subject': subject,
-              'email': 'owner@example.com',
-              'expires_at': expiry,
-            }),
-            200,
-          );
-        }
-        if (path.endsWith('/current')) {
-          return http.Response(
-            jsonEncode({
-              'identity': {'pubkey_hex': bound},
-            }),
-            200,
-          );
-        }
-        if (path.endsWith('/known-communities/list')) {
-          await beforeList?.call();
-          if (rejectList) return http.Response('{}', 503);
-          return http.Response(jsonEncode({'communities': rows}), 200);
-        }
-        if (path.endsWith('/known-communities/add')) {
-          final body = jsonDecode(request.body) as Map<String, dynamic>;
-          return http.Response(
-            jsonEncode({
-              'community': {'community_url': body['community_url']},
-            }),
-            200,
-          );
-        }
-        return http.Response('{}', 503);
-      }),
+      storage: accountStorage,
+      httpClient: client,
     );
     if (widget) {
       account.dispose();
       account = WidgetDiscoveryAccount(this);
     } else {
       await account.exchange(code: 'code', verifier: 'a' * 43);
+      if (coldAccount) {
+        // A later process: the session is saved but not restored yet.
+        account.dispose();
+        account = BuilderlabAccountClient(
+          storage: accountStorage,
+          httpClient: client,
+        );
+      }
     }
-    await store.create(keys.nsec);
-    if (backup) {
+    if (withIdentity) await store.create(keys.nsec);
+    if (backup && withIdentity) {
       await store.confirmBackup(
         BackupReceipt(
           backend: BuilderlabAccountClient.origin.toString(),

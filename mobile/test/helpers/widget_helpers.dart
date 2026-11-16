@@ -1,3 +1,4 @@
+import 'package:buzz/shared/hosted/known_community_sync_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -9,9 +10,14 @@ class WidgetHelpers {
     required Widget child,
     List<Override> overrides = const [],
     bool disableAnimations = false,
+    bool enableAccountCommunitySync = false,
   }) {
     return ProviderScope(
-      overrides: overrides,
+      overrides: [
+        if (!enableAccountCommunitySync)
+          knownCommunitySyncProvider.overrideWithValue(null),
+        ...overrides,
+      ],
       child: MaterialApp(
         theme: AppTheme.light(),
         home: Builder(

@@ -39,6 +39,7 @@ class HomePage extends HookConsumerWidget {
     required this.openBestieConversation,
     this.communityInvitePageBuilder,
     this.mePageBuilder,
+    this.backgroundHost,
     this.communityAppearancePageBuilder,
     super.key,
   });
@@ -58,6 +59,9 @@ class HomePage extends HookConsumerWidget {
     ValueNotifier<VoidCallback?>,
   )?
   mePageBuilder;
+
+  /// An invisible widget that serves background work while Home is up.
+  final Widget? backgroundHost;
   final WidgetBuilder? communityInvitePageBuilder;
   final WidgetBuilder? communityAppearancePageBuilder;
 
@@ -393,6 +397,7 @@ class HomePage extends HookConsumerWidget {
                   openBestieConversation: openBestieConversation,
                 ),
               ),
+            ?backgroundHost,
             MediaQueryOverride(
               transform: (media) => media.copyWith(
                 padding: media.padding.copyWith(
