@@ -3693,6 +3693,25 @@ async fn e_tag_any_runs_with_real_binds_on_p_join_and_count() {
             .expect("miss count"),
         0
     );
+
+    // A thread-page-wide `#e` set binds its arrays through a scalar subquery;
+    // the match must be the same with and without the `#p` join.
+    let mut wide: Vec<String> = (1..=200).map(|i| format!("{i:064x}")).collect();
+    wide.push(fx.root_hex.clone());
+    q.e_tags = Some(wide);
+    for p_tag in [None, Some(fx.mentioned_hex.clone())] {
+        q.p_tag_hex = p_tag;
+        let rows = event::query_events(&fx.writer, &q)
+            .await
+            .expect("wide e-tag select");
+        assert_eq!(contents(&rows), vec!["writer-reply"]);
+        assert_eq!(
+            event::count_events(&fx.writer, &q)
+                .await
+                .expect("wide e-tag count"),
+            1
+        );
+    }
 }
 
 #[path = "tests/thread_window_postgres_tests.rs"]
