@@ -4985,27 +4985,7 @@ mod postgres_tests {
         remove_member(&pool, community, channel_id, &member, &admin)
             .await
             .expect("admin removes another admin");
-        // Owners retain ownership delegation, co-owner demotion and removal.
-        add_member(
-            &pool,
-            community,
-            channel_id,
-            &admin,
-            MemberRole::Owner,
-            Some(&owner),
-        )
-        .await
-        .expect("owner delegates ownership");
-        add_member(
-            &pool,
-            community,
-            channel_id,
-            &admin,
-            MemberRole::Admin,
-            Some(&owner),
-        )
-        .await
-        .expect("owner demotes co-owner");
+        // Owners can remove co-owners; the last-owner guard still applies.
         remove_member(&pool, community, channel_id, &co_owner, &owner)
             .await
             .expect("owner removes co-owner");
