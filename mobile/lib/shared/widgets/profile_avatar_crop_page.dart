@@ -547,6 +547,6 @@ Uint8List _cropAvatar(_CropRequest request) {
   );
   return resized.hasAlpha &&
           resized.any((pixel) => pixel.a < pixel.maxChannelValue)
-      ? image.encodePng(resized)
+      ? image.encodePng(resized, singleFrame: true)
       : image.encodeJpg(resized, quality: 90);
 }

@@ -691,6 +691,19 @@ void main() {
     expect(uploaded.getPixel(0, 0).a, 0);
   });
 
+  testWidgets('uploads only the first frame of an animated transparent crop', (
+    tester,
+  ) async {
+    final photo = image.Image(width: 8, height: 8, numChannels: 4)
+      ..addFrame(image.Image(width: 8, height: 8, numChannels: 4));
+    final uploadService = await cropAndUpload(tester, photo);
+
+    expect(uploadService.uploadedMimeType, 'image/png');
+    final uploaded = image.decodePng(uploadService.uploadedBytes!)!;
+    expect(uploaded.numFrames, 1);
+    expect(uploaded.getPixel(0, 0).a, 0);
+  });
+
   testWidgets('uploads an opaque 16-bit photo crop as JPEG', (tester) async {
     final uploadService = await cropAndUpload(
       tester,
