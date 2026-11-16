@@ -10,6 +10,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/read_state/read_state_manager.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
+import 'package:buzz/shared/read_state/read_state_storage.dart';
+import 'package:buzz/shared/theme/community_theme_preference.dart';
 import 'package:buzz/shared/read_state/thread_follows_format.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
@@ -675,20 +677,26 @@ void main() {
       );
     });
 
-    Map<String, int> ownGroup(ReadStateManager from) => readStateBlobs()
-        .where((blob) => blob.containsKey('ov_s:$channel'))
-        .map(
-          (blob) => {
-            for (final key in [
-              channel,
-              'ov_s:$channel',
-              'ov_c:$channel',
-              'ov_b:$channel',
-            ])
-              key: ?blob[key],
-          },
-        )
-        .first;
+    /// The channel group in [from]'s own primary, as it last published it.
+    Map<String, int> ownGroup(ReadStateManager from) {
+      final journal = ReadStateStorage(prefs).readJournal(
+        '${keys.public}:${Uri.encodeComponent(normalizeCommunityRelayUrl(from.relayUrl))}',
+      )!;
+      final primary = relay
+          .retained['$readStateDTagPrefix${(journal['slots'] as List).first}']!;
+      final blob = decodeReadStateBlob(
+        crypto.decrypt(primary.content),
+      )!.contexts;
+      return {
+        for (final key in [
+          channel,
+          'ov_s:$channel',
+          'ov_c:$channel',
+          'ov_b:$channel',
+        ])
+          key: ?blob[key],
+      };
+    }
 
     for (final (name, frontier) in [
       ('never read', null),
