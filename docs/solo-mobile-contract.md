@@ -1,7 +1,6 @@
 # Solo desktop/mobile contract
 
-The current Solo producer is **[block/buzz-app](https://github.com/block/buzz-app)**,
-not the older `desktop/` client retained in this repository.
+The current Solo producer is **[block/buzz-app](https://github.com/block/buzz-app)**.
 
 The captured producer revision is
 [`64726576ed3b082daa5786e5e7ca6b5a018663a1`](https://github.com/block/buzz-app/commit/64726576ed3b082daa5786e5e7ca6b5a018663a1):

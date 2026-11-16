@@ -1,5 +1,9 @@
 # Remote Agents and Their Management: A Formal Specification
 
+> **Note:** `desktop/` paths in this document refer to the legacy desktop app,
+> which has been removed from this repository. The desktop app now lives in
+> [block/buzz-app](https://github.com/block/buzz-app).
+
 `draft`
 
 ## Abstract

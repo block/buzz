@@ -1,5 +1,9 @@
 # Buzz Entity Links
 
+> **Note:** `desktop/` paths in this document refer to the legacy desktop app,
+> which has been removed from this repository. The desktop app now lives in
+> [block/buzz-app](https://github.com/block/buzz-app).
+
 Status: **partially implemented**. Done on this branch:
 
 - Slice 0 — HTTPS relay git clone URLs (`{relay-origin}/git/<pubkey>/<repo>`)

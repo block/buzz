@@ -1,5 +1,9 @@
 # Agent availability and lifecycle
 
+> **Note:** `desktop/` paths in this document refer to the legacy desktop app,
+> which has been removed from this repository. The desktop app now lives in
+> [block/buzz-app](https://github.com/block/buzz-app).
+
 Availability means conversational presence on the relay, not process health.
 A retained deployment receipt, PID, or `running` record cannot turn an agent's
 availability dot green. A successful presence snapshot with no entry means

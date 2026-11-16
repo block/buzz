@@ -36,7 +36,6 @@ members = [
     "crates/buzz-datastore-tracing",
     "examples/countdown-bot",
 ]
-exclude = ["desktop/src-tauri"]
 resolver = "2"
 
 [workspace.package]
@@ -180,7 +179,7 @@ opt-level = 3
 # Sprig profile — optimized for deploy-anywhere Sprig release artifacts.
 # Sprig is distributed over the network and installed on fresh hosts, so binary
 # size matters more than compile speed here. Keep this separate from the normal
-# `release` profile so desktop/dev release builds do not inherit the slower
+# `release` profile so other release builds do not inherit the slower
 # size-focused settings unless they opt in explicitly.
 [profile.sprig]
 inherits = "release"

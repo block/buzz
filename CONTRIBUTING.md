@@ -81,8 +81,8 @@ We review as capacity allows — focused PRs that follow this guide move fastest
 | Tool | Version | Notes |
 |------|---------|-------|
 | Rust | 1.88+ | Install via [rustup](https://rustup.rs/) |
-| Node.js | 24+ | Required for desktop app commands and `just ci` |
-| pnpm | 10+ | Required for desktop app commands and `just ci` |
+| Node.js | 24+ | Required for web client commands and `just ci` |
+| pnpm | 10+ | Required for web client commands and `just ci` |
 | Flutter | 3.47.9+ | Required for mobile app — install via [flutter.dev](https://docs.flutter.dev/get-started/install) |
 | Xcode | 27.1 recommended; 26 supported | Required for iOS builds; see [iOS toolchain setup](mobile/README.md#ios-toolchain) |
 | Docker | 24+ | For Postgres, Redis, MinIO |
@@ -102,37 +102,6 @@ Hermit pins Rust, `just`, Node, pnpm, and other tools to the versions in
 (which `just setup` calls automatically) to pre-download all required tools
 upfront. If you don't use Hermit, ensure your toolchain meets the minimum
 versions in the table above.
-
-#### Linux: Tauri system libraries
-
-Hermit pins language toolchains, not system libraries. On Linux, the desktop
-app's Rust crates link against GTK and WebKitGTK, so `just ci` (and any
-`just desktop-tauri-*` recipe) needs these installed system-wide first. On
-Debian/Ubuntu:
-
-```bash
-sudo apt-get install -y --no-install-recommends \
-  build-essential curl file libasound2-dev libayatana-appindicator3-dev \
-  libgtk-3-dev librsvg2-dev libssl-dev libwebkit2gtk-4.1-dev libxdo-dev \
-  patchelf wget
-```
-
-This is the same list CI installs (see `.github/workflows/ci.yml`), so matching
-it locally keeps your results comparable to CI. Other distributions ship these
-under different package names — see the
-[Tauri prerequisites](https://tauri.app/start/prerequisites/) for the
-equivalents.
-
-Without them, `just ci` fails partway through `just check` with a pkg-config
-error such as:
-
-```
-The system library `gdk-pixbuf-2.0` required by crate `gdk-pixbuf-sys` was not found.
-```
-
-If you're only touching the relay, CLI, or other server-side crates, you can
-skip this and run the narrower recipes instead — `just fmt-check`, `just
-clippy`, `just test-unit`, and `just test` need no GTK.
 
 ### First-Time Setup
 
@@ -162,35 +131,24 @@ Adminer on `:8082`, Keycloak on `:8180` for local OAuth/OIDC testing, MinIO on
 `:9000` for media storage, and Prometheus on `:9090` for metrics) and runs all
 pending database migrations.
 
-### Running the Relay and Desktop App
+### Running the Relay
 
 ```bash
-just dev   # starts the relay + desktop app in one command
+just relay   # relay on ws://localhost:3000
+just web     # web client dev server (optional, second terminal)
 ```
 
-`just dev` builds all agent tools, starts the relay (`ws://localhost:3000`) in
-the background, and launches the Tauri desktop app. The relay process is
-automatically killed when you quit the app or press Ctrl+C.
-
-For a split-terminal workflow (relay logs visible separately from Vite output):
-
-```bash
-just relay        # terminal 1 — relay on ws://localhost:3000
-just desktop-dev  # terminal 2 — Vite dev server only (no Tauri shell)
-```
+The desktop app is not in this repository. To build or run it, see
+[block/buzz-app](https://github.com/block/buzz-app).
 
 ### Stopping / Resetting
 
 ```bash
 just down    # Stop Docker services, keep data
-just reset   # Wipe all dev state and recreate it; installed Buzz is preserved
+just reset   # Wipe all dev state and recreate it
 ```
 
-Development desktop state uses separate bundle identifiers
-(`xyz.block.buzz.app.dev` and per-worktree variants), a separate keyring service
-(`buzz-desktop-dev`), and `~/.buzz-dev`. `just reset` removes those dev-only
-locations and the local Docker volumes. It does not touch the installed app's
-`xyz.block.buzz.app` data, `buzz-desktop` keyring service, or `~/.buzz` nest.
+`just reset` removes the local Docker volumes and recreates the environment.
 
 ---
 
@@ -298,17 +256,16 @@ Before opening a PR, run the full CI gate locally:
 
 ```bash
 just ci
-# Runs: check + unit tests + desktop build + Tauri check + mobile tests
+# Runs: check + unit tests + web build + mobile tests
 ```
 
 This is the same check that runs in CI. PRs that fail `just ci` will not be
-merged. If `just ci` fails on formatting, `just fix-all` fixes it in one shot (`rustfmt` + Tauri fmt + desktop, web, and mobile formatters).
+merged. If `just ci` fails on formatting, `just fix-all` fixes it in one shot (`rustfmt` + web and mobile formatters).
 
 Pull requests also get an advisory **flake check**. `scripts/flake-check.mjs
 select` maps the diff against the base branch to the Rust tests (in the root
-and desktop Tauri workspaces), desktop `node --test` files, Playwright smoke
-journeys and Flutter test files it changed: a hunk inside a test body selects
-that test; a change anywhere else in a test file (imports, helpers, hooks,
+workspace) and Flutter test files it changed: a hunk inside a Rust test body
+selects that test; a change anywhere else in a test file (imports, helpers,
 the code under test beside Rust tests) or a new file selects the whole file.
 An integration test binary's tests include those of the file modules its
 root declares (`mod x;`, `#[path = "…"] mod x;`), and a change to a helper
@@ -319,12 +276,10 @@ usually a race in the test or the code under it, worth fixing before it
 lands, though a test that needs infrastructure or the regular lane's
 cross-file concurrency can fail every repetition instead. Some changed tests
 are deliberately not repeated: `#[ignore]`d and Postgres-backed Rust tests,
-Playwright specs outside the `smoke` project, `*.perf.ts` measurements, and a
-selection too large for its lane (over 64 KiB of entries, or more Playwright
-journeys than ten repetitions can finish within the lane's timeout).
+and a selection too large for its lane (over 64 KiB of entries).
 A Rust test repeats in every feature graph the regular lanes test its
-package in that lists it (LaunchDarkly, the App Attest development feature,
-the desktop crate's lib under `mesh-llm`), since a `#[cfg(feature = …)]` arm
+package in that lists it (LaunchDarkly, the App Attest development
+feature), since a `#[cfg(feature = …)]` arm
 compiles only in its own graph; the step summary marks a row from a feature
 graph with that feature. A selected test that no such graph lists on the
 Linux runner, such as a macOS-only one, fails its lane by name rather than
@@ -427,7 +382,7 @@ required. The scope (in parentheses) is optional but encouraged.
    - How to test it manually (if applicable)
    - Any follow-up work deferred to a future PR
 
-6. **Shows the UI** — any PR that changes the desktop or mobile UI includes
+6. **Shows the UI** — any PR that changes the web or mobile UI includes
    before/after screenshots (or a short recording for interactions) in the
    description. We can't run every branch locally — screenshots let us review
    UI changes same-day instead of waiting for someone to build your branch.
@@ -442,11 +397,8 @@ because we can't safely review them without prior discussion:
 - **Cosmetic renames or style-only churn** that doesn't fix a bug or improve
   clarity
 - **Entirely new features** with no prior discussion
-- **Feature work in `desktop/`** — `desktop/` is the deprecated Buzz 0.X
-  desktop app. Build desktop features in
-  [block/buzz-app](https://github.com/block/buzz-app) instead; change
-  `desktop/` here only to fix a 0.X bug or to keep it compiling after a shared
-  crate change
+- **Desktop app changes** — the desktop app is not in this repository. Open
+  desktop PRs in [block/buzz-app](https://github.com/block/buzz-app) instead
 - **Drive-by changes bundled into an unrelated fix** — split them out
 
 If you're considering any of these, open an issue first and we'll tell you
@@ -488,9 +440,9 @@ to existing clients.
 
 Buzz is developed across multiple repositories. This repo (`block/buzz`)
 is the open-source home for the relay, mobile app, CLI, and agent harness.
-It also holds `desktop/`, the deprecated Buzz 0.X desktop app. The Buzz 1.0
-desktop and web app lives in [block/buzz-app](https://github.com/block/buzz-app),
-and all new desktop feature work goes there. Internal repositories handle
+The Buzz desktop and web app lives in
+[block/buzz-app](https://github.com/block/buzz-app), and all desktop work goes
+there. Internal repositories handle
 enterprise-signed builds and infrastructure deployment.
 
 See [AGENTS.md § Ecosystem](AGENTS.md#ecosystem) for the full repo table and

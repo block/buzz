@@ -25,8 +25,6 @@ jobs:
       pull-requests: read
     outputs:
       rust: ${{ steps.selection.outputs.rust }}
-      desktop: ${{ steps.selection.outputs.desktop }}
-      desktop-rust: ${{ steps.selection.outputs.desktop-rust }}
       web: ${{ steps.selection.outputs.web }}
       mobile: ${{ steps.selection.outputs.mobile }}
       mobile-native: ${{ steps.selection.outputs.mobile-native }}
@@ -78,24 +76,6 @@ jobs:
               - 'scripts/ci-apt-retry.sh'
               - 'scripts/ci-hermit-retry.sh'
               - 'Justfile'
-            desktop:
-              - '.github/workflows/ci.yml'
-              - '.github/workflows/_ci-desktop.yml'
-              - 'scripts/ci-apt-retry.sh'
-              - 'Justfile'
-              - 'scripts/generate-macos-icon.py'
-              - 'scripts/macos-icon.sh'
-              - 'bin/uv'
-              - 'bin/.uv-*.pkg'
-              - 'scripts/model-capabilities.json'
-              - 'scripts/normative-corpus.json'
-              - 'desktop/**'
-              - 'pnpm-lock.yaml'
-              - 'scripts/flake-check.mjs'
-              - 'scripts/flake-check.test.mjs'
-              - '.github/workflows/_ci-flake.yml'
-            desktop-rust:
-              - 'desktop/src-tauri/**'
             web:
               - 'web/**'
               - 'pnpm-lock.yaml'
@@ -157,16 +137,8 @@ jobs:
         run: scripts/test-release-ref-contract.sh
       - name: Relay image eligibility contract
         run: scripts/test-relay-image-eligibility-workflow.sh
-      - name: Desktop release candidate contract
-        run: scripts/test-desktop-release-candidate.sh
-      - name: OSS desktop promotion contract
-        run: |
-          scripts/test-oss-desktop-promotion.sh
-          scripts/test-oss-desktop-promotion-behavior.sh
       - name: Mobile release contract
         run: scripts/test-mobile-release-contract.sh
-      - name: Desktop instance environment contract
-        run: scripts/test-desktop-instance-detection.sh
       - name: Mobile worktree identity contract
         run: scripts/test-mobile-worktree-overrides.sh
       - name: Codex security review contract
@@ -183,6 +155,8 @@ jobs:
         run: scripts/test-ci-required-context-isolation.sh
       - name: CI path selection regression tests
         run: node --test scripts/ci-selection.test.mjs scripts/ci-required-gates.test.mjs scripts/ci-apt-retry.test.mjs scripts/ci-hermit-retry.test.mjs
+      - name: Flake check selection tests
+        run: node --test scripts/flake-check.test.mjs
       - name: File size policy
         run: just file-size-check
 
@@ -196,10 +170,10 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - name: Check for dead API token references in client code
         run: |
-          # Fail if dead API token patterns reappear in desktop, mobile, docs, or config.
+          # Fail if dead API token patterns reappear in mobile, docs, or config.
           # Relay crates are excluded — they still use token auth internally.
           PATTERNS='TokenScope|MintTokenResponse|hasApiToken|spr_tok_'
-          PATHS='desktop/src/ desktop/tests/ mobile/test/ mobile/lib/ .env.example'
+          PATHS='mobile/test/ mobile/lib/ .env.example'
           EXCLUDES='--exclude-dir=node_modules --exclude-dir=.dart_tool'
           if grep -rn $EXCLUDES -E "$PATTERNS" $PATHS 2>/dev/null; then
             echo "::error::Dead API token references found in client code. See above."
@@ -210,11 +184,10 @@ jobs:
   rust:
     name: Rust
     needs: [changes]
-    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop-rust == 'true'
+    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
     uses: ./.github/workflows/_ci-rust.yml
     with:
       rust: ${{ needs.changes.outputs.rust == 'true' }}
-      desktop_rust: ${{ needs.changes.outputs.desktop-rust == 'true' }}
       lane: required
 
   rust-cross-compile-domain:
@@ -224,28 +197,15 @@ jobs:
     uses: ./.github/workflows/_ci-rust.yml
     with:
       rust: ${{ needs.changes.outputs.rust == 'true' }}
-      desktop_rust: ${{ needs.changes.outputs.desktop-rust == 'true' }}
       lane: cross-compile
-
-  desktop-domain:
-    name: Desktop Domain
-    needs: [changes]
-    if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
-    uses: ./.github/workflows/_ci-desktop.yml
-    with:
-      rust: ${{ needs.changes.outputs.rust == 'true' }}
-      desktop: ${{ needs.changes.outputs.desktop == 'true' }}
-      desktop_rust: ${{ needs.changes.outputs.desktop-rust == 'true' }}
 
   relay-artifacts-domain:
     name: Relay Artifact Producer
     needs: [changes]
-    if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
+    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
     uses: ./.github/workflows/_ci-relay.yml
     with:
       rust: ${{ needs.changes.outputs.rust == 'true' }}
-      desktop: ${{ needs.changes.outputs.desktop == 'true' }}
-      desktop_rust: ${{ needs.changes.outputs.desktop-rust == 'true' }}
       lane: artifacts
 
   postgres-domain:
@@ -255,29 +215,15 @@ jobs:
     uses: ./.github/workflows/_ci-relay.yml
     with:
       rust: ${{ needs.changes.outputs.rust == 'true' }}
-      desktop: ${{ needs.changes.outputs.desktop == 'true' }}
-      desktop_rust: ${{ needs.changes.outputs.desktop-rust == 'true' }}
       lane: postgres
-
-  desktop-macos-domain:
-    name: Desktop macOS Domain
-    needs: [changes]
-    if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
-    uses: ./.github/workflows/_ci-desktop-macos.yml
-    with:
-      rust: ${{ needs.changes.outputs.rust == 'true' }}
-      desktop: ${{ needs.changes.outputs.desktop == 'true' }}
-      desktop_rust: ${{ needs.changes.outputs.desktop-rust == 'true' }}
 
   relay-domain:
     name: Relay and PostgreSQL
     needs: [changes, relay-artifacts-domain]
-    if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
+    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
     uses: ./.github/workflows/_ci-relay.yml
     with:
       rust: ${{ needs.changes.outputs.rust == 'true' }}
-      desktop: ${{ needs.changes.outputs.desktop == 'true' }}
-      desktop_rust: ${{ needs.changes.outputs.desktop-rust == 'true' }}
       lane: required
 
   clients:
@@ -322,7 +268,7 @@ jobs:
 
   rust-lint:
     name: Rust Lint
-    if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop-rust == 'true')))
+    if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.rust == 'true')))
     needs: [changes, rust]
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -350,7 +296,7 @@ jobs:
 
   windows-rust:
     name: Windows Rust (x86_64-pc-windows-msvc)
-    if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop-rust == 'true')))
+    if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.rust == 'true')))
     needs: [changes, rust]
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -362,37 +308,9 @@ jobs:
           RESULT: ${{ needs.rust.outputs.windows_rust_result }}
         run: test "$SELECTION_RESULT" = success && test "$RESULT" = success
 
-  desktop:
-    name: Desktop
-    if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')))
-    needs: [changes, desktop-domain]
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    permissions: {}
-    steps:
-      - name: Check Desktop result
-        env:
-          SELECTION_RESULT: ${{ needs.changes.result }}
-          RESULT: ${{ needs.desktop-domain.outputs.desktop_result }}
-        run: test "$SELECTION_RESULT" = success && test "$RESULT" = success
-
-  desktop-build-macos:
-    name: Desktop Build (macOS)
-    if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')))
-    needs: [changes, desktop-macos-domain]
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    permissions: {}
-    steps:
-      - name: Check Desktop Build (macOS) result
-        env:
-          SELECTION_RESULT: ${{ needs.changes.result }}
-          RESULT: ${{ needs.desktop-macos-domain.outputs.desktop_macos_result }}
-        run: test "$SELECTION_RESULT" = success && test "$RESULT" = success
-
   desktop-e2e-relay:
     name: Desktop E2E Relay
-    if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')))
+    if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.rust == 'true')))
     needs: [changes, relay-artifacts-domain]
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -402,20 +320,6 @@ jobs:
         env:
           SELECTION_RESULT: ${{ needs.changes.result }}
           RESULT: ${{ needs.relay-artifacts-domain.outputs.desktop_e2e_relay_result }}
-        run: test "$SELECTION_RESULT" = success && test "$RESULT" = success
-
-  desktop-e2e-integration:
-    name: Desktop E2E Integration
-    if: always() && (needs.changes.result != 'success' || (needs.relay-artifacts-domain.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')))
-    needs: [changes, relay-artifacts-domain, relay-domain]
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    permissions: {}
-    steps:
-      - name: Check Desktop E2E Integration result
-        env:
-          SELECTION_RESULT: ${{ needs.changes.result }}
-          RESULT: ${{ needs.relay-domain.outputs.desktop_e2e_integration_result }}
         run: test "$SELECTION_RESULT" = success && test "$RESULT" = success
 
   backend-integration:

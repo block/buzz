@@ -94,11 +94,11 @@ async function select(paths, pullRequest = false, apiStatus = 200) {
     commit("PR documentation or code");
     const head = git("rev-parse", "HEAD").toString().trim();
     git("checkout", "-qb", "upstream", base);
-    const upstreamPath = "desktop/src/upstream-only.ts";
+    const upstreamPath = "web/src/upstream-only.ts";
     mkdirSync(dirname(join(repo, upstreamPath)), { recursive: true });
     writeFileSync(join(repo, upstreamPath), "upstream change\n");
     git("add", upstreamPath);
-    commit("Unrelated upstream desktop change");
+    commit("Unrelated upstream web change");
     git(
       "-c",
       "user.name=CI fixture",
@@ -181,7 +181,7 @@ async function select(paths, pullRequest = false, apiStatus = 200) {
   const rawOutputs = Object.fromEntries(
     [
       ...readFileSync(output, "utf8").matchAll(
-        /^(rust|desktop|desktop-rust|web|mobile|mobile-native)<<([^\n]+)\n(true|false)\n\2/gm,
+        /^(rust|web|mobile|mobile-native)<<([^\n]+)\n(true|false)\n\2/gm,
       ),
     ].map(([, key, , value]) => [key, value]),
   );
@@ -268,22 +268,15 @@ const scenarios = [
     ["scripts/test-mobile-gateway-recipes.sh"],
     ["mobile"],
   ],
-  ["desktop", ["desktop/src/main.tsx"], ["desktop"]],
-  ["Tauri", ["desktop/src-tauri/src/main.rs"], ["desktop", "desktop-rust"]],
   ["relay", ["crates/buzz-relay/src/main.rs"], ["rust"]],
   ["migration", ["migrations/123.sql"], ["rust"]],
   [
     "shared workflow",
     [".github/workflows/ci.yml"],
-    ["desktop", "mobile", "mobile-native", "rust"],
+    ["mobile", "mobile-native", "rust"],
   ],
-  [
-    "desktop workflow",
-    [".github/workflows/_ci-desktop.yml"],
-    ["desktop", "mobile", "rust"],
-  ],
-  ["Justfile", ["Justfile"], ["desktop", "mobile", "rust"]],
-  ["CI apt retry", ["scripts/ci-apt-retry.sh"], ["desktop", "rust"]],
+  ["Justfile", ["Justfile"], ["mobile", "rust"]],
+  ["CI apt retry", ["scripts/ci-apt-retry.sh"], ["rust"]],
   ["CI Hermit retry", ["scripts/ci-hermit-retry.sh"], ["mobile", "rust"]],
   ["integration services", ["docker-compose.yml"], ["rust"]],
   ["CI integration images", ["docker-compose.ci.yml"], ["rust"]],
@@ -293,9 +286,9 @@ const scenarios = [
     ["rust", "mobile"],
   ],
   [
-    "mixed mobile and desktop",
-    ["mobile/lib/main.dart", "desktop/src/main.tsx"],
-    ["desktop", "mobile"],
+    "mixed mobile and web",
+    ["mobile/lib/main.dart", "web/src/main.tsx"],
+    ["mobile", "web"],
   ],
   ["web", ["web/src/main.tsx"], ["web"]],
   ["documentation", ["README.md"], []],
@@ -310,37 +303,26 @@ const scenarios = [
     [],
   ],
   ["crate Markdown", ["crates/buzz-cli/README.md"], ["rust"]],
-  ["desktop Markdown", ["desktop/README.md"], ["desktop"]],
-  [
-    "Tauri Markdown",
-    ["desktop/src-tauri/README.md"],
-    ["desktop", "desktop-rust"],
-  ],
   ["web Markdown", ["web/docs/design.md"], ["web"]],
   ["mobile Markdown", ["mobile/test/README.md"], ["mobile"]],
   ["schema Markdown", ["schema/README.md"], ["rust"]],
   ["migration Markdown", ["migrations/README.md"], ["rust"]],
   [
-    "mixed documentation and desktop",
-    ["VISION_MOBILE.md", "docs/mobile/design.md", "desktop/src/main.tsx"],
-    ["desktop"],
+    "mixed documentation and web",
+    ["VISION_MOBILE.md", "docs/mobile/design.md", "web/src/main.tsx"],
+    ["web"],
   ],
   [
     "mixed documentation and relay",
-    ["docs/desktop/design.md", "crates/buzz-relay/src/lib.rs"],
+    ["docs/relay/design.md", "crates/buzz-relay/src/lib.rs"],
     ["rust"],
   ],
   ["embedded ACP prompt", ["crates/buzz-acp/src/base_prompt.md"], ["rust"]],
-  [
-    "embedded Tauri skill",
-    ["desktop/src-tauri/src/managed_agents/nest_skill.md"],
-    ["desktop", "desktop-rust"],
-  ],
 ];
 for (const [name, paths, expected] of scenarios) {
   test(`real paths-filter: ${name}`, async () => {
     const outputs = await select(paths);
-    assert.equal(Object.keys(outputs).length, 6);
+    assert.equal(Object.keys(outputs).length, 4);
     assert.deepEqual(
       Object.keys(outputs)
         .filter((key) => outputs[key] === "true")
@@ -362,14 +344,14 @@ for (const [name, paths, expected] of [
     ["mobile"],
   ],
   [
-    "mixed desktop and Markdown",
-    ["CONTEXT.md", "desktop/src/main.tsx"],
-    ["desktop"],
+    "mixed web and Markdown",
+    ["CONTEXT.md", "web/src/main.tsx"],
+    ["web"],
   ],
 ]) {
   test(`PR file list ignores newer base changes: ${name}`, async () => {
     const outputs = await select(paths, true);
-    assert.equal(Object.keys(outputs).length, 6);
+    assert.equal(Object.keys(outputs).length, 4);
     assert.deepEqual(
       Object.keys(outputs)
         .filter((key) => outputs[key] === "true")
@@ -381,14 +363,7 @@ for (const [name, paths, expected] of [
 
 test("workflow consumes guarded selection outputs", () => {
   const outputs = workflow.match(/ {4}outputs:\n([\s\S]*?) {4}steps:/)[1];
-  for (const key of [
-    "rust",
-    "desktop",
-    "desktop-rust",
-    "web",
-    "mobile",
-    "mobile-native",
-  ]) {
+  for (const key of ["rust", "web", "mobile", "mobile-native"]) {
     assert.ok(outputs.includes(`steps.selection.outputs.${key}`));
   }
   assert.match(
@@ -402,7 +377,7 @@ for (const count of [2999, 3000, 3001]) {
       { length: Math.min(count, 3000) },
       (_, i) => `docs/file-${i}.md`,
     );
-    if (count > 3000) paths.push("desktop/src/omitted-by-api.ts");
+    if (count > 3000) paths.push("web/src/omitted-by-api.ts");
     const outputs = await select(paths, true);
     for (const value of Object.values(outputs)) {
       assert.equal(value, count >= 3000 ? "true" : "false");

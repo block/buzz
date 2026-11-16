@@ -15,13 +15,11 @@ everything around the run:
 - One pinned *user* identity for the whole benchmark environment: it owns
   every trial channel and posts every task, like one human running many
   teams. Channels are kept (not archived) after each trial.
-- ``--gui`` adds that user to the relay membership list and opens the Buzz
-  desktop app logged in as them, so a human can watch the teams work live.
 
 Run inside the testbed environment (the just recipe does this):
 
     uv run --project benchmarks/harbor-buzz-orchestra/testbed \
-        benchmarks/harbor-buzz-orchestra/scripts/benchmark.py [--gui] [...]
+        benchmarks/harbor-buzz-orchestra/scripts/benchmark.py [...]
 """
 
 from __future__ import annotations
@@ -33,7 +31,6 @@ import importlib.util
 import json
 import os
 import secrets
-import shutil
 import subprocess
 import sys
 import time
@@ -53,7 +50,6 @@ COMPOSE_FILES = (
 RELAY_HTTP_PORT = 3600
 PG_HOST_PORT = 5633
 METRICS_HOST_PORT = 9602
-GUI_BUNDLE_IDENTIFIER = "xyz.block.buzz.app.benchmark"
 
 DEFAULT_DATASET = "terminal-bench/terminal-bench-2-1"
 DEFAULT_ATTEMPTS = 5
@@ -164,15 +160,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Upload to Harbor Hub when the job finishes",
     )
     parser.add_argument(
-        "--gui",
-        action="store_true",
-        help="Open the Buzz desktop app as the benchmark user to watch the run live",
-    )
-    parser.add_argument(
         "--fresh",
         action="store_true",
-        help="Reset first: drop the stack's Docker volumes and the benchmark "
-        "GUI's app state (keys in state.json are kept)",
+        help="Reset first: drop the stack's Docker volumes "
+        "(keys in state.json are kept)",
     )
     parser.add_argument(
         "--dry-run",
@@ -367,15 +358,15 @@ def load_state() -> dict[str, str]:
 
 
 def print_user_identity(state: dict[str, str]) -> None:
-    """Show the pinned benchmark user's key so a human can import it during
-    the desktop GUI's onboarding (this stack is local-only; the key guards
-    nothing beyond it)."""
+    """Show the pinned benchmark user's key so a human can import it into a
+    Buzz client (this stack is local-only; the key guards nothing beyond
+    it)."""
     from harbor_buzz_testbed.keys import encode_nsec
 
     print(
         f"benchmark user pubkey: {state['user_pubkey']}\n"
         f"benchmark user nsec:   {encode_nsec(state['user_secret_key'])} "
-        "(import this in the GUI onboarding to watch as the benchmark user)"
+        "(import this in a Buzz client to watch as the benchmark user)"
     )
 
 
@@ -505,17 +496,9 @@ def bring_up_stack(state: dict[str, str]) -> None:
 
 
 def reset_environment() -> None:
-    """--fresh: drop the stack's Docker volumes and the benchmark GUI's
-    app state, together — GUI records (workspaces, read state) only stay
-    coherent as long as the database they reference exists. Keys in
-    ``state.json`` are kept, so the same nsec works after the reset."""
+    """--fresh: drop the stack's Docker volumes. Keys in ``state.json`` are
+    kept, so the same nsec works after the reset."""
     subprocess.run(compose_command("down", "-v"), check=True)
-    if sys.platform == "darwin":
-        for domain in ("WebKit", "Caches", "Application Support"):
-            shutil.rmtree(
-                Path.home() / "Library" / domain / GUI_BUNDLE_IDENTIFIER,
-                ignore_errors=True,
-            )
 
 
 def ensure_stack(state: dict[str, str]) -> None:
@@ -628,85 +611,6 @@ def ensure_agent_binaries() -> Path:
     return bin_dir
 
 
-# -- GUI ---------------------------------------------------------------------
-
-
-def launch_gui(state: dict[str, str]) -> subprocess.Popen:
-    """Open the Buzz desktop app logged in as the benchmark user.
-
-    The relay runs closed (membership required), so the user pubkey is first
-    added to the relay membership list via buzz-admin inside the container —
-    NIP-OA auth tags cover the agents, but the GUI authenticates as a plain
-    member, exactly like a human.
-    """
-    subprocess.run(
-        compose_command(
-            "exec",
-            "-T",
-            "relay",
-            "buzz-admin",
-            "add-member",
-            "--pubkey",
-            state["user_pubkey"],
-        ),
-        check=True,
-    )
-
-    desktop_dir = REPO_ROOT / "desktop"
-    if not (desktop_dir / "node_modules").is_dir():
-        subprocess.run(["pnpm", "install"], cwd=desktop_dir, check=True)
-
-    # tauri dev needs sidecar files present; stub them and drop in the real
-    # CLI binary (mirrors the just staging recipe).
-    target = subprocess.run(
-        ["rustc", "-vV"], capture_output=True, text=True, check=True
-    ).stdout
-    triple = next(
-        line.split(": ", 1)[1]
-        for line in target.splitlines()
-        if line.startswith("host: ")
-    )
-    sidecar_dir = desktop_dir / "src-tauri" / "binaries"
-    sidecar_dir.mkdir(parents=True, exist_ok=True)
-    binaries = ensure_binaries()
-    for name in (
-        "buzz-acp",
-        "buzz-agent",
-        "buzz-dev-mcp",
-        "git-credential-nostr",
-        "buzz",
-    ):
-        stub = sidecar_dir / f"{name}-{triple}"
-        if not stub.exists():
-            stub.touch()
-    real_cli = sidecar_dir / f"buzz-{triple}"
-    real_cli.write_bytes(binaries["buzz"].read_bytes())
-    real_cli.chmod(0o755)
-
-    print(
-        f"Opening Buzz GUI as the benchmark user ({state['user_pubkey'][:16]}…).\n"
-        "Watch, don't type — a message from you mid-trial would taint the run."
-    )
-    # Distinct bundle identifier: the desktop app persists workspaces (incl.
-    # their relay URLs) in per-identifier WebKit localStorage, and a stored
-    # workspace's relay URL overrides BUZZ_RELAY_URL by design. Reusing the
-    # default identifier means any past local-dev session's ws://localhost:3000
-    # workspace silently shadows the benchmark relay. An identifier of our own
-    # keeps that state isolated both ways.
-    tauri_config = json.dumps(
-        {"identifier": GUI_BUNDLE_IDENTIFIER, "productName": "Buzz Benchmark"}
-    )
-    return subprocess.Popen(
-        ["pnpm", "exec", "tauri", "dev", "--config", tauri_config],
-        cwd=desktop_dir,
-        env={
-            **os.environ,
-            "BUZZ_RELAY_URL": f"ws://localhost:{RELAY_HTTP_PORT}",
-            "BUZZ_PRIVATE_KEY": state["user_secret_key"],
-        },
-    )
-
-
 # -- main ---------------------------------------------------------------------
 
 
@@ -773,8 +677,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.fresh:
             reset_environment()
         ensure_stack(state)
-        if args.gui:
-            launch_gui(state)
 
     for run_args in runs:
         result = run_leaderboard.main(

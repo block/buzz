@@ -168,7 +168,7 @@ in the app name (`Buzz (my-branch)`, or a short SHA when the worktree is
 detached). Because the identifier follows the directory rather than the
 branch, one worktree keeps exactly one installed app — and its login state —
 across branch switches, and builds from multiple worktrees install side by
-side, mirroring the desktop dev experience. Release and profile builds
+side. Release and profile builds
 always keep the production identity and name.
 
 `just mobile-dev` and `just mobile-build-android` apply this automatically by

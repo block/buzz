@@ -5,7 +5,7 @@
 # dorny/paths-filter and `scripts/check-file-sizes-core.mjs` `resolveBaseRef`.
 # Without it lefthook derives files from `git diff HEAD @{push}`, which after a
 # rebase or `git merge origin/main` includes everything main changed since the
-# branch's last push (firing mobile/desktop/rust lanes on unrelated pushes), and
+# branch's last push (firing mobile/rust lanes on unrelated pushes), and
 # on a brand-new branch falls back to a stale remote's tip (a full-suite run).
 # The three-dot diff scopes every lane to what this branch actually changed.
 # Both the three-dot diff and lefthook's stock discovery inspect the checked-out
@@ -13,14 +13,10 @@
 # tree, not the pushed commit — the always-on `push-head-scope` lane warns when
 # they diverge and CI remains the authoritative gate for that ref.
 # Deliberate deviations:
-# - The `.github/workflows/ci.yml` path CI adds to its `rust`/`desktop`/`mobile`
-#   filters, `scripts/ci-apt-retry.sh` in `rust`/`desktop`, and
+# - The `.github/workflows/ci.yml` path CI adds to its `rust`/`mobile`
+#   filters, `scripts/ci-apt-retry.sh` in `rust`, and
 #   `scripts/ci-hermit-retry.sh` in `rust`/`mobile`, are omitted; a
 #   CI-plumbing-only edit doesn't need a local test run.
-# - `desktop-test` doesn't trigger on `crates/**` changes, though CI's Desktop
-#   JS job does: a few node:test cases read relay/DB crate sources to pin shared
-#   constants. Running the full desktop suite on every crate push would be
-#   expensive locally, so CI is the authoritative check for that coupling.
 # - The repository-wide `file-size-check` is deliberately unfiltered. Its own
 #   merge-base diff is the path filter; duplicating its governed roots here is
 #   the coverage drift this gate is intended to prevent.
@@ -48,16 +44,6 @@ pre-commit:
     rust-fmt:
       glob: ["crates/**", "examples/countdown-bot/**"]
       run: just fmt
-      stage_fixed: true
-    desktop-tauri-fmt:
-      glob: ["desktop/src-tauri/**"]
-      run: just desktop-tauri-fmt
-      stage_fixed: true
-    desktop-fix:
-      # A lockfile-only change has no desktop source for Biome to rewrite.
-      glob: ["desktop/**"]
-      exclude: ["desktop/src-tauri/**"]
-      run: just desktop-fix
       stage_fixed: true
     web-fix:
       # A lockfile-only change has no web source for Biome to rewrite.
@@ -108,37 +94,6 @@ pre-push:
         # An orphaned nextest otherwise spins on the dead pty's input.
         NEXTEST_NO_INPUT_HANDLER: "1"
       run: ./scripts/without-git-env.sh just test-unit
-    desktop-check:
-      files: git diff --name-only origin/main...HEAD
-      glob: ["desktop/**", "pnpm-lock.yaml", "Justfile"]
-      exclude: ["desktop/src-tauri/**"]
-      env: &pnpm-verify-deps
-        # Warn when node_modules looks stale against the workspace (pnpm uses
-        # recorded workspace state and manifest mtimes; not a complete
-        # lockfile-content check). `warn`, not `error`: `just
-        # bump-desktop-version` leaves the workspace flagged, and release prep
-        # pushes through this hook.
-        pnpm_config_verify_deps_before_run: warn
-      run: ./scripts/without-git-env.sh just desktop-check
-    desktop-typecheck:
-      files: git diff --name-only origin/main...HEAD
-      glob: ["desktop/**", "pnpm-lock.yaml", "Justfile"]
-      exclude: ["desktop/src-tauri/**"]
-      env: *pnpm-verify-deps
-      run: ./scripts/without-git-env.sh just desktop-typecheck
-    desktop-test:
-      files: git diff --name-only origin/main...HEAD
-      glob: ["desktop/**", "pnpm-lock.yaml", "Justfile"]
-      exclude: ["desktop/src-tauri/**"]
-      env: *pnpm-verify-deps
-      run: ./scripts/without-git-env.sh just desktop-test
-    desktop-tauri-checks:
-      # Keep local lint parity with Desktop Tauri CI for every path that can
-      # affect the Tauri crate or its path dependencies. Run clippy and tests
-      # serially so parallel pre-push hooks do not contend for Cargo's lock.
-      files: git diff --name-only origin/main...HEAD
-      glob: ["desktop/src-tauri/**", "crates/**", "migrations/**", "schema/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml", "scripts/run-tests.sh", "Justfile"]
-      run: ./scripts/without-git-env.sh sh -c 'just desktop-tauri-clippy && just desktop-tauri-test'
     mobile-checks:
       # Run analysis and tests serially so parallel pre-push hooks do not
       # contend for shared Flutter state (.dart_tool, shader bundle).
