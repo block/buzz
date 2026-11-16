@@ -2,8 +2,9 @@ const OPEN_PREFIX = "/open/";
 
 /**
  * `buzz://` navigation hosts. Each opens a destination in the selected community.
- * Keep in sync with the navigation arms of `handle_deep_link_url` in
- * desktop/src-tauri/src/deep_link.rs.
+ * Keep in sync with `parseBuzzLink` in block/buzz-app
+ * src/features/navigation/buzz-links.ts and the navigation arms of
+ * `handle_deep_link_url` in desktop/src-tauri/src/deep_link.rs.
  */
 const NAVIGATION_HOSTS = new Set([
   "message",
