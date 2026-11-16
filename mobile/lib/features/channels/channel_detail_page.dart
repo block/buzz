@@ -507,12 +507,14 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
           )
         : _twoLineAppBarTitleContentHeight(context) + 64;
 
-    // Opening a forum or a DM reads the whole channel: a forum has no
-    // timeline to read row by row, and a DM is all for the reader. Other
+    // Opening a forum, a DM or a Solo chat reads the whole channel: a forum
+    // has no timeline to read row by row, and a DM or a Solo chat is all for
+    // the reader. Other
     // timelines write their read marks while the reader looks at rows; see
     // `readingMarks`.
     final openReadTimestamp = _openReadTimestamp(
       channel: resolvedChannel,
+      personalChat: personalChat,
       messagesState: messagesState,
     );
 
@@ -566,13 +568,15 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       });
     }, [channel.id, readState.isReady, openReadActive, openReadTimestamp]);
 
-    final headerMembers = ref.watch(channelMembersProvider(resolvedChannel.id));
+    final headerMembers = ref.watch(
+      latestChannelMembersProvider(resolvedChannel.id),
+    );
     final dmHeader = _watchDmHeader(
       ref,
       resolvedChannel,
       currentPubkey,
       agentPubkeys,
-      soloMembers: headerMembers.value,
+      soloMembers: headerMembers,
       personalChat: personalChat,
     );
     Future<void> openChannelDetails() async {
