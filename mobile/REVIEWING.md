@@ -17,8 +17,9 @@ any blocking finding.
 2. **No hangs or stutters.** Keep expensive work (decoding, crypto, parsing,
    big sorts) off the UI isolate. Avoid needless rebuilds, especially during
    animations and keyboard motion.
-3. **Use the network carefully.** No polling when live updates exist. Fetch
-   only what changed. Survive slow and flaky links.
+3. **Use the network carefully.** Don't poll for what live updates already
+   deliver; a slow, bounded backstop that reconciles missed or expired state
+   is fine. Fetch only what changed. Survive slow and flaky links.
 4. **Don't clog the pipe.** Work the user isn't waiting for must never delay
    work they are.
 5. **Reliability means the app stays usable.** A rare crash with no data loss
