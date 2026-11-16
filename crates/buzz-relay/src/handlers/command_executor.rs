@@ -625,9 +625,10 @@ async fn grow_with_agents(
 /// With `["history", "include"]`, people and agents join in place, with the
 /// DM's history. People move the DM's identity to the grown set of people, or,
 /// if a DM of those people already exists, that DM is returned instead and
-/// nothing changes here. Without the tag, everyone starts a new DM of exactly
-/// its members (no history), as before. So do people added to a DM of at most
-/// one person, even with the tag. With `["history", "ask"]`, the relay adds
+/// nothing changes here. Without the tag, everyone starts a new DM of its
+/// people and the additions (no history), unless those people already have
+/// one: the caller lands there, and named agents join it. So do people added
+/// to a DM of at most one person, even with the tag. With `["history", "ask"]`, the relay adds
 /// agents alone and people to a DM of at most one person as with `include`,
 /// and refuses people joining any other DM with [`NEEDS_HISTORY_CHOICE`],
 /// changing nothing. An agent cannot send either tag.
@@ -705,11 +706,10 @@ async fn handle_dm_add_member(
             additions.push(pk);
         }
     }
-    if include_history
-        && !dm_agents(tenant, state, std::slice::from_ref(&self_bytes))
-            .await?
-            .is_empty()
-    {
+    let actor_is_agent = !dm_agents(tenant, state, std::slice::from_ref(&self_bytes))
+        .await?
+        .is_empty();
+    if include_history && actor_is_agent {
         return Err(IngestError::Rejected(ONLY_PEOPLE_SHARE_HISTORY.into()));
     }
 
@@ -766,7 +766,10 @@ async fn handle_dm_add_member(
         }
         // Start a new DM of its people and the additions (no history); this
         // DM and its agents stay put. A DM of at most one person never gains
-        // people, even with the tag.
+        // people, even with the tag. If those people already have a DM, the
+        // caller lands there, and named agents join it with its history, as
+        // agents do; only people share it, so an agent adding finds only a DM
+        // of exactly these members.
         Some(DmGrowth::PeopleStartNewDm) | None => {
             let (channel, created, participants) = state
                 .db
@@ -775,11 +778,21 @@ async fn handle_dm_add_member(
                     channel_id,
                     &self_bytes,
                     &addition_refs,
+                    !actor_is_agent,
                     &policy,
                 )
                 .await
                 .map_err(dm_write_error)?;
-            (channel.id, created, Vec::new(), !created, participants)
+            let added = if created || actor_is_agent {
+                Vec::new()
+            } else {
+                let agents: Vec<Vec<u8>> = dm_agents(tenant, state, &additions)
+                    .await?
+                    .into_keys()
+                    .collect();
+                grow_with_agents(tenant, state, channel.id, &self_bytes, &agents).await?
+            };
+            (channel.id, created, added, !created, participants)
         }
     };
 

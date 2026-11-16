@@ -207,6 +207,51 @@ async fn find_dm_in<'e>(
     row.map(row_to_channel_record).transpose()
 }
 
+/// The existing DM that opening a DM of `participants`, of whom `agents` are
+/// agents, finds. With `by_people`, the DM of their people, or one made before
+/// agents were told apart, identified by all its members. Without, the DM of
+/// exactly these members: one identified by all of them, or their people's DM
+/// when it holds exactly them now, as a DM that agents joined in place does.
+async fn find_opened_dm(
+    conn: &mut sqlx::PgConnection,
+    community_id: CommunityId,
+    participants: &[&[u8]],
+    agents: &HashSet<Vec<u8>>,
+    by_people: bool,
+) -> Result<Option<ChannelRecord>> {
+    let people = dm_identity_hash(participants, agents);
+    let exact = compute_participant_hash(participants);
+    let (first, second) = if by_people {
+        (people, exact)
+    } else {
+        (exact, people)
+    };
+    if let Some(found) = find_dm_in(&mut *conn, community_id, &first).await? {
+        return Ok(Some(found));
+    }
+    if second == first {
+        return Ok(None);
+    }
+    let Some(found) = find_dm_in(&mut *conn, community_id, &second).await? else {
+        return Ok(None);
+    };
+    if by_people {
+        return Ok(Some(found));
+    }
+    let members: HashSet<Vec<u8>> = sqlx::query_scalar(
+        "SELECT pubkey FROM channel_members \
+         WHERE community_id = $1 AND channel_id = $2 AND removed_at IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(found.id)
+    .fetch_all(&mut *conn)
+    .await?
+    .into_iter()
+    .collect();
+    let wanted: HashSet<Vec<u8>> = participants.iter().map(|pk| pk.to_vec()).collect();
+    Ok((members == wanted).then_some(found))
+}
+
 /// Create a new DM channel for the given participant pubkeys, or return the
 /// existing one if a DM with the same participant set already exists.
 ///
@@ -279,10 +324,12 @@ async fn find_or_create_dm(
         )));
     }
 
-    let hash = opened_identity_hash(participants, &agents, by_people);
-    if let Some(existing) = find_dm_in(&mut *conn, community_id, &hash).await? {
+    if let Some(existing) =
+        find_opened_dm(&mut *conn, community_id, participants, &agents, by_people).await?
+    {
         return Ok((existing, false));
     }
+    let hash = opened_identity_hash(participants, &agents, by_people);
     // Messaging one agent alone needs no permission: a new direct DM shares
     // no one's history.
     let direct = participants.len() == 2 && participants.contains(&created_by);
@@ -507,7 +554,8 @@ pub async fn list_dms_for_user(
 /// it may hold agents that `pubkeys` does not name, and lack agents it does.
 /// Adding those is [`grow_dm`]'s job. A DM made before agents were told apart
 /// is still found by all its members. Without `by_people`, only a DM of
-/// exactly these members, agents included, is found or made. A found DM is
+/// exactly these members, agents included, is found or made, which may be
+/// the DM of their people that agents joined in place. A found DM is
 /// returned only to an active member of it, so naming a DM's people cannot be
 /// used to see or join it. A new DM's agents need `policy`'s permission.
 ///
@@ -536,15 +584,10 @@ pub async fn open_dm(
         )));
     }
 
-    let hash = opened_identity_hash(&all, &agents, by_people);
-    // DMs made before agents were told apart are identified by all members.
-    let legacy = compute_participant_hash(&all);
-
     // Check for existing DM first (fast path, no transaction).
-    let mut existing = find_dm_by_participants(pool, community_id, &hash).await?;
-    if existing.is_none() && legacy != hash {
-        existing = find_dm_by_participants(pool, community_id, &legacy).await?;
-    }
+    let mut conn = pool.acquire().await?;
+    let existing = find_opened_dm(&mut conn, community_id, &all, &agents, by_people).await?;
+    drop(conn);
     if let Some(existing) = existing {
         return reopen_dm(pool, community_id, existing, created_by).await;
     }
@@ -750,8 +793,10 @@ pub async fn grow_dm(
 /// `source` must be a live, unarchived DM with `actor` as an active member.
 /// Its members are read under its membership lock, held until the new DM is
 /// made on the same transaction, so the new DM holds exactly who is in
-/// `source` now. If a DM of exactly these members exists, it is returned to
-/// `actor` if they are in it, and shown in their sidebar.
+/// `source` now. If a DM of these members already exists, found as
+/// [`open_dm`] finds it (by its people with `by_people`, when people join), it
+/// is returned to `actor` if they are in it, and shown in their sidebar; named
+/// agents it lacks are the caller's to add.
 ///
 /// Returns `(channel, was_created, participants)`.
 pub async fn fork_dm(
@@ -760,6 +805,7 @@ pub async fn fork_dm(
     source: Uuid,
     actor: &[u8],
     additions: &[&[u8]],
+    by_people: bool,
     policy: AgentAddPolicy<'_>,
 ) -> Result<(ChannelRecord, bool, Vec<Vec<u8>>)> {
     let mut tx = crate::begin_community_write_transaction(
@@ -772,6 +818,12 @@ pub async fn fork_dm(
     let source_members = locked_dm_members(tx.conn(), community_id, source, actor).await?;
     let source_refs: Vec<&[u8]> = source_members.iter().map(Vec::as_slice).collect();
     let agents = agents_among(tx.conn(), community_id, &source_refs).await?;
+    let added_agents = agents_among(tx.conn(), community_id, additions).await?;
+    // Agents alone do not change who the DM is for, so they start a DM of
+    // exactly these members, as they always have.
+    let people_join = additions
+        .iter()
+        .any(|pk| !added_agents.contains(*pk) && !source_members.iter().any(|m| m == pk));
     let mut members: Vec<Vec<u8>> = source_members
         .into_iter()
         .filter(|pk| pk.as_slice() == actor || !agents.contains(pk))
@@ -782,8 +834,15 @@ pub async fn fork_dm(
         }
     }
     let refs: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
-    let (channel, created) =
-        find_or_create_dm(tx.conn(), community_id, &refs, actor, false, policy).await?;
+    let (channel, created) = find_or_create_dm(
+        tx.conn(),
+        community_id,
+        &refs,
+        actor,
+        by_people && people_join,
+        policy,
+    )
+    .await?;
     if !created {
         let shown = sqlx::query(
             "UPDATE channel_members SET hidden_at = NULL \
@@ -1203,7 +1262,8 @@ impl Db {
         .await
     }
 
-    /// Start a DM of everyone in a DM plus `additions`, without its history.
+    /// Start a DM of everyone in a DM plus `additions`, without its history,
+    /// or return the DM they already have.
     #[datastore_span(name = "fork_dm", system = "postgresql")]
     pub async fn fork_dm(
         &self,
@@ -1211,9 +1271,19 @@ impl Db {
         source: Uuid,
         actor: &[u8],
         additions: &[&[u8]],
+        by_people: bool,
         policy: AgentAddPolicy<'_>,
     ) -> Result<(ChannelRecord, bool, Vec<Vec<u8>>)> {
-        crate::dm::fork_dm(&self.pool, community_id, source, actor, additions, policy).await
+        crate::dm::fork_dm(
+            &self.pool,
+            community_id,
+            source,
+            actor,
+            additions,
+            by_people,
+            policy,
+        )
+        .await
     }
 
     /// Hide a DM channel for a specific user.

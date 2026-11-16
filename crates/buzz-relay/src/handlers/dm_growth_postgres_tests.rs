@@ -1114,25 +1114,83 @@ async fn a_new_dm_from_a_dm_carries_only_its_people() {
     );
     assert_eq!(members(&state, &tenant, trio).await, set_of(&[&a, &b, &x]));
 
-    // An agent named in the add joins.
+    // These people now have a DM, so starting another lands there, and an
+    // agent named in the add joins it, with its history.
     let (named, created) = add(&state, &tenant, &a, trio, &[&c, &m], false)
         .await
         .expect("start new DM with an agent");
-    assert!(created);
+    assert_eq!((named, created), (forked, false));
     assert_eq!(
-        members(&state, &tenant, named).await,
+        members(&state, &tenant, forked).await,
         set_of(&[&a, &b, &c, &m])
     );
+    assert_eq!(members(&state, &tenant, trio).await, set_of(&[&a, &b, &x]));
 
-    // A DM of one person and agents, theirs or not: the new DM is people only.
+    // A DM of one person and agents, theirs or not: the new DM is people
+    // only, and the next one opens it.
+    let mut pair = None;
     for (agent, history) in [(&m, true), (&y, false)] {
         let solo = open(&state, &tenant, &a, &[agent]).await.expect("solo");
-        let (target, _) = add(&state, &tenant, &a, solo, &[&c], history)
+        let (target, created) = add(&state, &tenant, &a, solo, &[&c], history)
             .await
             .expect("add a person");
         assert_ne!(target, solo);
+        assert_eq!(created, pair.is_none());
+        assert_eq!(*pair.get_or_insert(target), target);
         assert_eq!(members(&state, &tenant, target).await, set_of(&[&a, &c]));
     }
+    let pair = pair.expect("a DM of A and C");
+
+    // From a DM of one person, an agent named with a person joins the DM
+    // those people already have, with its history.
+    let solo = open(&state, &tenant, &a, &[&y]).await.expect("solo");
+    assert_eq!(
+        add(&state, &tenant, &a, solo, &[&c, &m], false)
+            .await
+            .expect("add a person and an agent"),
+        (pair, false)
+    );
+    assert_eq!(members(&state, &tenant, pair).await, set_of(&[&a, &c, &m]));
+    assert_eq!(members(&state, &tenant, solo).await, set_of(&[&a, &y]));
+}
+
+/// A client from before agents were told apart opens a DM by all its
+/// members. A DM whose agents joined it in place holds exactly those members,
+/// so the open lands there instead of making another; a DM that holds others
+/// too is not theirs.
+/// Mutation: drop the people's-DM fallback from untagged opens → a second DM
+/// of A, B and X is made → RED; skip its members check → the open of A, B and
+/// Y lands in a DM that also holds X → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn an_untagged_open_finds_the_dm_agents_joined_in_place() {
+    let state = state().await;
+    let tenant = community(&state, "dm-untagged-grown").await;
+    let (a, b, x, y) = (
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+    );
+    make_agent(&state, &tenant, &x, &a, "owner_only").await;
+    make_agent(&state, &tenant, &y, &a, "owner_only").await;
+    let dm = open(&state, &tenant, &a, &[&b]).await.expect("open");
+    add(&state, &tenant, &a, dm, &[&x], true)
+        .await
+        .expect("agent joins");
+
+    for (actor, others) in [(&a, [&b, &x]), (&b, [&a, &x])] {
+        assert_eq!(
+            open(&state, &tenant, actor, &others).await.expect("reopen"),
+            dm
+        );
+    }
+    assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a, &b, &x]));
+
+    // Without X, or with another agent, it is not the DM asked for.
+    let other = open(&state, &tenant, &a, &[&b, &y]).await.expect("open");
+    assert_ne!(other, dm);
+    assert_eq!(members(&state, &tenant, other).await, set_of(&[&a, &b, &y]));
 }
 
 /// An agent already in a DM and named in an add joins whichever DM the add
@@ -1450,6 +1508,7 @@ async fn a_new_dm_cannot_start_from_an_archived_dm() {
             dm,
             &a.public_key().to_bytes(),
             &[c_pk.as_slice()],
+            true,
             &|_: &str, _: &[u8]| Ok(()),
         )
         .await;
