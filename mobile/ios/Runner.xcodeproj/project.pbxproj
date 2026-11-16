@@ -20,6 +20,7 @@
 		C0AF00000000000000000001 /* NativeConfirmationDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0AF00000000000000000002 /* NativeConfirmationDialog.swift */; };
 		C0AF00000000000000000021 /* NativePresenceMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0AF00000000000000000022 /* NativePresenceMenu.swift */; };
 		C0AF00000000000000000011 /* NativeAddMembersSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0AF00000000000000000012 /* NativeAddMembersSheet.swift */; };
+		D0AF00000000000000000011 /* NativeChannelActionsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0AF00000000000000000012 /* NativeChannelActionsSheet.swift */; };
 		C0AF00000000000000000071 /* NativeCreateChannelSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0AF00000000000000000072 /* NativeCreateChannelSheet.swift */; };
 		BZZ00000000000000000001 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BZZ00000000000000000006 /* NotificationService.swift */; };
 		BZZ00000000000000000002 /* NotificationService.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = BZZ00000000000000000009 /* NotificationService.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -122,6 +123,7 @@
 		C0AF00000000000000000002 /* NativeConfirmationDialog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeConfirmationDialog.swift; sourceTree = "<group>"; };
 		C0AF00000000000000000022 /* NativePresenceMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePresenceMenu.swift; sourceTree = "<group>"; };
 		C0AF00000000000000000012 /* NativeAddMembersSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeAddMembersSheet.swift; sourceTree = "<group>"; };
+		D0AF00000000000000000012 /* NativeChannelActionsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeChannelActionsSheet.swift; sourceTree = "<group>"; };
 		C0AF00000000000000000072 /* NativeCreateChannelSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeCreateChannelSheet.swift; sourceTree = "<group>"; };
 		BZZ00000000000000000006 /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationService.swift; sourceTree = "<group>"; };
 		BZZ00000000000000000007 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -334,6 +336,7 @@
 				C0AF00000000000000000002 /* NativeConfirmationDialog.swift */,
 				C0AF00000000000000000022 /* NativePresenceMenu.swift */,
 				C0AF00000000000000000012 /* NativeAddMembersSheet.swift */,
+				D0AF00000000000000000012 /* NativeChannelActionsSheet.swift */,
 				C0AF00000000000000000072 /* NativeCreateChannelSheet.swift */,
 				4A71C01A2F40D00100A17E01 /* NativeProfileTextEditor.swift */,
 				F84390190000000000000002 /* NativeStatusEditor.swift */,
@@ -687,6 +690,7 @@
 				C0AF00000000000000000001 /* NativeConfirmationDialog.swift in Sources */,
 				C0AF00000000000000000021 /* NativePresenceMenu.swift in Sources */,
 				C0AF00000000000000000011 /* NativeAddMembersSheet.swift in Sources */,
+				D0AF00000000000000000011 /* NativeChannelActionsSheet.swift in Sources */,
 				C0AF00000000000000000071 /* NativeCreateChannelSheet.swift in Sources */,
 				4A71C0192F40D00100A17E01 /* NativeProfileTextEditor.swift in Sources */,
 				F84390190000000000000001 /* NativeStatusEditor.swift in Sources */,
