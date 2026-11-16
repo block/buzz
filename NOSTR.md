@@ -281,10 +281,17 @@ for its comments. It belongs to the artifact, not to anyone who posts in it.
   posts comes only from the home, through [Channel parents](#channel-parents):
   the home's readers read, a view-only (`guest`) home's people read but do
   not post, and a home's `parent_access` applies as it does to any child.
-  Comments close to new posts while the home is archived.
-- **No people or settings of its own.** kind:9000, 9001, 9002, 9008, 9021
-  and 9022 are refused in a conversation. The home's direct owners and
-  admins may delete comments with kind:9005; authors may delete their own.
+  Comments close to new posts while the home is archived. Only the home
+  counts: an archived project above it still grants access and does not
+  archive its channels, so it does not close their comments either, just as
+  it does not close posting in those channels.
+- **Only comments.** A conversation accepts only kind:9 messages, kind:40003
+  edits, kind:7 reactions, kind:5 and kind:9005 deletions, and the opening
+  kind:9007. Every other kind with its `h`, including people (9000, 9001,
+  9021, 9022), settings (9002), deletion (9008), a canvas, and any kind added
+  later, is refused with `invalid: an artifact's conversation only holds
+  comments`. The home's direct owners and admins may delete comments with
+  kind:9005; authors may delete their own.
 - **Moves.** When the artifact moves, the conversation moves with it in the
   same transaction: its parent becomes the new home, the old home's readers
   lose it at once, and their live subscriptions close. A move to a home that

@@ -14,8 +14,8 @@ use buzz_auth::Scope;
 use crate::handlers::group_state_postgres_tests::{create_channel, edit_channel, test_conn};
 use crate::handlers::ingest::{ingest_event, HttpAuthMethod, IngestAuth};
 use crate::handlers::parent_access_postgres_tests::{
-    add, auto_archive, count_named, post, read_implicit, read_named, role_in, set_parent,
-    set_parent_access, Tree,
+    add, auto_archive, count_named, post, read_implicit, read_named, req_event_ids, role_in,
+    set_parent, set_parent_access, Tree,
 };
 use crate::state::AppState;
 
@@ -372,10 +372,11 @@ async fn moving_a_task_moves_its_comments() {
         .expect("the new home's reader comments");
 }
 
-/// A conversation has no people or settings of its own; no other channel
-/// may take its address or type, and it holds no artifacts.
-/// Mutation: drop `conversation_refuses_kind`, or the generic 9007 guard
-/// → RED.
+/// A conversation holds only comments: people, settings, a canvas or any
+/// other kind it does not list are refused. No other channel may take its
+/// address or type, and it holds no artifacts.
+/// Mutation: drop `conversation_accepts_kind`, accept every kind, or drop the
+/// generic 9007 guard → RED.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn a_conversation_has_no_people_or_settings() {
@@ -385,12 +386,18 @@ async fn a_conversation_has_no_people_or_settings() {
     let conversation = open(state, tenant, &t.owner, id).await.unwrap();
     let h = conversation.to_string();
     let person = Keys::generate().public_key().to_hex();
-    let attempts: [(u16, Vec<Vec<&str>>); 5] = [
+    let message = "0".repeat(64);
+    let attempts: [(u16, Vec<Vec<&str>>); 8] = [
         (9000, vec![vec!["p", &person]]),
         (9001, vec![vec!["p", &person]]),
         (9002, vec![vec!["name", "renamed"]]),
         (9008, vec![]),
         (9021, vec![]),
+        // A canvas, and kinds an ordinary channel takes that no refuse
+        // list ever named: a pin and a forum post.
+        (40100, vec![]),
+        (40004, vec![vec!["e", &message]]),
+        (45001, vec![]),
     ];
     for (kind, extra) in attempts {
         let mut tags = vec![Tag::parse(["h", h.as_str()]).unwrap()];
@@ -400,10 +407,7 @@ async fn a_conversation_has_no_people_or_settings() {
             .sign_with_keys(&t.owner)
             .unwrap();
         let refused = send(state, tenant, event).await.unwrap_err();
-        assert!(
-            refused.contains("no members or settings"),
-            "{kind}: {refused}"
-        );
+        assert!(refused.contains("only holds comments"), "{kind}: {refused}");
     }
 
     let squat = |h: Uuid, channel_type: &str| {
@@ -433,10 +437,8 @@ async fn a_conversation_has_no_people_or_settings() {
     )
     .await
     .unwrap_err();
-    assert!(
-        refused.contains("cannot live in a conversation"),
-        "{refused}"
-    );
+    // An artifact is not a comment, so the allowlist refuses it first.
+    assert!(refused.contains("only holds comments"), "{refused}");
 }
 
 /// The home's own owners and admins delete comments; a member of the home
@@ -502,4 +504,189 @@ async fn an_auto_archiving_chat_holds_task_comments() {
         1,
         "comments stay readable"
     );
+}
+
+/// Two people opening a task's conversation at once both succeed and get
+/// the same channel, which nobody owns, and both comment in it.
+/// Mutation: drop the artifact lock from `ensure_artifact_conversation` →
+/// RED or flaky.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn two_first_comments_at_once_share_one_conversation() {
+    let t = Tree::new("conversation-race").await;
+    let (state, tenant) = (&t.state, &t.tenant);
+    for _ in 0..8 {
+        let (id, _) = create_task(state, tenant, &t.owner, t.child).await;
+        let (a, b) = tokio::join!(
+            open(state, tenant, &t.owner, id),
+            open(state, tenant, &t.reader, id)
+        );
+        let (a, b) = (a.expect("first opener"), b.expect("second opener"));
+        assert_eq!(a, b);
+        let members: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM channel_members WHERE community_id = $1 AND channel_id = $2",
+        )
+        .bind(tenant.community().as_uuid())
+        .bind(a)
+        .fetch_one(state.db.pool())
+        .await
+        .unwrap();
+        assert_eq!(members, 0, "nobody owns it");
+        let (x, y) = tokio::join!(
+            post(state, tenant, &t.owner, a),
+            post(state, tenant, &t.reader, a)
+        );
+        x.expect("owner comments");
+        y.expect("reader comments");
+        assert_eq!(count_named(state, tenant, &t.reader, a).await, Some(2));
+    }
+}
+
+/// A conversation opens only at its own task's address: not at a made-up
+/// one, not at another task's, and nobody can claim a task's address before
+/// its first comment, with or without the `artifact` type.
+/// Mutation: drop the derivation check or the generic 9007 guard → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_forged_or_claimed_address_is_refused() {
+    let t = Tree::new("conversation-forged").await;
+    let (state, tenant) = (&t.state, &t.tenant);
+    let (mine, _) = create_task(state, tenant, &t.owner, t.child).await;
+    let (theirs, _) = create_task(state, tenant, &t.owner, t.child).await;
+    let theirs_at = buzz_core::artifact::conversation_id(&theirs.to_string());
+
+    for h in [Uuid::new_v4(), theirs_at] {
+        let refused = send(state, tenant, open_event(&t.owner, &mine.to_string(), h))
+            .await
+            .unwrap_err();
+        assert!(!refused.is_empty());
+    }
+    let claim = |extra: Option<[&str; 2]>| {
+        let mut tags = vec![
+            Tag::parse(["h", &theirs_at.to_string()]).unwrap(),
+            Tag::parse(["name", "early"]).unwrap(),
+        ];
+        tags.extend(extra.map(|t| Tag::parse(t).unwrap()));
+        EventBuilder::new(Kind::Custom(9007), "")
+            .tags(tags)
+            .sign_with_keys(&t.owner)
+            .unwrap()
+    };
+    for extra in [
+        None,
+        Some(["channel_type", "stream"]),
+        Some(["channel_type", "artifact"]),
+    ] {
+        assert!(
+            send(state, tenant, claim(extra)).await.is_err(),
+            "claiming early: {extra:?}"
+        );
+    }
+    assert!(state
+        .db
+        .get_channel_for_event_write(tenant.community(), theirs_at)
+        .await
+        .is_err());
+    assert_eq!(
+        open(state, tenant, &t.owner, theirs).await.unwrap(),
+        theirs_at,
+        "its own task still opens it"
+    );
+    assert_eq!(
+        state
+            .db
+            .get_channel_for_event_write(tenant.community(), theirs_at)
+            .await
+            .unwrap()
+            .name,
+        theirs.to_string()
+    );
+}
+
+/// A channel whose tasks have comments can be filed into a project, but not
+/// under a project's child, where its comments would be a fourth level.
+/// Mutation: leave conversations out of the depth check → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn filing_a_channel_with_comments_respects_the_depth_limit() {
+    let t = Tree::new("conversation-filing").await;
+    let (state, tenant) = (&t.state, &t.tenant);
+    let chat = create_channel(state, tenant, &t.owner, &[&["visibility", "private"]]).await;
+    let (id, _) = create_task(state, tenant, &t.owner, chat).await;
+    let conversation = open(state, tenant, &t.owner, id).await.unwrap();
+
+    let refused = set_parent(state, tenant, &t.owner, chat, Some(t.child))
+        .await
+        .unwrap_err();
+    assert!(!refused.is_empty());
+    let parent = |id| async move {
+        state
+            .db
+            .get_channel_for_event_write(tenant.community(), id)
+            .await
+            .unwrap()
+            .parent_id
+    };
+    assert_eq!(parent(chat).await, None, "nothing was saved");
+
+    set_parent(state, tenant, &t.owner, chat, Some(t.project))
+        .await
+        .expect("filed into the project");
+    assert_eq!(parent(chat).await, Some(t.project));
+    assert_eq!(parent(conversation).await, Some(chat));
+    post(state, tenant, &t.reader, conversation)
+        .await
+        .expect("the project's reader comments");
+}
+
+/// Task conversations stay out of everything that does not name them:
+/// reads, counts, searches and channel listings.
+/// Mutation: list the `artifact` type among the legacy types → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn task_conversations_stay_out_of_lists_and_search() {
+    let t = Tree::new("conversation-hidden").await;
+    let (state, tenant) = (&t.state, &t.tenant);
+    let (id, _) = create_task(state, tenant, &t.owner, t.child).await;
+    let conversation = open(state, tenant, &t.owner, id).await.unwrap();
+    let word = format!("needle{}", Uuid::new_v4().simple());
+    let comment = EventBuilder::new(Kind::Custom(9), format!("look {word}"))
+        .tags([Tag::parse(["h", &conversation.to_string()]).unwrap()])
+        .sign_with_keys(&t.reader)
+        .unwrap();
+    let comment_id = comment.id.to_hex();
+    send(state, tenant, comment).await.expect("comment");
+
+    for reader in [&t.owner, &t.reader] {
+        for filter in [
+            serde_json::json!({"kinds": [9]}),
+            serde_json::json!({"kinds": [9], "search": word}),
+            serde_json::json!({"ids": [comment_id]}),
+        ] {
+            let ids = req_event_ids(state, tenant, reader, filter.clone()).await;
+            assert!(!ids.contains(&comment_id), "{filter}");
+        }
+        assert_eq!(
+            req_event_ids(
+                state,
+                tenant,
+                reader,
+                serde_json::json!({"kinds": [9], "#h": [conversation], "search": word}),
+            )
+            .await,
+            vec![comment_id.clone()],
+            "naming it finds it"
+        );
+        let accessible = state
+            .get_accessible_channel_ids_cached(tenant.community(), &reader.public_key().to_bytes())
+            .await
+            .unwrap();
+        assert!(!accessible.contains(&conversation), "not in channel lists");
+        let snapshot = state
+            .db
+            .get_member_channel_ids(tenant.community(), &reader.public_key().to_bytes())
+            .await
+            .unwrap();
+        assert!(!snapshot.contains(&conversation), "not in membership lists");
+    }
 }
