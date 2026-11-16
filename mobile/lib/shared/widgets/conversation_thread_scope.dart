@@ -11,3 +11,7 @@ class ConversationThreadScope extends InheritedWidget {
   @override
   bool updateShouldNotify(ConversationThreadScope oldWidget) => false;
 }
+
+/// Marks a full-screen page that shows over the conversation without leaving
+/// it, such as the media viewer. Pushing one keeps the thread pane open.
+mixin KeepsConversationThread<T> on PageRoute<T> {}

@@ -1,3 +1,4 @@
+import 'package:buzz/features/channels/media_viewer_page.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'package:buzz/shared/widgets/conversation_layout.dart';
@@ -405,6 +406,17 @@ void main() {
     expect(find.text('Second conversation'), findsOneWidget);
     expect(find.semantics.byLabel('Second conversation'), findsOne);
 
+    // A second Back while the overlay slides away is spent on the overlay,
+    // so a double press doesn't close the conversation.
+    await tester.tap(find.byTooltip('Show sidebar'));
+    await tester.pumpAndSettle();
+    await tester.binding.handlePopRoute();
+    await tester.pump(const Duration(milliseconds: 60));
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(list, findsNothing);
+    expect(find.text('Second conversation'), findsOneWidget);
+
     // Rotating an open overlay into a docked sidebar spends it: Hide then
     // hides, and rotating back does not reopen it.
     await tester.tap(find.byTooltip('Show sidebar'));
@@ -445,6 +457,16 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Reply in thread'));
     await tester.pumpAndSettle();
+    expect(find.text('Thread content'), findsOneWidget);
+    // The media viewer only shows over the conversation: the thread stays,
+    // and Back closes the viewer first.
+    await tester.tap(find.text('Open image'));
+    await tester.pumpAndSettle();
+    expect(find.byType(MediaImageViewerPage), findsOneWidget);
+    expect(find.text('Thread content'), findsOneWidget);
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.byType(MediaImageViewerPage), findsNothing);
     expect(find.text('Thread content'), findsOneWidget);
     await tester.tap(find.text('Open linked page'));
     await tester.pumpAndSettle();
@@ -499,6 +521,14 @@ class _TabletConversation extends StatelessWidget {
             context,
           ).push(MaterialPageRoute<void>(builder: (_) => const _LinkedPage())),
           child: const Text('Open linked page'),
+        ),
+        TextButton(
+          onPressed: () => openImageViewer(
+            context,
+            imageUrl: 'https://example.org/photo.png',
+            heroTag: 'tablet-photo',
+          ),
+          child: const Text('Open image'),
         ),
       ],
     ),

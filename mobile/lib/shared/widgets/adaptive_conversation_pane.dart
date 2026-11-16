@@ -280,8 +280,9 @@ class AdaptiveConversationPane extends HookConsumerWidget {
     final threadNavigator = useMemoized(() => GlobalKey<NavigatorState>());
     // A thread belongs to the selected conversation page. A page pushed above
     // it (a channel link, a profile) closes the thread, which would otherwise
-    // stay beside a page it does not belong to.
-    final threadCloser = useMemoized(() => _ThreadCloser(controller), [
+    // stay beside a page it does not belong to. Anything pushed above it,
+    // the media viewer included, takes Back before the thread.
+    final detailRoutes = useMemoized(() => _DetailRoutes(controller), [
       controller,
     ]);
     final sidebarHidden = ref.watch(conversationSidebarHiddenProvider);
@@ -394,8 +395,9 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                 (wide ? listWidth + leftInset + 1 : 0.0);
             final detailWidth =
                 layout?.detailWidth ?? constraints.maxWidth - detailLeft;
-            // The overlay owns focus and Back from the frame it opens until the
-            // frame it starts closing, whatever the slide animation shows.
+            // The overlay owns focus from the frame it opens until the frame
+            // it starts closing, whatever the slide animation shows. Back
+            // stays with it until the slide ends; see the PopScope below.
             final overlayOpen =
                 layout?.sidebar == ConversationSidebarMode.overlay;
             void toggleSidebar() => ConversationSidebarScope.toggleFor(
@@ -513,7 +515,7 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                 Widget detail = Navigator(
                   requestFocus: selected != null,
                   key: navigator,
-                  observers: [routeObserver, threadCloser],
+                  observers: [routeObserver, detailRoutes],
                   pages: [
                     if (!(wide && persistentSelection && selected != null))
                       MaterialPage<void>(
@@ -614,6 +616,14 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                               if (didPop || !active) return;
                               if (overlayOpen) {
                                 controller.hideSidebarOverlay();
+                              } else if (overlaid) {
+                                // A second Back while the overlay slides
+                                // away is spent on it, not the conversation.
+                              } else if (detailRoutes.covering) {
+                                // The newest route goes first: a viewer or
+                                // sheet above the conversation, then the
+                                // thread beside it.
+                                navigator.currentState!.maybePop(result);
                               } else if (threadOpen) {
                                 threadNavigator.currentState?.maybePop(result);
                               } else if (selected != null &&
@@ -1009,7 +1019,8 @@ Future<void> openThreadPane(BuildContext context, WidgetBuilder builder) async {
   final pane = context
       .getInheritedWidgetOfExactType<ConversationPaneScope>()
       ?.notifier;
-  final settings = ModalRoute.of(context)?.settings;
+  // Settings never change for a route, so this doesn't rebuild the caller.
+  final settings = ModalRoute.settingsOf(context);
   if (pane != null &&
       pane.selectedId != null &&
       // Only the selected conversation page; pages pushed above it push.
@@ -1083,17 +1094,30 @@ class AdaptiveConversationDestination extends HookConsumerWidget {
   }
 }
 
-/// Closes the thread pane when a page is pushed above the selected
-/// conversation. Sheets and dialogs leave it open.
-class _ThreadCloser extends NavigatorObserver {
-  _ThreadCloser(this.controller);
+/// Tracks routes pushed above the selected conversation, such as linked
+/// pages, the media viewer and sheets.
+///
+/// A page closes the thread pane. Sheets, dialogs and
+/// [KeepsConversationThread] pages such as the media viewer leave it open.
+class _DetailRoutes extends NavigatorObserver {
+  _DetailRoutes(this.controller);
 
   final ConversationPaneController controller;
+  final _above = <Route<dynamic>>{};
+
+  /// Whether a pushed route covers the conversation, so Back closes it before
+  /// the thread pane.
+  bool get covering {
+    _above.removeWhere((route) => !route.isActive);
+    return _above.isNotEmpty;
+  }
 
   @override
   void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
     // Declarative pages are the pane's own selection and placeholder.
-    if (route is! PageRoute || route.settings is Page) return;
+    if (route.settings is Page) return;
+    _above.add(route);
+    if (route is! PageRoute || route is KeepsConversationThread) return;
     // A page pushed while building waits for the frame to finish.
     if (SchedulerBinding.instance.schedulerPhase ==
         SchedulerPhase.persistentCallbacks) {
@@ -1104,4 +1128,12 @@ class _ThreadCloser extends NavigatorObserver {
       controller.closeThread();
     }
   }
+
+  @override
+  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) =>
+      _above.remove(route);
+
+  @override
+  void didRemove(Route<dynamic> route, Route<dynamic>? previousRoute) =>
+      _above.remove(route);
 }

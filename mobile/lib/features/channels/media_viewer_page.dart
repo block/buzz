@@ -19,6 +19,7 @@ import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/concentric_sheet_surface.dart';
+import '../../shared/widgets/conversation_thread_scope.dart';
 import '../../shared/widgets/page_indicator.dart';
 import '../../shared/widgets/duo_toolbar.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
@@ -103,27 +104,40 @@ PageRoute<void> buildImageViewerRoute({
         ),
       ];
   final safeInitialIndex = initialIndex.clamp(0, images.length - 1).toInt();
-  return PageRouteBuilder<void>(
-    transitionDuration: disableAnimations
-        ? Duration.zero
-        : _imageViewerPushDuration,
-    reverseTransitionDuration: disableAnimations
-        ? Duration.zero
-        : _imageViewerPopDuration,
-    pageBuilder: (context, animation, secondaryAnimation) =>
-        MediaImageViewerPage(
-          imageUrl: imageUrl,
-          heroTag: heroTag,
-          semanticLabel: semanticLabel,
-          galleryItems: images,
-          initialIndex: safeInitialIndex,
-          onSelectionChanged: onSelectionChanged,
-          onReply: onReply,
-          onMore: onMore,
-        ),
-    transitionsBuilder: (context, animation, secondaryAnimation, child) =>
-        _MediaViewerRouteTransition(animation: animation, child: child),
+  return _MediaViewerRoute(
+    disableAnimations: disableAnimations,
+    builder: (context) => MediaImageViewerPage(
+      imageUrl: imageUrl,
+      heroTag: heroTag,
+      semanticLabel: semanticLabel,
+      galleryItems: images,
+      initialIndex: safeInitialIndex,
+      onSelectionChanged: onSelectionChanged,
+      onReply: onReply,
+      onMore: onMore,
+    ),
   );
+}
+
+/// The media viewer covers the conversation without leaving it, so an open
+/// thread pane stays beside it.
+class _MediaViewerRoute extends PageRouteBuilder<void>
+    with KeepsConversationThread<void> {
+  _MediaViewerRoute({
+    required bool disableAnimations,
+    required WidgetBuilder builder,
+  }) : super(
+         transitionDuration: disableAnimations
+             ? Duration.zero
+             : _imageViewerPushDuration,
+         reverseTransitionDuration: disableAnimations
+             ? Duration.zero
+             : _imageViewerPopDuration,
+         pageBuilder: (context, animation, secondaryAnimation) =>
+             builder(context),
+         transitionsBuilder: (context, animation, secondaryAnimation, child) =>
+             _MediaViewerRouteTransition(animation: animation, child: child),
+       );
 }
 
 void openImageViewer(
@@ -163,21 +177,13 @@ void openVideoViewer(
   VoidCallback? onReply,
 }) {
   Navigator.of(context).push(
-    PageRouteBuilder<void>(
-      transitionDuration: MediaQuery.disableAnimationsOf(context)
-          ? Duration.zero
-          : _imageViewerPushDuration,
-      reverseTransitionDuration: MediaQuery.disableAnimationsOf(context)
-          ? Duration.zero
-          : _imageViewerPopDuration,
-      pageBuilder: (context, animation, secondaryAnimation) =>
-          MediaVideoViewerPage(
-            videoUrl: videoUrl,
-            posterUrl: posterUrl,
-            onReply: onReply,
-          ),
-      transitionsBuilder: (context, animation, secondaryAnimation, child) =>
-          _MediaViewerRouteTransition(animation: animation, child: child),
+    _MediaViewerRoute(
+      disableAnimations: MediaQuery.disableAnimationsOf(context),
+      builder: (context) => MediaVideoViewerPage(
+        videoUrl: videoUrl,
+        posterUrl: posterUrl,
+        onReply: onReply,
+      ),
     ),
   );
 }
