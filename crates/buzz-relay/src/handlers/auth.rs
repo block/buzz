@@ -2879,6 +2879,92 @@ mod tests {
             );
         }
 
+        /// On a closed relay with NIP-OA admission off, a member agent's
+        /// verified NIP-OA tag records its owner; a tag for another agent or
+        /// one that has expired records nothing; a refused AUTH (agent not a
+        /// member, owner not a member) records nothing.
+        /// Mutation: restore the `!require_relay_membership` guard on the
+        /// recording step → the member agent's owner stays NULL → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn closed_relay_auth_records_only_verified_admitted_owner() {
+            use std::sync::Arc;
+            let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                .await
+                .expect("PostgreSQL must be available");
+            let state = state_with_pool(pool, |c| {
+                c.require_relay_membership = true;
+                c.allow_nip_oa_auth = false;
+            })
+            .await;
+            let community = seeded_community(&state).await;
+            let owner = Keys::generate();
+            let (valid, wrong_agent, stale, refused) = (
+                Keys::generate(),
+                Keys::generate(),
+                Keys::generate(),
+                Keys::generate(),
+            );
+            for keys in [&valid, &wrong_agent, &stale] {
+                state
+                    .db
+                    .add_relay_member(
+                        community,
+                        &keys.public_key().to_hex(),
+                        "member",
+                        None,
+                        &nostr::Keys::generate(),
+                    )
+                    .await
+                    .map(|write| write.outcome)
+                    .expect("add agent");
+            }
+            let tag = |agent: &nostr::PublicKey, conditions: &str| -> Vec<String> {
+                let json = buzz_sdk::nip_oa::compute_auth_tag(&owner, agent, conditions)
+                    .expect("sign NIP-OA credential");
+                serde_json::from_str(&json).expect("tag JSON")
+            };
+            let cases = [
+                (&valid, tag(&valid.public_key(), ""), true, true),
+                (&wrong_agent, tag(&stale.public_key(), ""), true, false),
+                (
+                    &stale,
+                    tag(&stale.public_key(), "created_at<1"),
+                    true,
+                    false,
+                ),
+                (&refused, tag(&refused.public_key(), ""), false, false),
+            ];
+            for (i, (keys, auth_tag, admitted, recorded)) in cases.into_iter().enumerate() {
+                let challenge = format!("record-owner-{i}");
+                let (conn, _ctrl) = registered_pending_conn(&state, community, &challenge);
+                handle_auth(
+                    signed_auth(keys, &challenge, Some(auth_tag)),
+                    Arc::clone(&conn),
+                    Arc::clone(&state),
+                )
+                .await;
+                assert_eq!(
+                    matches!(conn.auth_state_snapshot(), AuthState::Authenticated(_)),
+                    admitted,
+                    "case {i} admission"
+                );
+                let stored: Option<Option<Vec<u8>>> = sqlx::query_scalar(
+                    "SELECT agent_owner_pubkey FROM users WHERE community_id = $1 AND pubkey = $2",
+                )
+                .bind(community.as_uuid())
+                .bind(keys.public_key().as_bytes().as_slice())
+                .fetch_optional(state.db.pool())
+                .await
+                .expect("read owner");
+                assert_eq!(
+                    stored.flatten(),
+                    recorded.then(|| owner.public_key().to_bytes().to_vec()),
+                    "case {i} owner record"
+                );
+            }
+        }
+
         /// Root AUTH records each agent's owner on its socket — the proven
         /// NIP-OA owner, or the stored owner link when the agent signs in
         /// without a credential — so revoking the owner closes both agents
