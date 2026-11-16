@@ -552,7 +552,9 @@ class ThreadDetailPage extends HookConsumerWidget {
     // that opened it, instead of stacking another copy of the page.
     useOpenThreadRoute(ref, threadHead.id, (messageId) {
       // Like a deep-link entry, a link's older target must expose Latest.
+      // A focused composer hides it, so drop focus as a new page used to.
       hidesLatestForInitialTailSettle.value = false;
+      composerFocusNode.unfocus();
       didJumpToInitialMessage.value = false;
       initialHighlightTargetIndex.value = null;
       initialTargetReadyForHighlight.value = false;
