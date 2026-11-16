@@ -246,7 +246,7 @@ The result always reports `account_erasure_complete: false`.
 
 ## Index rollout
 
-Migration 0089 adds uploader/hash and hash/uploader indexes to `media_uploaders`
+Migration 0092 adds uploader/hash and hash/uploader indexes to `media_uploaders`
 and equivalent partial indexes for `media_uploaded` audit entries. Existing
 community keys remain unchanged. Apply schema before deploying the cleanup code.
 The migration builds missing indexes under a 1-second lock timeout and a

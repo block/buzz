@@ -107,7 +107,7 @@ The gateway serves Prometheus metrics at `GET /metrics` on the **private health 
 | `push_gateway_reaper_failures_total` | counter | — | Retention reaper sweep failures. |
 | `push_gateway_readiness_failures_total` | counter | `cause` = `not_accepting` \| `authority` | Readiness probe failures by cause. |
 
-`push_gateway_delivery_errors_total` is intentionally **narrow**: it counts only selected exit classes of the `/v1/deliveries/apns` handler. `class` ∈ `invalid_grant` (grant rejected at the admission seam, before a permit is issued), `rate_limited`, `temporarily_unavailable` (authority unavailable at the admission seam), `profile_mismatch`, `profile_disabled`, `token_custody` (endpoint-token open failure), `finish_failed` (detached disposition/join failure returned as 503). Request/auth/attestation/grant validation on the enrollment, delegation, rotation, and revocation handlers is **not** counted by this metric; it is a delivery-hot-path signal, not a total error rate across the API.
+`push_gateway_delivery_errors_total` is intentionally **narrow**: it counts only selected exit classes of the delivery handler (`/v1/deliveries` and its `/v1/deliveries/apns` alias). `class` ∈ `invalid_grant` (grant rejected at the admission seam, before a permit is issued), `rate_limited`, `temporarily_unavailable` (authority unavailable at the admission seam), `profile_mismatch`, `profile_disabled`, `token_custody` (endpoint-token open failure), `finish_failed` (detached disposition/join failure returned as 503). Request/auth/attestation/grant validation on the enrollment, delegation, rotation, and revocation handlers is **not** counted by this metric; it is a delivery-hot-path signal, not a total error rate across the API.
 
 Scraping is **opt-in** and off by default, so the default chart render is unchanged and `8081` keeps no pod ingress. For prometheus-operator, set `podMonitor.enabled=true` and `networkPolicy.monitoring.enabled=true` with `networkPolicy.monitoring.namespaceSelector` / `podSelector` naming your scraper. For Datadog Autodiscovery, leave `podMonitor.enabled=false`, supply the OpenMetrics check through `podAnnotations`, and enable the same narrowly selected NetworkPolicy ingress:
 
@@ -155,8 +155,12 @@ Alerting rules ship as an opt-in prometheus-operator `PrometheusRule` (`promethe
 Relay push is an explicit deployment opt-in through `BUZZ_PUSH_ENABLED=true`;
 the established strict boolean parser rejects unknown values and the default is
 false. When enabled, `BUZZ_PUSH_GATEWAY_DELIVERY_URL` is required and must be an
-exact HTTP(S) `/v1/deliveries/apns` URL. Credentials, query and fragment are
-not accepted. The relay signs and sends the same configured URL. An absent or explicitly empty URL while
+exact HTTP(S) URL whose path is `/v1/deliveries/apns` or `/v1/deliveries`.
+Use `/v1/deliveries` only with a gateway that already serves it; the public
+gateway at `push.buzz.xyz` does not yet. A gateway that does not answer on the
+configured path (404 or 403) fails each delivery permanently, so the
+notification is dropped rather than retried.
+Credentials, query and fragment are not accepted. The relay signs and sends the same configured URL. An absent or explicitly empty URL while
 enabled is a startup error. Only an enabled relay
 advertises its host-scoped NIP-PL descriptor, accepts leases, and starts the
 matcher and delivery worker. Relays retain lease matching, authorization, durable
@@ -389,8 +393,10 @@ helm pull oci://ghcr.io/block/buzz/charts/buzz-push-gateway --version X.Y.Z
 
 The gateway verifies the signed method and delivery path using the NIP-98 event
 format, rather than matching the full incoming HTTP(S) request URL. The signed
-method must be `POST`; the signed URL path must be `/v1/deliveries/apns`, without
-query, fragment or credentials. Incoming request queries are rejected.
+method must be `POST`; the signed URL path must be the path of the route the
+request is sent to, `/v1/deliveries` or its `/v1/deliveries/apns` alias, without
+query, fragment or credentials. A request signed for one route is rejected on
+the other. Incoming request queries are rejected.
 Host and forwarding headers do not participate in delivery authentication.
 Event signatures, body hashes, timestamps, grant checks and replay protection
 remain enforced. No mobile App Attest audiences or relay activation settings change.

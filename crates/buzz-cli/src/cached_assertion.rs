@@ -84,7 +84,8 @@ pub(crate) fn unix_now() -> u64 {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     #[cfg(test)]
-    let now = now + test_clock::SKEW.with(std::cell::Cell::get);
+    let now = test_clock::FROZEN.with(std::cell::Cell::get).unwrap_or(now)
+        + test_clock::SKEW.with(std::cell::Cell::get);
     now
 }
 
@@ -93,7 +94,13 @@ pub(crate) fn unix_now() -> u64 {
 #[cfg(test)]
 pub(crate) mod test_clock {
     thread_local! {
+        pub(super) static FROZEN: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
         pub(super) static SKEW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+    /// Pin this thread's clock to `at`, so reads on either side of a
+    /// wall-clock second boundary agree; `advance` still moves it.
+    pub(crate) fn freeze(at: u64) {
+        FROZEN.with(|frozen| frozen.set(Some(at)));
     }
     pub(crate) fn advance(secs: u64) {
         SKEW.with(|skew| skew.set(skew.get() + secs));

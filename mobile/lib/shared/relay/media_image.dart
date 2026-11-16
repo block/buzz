@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
+import 'package:buzz/shared/http/app_http_client.dart';
 
 import '../hosted/hosted_relay_auth.dart';
 import '../utils/bounded_fetch.dart';
@@ -17,7 +18,9 @@ import 'media_disk_cache.dart';
 /// so TLS connections are reused across images instead of re-handshaking per
 /// fetch. Override in tests to stub the network.
 final mediaHttpClientProvider = Provider<http.Client>((ref) {
-  final client = ref.watch(hostedHttpClientFactoryProvider)();
+  final client = ref.watch(hostedHttpClientFactoryProvider)(
+    traffic: HttpTraffic.media,
+  );
   ref.onDispose(client.close);
   return client;
 });
@@ -248,7 +251,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       if (wasAbandoned) throw StateError('Image load abandoned');
       onBytesLoaded?.call(bytes);
       final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
-      return await decode(buffer);
+      return withBrowserFrameTiming(await decode(buffer));
     } catch (_) {
       // An abandoned load has no listener left to report to, and an error
       // would surface as an unhandled image error. The consumer already
@@ -523,6 +526,47 @@ class _MediaImageStreamCompleter extends MultiFrameImageStreamCompleter {
     _listeners.remove(listener);
     super.removeListener(listener);
   }
+}
+
+/// Shows animation frames that ask for 10 ms or less for 100 ms instead, as
+/// browsers do (Firefox first, then Chromium and WebKit), so an animated
+/// emoji plays at the same speed as on desktop. Flutter uses the delay as
+/// written, so a GIF with 0 or 1 centisecond delays otherwise runs at the
+/// display refresh rate.
+@visibleForTesting
+ui.Codec withBrowserFrameTiming(ui.Codec codec) =>
+    codec.frameCount > 1 ? _BrowserFrameTimingCodec(codec) : codec;
+
+class _BrowserFrameTimingCodec implements ui.Codec {
+  _BrowserFrameTimingCodec(this._codec);
+
+  final ui.Codec _codec;
+
+  @override
+  int get frameCount => _codec.frameCount;
+
+  @override
+  int get repetitionCount => _codec.repetitionCount;
+
+  @override
+  Future<ui.FrameInfo> getNextFrame() async {
+    final frame = await _codec.getNextFrame();
+    if (frame.duration > const Duration(milliseconds: 10)) return frame;
+    return _SlowedFrame(frame.image);
+  }
+
+  @override
+  void dispose() => _codec.dispose();
+}
+
+class _SlowedFrame implements ui.FrameInfo {
+  _SlowedFrame(this.image);
+
+  @override
+  final ui.Image image;
+
+  @override
+  Duration get duration => const Duration(milliseconds: 100);
 }
 
 /// One download shared by every load of the same URL, auth scope and role

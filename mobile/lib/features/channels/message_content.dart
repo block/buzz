@@ -1,9 +1,11 @@
 import 'message_reply_drag_target.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
+
 import 'dart:async';
 import 'dart:convert';
 import '../../shared/widgets/ios_media_carousel.dart';
 import '../../shared/widgets/message_attachment_corners.dart';
+
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -11,7 +13,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter/semantics.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
@@ -44,6 +46,7 @@ import 'native_photo_zoom_preview.dart';
 import 'native_video_files.dart';
 import 'message_content/link_normalizer.dart';
 import 'message_content/markdown_escapes.dart';
+import 'message_content/markdown_tables.dart';
 import 'message_content/preview_text.dart';
 import 'message_media.dart';
 import 'message_content/bubble_segments.dart';
@@ -327,10 +330,8 @@ class MessageContent extends HookConsumerWidget {
           )
         : null;
     final galleryText = trailingGallery?.content ?? normalizedContent;
-    // gpt_markdown has no backslash escapes, so hold escaped characters as
-    // stand-ins that _MarkdownEscapeMd and the link builders restore.
     final markdownContent = useMemoized(
-      () => shieldMarkdownProseEscapes(galleryText),
+      () => separateMarkdownTables(escapeMarkdownLiterals(galleryText)),
       [galleryText],
     );
     final customEmoji = _mergeCustomEmoji(
@@ -366,42 +367,35 @@ class MessageContent extends HookConsumerWidget {
         ? kEmojiOnlyCustomEmojiSize
         : kCustomEmojiInlineSize;
 
+    // A new pool per message text, so an edit retires the old links'
+    // recognizers (and any hold under way on them) with the old text.
+    final pressedLink = useValueNotifier<_LinkTextRecognizer?>(null);
+    final linkRecognizers = useMemoized(
+      () => _LinkTextRecognizers(pressedLink),
+      [markdownContent],
+    );
+    useEffect(() => linkRecognizers.dispose, [linkRecognizers]);
+
     final finalContent = useMemoized(() {
       // Replace spaces with non-breaking spaces inside known mention names
-      // so the gpt_markdown combined regex can match multi-word names
-      // even when caseSensitive is not preserved.
-      // Skip content inside backticks to avoid altering inline code.
-      final mentionParts = markdownContent.split('`');
-      final mentionBuf = StringBuffer();
-      for (var i = 0; i < mentionParts.length; i++) {
-        if (i.isOdd) {
-          mentionBuf.write('`${mentionParts[i]}`');
-        } else {
-          var segment = mentionParts[i];
-          for (final range in mentionOccurrences(
-            segment,
-            mentionBindings.keys,
-          ).reversed) {
-            segment = segment.replaceRange(
-              range.start,
-              range.end,
-              '@${_markdownMentionName(range.label)}',
-            );
-          }
-          mentionBuf.write(segment);
+      // so _MentionMd's pattern matches multi-word names as one token, in
+      // the authored case. Code, inline or fenced, is left as written.
+      return mapMarkdownProse(markdownContent, (segment) {
+        for (final range in mentionOccurrences(
+          segment,
+          mentionBindings.keys,
+        ).reversed) {
+          segment = segment.replaceRange(
+            range.start,
+            range.end,
+            '@${_markdownMentionName(segment.substring(range.start + 1, range.end))}',
+          );
         }
-      }
-      var result = mentionBuf.toString();
-
-      // Ensure channel links at the very start of content don't get
-      // swallowed by markdown processing.
-      if (RegExp(r'^#[A-Za-z0-9_]').hasMatch(result)) {
-        result = '\u200B$result';
-      }
-      return result;
+        return segment;
+      });
     }, [markdownContent, mentionPresentationKey]);
 
-    final inlineComponents = _useMessageInlineComponents(
+    final inlinePatterns = _useMessageInlinePatterns(
       content: content,
       finalContent: finalContent,
       mentionNames: resolvedMentionNames,
@@ -421,65 +415,72 @@ class MessageContent extends HookConsumerWidget {
     // An authored slot is drawn as written; the marker takes its own line.
     final markerSlot = edited && !finalContent.contains(editedSlot);
     final components = useMemoized(
-      () => [if (markerSlot) EditedMarkerMd(editedStyle), ...inlineComponents],
-      [inlineComponents, editedStyle, markerSlot],
+      () => [
+        if (markerSlot) editedMarkerPattern(editedStyle),
+        ...inlinePatterns,
+        escapedSigilPattern,
+      ],
+      [inlinePatterns, editedStyle, markerSlot],
     );
 
     Widget renderMarkdown(String text) => KeyedSubtree(
       key: ValueKey(
         '$text\u0000$mentionPresentationKey\u0000$channelPresentationKey',
       ),
-      child: GptMarkdown(
-        text,
-        style: style,
-        styleSheet: bubble
-            ? GptMarkdownStyleSheet(
-                blockQuote: BlockQuoteStyle(barColor: bubbleInk),
-                hr: HrStyle(color: bubbleInk.withValues(alpha: 0.3)),
-                table: TableStyle(
-                  borderColor: bubbleInk.withValues(alpha: 0.3),
-                  headerBackground: Colors.transparent,
-                  headerTextStyle: TextStyle(color: bubbleInk),
-                ),
-              )
-            : null,
-        followLinkColor: false,
-        // normalizeBareLinks() already turns bare URLs into Markdown links;
-        // gpt_markdown 1.2.0 autolinks by default, so both would run.
-        autolink: false,
-        codeBuilder: (context, name, code, closed) => _MessageCodeBlock(
-          name: name,
-          code: code,
-          bubble: bubble,
-          ink: bubble && ownMessage ? ownTextColor : null,
-        ),
-        linkBuilder: (context, linkText, shieldedUrl, linkStyle) {
-          final url = unshieldMarkdownEscapes(shieldedUrl);
-          return _buildLink(
-            context,
+      child: _LinkPressHighlight(
+        pressed: pressedLink,
+        child: GptMarkdown(
+          text,
+          style: style,
+          styleSheet: bubble
+              ? GptMarkdownStyleSheet(
+                  blockQuote: BlockQuoteStyle(barColor: bubbleInk),
+                  hr: HrStyle(color: bubbleInk.withValues(alpha: 0.3)),
+                  table: TableStyle(
+                    borderColor: bubbleInk.withValues(alpha: 0.3),
+                    headerBackground: Colors.transparent,
+                    headerTextStyle: TextStyle(color: bubbleInk),
+                  ),
+                )
+              : null,
+          followLinkColor: false,
+          // normalizeBareLinks() already turns bare URLs into Markdown links;
+          // gpt_markdown autolinks by default, so both would run.
+          autolink: false,
+          // Desktop has no GitHub alerts: a `> [!NOTE]` quote stays a quote.
+          alertBuilder: (_, alert) => alert.asBlockQuote(),
+          codeBuilder: (context, name, code, closed) => _MessageCodeBlock(
+            name: name,
+            code: code,
+            bubble: bubble,
+            ink: bubble && ownMessage ? ownTextColor : null,
+          ),
+          // Chips, media links and taps are handled in _buildLink, so the
+          // package's own tap is not used.
+          inlineLinkBuilder: (link) => _buildLink(
+            link,
             ref,
-            linkText,
-            url,
-            imetaByUrl[url],
-            linkStyle,
+            unmaskInlinePatterns(link.url),
             style,
             resolvedChannelTap,
             resolvedChannelNames,
-          );
-        },
-        imageBuilder: (context, shieldedUrl, _, _) {
-          final imageUrl = unshieldMarkdownEscapes(shieldedUrl);
-          return _buildMedia(
-            context,
-            imageUrl,
-            imetaByUrl[imageUrl],
-            onReply: onMediaReply == null ? null : mediaReply,
-            onMore: onMediaMore == null ? null : mediaMore,
-          );
-        },
-        textAlign: textAlign ?? (bubble ? TextAlign.start : null),
-        maxLines: maxLines,
-        inlineComponents: components,
+            linkRecognizers,
+            imetaByUrl,
+          ),
+          imageBuilder: (context, maskedUrl, _, _) {
+            final imageUrl = unmaskInlinePatterns(maskedUrl);
+            return _buildMedia(
+              context,
+              imageUrl,
+              imetaByUrl[imageUrl],
+              onReply: onMediaReply == null ? null : mediaReply,
+              onMore: onMediaMore == null ? null : mediaMore,
+            );
+          },
+          textAlign: textAlign ?? (bubble ? TextAlign.start : null),
+          maxLines: maxLines,
+          inlinePatterns: components,
+        ),
       ),
     );
     final segments = bubble
@@ -671,17 +672,21 @@ class MessageContent extends HookConsumerWidget {
     );
   }
 
-  Widget _buildLink(
-    BuildContext context,
+  /// A link as text that wraps with the sentence, or as a widget for chips,
+  /// audio and repository links.
+  InlineSpan _buildLink(
+    LinkBuildDetails link,
     WidgetRef ref,
-    InlineSpan linkText,
     String url,
-    ImetaEntry? imeta,
-    TextStyle linkStyle,
     TextStyle? fallbackStyle,
     void Function(String channelId) resolvedChannelTap,
     Map<String, String> resolvedChannelNames,
+    _LinkTextRecognizers recognizers,
+    Map<String, ImetaEntry> imetaByUrl,
   ) {
+    final context = link.context;
+    final linkText = TextSpan(children: link.labelSpans);
+    final imeta = imetaByUrl[url];
     String text = '';
     linkText.visitChildren((span) {
       if (span is TextSpan && span.text != null) {
@@ -690,10 +695,10 @@ class MessageContent extends HookConsumerWidget {
       return true;
     });
 
-    final baseStyle = fallbackStyle ?? linkStyle;
+    final baseStyle = fallbackStyle ?? link.style;
     if (imeta != null &&
         classifyMediaUrl(url, imeta: imeta) == MessageMediaKind.audio) {
-      return _buildMedia(context, url, imeta);
+      return link.asWidgetSpan(_buildMedia(context, url, imeta));
     }
     final uri = Uri.tryParse(url);
     final buzzLink = uri?.scheme == 'buzz'
@@ -744,17 +749,11 @@ class MessageContent extends HookConsumerWidget {
       decoration: TextDecoration.underline,
       decorationColor: context.colors.primary,
     );
-    final linkTextWidget = isCanonicalBuzzLabel
-        ? Text(
-            text,
-            style: baseStyle.copyWith(
-              color: context.colors.primary,
-              fontWeight: FontWeight.w600,
-            ),
-          )
-        : Text.rich(TextSpan(style: authoredLinkStyle, children: [linkText]));
-
-    final renderedLink = isCanonicalBuzzLabel && buzzPresentation != null
+    final canonicalLabelStyle = baseStyle.copyWith(
+      color: context.colors.primary,
+      fontWeight: FontWeight.w600,
+    );
+    final chip = isCanonicalBuzzLabel && buzzPresentation != null
         ? _TokenPill(
             key: ValueKey('buzz-link-chip:$url'),
             icon: buzzPresentation.icon,
@@ -763,19 +762,35 @@ class MessageContent extends HookConsumerWidget {
             text: buzzPresentation.label,
             textStyle: baseStyle.copyWith(fontWeight: FontWeight.w600),
           )
-        : linkTextWidget;
+        : null;
 
     final highlightColor = (baseStyle.color ?? context.colors.primary)
         .withValues(alpha: 0.2);
 
     // Mobile has no repo/PR/issue destination yet, so these chips have no tap
     // and no Open action, but a hold still copies or shares the link.
+    // The container keeps the chip's label its own node; without it, the
+    // non-interactive chip merges into the surrounding paragraph's label.
     if (buzzLink is EntityDeepLink) {
-      return _LinkLongPress(
-        url: url,
-        onOpen: null,
-        highlightColor: highlightColor,
-        child: renderedLink,
+      return link.asWidgetSpan(
+        Semantics(
+          container: true,
+          child: _LinkLongPress(
+            url: url,
+            onOpen: null,
+            highlightColor: highlightColor,
+            child:
+                chip ??
+                Text.rich(
+                  TextSpan(
+                    style: isCanonicalBuzzLabel
+                        ? canonicalLabelStyle
+                        : authoredLinkStyle,
+                    children: [linkText],
+                  ),
+                ),
+          ),
+        ),
       );
     }
 
@@ -822,11 +837,49 @@ class MessageContent extends HookConsumerWidget {
     // openLink handles only these schemes; the sheet hides Open for others.
     final scheme = Uri.tryParse(url)?.scheme;
     final canOpen = scheme == 'buzz' || scheme == 'http' || scheme == 'https';
-    return _LinkLongPress(
+    void showActions() => _showLinkActions(
+      context,
       url: url,
       onOpen: canOpen ? () => unawaited(openLink()) : null,
-      highlightColor: highlightColor,
-      child: GestureDetector(onTap: openLink, child: renderedLink),
+    );
+    if (chip != null) {
+      return link.asWidgetSpan(
+        _LinkLongPress(
+          url: url,
+          onOpen: canOpen ? () => unawaited(openLink()) : null,
+          highlightColor: highlightColor,
+          child: GestureDetector(onTap: openLink, child: chip),
+        ),
+      );
+    }
+
+    // Text, not a widget, so a long label wraps mid-label and the words after
+    // it continue on the same line.
+    // The recognizer outlives this link when an edit removes it, so a tap or
+    // hold already under way checks that the link is still on screen.
+    // A link nothing can open shows its actions on a tap, so it isn't dead
+    // for screen reader users, who can't reach the hold.
+    final recognizer = recognizers.forLink(url, text)
+      ..onTap = (() {
+        if (!context.mounted) return;
+        canOpen ? unawaited(openLink()) : showActions();
+      })
+      ..onHold = () {
+        if (context.mounted) showActions();
+      }
+      ..highlightColor = highlightColor;
+    // A canonical label is drawn as its plain text, as before; an authored
+    // label keeps its parsed spans (bold, code) in the link style.
+    if (isCanonicalBuzzLabel) {
+      return TextSpan(
+        text: text,
+        style: canonicalLabelStyle,
+        recognizer: recognizer,
+      );
+    }
+    return TextSpan(
+      style: authoredLinkStyle,
+      children: _withLinkRecognizer(link.labelSpans, recognizer),
     );
   }
 }

@@ -36,6 +36,9 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
 
   /// Lookups whose batch query is on the wire.
   final Set<String> _inFlight = {};
+
+  /// Completes when the batch query on the wire has finished.
+  Completer<bool>? _flightCompleter;
   void Function()? _snapshotWriter;
   Timer? _snapshotTimer;
   Map<String, UserProfile> _latest = const {};
@@ -175,17 +178,36 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     final alreadyPending = normalized.any(
       (pk) => _pending.contains(pk) && !state.containsKey(pk),
     );
+    // A batch already on the wire answers these; asking again would download
+    // the same profiles twice.
+    final flight = _flightCompleter;
+    final awaitsFlight =
+        flight != null &&
+        normalized.any(
+          (pk) => _inFlight.contains(pk) && !state.containsKey(pk),
+        );
     final uncached = normalized
-        .where((pk) => !state.containsKey(pk) && !_pending.contains(pk))
+        .where(
+          (pk) =>
+              !state.containsKey(pk) &&
+              !_pending.contains(pk) &&
+              !_inFlight.contains(pk),
+        )
         .toList();
     // Restored profiles already render; revalidate them without making the
     // caller wait on the network.
     normalized.where(_unrevalidated.contains).forEach(_scheduleFetch);
-    if (uncached.isEmpty && !alreadyPending) return Future.value(true);
+    if (uncached.isEmpty && !alreadyPending) {
+      return awaitsFlight ? flight.future : Future.value(true);
+    }
     _pending.addAll(uncached);
     final completer = _batchCompleter ??= Completer<bool>();
     _scheduleBatch();
-    return completer.future;
+    if (!awaitsFlight) return completer.future;
+    return Future.wait([
+      flight.future,
+      completer.future,
+    ]).then((results) => results.every((succeeded) => succeeded));
   }
 
   /// Force-refresh profiles for identity-sensitive gates.
@@ -249,8 +271,9 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
 
     final pubkeys = _pending.toList();
     _pending.clear();
-    final completer = _batchCompleter;
+    final completer = _batchCompleter ?? Completer<bool>();
     _batchCompleter = null;
+    _flightCompleter = completer;
 
     _flushInFlight = true;
     _inFlight.addAll(pubkeys);
@@ -272,7 +295,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
         if (remaining == 0) {
           // All requested pages are ready.
           succeeded = true;
-          completer?.complete(true);
+          completer.complete(true);
         }
       }
     } catch (_) {
@@ -280,9 +303,8 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
       // restored profile, which the next lookup revalidates again.
     } finally {
       if (_isCurrent(generation)) _inFlight.removeAll(pubkeys);
-      if (completer != null && !completer.isCompleted) {
-        completer.complete(succeeded);
-      }
+      if (!completer.isCompleted) completer.complete(succeeded);
+      if (identical(_flightCompleter, completer)) _flightCompleter = null;
       _flushInFlight = false;
       if (ref.mounted && _pending.isNotEmpty) _scheduleBatch();
     }

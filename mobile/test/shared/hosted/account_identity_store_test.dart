@@ -204,6 +204,7 @@ void main() {
         final storage = UncertainStorage();
         final store = AccountIdentityStore(storage: storage);
         var authorizations = 0;
+        var generatedHere = 0;
         final receipt = BackupReceipt(
           backend: 'https://app.builderlab.xyz',
           subject: 'a',
@@ -212,6 +213,7 @@ void main() {
         );
         Future<AccountIdentitySnapshot?> write() => generate
             ? store.generateIfAbsent(
+                onGenerated: () => generatedHere++,
                 authorize: () async {
                   authorizations++;
                   return true;
@@ -223,6 +225,8 @@ void main() {
         final retried = (await write())!;
         expect(retried.pubkey, persisted.pubkey);
         expect(authorizations, generate ? 1 : 0);
+        // An uncertain write or an existing slot is never fresh creation consent.
+        expect(generatedHere, 0);
         if (!generate) {
           expect(retried.backup?.backupId, 'one');
           final other = nostr.Keys('2'.padLeft(64, '0'));

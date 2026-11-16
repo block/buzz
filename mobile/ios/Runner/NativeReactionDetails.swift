@@ -574,7 +574,10 @@ final class NativeMessageImageLoader: NSObject, URLSessionDataDelegate {
       let animation = (properties?[kCGImagePropertyGIFDictionary as String]
         ?? properties?[kCGImagePropertyPNGDictionary as String] ?? properties?["{WebP}"]) as? [String: Any]
       let delay = (animation?["UnclampedDelayTime"] ?? animation?["DelayTime"]) as? Double ?? 0.1
-      duration += max(0.02, delay) * Double(step)
+      // Frames asking for 10 ms or less show for 100 ms, as in browsers and
+      // the Flutter timeline (MediaImageProvider), so the sheet plays an
+      // emoji at the same speed as the chip that opened it.
+      duration += (delay <= 0.01 ? 0.1 : delay) * Double(step)
     }
     guard let first = frames.first else { return nil }
     return frames.count > 1 ? UIImage.animatedImage(with: frames, duration: duration) : first

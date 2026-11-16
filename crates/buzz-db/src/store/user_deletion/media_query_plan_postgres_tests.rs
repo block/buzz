@@ -111,7 +111,7 @@ async fn media_discovery_and_sharing_use_indexes_without_current_membership() {
     }
     // Exercise inline creation on a populated table and verification of the
     // already-built indexes. A wrong prebuild must fail, not be accepted by name.
-    let migration = include_str!("../../../../../migrations/0089_media_evidence_indexes.sql");
+    let migration = include_str!("../../../../../migrations/0092_media_evidence_indexes.sql");
     let mut tx = pool.begin().await.unwrap();
     sqlx::query("DROP INDEX idx_media_uploaders_actor_hash")
         .execute(&mut *tx)

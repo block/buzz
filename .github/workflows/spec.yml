@@ -1,0 +1,73 @@
+name: formal specs
+
+# Re-checks the Git-on-object-storage models whenever they, or the script that
+# runs them, change. docs/spec/check.sh model-checks the protocol with TLC and
+# requires every seeded design error to be detected; docs/spec/lean holds a
+# machine-checked proof of the pointer discipline for unbounded parameters.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/spec/**"
+      - ".github/workflows/spec.yml"
+  pull_request:
+    paths:
+      - "docs/spec/**"
+      - ".github/workflows/spec.yml"
+
+permissions: {}
+
+concurrency:
+  group: spec-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tlc:
+    name: TLC model check
+    runs-on: ubuntu-latest
+    # About three minutes on 16 cores; the hosted runner has fewer.
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      # The runner image provides Java; check.sh fetches TLC at a pinned
+      # version and verifies its SHA-256 before running it.
+      - name: Model-check the protocol and the seeded design errors
+        run: docs/spec/check.sh
+
+  lean:
+    name: Lean proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      ELAN_VERSION: v4.2.4
+      ELAN_SHA256: 42b94d4244e8353142c456ec0e4ca6528fd898a6c604d4059f494e706e431f63
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install elan (pinned, hash-checked)
+        run: |
+          set -euo pipefail
+          archive=elan-x86_64-unknown-linux-gnu.tar.gz
+          curl -fsSL -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/leanprover/elan/releases/download/$ELAN_VERSION/$archive"
+          echo "$ELAN_SHA256  $RUNNER_TEMP/$archive" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/elan-init" -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      # The toolchain is the one named in docs/spec/lean/lean-toolchain.
+      - name: Check the proof
+        working-directory: docs/spec/lean
+        run: |
+          set -euo pipefail
+          lake build 2>&1 | tee "$RUNNER_TEMP/lean.log"
+          # A proof that used `sorry` would build with a warning and would
+          # list `sorryAx` among the axioms it depends on.
+          ! grep -E "sorryAx|declaration uses 'sorry'" "$RUNNER_TEMP/lean.log"

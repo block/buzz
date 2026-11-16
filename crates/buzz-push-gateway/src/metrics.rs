@@ -88,7 +88,8 @@ pub fn record_admission(result: Admission) {
 }
 
 /// Record a delivery-path error, tagged by the static failure class. This
-/// counter covers only the `/v1/deliveries/apns` handler's post-admission exit
+/// counter covers only the delivery handler's (`/v1/deliveries` and its
+/// `/v1/deliveries/apns` alias) post-admission exit
 /// classes (admission rejection/unavailability, profile mismatch, token-custody
 /// open failure, and detached finish/join failure); pre-admission request/auth/
 /// attestation validation on the enrollment and delegation handlers is not
