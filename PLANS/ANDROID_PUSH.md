@@ -68,7 +68,7 @@ Decisions recorded as ADRs: [0004](../docs/adr/0004-push-gateway-hides-device-pl
 
 **Relay**
 
-- The lease plaintext no longer needs `transport`. During rollout the relay accepts leases with or without it and ignores it. Once released iOS clients stop sending it, the relay rejects it. Whether that change needs a new capability version is decided against [docs/buzz-push.md](../docs/buzz-push.md)'s compatibility rule when it is implemented.
+- The lease keeps its `transport` member, and every platform sends the same fixed value that iOS sends today. It is a protocol constant, not device data, so it reveals nothing about the platform. Keeping it lets new clients, Android included, work with relays already deployed, and today's iOS clients work with new relays, so nothing has to roll out in a set order.
 - The delivery URL setting points at the gateway's platform-neutral route.
 - Classes stay the single default class.
 
@@ -96,7 +96,7 @@ Tests check behavior at two points, through public interfaces, with fakes only a
 
 - **Push gateway HTTP API.** Extend the existing HTTP delivery and attestation tests with a fake FCM sender and generated Key Attestation chains: enroll, delegate, deliver, rotate endpoint and revoke for an Android installation, and table rows for each rejected attestation (unlocked bootloader, Unverified or Failed boot state, wrong package or signing digest, wrong challenge, revoked certificate, software-backed key), plus the per-key rate limit. Signed installation calls get matching rows: wrong key, altered transcript, reused challenge. Prior art: the gateway's HTTP delivery tests and App Attest assertion tests.
 - **Dart wake-to-notification function.** Run it against a fake relay as a journey: DM and mention notify; self-authored, muted and hellthread messages don't; an already shown message doesn't notify again; several communities; slow and unreachable relays return a fallback inside the time budget. The ported body formatter runs the shared notification-body fixtures. Prior art: the iOS resolver tests in BuzzPushKit.
-- **Relay.** Lease parsing accepts leases with and without `transport` during rollout, in the existing push lease tests.
+- **Relay.** The delivery URL setting accepts the platform-neutral route, in the existing relay configuration tests.
 - **End to end.** Before readiness, exercise the real flow on a physical Android phone and an iOS device: enroll, receive a DM and a mention with the app killed, tap through, rotate the token, and sign out.
 
 ## Out of Scope
@@ -120,12 +120,10 @@ Tests check behavior at two points, through public interfaces, with fakes only a
 
 Work blockers first. Each ticket is a vertical slice that can be verified on its own.
 
-1. **Relay ignores lease transport and uses a platform-neutral delivery route.** The gateway accepts deliveries on a platform-neutral route, keeping the APNs route as an alias. The relay accepts leases without `transport` and posts to the new route. iOS keeps working. Blocked by: none.
-2. **iOS clients stop sending transport.** The mobile lease drops `transport`, and enrollment carries an explicit platform. Verified on an iOS device. Blocked by: 1.
-3. **Gateway records installation platform and sends FCM wakes.** Adds the platform (derived from the attestation type) and per-platform endpoints, Keystore-signed installation calls, the FCM HTTP v1 sender and the Android configuration. Enrollment is tested end to end with a test-only attestation verifier, using a fake FCM sender. Blocked by: 1.
-4. **Gateway verifies Android Key Attestation.** Adds Google roots, the revocation list refresh, the boot-state and app-identity checks, and the per-key rate limit. Tested with the table of rejected attestations. Blocked by: 3.
-5. **Dart notification body formatter.** Ports the formatter to Dart, passing the shared notification-body fixtures. Blocked by: none.
-6. **Dart wake-to-notification function.** Headless and journey-tested against a fake relay, including the already-shown record and the fallback inside the time budget. Blocked by: 5.
-7. **Android wake handling.** Firebase messaging service, generic notification first, background engine, watchdog, categories, grouping and tap-to-open, with wakes triggered locally, starting from the [prototype](https://github.com/block/buzz/tree/prototype/android-push-headless-dart). Verified on a physical phone. Blocked by: 6.
-8. **Android enrollment and lease publication.** FCM token, Keystore attestation, enrollment, signed installation calls, token rotation, the permission prompt and sign-out revocation, wired into the shared push layer. End to end on a physical phone against a test gateway and relay. Blocked by: 2, 4, 7.
-9. **Relay rejects lease transport.** After released iOS clients no longer send it. Blocked by: 2 being released and adopted.
+1. **Platform-neutral delivery route.** The gateway accepts deliveries on a platform-neutral route, keeping the APNs route as an alias, and the relay's delivery URL setting accepts it. iOS keeps working. Blocked by: none.
+2. **Gateway records installation platform and sends FCM wakes.** Adds the platform (derived from the attestation type) and per-platform endpoints, Keystore-signed installation calls, the FCM HTTP v1 sender and the Android configuration. Enrollment is tested end to end with a test-only attestation verifier, using a fake FCM sender. Blocked by: 1.
+3. **Gateway verifies Android Key Attestation.** Adds Google roots, the revocation list refresh, the boot-state and app-identity checks, and the per-key rate limit. Tested with the table of rejected attestations. Blocked by: 2.
+4. **Dart notification body formatter.** Ports the formatter to Dart, passing the shared notification-body fixtures. Blocked by: none.
+5. **Dart wake-to-notification function.** Headless and journey-tested against a fake relay, including the already-shown record and the fallback inside the time budget. Blocked by: 4.
+6. **Android wake handling.** Firebase messaging service, generic notification first, background engine, watchdog, categories, grouping and tap-to-open, with wakes triggered locally, starting from the [prototype](https://github.com/block/buzz/tree/prototype/android-push-headless-dart). Verified on a physical phone. Blocked by: 5.
+7. **Android enrollment and lease publication.** FCM token, Keystore attestation, enrollment, signed installation calls, token rotation, the permission prompt and sign-out revocation, wired into the shared push layer. End to end on a physical phone against a test gateway and relay. Blocked by: 3, 6.

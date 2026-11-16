@@ -1,11 +1,11 @@
 # The push gateway hides each installation's platform from the relay
 
-A relay should learn as little as possible about the devices its members use, so that device details can't help correlate one person's identities. So a [push gateway](../../CONTEXT.md#push-gateway) serves one mobile app (an internal build, the public build or a fork's app) on every platform it ships on, rather than one gateway per platform. The installation's platform and push service live only inside the gateway-sealed grant, which the relay stores but can't read. The relay's push lease names no transport, uses one set of priority classes that the gateway maps to each platform, and follows the same renewal schedule on every platform. Every delivery request the relay sends goes to one platform-neutral gateway route and is the same whatever the device is.
+A relay should learn as little as possible about the devices its members use, so that device details can't help correlate one person's identities. So a [push gateway](../../CONTEXT.md#push-gateway) serves one mobile app (an internal build, the public build or a fork's app) on every platform it ships on, rather than one gateway per platform. The installation's platform and push service live only inside the gateway-sealed grant, which the relay stores but can't read. The relay's push lease carries the same fixed `transport` value on every platform, uses one set of priority classes that the gateway maps to each platform, and follows the same renewal schedule on every platform. Every delivery request the relay sends goes to one platform-neutral gateway route and is the same whatever the device is.
 
 ## Considered options
 
 - **One gateway per platform, with the relay choosing a gateway by platform.** It would keep the gateway's one-transport data model, but the relay would have to know each installation's platform.
-- **Keep the transport in the lease plaintext and the relay's checks.** This is today's design. Removing it later means a lease format change and re-enrollment, so it is cheaper to remove before a second platform ships.
+- **Remove `transport` from the lease.** It would tidy the format, but released clients and relays require it, so removing it would need an ordered rollout across clients and relays. Since every platform sends the same constant, it tells the relay nothing, and the leftover value (which names APNs) is the accepted cost.
 
 ## Consequences
 
