@@ -21,7 +21,7 @@ use uuid::Uuid;
 use buzz_core::kind::*;
 use buzz_core::tenant::{CommunityId, TenantContext};
 use buzz_datastore_tracing::datastore_span;
-use buzz_db::dm::{DmGrowth, DmOpen, MAX_DM_PEOPLE};
+use buzz_db::dm::{DmGrowth, MAX_DM_PEOPLE};
 use buzz_db::workflow::{ApprovalStatus, RunStatus};
 use buzz_db::DbError;
 use buzz_workflow::executor::TriggerContext;
@@ -420,42 +420,28 @@ enum History {
     /// `["history", "include"]`: the caller has agreed to share an existing
     /// DM's history with whoever joins it.
     Include,
-    /// `["history", "ask"]`: as with `include` when no one would see history
-    /// they cannot already read, and otherwise refused with
-    /// [`NEEDS_HISTORY_CHOICE`], changing nothing. An add asks when people
-    /// would join a DM of two or more people; an open, when named agents
-    /// would join the DM of its people.
+    /// `["history", "ask"]` (kind:41011 only): join as with `include` when the
+    /// relay needs no choice, and refuse with [`NEEDS_HISTORY_CHOICE`] when
+    /// people would join a DM of two or more people.
     Ask,
 }
 
-fn history_tag(event: &Event) -> Result<History, IngestError> {
+fn history_tag(event: &Event, ask_allowed: bool) -> Result<History, IngestError> {
     match extract_tag(event, "history").as_deref() {
         None => Ok(History::Untagged),
         Some("include") => Ok(History::Include),
-        Some("ask") => Ok(History::Ask),
+        Some("ask") if ask_allowed => Ok(History::Ask),
         Some(other) => Err(IngestError::Rejected(format!(
             "invalid: history must be \"include\", got \"{other}\""
         ))),
     }
 }
 
-/// Why a command tagged `["history", "ask"]` was refused: someone would join
-/// an existing DM and see its history, so the caller must choose, and send
-/// the command again tagged `include`, or untagged. Clients match this exact
-/// text.
+/// Why an add tagged `["history", "ask"]` was refused: people would join a DM
+/// of two or more people, so the caller must choose whether they see its
+/// history and send the add again tagged `include`, or untagged. Clients
+/// match this exact text.
 const NEEDS_HISTORY_CHOICE: &str = "needs-choice: history";
-
-/// [`NEEDS_HISTORY_CHOICE`] for an open, followed by a space and the DM the
-/// caller already belongs to, with the named agents that would join it:
-/// `{"channel_id": "<uuid>", "joining": ["<hex pubkey>", ...]}`. Clients
-/// confirm by adding exactly those agents to exactly that DM.
-fn open_needs_choice(channel_id: Uuid, joining: &[Vec<u8>]) -> String {
-    let joining: Vec<String> = joining.iter().map(hex::encode).collect();
-    format!(
-        "{NEEDS_HISTORY_CHOICE} {}",
-        serde_json::json!({ "channel_id": channel_id.to_string(), "joining": joining })
-    )
-}
 
 /// Why the relay's moderation DM cannot take anyone else.
 const MODERATION_DM_REFUSAL: &str = "invalid: this DM cannot be changed";
@@ -499,7 +485,7 @@ async fn handle_dm_open(
     auth: &IngestAuth,
 ) -> Result<IngestResult, IngestError> {
     let self_bytes = auth.pubkey().to_bytes().to_vec();
-    let history = history_tag(event)?;
+    let include_history = history_tag(event, false)? == History::Include;
 
     // 1. Decode the other participants from `p` tags (deduplicated).
     let mut others: Vec<Vec<u8>> = Vec::new();
@@ -538,7 +524,7 @@ async fn handle_dm_open(
             "invalid: a DM may hold at most {MAX_DM_PEOPLE} people; agents do not count"
         )));
     }
-    if history != History::Untagged && agents.contains_key(&self_bytes) {
+    if include_history && agents.contains_key(&self_bytes) {
         return Err(IngestError::Rejected(ONLY_PEOPLE_SHARE_HISTORY.into()));
     }
 
@@ -557,44 +543,21 @@ async fn handle_dm_open(
     // 3. Execute. With history, open the DM of these people, bring it up to
     //    date and add any named agents it does not hold yet; without, the DM of
     //    exactly these members. Each agent that joins needs its policy. Only
-    //    agents join a reopened DM: someone who left is not added back. Asking,
-    //    open the DM of these people only if it already holds every named
-    //    agent, adding no one.
+    //    agents join a reopened DM: someone who left is not added back.
     let all_refs: Vec<&[u8]> = all_bytes.iter().map(|b| b.as_slice()).collect();
     let policy = agent_add_policy(&self_bytes);
-    let (channel, was_created) = if history == History::Ask {
-        match state
-            .db
-            .open_dm_asking(tenant.community(), &all_refs, &self_bytes, &policy)
-            .await
-            .map_err(dm_write_error)?
-        {
-            DmOpen::Opened(channel, created) => (channel, created),
-            // Dropping `tx` uncommitted forgets this command, so the open can
-            // be sent again with the caller's choice.
-            DmOpen::NeedsChoice {
-                channel_id,
-                joining,
-            } => {
-                return Err(IngestError::Rejected(open_needs_choice(
-                    channel_id, &joining,
-                )))
-            }
-        }
-    } else {
-        state
-            .db
-            .open_dm(
-                tenant.community(),
-                &all_refs,
-                &self_bytes,
-                history == History::Include,
-                &policy,
-            )
-            .await
-            .map_err(dm_write_error)?
-    };
-    let added = if was_created || history != History::Include {
+    let (channel, was_created) = state
+        .db
+        .open_dm(
+            tenant.community(),
+            &all_refs,
+            &self_bytes,
+            include_history,
+            &policy,
+        )
+        .await
+        .map_err(dm_write_error)?;
+    let added = if was_created || !include_history {
         Vec::new()
     } else {
         let named_agents: Vec<Vec<u8>> = agents.into_keys().collect();
@@ -688,7 +651,7 @@ async fn handle_dm_add_member(
             "invalid: must specify at least 1 new participant in p tags".into(),
         ));
     }
-    let history = history_tag(event)?;
+    let history = history_tag(event, true)?;
     let include_history = history != History::Untagged;
 
     // 2. Validate caller is member of existing DM
