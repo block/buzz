@@ -288,20 +288,11 @@ impl ActionSink for RelayActionSink {
             let participants = vec![author.to_vec(), recipient.to_vec()];
             // Sending to an existing DM must not reopen a conversation the
             // owner hid. Only the interactive open command changes visibility.
-            let hash = buzz_db::dm::compute_participant_hash(&[&author, &recipient]);
-            let (channel, was_created) = match state
+            let (channel, was_created) = state
                 .db
-                .find_dm_by_participants(community_id, &hash)
+                .create_dm_if_missing(community_id, &[&author, &recipient], &author)
                 .await
-                .map_err(|e| ActionSinkError::Database(e.to_string()))?
-            {
-                Some(channel) => (channel, false),
-                None => state
-                    .db
-                    .open_dm(community_id, &[&recipient], &author)
-                    .await
-                    .map_err(|e| ActionSinkError::Database(e.to_string()))?,
-            };
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
             // Refresh on every attempt: a prior attempt may have persisted the
             // channel but failed before publishing its discovery events.
             for participant in &participants {
