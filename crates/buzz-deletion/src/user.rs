@@ -7,6 +7,8 @@ use uuid::Uuid;
 /// Preview real memberships or prepare and execute synthetic deletion requests.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Preview or delete profiles in one community; deletion requires stopped writers.
+    ProfileBatches(profile_batches::Args),
     /// Print real current memberships as JSON; does not save or execute a request.
     Inventory {
         /// Demo fixture (default), hex public key, or npub. Current memberships only.
@@ -74,6 +76,10 @@ pub enum Command {
 
 /// Run inventory discovery or synthetic workflow commands against PostgreSQL.
 pub async fn run(command: Command) -> Result<i32> {
+    let command = match command {
+        Command::ProfileBatches(args) => return profile_batches::run(args).await,
+        other => other,
+    };
     let db = if matches!(command, Command::Inventory { .. }) {
         buzz_db::Db::connect_cold_start(
             buzz_db::DbConfig {
@@ -91,6 +97,7 @@ pub async fn run(command: Command) -> Result<i32> {
     };
     let store = db.entity_deletion_store();
     match command {
+        Command::ProfileBatches(_) => anyhow::bail!("profile command was not dispatched"),
         Command::Inventory { pubkey } => {
             crate::print_json(&inventory::generate(&db, &pubkey).await?)?;
         }
@@ -154,6 +161,7 @@ mod handlers;
 mod inventory;
 /// Standalone delegation of an owned community to community deletion.
 pub mod owned_community;
+mod profile_batches;
 /// Read-only summaries of locally saved request progress and external waits.
 pub mod summary;
 mod transition;
