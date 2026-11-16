@@ -1,11 +1,13 @@
 //! Per-attested-key rate limit on signed installation calls.
 //!
 //! Attestation carries no stable device id and each enrollment makes a fresh
-//! key, so enrollment is bounded by the challenge quota instead. After
-//! enrollment the attested key is the installation's identity, and this limit
-//! keeps one installation from flooding the gateway. Counters live in memory,
-//! per replica, so a deployment with several replicas allows each key up to
-//! that many times the configured calls.
+//! key, so enrollment is not limited per device. The challenge quota caps only
+//! outstanding challenges (consuming one deletes it), not the rate of
+//! completed enrollments. After enrollment the attested key is the
+//! installation's identity, and this limit keeps one installation from
+//! flooding the gateway. Counters live in memory, per replica, so a deployment
+//! with several replicas allows each key up to that many times the configured
+//! calls.
 
 use std::{collections::HashMap, sync::Mutex};
 

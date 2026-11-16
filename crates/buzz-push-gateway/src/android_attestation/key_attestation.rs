@@ -182,7 +182,12 @@ impl KeyAttestationVerifier {
                 return Err("weak_signature");
             }
         }
-        for issuer in &certs[1..] {
+        // The attestation key certificate (`certs[1]`) is exempt: some factory
+        // keyboxes issue it with CA:FALSE and digitalSignature only (Google's
+        // Sony Xperia 10 III sample), and Google's validator never checks these
+        // flags. A Keystore leaf cannot stand in for it, because a
+        // KeyDescription above the leaf is refused.
+        for issuer in certs.iter().skip(2) {
             let is_ca = matches!(issuer.basic_constraints(), Ok(Some(ext)) if ext.value.ca);
             let may_sign = match issuer.key_usage() {
                 Ok(Some(usage)) => usage.value.key_cert_sign(),

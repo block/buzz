@@ -187,6 +187,12 @@ struct Pki {
     leaf_p384: bool,
     /// The leaf certificate encodes its key as a compressed point.
     leaf_compressed: bool,
+    /// The intermediate is CA:FALSE with digitalSignature only, as some
+    /// factory attestation key certificates are.
+    intermediate_not_ca: bool,
+    /// A CA:FALSE, digitalSignature certificate between the root and the
+    /// intermediate issues the intermediate.
+    non_ca_issues_intermediate: bool,
 }
 
 fn ec_key(nid: Nid) -> PKey<Private> {
@@ -268,6 +274,20 @@ struct Generated {
 const ROOT_SERIAL: u32 = 0x10;
 const INTERMEDIATE_SERIAL: u32 = 0x20;
 const LEAF_SERIAL: u32 = 0x30;
+const UPPER_SERIAL: u32 = 0x40;
+
+/// Basic constraints CA:FALSE and key usage digitalSignature only, the shape
+/// of some factory attestation key certificates.
+fn not_a_ca() -> Vec<X509Extension> {
+    vec![
+        BasicConstraints::new().critical().build().unwrap(),
+        KeyUsage::new()
+            .critical()
+            .digital_signature()
+            .build()
+            .unwrap(),
+    ]
+}
 
 fn generate(spec: &Spec, pki: &Pki, transcript: &[u8]) -> Generated {
     let trusted_root_key = ec_key(Nid::SECP384R1);
@@ -300,6 +320,28 @@ fn generate(spec: &Spec, pki: &Pki, transcript: &[u8]) -> Generated {
     if pki.provisioned {
         intermediate_extensions.push(custom_extension(PROVISIONING_INFO_OID, &octets(&[1])));
     }
+    if pki.intermediate_not_ca {
+        intermediate_extensions.extend(not_a_ca());
+    }
+    let upper_key = ec_key(Nid::X9_62_PRIME256V1);
+    let upper = pki.non_ca_issues_intermediate.then(|| {
+        certificate(
+            UPPER_SERIAL,
+            "Example Attestation Key Issuer",
+            &upper_key,
+            Some(Issuer {
+                name: signing_root.subject_name(),
+                key: &signing_root_key,
+            }),
+            false,
+            "20400101000000Z",
+            not_a_ca(),
+        )
+    });
+    let (intermediate_issuer_name, intermediate_issuer_key) = match &upper {
+        Some(upper) => (upper.subject_name(), &upper_key),
+        None => (signing_root.subject_name(), &signing_root_key),
+    };
     let description = key_description(spec, transcript);
     if pki.extension_on_intermediate {
         intermediate_extensions.push(custom_extension(KEY_DESCRIPTION_OID, &description));
@@ -309,10 +351,10 @@ fn generate(spec: &Spec, pki: &Pki, transcript: &[u8]) -> Generated {
         "Example Attestation Intermediate",
         &intermediate_key,
         Some(Issuer {
-            name: signing_root.subject_name(),
-            key: &signing_root_key,
+            name: intermediate_issuer_name,
+            key: intermediate_issuer_key,
         }),
-        true,
+        !pki.intermediate_not_ca,
         if pki.expired_intermediate {
             "20210101000000Z"
         } else {
@@ -348,10 +390,16 @@ fn generate(spec: &Spec, pki: &Pki, transcript: &[u8]) -> Generated {
         vec![custom_extension(KEY_DESCRIPTION_OID, &description)],
     );
     Generated {
-        chain: [&leaf, &intermediate, &signing_root]
-            .iter()
-            .map(|cert| cert.to_der().unwrap())
-            .collect(),
+        chain: [
+            Some(&leaf),
+            Some(&intermediate),
+            upper.as_ref(),
+            Some(&signing_root),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|cert| cert.to_der().unwrap())
+        .collect(),
         root_pem: String::from_utf8(trusted_root.to_pem().unwrap()).unwrap(),
     }
 }
@@ -471,6 +519,14 @@ fn accepted_attestations_prove_the_leaf_key() {
             Spec::default(),
             Pki {
                 provisioned: true,
+                ..Pki::default()
+            },
+        ),
+        (
+            "factory attestation key certificate that is not a CA",
+            Spec::default(),
+            Pki {
+                intermediate_not_ca: true,
                 ..Pki::default()
             },
         ),
@@ -698,6 +754,15 @@ fn rejected_attestations() {
                 ..Pki::default()
             },
             "attestation_extension_misplaced",
+        ),
+        (
+            "issuer of the attestation key certificate is not a CA",
+            Spec::default(),
+            Pki {
+                non_ca_issues_intermediate: true,
+                ..Pki::default()
+            },
+            "issuer_not_a_ca",
         ),
         (
             "leaf key is not P-256",
