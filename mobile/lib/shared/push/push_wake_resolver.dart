@@ -28,6 +28,10 @@ const pushWakeMaxNotifications = 20;
 /// recorded as shown, so a later wake does not bring them back.
 const pushWakeMaxPerConversation = 8;
 
+/// Most bytes a relay answer may have, as received and again once inflated.
+/// Fifty events of the 64 KiB content limit fit with room to spare.
+const pushWakeMaxResponseBytes = 4 * 1024 * 1024;
+
 /// How a notification is categorized, which is the Android channel the user
 /// may have silenced. A message in a direct-message channel is a
 /// [directMessage] even when it also mentions the user.
@@ -250,6 +254,18 @@ class _WakeRun {
   final done = <String>{};
   final claims = <Future<void>>[];
   bool closed = false;
+  final _clock = Stopwatch()..start();
+
+  /// Whether the wake's budget is spent, by [PushWakeTimeouts.total] or
+  /// because the wake already stopped waiting for its tasks.
+  bool expired(PushWakeTimeouts timeouts) =>
+      closed || _clock.elapsed >= timeouts.total;
+
+  /// What is left of the budget, never negative.
+  Duration remaining(PushWakeTimeouts timeouts) {
+    final left = timeouts.total - _clock.elapsed;
+    return left.isNegative ? Duration.zero : left;
+  }
 }
 
 Future<void> _resolveCommunity(
@@ -272,9 +288,8 @@ Future<void> _resolveCommunity(
     required Duration timeout,
   }) async {
     final body = utf8.encode(jsonEncode(filters));
-    final response = await client.post(
-      url,
-      headers: {
+    final request = http.Request('POST', url)
+      ..headers.addAll({
         'Authorization': buildNip98AuthHeader(
           method: 'POST',
           url: url.toString(),
@@ -283,17 +298,30 @@ Future<void> _resolveCommunity(
           pubkey: mine,
         ),
         'Content-Type': 'application/json',
-      },
-      body: body,
+        'Accept-Encoding': 'gzip',
+      })
+      ..bodyBytes = body;
+    // An untrusted relay can't make the wake buffer or inflate more than the
+    // cap, however small its compressed answer is.
+    final response = await client.sendBounded(
+      request,
+      maxBytes: pushWakeMaxResponseBytes,
       timeout: timeout,
     );
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw RelayException(response.statusCode, '');
     }
-    return parseRelayQueryEvents(
+    final events = parseRelayQueryEvents(
       response.bodyBytes,
       response.headers['content-type'],
+      maxInflatedBytes: pushWakeMaxResponseBytes,
     );
+    // A relay answers each filter's `limit` at most. More is not a relay to
+    // spend signature checks on.
+    if (events.length > filters.fold(0, (n, f) => n + (f['limit'] as int))) {
+      throw const FormatException('Relay returned more events than asked');
+    }
+    return events;
   }
 
   final newest = await store.newestShown(community.id);
@@ -340,7 +368,14 @@ Future<void> _resolveCommunity(
     // wakes see messages they have already shown.
     final claimed = <PushWakeNotification>[];
     final senders = <String, String>{};
+    var complete = true;
     for (final (:event, :category) in selected) {
+      // Stop at the deadline. Messages not yet claimed stay unclaimed, so the
+      // next wake gets them, and the ones already claimed are still returned.
+      if (run.expired(timeouts)) {
+        complete = false;
+        break;
+      }
       final createdAt = DateTime.fromMillisecondsSinceEpoch(
         event.createdAt * 1000,
         isUtc: true,
@@ -375,7 +410,10 @@ Future<void> _resolveCommunity(
     final kept = capPushWakeNotifications(claimed);
     var names = <String, String>{};
     var channels = <String, String>{};
-    if (kept.isNotEmpty) {
+    final metadataBudget = timeouts.metadata < run.remaining(timeouts)
+        ? timeouts.metadata
+        : run.remaining(timeouts);
+    if (kept.isNotEmpty && metadataBudget > Duration.zero) {
       try {
         final people = {for (final n in kept) senders[n.eventId]!}.toList();
         final channelIds = {for (final n in kept) n.target.channelId}.toList();
@@ -390,7 +428,7 @@ Future<void> _resolveCommunity(
             '#d': channelIds,
             'limit': channelIds.length,
           },
-        ], timeout: timeouts.metadata);
+        ], timeout: metadataBudget);
         names = _profileNames(metadata);
         channels = _channelNames(metadata);
       } on Object {
@@ -406,7 +444,9 @@ Future<void> _resolveCommunity(
               : channels[n.target.channelId],
         ),
     ]);
-    run.done.add(community.id);
+    // A wake cut short leaves the community unfinished, so it is reported as
+    // incomplete and the next wake looks again.
+    if (complete) run.done.add(community.id);
   }();
   run.claims.add(work);
   await work;
