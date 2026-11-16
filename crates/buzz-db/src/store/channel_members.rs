@@ -1097,6 +1097,7 @@ fn member_put_denial_message(denial: buzz_core::channel::MemberPutDenial) -> &'s
     match denial {
         D::NotAMember => "private channel requires an invite from an active member",
         D::ElevatedRoleGrant => "only owners/admins may grant elevated roles",
+        D::OwnershipChange => "only owners may grant ownership or change an owner's role",
         D::GuestCannotAdd => "only members can add people in this channel",
         D::SelfJoinAboveJoinRole => {
             "joining this channel gives the guest role; ask a member to make you a member"
@@ -1108,7 +1109,8 @@ fn member_put_denial_message(denial: buzz_core::channel::MemberPutDenial) -> &'s
 /// Remove a member from a channel (soft delete).
 ///
 /// `actor_pubkey` must be an active owner/admin, the agent's owner, or the member
-/// removing themselves.
+/// removing themselves. Only a channel owner may remove another channel owner,
+/// even when the target is their own agent.
 ///
 /// Returns `Err(DbError::MemberNotFound)` if the target is not an active member.
 ///
@@ -1154,6 +1156,7 @@ pub async fn remove_member(
     // as `add_member`).
     acquire_channel_membership_lock(tx.conn(), community_id, channel_id).await?;
 
+    let target_role = get_active_role_tx(tx.conn(), community_id, channel_id, pubkey).await?;
     if !is_self_remove {
         let actor_role_str = get_active_role_tx(tx.conn(), community_id, channel_id, actor_pubkey)
             .await?
@@ -1161,6 +1164,11 @@ pub async fn remove_member(
         let actor_role: MemberRole = actor_role_str.parse().map_err(|_| {
             DbError::InvalidData(format!("invalid role in database: {actor_role_str}"))
         })?;
+        if target_role.as_deref() == Some("owner") && actor_role != MemberRole::Owner {
+            return Err(DbError::AccessDenied(
+                "only owners may remove another owner".to_string(),
+            ));
+        }
         if !actor_role.is_elevated() && !actor_is_agent_owner {
             return Err(DbError::AccessDenied(
                 "only owners/admins or the agent's owner may remove other members".to_string(),
@@ -1171,7 +1179,6 @@ pub async fn remove_member(
     // Defense-in-depth: prevent removing the last owner regardless of caller.
     // Callers (REST handlers, NIP-29 handlers) also check this, but the DB
     // layer enforces it as the final safety net.
-    let target_role = get_active_role_tx(tx.conn(), community_id, channel_id, pubkey).await?;
     if target_role.as_deref() == Some("owner") {
         let row = sqlx::query(
             "SELECT COUNT(*) as cnt FROM channel_members \
@@ -4888,6 +4895,125 @@ mod postgres_tests {
         );
     }
 
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn admins_cannot_change_ownership_or_remove_owners() {
+        let pool = setup_pool().await;
+        let (community, channel_id, owner, co_owner) =
+            channel_with_two_owners(&pool, "owner-precedence").await;
+        let admin = random_pubkey();
+        let member = random_pubkey();
+        let newcomer = random_pubkey();
+        for pk in [&admin, &member, &newcomer] {
+            ensure_user(&pool, community, pk)
+                .await
+                .expect("ensure user");
+        }
+        add_member(
+            &pool,
+            community,
+            channel_id,
+            &admin,
+            MemberRole::Admin,
+            Some(&owner),
+        )
+        .await
+        .expect("owner grants admin");
+        add_member(
+            &pool,
+            community,
+            channel_id,
+            &member,
+            MemberRole::Member,
+            Some(&admin),
+        )
+        .await
+        .expect("admin adds member");
+
+        // Granting owner to self, another member, or a new member must fail.
+        // So must demoting/removing a co-owner even while another owner remains.
+        for (target, requested) in [
+            (&admin, MemberRole::Owner),
+            (&member, MemberRole::Owner),
+            (&newcomer, MemberRole::Owner),
+            (&co_owner, MemberRole::Admin),
+        ] {
+            let err = add_member(
+                &pool,
+                community,
+                channel_id,
+                target,
+                requested,
+                Some(&admin),
+            )
+            .await
+            .expect_err("admin must not change ownership");
+            assert!(matches!(err, DbError::AccessDenied(_)), "{err:?}");
+        }
+        // Owning the agent is not a way around its channel-owner role.
+        set_agent_owner(&pool, community, &co_owner, &admin)
+            .await
+            .expect("set immutable agent ownership");
+        let err = remove_member(&pool, community, channel_id, &co_owner, &admin)
+            .await
+            .expect_err("admin must not remove an owner, even its own agent");
+        assert!(matches!(err, DbError::AccessDenied(_)), "{err:?}");
+        let members = get_members(&pool, community, channel_id)
+            .await
+            .expect("members");
+        for (pk, role) in [
+            (&owner, "owner"),
+            (&co_owner, "owner"),
+            (&admin, "admin"),
+            (&member, "member"),
+        ] {
+            assert!(members.iter().any(|m| &m.pubkey == pk && m.role == role));
+        }
+        assert!(!members.iter().any(|m| m.pubkey == newcomer));
+
+        // Admins keep ordinary role management and removal authority.
+        add_member(
+            &pool,
+            community,
+            channel_id,
+            &member,
+            MemberRole::Admin,
+            Some(&admin),
+        )
+        .await
+        .expect("admin promotes another admin");
+        remove_member(&pool, community, channel_id, &member, &admin)
+            .await
+            .expect("admin removes another admin");
+        // Owners retain ownership delegation, co-owner demotion and removal.
+        add_member(
+            &pool,
+            community,
+            channel_id,
+            &admin,
+            MemberRole::Owner,
+            Some(&owner),
+        )
+        .await
+        .expect("owner delegates ownership");
+        add_member(
+            &pool,
+            community,
+            channel_id,
+            &admin,
+            MemberRole::Admin,
+            Some(&owner),
+        )
+        .await
+        .expect("owner demotes co-owner");
+        remove_member(&pool, community, channel_id, &co_owner, &owner)
+            .await
+            .expect("owner removes co-owner");
+        remove_member(&pool, community, channel_id, &owner, &owner)
+            .await
+            .expect_err("last-owner guard remains in force");
+    }
+
     /// Sets up an open channel with exactly two owners, returning
     /// `(community, channel_id, owner_a, owner_b)`.
     async fn channel_with_two_owners(
@@ -5678,6 +5804,74 @@ mod postgres_tests {
             members.iter().any(|m| m.pubkey == victim),
             "victim must not have been removed by a demoted actor"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn remove_member_protects_a_target_promoted_to_owner_while_waiting() {
+        let pool = setup_pool().await;
+        let (community, channel_id, owner, admin) =
+            channel_with_two_owners(&pool, "owner-precedence-race").await;
+        add_member(
+            &pool,
+            community,
+            channel_id,
+            &admin,
+            MemberRole::Admin,
+            Some(&owner),
+        )
+        .await
+        .expect("make actor an admin");
+        let target = random_pubkey();
+        ensure_user(&pool, community, &target)
+            .await
+            .expect("ensure target");
+        add_member(
+            &pool,
+            community,
+            channel_id,
+            &target,
+            MemberRole::Member,
+            Some(&owner),
+        )
+        .await
+        .expect("add target");
+
+        let mut holder = pool.begin().await.expect("begin lock holder");
+        acquire_channel_membership_lock(&mut holder, community, channel_id)
+            .await
+            .expect("lock membership");
+        let pool2 = pool.clone();
+        let target2 = target.clone();
+        let mut remover = tokio::spawn(async move {
+            remove_member(&pool2, community, channel_id, &target2, &admin).await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(750), &mut remover)
+                .await
+                .is_err(),
+            "removal must wait on membership lock"
+        );
+        sqlx::query("UPDATE channel_members SET role = 'owner' WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3")
+            .bind(community.as_uuid())
+            .bind(channel_id)
+            .bind(&target)
+            .execute(&mut *holder)
+            .await
+            .expect("promote target before removal obtains lock");
+        holder.commit().await.expect("commit promotion");
+        let err = tokio::time::timeout(std::time::Duration::from_secs(10), remover)
+            .await
+            .expect("removal proceeds")
+            .expect("task completes")
+            .expect_err("admin must not remove newly promoted owner");
+        assert!(matches!(err, DbError::AccessDenied(_)), "{err:?}");
+        let members = get_members(&pool, community, channel_id)
+            .await
+            .expect("members");
+        assert!(members
+            .iter()
+            .any(|m| m.pubkey == target && m.role == "owner"));
     }
 
     /// A soft-removed row keeps its stored `role`, but that role is history,

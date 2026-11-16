@@ -698,7 +698,7 @@ pub async fn validate_admin_event(
                 channel_authz::decide_self_departure(&members, &actor_bytes)?;
                 Ok(())
             } else {
-                match channel_authz::classify_remove_other(&members, &actor_bytes) {
+                match channel_authz::classify_remove_other(&members, &actor_bytes, &target_pubkey) {
                     RemoveOtherDecision::Allow => Ok(()),
                     RemoveOtherDecision::CheckAgentOwner => {
                         if state
