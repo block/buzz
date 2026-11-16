@@ -47,14 +47,15 @@ class _FakeRelaySession extends RelaySessionNotifier {
   }
 }
 
-NostrEvent _reply(String id, int createdAt) => NostrEvent(
+NostrEvent _reply(String id, int createdAt, {String? ms}) => NostrEvent(
   id: id,
   pubkey: 'bob',
   createdAt: createdAt,
   kind: EventKind.streamMessage,
-  tags: const [
+  tags: [
     ['h', 'chan'],
     ['e', threadIdRoot, '', 'reply'],
+    if (ms != null) ['ms', ms],
   ],
   content: 'reply $id',
   sig: '',
@@ -316,13 +317,13 @@ void main() {
     return (container, fakeSession, subscription);
   }
 
-  test('thread replies keep desktop same-second id order', () {
+  test('thread replies merge by ms, retaining their equal-ms id order', () {
     expect(
       mergeThreadEvents(
-        [_reply('z', 1000)],
-        [_reply('a', 1000), _reply('m', 1000)],
+        [_reply('z', 1000, ms: '100')],
+        [_reply('a', 1000, ms: '900'), _reply('m', 1000, ms: '900')],
       ).map((event) => event.id),
-      ['a', 'm', 'z'],
+      ['z', 'a', 'm'],
     );
   });
 
