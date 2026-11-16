@@ -1464,23 +1464,10 @@ async fn submit_event_authed(
         token_owner,
     )
     .await;
-    let nip_oa_owner = match caller.admit_member(membership) {
-        // Any verified NIP-OA owner is recorded, whatever the relay mode.
-        Ok(owner) => owner.or_else(|| {
-            super::relay_members::extract_nip_oa_owner(
-                &pubkey_bytes,
-                auth_tag,
-                signed_auth_created_at,
-            )
-        }),
-        Err(e) => {
-            return SubmitOutcome::Err {
-                response: e.into_response(),
-            };
-        }
-    };
-    if let Some(owner) = nip_oa_owner {
-        super::relay_members::materialize_nip_oa_owner(state, tenant, &pubkey, &owner).await;
+    if let Err(e) = caller.admit_member(membership) {
+        return SubmitOutcome::Err {
+            response: e.into_response(),
+        };
     }
 
     let auth = IngestAuth::Http {
@@ -11144,6 +11131,133 @@ pub(crate) mod postgres_tests {
             .unwrap();
         assert!(materialize().await, "a known link is still confirmed");
         assert_eq!(agent_rows().await, 0, "a known link writes nothing");
+    }
+
+    /// On a closed relay with NIP-OA admission off, an ownerless member agent's
+    /// `POST /events` with a NIP-OA tag records its owner; removing the owner
+    /// then removes the agent, and its next request is refused. A tag naming
+    /// another owner than the stored one cannot be recorded, so that request
+    /// is refused and its event is not stored.
+    /// Mutation: drop the recording step from the shared HTTP admission →
+    /// the owner stays unrecorded → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn closed_relay_http_records_owner_and_refuses_on_link_failure() {
+        let mut state = bridge_handler_test_state()
+            .await
+            .expect("local Postgres and Redis");
+        {
+            let config = Arc::make_mut(&mut Arc::get_mut(&mut state).expect("unique").config);
+            config.require_relay_membership = true;
+            config.allow_nip_oa_auth = false;
+        }
+        let tenant = fresh_tenant("http-owner-record.test");
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(tenant.community().as_uuid())
+            .bind(format!(
+                "http-owner-{}.example",
+                tenant.community().as_uuid().simple()
+            ))
+            .execute(state.db.pool())
+            .await
+            .expect("insert community");
+        let (owner, agent, other_owner, conflicted) = (
+            Keys::generate(),
+            Keys::generate(),
+            Keys::generate(),
+            Keys::generate(),
+        );
+        for keys in [&owner, &agent, &conflicted] {
+            buzz_db::relay_members::add_relay_member(
+                state.db.pool(),
+                tenant.community(),
+                &keys.public_key().to_hex(),
+                "member",
+                None,
+                &Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("add member");
+        }
+        let submit = |keys: &Keys, tag_owner: &Keys| {
+            let state = state.clone();
+            let tenant = tenant.clone();
+            let (keys, tag_owner) = (keys.clone(), tag_owner.clone());
+            async move {
+                let tag = buzz_sdk::nip_oa::compute_auth_tag(&tag_owner, &keys.public_key(), "")
+                    .expect("sign NIP-OA credential");
+                let mut headers = HeaderMap::new();
+                headers.insert("x-auth-tag", tag.parse().expect("header value"));
+                let event = EventBuilder::new(Kind::TextNote, "owner-record")
+                    .sign_with_keys(&keys)
+                    .expect("sign event");
+                let outcome = submit_event_authed(
+                    &state,
+                    &tenant,
+                    &headers,
+                    serde_json::to_vec(&event).expect("event json").as_slice(),
+                    &mut ProvenCaller {
+                        pubkey: keys.public_key(),
+                        event_id_bytes: fresh_nip98_event_id_bytes(),
+                        signed_at: Some(nostr::Timestamp::now().as_secs()),
+                        token_owner: None,
+                        slot: AccessSlot::default(),
+                    },
+                    None,
+                )
+                .await;
+                matches!(outcome, SubmitOutcome::Ok { accepted: true, .. })
+            }
+        };
+        let owns = |agent: &Keys, owner: &Keys| {
+            let (state, community) = (state.clone(), tenant.community());
+            let (agent, owner) = (agent.public_key(), owner.public_key());
+            async move {
+                state
+                    .db
+                    .is_agent_owner(community, agent.as_bytes(), owner.as_bytes())
+                    .await
+                    .expect("owner lookup")
+            }
+        };
+
+        assert!(submit(&agent, &owner).await, "the member agent is admitted");
+        assert!(owns(&agent, &owner).await, "its owner is recorded");
+        buzz_db::relay_members::remove_relay_member(
+            state.db.pool(),
+            tenant.community(),
+            &owner.public_key().to_hex(),
+            &Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("remove owner");
+        assert!(
+            !submit(&agent, &owner).await,
+            "the agent is refused after removal"
+        );
+
+        for keys in [&conflicted, &other_owner] {
+            state
+                .db
+                .ensure_user(tenant.community(), keys.public_key().as_bytes())
+                .await
+                .expect("ensure user");
+        }
+        assert!(state
+            .db
+            .set_agent_owner(
+                tenant.community(),
+                conflicted.public_key().as_bytes(),
+                other_owner.public_key().as_bytes(),
+            )
+            .await
+            .expect("seed other owner"));
+        assert!(
+            !submit(&conflicted, &owner).await,
+            "an owner that cannot be recorded refuses the request"
+        );
     }
 
     /// An agent socket admitted with no owner, then linked to its owner by a

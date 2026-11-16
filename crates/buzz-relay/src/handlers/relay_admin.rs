@@ -1294,6 +1294,7 @@ mod postgres_tests {
         state: std::sync::Arc<crate::state::AppState>,
         tenant: buzz_core::tenant::TenantContext,
         member: Keys,
+        agent: Keys,
         closing: Vec<(&'static str, tokio_util::sync::CancellationToken)>,
         other_community: tokio_util::sync::CancellationToken,
         _guards: Vec<crate::state::CommunityConnectionGuard>,
@@ -1311,18 +1312,21 @@ mod postgres_tests {
         );
         let (_, other_tenant) = workspace_profile_test_state(&other_host, true).await;
         let (member, agent) = (Keys::generate(), Keys::generate());
-        state
-            .db
-            .add_relay_member(
-                tenant.community(),
-                &member.public_key().to_hex(),
-                "member",
-                None,
-                &nostr::Keys::generate(),
-            )
-            .await
-            .map(|write| write.outcome)
-            .expect("seed member");
+        // The agent joined directly as a member, so leaving must remove its row.
+        for keys in [&member, &agent] {
+            state
+                .db
+                .add_relay_member(
+                    tenant.community(),
+                    &keys.public_key().to_hex(),
+                    "member",
+                    None,
+                    &nostr::Keys::generate(),
+                )
+                .await
+                .map(|write| write.outcome)
+                .expect("seed member");
+        }
         for keys in [&member, &agent] {
             state
                 .db
@@ -1368,6 +1372,7 @@ mod postgres_tests {
             state,
             tenant,
             member,
+            agent,
             closing,
             other_community,
             _guards: guards,
@@ -1446,6 +1451,15 @@ mod postgres_tests {
                 .await
                 .expect("membership read"),
             "the membership row is gone"
+        );
+        assert!(
+            f.state
+                .db
+                .get_relay_member(f.tenant.community(), &f.agent.public_key().to_hex())
+                .await
+                .expect("agent membership read")
+                .is_none(),
+            "the directly joined agent's membership row is gone"
         );
         assert_left(&f);
     }

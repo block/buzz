@@ -2882,7 +2882,8 @@ mod tests {
         /// On a closed relay with NIP-OA admission off, a member agent's
         /// verified NIP-OA tag records its owner; a tag for another agent or
         /// one that has expired records nothing; a refused AUTH (agent not a
-        /// member, owner not a member) records nothing.
+        /// member) records nothing. Removing the recorded owner then refuses
+        /// the agent's next AUTH.
         /// Mutation: restore the `!require_relay_membership` guard on the
         /// recording step → the member agent's owner stays NULL → RED.
         #[tokio::test]
@@ -2905,7 +2906,7 @@ mod tests {
                 Keys::generate(),
                 Keys::generate(),
             );
-            for keys in [&valid, &wrong_agent, &stale] {
+            for keys in [&owner, &valid, &wrong_agent, &stale] {
                 state
                     .db
                     .add_relay_member(
@@ -2963,6 +2964,32 @@ mod tests {
                     "case {i} owner record"
                 );
             }
+
+            // The recorded owner's removal takes the agent with it.
+            buzz_db::relay_members::remove_relay_member(
+                state.db.pool(),
+                community,
+                &owner.public_key().to_hex(),
+                &nostr::Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("remove owner");
+            let (conn, _ctrl) = registered_pending_conn(&state, community, "record-owner-after");
+            handle_auth(
+                signed_auth(
+                    &valid,
+                    "record-owner-after",
+                    Some(tag(&valid.public_key(), "")),
+                ),
+                Arc::clone(&conn),
+                Arc::clone(&state),
+            )
+            .await;
+            assert!(
+                !matches!(conn.auth_state_snapshot(), AuthState::Authenticated(_)),
+                "the agent is refused after its owner's removal"
+            );
         }
 
         /// Root AUTH records each agent's owner on its socket — the proven

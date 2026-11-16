@@ -448,7 +448,13 @@ pub mod relay_members {
             token_owner,
         )
         .await?;
-        if let Some(token_owner) = token_owner {
+        // Every admitted request records its verified owner here, whatever
+        // the relay mode or how it was admitted: removing or banning the owner
+        // reaches the agent only through that record.
+        let recorded = token_owner.or(owner).or_else(|| {
+            extract_nip_oa_owner(pubkey_bytes, auth_tag_header, signed_auth_created_at)
+        });
+        if let Some(recorded) = recorded {
             let Ok(agent) = nostr::PublicKey::from_slice(pubkey_bytes) else {
                 return Err((
                     AuthReason::MembershipUnavailable,
@@ -456,23 +462,23 @@ pub mod relay_members {
                     None,
                 ));
             };
-            match link_agent_owner(state, tenant, &agent, &token_owner).await {
+            match link_agent_owner(state, tenant, &agent, &recorded).await {
                 OwnerLink::Linked => {}
-                OwnerLink::Conflict => {
+                OwnerLink::Conflict if token_owner.is_some() => {
                     return Err((
                         AuthReason::OwnerMismatch,
                         super::api_error(StatusCode::FORBIDDEN, OWNER_MISMATCH),
                         Some("not_stored_owner"),
                     ))
                 }
-                OwnerLink::Unavailable => {
+                OwnerLink::Conflict | OwnerLink::Unavailable => {
                     return Err((
                         AuthReason::NipOaOwnerUnlinked,
                         super::api_error(
                             StatusCode::SERVICE_UNAVAILABLE,
                             crate::handlers::auth::OWNER_LINK_ERROR,
                         ),
-                        Some("owner_link_unavailable"),
+                        token_owner.map(|_| "owner_link_unavailable"),
                     ))
                 }
             }
