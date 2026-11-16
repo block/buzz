@@ -49,6 +49,15 @@ class OrganizationSignIn extends ChangeNotifier {
   /// The last sign-in or session-check failure, cleared by the next attempt.
   Object? failure;
 
+  /// [failure] as a short code shown with the failure message, so a reported
+  /// screenshot names the step that failed.
+  String? get failureCode => switch (failure) {
+    null => null,
+    final BrowserAuthFailure f => 'browser-${f.name}',
+    final AccountFailure f => 'account-${f.name}',
+    final f => throw StateError('Unexpected sign-in failure: $f'),
+  };
+
   final _subscriptions = <StreamSubscription<Object>>[];
 
   /// Advanced by every start or cancel, so an exchange from an abandoned

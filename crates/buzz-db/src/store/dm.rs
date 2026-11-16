@@ -296,6 +296,27 @@ pub async fn create_dm(
     Ok(found)
 }
 
+/// Create or reuse the DM of exactly `participants` without changing who has
+/// it hidden, as a workflow sending a DM needs: only the interactive open
+/// changes visibility. True only when this call made the DM. A new DM's agents
+/// need no permission, as a workflow DMs its owner directly.
+pub async fn create_dm_if_missing(
+    pool: &PgPool,
+    community_id: CommunityId,
+    participants: &[&[u8]],
+    created_by: &[u8],
+) -> Result<(ChannelRecord, bool)> {
+    create_dm(
+        pool,
+        community_id,
+        participants,
+        created_by,
+        false,
+        &|_: &str, _: &[u8]| Ok(()),
+    )
+    .await
+}
+
 /// [`create_dm`] on the caller's transaction, so a caller holding a DM's lock
 /// makes the new DM without another connection.
 async fn find_or_create_dm(
@@ -1217,6 +1238,17 @@ impl Db {
         .await
     }
 
+    /// Create or reuse a DM without unhiding it; true only for the creator.
+    #[datastore_span(name = "create_dm_if_missing", system = "postgresql")]
+    pub async fn create_dm_if_missing(
+        &self,
+        community_id: CommunityId,
+        participants: &[&[u8]],
+        created_by: &[u8],
+    ) -> Result<(ChannelRecord, bool)> {
+        crate::dm::create_dm_if_missing(&self.pool, community_id, participants, created_by).await
+    }
+
     /// List all DMs for a user.
     #[datastore_span(name = "list_dms_for_user", system = "postgresql")]
     pub async fn list_dms_for_user(
@@ -1334,6 +1366,10 @@ impl Db {
 }
 
 // -- Tests --------------------------------------------------------------------
+
+#[cfg(test)]
+#[path = "dm_postgres_tests.rs"]
+mod postgres_tests;
 
 #[cfg(test)]
 mod tests {

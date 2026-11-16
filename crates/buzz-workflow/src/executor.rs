@@ -428,10 +428,15 @@ pub fn resolve_step_templates(
             channel: t_opt(channel)?,
             reply_in_thread: *reply_in_thread,
         }),
-        SendDm { to, text } => Ok(SendDm {
-            to: t(to)?,
-            text: t(text)?,
-        }),
+        SendDm { to, text } => {
+            // Recheck stored definitions too: a workflow saved before recipient
+            // validation was introduced must not route from arbitrary input.
+            crate::schema::validate_dm_recipient(to)?;
+            Ok(SendDm {
+                to: t(to)?,
+                text: t(text)?,
+            })
+        }
         SetChannelTopic { topic } => Ok(SetChannelTopic { topic: t(topic)? }),
         AddReaction { emoji } => Ok(AddReaction { emoji: t(emoji)? }),
         CallWebhook {
@@ -735,10 +740,72 @@ pub async fn dispatch_action(
                     Ok(StepResult::Completed(output))
                 }
 
-                SendDm { to, text: _ } => {
-                    warn!(run_id = %run_id, step = step_id, "SendDm not yet implemented (to={to})");
-                    // TODO (WF-07): emit DM event.
-                    Err(WorkflowError::NotImplemented("SendDm".into()))
+                SendDm { to, text } => {
+                    let run = engine
+                        .db
+                        .get_workflow_run(community_id, run_id)
+                        .await
+                        .map_err(|e| WorkflowError::WebhookError(format!(
+                            "SendDm: failed to load workflow run {run_id}: {e}"
+                        )))?;
+                    let workflow = engine
+                        .db
+                        .get_workflow(community_id, run.workflow_id)
+                        .await
+                        .map_err(|e| WorkflowError::WebhookError(format!(
+                            "SendDm: failed to load workflow {}: {e}", run.workflow_id
+                        )))?;
+                    let withheld_reasons = agent_mentions_withheld_reasons(
+                        engine.config.agent_mentions,
+                        cause_may_direct_agents(run.cause.as_ref(), &workflow.owner_pubkey),
+                        definition_may_direct_agents,
+                        resumed,
+                    );
+                    let authored_text = match &step.action {
+                        SendDm { text, .. } => text.as_str(),
+                        _ => {
+                            return Err(WorkflowError::InvalidDefinition(
+                                "SendDm: resolved action does not match its authored step".into(),
+                            ));
+                        }
+                    };
+                    let sent = engine
+                        .action_sink()?
+                        .send_dm(
+                            community_id,
+                            to,
+                            text,
+                            authored_text,
+                            withheld_reasons.is_empty(),
+                            &hex::encode(&workflow.owner_pubkey),
+                        )
+                        .await?;
+                    let mut output = serde_json::json!({
+                        "sent": true,
+                        "event_id": sent.event_id,
+                    });
+                    if sent.agent_mentions_withheld {
+                        info!(
+                            target: crate::AGENT_MENTIONS_LOG_TARGET,
+                            community = %community_id,
+                            workflow = %run.workflow_id,
+                            run_id = %run_id,
+                            step = step_id,
+                            reasons = ?withheld_reasons,
+                            "owner-only agent mentions withheld buzz:workflow-mention tags"
+                        );
+                        for reason in &withheld_reasons {
+                            metrics::counter!(
+                                "buzz_workflow_agent_mentions_withheld_total",
+                                "reason" => *reason
+                            ).increment(1);
+                        }
+                        output["agent_mentions"] = serde_json::json!({
+                            "withheld": true,
+                            "reasons": withheld_reasons,
+                        });
+                    }
+                    Ok(StepResult::Completed(output))
                 }
 
                 SetChannelTopic { topic: _ } => {
@@ -2101,7 +2168,7 @@ mod tests {
         for other in [
             "  - id: approve\n    action: request_approval\n    from: '@manager'\n    message: ok?\n",
             "  - id: react\n    action: add_reaction\n    emoji: eyes\n",
-            "  - id: dm\n    action: send_dm\n    to: '@manager'\n    text: hi\n",
+            "  - id: dm\n    action: send_dm\n    to: '{{trigger.author}}'\n    text: hi\n",
             "  - id: topic\n    action: set_channel_topic\n    topic: hi\n",
         ] {
             assert!(
