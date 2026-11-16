@@ -1,184 +1,184 @@
-//! Disposable, disk-backed inventory. Never used as a restart journal.
-use anyhow::{bail, Result};
+//! Disposable, bounded in-memory inventory. Never used as a restart journal.
+use anyhow::{bail, Context, Result};
 use buzz_media::{ObjectVersionEntry, ObjectVersionKind};
-use sqlx::{
-    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous},
-    Connection, SqliteConnection,
-};
+use std::collections::{BTreeMap, BTreeSet};
+use std::mem::size_of;
+use std::ops::Bound::{Excluded, Included, Unbounded};
 
 pub(super) const PAGE_SIZE: u16 = 500;
-const MAX_PAGES: u32 = 262_144; // 1 GiB at 4096 bytes/page, including indexes.
+const MAX_BYTES: usize = 128 * 1024 * 1024;
+const MAX_ENTRIES: usize = 250_000;
 const MAX_ENTRY_BYTES: usize = 16_384;
+// Conservative allowance per tree entry for node pointers, spare node slots,
+// and allocator overhead, in addition to inline data and owned string bytes.
+// This is an inventory accounting budget, not a process RSS limit. Transient
+// listing/report pages and the DB/HTTP clients have their own allocations.
+const TREE_ENTRY_OVERHEAD: usize = 256;
+
+type VersionKey = (String, i64, i64);
+type Marker = (String, String, String);
+
+#[derive(Default)]
+struct Candidate {
+    shared: bool,
+    db_checked: bool,
+}
 
 pub(super) struct Inventory {
-    conn: SqliteConnection,
-    // Private temporary directory; files are removed on success, error or cancellation.
-    _directory: tempfile::TempDir,
+    candidates: BTreeMap<String, Candidate>,
+    filenames: BTreeSet<(String, String)>,
+    versions: BTreeMap<VersionKey, ObjectVersionEntry>,
+    markers: BTreeSet<Marker>,
+    bytes: usize,
+    entries: usize,
+    max_bytes: usize,
+    max_entries: usize,
+    next_id: i64,
 }
 
 impl Inventory {
     pub async fn new() -> Result<Self> {
-        Self::with_page_limit(MAX_PAGES).await
+        Ok(Self::with_limits(MAX_BYTES, MAX_ENTRIES))
     }
 
-    async fn with_page_limit(max_pages: u32) -> Result<Self> {
-        let directory = tempfile::tempdir()?;
-        let options = SqliteConnectOptions::new()
-            .filename(directory.path().join("inventory.sqlite"))
-            .create_if_missing(true)
-            .journal_mode(SqliteJournalMode::Off)
-            .synchronous(SqliteSynchronous::Off)
-            .statement_cache_capacity(16)
-            .pragma("page_size", "4096")
-            .pragma("max_page_count", max_pages.to_string())
-            .pragma("cache_size", "-4096")
-            .pragma("mmap_size", "0")
-            .pragma("temp_store", "FILE");
-        let mut conn = SqliteConnection::connect_with(&options).await?;
-        // Journaling is disabled because any failure discards this inventory; no
-        // persisted decision is trusted after a restart. Source data stays intact
-        // throughout collection. No application DB schema is changed.
-        sqlx::raw_sql(
-            "CREATE TABLE candidates (hash TEXT PRIMARY KEY, shared INTEGER NOT NULL DEFAULT 0, db_checked INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;
-             CREATE TABLE filenames (hash TEXT, name TEXT, PRIMARY KEY(hash, name)) WITHOUT ROWID;
-             CREATE TABLE versions (id INTEGER PRIMARY KEY, hash TEXT NOT NULL,
-                 priority INTEGER NOT NULL, unversioned INTEGER NOT NULL, entry TEXT NOT NULL);
-             CREATE INDEX versions_by_hash ON versions(hash, priority, id);
-             CREATE TABLE listing_markers (prefix TEXT, key TEXT, version TEXT,
-                 PRIMARY KEY(prefix, key, version)) WITHOUT ROWID;",
-        ).execute(&mut conn).await?;
-        Ok(Self {
-            conn,
-            _directory: directory,
-        })
+    pub(super) fn with_limits(max_bytes: usize, max_entries: usize) -> Self {
+        Self {
+            candidates: BTreeMap::new(),
+            filenames: BTreeSet::new(),
+            versions: BTreeMap::new(),
+            markers: BTreeSet::new(),
+            bytes: 0,
+            entries: 0,
+            max_bytes,
+            max_entries,
+            next_id: 0,
+        }
+    }
+
+    // Charge before retaining any new data. On failure the caller discards the
+    // entire inventory, before report::execute can mutate storage or attribution.
+    fn reserve<T>(&mut self, string_bytes: usize) -> Result<()> {
+        let bytes = self
+            .bytes
+            .checked_add(size_of::<T>() + TREE_ENTRY_OVERHEAD)
+            .and_then(|bytes| bytes.checked_add(string_bytes))
+            .context("media inventory byte accounting overflow")?;
+        if bytes > self.max_bytes || self.entries >= self.max_entries {
+            bail!("media inventory capacity exceeded ({} byte budget, {} entries); discovery aborted before deletion", self.max_bytes, self.max_entries);
+        }
+        self.bytes = bytes;
+        self.entries += 1;
+        Ok(())
     }
 
     pub async fn add_candidates(&mut self, hashes: &[String]) -> Result<()> {
-        if hashes.is_empty() {
-            return Ok(());
-        }
-        let mut tx = self.conn.begin().await?;
         for hash in hashes {
-            sqlx::query("INSERT OR IGNORE INTO candidates(hash) VALUES (?)")
-                .bind(hash)
-                .execute(&mut *tx)
-                .await?;
+            check_string(hash)?;
+            if !self.candidates.contains_key(hash) {
+                self.reserve::<(String, Candidate)>(hash.len())?;
+                self.candidates.insert(hash.clone(), Candidate::default());
+            }
         }
-        tx.commit().await?;
         Ok(())
     }
 
     pub async fn candidates(&mut self, after: &str) -> Result<Vec<(String, bool)>> {
-        Ok(sqlx::query_as(
-            "SELECT hash, shared FROM candidates WHERE hash > ? ORDER BY hash LIMIT ?",
-        )
-        .bind(after)
-        .bind(i64::from(PAGE_SIZE))
-        .fetch_all(&mut self.conn)
-        .await?)
+        Ok(self
+            .candidates
+            .range::<str, _>((Excluded(after), Unbounded))
+            .take(usize::from(PAGE_SIZE))
+            .map(|(hash, candidate)| (hash.clone(), candidate.shared))
+            .collect())
     }
 
     pub async fn add_classified_candidates(&mut self, page: &[(String, bool)]) -> Result<()> {
-        let mut tx = self.conn.begin().await?;
         for (hash, shared) in page {
-            sqlx::query("INSERT INTO candidates(hash, shared, db_checked) VALUES (?, ?, 1)
-                ON CONFLICT(hash) DO UPDATE SET shared = MAX(shared, excluded.shared), db_checked = 1")
-                .bind(hash).bind(shared).execute(&mut *tx).await?;
+            self.add_candidates(std::slice::from_ref(hash)).await?;
+            if let Some(candidate) = self.candidates.get_mut(hash) {
+                candidate.shared |= shared;
+                candidate.db_checked = true;
+            }
         }
-        tx.commit().await?;
         Ok(())
     }
 
     pub async fn unchecked_candidates(&mut self, after: &str) -> Result<Vec<String>> {
-        Ok(sqlx::query_scalar(
-            "SELECT hash FROM candidates WHERE db_checked = 0 AND hash > ? ORDER BY hash LIMIT ?",
-        )
-        .bind(after)
-        .bind(i64::from(PAGE_SIZE))
-        .fetch_all(&mut self.conn)
-        .await?)
+        Ok(self
+            .candidates
+            .range::<str, _>((Excluded(after), Unbounded))
+            .filter(|(_, candidate)| !candidate.db_checked)
+            .take(usize::from(PAGE_SIZE))
+            .map(|(hash, _)| hash.clone())
+            .collect())
     }
 
     pub async fn contains(&mut self, hash: &str) -> Result<bool> {
-        Ok(
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM candidates WHERE hash = ?)")
-                .bind(hash)
-                .fetch_one(&mut self.conn)
-                .await?,
-        )
+        Ok(self.candidates.contains_key(hash))
     }
 
     pub async fn mark_shared(&mut self, hashes: &[String]) -> Result<()> {
-        if hashes.is_empty() {
-            return Ok(());
-        }
-        let mut tx = self.conn.begin().await?;
         for hash in hashes {
-            sqlx::query("UPDATE candidates SET shared = 1 WHERE hash = ?")
-                .bind(hash)
-                .execute(&mut *tx)
-                .await?;
+            if let Some(candidate) = self.candidates.get_mut(hash) {
+                candidate.shared = true;
+            }
         }
-        tx.commit().await?;
         Ok(())
     }
 
     pub async fn add_versions(&mut self, versions: &[(String, ObjectVersionEntry)]) -> Result<()> {
-        if versions.is_empty() {
-            return Ok(());
-        }
-        let mut tx = self.conn.begin().await?;
         for (hash, version) in versions {
-            let entry = serde_json::to_string(version)?;
-            if entry.len() > MAX_ENTRY_BYTES {
+            check_string(hash)?;
+            check_string(&version.key)?;
+            check_string(&version.version_id)?;
+            if serde_json::to_string(version)?.len() > MAX_ENTRY_BYTES {
                 bail!("storage version metadata exceeds 16 KiB");
             }
-            sqlx::query(
-                "INSERT INTO versions(hash, priority, unversioned, entry) VALUES (?, ?, ?, ?)",
-            )
-            .bind(hash)
-            .bind(priority(version))
-            .bind(version.version_id.is_empty() || version.version_id == "null")
-            .bind(entry)
-            .execute(&mut *tx)
-            .await?;
+            let id = self
+                .next_id
+                .checked_add(1)
+                .context("media inventory version ID overflow")?;
+            self.reserve::<(VersionKey, ObjectVersionEntry)>(
+                hash.len() + version.key.len() + version.version_id.len(),
+            )?;
+            self.versions
+                .insert((hash.clone(), priority(version), id), version.clone());
+            self.next_id = id;
         }
-        tx.commit().await?;
         Ok(())
     }
 
     pub async fn add_filename(&mut self, hash: &str, name: &str) -> Result<()> {
-        if name.len() > MAX_ENTRY_BYTES {
-            bail!("stored filename exceeds 16 KiB");
+        check_string(hash)?;
+        check_string(name)?;
+        let key = (hash.to_owned(), name.to_owned());
+        if !self.filenames.contains(&key) {
+            self.reserve::<(String, String)>(hash.len() + name.len())?;
+            self.filenames.insert(key);
         }
-        sqlx::query("INSERT OR IGNORE INTO filenames(hash, name) VALUES (?, ?)")
-            .bind(hash)
-            .bind(name)
-            .execute(&mut self.conn)
-            .await?;
         Ok(())
     }
 
-    // A hash may have several stored extensions. Use the first for the display
-    // name; every actual key remains available in the file's versions array.
+    // A hash may have several stored extensions. Use the first for display;
+    // every actual key remains available in the file's versions array.
     pub async fn filename(&mut self, hash: &str) -> Result<Option<String>> {
-        Ok(
-            sqlx::query_scalar("SELECT name FROM filenames WHERE hash = ? ORDER BY name LIMIT 1")
-                .bind(hash)
-                .fetch_optional(&mut self.conn)
-                .await?,
-        )
+        Ok(self
+            .filenames
+            .range((hash.to_owned(), String::new())..)
+            .next()
+            .filter(|(entry_hash, _)| entry_hash == hash)
+            .map(|(_, name)| name.clone()))
     }
 
     pub async fn require_immutable_versions(&mut self) -> Result<()> {
-        let invalid: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM versions v JOIN candidates c ON c.hash = v.hash
-             WHERE c.shared = 0 AND v.unversioned = 1)",
-        )
-        .fetch_one(&mut self.conn)
-        .await?;
-        if invalid {
-            bail!("selected media has unversioned objects; immutable version IDs are required");
+        for ((hash, _, _), version) in &self.versions {
+            if self
+                .candidates
+                .get(hash)
+                .is_some_and(|candidate| !candidate.shared)
+                && (version.version_id.is_empty() || version.version_id == "null")
+            {
+                bail!("selected media has unversioned objects; immutable version IDs are required");
+            }
         }
         Ok(())
     }
@@ -189,16 +189,16 @@ impl Inventory {
         key: &str,
         version: &str,
     ) -> Result<bool> {
-        Ok(sqlx::query(
-            "INSERT OR IGNORE INTO listing_markers(prefix, key, version) VALUES (?, ?, ?)",
-        )
-        .bind(prefix)
-        .bind(key)
-        .bind(version)
-        .execute(&mut self.conn)
-        .await?
-        .rows_affected()
-            == 1)
+        for value in [prefix, key, version] {
+            check_string(value)?;
+        }
+        let marker = (prefix.to_owned(), key.to_owned(), version.to_owned());
+        if self.markers.contains(&marker) {
+            return Ok(false);
+        }
+        self.reserve::<Marker>(prefix.len() + key.len() + version.len())?;
+        self.markers.insert(marker);
+        Ok(true)
     }
 
     pub async fn versions(
@@ -206,25 +206,27 @@ impl Inventory {
         hash: &str,
         after: (i64, i64),
     ) -> Result<Vec<(i64, i64, ObjectVersionEntry)>> {
-        let rows: Vec<(i64, i64, String)> = sqlx::query_as(
-            "SELECT priority, id, entry FROM versions
-             WHERE hash = ? AND (priority, id) > (?, ?) ORDER BY priority, id LIMIT ?",
-        )
-        .bind(hash)
-        .bind(after.0)
-        .bind(after.1)
-        .bind(i64::from(PAGE_SIZE))
-        .fetch_all(&mut self.conn)
-        .await?;
-        rows.into_iter()
-            .map(|(priority, id, entry)| Ok((priority, id, serde_json::from_str(&entry)?)))
-            .collect()
+        Ok(self
+            .versions
+            .range((
+                Excluded((hash.to_owned(), after.0, after.1)),
+                Included((hash.to_owned(), i64::MAX, i64::MAX)),
+            ))
+            .take(usize::from(PAGE_SIZE))
+            .map(|((_, priority, id), version)| (*priority, *id, version.clone()))
+            .collect())
     }
 
     pub async fn close(self) -> Result<()> {
-        self.conn.close().await?;
         Ok(())
     }
+}
+
+fn check_string(value: &str) -> Result<()> {
+    if value.len() > MAX_ENTRY_BYTES {
+        bail!("media inventory field exceeds 16 KiB");
+    }
+    Ok(())
 }
 
 fn priority(version: &ObjectVersionEntry) -> i64 {
@@ -237,113 +239,5 @@ fn priority(version: &ObjectVersionEntry) -> i64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn inventory_deduplicates_pages_and_orders_attribution_last() {
-        let mut inventory = Inventory::new().await.unwrap();
-        let path = inventory._directory.path().to_path_buf();
-        let hashes: Vec<_> = (0..501).map(|i| format!("{i:064x}")).collect();
-        inventory.add_candidates(&hashes).await.unwrap();
-        inventory.add_candidates(&hashes).await.unwrap();
-        let page = inventory.candidates("").await.unwrap();
-        assert_eq!(page.len(), 500);
-        assert_eq!(inventory.candidates(&page[499].0).await.unwrap().len(), 1);
-        let hash = &hashes[0];
-        let entries: Vec<_> = [
-            ("_uploads/claim", ObjectVersionKind::Object),
-            ("_uploads/claim", ObjectVersionKind::DeleteMarker),
-            ("blob", ObjectVersionKind::DeleteMarker),
-            ("blob", ObjectVersionKind::Object),
-        ]
-        .into_iter()
-        .map(|(key, kind)| {
-            (
-                hash.clone(),
-                ObjectVersionEntry {
-                    key: key.into(),
-                    version_id: "v1".into(),
-                    kind,
-                    size: 1,
-                },
-            )
-        })
-        .collect();
-        inventory.add_versions(&entries).await.unwrap();
-        let ordered = inventory.versions(hash, (-1, 0)).await.unwrap();
-        assert_eq!(
-            ordered.iter().map(|v| v.0).collect::<Vec<_>>(),
-            vec![0, 1, 2, 3]
-        );
-        assert_eq!(ordered[3].2.key, "_uploads/claim");
-        // A large file family must cross a page without losing a version or
-        // moving its final ownership record ahead of the remaining bytes.
-        let many: Vec<_> = (0..501)
-            .map(|i| {
-                (
-                    hashes[1].clone(),
-                    ObjectVersionEntry {
-                        key: "blob".into(),
-                        version_id: format!("v{i}"),
-                        kind: ObjectVersionKind::Object,
-                        size: 1,
-                    },
-                )
-            })
-            .chain(std::iter::once((hashes[1].clone(), entries[0].1.clone())))
-            .collect();
-        inventory.add_versions(&many).await.unwrap();
-        let first = inventory.versions(&hashes[1], (-1, 0)).await.unwrap();
-        assert_eq!(first.len(), 500);
-        let last = first.last().unwrap();
-        let rest = inventory
-            .versions(&hashes[1], (last.0, last.1))
-            .await
-            .unwrap();
-        assert_eq!(rest.len(), 2);
-        assert_eq!(rest[1].2.key, "_uploads/claim");
-        assert!(inventory
-            .remember_marker("_uploads/", "key", "v1")
-            .await
-            .unwrap());
-        assert!(inventory
-            .remember_marker("_uploads/", "key", "v2")
-            .await
-            .unwrap());
-        assert!(!inventory
-            .remember_marker("_uploads/", "key", "v1")
-            .await
-            .unwrap());
-        assert!(inventory.remember_marker("", "key", "v1").await.unwrap());
-        inventory.close().await.unwrap();
-        assert!(!path.exists());
-    }
-
-    #[tokio::test]
-    async fn disk_limit_aborts_instead_of_truncating_inventory() {
-        let mut inventory = Inventory::with_page_limit(8).await.unwrap();
-        let version = ObjectVersionEntry {
-            key: "k".repeat(8000),
-            version_id: "v1".into(),
-            kind: ObjectVersionKind::Object,
-            size: 1,
-        };
-        let mut full = false;
-        for _ in 0..16 {
-            if inventory
-                .add_versions(&[("a".repeat(64), version.clone())])
-                .await
-                .is_err()
-            {
-                full = true;
-                break;
-            }
-        }
-        assert!(full);
-        let size = std::fs::metadata(inventory._directory.path().join("inventory.sqlite"))
-            .unwrap()
-            .len();
-        assert!(size <= 8 * 4096);
-    }
-}
+#[path = "media_inventory_tests.rs"]
+mod tests;

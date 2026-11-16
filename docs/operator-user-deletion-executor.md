@@ -224,9 +224,16 @@ upload claims. Unrelated Git objects and unrelated blobs are not listed.
 The metadata namespace scans remain proportional to their namespace sizes.
 
 All evidence and exact version IDs are collected before deletion begins.
-Each listing is bounded to 100,000 pages of at most 1,000 entries; temporary
-SQLite inventory is bounded to 1 GiB. These are failure guards, not limits on
-how many files a user may own. Exhausting either aborts before mutation.
+Each listing is bounded to 100,000 pages of at most 1,000 entries. The disposable
+in-memory inventory has a 128 MiB accounting budget and a 250,000-entry cap
+across candidates, filenames, object versions, and listing markers. Accounting
+includes inline data, string bytes, and a conservative 256-byte tree/allocator
+allowance per entry. Individual fields and serialized version records are
+limited to 16 KiB. The budget is not a process RSS limit: bounded listing/report
+pages and database/HTTP clients allocate separately. It replaces the former
+1 GiB disk inventory, so large jobs may reach capacity sooner. Exhausting a
+limit aborts before mutation, with a capacity error; no partial inventory is
+used for deletion. Retries rebuild discovery from PostgreSQL and storage.
 Unversioned exclusive objects also abort. Upload claim objects are deleted
 last, and the target's database uploader rows are removed only after that
 file's storage processing succeeds, so a partial failure can be retried.

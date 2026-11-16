@@ -69,7 +69,7 @@ pub(super) async fn handle_with_storage(
 }
 
 // Fakes replace only external DB/storage boundaries; the tests run the same
-// candidate collection, prefix scans, disk inventory and deletion loop.
+// candidate collection, prefix scans, bounded inventory and deletion loop.
 trait Database {
     async fn targets(&self, pubkey: &str) -> Result<Vec<String>>;
     async fn candidates(&self, pubkeys: &[String], after: &str) -> Result<Vec<(String, bool)>>;
@@ -139,9 +139,19 @@ async fn run_handler(
     delete: bool,
     output: &mut impl Write,
 ) -> Result<Value> {
+    run_handler_with_inventory(db, media, pubkey, delete, output, Inventory::new().await?).await
+}
+
+async fn run_handler_with_inventory(
+    db: &impl Database,
+    media: &impl Storage,
+    pubkey: &str,
+    delete: bool,
+    output: &mut impl Write,
+    mut inventory: Inventory,
+) -> Result<Value> {
     let keys = db.targets(pubkey).await?;
     let keys_set: HashSet<_> = keys.iter().cloned().collect();
-    let mut inventory = Inventory::new().await?;
     let mut after = String::new();
     loop {
         let page = db.candidates(&keys, &after).await?;
@@ -322,6 +332,7 @@ pub(super) fn configured_storage() -> Result<MediaStorage> {
 
 #[cfg(test)]
 mod tests {
+    mod capacity;
     mod claim_versions;
     mod s3;
     use super::*;
