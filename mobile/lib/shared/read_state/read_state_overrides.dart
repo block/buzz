@@ -128,11 +128,9 @@ extension ReadStateOverrides on ReadStateManager {
       return;
     }
     if (isOverrideDeferred(register, now: _now())) {
-      _deferredOverrides.add((
-        channelId: channelId,
-        register: register,
-        local: local,
-      ));
+      final held = (channelId: channelId, register: register, local: local);
+      // A repeated delivery holds nothing new.
+      if (!_deferredOverrides.contains(held)) _deferredOverrides.add(held);
       return;
     }
     final current = _overrides[channelId];
@@ -167,9 +165,21 @@ extension ReadStateOverrides on ReadStateManager {
     activeChannelOverrides;
   }
 
-  /// Whether the unread record may be published: never while a held-back
-  /// group could be its only carrier.
+  /// Whether an unread candidate may be planned: held-back groups the clock
+  /// has reached merge first, so the save before sending covers them.
   bool get _unreadPublishable => _resolveDeferred();
+
+  /// Whether the candidate planned as [planned] may still be sent. Changes
+  /// nothing: anything held back, or admitted since planning, refuses it,
+  /// and the next pass saves and rebuilds, so an older record never
+  /// replaces the only carrier of a mark the journal does not cover.
+  bool _unreadStillCurrent(Map<String, int> planned) {
+    if (_deferredOverrides.isEmpty && mapEquals(_planUnread(), planned)) {
+      return true;
+    }
+    _schedulePublish();
+    return false;
+  }
 
   /// Drops dead groups past the discard guard, with their ceilings.
   void _discardOverrides() {

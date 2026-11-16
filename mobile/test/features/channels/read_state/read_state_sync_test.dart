@@ -1100,6 +1100,83 @@ void main() {
       },
     );
 
+    test('a mark admitted during the signing save never lets the older '
+        'record replace its only carrier', () async {
+      final store = _FailingStore();
+      SharedPreferencesStorePlatform.instance = store;
+      SharedPreferences.resetStatic();
+      prefs = await SharedPreferences.getInstance();
+      final phone = await device('phone');
+      phone.markContextRead(channel, clock - 100);
+      await phone.flush();
+      expect(phone.markChannelUnread(channel), isTrue);
+      final journal = ReadStateStorage(prefs).readJournal(
+        '${keys.public}:${Uri.encodeComponent(normalizeCommunityRelayUrl(phone.relayUrl))}',
+      )!;
+      final coordinate = '$readStateUnreadDTagPrefix${journal['unreadSlot']}';
+      final other = '${channel}b';
+      final release = Completer<void>();
+      store.onJournal = (encoded) async {
+        final pending = (jsonDecode(encoded) as Map)['pending'] as Map;
+        if (!pending.containsKey(coordinate)) return;
+        store.onJournal = null;
+        // Our own coordinate, already the only carrier of a held mark.
+        final carrier = NostrEvent(
+          id: 'carrier',
+          pubkey: keys.public,
+          createdAt: clock - 10,
+          kind: EventKind.readState,
+          tags: [
+            ['d', coordinate],
+            ['t', readStateUnreadTag],
+          ],
+          content: crypto.encrypt(
+            jsonEncode(
+              ReadStateBlob(
+                clientId: journal['clientId'] as String,
+                contexts: {
+                  other: clock - 100,
+                  'ov_s:$other': clock + 700,
+                  'ov_c:$other': 0,
+                  'ov_b:$other': clock - 100,
+                },
+                version: 2,
+              ).toJson(),
+            ),
+          ),
+          sig: 'sig',
+        );
+        relay.retained[coordinate] = carrier;
+        relay.deliver(carrier);
+        clock += 800;
+        store.fail = true;
+        await release.future;
+      };
+      final flushed = phone.flush().catchError((_) {});
+      await pumpEventQueue();
+      release.complete();
+      await flushed;
+      await phone.flush().catchError((_) {});
+      expect(
+        decodeReadStateBlob(
+          crypto.decrypt(relay.retained[coordinate]!.content),
+          version: 2,
+        )!.contexts,
+        contains('ov_s:$other'),
+      );
+    });
+
+    test('a repeated held delivery is held once', () async {
+      final phone = await device('phone');
+      relay.deliver(heldPeer('${channel}b'));
+      relay.deliver(heldPeer('${channel}b'));
+      await phone.flush();
+      final journal = ReadStateStorage(prefs).readJournal(
+        '${keys.public}:${Uri.encodeComponent(normalizeCommunityRelayUrl(phone.relayUrl))}',
+      )!;
+      expect(journal['deferredOverrides'], hasLength(1));
+    });
+
     test('a held-back incoming group meets the replay cutoff, not the local '
         'grace', () async {
       final other = '${channel}b';
@@ -1415,9 +1492,15 @@ class _FailingStore extends InMemorySharedPreferencesStore {
   _FailingStore() : super.empty();
   bool fail = false;
 
+  /// Runs on each journal write after its JSON was encoded.
+  Future<void> Function(String encoded)? onJournal;
+
   @override
   Future<bool> setValue(String valueType, String key, Object value) async {
-    if (fail && key.contains('buzz.nip-rs.journal')) return false;
+    final journal = key.contains('buzz.nip-rs.journal');
+    final failing = fail;
+    if (journal) await onJournal?.call(value as String);
+    if (failing && journal) return false;
     return super.setValue(valueType, key, value);
   }
 }

@@ -933,7 +933,7 @@ class ReadStateManager {
             !_canPublishFollows) {
           continue; // Held with its edits; the pass reports why below.
         }
-        if (entry.key == unreadCoordinate && !_unreadPublishable) {
+        if (entry.key == unreadCoordinate && !_unreadStillCurrent(unread)) {
           continue; // Kept until no held-back group could need its carrier.
         }
         if (_relaySession == null) {
@@ -998,7 +998,8 @@ class ReadStateManager {
         await _persistLocalState();
       }
       if (prepared[unreadCoordinate] case final event?
-          when !mapEquals(_unreadPublished, unread) && _unreadPublishable) {
+          when !mapEquals(_unreadPublished, unread) &&
+              _unreadStillCurrent(unread)) {
         if (!_servesThisCommunity ||
             !_ownsJournal ||
             (_disposed && !allowDisposed)) {
@@ -1014,7 +1015,7 @@ class ReadStateManager {
             _pending[unreadCoordinate] = event;
             await _persistLocalState();
             checkConnection?.call();
-            if (!_unreadPublishable) {
+            if (!_unreadStillCurrent(unread)) {
               throw StateError('A held-back unread group defers publication');
             }
             if (!_servesThisCommunity ||
