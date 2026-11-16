@@ -15,7 +15,7 @@
 //! 1. Parse JSON into a `nostr::Event`
 //! 2. Verify `kind == 27235` (`Kind::HttpAuth`)
 //! 3. Verify Schnorr signature via `buzz_core::verify_event`
-//! 4. Verify `created_at` within ±60 seconds of server time
+//! 4. Verify `created_at` within ±120 seconds of server time
 //! 5. Verify `["u", <url>]` tag matches `expected_url` (normalised: case-insensitive
 //!    scheme/host, trailing slash stripped)
 //! 6. Verify `["method", <method>]` tag matches `expected_method` (case-insensitive)
@@ -23,13 +23,13 @@
 //!    `SHA-256(body) == hex(payload_tag)`. This prevents body-substitution attacks.
 //! 8. Return `event.pubkey` on success.
 
-use nostr::{Alphabet, Event, Kind, SingleLetterTag, TagKind, Timestamp};
+use nostr::{Alphabet, Event, Kind, SingleLetterTag, TagKind};
 use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::error::AuthError;
 
-const TIMESTAMP_TOLERANCE_SECS: u64 = 60;
+use crate::TIMESTAMP_TOLERANCE_SECS;
 
 /// Verify a NIP-98 HTTP Auth event (kind:27235).
 ///
@@ -74,8 +74,8 @@ pub fn verify_nip98_event(
     buzz_core::verify_event(&event)
         .map_err(|_| AuthError::Nip98Invalid("invalid Schnorr signature".to_string()))?;
 
-    // 4. Verify created_at within ±60 seconds of now.
-    let now = Timestamp::now().as_secs();
+    // 4. Verify created_at within ±TIMESTAMP_TOLERANCE_SECS of now.
+    let now = crate::wall_now();
     let event_ts = event.created_at.as_secs();
     let delta = now.abs_diff(event_ts);
     if delta > TIMESTAMP_TOLERANCE_SECS {
@@ -292,12 +292,18 @@ mod tests {
     }
 
     #[test]
-    fn expired_timestamp_rejected() {
+    fn timestamp_tolerance_is_120s_either_way() {
         let keys = Keys::generate();
-        let old_ts = Timestamp::from(Timestamp::now().as_secs().saturating_sub(120));
-        let json = make_nip98_event(&keys, TEST_URL, TEST_METHOD, None, Some(old_ts));
-        let result = verify_nip98_event(&json, TEST_URL, TEST_METHOD, None);
-        assert!(matches!(result, Err(AuthError::Nip98Invalid(_))));
+        let now = 1_800_000_000u64;
+        for (offset, ok) in [(120, true), (-120, true), (121, false), (-121, false)] {
+            let ts = Timestamp::from(now.saturating_add_signed(offset));
+            let json = make_nip98_event(&keys, TEST_URL, TEST_METHOD, None, Some(ts));
+            let result = crate::test_clock::pinned(now, || {
+                verify_nip98_event(&json, TEST_URL, TEST_METHOD, None)
+            });
+            assert_eq!(result.is_ok(), ok, "offset {offset}s");
+            assert!(ok || matches!(result, Err(AuthError::Nip98Invalid(_))));
+        }
     }
 
     #[test]

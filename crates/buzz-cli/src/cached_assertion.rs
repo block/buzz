@@ -1,6 +1,6 @@
-//! The one cached NIP-FI assertion an evidence link holds for its relay,
-//! shared by the headless adapter session and the Buzz desktop link: one
-//! `exp` parser and one refresh rule.
+//! The one cached NIP-FI assertion the headless adapter session holds for its
+//! relay: one `exp` parser and one refresh rule. The Buzz desktop link keeps
+//! no copy; the desktop app's cache is the only owner of its assertions.
 
 use tokio::sync::Mutex;
 
@@ -9,37 +9,103 @@ use crate::error::CliError;
 /// Refresh at least this long before expiry.
 const REFRESH_MARGIN_SECS: u64 = 30;
 
+/// Fetches per [`CachedAssertion::get`] before an assertion that arrives with
+/// no local lifetime left is reported instead of retried.
+const ACQUIRE_ATTEMPTS: usize = 3;
+
+/// A fetched assertion and the monotonic time ([`monotonic_now`]) the
+/// request that returned it was sent.
+pub(crate) type Fetched = Option<(String, u64)>;
+
 /// An evidence link's current assertion, or its answer that it has none.
 #[derive(Default)]
-pub(crate) struct CachedAssertion(Mutex<Option<(Option<String>, u64)>>);
+pub(crate) struct CachedAssertion(Mutex<Option<(Option<String>, Receipt)>>);
+
+/// When a cached answer arrived, on both clocks, and how long it may be
+/// reused (monotonic seconds).
+#[derive(Clone, Copy)]
+struct Receipt {
+    monotonic: u64,
+    wall: u64,
+    budget: u64,
+}
+
+impl Receipt {
+    /// Still reusable at `monotonic` and `wall`. The monotonic clock stops
+    /// while the computer sleeps, so the wall clock bounds it too; a wall
+    /// clock set back counts as no time passed.
+    fn usable(self, monotonic: u64, wall: u64) -> bool {
+        let elapsed = monotonic
+            .saturating_sub(self.monotonic)
+            .max(wall.saturating_sub(self.wall));
+        elapsed < self.budget
+    }
+}
 
 impl CachedAssertion {
     /// The cached answer until its refresh point, else `fetch`'s. A fetched
-    /// assertion must be a compact JWS with an `exp`; `None` is kept until
-    /// the next command. Concurrent callers share one fetch.
-    pub(crate) async fn get<F>(&self, fetch: F) -> Result<Option<String>, CliError>
+    /// assertion must be a compact JWS with `exp` and `iat`, and must have
+    /// local lifetime left; one with none is fetched again, a bounded number
+    /// of times. `None` is kept until the next command. Concurrent callers
+    /// share one fetch.
+    pub(crate) async fn get<F, Fut>(&self, fetch: F) -> Result<Option<String>, CliError>
     where
-        F: std::future::Future<Output = Result<Option<String>, CliError>>,
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<Fetched, CliError>>,
     {
         let mut cached = self.0.lock().await;
-        if let Some((assertion, refresh)) = cached.as_ref() {
-            if unix_now() < *refresh {
+        if let Some((assertion, receipt)) = cached.as_ref() {
+            if receipt.usable(monotonic_now(), unix_now()) {
                 return Ok(assertion.clone());
             }
         }
-        let assertion = fetch.await?;
-        let refresh = match assertion.as_deref() {
-            Some(jws) => refresh_at(
-                unix_now(),
-                jws_exp(jws).ok_or_else(|| {
+        *cached = None;
+        for _ in 0..ACQUIRE_ATTEMPTS {
+            let Some((jws, request_start)) = fetch().await? else {
+                let forever = Receipt {
+                    monotonic: 0,
+                    wall: 0,
+                    budget: u64::MAX,
+                };
+                *cached = Some((None, forever));
+                return Ok(None);
+            };
+            let claims = jws_claims(&jws)
+                .filter(|c| c.lifetime.is_some())
+                .ok_or_else(|| {
                     CliError::Auth("the evidence source returned an unreadable assertion".into())
-                })?,
-            ),
-            None => u64::MAX,
-        };
-        *cached = Some((assertion.clone(), refresh));
-        Ok(assertion)
+                })?;
+            let (receipt, wall) = (monotonic_now(), unix_now());
+            let deadline = local_deadline(request_start, receipt, wall, claims);
+            if deadline > receipt {
+                let budget = refresh_at(receipt, deadline) - receipt;
+                let at = Receipt {
+                    monotonic: receipt,
+                    wall,
+                    budget,
+                };
+                *cached = Some((Some(jws.clone()), at));
+                return Ok(Some(jws));
+            }
+        }
+        Err(CliError::Auth(format!(
+            "the evidence source returned {ACQUIRE_ATTEMPTS} assertions with no lifetime left; \
+             check that this computer's clock is correct"
+        )))
     }
+}
+
+/// The local monotonic deadline of an assertion whose request was sent at
+/// `request_start` and answered at `receipt` (monotonic seconds), with the
+/// wall clock at `wall_at_receipt`: the issuer's lifetime counted from the
+/// send, capped by `exp` against the local wall clock. The first term keeps a
+/// skewed local clock from stretching the token; the second keeps a short
+/// session-capped token from outliving its `exp`. A deadline at or before
+/// `receipt` means no lifetime is left. `claims.lifetime` must be present.
+fn local_deadline(request_start: u64, receipt: u64, wall_at_receipt: u64, claims: Claims) -> u64 {
+    let by_exp = receipt + claims.exp.saturating_sub(wall_at_receipt);
+    let by_lifetime = request_start + claims.lifetime.unwrap_or(0);
+    by_exp.min(by_lifetime)
 }
 
 /// Refresh at the earlier of half-life and [`REFRESH_MARGIN_SECS`] before
@@ -58,6 +124,19 @@ pub(crate) fn refresh_at(now: u64, exp: u64) -> u64 {
 /// JSON-object payload with an integer `exp`. The relay verifies the
 /// signature; the CLI only refuses output it could not present or refresh.
 pub(crate) fn jws_exp(token: &str) -> Option<u64> {
+    jws_claims(token).map(|c| c.exp)
+}
+
+/// The `exp` claim of an assertion and, when it has a numeric `iat`, its
+/// issuer lifetime `exp − iat` in whole seconds.
+#[derive(Clone, Copy)]
+struct Claims {
+    exp: u64,
+    lifetime: Option<u64>,
+}
+
+/// [`jws_exp`]'s structural check, also returning the lifetime.
+fn jws_claims(token: &str) -> Option<Claims> {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     let mut segments = token.split('.');
     let (Some(header), Some(payload), Some(signature), None) = (
@@ -75,7 +154,33 @@ pub(crate) fn jws_exp(token: &str) -> Option<u64> {
         return None;
     }
     json(header)?.get("alg")?.as_str()?;
-    json(payload)?.get("exp")?.as_u64()
+    let payload = json(payload)?;
+    Some(Claims {
+        exp: payload.get("exp")?.as_u64()?,
+        lifetime: lifetime(&payload),
+    })
+}
+
+/// `max(0, floor(exp − iat))`. `iat` is a NumericDate, so it may be
+/// fractional (`exp` is already an integer here); rounding down never
+/// stretches the token.
+fn lifetime(payload: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
+    let exp = payload.get("exp")?.as_f64()?;
+    let iat = payload.get("iat")?.as_f64()?;
+    Some((exp - iat).floor().max(0.0) as u64)
+}
+
+/// Whole seconds on a monotonic clock, for local deadlines a wall-clock
+/// change cannot move.
+pub(crate) fn monotonic_now() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let now = START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_secs();
+    #[cfg(test)]
+    let now = now + test_clock::SKEW.with(std::cell::Cell::get);
+    now
 }
 
 pub(crate) fn unix_now() -> u64 {
@@ -105,6 +210,11 @@ pub(crate) mod test_clock {
     pub(crate) fn advance(secs: u64) {
         SKEW.with(|skew| skew.set(skew.get() + secs));
     }
+    /// Move only this thread's frozen wall clock, as a sleep does while the
+    /// monotonic clock stands still. Requires [`freeze`].
+    pub(crate) fn advance_wall(secs: u64) {
+        FROZEN.with(|frozen| frozen.set(Some(frozen.get().expect("freeze first") + secs)));
+    }
 }
 
 #[cfg(test)]
@@ -121,6 +231,27 @@ mod tests {
     }
 
     #[test]
+    fn the_deadline_counts_the_lifetime_from_the_request_start() {
+        let claims = |iat, exp| Claims {
+            exp,
+            lifetime: Some(exp - iat),
+        };
+        // Issuer clock: iat 10_000, exp 10_180. The reply took 20 s.
+        // A local clock 120 s slow would read 180 + 120 s left by `exp`;
+        // the lifetime from the request start caps it.
+        assert_eq!(local_deadline(0, 20, 9_900, claims(10_000, 10_180)), 180);
+        // A local clock 120 s fast: `exp` leaves 40 s past receipt, the tighter bound.
+        assert_eq!(local_deadline(0, 20, 10_140, claims(10_000, 10_180)), 60);
+        // A sleep: the wall clock jumps 1 hour, the monotonic clock doesn't.
+        let at = Receipt {
+            monotonic: 20,
+            wall: 10_140,
+            budget: 20,
+        };
+        assert!(at.usable(20, 10_140) && !at.usable(20, 10_140 + 3_600));
+    }
+
+    #[test]
     fn jws_exp_needs_a_compact_jws_with_alg_and_exp() {
         let payload = "eyJleHAiOjE3OTAwMDAzMDB9"; // {"exp":1790000300}
         let header = "eyJhbGciOiJFUzI1NiJ9"; // {"alg":"ES256"}
@@ -131,5 +262,9 @@ mod tests {
         assert_eq!(jws_exp(&format!("e30.{payload}.c2ln")), None, "no alg");
         assert_eq!(jws_exp(&format!("{header}.{payload}")), None);
         assert_eq!(jws_exp(&format!("{header}.{payload}.c2ln.x")), None);
+        // A fractional `iat` is a valid NumericDate; the lifetime rounds down.
+        let fractional = "eyJpYXQiOjE3OTAwMDAwMDAuNSwiZXhwIjoxNzkwMDAwMzAwfQ"; // {"iat":1790000000.5,"exp":1790000300}
+        let claims = jws_claims(&format!("{header}.{fractional}.c2ln")).unwrap();
+        assert_eq!((claims.exp, claims.lifetime), (1_790_000_300, Some(299)));
     }
 }

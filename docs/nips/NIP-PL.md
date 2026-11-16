@@ -395,7 +395,7 @@ Success is `200 {"status":"revoked"}`. The revocation atomically invalidates the
 
 ### Relay delivery
 
-The relay sends requests to the configured HTTP(S) delivery URL ending in `/v1/deliveries/apns`. Delivery authentication uses the NIP-98 event format with method/path binding rather than full request-URL matching. The signed method MUST be `POST` and the signed HTTP(S) URL path MUST be exactly `/v1/deliveries/apns`, without query, fragment or credentials. The gateway does not compare scheme, host or port to the incoming request and rejects incoming request queries. `https://push.buzz.xyz/v1/deliveries/apns` is an example. Request:
+The relay sends requests to the configured HTTP(S) delivery URL ending in `/v1/deliveries`. The route is platform-neutral: the request is the same whatever the device's platform is. A gateway also serves the same handler at `/v1/deliveries/apns`, an alias that earlier relays use. Delivery authentication uses the NIP-98 event format with method/path binding rather than full request-URL matching. The signed method MUST be `POST` and the signed HTTP(S) URL path MUST be exactly the path of the route the request is sent to, without query, fragment or credentials, so a request signed for one route is rejected on the other. The gateway does not compare scheme, host or port to the incoming request and rejects incoming request queries. `https://push.example.com/v1/deliveries` is an example. Request:
 
 ```json
 {"v":1,"endpoint_grant":"<opaque-capability>","request_id":"<uuid>","expires_at":<unix-seconds>}

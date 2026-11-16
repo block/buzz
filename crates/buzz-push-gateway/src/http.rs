@@ -15,7 +15,7 @@ use crate::{
 };
 use axum::{
     body::Bytes,
-    extract::{OriginalUri, State},
+    extract::{MatchedPath, OriginalUri, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -73,10 +73,18 @@ fn valid_relay_pubkey(v: &str) -> bool {
         && v.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
-pub(crate) const DELIVERY_PATH: &str = "/v1/deliveries/apns";
+/// Platform-neutral delivery route. Nothing about the device platform reaches
+/// the relay, so deliveries do not name one.
+pub(crate) const DELIVERY_PATH: &str = "/v1/deliveries";
+/// The original APNs-named delivery route, kept as an alias of
+/// [`DELIVERY_PATH`] until relays have moved to the platform-neutral route.
+pub(crate) const APNS_DELIVERY_ALIAS_PATH: &str = "/v1/deliveries/apns";
 
 // Keep preliminary decoding bounded to the pinned nostr verifier's limits.
-fn delivery_auth(header: &str, body: &[u8]) -> Option<(String, String)> {
+//
+// `route_path` is the delivery route the request arrived on. The signed URL
+// path must equal it, so a request signed for one route is rejected on the other.
+fn delivery_auth(header: &str, body: &[u8], route_path: &str) -> Option<(String, String)> {
     let (prefix, encoded) = header.split_once(' ')?;
     const MAX_EVENT_BYTES: usize = 64 * 1024;
     const MAX_ENCODED_BYTES: usize = MAX_EVENT_BYTES.div_ceil(3) * 4;
@@ -93,7 +101,7 @@ fn delivery_auth(header: &str, body: &[u8]) -> Option<(String, String)> {
         _ => return None,
     };
     if !matches!(signed_url.scheme(), "http" | "https")
-        || signed_url.path() != DELIVERY_PATH
+        || signed_url.path() != route_path
         || signed_url.query().is_some()
         || signed_url.fragment().is_some()
         || !signed_url.username().is_empty()
@@ -633,6 +641,7 @@ async fn revoke_installation(State(s): State<AppState>, body: Bytes) -> Response
 
 async fn deliver(
     State(s): State<AppState>,
+    matched_path: MatchedPath,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     body: Bytes,
@@ -654,7 +663,7 @@ async fn deliver(
     if uri.query().is_some() {
         return error(StatusCode::UNAUTHORIZED, "invalid_auth");
     }
-    let (event_id, relay) = match delivery_auth(auth, &body) {
+    let (event_id, relay) = match delivery_auth(auth, &body, matched_path.as_str()) {
         Some(auth) => auth,
         None => return error(StatusCode::UNAUTHORIZED, "invalid_auth"),
     };
@@ -824,6 +833,7 @@ pub fn router_with_metrics(
         .route("/v1/installations/endpoint", post(rotate_endpoint))
         .route("/v1/installations/revoke", post(revoke_installation))
         .route(DELIVERY_PATH, post(deliver))
+        .route(APNS_DELIVERY_ALIAS_PATH, post(deliver))
         .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BYTES));
     let public = Router::new()
         .merge(enrollment)

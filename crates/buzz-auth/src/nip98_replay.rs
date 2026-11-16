@@ -10,7 +10,7 @@
 //!
 //! The required shape (§5):
 //!
-//! - shared state (Redis), atomic set-if-absent, TTL ≥ 120s
+//! - shared state (Redis), atomic set-if-absent, TTL ≥ [`DEFAULT_REPLAY_TTL_SECS`]
 //! - community-scoped key — see [`nip98_replay_key`]
 //!
 //! ## Usage shape
@@ -26,8 +26,9 @@
 //! // safe to honor the request as `pubkey`
 //! ```
 //!
-//! The TTL must cover the verifier's clock-skew tolerance (currently ±60s, so
-//! the window over which a duplicate event id is even plausible is 2×60 = 120s).
+//! The TTL must cover the verifier's clock-skew tolerance (±120s, so the
+//! window over which a duplicate event id is even plausible is 2×120 = 240s),
+//! plus the slack described on [`DEFAULT_REPLAY_TTL_SECS`].
 //! [`DEFAULT_REPLAY_TTL_SECS`] is the floor; deployments may raise it.
 
 use std::{future::Future, pin::Pin};
@@ -35,19 +36,33 @@ use std::{future::Future, pin::Pin};
 use buzz_core::TenantContext;
 use nostr::EventId;
 
-use crate::error::AuthError;
+use crate::{error::AuthError, TIMESTAMP_TOLERANCE_SECS};
 
 /// Floor for the replay-prevention window, in seconds.
 ///
-/// Matches the §5 gate ("TTL ≥ 120s") and the doubled NIP-98 timestamp
-/// tolerance (±60s window → 120s span). Implementations MAY use a larger TTL
-/// for safety margin; they MUST NOT use a smaller one.
-pub const DEFAULT_REPLAY_TTL_SECS: u64 = 120;
+/// An event is admissible for `2 × TIMESTAMP_TOLERANCE_SECS` (240s) of
+/// verifier time, plus 1s because both whole-second bounds are inclusive.
+/// The remaining 9s budget covers the clock difference between any two relay
+/// pods sharing this seen-set: a marker written by one pod must outlive the
+/// last second another pod would still admit the event. That budget assumes
+/// NTP-synced pods whose pairwise difference stays within 9s; it is an
+/// operational assumption, not something this constant can enforce.
+///
+/// Implementations MAY use a larger TTL for safety margin; they MUST NOT use
+/// a smaller one.
+pub const DEFAULT_REPLAY_TTL_SECS: u64 = 250;
+
+/// Pairwise relay-pod clock difference budgeted into [`DEFAULT_REPLAY_TTL_SECS`].
+const POD_CLOCK_DIFFERENCE_BUDGET_SECS: u64 = 9;
+
+const _: () = assert!(
+    DEFAULT_REPLAY_TTL_SECS >= 2 * TIMESTAMP_TOLERANCE_SECS + 1 + POD_CLOCK_DIFFERENCE_BUDGET_SECS
+);
 
 /// Ceiling for the replay-prevention window, in seconds.
 ///
 /// Any TTL beyond an hour is implausible for NIP-98 replay protection: the
-/// verifier only accepts events within ±60s, so a same-id replay is only
+/// verifier only accepts events within ±120s, so a same-id replay is only
 /// physically possible inside that window plus clock skew. A 1-hour cap is
 /// 30× the natural maximum and still keeps Redis values well inside
 /// `i64::MAX` seconds (which Redis `EX` requires). Anything larger reaching
@@ -89,7 +104,7 @@ pub trait Nip98ReplayGuard: Send + Sync {
     /// NOT honor it as-given.
     ///
     /// `ttl_secs` MUST be clamped down to [`MAX_REPLAY_TTL_SECS`] if larger.
-    /// The replay window's natural maximum is the verifier's ±60s tolerance;
+    /// The replay window's natural maximum is the verifier's ±120s tolerance;
     /// values past an hour are implausible and risk Redis `EX` parse failures
     /// (Redis interprets `EX` as a signed 64-bit integer).
     fn try_mark<'a>(
