@@ -11,6 +11,12 @@ mod stage_postgres_tests;
 #[path = "postgres_tests/expansion_postgres_tests.rs"]
 mod expansion_postgres_tests;
 
+#[path = "memberships_postgres_tests.rs"]
+mod memberships_postgres_tests;
+
+#[path = "ownership_postgres_tests.rs"]
+mod ownership_postgres_tests;
+
 const TARGET: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 const TABLES: &[&str] = &[
     "api_tokens",
@@ -65,7 +71,9 @@ impl Fixture {
     }
 
     fn store(&self) -> UserDeletionStore {
-        Db::from_pool(self.pool.clone()).user_deletion_store()
+        Db::from_pool(self.pool.clone())
+            .user_deletion_store()
+            .with_account_snapshot_signer(nostr::Keys::parse(&format!("{:064x}", 1)).unwrap())
     }
 
     async fn run(&self, mode: ExecutionMode, out: &mut impl Write) -> Result<AccountBatchSummary> {

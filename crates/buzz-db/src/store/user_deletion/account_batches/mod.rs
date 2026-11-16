@@ -5,11 +5,13 @@ use super::{normalize_user_deletion_pubkey, ExecutionMode, UserDeletionStore};
 use crate::{DbError, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
-use sqlx::{Connection, PgConnection};
+use sqlx::PgConnection;
 use std::io::Write;
 use uuid::Uuid;
 
+mod memberships;
 mod operations;
+mod ownership;
 mod scope;
 use operations::{Operation, GLOBAL_OPERATIONS, OPERATIONS};
 pub use scope::{AccountCommunityScope, AccountScope};
@@ -42,6 +44,8 @@ pub struct GlobalAccountBatchOptions {
 }
 
 struct Options {
+    target: String,
+    agents: Vec<String>,
     community: Option<Uuid>,
     pubkey: String,
     actor: Option<String>,
@@ -76,20 +80,6 @@ pub struct AccountBatchSummary {
 }
 
 impl UserDeletionStore {
-    /// Print or apply bounded account batches. Workflow callers supply their
-    /// current lease and stage so delete transactions validate that authority.
-    pub async fn run_account_batches(
-        &self,
-        options: &AccountBatchOptions,
-        mode: ExecutionMode,
-        writer: &mut impl Write,
-        stage: Option<(&crate::entity_deletion::EntityLease, Uuid)>,
-    ) -> Result<AccountBatchSummary> {
-        let options = validated(options)?;
-        self.run_batches(&options, OPERATIONS, mode, writer, stage)
-            .await
-    }
-
     /// Clean global listeners, feedback and DB roles for one explicitly selected
     /// key. The caller supplies the audit actor. No workflow stage can imply this
     /// deployment-wide authority. Config-backed roles must be removed separately.
@@ -100,6 +90,8 @@ impl UserDeletionStore {
         writer: &mut impl Write,
     ) -> Result<AccountBatchSummary> {
         let options = Options {
+            target: normalize_user_deletion_pubkey(&options.pubkey)?,
+            agents: Vec::new(),
             community: None,
             pubkey: normalize_user_deletion_pubkey(&options.pubkey)?,
             actor: Some(normalize_user_deletion_pubkey(&options.actor)?),
@@ -120,14 +112,6 @@ impl UserDeletionStore {
         stage: Option<(&crate::entity_deletion::EntityLease, Uuid)>,
     ) -> Result<AccountBatchSummary> {
         let delete = mode == ExecutionMode::Delete;
-        // Close on return/cancellation rather than leaking session timeouts to the pool.
-        let mut conn = self.pool.acquire().await?.detach();
-        sqlx::query("SET statement_timeout='30s'")
-            .execute(&mut conn)
-            .await?;
-        sqlx::query("SET lock_timeout='3s'")
-            .execute(&mut conn)
-            .await?;
         let mut summary = AccountBatchSummary {
             record: "account_batches_summary",
             read_only: !delete,
@@ -137,13 +121,26 @@ impl UserDeletionStore {
             account_erasure_complete: false,
         };
         if delete {
-            start(&mut conn, options, writer, true).await?;
+            let mut start_tx = self.pool.begin().await?;
+            timeouts(&mut start_tx).await?;
+            start(&mut start_tx, options, writer, true).await?;
+            start_tx.commit().await?;
             for op in operations {
+                if op.table == "channel_members" && op.action == "delete" {
+                    self.delete_memberships(options, op, writer, stage, &mut summary)
+                        .await?;
+                    if !summary.supported_scope_exhausted {
+                        break;
+                    }
+                    continue;
+                }
                 loop {
-                    let mut tx = conn.begin().await?;
+                    let mut tx = self.pool.begin().await?;
+                    timeouts(&mut tx).await?;
                     if let Some((lease, id)) = stage {
                         validate_stage(&mut tx, lease, id, options).await?;
                     }
+                    ownership::recheck(&mut tx, options, true).await?;
                     if op.table == "relay_operators" {
                         crate::store::relay_operators::acquire_roster_lock(&mut tx).await?;
                     }
@@ -177,20 +174,25 @@ impl UserDeletionStore {
             }
             // Independent absence checks; never infer completion from counters.
             if summary.supported_scope_exhausted {
+                let mut verify_tx = self.pool.begin().await?;
+                timeouts(&mut verify_tx).await?;
                 for op in operations {
-                    if !select(&mut conn, options, op, None, false, &summary)
+                    if !select(&mut verify_tx, options, op, None, false, &summary)
                         .await?
                         .is_empty()
                     {
                         return Err(invalid("supported rows remain; rerun to resume"));
                     }
                 }
+                verify_tx.commit().await?;
             }
         } else {
-            let mut tx = conn.begin().await?;
+            let mut tx = self.pool.begin().await?;
+            timeouts(&mut tx).await?;
             sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
                 .execute(&mut *tx)
                 .await?;
+            ownership::recheck(&mut tx, options, false).await?;
             start(&mut tx, options, writer, false).await?;
             for op in operations {
                 let mut cursor = None;
@@ -215,7 +217,6 @@ impl UserDeletionStore {
             }
             tx.commit().await?;
         }
-        conn.close().await?;
         line(writer, &summary)?;
         Ok(summary)
     }
@@ -233,6 +234,8 @@ fn bounds(batch_size: u16, max_items: u32) -> Result<()> {
 fn validated(options: &AccountBatchOptions) -> Result<Options> {
     bounds(options.batch_size, options.max_items)?;
     Ok(Options {
+        target: normalize_user_deletion_pubkey(&options.pubkey)?,
+        agents: Vec::new(),
         community: Some(options.community),
         actor: None,
         pubkey: normalize_user_deletion_pubkey(&options.pubkey)?,
@@ -271,9 +274,9 @@ async fn start(
         "retained":{"parameterized_event_watermarks":watermarks,
             "policy":["replay protection and deletion evidence","shared creator and repository routing references",
                 "moderation, enforcement and audit history","shared or uncertain device registrations",
-                "shared signed membership snapshots"]},
-        "unsupported":["profile cleanup","workflow frozen user-and-agent scope integration",
-            "shared membership snapshot reconciliation","device ownership attribution",
+                "historical superseded signed membership snapshots"]},
+        "unsupported":["profile cleanup","remaining workflow handlers",
+            "device ownership attribution",
             "repository and config-backed authority revocation","cache and live-session invalidation"],
         "account_erasure_complete":false}),
     )
@@ -287,8 +290,12 @@ async fn select(
     lock: bool,
     summary: &AccountBatchSummary,
 ) -> Result<Vec<Value>> {
-    let limit =
-        u32::from(options.batch_size).min(options.max_items.saturating_sub(summary.items).max(1));
+    let batch_size = if op.table == "channel_members" && op.action == "delete" {
+        1
+    } else {
+        options.batch_size
+    };
+    let limit = u32::from(batch_size).min(options.max_items.saturating_sub(summary.items).max(1));
     let lock = if lock { " FOR UPDATE" } else { "" };
     let (order, after) = op.pagination();
     let sql = format!("SELECT {} FROM {} WHERE {} AND ({}) AND ($3::jsonb IS NULL OR {after}) ORDER BY {order} LIMIT $4{lock}", op.key, op.table, options.scope_sql(), op.selector);
@@ -368,7 +375,8 @@ fn batch(
     line(
         writer,
         &json!({"record":"proposed_batch","number":summary.batches+1,"community":options.community,
-        "table":op.table,"action":op.action,"keys":keys}),
+        "table":op.table,"action":op.action,"keys":keys,
+        "rebuild_saved_channel_lists":op.table == "channel_members" && op.action == "delete"}),
     )
 }
 
@@ -389,7 +397,7 @@ fn line(writer: &mut impl Write, value: &impl Serialize) -> Result<()> {
 }
 
 async fn validate_stage(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tx: &mut PgConnection,
     lease: &crate::entity_deletion::EntityLease,
     stage_id: Uuid,
     options: &Options,
@@ -400,7 +408,7 @@ async fn validate_stage(
     let inputs =
         super::UserDeletionInventory::read(&request)?.inputs(&request.target, options.community)?;
     if request.status != "running"
-        || normalize_user_deletion_pubkey(&request.target)? != options.pubkey
+        || normalize_user_deletion_pubkey(&request.target)? != options.target
     {
         return Err(invalid("account stage target or status changed"));
     }
@@ -413,12 +421,22 @@ async fn validate_stage(
     .bind(lease.request_id)
     .bind(options.community)
     .bind(inputs)
-    .fetch_one(&mut **tx)
+    .fetch_one(&mut *tx)
     .await?;
     if !matches {
         return Err(invalid(
             "account stage is not current or outside approved scope",
         ));
     }
+    Ok(())
+}
+
+async fn timeouts(conn: &mut PgConnection) -> Result<()> {
+    sqlx::query("SET LOCAL statement_timeout='30s'")
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("SET LOCAL lock_timeout='3s'")
+        .execute(conn)
+        .await?;
     Ok(())
 }

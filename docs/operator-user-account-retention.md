@@ -13,7 +13,8 @@ Do not infer permission to delete another person's data from a matching key.
 | Moderation and enforcement | Keep bans, reports, moderation actions, admin action history and rate-limit history, including identifying keys and notes. Pending actions and copied payloads still require review before claiming complete access revocation or erasure. |
 | Audit history | Keep operator audit and hash-chained audit history intact. Record new role revocations in the normal audit trail. |
 | Shared device registrations | Keep registrations used by other accounts. Delete only with proven exclusive ownership; preserve and report uncertain ownership. Relay identity keys and client installation strings do not establish gateway ownership. |
-| Shared signed membership lists and multi-subject commands | Keep until a safe reconciliation rule and implementation preserve surviving members. Do not rewrite signed payloads as though their signatures remained valid. |
+| Shared signed membership lists | Rebuild current member/admin/metadata lists using the existing relay signer, atomically with each channel membership removal. Preserve superseded historical events and creator attribution. Never edit a signed payload in place. |
+| Multi-subject commands and membership notices | Preserve; attribution and historical-message removal remain separate. |
 | Deletion evidence and replay protection | Keep deletion requests, approvals, inventories, stage history, fences and replay watermarks. Watermark removal is not unfinished cleanup. |
 
 These are explicit retention exceptions, not assertions of anonymous data.

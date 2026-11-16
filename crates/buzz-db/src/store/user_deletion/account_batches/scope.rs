@@ -1,12 +1,12 @@
-//! Frozen inputs for the offline account command, independent of live membership.
+//! Community selection for the offline account command, independent of membership.
 use super::*;
 use serde::Deserialize;
 use std::collections::BTreeSet;
 
 const MAX_TARGETS: usize = 10_000;
 
-/// Saved account cleanup inputs. Preserve this file across retries and profile
-/// cleanup; never rediscover agent ownership after deleting its source rows.
+/// Saved account cleanup inputs. Agent keys are a discovery snapshot only;
+/// each handler fetches current ownership. Keep ownership rows until cleanup ends.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountScope {
@@ -102,14 +102,15 @@ impl UserDeletionStore {
                 AccountCommunityScope { community, pubkeys }
             }).collect(),
             retained: vec!["global agent records: ownership is community-scoped; no exclusive deployment-wide attribution".into(),
-                "shared ownership, moderation/audit, device registrations and signed membership snapshots: see operator-user-account-retention.md".into()],
+                "shared ownership, moderation/audit, device registrations and historical signed membership snapshots: see operator-user-account-retention.md".into()],
         };
         scope.validate()?;
         tx.commit().await?;
         Ok(scope)
     }
 
-    /// Execute a previously captured scope with one invocation-wide row budget.
+    /// Execute the selected communities with one invocation-wide row budget.
+    /// Saved agent keys never authorize deletion; each handler fetches them again.
     /// This direct offline command does not bypass or rewrite workflow approval.
     pub async fn run_account_scope(
         &self,
@@ -127,8 +128,16 @@ impl UserDeletionStore {
         // every scope before global work so a later owner cannot cause partial
         // cleanup of a plan that cannot be executed safely.
         for row in &scope.communities {
+            let mut tx = self.pool.begin().await?;
+            timeouts(&mut tx).await?;
+            let mut keys = vec![scope.target.clone()];
+            keys.extend(ownership::agents(&mut tx, row.community, &scope.target, false).await?);
+            tx.rollback().await?;
+            if mode == ExecutionMode::Delete {
+                self.preflight_memberships(row.community, &keys).await?;
+            }
             let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM relay_members WHERE community_id=$1 AND pubkey=ANY($2) AND role='owner')")
-                .bind(row.community).bind(&row.pubkeys).fetch_one(&self.pool).await?;
+                .bind(row.community).bind(&keys).fetch_one(&self.pool).await?;
             if owned {
                 return Err(invalid(
                     "owned-community handoff required; account scope was not executed",
@@ -164,29 +173,27 @@ impl UserDeletionStore {
         total.items += summary.items;
         total.batches += summary.batches;
         total.supported_scope_exhausted = summary.supported_scope_exhausted;
-        'communities: for row in &scope.communities {
-            for key in &row.pubkeys {
-                if !total.supported_scope_exhausted || total.items == max_items {
-                    total.supported_scope_exhausted = false;
-                    break 'communities;
-                }
-                let summary = self
-                    .run_account_batches(
-                        &AccountBatchOptions {
-                            community: row.community,
-                            pubkey: key.clone(),
-                            batch_size,
-                            max_items: max_items - total.items,
-                        },
-                        mode,
-                        writer,
-                        None,
-                    )
-                    .await?;
-                total.items += summary.items;
-                total.batches += summary.batches;
-                total.supported_scope_exhausted = summary.supported_scope_exhausted;
+        for row in &scope.communities {
+            if !total.supported_scope_exhausted || total.items == max_items {
+                total.supported_scope_exhausted = false;
+                break;
             }
+            let summary = self
+                .run_account_batches(
+                    &AccountBatchOptions {
+                        community: row.community,
+                        pubkey: scope.target.clone(),
+                        batch_size,
+                        max_items: max_items - total.items,
+                    },
+                    mode,
+                    writer,
+                    None,
+                )
+                .await?;
+            total.items += summary.items;
+            total.batches += summary.batches;
+            total.supported_scope_exhausted = summary.supported_scope_exhausted;
         }
         line(writer, &total)?;
         Ok(total)

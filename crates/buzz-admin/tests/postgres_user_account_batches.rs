@@ -27,6 +27,7 @@ async fn cli(url: &str, community: Uuid, pubkey: &str, args: &[&str], code: i32)
             .args(args)
             .env("DATABASE_URL", url)
             .env("BUZZ_AUTO_MIGRATE", "false")
+            .env("BUZZ_RELAY_PRIVATE_KEY", format!("{:064x}", 1))
             .kill_on_drop(true)
             .output(),
     )
@@ -81,9 +82,10 @@ async fn account_command_modes_cap_and_resume_use_real_database_engine() {
         (vec!["--print-only"], TARGET.to_owned()),
     ] {
         let rows = cli(&url, community, &key, &mode, 0).await;
-        assert_eq!(rows[0]["pubkey"], TARGET);
+        assert_eq!(rows[0]["record"], "account_targets");
+        assert_eq!(rows[0]["target"], TARGET);
         let summary = rows.last().unwrap();
-        assert_eq!(summary["record"], "account_batches_summary");
+        assert_eq!(summary["record"], "account_handler_summary");
         assert_eq!(summary["items"], 35);
         assert_eq!(summary["read_only"], true);
         assert_eq!(summary["supported_scope_exhausted"], true);
@@ -162,6 +164,7 @@ async fn global_and_frozen_scope_commands_use_explicit_saved_inputs() {
             .args(args)
             .env("DATABASE_URL", &url)
             .env("BUZZ_AUTO_MIGRATE", "false")
+            .env("BUZZ_RELAY_PRIVATE_KEY", format!("{:064x}", 1))
             .env_remove("RELAY_OPERATOR_PUBKEYS")
             .env_remove("RELAY_OWNER_PUBKEY")
             .kill_on_drop(true);

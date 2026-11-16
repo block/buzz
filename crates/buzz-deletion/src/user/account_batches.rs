@@ -24,7 +24,7 @@ pub struct Args {
     /// Audit identity performing global role revocation (hex or npub).
     #[arg(long, value_parser = parse_pubkey, requires = "wide_scope")]
     pub(super) actor: Option<String>,
-    /// Frozen output of account-scope; reuse the same file on every retry.
+    /// Output of account-scope selecting communities; agents are fetched on every run.
     #[arg(long, group = "wide_scope", requires = "actor", conflicts_with_all = ["community", "global", "pubkey"])]
     pub(super) scope_file: Option<std::path::PathBuf>,
     /// Print proposals only (default); does not change data, progress, or caches.
@@ -51,8 +51,7 @@ pub(super) async fn run(
     mode: ExecutionMode,
     stage: Option<(&EntityLease, Uuid)>,
 ) -> Result<AccountBatchSummary> {
-    Ok(db
-        .user_deletion_store()
+    Ok(store(db, mode)?
         .run_account_batches(options, mode, &mut std::io::stdout(), stage)
         .await?)
 }
@@ -80,8 +79,7 @@ pub(super) async fn run_command(
         if mode == ExecutionMode::Delete && configured_operator(&scope.target)? {
             anyhow::bail!("target is a config-backed operator; remove that authority from every relay configuration before offline cleanup");
         }
-        return Ok(db
-            .user_deletion_store()
+        return Ok(store(db, mode)?
             .run_account_scope(
                 &scope,
                 args.actor
@@ -101,8 +99,7 @@ pub(super) async fn run_command(
         if mode == ExecutionMode::Delete && configured_operator(&pubkey)? {
             anyhow::bail!("target is a config-backed operator; remove that authority from every relay configuration before offline cleanup");
         }
-        Ok(db
-            .user_deletion_store()
+        Ok(store(db, mode)?
             .run_global_account_batches(
                 &GlobalAccountBatchOptions {
                     pubkey,
@@ -131,6 +128,25 @@ pub(super) async fn run_command(
             None,
         )
         .await
+    }
+}
+
+// Preview never needs secret material and never invokes the signing path.
+fn store(
+    db: &buzz_db::Db,
+    mode: ExecutionMode,
+) -> Result<buzz_db::user_deletion::UserDeletionStore> {
+    let store = db.user_deletion_store();
+    if mode == ExecutionMode::ReadOnly {
+        return Ok(store);
+    }
+    match std::env::var("BUZZ_RELAY_PRIVATE_KEY") {
+        Ok(value) => Ok(store.with_account_snapshot_signer(
+            nostr::Keys::parse(&value)
+                .map_err(|_| anyhow::anyhow!("invalid BUZZ_RELAY_PRIVATE_KEY"))?,
+        )),
+        Err(std::env::VarError::NotPresent) => Ok(store),
+        Err(_) => anyhow::bail!("invalid BUZZ_RELAY_PRIVATE_KEY"),
     }
 }
 

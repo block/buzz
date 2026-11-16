@@ -230,7 +230,31 @@ async fn personal_events_revisions_copies_and_community_feedback_are_removed() {
             })
             .cloned()
             .collect();
-        assert_eq!(after[table], json!(expected), "{table}");
+        // Account membership cleanup adds three signed discovery heads and
+        // their mention entries; the journey below tests those independently.
+        let generated: BTreeSet<_> = after["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| {
+                !r["channel_id"].is_null()
+                    && [39000, 39001, 39002].contains(&r["kind"].as_i64().unwrap())
+            })
+            .map(|r| r["id"].clone().to_string())
+            .collect();
+        let actual: Vec<_> = after[table]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| {
+                !(matches!(table, "events" | "event_mentions")
+                    && generated.contains(
+                        &r[if table == "events" { "id" } else { "event_id" }].to_string(),
+                    ))
+            })
+            .cloned()
+            .collect();
+        assert_eq!(json!(actual), json!(expected), "{table}");
     }
     assert_eq!(
         f.run(ExecutionMode::Delete, &mut Vec::new())
@@ -244,7 +268,7 @@ async fn personal_events_revisions_copies_and_community_feedback_are_removed() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn frozen_scope_survives_removed_ownership_and_covers_former_communities() {
+async fn scope_refreshes_ownership_on_retry_and_covers_former_communities() {
     let f = Fixture::new().await;
     sqlx::query("UPDATE users SET agent_owner_pubkey=decode($1,'hex') WHERE community_id=$2 AND pubkey=decode($3,'hex')").bind(TARGET).bind(f.options.community).bind(OTHER_KEY).execute(&f.pool).await.unwrap();
     sqlx::query("DELETE FROM relay_members WHERE pubkey=$1")
@@ -293,9 +317,10 @@ async fn frozen_scope_survives_removed_ownership_and_covers_former_communities()
         .await
         .unwrap();
     assert_eq!(f.snapshot().await, before);
-    // A later profile step can remove ownership evidence. Retry must use saved
-    // inputs, and must not infer ownership in the other community.
-    sqlx::query("UPDATE users SET agent_owner_pubkey=NULL")
+    // A saved key is not authority: transfer away after preview, then prove
+    // both communities preserve that agent. A later retry discovers it anew.
+    sqlx::query("UPDATE users SET agent_owner_pubkey=decode($1,'hex')")
+        .bind(ACTOR)
         .execute(&f.pool)
         .await
         .unwrap();
@@ -318,6 +343,27 @@ async fn frozen_scope_survives_removed_ownership_and_covers_former_communities()
         .await
         .unwrap();
     assert!(rest.supported_scope_exhausted);
+    let retained: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM api_tokens WHERE owner_pubkey=decode($1,'hex')")
+            .bind(OTHER_KEY)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(retained, 6);
+    // Reassign only in the first community. The same file must pick this up.
+    sqlx::query("UPDATE users SET agent_owner_pubkey=decode($1,'hex') WHERE community_id=$2 AND pubkey=decode($3,'hex')")
+        .bind(TARGET).bind(f.options.community).bind(OTHER_KEY).execute(&f.pool).await.unwrap();
+    store
+        .run_account_scope(
+            &saved,
+            ACTOR,
+            2,
+            1000,
+            ExecutionMode::Delete,
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap();
     let tokens:Vec<(Uuid,String)>=sqlx::query_as("SELECT community_id,encode(owner_pubkey,'hex') FROM api_tokens ORDER BY community_id,owner_pubkey").fetch_all(&f.pool).await.unwrap();
     assert!(tokens
         .iter()

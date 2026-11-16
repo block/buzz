@@ -528,7 +528,7 @@ async fn get_channel_with_operation(
 }
 
 /// Read a live channel on `conn`.
-async fn select_channel(
+pub(crate) async fn select_channel(
     conn: &mut sqlx::PgConnection,
     community_id: CommunityId,
     channel_id: Uuid,

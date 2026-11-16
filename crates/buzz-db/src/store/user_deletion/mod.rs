@@ -24,12 +24,14 @@ const MAX_COMMUNITIES: usize = 1000;
 #[derive(Clone)]
 pub struct UserDeletionStore {
     pool: PgPool,
+    account_snapshot_signer: Option<nostr::Keys>,
 }
 impl Db {
     /// Access user-specific deletion request preparation using the writer pool.
     pub fn user_deletion_store(&self) -> UserDeletionStore {
         UserDeletionStore {
             pool: self.pool().clone(),
+            account_snapshot_signer: None,
         }
     }
 }
@@ -40,3 +42,12 @@ mod postgres_tests;
 
 #[cfg(test)]
 mod discovery_postgres_tests;
+
+impl UserDeletionStore {
+    /// Configure the deployment's existing relay key for atomic account roster repair.
+    /// Never generate an ephemeral key: readers trust the serving relay's identity.
+    pub fn with_account_snapshot_signer(mut self, signer: nostr::Keys) -> Self {
+        self.account_snapshot_signer = Some(signer);
+        self
+    }
+}

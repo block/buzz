@@ -226,6 +226,13 @@ async fn real_account_cap_saves_failure_then_retry_saves_success() {
         .as_deref()
         .unwrap()
         .contains("account batch limit reached"));
+    // Ownership changed after approval and the first invocation. The real
+    // workflow retry must discover this direct agent while retaining its source.
+    let agent = "22".repeat(32);
+    sqlx::query("INSERT INTO users(community_id,pubkey,agent_owner_pubkey) VALUES ($1,decode($2,'hex'),decode($3,'hex'))")
+        .bind(f.community).bind(&agent).bind(TARGET).execute(&f.pool).await.unwrap();
+    sqlx::query("INSERT INTO api_tokens(community_id,id,owner_pubkey,token_hash,name,scopes) VALUES ($1,$2,decode($3,'hex'),$4,'agent retry','[]')")
+        .bind(f.community).bind(Uuid::new_v4()).bind(&agent).bind(vec![9u8;32]).execute(&f.pool).await.unwrap();
     let started = account.started_at;
     // Retry timing is a storage precondition, not a sleep in this regression.
     sqlx::query("UPDATE entity_deletion_requests SET next_attempt_at=clock_timestamp()-interval '1 second' WHERE id=$1")
@@ -246,7 +253,7 @@ async fn real_account_cap_saves_failure_then_retry_saves_success() {
         .unwrap(),
         0
     );
-    f.assert_account_saved(3).await;
+    f.assert_account_saved(4).await;
     let resumed = f.inspect_released().await;
     assert_eq!(
         resumed.execution.lease_generation,
