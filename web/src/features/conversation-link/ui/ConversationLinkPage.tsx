@@ -9,7 +9,7 @@ import {
 import { relayWsUrl } from "@/shared/lib/relay-url";
 import { Button } from "@/shared/ui/button";
 import * as React from "react";
-import { conversationAppLink } from "../conversation-link";
+import { conversationAppLink, opensAppOnLoad } from "../conversation-link";
 
 /**
  * Landing page for a shared conversation link (`/channel/<id>[/<event>]`).
@@ -25,21 +25,18 @@ export function ConversationLinkPage({
 }) {
   const relay = relayWsUrl();
   const host = relay.replace(/^wss?:\/\//, "");
-  const threadRootId = new URLSearchParams(window.location.search).get(
-    "thread",
-  );
-  const appLink = conversationAppLink({ channelId, messageId, threadRootId });
+  const appLink = conversationAppLink({
+    channelId,
+    messageId,
+    search: window.location.search,
+  });
   const [downloadUrl, setDownloadUrl] = React.useState(BUZZ_RELEASES_URL);
 
   React.useEffect(() => {
     let active = true;
     detectBuzzDownloadPlatform(navigator).then(async (platform) => {
-      // Desktop browsers ignore an unhandled scheme, so try the app at once.
-      // Mobile browsers show an error page for one, so wait for a tap there.
-      const desktop = ["macos", "windows", "linux"].includes(
-        platform.operatingSystem,
-      );
-      if (active && desktop && appLink) window.location.href = appLink;
+      if (active && appLink && opensAppOnLoad(platform.operatingSystem))
+        window.location.href = appLink;
       const url = await resolveBuzzDownloadUrlForPlatform(platform);
       if (active) setDownloadUrl(url);
     });

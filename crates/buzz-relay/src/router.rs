@@ -146,9 +146,9 @@ const NIP_FI_EXEMPT_PREFIXES: &[&str] = &[
     "/favicon.svg",
     // Invite landing page (SPA) — subtree
     "/invite/",
-    // Conversation link landing page (SPA): hands off to `buzz://`, reads no
-    // relay data — subtree
-    "/channel/",
+    // The conversation link landing page is exempt by its exact path shape in
+    // `nip_fi_guard_exempts`, not by a `/channel/` subtree, so a later route
+    // under `/channel/` stays guarded.
     // Git web GUI (SPA) — exact + subtree
     "/repos",
     // Internal HMAC/localhost control-plane endpoint for the pre-receive hook.
@@ -402,6 +402,12 @@ fn nip_fi_guard_exempts(state: &AppState, request: &Request<Body>) -> bool {
     });
 
     if exempt {
+        return true;
+    }
+
+    // Conversation link landing page (SPA): hands off to `buzz://` and reads
+    // no relay data. Only `/channel/<channel>[/<event>]`, as the SPA serves it.
+    if is_conversation_link_path(path) {
         return true;
     }
 
@@ -3849,24 +3855,26 @@ mod tests {
     //
     // This is the mechanism the tests below exercise at the unit level.
 
-    /// Returns true when `path` is exempt per `NIP_FI_EXEMPT_PREFIXES`.
-    /// Mirrors the matching logic in `nip_fi_assertion_guard`.
+    /// Returns true when `path` is exempt per `NIP_FI_EXEMPT_PREFIXES` or the
+    /// conversation link shape. Mirrors the matching logic in
+    /// `nip_fi_guard_exempts`, apart from its host-qualified admin SPA paths.
     fn is_exempt(path: &str) -> bool {
-        NIP_FI_EXEMPT_PREFIXES.iter().any(|pattern| {
-            if *pattern == "/" {
-                return path == "/";
-            }
-            if pattern.ends_with('/') {
-                return path.starts_with(pattern);
-            }
-            if path == *pattern {
-                return true;
-            }
-            if let Some(rest) = path.strip_prefix(pattern) {
-                return rest.starts_with('/') || rest.starts_with('?') || rest.starts_with('#');
-            }
-            false
-        })
+        is_conversation_link_path(path)
+            || NIP_FI_EXEMPT_PREFIXES.iter().any(|pattern| {
+                if *pattern == "/" {
+                    return path == "/";
+                }
+                if pattern.ends_with('/') {
+                    return path.starts_with(pattern);
+                }
+                if path == *pattern {
+                    return true;
+                }
+                if let Some(rest) = path.strip_prefix(pattern) {
+                    return rest.starts_with('/') || rest.starts_with('?') || rest.starts_with('#');
+                }
+                false
+            })
     }
 
     // Exempt paths — guard must pass these through in Enforce mode.
@@ -3881,6 +3889,13 @@ mod tests {
             "/info-extra must NOT match /info"
         );
         assert!(!is_exempt("/healthz"), "/healthz must NOT match /health");
+
+        // Conversation link landing page: its exact shape, not a subtree
+        assert!(is_exempt("/channel/general"));
+        assert!(is_exempt("/channel/general/abc123"));
+        assert!(!is_exempt("/channel/"));
+        assert!(!is_exempt("/channel/general/abc123/extra"));
+        assert!(!is_exempt("/channel/general/"));
 
         // Probes
         assert!(is_exempt("/health"));
