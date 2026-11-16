@@ -18463,6 +18463,10 @@ void main() {
         );
         // A tablet thread pane hides the Activity list while it is open.
         expect(
+          find.byKey(const ValueKey('conversation-thread')),
+          findsOneWidget,
+        );
+        expect(
           find.descendant(
             of: find.byType(ThreadDetailPage),
             matching: find.text('Retained thread draft'),

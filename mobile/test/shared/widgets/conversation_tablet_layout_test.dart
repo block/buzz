@@ -365,9 +365,20 @@ void main() {
     expect(find.text('Second conversation'), findsOneWidget);
     expect(list, findsNothing);
 
-    // Keyboard: Control-Command-S reveals the sidebar and Escape dismisses it.
-    await tester.tap(find.byKey(const ValueKey('conversation-field')));
+    // Keyboard: Control-Command-S reveals the sidebar and Escape dismisses it,
+    // moving focus into the sidebar and back to the composer.
+    bool composerFocused() => tester
+        .widget<EditableText>(
+          find.descendant(
+            of: find.byKey(const ValueKey('conversation-field')),
+            matching: find.byType(EditableText),
+          ),
+        )
+        .focusNode
+        .hasFocus;
+    await tester.showKeyboard(find.byKey(const ValueKey('conversation-field')));
     await tester.pump();
+    expect(composerFocused(), isTrue);
     await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
     await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
     await tester.sendKeyEvent(LogicalKeyboardKey.keyS);
@@ -375,9 +386,11 @@ void main() {
     await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
     await tester.pumpAndSettle();
     expect(list, findsOneWidget);
+    expect(composerFocused(), isFalse);
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
     await tester.pumpAndSettle();
     expect(list, findsNothing);
+    expect(composerFocused(), isTrue);
 
     // The overlay is modal: screen readers skip the conversation behind it,
     // and system Back dismisses it before it would close the conversation.
@@ -407,6 +420,16 @@ void main() {
     await tester.pumpAndSettle();
     expect(list, findsNothing);
 
+    // So does a window that turns compact, as in Split View.
+    await tester.tap(find.byTooltip('Show sidebar'));
+    await tester.pumpAndSettle();
+    expect(list, findsOneWidget);
+    tester.view.physicalSize = const Size(500, 900);
+    await tester.pumpAndSettle();
+    tester.view.physicalSize = _portrait;
+    await tester.pumpAndSettle();
+    expect(list, findsNothing);
+
     // System Back closes an open thread, not the conversation under it.
     await tester.tap(find.text('Reply in thread'));
     await tester.pumpAndSettle();
@@ -415,6 +438,29 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Thread content'), findsNothing);
     expect(find.text('Second conversation'), findsOneWidget);
+
+    // A thread belongs to its conversation page: a page pushed above it
+    // closes the pane, and threads opened from that page push over it.
+    tester.view.physicalSize = _landscape;
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Reply in thread'));
+    await tester.pumpAndSettle();
+    expect(find.text('Thread content'), findsOneWidget);
+    await tester.tap(find.text('Open linked page'));
+    await tester.pumpAndSettle();
+    expect(find.text('Linked page'), findsOneWidget);
+    expect(find.text('Thread content'), findsNothing);
+    await tester.tap(find.text('Reply in linked thread'));
+    await tester.pumpAndSettle();
+    expect(find.text('Linked thread content'), findsOneWidget);
+    expect(find.byKey(const ValueKey('conversation-thread')), findsNothing);
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.text('Linked page'), findsNothing);
+    expect(find.text('Second conversation'), findsOneWidget);
+    expect(find.text('Thread content'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 }
@@ -448,7 +494,31 @@ class _TabletConversation extends StatelessWidget {
           ),
           child: const Text('Reply in thread'),
         ),
+        TextButton(
+          onPressed: () => Navigator.of(
+            context,
+          ).push(MaterialPageRoute<void>(builder: (_) => const _LinkedPage())),
+          child: const Text('Open linked page'),
+        ),
       ],
+    ),
+  );
+}
+
+class _LinkedPage extends StatelessWidget {
+  const _LinkedPage();
+
+  @override
+  Widget build(BuildContext context) => FrostedScaffold(
+    appBar: const FrostedAppBar(title: Text('Linked page')),
+    body: Center(
+      child: TextButton(
+        onPressed: () => openThreadPane(
+          context,
+          (_) => const Scaffold(body: Text('Linked thread content')),
+        ),
+        child: const Text('Reply in linked thread'),
+      ),
     ),
   );
 }

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -277,6 +278,12 @@ class AdaptiveConversationPane extends HookConsumerWidget {
     // after the frame, once the pane is gone.
     final mountedDetails = useMemoized(() => ValueNotifier(0));
     final threadNavigator = useMemoized(() => GlobalKey<NavigatorState>());
+    // A thread belongs to the selected conversation page. A page pushed above
+    // it (a channel link, a profile) closes the thread, which would otherwise
+    // stay beside a page it does not belong to.
+    final threadCloser = useMemoized(() => _ThreadCloser(controller), [
+      controller,
+    ]);
     final sidebarHidden = ref.watch(conversationSidebarHiddenProvider);
     final threadWidth = ref.watch(conversationThreadWidthProvider);
     // While the thread divider is dragged: whether the sidebar was docked.
@@ -287,14 +294,22 @@ class AdaptiveConversationPane extends HookConsumerWidget {
     useEffect(() {
       var open = controller.sidebarOverlay;
       FocusNode? previous;
+      String? openedFor;
       void sync() {
         if (controller.sidebarOverlay == open) return;
         open = controller.sidebarOverlay;
         if (open) {
           previous = FocusManager.instance.primaryFocus;
+          openedFor = controller.selectedId;
         }
-        final target = open ? listFocus : previous;
+        // Picking another chat closes the overlay; its old focus is gone.
+        final target = open
+            ? listFocus
+            : controller.selectedId == openedFor
+            ? previous
+            : null;
         if (!open) previous = null;
+        // The panes stop excluding focus in the next frame, before this runs.
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (target != null && target.context != null) target.requestFocus();
         });
@@ -327,6 +342,11 @@ class AdaptiveConversationPane extends HookConsumerWidget {
               _compactPaneNavigators[ownerRoute] =
                   active && !wide && selected != null ? navigator : null;
             }
+            // An unfolded tablet window can hide its sidebar and show a thread
+            // beside the conversation. Duo keeps its hinge-bound panes, and a
+            // persistent selection (Settings) keeps its list as navigation.
+            final tablet =
+                wide && book == null && strip == null && !persistentSelection;
             // Pane surfaces meet at the fold so their header backdrops remain
             // continuous. Content insets below keep controls out of its bounds.
             // The default sidebar fits Home's 256 pt navigation bar inside
@@ -339,14 +359,12 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                               0.0,
                               (contentWidth - 1) / 2,
                             ) ??
-                            (contentWidth / 3).clamp(256.0 + 2 * Grid.xs, 360.0)
+                            (contentWidth / 3).clamp(
+                              tablet ? 256.0 + 2 * Grid.xs : 280.0,
+                              360.0,
+                            )
                       : (contentWidth - 1) * listWidthFraction!
                 : constraints.maxWidth;
-            // An unfolded tablet window can hide its sidebar and show a thread
-            // beside the conversation. Duo keeps its hinge-bound panes, and a
-            // persistent selection (Settings) keeps its list as navigation.
-            final tablet =
-                wide && book == null && strip == null && !persistentSelection;
             final layout = tablet
                 ? ConversationLayout.resolve(
                     width: constraints.maxWidth,
@@ -362,9 +380,10 @@ class AdaptiveConversationPane extends HookConsumerWidget {
             final docked =
                 layout == null ||
                 layout.sidebar == ConversationSidebarMode.docked;
-            // Once the sidebar docks, for example after rotating, a pending
-            // overlay request is spent; otherwise it would reappear later.
-            if (layout != null && docked && controller.sidebarOverlay) {
+            // Once the sidebar docks or the window turns compact, for example
+            // after rotating or in Split View, a pending overlay request is
+            // spent; otherwise it would reappear later.
+            if (docked && controller.sidebarOverlay) {
               WidgetsBinding.instance.addPostFrameCallback(
                 (_) => controller.hideSidebarOverlay(),
               );
@@ -375,6 +394,10 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                 (wide ? listWidth + leftInset + 1 : 0.0);
             final detailWidth =
                 layout?.detailWidth ?? constraints.maxWidth - detailLeft;
+            // The overlay owns focus and Back from the frame it opens until the
+            // frame it starts closing, whatever the slide animation shows.
+            final overlayOpen =
+                layout?.sidebar == ConversationSidebarMode.overlay;
             void toggleSidebar() => ConversationSidebarScope.toggleFor(
               mode: layout!.sidebar,
               canDock: layout.canDock,
@@ -490,7 +513,7 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                 Widget detail = Navigator(
                   requestFocus: selected != null,
                   key: navigator,
-                  observers: [routeObserver],
+                  observers: [routeObserver, threadCloser],
                   pages: [
                     if (!(wide && persistentSelection && selected != null))
                       MaterialPage<void>(
@@ -589,7 +612,7 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                                 (wide && persistentSelection && !threadOpen),
                             onPopInvokedWithResult: (didPop, result) {
                               if (didPop || !active) return;
-                              if (overlaid) {
+                              if (overlayOpen) {
                                 controller.hideSidebarOverlay();
                               } else if (threadOpen) {
                                 threadNavigator.currentState?.maybePop(result);
@@ -600,7 +623,9 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                             },
                             child: ExcludeFocus(
                               excluding:
-                                  selected == null || threadCovers || overlaid,
+                                  selected == null ||
+                                  threadCovers ||
+                                  overlayOpen,
                               child: ExcludeSemantics(
                                 excluding: threadCovers || overlaid,
                                 child: NavigatorPopHandler<Object?>(
@@ -662,7 +687,7 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                                 active &&
                                 (ModalRoute.isCurrentOf(context) ?? true),
                             child: ExcludeFocus(
-                              excluding: overlaid,
+                              excluding: overlayOpen,
                               child: ExcludeSemantics(
                                 excluding: overlaid,
                                 child: ConversationThreadPane(
@@ -735,6 +760,7 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                     LogicalKeyboardKey.keyS,
                     control: true,
                     meta: true,
+                    includeRepeats: false,
                   ): toggleSidebar,
                   if (layout.sidebar == ConversationSidebarMode.overlay)
                     const SingleActivator(LogicalKeyboardKey.escape):
@@ -978,9 +1004,17 @@ Future<void> openConversationPane(
 /// A thread opened from inside a thread pane stacks in that pane, and phones,
 /// Duo and destinations without a pane keep an ordinary pushed route.
 Future<void> openThreadPane(BuildContext context, WidgetBuilder builder) async {
-  final pane = ConversationPaneScope.maybeOf(context);
+  // Event handlers look the pane up without subscribing, so rows and lists
+  // don't rebuild whenever the sidebar or thread pane changes.
+  final pane = context
+      .getInheritedWidgetOfExactType<ConversationPaneScope>()
+      ?.notifier;
+  final settings = ModalRoute.of(context)?.settings;
   if (pane != null &&
       pane.selectedId != null &&
+      // Only the selected conversation page; pages pushed above it push.
+      settings is Page &&
+      settings.key == pane.selectionKey &&
       !ConversationThreadScope.isInside(context) &&
       // Only a tablet layout's conversation column carries the sidebar scope.
       context.getInheritedWidgetOfExactType<ConversationSidebarScope>() !=
@@ -1046,5 +1080,28 @@ class AdaptiveConversationDestination extends HookConsumerWidget {
         ),
       ),
     );
+  }
+}
+
+/// Closes the thread pane when a page is pushed above the selected
+/// conversation. Sheets and dialogs leave it open.
+class _ThreadCloser extends NavigatorObserver {
+  _ThreadCloser(this.controller);
+
+  final ConversationPaneController controller;
+
+  @override
+  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    // Declarative pages are the pane's own selection and placeholder.
+    if (route is! PageRoute || route.settings is Page) return;
+    // A page pushed while building waits for the frame to finish.
+    if (SchedulerBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      SchedulerBinding.instance.addPostFrameCallback(
+        (_) => controller.closeThread(),
+      );
+    } else {
+      controller.closeThread();
+    }
   }
 }
