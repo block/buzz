@@ -266,12 +266,16 @@ pub fn announce_changed(tenant: &TenantContext, state: &AppState, channel: Uuid)
 }
 
 /// Tell `pubkey` and every agent it owns, and no one else, to ask again
-/// what they may do in every channel. Call after a committed community
-/// timeout or untimeout of `pubkey`: an agent is restricted by its owner's
-/// row. Sent off the caller's path, best effort like [`announce_changed`].
-/// The kind is p-gated, so only the named pubkey may subscribe to it or
-/// receive it.
-pub fn announce_restriction_changed(tenant: &TenantContext, state: &AppState, pubkey: &[u8]) {
+/// what they may do in every channel: an agent is restricted by its owner's
+/// row. Sent only by [`AppState::restrictions_changed`], the step every
+/// restriction change passes through. Off the caller's path, best effort
+/// like [`announce_changed`]. The kind is p-gated, so only the named pubkey
+/// may subscribe to it or receive it.
+pub(crate) fn announce_restriction_changed(
+    tenant: &TenantContext,
+    state: &AppState,
+    pubkey: &[u8],
+) {
     let (tenant, db, pubsub, keys, pubkey) = (
         tenant.clone(),
         state.db.clone(),

@@ -65,7 +65,7 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **Presence (kind:20001)** | ✅ | Ephemeral; arbitrary status string (truncated to 128 chars); writes to Redis (`set_presence`/`clear_presence` on `"offline"`), then fan-out to local subscribers. In multi-community mode presence is scoped to the connected community. |
 | **Agent presence (kind:20003)** | ✅ | Ephemeral; an owner's presence for the agents it owns, named by `p` tags (at most 256); `online`/`away` set and `offline` clears each agent's presence as its own kind:20001 would. Not fanned out. |
 | **Channel access changed (kind:20004)** | ✅ | Ephemeral, relay-signed and relay-only: tells a channel's live subscribers to ask again what they may do there (see [Channel access](#channel-access)). A client may not send it. |
-| **Viewer access changed (kind:20005)** | ✅ | Ephemeral, relay-signed, relay-only and `#p`-gated: tells one pubkey, when its community timeout starts or is lifted, to ask again what it may do in every channel (see [Channel access](#channel-access)). A client may not send it. |
+| **Viewer access changed (kind:20005)** | ✅ | Ephemeral, relay-signed, relay-only and `#p`-gated: tells one pubkey, when its community timeout or ban changes, to ask again what it may do in every channel (see [Channel access](#channel-access)). A client may not send it. |
 | **Typing indicators (kind:20002)** | ✅ | Ephemeral, not stored; published via Redis pub/sub (multi-node capable unlike presence fan-out) |
 | **NIP-42 authentication** | ✅ | Proactive challenge; optional pubkey allowlist |
 | **NIP-11 relay info** | ✅ | `GET /` with `Accept: application/nostr+json` |
@@ -361,8 +361,10 @@ channels the signer has not joined all get the same answer.
   huddle's auto-archive or auto-join. It carries no answer: ask again. It
   is best effort, so a client also asks again when it reconnects and when
   a post is refused.
-- **Ask again everywhere.** When a community timeout of a pubkey starts or
-  is lifted, the relay sends an ephemeral kind:20005, signed by the relay,
+- **Ask again everywhere.** When a pubkey's community restriction changes
+  (a timeout or ban starts or is lifted, by any route: a moderation
+  command, the admin API or a resolved report), or an agent's owner is
+  recorded, the relay sends an ephemeral kind:20005, signed by the relay,
   with empty content and only `["p", <pubkey>]`, to that pubkey and to each
   agent it owns. Subscribe with `{"kinds":[20005],"#p":[<own pubkey>]}`;
   the kind is `#p`-gated, so it reaches no one else. It carries no answer:

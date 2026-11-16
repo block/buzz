@@ -454,7 +454,7 @@ async fn pushes(
 
 /// A state with live Redis at `REDIS_URL` and multi-node fan-out: `POST
 /// /query` admission and the push both go through Redis.
-async fn live_state() -> Arc<AppState> {
+pub(crate) async fn live_state() -> Arc<AppState> {
     let redis_url = std::env::var("REDIS_URL").expect("REDIS_URL names a live Redis");
     let state = crate::state::tests::test_state_with_database_and_redis_url(
         &crate::test_support::database_url(),
@@ -736,7 +736,7 @@ async fn a_full_page_under_nested_projects_answers_quickly() {
 /// client's `{"kinds":[20005],"#p":[<self>]}` REQ does. With `p` false the
 /// filter names no `#p`, as a REQ the relay would refuse; fan-out must still
 /// deliver nothing that names someone else.
-fn subscribe_viewer(
+pub(crate) fn subscribe_viewer(
     state: &Arc<AppState>,
     tenant: &TenantContext,
     viewer: &Keys,
@@ -759,7 +759,7 @@ fn subscribe_viewer(
 }
 
 /// The pubkeys named by relay-signed per-viewer pushes in `rx` within `wait`.
-async fn viewer_pushes(
+pub(crate) async fn viewer_pushes(
     state: &AppState,
     rx: &mut tokio::sync::mpsc::Receiver<Message>,
     wait: Duration,
@@ -812,8 +812,11 @@ async fn moderate(
 /// A timed-out person, and an agent they own, are told they may not post
 /// anywhere and until when, matching the post gate. The timeout and its
 /// lifting are each pushed to that person and their agent, and to no one
-/// else. A timeout that runs out lifts on time with no push.
+/// else. A timeout that runs out lifts on time with no push: the answer's
+/// `timed_out_until` is when to ask again. A banned person may not post and
+/// has no end to wait for.
 /// Mutation: leave the restriction out of `post`, drop `timed_out_until`,
+/// report it for a ban,
 /// drop the push from 9042 or 9043, skip the owner's agents, or deliver the
 /// push without the p gate → RED.
 #[tokio::test]
@@ -925,7 +928,7 @@ async fn a_timeout_closes_posting_and_is_pushed_to_that_person_only() {
     .await;
     assert_eq!(
         viewer_pushes(state, &mut member_rx, Duration::from_secs(3)).await,
-        vec![member_hex]
+        vec![member_hex.clone()]
     );
     assert_eq!(
         viewer_pushes(state, &mut agent_rx, Duration::from_secs(1)).await,
@@ -969,4 +972,37 @@ async fn a_timeout_closes_posting_and_is_pushed_to_that_person_only() {
         Some(open_to_post(f.child))
     );
     assert!(post(state, tenant, &member, f.child).await.is_ok());
+    assert_eq!(
+        viewer_pushes(state, &mut member_rx, Duration::from_millis(200)).await,
+        vec![member_hex.clone()],
+        "the short timeout is pushed when set, and not when it runs out"
+    );
+
+    // A banned person is told they may not post, with no end to wait for,
+    // even under a timeout that has one.
+    moderate(
+        state,
+        tenant,
+        &f.owner,
+        buzz_core::kind::KIND_MODERATION_TIMEOUT,
+        &member,
+        Some(until),
+    )
+    .await;
+    moderate(
+        state,
+        tenant,
+        &f.owner,
+        buzz_core::kind::KIND_MODERATION_BAN,
+        &member,
+        None,
+    )
+    .await;
+    assert!(viewer_pushes(state, &mut member_rx, Duration::from_secs(3))
+        .await
+        .contains(&member.public_key().to_hex()));
+    let banned = ask_one(state, tenant, &member, f.child).await.unwrap();
+    assert_eq!(banned["post"], json!(false), "{banned}");
+    assert!(banned.get("timed_out_until").is_none(), "{banned}");
+    assert!(post(state, tenant, &member, f.child).await.is_err());
 }

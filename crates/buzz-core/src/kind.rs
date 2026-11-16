@@ -534,7 +534,7 @@ pub const KIND_AGENT_PRESENCE: u32 = 20003;
 /// (NOSTR.md, Channel access). Empty content; only `["h", <channel id>]`.
 pub const KIND_CHANNEL_ACCESS_CHANGED: u32 = 20004;
 /// Ephemeral, relay-signed: "ask again what you may do in every channel",
-/// sent when the named person's community timeout starts or is lifted
+/// sent when the named person's community restriction changes
 /// (NOSTR.md, Channel access). Empty content; only `["p", <pubkey>]`, and
 /// delivered only to that pubkey.
 pub const KIND_VIEWER_ACCESS_CHANGED: u32 = 20005;

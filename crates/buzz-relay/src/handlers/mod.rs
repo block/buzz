@@ -11,7 +11,7 @@ pub mod auth;
 /// What a viewer may do in named channels, and the push to ask again.
 pub mod channel_access;
 #[cfg(test)]
-mod channel_access_postgres_tests;
+pub(crate) mod channel_access_postgres_tests;
 /// Pure NIP-29 channel membership-authority decisions (kinds 9000/9001/9022).
 pub mod channel_authz;
 /// Subscription close (CLOSE) handler.
