@@ -36,16 +36,18 @@ import 'user_status_cache_provider.dart';
 
 /// Show a user profile bottom sheet for the given [pubkey].
 ///
+/// Completes after the profile and any conversation opened from it close.
+///
 /// The sheet names [pubkey] as the opening surface did: within the live
 /// comparison context [names] (for example a channel's members). Without it,
 /// the identity is compared only with itself.
-void showUserProfileSheet(
+Future<void> showUserProfileSheet(
   BuildContext context,
   String pubkey, {
   ProviderListenable<IdentityNames>? names,
   WidgetBuilder? contextualActions,
-}) {
-  showBuzzModalBottomSheet<Channel>(
+}) async {
+  final channel = await showBuzzModalBottomSheet<Channel>(
     context: context,
     isScrollControlled: true,
     showDragHandle: false,
@@ -54,17 +56,16 @@ void showUserProfileSheet(
       names: names,
       contextualActions: contextualActions,
     ),
-  ).then((channel) {
-    if (channel == null || !context.mounted) return;
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => ChannelDetailPage(
-          channel: channel,
-          placement: ChannelRoutePlacement.ordinary,
-        ),
+  );
+  if (channel == null || !context.mounted) return;
+  await Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      builder: (_) => ChannelDetailPage(
+        channel: channel,
+        placement: ChannelRoutePlacement.ordinary,
       ),
-    );
-  });
+    ),
+  );
 }
 
 class UserProfileSheet extends HookConsumerWidget {
