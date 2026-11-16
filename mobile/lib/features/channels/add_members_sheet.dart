@@ -29,13 +29,14 @@ bool _nativePickerOpen = false;
 /// Opens the platform member picker, retaining the Android sheet presentation.
 ///
 /// For a DM, [isDm] asks whether added people see its history, and
-/// [onMovedTo] receives the DM they ended up in when it is another one.
+/// [onAddedToDm] receives the DM they ended up in: this one, grown, or
+/// another.
 Future<bool?> showAddChannelMembersSheet({
   required BuildContext context,
   required String channelId,
   required Set<String> existingPubkeys,
   bool isDm = false,
-  void Function(Channel dm)? onMovedTo,
+  void Function(Channel dm)? onAddedToDm,
 }) async {
   if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
     if (_nativePickerOpen) return null;
@@ -49,7 +50,7 @@ Future<bool?> showAddChannelMembersSheet({
           channelId: channelId,
           existingPubkeys: existingPubkeys,
           isDm: isDm,
-          onMovedTo: onMovedTo,
+          onAddedToDm: onAddedToDm,
           nativePresentation: true,
         ),
       );
@@ -71,7 +72,7 @@ Future<bool?> showAddChannelMembersSheet({
       channelId: channelId,
       existingPubkeys: existingPubkeys,
       isDm: isDm,
-      onMovedTo: onMovedTo,
+      onAddedToDm: onAddedToDm,
     ),
   );
 }
@@ -83,14 +84,14 @@ class AddChannelMembersSheet extends HookConsumerWidget {
     required this.channelId,
     required this.existingPubkeys,
     this.isDm = false,
-    this.onMovedTo,
+    this.onAddedToDm,
     this.nativePresentation = false,
   });
 
   final String channelId;
   final Set<String> existingPubkeys;
   final bool isDm;
-  final void Function(Channel dm)? onMovedTo;
+  final void Function(Channel dm)? onAddedToDm;
   final bool nativePresentation;
 
   @override
@@ -103,6 +104,9 @@ class AddChannelMembersSheet extends HookConsumerWidget {
     final selectedUsers = useState<List<MentionCandidate>>([]);
     final isSubmitting = useState(false);
     final submitError = useState<String?>(null);
+    // The DM an accepted add landed in but that is not confirmed yet. Add
+    // then opens it again instead of sending the add a second time.
+    final acceptedDm = useState<String?>(null);
     // The iOS picker marks itself busy before asking Dart to add; a bump
     // rebuilds the sheet so it receives the unchanged idle state again.
     final resync = useState(0);
@@ -181,7 +185,7 @@ class AddChannelMembersSheet extends HookConsumerWidget {
     void retry() => ref.invalidate(mentionUserSearchProvider(search));
 
     void toggleUser(MentionCandidate user) {
-      if (isSubmitting.value) return;
+      if (isSubmitting.value || acceptedDm.value != null) return;
       final normalized = user.pubkey.toLowerCase();
       // The current selection, not this build's: a second tap can land
       // before the rebuild that reflects the first.
@@ -204,11 +208,15 @@ class AddChannelMembersSheet extends HookConsumerWidget {
     }
 
     // Agents join a DM with its history, as on desktop; adding a person asks.
+    // Only an agent with a verified owner counts: the relay treats anyone
+    // else as a person, so a directory listing alone still asks.
     // The relay joins anyone to this DM only with the history tag. A DM of at
     // most one person and their agents never gains a person: adding one
     // starts a new DM without asking.
     Future<bool?> askIncludeHistory(List<MentionCandidate> users) async {
-      if (users.every((user) => user.isAgent)) return true;
+      if (users.every((user) => user.isAgent && user.ownerPubkey != null)) {
+        return true;
+      }
       final people = existingPubkeys
           .where((pubkey) => userCache[pubkey]?.isAgent != true)
           .length;
@@ -226,6 +234,15 @@ class AddChannelMembersSheet extends HookConsumerWidget {
       final submittedUsers = List<MentionCandidate>.of(selectedUsers.value);
       submitError.value = null;
       try {
+        final accepted = acceptedDm.value;
+        if (accepted != null) {
+          isSubmitting.value = true;
+          final dm = await actions.openAddedDm(accepted);
+          if (!context.mounted) return;
+          Navigator.of(context).pop(true);
+          onAddedToDm?.call(dm);
+          return;
+        }
         final bool? includeHistory;
         try {
           includeHistory = isDm
@@ -244,7 +261,7 @@ class AddChannelMembersSheet extends HookConsumerWidget {
           );
           if (!context.mounted) return;
           Navigator.of(context).pop(true);
-          if (dm.id != channelId) onMovedTo?.call(dm);
+          onAddedToDm?.call(dm);
           return;
         }
         await actions.addMembers(
@@ -252,6 +269,10 @@ class AddChannelMembersSheet extends HookConsumerWidget {
           pubkeys: submittedUsers.map((user) => user.pubkey).toList(),
         );
         if (context.mounted) Navigator.of(context).pop(true);
+      } on DmAddUnconfirmed catch (error) {
+        if (!context.mounted) return;
+        acceptedDm.value = error.channelId;
+        submitError.value = error.toString();
       } on AddMembersException catch (error) {
         if (!context.mounted) return;
         final failedPubkeys = error.failures.keys

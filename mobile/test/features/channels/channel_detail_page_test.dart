@@ -1764,6 +1764,37 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.byType(AddChannelMembersSheet), findsOneWidget);
+
+      // The DM grows in place: its details show it as a group.
+      expect(
+        find.byKey(const ValueKey('channel-details-members-card')),
+        findsNothing,
+      );
+      tester
+          .widget<AddChannelMembersSheet>(find.byType(AddChannelMembersSheet))
+          .onAddedToDm!(
+        Channel(
+          id: _channelId,
+          name: 'DM',
+          channelType: 'dm',
+          visibility: 'private',
+          description: 'Direct message',
+          createdBy: 'self',
+          createdAt: DateTime(2025),
+          memberCount: 3,
+          participants: const ['Self', 'Alice', 'Robin'],
+          participantPubkeys: const ['self', 'alice', 'robin'],
+          isMember: true,
+        ),
+      );
+      Navigator.of(
+        tester.element(find.byType(AddChannelMembersSheet)),
+      ).pop(true);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('channel-details-members-card')),
+        findsOneWidget,
+      );
     });
 
     testWidgets('the moderation DM offers no Add', (tester) async {

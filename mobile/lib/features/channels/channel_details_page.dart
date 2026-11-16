@@ -293,9 +293,14 @@ class ChannelDetailsPage extends HookConsumerWidget {
           for (final member in members) member.pubkey.toLowerCase(),
         },
         isDm: resolvedChannel.isDm,
-        // They ended up in another DM: leave these details for that DM.
-        onMovedTo: (dm) {
+        onAddedToDm: (dm) {
           if (!context.mounted) return;
+          // This DM grew: show its new members.
+          if (dm.id == resolvedChannel.id) {
+            displayedChannel.value = dm;
+            return;
+          }
+          // They ended up in another DM: leave these details for that DM.
           Navigator.of(context)
             ..pop()
             ..push(

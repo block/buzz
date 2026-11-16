@@ -33,6 +33,18 @@ class ChannelJoinUnconfirmed implements Exception {
   String toString() => 'Join was sent but is not confirmed yet';
 }
 
+/// An add to a DM the relay accepted into another DM, [channelId], that
+/// this client could not yet confirm or show. [ChannelActions.openAddedDm]
+/// checks again without sending the add again.
+class DmAddUnconfirmed implements Exception {
+  const DmAddUnconfirmed(this.channelId);
+
+  final String channelId;
+
+  @override
+  String toString() => 'Added. Tap Add again to open the DM.';
+}
+
 class ChannelActions {
   final Ref _ref;
   final RelaySessionNotifier _session;
@@ -233,7 +245,8 @@ class ChannelActions {
   /// they ended up in. With [includeHistory] they join this DM and can read
   /// it, unless the grown group already has a DM, which is returned instead.
   /// Without it, or when a person joins a DM of at most one person, they
-  /// start a new DM of everyone.
+  /// start a new DM of its people and them. When that other DM cannot be
+  /// confirmed yet, throws [DmAddUnconfirmed] with its id.
   Future<Channel> addToDm({
     required String channelId,
     required List<String> pubkeys,
@@ -269,7 +282,24 @@ class ChannelActions {
         orElse: () => throw Exception('DM is not visible yet'),
       );
     }
-    return _refreshChannelsAndRead(id);
+    return openAddedDm(id);
+  }
+
+  /// Confirms through the writer that the current user is in the DM
+  /// [channelId] an add landed in, and returns it, without sending the add
+  /// again. Throws [DmAddUnconfirmed] when it cannot be confirmed or shown.
+  Future<Channel> openAddedDm(String channelId) async {
+    try {
+      await recheckJoin(channelId);
+    } on ChannelJoinUnconfirmed {
+      throw DmAddUnconfirmed(channelId);
+    }
+    final channels = await _ref.read(channelsProvider.future);
+    _ensureCommunityValid();
+    return channels.firstWhere(
+      (channel) => channel.id == channelId,
+      orElse: () => throw DmAddUnconfirmed(channelId),
+    );
   }
 
   void _ensureCommunityValid() {

@@ -182,6 +182,59 @@ void _confirmedJoinCases() {
       },
     );
 
+    test(
+      'an add that lands in another DM is confirmed through the writer',
+      () async {
+        final keys = nostr.Keys.generate();
+        final session = _WriterReplicaRelaySession(
+          memberships: const [],
+          metadata: [
+            _meta(id: _otherJoinedChannel, name: 'dm', channelType: 'dm'),
+            _meta(id: _joinedChannel, name: 'new dm', channelType: 'dm'),
+          ],
+        )..dmAddResponse = 'response:{"channel_id":"$_joinedChannel"}';
+        final container = _buildContainer(session: session);
+        addTearDown(container.dispose);
+        final actions = container.read(
+          Provider<ChannelActions>(
+            (ref) => ChannelActions(
+              ref: ref,
+              session: session,
+              signedEventRelay: SignedEventRelay(
+                session: session,
+                nsec: keys.nsec,
+              ),
+              currentPubkey: 'me',
+            ),
+          ),
+        );
+        await container.read(channelsProvider.future);
+
+        // The writer has the new DM; the replica the list reads does not.
+        session.writerMemberships = [_membership(_joinedChannel, 'me')];
+        session.rosterFailures = 1;
+        await expectLater(
+          actions.addToDm(
+            channelId: _otherJoinedChannel,
+            pubkeys: const ['robin'],
+            includeHistory: false,
+          ),
+          throwsA(
+            isA<DmAddUnconfirmed>().having(
+              (error) => error.channelId,
+              'channelId',
+              _joinedChannel,
+            ),
+          ),
+        );
+
+        // Opening it again reads the writer and sends nothing.
+        final dm = await actions.openAddedDm(_joinedChannel);
+        expect(dm.id, _joinedChannel);
+        expect(session.published.map((event) => event.kind), [41011]);
+      },
+    );
+
     test('a list rebuild during the join still shows the membership', () async {
       final session = _WriterReplicaRelaySession(
         memberships: const [],
@@ -218,12 +271,27 @@ class _WriterReplicaRelaySession extends _FakeRelaySession {
   int rosterFailures = 0;
   final published = <NostrEvent>[];
 
+  /// The relay's answer to a DM add (kind:41011), as its OK message.
+  String? dmAddResponse;
+
   @override
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     published.add(event);
+    final response = dmAddResponse;
+    if (event.kind == 41011 && response != null) {
+      return NostrEvent(
+        id: event.id,
+        pubkey: event.pubkey,
+        createdAt: event.createdAt,
+        kind: event.kind,
+        tags: event.tags,
+        content: response,
+        sig: event.sig,
+      );
+    }
     return event;
   }
 
