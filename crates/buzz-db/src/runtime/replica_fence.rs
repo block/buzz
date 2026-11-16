@@ -704,6 +704,24 @@ impl ProbeError {
     }
 }
 
+impl crate::error::DatastoreSpanError for ProbeError {
+    fn span_error_type(&self) -> &'static str {
+        match self {
+            Self::Writer(e) => e.span_error_type(),
+            Self::MaskedActivity { .. } => "masked_activity",
+            Self::HeartbeatRowMissing => "heartbeat_row_missing",
+            Self::Deadline(_) => "deadline",
+        }
+    }
+
+    fn span_sqlx_error(&self) -> Option<&sqlx::Error> {
+        match self {
+            Self::Writer(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
 /// Connect the probe's dedicated one-connection pool.
 ///
 /// The probe must not borrow the serving writer pool: under load its beat
@@ -1072,7 +1090,8 @@ pub const AURORA_IDENTITY_FN: &str = "aurora_db_instance_identifier";
 /// a wrong answer.
 #[datastore_span(
     name = "replica_fence_reader_supports_aurora_identity",
-    system = "postgresql"
+    system = "postgresql",
+    pool = "reader"
 )]
 pub async fn reader_supports_aurora_identity(conn: &mut PgConnection) -> Result<bool, sqlx::Error> {
     match sqlx::query(sqlx::AssertSqlSafe(format!(

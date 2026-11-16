@@ -111,7 +111,7 @@ pub(crate) async fn refresh_channel_ttls(
                 )
                 .increment(1);
                 tracing::warn!(
-                    %error,
+                    error_kind = %error.kind(),
                     channel_id = %channel,
                     reason,
                     "channel TTL refresh failed; event committed without refreshing the deadline"

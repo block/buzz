@@ -16,10 +16,14 @@ quote = "1"
 syn = { version = "2", features = ["full"] }
 
 [dev-dependencies]
+# The generated code calls `buzz_db::error::record_span_error`.
+buzz-db = { workspace = true }
 metrics = { workspace = true }
 metrics-util = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }

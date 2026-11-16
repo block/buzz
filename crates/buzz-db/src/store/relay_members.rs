@@ -1279,7 +1279,7 @@ impl Db {
                         Err(e)
                     }
                     Err(e) => {
-                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        tracing::warn!(path, error_kind = %e.kind(), "replica read failed; re-running on writer");
                         Self::record_route(path, "writer", "replica_error");
                         pending_default_channel_join(&self.pool, community, pubkey).await
                     }
@@ -1350,7 +1350,7 @@ impl Db {
                         Err(e)
                     }
                     Err(e) => {
-                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        tracing::warn!(path, error_kind = %e.kind(), "replica read failed; re-running on writer");
                         Self::record_route(path, "writer", "replica_error");
                         is_relay_member(&self.pool, community, pubkey).await
                     }

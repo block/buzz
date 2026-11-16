@@ -51,6 +51,28 @@ pub enum AuditError {
     Serialization(#[from] serde_json::Error),
 }
 
+impl buzz_db::error::DatastoreSpanError for AuditError {
+    fn span_error_type(&self) -> &'static str {
+        match self {
+            Self::Database(e) => e.span_error_type(),
+            Self::Admission(e) => e.span_error_type(),
+            Self::ChainViolation { .. } => "chain_violation",
+            Self::HashMismatch { .. } => "hash_mismatch",
+            Self::UnknownAction => "unknown_action",
+            Self::UnsupportedHashVersion { .. } => "unsupported_hash_version",
+            Self::Serialization(_) => "serialization",
+        }
+    }
+
+    fn span_sqlx_error(&self) -> Option<&sqlx::Error> {
+        match self {
+            Self::Database(e) => Some(e),
+            Self::Admission(e) => e.span_sqlx_error(),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

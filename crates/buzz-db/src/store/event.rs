@@ -1510,7 +1510,8 @@ pub(crate) fn row_to_stored_event(row: sqlx::postgres::PgRow) -> Result<Option<S
     let event: nostr::Event = match serde_json::from_value(event_json) {
         Ok(e) => e,
         Err(e) => {
-            tracing::warn!("failed to reconstruct event from DB row: {e}");
+            // serde messages can quote the offending value; keep only its class.
+            tracing::warn!(category = ?e.classify(), "failed to reconstruct event from DB row");
             return Ok(None);
         }
     };
@@ -2501,7 +2502,7 @@ impl Db {
                     Err(e) => {
                         // Mid-query replica failure: fail closed to the
                         // writer rather than surfacing a routed error.
-                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        tracing::warn!(path, error_kind = %e.kind(), "replica read failed; re-running on writer");
                         Self::record_route(path, "writer", "replica_error");
                         // Release the reader and its history permit before the
                         // writer re-run, so a replica-error burst can't fill the cap.
@@ -2566,7 +2567,7 @@ impl Db {
                         Err(e)
                     }
                     Err(e) => {
-                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        tracing::warn!(path, error_kind = %e.kind(), "replica read failed; re-running on writer");
                         Self::record_route(path, "writer", "replica_error");
                         // Release the reader and its history permit before the
                         // writer re-run, so a replica-error burst can't fill the cap.
@@ -2635,7 +2636,7 @@ impl Db {
                         Err(e)
                     }
                     Err(e) => {
-                        tracing::warn!(path, "replica count failed; re-running on writer: {e}");
+                        tracing::warn!(path, error_kind = %e.kind(), "replica count failed; re-running on writer");
                         Self::record_route(path, "writer", "replica_error");
                         // Release the reader and its history permit before the
                         // writer re-run, so a replica-error burst can't fill the cap.

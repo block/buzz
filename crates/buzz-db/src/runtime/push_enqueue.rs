@@ -86,7 +86,7 @@ impl PushEnqueue {
                     }
                     Ok(Err(error)) => {
                         record_drop("error");
-                        tracing::warn!(%error, community = %job.community, "push enqueue failed after message commit");
+                        tracing::warn!(error_kind = %error.kind(), community = %job.community, "push enqueue failed after message commit");
                     }
                     Err(_) => record_drop("timeout"),
                 }

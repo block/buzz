@@ -1176,13 +1176,16 @@ dependencies = [
 name = "buzz-datastore-tracing"
 version = "0.1.0"
 dependencies = [
+ "buzz-db",
  "metrics",
  "metrics-util",
  "opentelemetry",
  "opentelemetry_sdk",
  "proc-macro2",
  "quote",
+ "sqlx",
  "syn 2.0.117",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-opentelemetry",
@@ -1210,6 +1213,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
