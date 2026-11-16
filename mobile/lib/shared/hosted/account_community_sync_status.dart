@@ -88,18 +88,18 @@ class AccountCommunitySyncStatus extends HookConsumerWidget {
                       account.account?.subject != subject) {
                     return;
                   }
+                  // The status may close while keys save; removal still runs.
+                  final communities = ref.read(communityListProvider.notifier);
                   try {
                     for (final item in local.where(
                       (c) => knownCommunityAddress(c.relayUrl) == url,
                     )) {
                       await keepCommunityKey(item);
-                      await ref
-                          .read(communityListProvider.notifier)
-                          .removeCommunity(
-                            item.id,
-                            confirmedSubject: subject,
-                            accountConfirmed: true,
-                          );
+                      await communities.removeCommunity(
+                        item.id,
+                        confirmedSubject: subject,
+                        accountConfirmed: true,
+                      );
                     }
                     sync?.retry();
                   } catch (_) {
