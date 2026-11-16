@@ -380,7 +380,15 @@ Future<void> _resolveCommunity(
         event.createdAt * 1000,
         isUtc: true,
       );
-      if (!await store.claim(community.id, event.id, createdAt)) continue;
+      // A claim that fails (storage full, say) ends this community's run.
+      // The messages claimed before it are returned, since they are already
+      // recorded as shown, and the community is reported as incomplete.
+      try {
+        if (!await store.claim(community.id, event.id, createdAt)) continue;
+      } on Object {
+        complete = false;
+        break;
+      }
       final body = notificationBody(event.content);
       // A message with no text (only markup) has nothing to show, but it is
       // recorded so it is not looked at again.
@@ -448,7 +456,10 @@ Future<void> _resolveCommunity(
     // incomplete and the next wake looks again.
     if (complete) run.done.add(community.id);
   }();
-  run.claims.add(work);
+  // The wake waits for this without its error, which reaches the community's
+  // own handler through the await below, so one community can't discard the
+  // others' notifications.
+  run.claims.add(work.then((_) {}, onError: (Object _) {}));
   await work;
 }
 

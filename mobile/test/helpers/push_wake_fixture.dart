@@ -280,3 +280,25 @@ class SlowShownMessageStore implements ShownMessageStore {
     return _inner.claim(community, eventId, createdAt);
   }
 }
+
+/// A store whose claims for [community] fail after [succeed] of them, as when
+/// storage fills midway through a wake.
+class FailingShownMessageStore implements ShownMessageStore {
+  FailingShownMessageStore(this._inner, this.community, {this.succeed = 0});
+
+  final ShownMessageStore _inner;
+  final String community;
+  int succeed;
+
+  @override
+  Future<DateTime?> newestShown(String community) =>
+      _inner.newestShown(community);
+
+  @override
+  Future<bool> claim(String community, String eventId, DateTime createdAt) {
+    if (community == this.community && succeed-- <= 0) {
+      throw const FileSystemException('No space left on device');
+    }
+    return _inner.claim(community, eventId, createdAt);
+  }
+}

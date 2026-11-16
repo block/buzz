@@ -137,6 +137,35 @@ void main() {
       result.notifications.map((n) => n.target.communityId).toSet(),
       relays.map((r) => r.communityId).toSet(),
     );
+
+    // Storage fails midway through one community. The other community's
+    // message and the one claimed before the failure still show, and the
+    // failing community is reported so the next wake finishes it.
+    final [healthy, failing] = relays;
+    final newer = healthy.message(
+      healthy.dmChannel(),
+      healthy.person('A'),
+      'a',
+    );
+    final failingDm = failing.dmChannel();
+    final friend = failing.person('B');
+    final skipped = failing.message(failingDm, friend, 'older');
+    final claimed = failing.message(failingDm, friend, 'newer');
+    final partial = await fixture.wake(
+      store: FailingShownMessageStore(
+        fixture.openStore(),
+        failing.communityId,
+        succeed: 1,
+      ),
+    );
+    expect(partial.notifications.map((n) => n.eventId).toSet(), {
+      newer.id,
+      claimed.id,
+    });
+    expect(partial.failedCommunityIds, [failing.communityId]);
+    expect((await fixture.wake()).notifications.map((n) => n.eventId), [
+      skipped.id,
+    ]);
   });
 
   test(
