@@ -385,6 +385,9 @@ final channelDetailsProvider = FutureProvider.family<ChannelDetails, String>((
     ),
   );
   if (events.isEmpty) {
+    // A channel that turned private or was deleted stays in the saved
+    // directory until its next full read. Opening it is how we learn early.
+    ref.read(channelsProvider.notifier).forgetDirectoryChannel(channelId);
     throw Exception('Channel not found: $channelId');
   }
   return channelDetailsFromEvent(events.first);
@@ -496,6 +499,22 @@ List<ChannelMember>? watchLatestChannelMembers(Ref ref, String channelId) {
         channelId: channelId,
       );
 }
+
+/// The roster to draw right away for [channelId]: the latest loaded one, or
+/// before any load in this scope, the channel list's member snapshot.
+///
+/// [channelMembersProvider] refetches on every page open, so a header that
+/// waited for it would redraw once the fetch lands.
+final latestChannelMembersProvider = Provider.autoDispose
+    .family<List<ChannelMember>?, String>((ref, channelId) {
+      final latest = watchLatestChannelMembers(ref, channelId);
+      if (latest != null) return latest;
+      if (ref.watch(channelsProvider).asData == null) return null;
+      final listed = ref
+          .read(channelsProvider.notifier)
+          .cachedMembersForChannel(channelId);
+      return listed.isEmpty ? null : listed;
+    });
 
 /// Channel canvas (kind:40100 for the channel).
 final channelCanvasProvider = FutureProvider.family<ChannelCanvas, String>((
