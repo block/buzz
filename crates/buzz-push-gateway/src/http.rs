@@ -718,7 +718,7 @@ async fn deliver(
         Err(AuthorityError::RateLimited) => {
             crate::metrics::record_admission(crate::metrics::Admission::Rejected);
             crate::metrics::record_delivery_error("rate_limited");
-            return error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+            return throttled(s.endpoint_quota_window_seconds);
         }
         Err(AuthorityError::Unavailable) => {
             crate::metrics::record_admission(crate::metrics::Admission::Unavailable);
