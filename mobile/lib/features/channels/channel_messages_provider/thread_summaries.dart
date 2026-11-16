@@ -2,6 +2,8 @@ part of '../channel_messages_provider.dart';
 
 extension _ThreadSummaryState on ChannelMessagesNotifier {
   void _reconcilePageSummaries(ChannelWindowPage page, int pageVersion) {
+    // Nothing below changes the cached replies, so index them once per page.
+    final cachedReplies = _cachedThreadReplyIdsByRoot();
     for (final row in page.rows) {
       final root = row.event.id;
       if ((_threadEvidenceVersions[root] ?? 0) > pageVersion) continue;
@@ -10,7 +12,7 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
       _summaryRefreshes.cancel(root);
       _setThreadQueryVersion(root, pageVersion);
       _clearDeletionUncertainty(root, pageVersion);
-      if (cachedThreadReplyIds(root).length >
+      if ((cachedReplies[root]?.length ?? 0) >
           (row.thread?.descendantCount ?? 0)) {
         _queueOverflowSummary(root);
       }

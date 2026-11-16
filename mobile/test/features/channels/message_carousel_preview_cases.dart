@@ -209,7 +209,7 @@ void carouselPreviewTests() {
             child: MessageContent(
               key: ValueKey(own),
               ownMessage: own,
-              bubble: true,
+              bubble: false,
               mediaCarouselTrailingOverflow: Grid.gutter,
               content:
                   '![one](https://example.com/mirror-one.png)\n![two](https://example.com/mirror-two.png)',

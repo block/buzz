@@ -58,6 +58,41 @@ const _typingThrottleMs = 3000;
 /// milliseconds after `resumed` (flutter/flutter#189051 logs about 0.4 s).
 const _composerKeyboardRestoreGrace = Duration(seconds: 1);
 
+// Keyboard show/hide drives Android IME lift and collapses on hide.
+void _useComposerKeyboardMetrics({
+  required BuildContext context,
+  required FocusNode focusNode,
+  required _ComposerVoiceNote voiceNote,
+  required ObjectRef<Timer?> androidImeFallbackTimer,
+  required ValueNotifier<bool> androidImeTransitionStarted,
+  required VoidCallback collapseComposer,
+}) {
+  final appView = View.of(context);
+  useEffect(() {
+    final observer = _ComposerKeyboardMetricsObserver(
+      view: appView,
+      onKeyboardShown: () {
+        androidImeFallbackTimer.value?.cancel();
+        androidImeTransitionStarted.value = true;
+      },
+      onKeyboardHidden: () {
+        androidImeFallbackTimer.value?.cancel();
+        if (defaultTargetPlatform == TargetPlatform.android) {
+          androidImeTransitionStarted.value = false;
+        }
+        voiceNote.onKeyboardHidden();
+        collapseComposer();
+        focusNode.unfocus();
+      },
+    );
+    WidgetsBinding.instance.addObserver(observer);
+    return () {
+      WidgetsBinding.instance.removeObserver(observer);
+      observer.dispose();
+    };
+  }, [appView, focusNode, voiceNote.isPreparing]);
+}
+
 class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
   final FlutterView view;
   final VoidCallback onKeyboardShown;
@@ -339,6 +374,82 @@ void spliceAndMoveCursor(
     selection: TextSelection.collapsed(offset: start + replacement.length),
   );
   focusNode.requestFocus();
+}
+
+/// Channel members as the send resolves typed names: loaded members, or the
+/// cached roster while they load.
+List<MentionCandidate> _typedMemberCandidates({
+  required AsyncValue<List<ChannelMember>> membersAsync,
+  required SessionStatus sessionStatus,
+  required List<ChannelMember> cachedMembers,
+  required Map<String, UserProfile> userCache,
+  required Map<String, String>? agentOwners,
+}) => buildMentionCandidates(
+  members: channelMembersForAutocomplete(
+    membersAsync: membersAsync,
+    sessionStatus: sessionStatus,
+    cachedMembers: cachedMembers,
+  ),
+  relayAgents: const [],
+  sharedChannelIds: const {},
+  userCache: userCache,
+  ownerByAgentPubkey: agentOwners ?? const {},
+);
+
+/// Qualify earlier namesake mentions outside code, keeping the cursor in
+/// place, and rebind [mentions] before the text changes. A key with any
+/// plain occurrence left, by the presence rule draft persistence uses (code
+/// formatting ignored), stays bound beside its qualified label. Returns
+/// [start] shifted by the edits before it. Call it before tracking the new
+/// selection: persistence prunes keys absent from the text. [competitors] are
+/// the typed member labels the send resolves: a longer one keeps its
+/// occurrence instead of losing its prefix to a rename.
+int _requalifyNamesakes(
+  _MarkdownEditingController controller,
+  Map<String, MentionCandidate> mentions,
+  MentionCandidate candidate,
+  int start,
+  Iterable<String> competitors,
+) {
+  final renames = namesakeRequalifications(candidate.label, candidate.pubkey, {
+    for (final entry in mentions.entries) entry.key: entry.value.pubkey,
+  });
+  if (renames.isEmpty) return start;
+  final text = controller.text;
+  final cursor = controller.selection.isValid
+      ? controller.selection.baseOffset
+      : text.length;
+  final code = controller._styledCodeRanges(text);
+  // Selected keys first, so an equal-length duplicate stays the selection's.
+  final selected = {for (final key in mentions.keys) key.toLowerCase()};
+  final labels = [
+    ...mentions.keys,
+    ...competitors.where((label) => !selected.contains(label.toLowerCase())),
+  ];
+  final result = renameMentions(
+    text,
+    labels,
+    renames,
+    start,
+    // Exactly what the editor draws as code stays as typed.
+    excluded: (from, to) => code.any((c) => c.start < from && to < c.end),
+  );
+  // Backtick-adjacent code is no occurrence, but persistence still keeps it.
+  final remaining = mentionOccurrences(
+    result.text.replaceAll('`', ' '),
+    labels,
+  ).map((range) => range.label).toSet().intersection(result.renamed);
+  for (final key in result.renamed) {
+    mentions[renames[key]!] =
+        result.kept.contains(key) || remaining.contains(key)
+        ? mentions[key]!
+        : mentions.remove(key)!;
+  }
+  controller.value = TextEditingValue(
+    text: result.text,
+    selection: TextSelection.collapsed(offset: cursor + result.offset - start),
+  );
+  return result.offset;
 }
 
 /// Insert [trigger] (e.g. `@` or `#`) at the cursor position, prefixed with

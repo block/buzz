@@ -1,0 +1,9 @@
+# A share hands off to the conversation
+
+A [share](../../CONTEXT.md#share) from the iOS share sheet does not send anything from the share extension. The extension stores the shared items and opens Buzz on the chosen conversation, where they join that conversation's existing draft in its normal composer; the person writes their text and sends from there. Choosing a [share target](../../CONTEXT.md#share-target) opens that conversation, and choosing the plain Buzz icon starts a new Solo chat. When that conversation is already open in Buzz, the share goes to its open composer rather than a second one, so the draft and its attachments keep one owner. If another page covers it, nothing is closed (that page may hold its own draft or unfinished work): the person stays where they are, a toast says to go back to that conversation, and the composer takes the share when they do. We chose this because sending from the extension would duplicate signing, media upload, a recipient picker and mention autocomplete inside a memory-limited process, where large screen recordings are most likely to fail, while the app already handles drafts, attachments, mention prefill and pending or failed sends.
+
+## Considered options
+
+- **Compose and send inside the share sheet.** It keeps the person in the app they shared from, which a hand-off cannot do: iOS offers only its own back link to the previous app. Deferred until the hand-off proves annoying, and then only for share targets, with a fixed recipient and a text field.
+- **A modal composer over the current Buzz screen.** It would have preserved the person's place inside Buzz, but needed a second composer. Opening the conversation itself reuses the existing one, and the back button returns to the previous screen.
+- **A picker for the plain Buzz icon.** Deferred; starting a new Solo chat needs no picker, and conversations that are shared to often become share targets.

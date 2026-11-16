@@ -982,7 +982,11 @@ class _GroupedReactionActions implements ChannelActions {
   @override
   Future<void> removeReaction(String id, String emoji) async => removed.add(id);
   @override
-  Future<void> addReaction(String id, String emoji) async => added.add(id);
+  Future<void> addReaction(
+    String id,
+    String emoji, {
+    required String targetAuthor,
+  }) async => added.add(id);
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

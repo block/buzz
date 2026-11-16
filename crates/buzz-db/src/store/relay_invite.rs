@@ -143,6 +143,33 @@ pub async fn mint_relay_invite(
     ttl_secs: u64,
     max_uses: Option<i32>,
 ) -> Result<MintedInvite> {
+    mint(pool, community, created_by, ttl_secs, max_uses, false).await
+}
+
+/// Like [`mint_relay_invite`], but refuses with
+/// [`DbError::InviteIssuerNotAdmin`](crate::DbError::InviteIssuerNotAdmin)
+/// unless `created_by` is an owner or admin inside the mint transaction. The
+/// role row is held `FOR SHARE` through commit, so a concurrent demotion,
+/// removal or ownership transfer either lands first and refuses this mint or
+/// waits for it.
+pub async fn mint_relay_invite_as_admin(
+    pool: &PgPool,
+    community: CommunityId,
+    created_by: &str,
+    ttl_secs: u64,
+    max_uses: Option<i32>,
+) -> Result<MintedInvite> {
+    mint(pool, community, created_by, ttl_secs, max_uses, true).await
+}
+
+async fn mint(
+    pool: &PgPool,
+    community: CommunityId,
+    created_by: &str,
+    ttl_secs: u64,
+    max_uses: Option<i32>,
+    require_admin: bool,
+) -> Result<MintedInvite> {
     validate_mint_inputs(ttl_secs, max_uses)?;
     if !is_canonical_invite_pubkey(created_by) {
         return Err(crate::error::DbError::InvalidData(
@@ -168,6 +195,19 @@ pub async fn mint_relay_invite(
     )
     .await?;
     lock_admission(tx.conn(), community).await?;
+    if require_admin {
+        let role: Option<String> = sqlx::query_scalar(
+            "SELECT role FROM relay_members \
+             WHERE community_id = $1 AND pubkey = $2 FOR SHARE",
+        )
+        .bind(community.as_uuid())
+        .bind(created_by)
+        .fetch_optional(tx.conn())
+        .await?;
+        if !matches!(role.as_deref(), Some("owner" | "admin")) {
+            return Err(crate::DbError::InviteIssuerNotAdmin);
+        }
+    }
     if principal_restricted(tx.conn(), community, created_by).await? {
         return Err(crate::DbError::InviteRestricted);
     }
@@ -693,20 +733,21 @@ pub async fn claim_relay_invite_with_owner(
 }
 
 impl Db {
-    /// Mints a v2 use-limited relay invite. The plaintext code is returned
-    /// exactly once; only its SHA-256 hash is persisted.
+    /// Mints a v2 use-limited relay invite for an owner or admin; see
+    /// [`mint_relay_invite_as_admin`]. The plaintext code is returned exactly
+    /// once; only its SHA-256 hash is persisted.
     ///
     /// `max_uses` is `None` for unlimited or `Some(1..=10000)`.
     /// `ttl_secs` must be in the shared invite lifetime range.
     #[datastore_span(name = "mint_relay_invite", system = "postgresql")]
-    pub async fn mint_relay_invite(
+    pub async fn mint_relay_invite_as_admin(
         &self,
         community: CommunityId,
         created_by: &str,
         ttl_secs: u64,
         max_uses: Option<i32>,
     ) -> Result<MintedInvite> {
-        mint_relay_invite(&self.pool, community, created_by, ttl_secs, max_uses).await
+        mint_relay_invite_as_admin(&self.pool, community, created_by, ttl_secs, max_uses).await
     }
 
     /// Claim an invite and persist caller-verified ownership atomically.

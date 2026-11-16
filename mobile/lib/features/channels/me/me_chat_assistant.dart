@@ -3,9 +3,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../../shared/me/me_assistant_names.dart';
 import '../../../shared/me/me_assistants.dart';
 import '../../../shared/me/me_agent_change.dart';
 import '../../../shared/me/me_sync.dart';
+import '../../../shared/mentions/agent_identity_provider.dart';
 import '../../../shared/profile/user_cache_provider.dart';
 import '../../../shared/relay/relay.dart';
 import '../../../shared/theme/theme.dart';
@@ -73,7 +75,9 @@ useMeChatAssistant(
   final prefs = sync?.prefs;
   final selection = useState((key, initial ?? prefs?.getString(key)));
   final busy = useState(false);
-  final agents = enabled ? ref.watch(meAssistantsProvider).value ?? [] : [];
+  final List<AgentDirectoryEntry> agents = enabled
+      ? ref.watch(meAssistantsProvider).value ?? []
+      : [];
   final members = enabled
       ? ref.watch(channelMembersProvider(channelId)).value ?? []
       : [];
@@ -93,30 +97,6 @@ useMeChatAssistant(
       ? ref.watch(userCacheProvider)[selected] ??
             ref.read(userCacheProvider.notifier).get(selected)
       : null;
-  // The owner's inventory name outranks the agent's self-published profile.
-  final name =
-      agents
-          .where((agent) => agent.pubkey == selected)
-          .firstOrNull
-          ?.displayName ??
-      profile?.displayName;
-  final avatarInitial = name?.trim().isNotEmpty == true
-      ? name!.trim()[0].toUpperCase()
-      : profile?.initial ?? '?';
-  String agentName(String pubkey) {
-    final names = [
-      agents.where((a) => a.pubkey == pubkey).firstOrNull?.displayName,
-      ref.read(userCacheProvider)[pubkey]?.displayName,
-    ];
-    return names
-            .whereType<String>()
-            .where((name) => name.trim().isNotEmpty)
-            .firstOrNull ??
-        (pubkey.length > 12
-            ? '${pubkey.substring(0, 8)}…${pubkey.substring(pubkey.length - 4)}'
-            : pubkey);
-  }
-
   MeAgentChange? pending;
   if (sync != null) {
     try {
@@ -125,6 +105,31 @@ useMeChatAssistant(
       // The action surfaces an unreadable journal without crashing the chat.
     }
   }
+  // The owner's inventory name outranks the agent's self-published profile.
+  // Only Solo reads these names; other chats must not watch every profile.
+  final names = enabled
+      ? watchMeAssistantNames(ref, agents, saved: [selected, pending?.agent])
+      : null;
+  // A known agent outside the inventory, such as an archived one, is labeled
+  // against the live agents so it never reads as a live namesake.
+  bool named(String pubkey) =>
+      names != null &&
+      (agents.any((agent) => agent.pubkey == pubkey) ||
+          ref.read(userCacheProvider)[pubkey]?.displayName?.trim().isNotEmpty ==
+              true);
+  final name = selected != null && named(selected)
+      ? names!.labelFor(selected)
+      : profile?.displayName;
+  final avatarInitial = name?.trim().isNotEmpty == true
+      ? name!.trim()[0].toUpperCase()
+      : profile?.initial ?? '?';
+  String agentName(String pubkey) {
+    if (named(pubkey)) return names!.labelFor(pubkey);
+    return pubkey.length > 12
+        ? '${pubkey.substring(0, 8)}…${pubkey.substring(pubkey.length - 4)}'
+        : pubkey;
+  }
+
   final pendingName = pending == null ? null : agentName(pending.agent);
   final label = pendingName != null
       ? 'Pending agent change: $pendingName'

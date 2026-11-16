@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import '../theme/theme.dart';
 import '../theme/buzz_icons.dart';
 import 'ios_glass_navigation_button.dart';
+import 'avatar_editor_options.dart';
 import 'avatar_editor_option_button.dart';
 
 /// Camera and photo-library actions shared by avatar editors.
@@ -25,31 +25,24 @@ class AvatarImageSourceControls extends StatelessWidget {
     child: Column(
       children: [
         const Spacer(),
-        Row(
-          children: [
-            const Spacer(),
-            Expanded(
-              child: _ImageSourceOption(
-                key: const ValueKey('image-source-camera'),
-                icon: BuzzIcons.camera,
-                iosIcon: IosGlassNavigationIcon.camera,
-                label: 'Camera',
-                onTap: isPicking ? null : onCamera,
-                labelMaxWidth: 96,
-              ),
+        AvatarEditorOptions(
+          options: [
+            _ImageSourceOption(
+              key: const ValueKey('image-source-camera'),
+              icon: BuzzIcons.camera,
+              iosIcon: IosGlassNavigationIcon.camera,
+              label: 'Camera',
+              onTap: isPicking ? null : onCamera,
+              labelMaxWidth: 96,
             ),
-            const SizedBox(width: Grid.half),
-            Expanded(
-              child: _ImageSourceOption(
-                key: const ValueKey('image-source-library'),
-                icon: BuzzIcons.images,
-                iosIcon: IosGlassNavigationIcon.photoLibrary,
-                label: 'Photo Library',
-                onTap: isPicking ? null : onLibrary,
-                labelMaxWidth: 104,
-              ),
+            _ImageSourceOption(
+              key: const ValueKey('image-source-library'),
+              icon: BuzzIcons.images,
+              iosIcon: IosGlassNavigationIcon.photoLibrary,
+              label: 'Photo Library',
+              onTap: isPicking ? null : onLibrary,
+              labelMaxWidth: 104,
             ),
-            const Spacer(),
           ],
         ),
       ],

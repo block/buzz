@@ -64,6 +64,22 @@ void registerNativeCreationTests(Widget Function(List<Override>) buildPage) {
       expect(found['detail'], isNull);
       await event('toggle', {'pubkey': _dmKey(2)});
       await event('query', {'value': 'Person'});
+      // Two taps before Flutter rebuilds still never list a person twice.
+      for (var tap = 0; tap < 2; tap++) {
+        await messenger.handlePlatformMessage(
+          bridge.name,
+          const StandardMethodCodec().encodeMethodCall(
+            MethodCall('toggle', {'session': session, 'pubkey': _dmKey(3)}),
+          ),
+          (_) {},
+        );
+      }
+      await tester.pumpAndSettle();
+      final picked = [
+        for (final user in states.last['selected'] as List)
+          (user as Map)['pubkey'],
+      ];
+      expect(picked.toSet(), hasLength(picked.length));
       for (final key in people.keys) {
         await event('toggle', {'pubkey': key});
       }

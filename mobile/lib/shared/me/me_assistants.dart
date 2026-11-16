@@ -10,7 +10,7 @@ import '../agents/remote_agents.dart';
 import '../mentions/agent_identity_provider.dart';
 import '../relay/relay.dart';
 import 'me_agent_inventory.dart';
-import 'me_archived_agents.dart';
+import '../identity_archives/identity_archives.dart';
 import 'me_sync.dart';
 
 /// The owner's current inventory, with verified ownership and desktop's
@@ -26,7 +26,7 @@ final meAssistantsProvider = FutureProvider<List<AgentDirectoryEntry>>((
   ref.watch(remoteAgentRegistrationRevisionProvider);
   // Refresh archive evidence with the inventory, including explicit retries.
   // Ordinary sheet openings reuse this provider's completed directory.
-  final archivedRequest = ref.refresh(meArchivedAgentsProvider.future);
+  final archivedRequest = ref.refresh(identityArchivesProvider.future);
   final inventory = await loadMeAgentInventory(sync);
   sync.check();
   final profiles = await _loadProfiles(sync, inventory.keys.toList());

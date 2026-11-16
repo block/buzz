@@ -2,6 +2,10 @@ import 'dart:async';
 import 'dart:ui' show SemanticsAction;
 
 import 'package:buzz/features/channels/me/me_chat_assistant.dart';
+import 'package:buzz/features/channels/me/me_workspace_picker.dart';
+import 'package:buzz/shared/widgets/frosted_scaffold.dart';
+import 'package:buzz/shared/widgets/frosted_app_bar.dart';
+import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:buzz/features/channels/me/me_assistant_picker.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
@@ -12,6 +16,8 @@ import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/utils/string_utils.dart';
+import 'package:buzz/shared/widgets/app_list.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -26,6 +32,13 @@ class _Profiles extends UserCacheNotifier {
     'a': const UserProfile(pubkey: 'a', displayName: 'Confusable Alpha'),
     'b': const UserProfile(pubkey: 'b', displayName: 'Confusable Beta'),
   };
+}
+
+class _CachedProfiles extends UserCacheNotifier {
+  _CachedProfiles(this.profiles);
+  final Map<String, UserProfile> profiles;
+  @override
+  Map<String, UserProfile> build() => profiles;
 }
 
 class _Harness extends HookConsumerWidget {
@@ -58,10 +71,93 @@ class _Harness extends HookConsumerWidget {
   }
 }
 
+class _NativeHeaderHarness extends HookConsumerWidget {
+  const _NativeHeaderHarness();
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final workspace = useMeWorkspace(context, ref, enabled: false);
+    final assistant = useMeChatAssistant(
+      context,
+      ref,
+      enabled: false,
+      channelId: 'chat',
+      initial: null,
+      messages: const [],
+    );
+    return FrostedScaffold(
+      appBar: FrostedAppBar(
+        nativeTitle: 'Solo chat',
+        nativeLeading: IosNavigationAction(
+          label: 'Back',
+          symbol: 'chevron.backward',
+          onPressed: () {},
+        ),
+        nativeActions: [workspace.nativeAction, assistant.nativeAction],
+      ),
+      body: const SizedBox.expand(),
+    );
+  }
+}
+
 void main() {
+  testWidgets('Solo controls stay in the upper rail across folds', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.padding = const FakeViewPadding(right: 76);
+    tester.view.viewPadding = const FakeViewPadding(right: 76);
+    addTearDown(tester.view.reset);
+    tester.view.physicalSize = const Size(466, 678);
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: const _NativeHeaderHarness(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final bar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar));
+    final labels = ['Back', ...bar.nativeActions!.map((a) => a.label)];
+    double previousY = 0;
+    for (final label in labels) {
+      final control = find.byKey(ValueKey('duo-toolbar-$label'));
+      expect(control, findsOneWidget);
+      final rect = tester.getRect(control);
+      expect(rect.center.dx, greaterThan(390));
+      expect(rect.center.dy, greaterThan(previousY));
+      previousY = rect.center.dy;
+    }
+    tester.view.physicalSize = const Size(951, 669);
+    await tester.pumpAndSettle();
+    previousY = 0;
+    for (final label in labels) {
+      final control = find.byKey(ValueKey('duo-toolbar-$label'));
+      expect(control, findsOneWidget);
+      final rect = tester.getRect(control);
+      expect(rect.center.dx, greaterThan(875));
+      expect(rect.center.dy, greaterThan(previousY));
+      expect(rect.bottom, lessThan(400));
+      previousY = rect.center.dy;
+    }
+    final header = tester.widget<IosNavigationBar>(
+      find.byWidgetPredicate(
+        (w) => w is IosNavigationBar && !w.standaloneControl,
+      ),
+    );
+    expect(header.actions, isEmpty);
+    tester.view.physicalSize = const Size(466, 678);
+    await tester.pumpAndSettle();
+    for (final label in labels) {
+      expect(find.byKey(ValueKey('duo-toolbar-$label')), findsOneWidget);
+    }
+    expect(tester.takeException(), isNull);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
   for (final keyFallback in [false, true]) {
     final target = keyFallback ? '0123456789abcdef' * 4 : 'b';
-    final targetName = keyFallback ? '01234567…cdef' : 'Beta';
+    // An unnamed agent reads as its compact npub, like every other picker.
+    final targetName = keyFallback ? shortPubkey(target) : 'Beta';
     for (final action in ['Resume', 'Later', 'Discard choice']) {
       testWidgets(
         'header restores pending agent choice: $action fallback=$keyFallback',
@@ -426,4 +522,115 @@ void main() {
       expect(ownershipReads, 2);
     },
   );
+  testWidgets('same-name agents read distinctly in the picker and header', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final sync = MeSync(
+      RelaySessionNotifier(),
+      RelayConfig(
+        baseUrl: 'https://relay.test',
+        nsec: nostr.Nip19.encode(
+          prefix: nostr.Nip19Prefix.nsec,
+          data: '0' * 63 + '1',
+        ),
+      ),
+      prefs: prefs,
+    );
+    final first = 'a1' * 32;
+    final second = 'b2' * 32;
+    await prefs.setString(
+      'me-assistant:${sync.community}:${sync.pubkey}:chat',
+      first,
+    );
+    var live = [first, second];
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          meSyncProvider.overrideWithValue(sync),
+          meAssistantsProvider.overrideWith(
+            (ref) async => [
+              for (final key in live)
+                AgentDirectoryEntry(pubkey: key, displayName: 'Atlas'),
+            ],
+          ),
+          channelMembersProvider('chat').overrideWith(
+            (ref) async => [
+              for (final key in [first, second])
+                ChannelMember(
+                  pubkey: key,
+                  role: 'bot',
+                  joinedAt: DateTime(2026),
+                ),
+            ],
+          ),
+          meAssistantOwnershipProvider.overrideWith((ref, key) async => true),
+          // An archived agent's profile stays in the client's cache.
+          userCacheProvider.overrideWith(
+            () => _CachedProfiles({
+              first: UserProfile(pubkey: first, displayName: 'Atlas'),
+            }),
+          ),
+        ],
+        child: MaterialApp(theme: AppTheme.light(), home: _Harness((_) {})),
+      ),
+    );
+    await tester.pumpAndSettle();
+    String headerLabel() => tester
+        .widget<IconButton>(find.byKey(const ValueKey('me-assistant-button')))
+        .tooltip!;
+    List<String> pickerLabels() => [
+      for (final row in tester.widgetList<AppListRowRaw>(
+        find.byType(AppListRowRaw),
+      ))
+        (row.title as Text).data!,
+    ];
+
+    final firstHeader = headerLabel();
+    expect(firstHeader, startsWith('Change agent: Atlas'));
+    expect(firstHeader, isNot('Change agent: Atlas'));
+    await tester.tap(find.byKey(const ValueKey('me-assistant-button')));
+    await tester.pumpAndSettle();
+    final labels = pickerLabels();
+    expect(labels, hasLength(2));
+    expect(labels.toSet(), hasLength(2), reason: 'Namesakes must differ');
+    expect('Change agent: ${labels.first}', firstHeader);
+    await tester.tap(find.text(labels.last));
+    await tester.pumpAndSettle();
+    expect(headerLabel(), 'Change agent: ${labels.last}');
+
+    // The first agent is archived: no live namesake remains, so the cached
+    // profiles of hidden agents add no qualifier.
+    live = [second];
+    ProviderScope.containerOf(
+      tester.element(find.byType(_Harness)),
+    ).invalidate(meAssistantsProvider);
+    await tester.pumpAndSettle();
+    expect(headerLabel(), 'Change agent: Atlas');
+    await tester.tap(find.byKey(const ValueKey('me-assistant-button')));
+    await tester.pumpAndSettle();
+    expect(pickerLabels(), ['Atlas']);
+    await tester.tapAt(Offset.zero);
+    await tester.pumpAndSettle();
+
+    // A saved switch to the archived agent still names it apart from its live
+    // namesake, where the owner decides whether to finish it.
+    await MeAgentChange.create(sync, 'chat', first).save(sync, 'chat');
+    ProviderScope.containerOf(
+      tester.element(find.byType(_Harness)),
+    ).invalidate(meAssistantsProvider);
+    await tester.pumpAndSettle();
+    final pending = find.textContaining('Finish choosing ');
+    final archivedName = tester
+        .widget<Text>(pending)
+        .data!
+        .substring('Finish choosing '.length);
+    expect(archivedName, startsWith('Atlas'));
+    expect(archivedName, isNot('Atlas'));
+    expect(headerLabel(), 'Pending agent change: $archivedName');
+    await tester.tap(pending);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Your choice of $archivedName'), findsOneWidget);
+  });
 }

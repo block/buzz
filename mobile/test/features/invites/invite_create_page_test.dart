@@ -7,6 +7,10 @@ import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/utils/string_utils.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'package:duo_kit/duo_kit.dart';
+import 'package:buzz/shared/widgets/duo_toolbar.dart';
+import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -18,6 +22,118 @@ void main() {
       'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
   const alice =
       'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+
+  testWidgets('unfolded invite splits title and controls clear of either rail', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(951, 669);
+    addTearDown(tester.view.reset);
+    try {
+      for (final left in [false, true]) {
+        await tester.pumpWidget(const SizedBox.shrink());
+        final actions = _FakeInviteActions();
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              communityInviteActionsProvider.overrideWithValue(actions),
+              myPubkeyProvider.overrideWithValue(owner),
+              communityMembershipProvider.overrideWith(
+                (ref) async => const CommunityMembershipSnapshot(
+                  snapshotFound: true,
+                  members: [
+                    CommunityMember(
+                      pubkey: owner,
+                      role: CommunityMemberRole.owner,
+                    ),
+                  ],
+                ),
+              ),
+              currentCommunityRoleProvider.overrideWithValue(
+                const AsyncData<CommunityMemberRole?>(
+                  CommunityMemberRole.owner,
+                ),
+              ),
+            ],
+            child: MaterialApp(
+              theme: AppTheme.light(),
+              home: DuoToolbarScope(
+                active: true,
+                strip: FoldStrip(
+                  side: left ? FoldStripSide.left : FoldStripSide.right,
+                  rect: Rect.fromLTWH(left ? 0 : 875, 0, 76, 669),
+                  topClearance: 110,
+                  bottomClearance: 0,
+                  isClearanceEstimated: true,
+                ),
+                child: const CommunityInvitePage(),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final title = tester.getRect(
+          find.byKey(const ValueKey('invite-title-pane')),
+        );
+        final controls = tester.getRect(
+          find.byKey(const ValueKey('invite-controls-pane')),
+        );
+        expect(title.left, left ? 76 : 0);
+        expect(controls.right, left ? 951 : 875);
+        expect(title.width, 375);
+        expect(controls.width, 499);
+        expect(controls.left, closeTo(title.right + 1, 0.01));
+        expect(
+          tester
+              .widget<IosNavigationBar>(find.byType(IosNavigationBar).first)
+              .standaloneLargeTitle,
+          isTrue,
+        );
+        for (final setting in ['expiry', 'max-uses']) {
+          await tester.tap(
+            find.byKey(Key('community-invite-$setting-setting')),
+          );
+          await tester.pumpAndSettle();
+          final sheet = tester.getRect(find.byType(BottomSheet));
+          expect(sheet.left, greaterThanOrEqualTo(controls.left));
+          expect(sheet.right, lessThanOrEqualTo(controls.right));
+          expect(
+            find.byKey(const ValueKey('invite-title-pane')),
+            findsOneWidget,
+          );
+          final barrier = tester.getRect(find.byType(ModalBarrier).last);
+          expect(barrier.left, greaterThanOrEqualTo(controls.left));
+          expect(barrier.right, lessThanOrEqualTo(controls.right));
+          await tester.tap(
+            find.byKey(
+              Key(
+                'community-invite-option-${setting == 'expiry' ? '1-day' : '3-uses'}',
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+          expect(find.byType(BottomSheet), findsNothing);
+        }
+        expect(actions.mintRequests.last, (86400, 3));
+        tester.view.physicalSize = const Size(800, 1100);
+        await tester.pumpAndSettle();
+        expect(find.byKey(const ValueKey('invite-title-pane')), findsNothing);
+        expect(
+          find.byKey(const ValueKey('invite-controls-pane')),
+          findsNothing,
+        );
+        expect(find.text('Share'), findsOneWidget);
+        tester.view.devicePixelRatio = 1;
+        tester.view.physicalSize = const Size(951, 669);
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+      }
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
 
   testWidgets('owner can invite a pasted npub and share generated link', (
     tester,

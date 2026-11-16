@@ -268,7 +268,8 @@ async fn disable_departed_member_workflows(
 }
 
 /// Close every live channel-scoped subscription on `conn_id`, removing them from
-/// the connection's local map and sending `CLOSED restricted` for each. Runs
+/// the connection's local map and sending `CLOSED restricted` for each; a
+/// holder that a pending same-ID REQ is replacing is only retired. Runs
 /// under the connection's lifecycle lock so a concurrent same-ID claim is
 /// either fully before (and revoked) or fully after (and untouched).
 pub(crate) async fn evict_conn_channel_subscriptions(
@@ -289,6 +290,13 @@ pub(crate) async fn evict_conn_channel_subscriptions(
         channel_id,
     );
     for update in removed {
+        // A newer same-ID REQ that has not claimed yet owns the ID and is
+        // replacing this holder, so the client already treats the holder as
+        // gone (NIP-01): retire it without touching the newer request's token
+        // or sending a frame for the ID.
+        let replaced = conn_subscriptions
+            .get(&update.sub_id)
+            .is_some_and(|held| !held.claimed);
         // A multi-channel sub keeps its other channels (and its map token).
         state
             .pubsub
@@ -305,7 +313,7 @@ pub(crate) async fn evict_conn_channel_subscriptions(
                 super::close::release_scope_topics(state, tenant, &rest.scope).await;
             }
         }
-        if update.removed || sync {
+        if (update.removed || sync) && !replaced {
             conn_subscriptions.remove(&update.sub_id);
             let reason = if sync {
                 "resync: channel access changed"
@@ -4187,6 +4195,7 @@ async fn seed_manifest_pointer(
         refs: BTreeMap::new(),
         packs: Vec::new(),
         parent: None,
+        published_at: None,
     };
     empty
         .validate()
@@ -4302,6 +4311,7 @@ async fn emit_initial_ref_state(
         head: DEFAULT_HEAD,
         refs: &empty_refs,
         actor_pubkey_hex: owner_hex,
+        published_at: None,
     };
     let event = build_ref_state_event(&inputs, &state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("build_ref_state_event: {e}"))?;
@@ -4641,34 +4651,32 @@ pub async fn publish_nipia_archival_list(
             );
         }
 
-        // NIP-16 resolves same-second replacements by event id. Force this
-        // canonical snapshot strictly past the current head instead of letting a
-        // rapid archive→unarchive randomly preserve the stale archive state.
-        let now = nostr::Timestamp::now().as_secs();
-        let previous = state
-            .db
-            .query_events_for_event_write(&buzz_db::event::EventQuery {
-                kinds: Some(vec![KIND_IA_ARCHIVED_LIST as i32]),
-                pubkey: Some(relay_pubkey.to_bytes().to_vec()),
-                limit: Some(1),
-                global_only: true,
-                ..buzz_db::event::EventQuery::for_community(tenant.community())
-            })
-            .await?;
-        let created_at = previous
-            .first()
-            .map(|event| (event.event.created_at.as_secs() + 1).max(now))
-            .unwrap_or(now);
-
-        let event = EventBuilder::new(Kind::Custom(KIND_IA_ARCHIVED_LIST as u16), "")
-            .tags(tags)
-            .custom_created_at(nostr::Timestamp::from(created_at))
-            .sign_with_keys(&state.relay_keypair)
-            .map_err(|e| anyhow::anyhow!("failed to sign kind:{KIND_IA_ARCHIVED_LIST}: {e}"))?;
-
+        // NIP-IA: each snapshot's created_at is strictly past the previous
+        // one's, so clients can ask only for a newer list. The head is read
+        // behind the replacement lock: two publishers racing on one head would
+        // otherwise both stamp head + 1 and let a same-second replacement win
+        // by event id.
         let (stored, was_inserted) = state
             .db
-            .replace_addressable_event(tenant.community(), &event, None)
+            .replace_addressable_event_after_head(
+                tenant.community(),
+                KIND_IA_ARCHIVED_LIST as i32,
+                &relay_pubkey.to_bytes(),
+                None,
+                |previous| {
+                    let now = nostr::Timestamp::now().as_secs();
+                    let created_at = previous.map_or(now, |previous| (previous + 1).max(now));
+                    EventBuilder::new(Kind::Custom(KIND_IA_ARCHIVED_LIST as u16), "")
+                        .tags(tags)
+                        .custom_created_at(nostr::Timestamp::from(created_at))
+                        .sign_with_keys(&state.relay_keypair)
+                        .map_err(|e| {
+                            buzz_db::DbError::InvalidData(format!(
+                                "failed to sign kind:{KIND_IA_ARCHIVED_LIST}: {e}"
+                            ))
+                        })
+                },
+            )
             .await
             .map_err(|e| anyhow::anyhow!("archive snapshot write failed: {}", e.kind()))?;
         if !was_inserted {

@@ -87,9 +87,7 @@ async fn thread_window_upper_fence_terminal_snapshot_and_fallback() {
         .sign_with_keys(&keys)
         .unwrap();
     for pool in [&writer, &replica] {
-        event::insert_event(pool, community, &edit, Some(channel))
-            .await
-            .unwrap();
+        crate::test_support::insert_historical_event(pool, community, &edit, channel).await;
         event::insert_event(pool, community, &deletion, None)
             .await
             .unwrap();

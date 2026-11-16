@@ -131,7 +131,8 @@ class ChannelDetailsPage extends HookConsumerWidget {
     final canJoin =
         resolvedChannel.visibility == 'open' &&
         !resolvedChannel.isArchived &&
-        !resolvedChannel.isMember;
+        !resolvedChannel.isMember &&
+        !resolvedChannel.joinsAsGuest;
     final canAddMembers =
         membersAsync.hasValue &&
         !membersAsync.isLoading &&
@@ -151,7 +152,19 @@ class ChannelDetailsPage extends HookConsumerWidget {
         membersAsync.value?.length ?? resolvedChannel.memberCount;
     final memberLabel =
         '$memberCount ${memberCount == 1 ? 'member' : 'members'}';
-    final previewMembers = members.take(_channelMemberPreviewLimit).toList();
+    // People, agents, then known-archived people and agents, as in the
+    // members sheet.
+    final archived = ref.watch(hiddenArchivedIdentitiesProvider);
+    bool isArchived(ChannelMember member) =>
+        archived.contains(member.pubkey.toLowerCase());
+    final previewMembers = [
+      for (final archivedPart in [false, true])
+        for (final bot in [false, true])
+          ...members.where(
+            (member) =>
+                member.isBot == bot && isArchived(member) == archivedPart,
+          ),
+    ].take(_channelMemberPreviewLimit).toList();
     final userCache = ref.watch(userCacheProvider);
     final memberLabels = watchChannelIdentityLabels(
       ref,
@@ -293,6 +306,17 @@ class ChannelDetailsPage extends HookConsumerWidget {
       try {
         await ref.read(channelActionsProvider).joinChannel(resolvedChannel.id);
         if (context.mounted) Navigator.of(context).pop(false);
+      } on ChannelJoinUnconfirmed {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showFeedbackSnackBar(
+            const SnackBar(
+              content: Text(
+                'Join sent, but not confirmed yet. Try again to check.',
+              ),
+            ),
+            kind: ToastKind.generic,
+          );
+        }
       } catch (_) {
         if (context.mounted) {
           ScaffoldMessenger.of(context).showFeedbackSnackBar(
@@ -450,6 +474,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
                     contextualLabel: memberLabels[member.pubkey.toLowerCase()],
                     avatarUrl:
                         userCache[member.pubkey.toLowerCase()]?.avatarUrl,
+                    isArchived: isArchived(member),
                   ),
                 if (memberCount > _channelMemberPreviewLimit)
                   AppListRowRaw(
@@ -738,6 +763,7 @@ class _ChannelMemberPreviewRow extends StatelessWidget {
     required this.displayName,
     required this.contextualLabel,
     required this.avatarUrl,
+    this.isArchived = false,
   });
 
   final ChannelMember member;
@@ -748,6 +774,9 @@ class _ChannelMemberPreviewRow extends StatelessWidget {
   /// The channel's contextual label for this member, when resolved.
   final String? contextualLabel;
   final String? avatarUrl;
+
+  /// Known-archived: the row says so, in text a screen reader reads too.
+  final bool isArchived;
 
   @override
   Widget build(BuildContext context) {
@@ -765,7 +794,9 @@ class _ChannelMemberPreviewRow extends StatelessWidget {
     final initial = isSelf || hasName
         ? name[0].toUpperCase()
         : (member.pubkey.isNotEmpty ? member.pubkey[0].toUpperCase() : '?');
-    final roleLabel = _channelMemberRoleLabel(member.role);
+    final roleLabel = isArchived
+        ? 'Archived \u00b7 ${_channelMemberRoleLabel(member.role)}'
+        : _channelMemberRoleLabel(member.role);
     final titleStyle = context.textTheme.bodyLarge;
     final roleStyle = context.textTheme.bodySmall?.copyWith(
       color: context.colors.onSurfaceVariant,

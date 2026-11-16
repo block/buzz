@@ -46,10 +46,18 @@ TimelineMessage _message({
 
 class _RecordingReactionActions implements ChannelActions {
   final added = <String>[];
+  final targetAuthors = <String>[];
   final removed = <String>[];
   @override
-  Future<void> addReaction(String eventId, String emoji) async =>
-      added.add(emoji);
+  Future<void> addReaction(
+    String eventId,
+    String emoji, {
+    required String targetAuthor,
+  }) async {
+    added.add(emoji);
+    targetAuthors.add(targetAuthor);
+  }
+
   @override
   Future<void> removeReaction(String eventId, String emoji) async =>
       removed.add(eventId);
@@ -457,6 +465,7 @@ void main() {
     await second.up();
     await tester.pumpAndSettle();
     expect(actions.added, ['👍']);
+    expect(actions.targetAuthors, ['alice']);
     expect(
       find.byKey(const ValueKey('message-actions-underlying-page')),
       findsOneWidget,

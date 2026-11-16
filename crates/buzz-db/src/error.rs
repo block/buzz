@@ -54,6 +54,10 @@ pub enum DbError {
     #[error("invitation principal is restricted")]
     InviteRestricted,
 
+    /// The invitation issuer is not an owner or admin at mint time.
+    #[error("invitation issuer is not an owner or admin")]
+    InviteIssuerNotAdmin,
+
     /// A verified invitation owner conflicts with the recorded owner.
     #[error("invitation owner does not match the recorded owner")]
     InviteOwnerMismatch,
@@ -109,6 +113,13 @@ pub enum DbError {
     /// A stored timestamp value could not be interpreted.
     #[error("invalid timestamp: {0}")]
     InvalidTimestamp(i64),
+
+    /// A channel event is too old for replica-fence completeness. Retrying the
+    /// same signed event cannot make its timestamp newer. Like the mixed-version
+    /// trigger's SQLx error, this remains a database error at the relay boundary
+    /// (WS OK false / HTTP 500), rather than a different ingest rejection class.
+    #[error("database error: events.created_at is below the replica-fence floor")]
+    CreatedAtFloorRejected,
 
     /// A roster mutation would remove the last effective relay Operator,
     /// leaving no one able to administer the deployment through the API.

@@ -414,29 +414,37 @@ class _PairingWelcomeView extends HookWidget {
                               alignment: Alignment.bottomCenter,
                               children: [
                                 for (var page = 1; page < 5; page++)
-                                  ExcludeFocus(
-                                    excluding: page != selectedPage,
-                                    child: ExcludeSemantics(
+                                  Positioned(
+                                    // Only the visible panel determines the footer height.
+                                    left: page == selectedPage ? null : 0,
+                                    right: page == selectedPage ? null : 0,
+                                    bottom: page == selectedPage ? null : 0,
+                                    child: ExcludeFocus(
                                       excluding: page != selectedPage,
-                                      child: IgnorePointer(
-                                        ignoring: page != selectedPage,
-                                        child: AnimatedSlide(
-                                          key: ValueKey('welcome-panel-$page'),
-                                          offset: Offset(
-                                            page == selectedPage
-                                                ? 0
-                                                : page == 1
-                                                ? -1
-                                                : 1,
-                                            0,
-                                          ),
-                                          duration: revealDuration,
-                                          curve: page == selectedPage
-                                              ? Curves.easeOutQuad
-                                              : Curves.easeOutCubic.flipped,
-                                          child: SizedBox(
-                                            width: double.infinity,
-                                            child: actions(page),
+                                      child: ExcludeSemantics(
+                                        excluding: page != selectedPage,
+                                        child: IgnorePointer(
+                                          ignoring: page != selectedPage,
+                                          child: AnimatedSlide(
+                                            key: ValueKey(
+                                              'welcome-panel-$page',
+                                            ),
+                                            offset: Offset(
+                                              page == selectedPage
+                                                  ? 0
+                                                  : page == 1
+                                                  ? -1
+                                                  : 1,
+                                              0,
+                                            ),
+                                            duration: revealDuration,
+                                            curve: page == selectedPage
+                                                ? Curves.easeOutQuad
+                                                : Curves.easeOutCubic.flipped,
+                                            child: SizedBox(
+                                              width: double.infinity,
+                                              child: actions(page),
+                                            ),
                                           ),
                                         ),
                                       ),

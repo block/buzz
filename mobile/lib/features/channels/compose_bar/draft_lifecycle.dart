@@ -72,6 +72,8 @@ Future<void> _sendTextOnlyDraft({
 }
 
 void _useComposeDraftLifecycle({
+  required BuildContext context,
+  required ObjectRef<_ComposerVoiceNote> voiceNote,
   required ObjectRef<Map<String, MentionCandidate>> mentionMap,
   required WidgetRef ref,
   required _MarkdownEditingController controller,
@@ -80,6 +82,7 @@ void _useComposeDraftLifecycle({
   required String? threadHeadId,
   required String draftIdentity,
   required ObjectRef<int> draftRevision,
+  required ObjectRef<String?> prefillText,
   required ValueNotifier<List<_PendingAttachment>> attachments,
   required ObjectRef<int> uploadGeneration,
   required ObjectRef<UploadCancellationToken?> activeUploadCancellation,
@@ -116,6 +119,7 @@ void _useComposeDraftLifecycle({
         });
     }
     if (identityChanged) {
+      prefillText.value = null;
       draftRevision.value += 1;
       onDraftIdentityChanged();
       uploadGeneration.value += 1;
@@ -141,6 +145,8 @@ void _useComposeDraftLifecycle({
     void persistDraft() {
       if (!identical(currentOwner.value, owner)) return;
       final text = controller.text;
+      // An untouched agent prefill is not a draft.
+      if (text == prefillText.value) return;
       if (text != lastPersistedText) {
         // Prune before the atomic snapshot, not in a later editor listener.
         // Code formatting hides a binding without deleting its literal.
@@ -176,8 +182,41 @@ void _useComposeDraftLifecycle({
     }
 
     controller.addListener(persistDraft);
-    return () => controller.removeListener(persistDraft);
+    // Another writer, such as a failed quick send from Siri, can save this
+    // draft while the composer is open; show its text rather than overwrite
+    // it with the next keystroke. Own saves match lastPersistedText.
+    final external = ref.listenManual(
+      composeDraftsProvider.select(
+        (drafts) => drafts.where((d) => d.key == draftKey).firstOrNull?.text,
+      ),
+      (_, text) {
+        if (!identical(currentOwner.value, owner)) return;
+        if (text == null ||
+            text == lastPersistedText ||
+            text == controller.text) {
+          return;
+        }
+        // A newer draft: an ordinary send that fails must not restore over it.
+        draftRevision.value += 1;
+        lastPersistedText = text;
+        controller.text = text;
+      },
+    );
+    return () {
+      controller.removeListener(persistDraft);
+      external.close();
+    };
   }, [controller, draftKey, draftIdentity, onDraftIdentityChanged]);
+  _useComposerShareDelivery(
+    context: context,
+    ref: ref,
+    draftKey: draftKey,
+    controller: controller,
+    attachments: attachments,
+    draftRevision: draftRevision,
+    voiceNote: voiceNote,
+    uploadError: uploadError,
+  );
 }
 
 // Report aggregate work independently of rebuilds, including sub-frame failures.

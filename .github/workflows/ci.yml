@@ -16,7 +16,7 @@ env:
 jobs:
   changes:
     name: Detect Changed Paths
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # The steps take about 75 seconds, but GitHub can finish the job minutes
     # after the last step. A 2-minute limit cancelled finished runs.
     timeout-minutes: 10
@@ -157,7 +157,7 @@ jobs:
 
   dead-token-guard:
     name: Dead Token Reference Guard
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -289,7 +289,7 @@ jobs:
     name: Rust Lint
     if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop-rust == 'true')))
     needs: [changes, rust]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -303,7 +303,7 @@ jobs:
     name: Unit Tests
     if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.rust == 'true')))
     needs: [changes, rust]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -317,7 +317,7 @@ jobs:
     name: Windows Rust (x86_64-pc-windows-msvc)
     if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop-rust == 'true')))
     needs: [changes, rust]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -331,7 +331,7 @@ jobs:
     name: Desktop
     if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')))
     needs: [changes, desktop-domain]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -345,7 +345,7 @@ jobs:
     name: Desktop Build (macOS)
     if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')))
     needs: [changes, desktop-macos-domain]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -359,7 +359,7 @@ jobs:
     name: Desktop E2E Relay
     if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')))
     needs: [changes, relay-artifacts-domain]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -373,7 +373,7 @@ jobs:
     name: Desktop E2E Integration
     if: always() && (needs.changes.result != 'success' || (needs.relay-artifacts-domain.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')))
     needs: [changes, relay-artifacts-domain, relay-domain]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -387,7 +387,7 @@ jobs:
     name: Backend Integration (relay e2e)
     if: always() && (needs.changes.result != 'success' || (needs.relay-artifacts-domain.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')))
     needs: [changes, relay-artifacts-domain, relay-domain]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -401,7 +401,7 @@ jobs:
     name: PostgreSQL Tests
     if: always() && (needs.changes.result != 'success' || (needs.relay-artifacts-domain.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')))
     needs: [changes, relay-artifacts-domain, postgres-domain]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -415,7 +415,7 @@ jobs:
     name: Relay E2E
     if: always() && (needs.changes.result != 'success' || (needs.relay-artifacts-domain.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true')))
     needs: [changes, relay-artifacts-domain, relay-domain]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -429,7 +429,7 @@ jobs:
     name: Web
     if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.web == 'true')))
     needs: [changes, clients]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -443,7 +443,7 @@ jobs:
     name: Mobile
     if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.mobile == 'true')))
     needs: [changes, clients]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -457,7 +457,7 @@ jobs:
     name: Security
     if: always() && (needs.changes.result != 'success' || ((github.event_name == 'push' || needs.changes.outputs.rust == 'true')))
     needs: [changes, security-domain]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     steps:

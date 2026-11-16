@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 use super::{
     binding::{resolve_repo_binding, RepoBinding},
     hydrate::load_pointer,
-    manifest::{is_safe_refname, pointer_key, Manifest},
+    manifest::{is_safe_refname, next_published_at, pointer_key, Manifest},
     manifest_event::{build_ref_state_event, RefStateInputs},
     store::{CasOutcome, ETag, GitStore, Precond},
     transport::{authorize_git_read, deny_banned_git_principal, validate_repo_id},
@@ -130,6 +130,10 @@ impl DefaultBranchSnapshot {
         }
         let changed = self.manifest.head != head;
         if changed {
+            self.manifest.published_at = Some(next_published_at(
+                &self.manifest,
+                nostr::Timestamp::now().as_secs(),
+            ));
             self.manifest.head = head;
             self.manifest.parent = Some(self.digest.clone());
             self.manifest.validate().map_err(backend)?;
@@ -401,10 +405,17 @@ async fn set_default_branch(
         )
     })?;
     serving_write.verify().await.map_err(backend)?;
-    let (snapshot, changed) = serving_write
-        .protect(snapshot.set(&state.git_store, request))
+    // As in `finalize_push`, a pointer CAS that landed stands even if the lease
+    // check after it fails; the lease-guarded kind:30618 insert decides
+    // whether publication may continue.
+    let (set, lease_after_cas) = serving_write
+        .protect_landed(snapshot.set(&state.git_store, request))
         .await
-        .map_err(backend)??;
+        .map_err(backend)?;
+    let (snapshot, changed) = set?;
+    if let Err(error) = lease_after_cas {
+        tracing::warn!(%error, "serving lease check failed after the default-branch CAS landed; continuing publication");
+    }
     let publication = async {
         if changed {
             let actor = auth.caller.to_hex();
@@ -414,6 +425,7 @@ async fn set_default_branch(
                     head: &snapshot.manifest.head,
                     refs: &snapshot.manifest.refs,
                     actor_pubkey_hex: &actor,
+                    published_at: snapshot.manifest.published_at,
                 },
                 &state.relay_keypair,
             )
@@ -435,7 +447,9 @@ async fn set_default_branch(
         Ok::<(), Response>(())
     }
     .await;
-    serving_write.finish().await.map_err(backend)?;
+    if let Err(error) = serving_write.finish().await {
+        tracing::warn!(%error, "failed to release community serving lease after default-branch publication");
+    }
     // Publication failure is not mistaken for a rolled-back manifest.
     if publication.is_err() {
         return Err(error(StatusCode::INTERNAL_SERVER_ERROR, "default branch committed but notification failed; read the current default branch before retrying"));

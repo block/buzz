@@ -20,6 +20,8 @@ void main() {
       ('buzz://message?channel=source', 'Chat'),
       ('### Heading', 'Heading'),
       ('🐝' * 90, '🐝' * 80),
+      ('> Ship it Friday\n>\n> ok?\n\nSummarize this', 'Summarize this'),
+      ('> Ship it Friday\n> ok?\n\n', 'Ship it Friday ok?'),
     ]) {
       expect(startingMeChatTitle(message), title);
     }

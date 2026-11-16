@@ -18,6 +18,20 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   group('artifact without a gateway define', () {
+    setUp(() => Env.debugPushGatewayUrlOverride = '');
+    tearDown(() => Env.debugPushGatewayUrlOverride = 'https://push.example');
+
+    test(
+      'reads the gateway only from its define, with no built-in default',
+      () {
+        Env.debugPushGatewayUrlOverride = null;
+        expect(
+          Env.pushGatewayUrl,
+          const String.fromEnvironment('BUZZ_PUSH_GATEWAY_URL'),
+        );
+      },
+    );
+
     test(
       'does not discover push capability or enter the opted-in lifecycle',
       () async {
@@ -108,6 +122,8 @@ void main() {
           );
           expect(find.text('Push notifications'), findsNothing);
           if (enabled) {
+            await tester.tap(find.text('Notifications'));
+            await tester.pumpAndSettle();
             final toggle = tester.widget<Switch>(find.byType(Switch));
             expect(toggle.value, isTrue);
             expect(toggle.onChanged, isNotNull);
@@ -119,5 +135,5 @@ void main() {
         },
       );
     }
-  }, skip: Env.pushGatewayConfigured);
+  });
 }

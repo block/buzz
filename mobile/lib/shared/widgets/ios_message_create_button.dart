@@ -5,12 +5,15 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../relay/relay.dart';
 import '../theme/theme.dart';
 import 'avatar_image.dart';
+import 'duo_toolbar.dart';
 
 /// The four desktop creation destinations, presented by UIKit on iOS.
-class IosMessageCreateButton extends HookWidget {
+class IosMessageCreateButton extends HookConsumerWidget {
   const IosMessageCreateButton({
     super.key,
     required this.actions,
@@ -19,8 +22,11 @@ class IosMessageCreateButton extends HookWidget {
     this.avatarUrl,
     this.avatarInitial,
     this.dividerBefore = const {},
+    this.destructiveIndices = const {},
     this.sectionTitles = const {},
     this.icon = 'plus',
+    this.iconSize,
+    this.foregroundColor,
     this.accessibilityLabel = 'Create',
     this.width = 64,
     this.height = 48,
@@ -33,14 +39,18 @@ class IosMessageCreateButton extends HookWidget {
     this.showIconWithLabel = false,
     this.onMenuVisibilityChanged,
     this.mergingNavigation = false,
+    this.navigationAxis = Axis.horizontal,
   });
 
   final Set<int> dividerBefore;
+  final Set<int> destructiveIndices;
   final Map<int, String> sectionTitles;
   final String? label;
   final double? labelFontSize;
   final String? avatarUrl, avatarInitial;
   final String icon;
+  final double? iconSize;
+  final Color? foregroundColor;
   final String accessibilityLabel;
   final double width, height;
   final bool plain;
@@ -63,10 +73,13 @@ class IosMessageCreateButton extends HookWidget {
   /// Hosts the Search/New/Bestie glass surfaces in one native container.
   final bool mergingNavigation;
 
+  /// Direction of the merged navigation surfaces.
+  final Axis navigationAxis;
+
   final List<({String label, String symbol, VoidCallback? onPressed})> actions;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final route = ModalRoute.of(context);
     final coveringProgress = useAnimation(
       route?.secondaryAnimation ?? kAlwaysDismissedAnimation,
@@ -75,7 +88,15 @@ class IosMessageCreateButton extends HookWidget {
         (route?.isCurrent ?? true) && coveringProgress == 0;
 
     final brightness = context.theme.brightness;
-    final foreground = context.colors.onSurface.toARGB32();
+    final foreground = (foregroundColor ?? context.colors.onSurface).toARGB32();
+    // Only an avatar trigger fetches media, so only it depends on the relay.
+    final media = avatarInitial == null
+        ? null
+        : (
+            auth: ref.watch(mediaGetAuthServiceProvider),
+            client: ref.watch(mediaHttpClientProvider),
+            diskCache: ref.watch(mediaDiskCacheProvider),
+          );
     final avatarFuture = useMemoized(
       () => avatarInitial == null
           ? null
@@ -85,10 +106,16 @@ class IosMessageCreateButton extends HookWidget {
               circular: true,
               background: context.colors.primaryContainer,
               foreground: context.colors.onPrimaryContainer,
-              networkImage: NetworkImage.new,
+              networkImages: (url) => smallMediaImageProviders(
+                url: url,
+                auth: media!.auth,
+                client: media.client,
+                diskCache: media.diskCache,
+              ),
             ),
       [
         avatarUrl,
+        media,
         avatarInitial,
         context.colors.primaryContainer,
         context.colors.onPrimaryContainer,
@@ -105,6 +132,7 @@ class IosMessageCreateButton extends HookWidget {
         {
           'id': i,
           'dividerBefore': dividerBefore.contains(i),
+          'destructive': destructiveIndices.contains(i),
           'sectionTitle': ?sectionTitles[i],
           'label': actions[i].label,
           'symbol': actions[i].symbol,
@@ -114,6 +142,7 @@ class IosMessageCreateButton extends HookWidget {
     ];
     final content = <String, Object>{
       'icon': icon,
+      'iconSize': ?iconSize,
       'imageBytes': ?avatar,
       'label': ?label,
       'labelFontSize': ?labelFontSize,
@@ -159,6 +188,7 @@ class IosMessageCreateButton extends HookWidget {
         channel.value,
         avatar,
         icon,
+        iconSize,
         label,
         labelFontSize,
         accessibilityLabel,
@@ -167,6 +197,7 @@ class IosMessageCreateButton extends HookWidget {
         deferMenuActions,
         showIconWithLabel,
         ...dividerBefore,
+        ...destructiveIndices,
         ...sectionTitles.entries.expand((e) => [e.key, e.value]),
         ...actions.expand((a) => [a.label, a.symbol, a.onPressed != null]),
         brightness,
@@ -192,9 +223,16 @@ class IosMessageCreateButton extends HookWidget {
           'plain': plain,
           'fillWidth': fillWidth,
           'buttonCenterX': width / 2,
-          'controlWidth': mergingNavigation ? 112.0 : width,
+          'controlWidth': mergingNavigation && navigationAxis == Axis.horizontal
+              ? 112.0
+              : width,
           'mergingNavigation': mergingNavigation,
-          'controlSize': height,
+          'menuAbove':
+              mergingNavigation &&
+              navigationAxis == Axis.horizontal &&
+              DuoToolbarScope.maybeOf(context)?.strip != null,
+          'verticalNavigation': navigationAxis == Axis.vertical,
+          'controlSize': mergingNavigation ? 56.0 : height,
           'hitTargetWidth': width,
           'hitTargetHeight': height,
           'brightness': brightness.name,

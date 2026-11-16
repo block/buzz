@@ -6,6 +6,7 @@ import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../../shared/theme/theme.dart';
+import '../message_content/markdown_escapes.dart';
 import 'observer_models.dart';
 
 /// Renders a single [TranscriptItem] in the agent activity transcript.
@@ -68,7 +69,7 @@ class _MessageItemWidget extends StatelessWidget {
           const SizedBox(height: Grid.half),
           if (item.text.isNotEmpty)
             GptMarkdown(
-              item.text,
+              escapeMarkdownLiterals(item.text),
               style: context.textTheme.bodyMedium?.copyWith(
                 color: context.colors.onSurface,
               ),
@@ -76,6 +77,7 @@ class _MessageItemWidget extends StatelessWidget {
               // link and do nothing when tapped. Transcript URLs stay text,
               // as they were before gpt_markdown started autolinking.
               autolink: false,
+              inlinePatterns: _transcriptInlinePatterns,
             ),
         ],
       ),
@@ -143,12 +145,13 @@ class _ThoughtItemWidget extends HookWidget {
               if (expanded.value && item.text.isNotEmpty) ...[
                 const SizedBox(height: Grid.half),
                 GptMarkdown(
-                  item.text,
+                  escapeMarkdownLiterals(item.text),
                   style: context.textTheme.bodySmall?.copyWith(
                     color: context.colors.onSurfaceVariant,
                   ),
                   // As above: no link handler on this surface either.
                   autolink: false,
+                  inlinePatterns: _transcriptInlinePatterns,
                 ),
               ],
             ],
@@ -490,3 +493,7 @@ class _CodeBlock extends StatelessWidget {
     );
   }
 }
+
+// Escapes read the same here as in messages: `\(` stays a parenthesis rather
+// than opening a formula, and an escaped sigil draws as itself.
+final _transcriptInlinePatterns = [escapedSigilPattern];

@@ -17,7 +17,8 @@ name: Docker image
 #
 # Triggers:
 #   - push to main           → :main + :sha-<7> + :main-<commit UTC>-<7>
-#                              + the matching :debug-* tags
+#                              + the matching :debug-* tags, only when the
+#                              push touches the image build context (below)
 #   - push tags relay-v*.*.* → :{version} + :{major}.{minor} + :{major}
 #                              + matching :debug-* tags
 #                              (+ :latest/:debug-latest for stable releases)
@@ -49,10 +50,26 @@ name: Docker image
 # semver, so relay-v0.3.0-rc.1 publishes :0.3.0-rc.1 without moving :latest,
 # and main pushes (no semver tag) never produce :latest.
 
+# Main pushes skip paths that .dockerignore keeps out of the build context:
+# they cannot change either image, and every published :main-<commit UTC>-<7>
+# tag rolls staging through Kargo. .github/ is ignored by Docker too, but this
+# workflow defines the build, so it is re-included. GitHub does not evaluate
+# path filters for tag pushes, so relay-v* tags always publish.
+# scripts/test-relay-image-eligibility-workflow.sh checks every exclusion
+# against .dockerignore.
 on:
   push:
     branches: [main]
     tags: ["relay-v[0-9]*"]
+    paths:
+      - "**"
+      - "!desktop/**"
+      - "!mobile/**"
+      - "!docs/**"
+      - "!bin/**"
+      - "!sidecars/**"
+      - "!.github/**"
+      - ".github/workflows/docker.yml"
   pull_request:
     paths:
       - "Dockerfile"

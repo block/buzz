@@ -324,6 +324,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
         query: search,
         historyKey: newDmMentionHistoryKey,
         unsharedAgents: false,
+        channelId: null,
       )),
     );
     final searching = ref.watch(recipientSearchPendingProvider(search));
@@ -339,6 +340,9 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
       query: search,
       opening: opening.value,
       pending: searching,
+      // Agents rank ahead of the known people an empty query lists, even
+      // when they load after them. Typed rows keep their places.
+      restartForNewAgents: search.isEmpty,
     );
     final availableResults = shown.rows;
     // Shown and chosen recipients are named together on every build, so a
@@ -401,6 +405,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
     if (nativePresentation) {
       final auth = ref.watch(mediaGetAuthServiceProvider);
       final client = ref.watch(mediaHttpClientProvider);
+      final diskCache = ref.watch(mediaDiskCacheProvider);
       final colors = context.colors;
       String? avatarUrl(MentionCandidate user) =>
           user.avatarUrl ?? userCache[user.pubkey]?.avatarUrl;
@@ -437,8 +442,12 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
             isAgent: user.isAgent,
             background: colors.primaryContainer,
             foreground: colors.onPrimaryContainer,
-            networkImage: (url) =>
-                MediaImageProvider(url: url, auth: auth, client: client),
+            networkImages: (url) => smallMediaImageProviders(
+              url: url,
+              auth: auth,
+              client: client,
+              diskCache: diskCache,
+            ),
           );
         },
         state: {
@@ -461,7 +470,9 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
         },
         onToggle: (pubkey) {
           if (isSubmitting.value) return;
-          if (selectedPubkeys.contains(pubkey)) {
+          // The current selection, not this build's: a second tap can land
+          // before the rebuild that reflects the first.
+          if (selectedUsers.value.any((user) => user.pubkey == pubkey)) {
             selectedUsers.value = selectedUsers.value
                 .where((user) => user.pubkey != pubkey)
                 .toList();

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:buzz/features/channels/add_members_sheet.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/shared/identity_archives/identity_archives.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -188,6 +189,69 @@ void main() {
       expect(actions.calls, [
         [subjectA],
       ]);
+    },
+  );
+
+  testWidgets(
+    'leaves out an archived namesake, and shows both while archives are unknown',
+    (tester) async {
+      final live = 'a' * 64;
+      final archived = 'b' * 64;
+      Future<List<String>> shownScouts(
+        Future<Set<String>> Function() archives,
+      ) async {
+        await tester.pumpWidget(
+          ProviderScope(
+            // A new scope per case, so no state is carried between them.
+            key: UniqueKey(),
+            overrides: [
+              userCacheProvider.overrideWith(_RecordingUserCache.new),
+              channelMembersProvider('channel').overrideWith((ref) async => []),
+              relaySessionProvider.overrideWith(
+                () => RecipientDirectorySession(
+                  {live: 'Scout', archived: 'Scout'},
+                  agents: {live, archived},
+                ),
+              ),
+              identityArchivesProvider.overrideWith((ref) => archives()),
+            ],
+            child: MaterialApp(
+              theme: AppTheme.light(),
+              home: const Scaffold(
+                body: AddChannelMembersSheet(
+                  channelId: 'channel',
+                  existingPubkeys: {},
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.enterText(
+          find.byKey(const ValueKey('add-channel-members-search')),
+          'Scout',
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        await tester.pumpAndSettle();
+        return [
+          for (final text in tester.widgetList<Text>(find.byType(Text)))
+            if (text.data?.startsWith('Scout') == true) text.data!,
+        ];
+      }
+
+      // The archived agent is not offered, and the live one keeps its
+      // plain name: a hidden namesake adds no qualifier.
+      expect(await shownScouts(() async => {archived}), ['Scout']);
+
+      // A failed archive read hides no one: both agents are offered, told
+      // apart from each other.
+      final unknown = await shownScouts(
+        () => Future.error(StateError('relay information unavailable')),
+      );
+      expect(unknown, hasLength(2));
+      expect(unknown.toSet(), hasLength(2));
+      expect(unknown, isNot(contains('Scout')));
     },
   );
 }

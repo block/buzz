@@ -2,9 +2,13 @@ import 'dart:ui' as ui;
 import 'dart:convert';
 
 import 'package:buzz/shared/emoji/emoji_avatar.dart';
+import 'package:buzz/shared/relay/media_auth.dart';
+import 'package:buzz/shared/relay/media_image.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart' as http_testing;
 
 void main() {
   testWidgets('bounds remote avatar decoding before painting the native PNG', (
@@ -26,12 +30,79 @@ void main() {
         initial: 'A',
         background: Colors.white,
         foreground: Colors.black,
-        networkImage: (_) => provider,
+        networkImages: (_) => [provider],
       );
       expect(png, isNotNull);
       expect(provider.decodedWidth, lessThanOrEqualTo(72));
       expect(provider.decodedHeight, lessThanOrEqualTo(72));
       expect(provider.decodedWidth, greaterThan(0));
+    });
+  });
+
+  testWidgets('native relay avatars load only thumbnails, like MediaImage', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      MediaImage.debugResetMissingThumbnails();
+      final recorder = ui.PictureRecorder();
+      Canvas(recorder).drawColor(Colors.blue, BlendMode.src);
+      final picture = recorder.endRecording();
+      final image = await picture.toImage(8, 8);
+      final blue = (await image.toByteData(
+        format: ui.ImageByteFormat.png,
+      ))!.buffer.asUint8List();
+      image.dispose();
+      picture.dispose();
+
+      const relay = 'https://relay.example';
+      final jpegOnly = '$relay/media/${'a1' * 32}.png';
+      final missing = '$relay/media/${'b2' * 32}.png';
+      final broken = '$relay/media/${'c3' * 32}.png';
+      String thumb(String url, String ext) =>
+          url.replaceFirst('.png', '.thumb.$ext');
+      final requested = <String>[];
+      final auth = MediaGetAuthService(baseUrl: relay, nsec: null);
+      final client = http_testing.MockClient((request) async {
+        final url = request.url.toString();
+        requested.add(url);
+        if (url == thumb(jpegOnly, 'jpg')) {
+          return http.Response.bytes(blue, 200);
+        }
+        if (url == thumb(broken, 'webp')) return http.Response('', 500);
+        return http.Response('', 404);
+      });
+      Future<bool> paintsImage(String url) async {
+        final png = await nativeAvatarImage(
+          url: url,
+          initial: 'A',
+          background: Colors.black,
+          foreground: Colors.white,
+          networkImages: (url) =>
+              smallMediaImageProviders(url: url, auth: auth, client: client),
+        );
+        final codec = await ui.instantiateImageCodec(png!);
+        final frame = await codec.getNextFrame();
+        final pixels = (await frame.image.toByteData())!;
+        frame.image.dispose();
+        codec.dispose();
+        // Left of center, clear of the initial: blue artwork or black.
+        return pixels.getUint8((36 * 72 + 10) * 4 + 2) > 200;
+      }
+
+      // A 404 moves to the JPEG thumbnail; the original is never fetched.
+      expect(await paintsImage(jpegOnly), isTrue);
+      expect(requested, [thumb(jpegOnly, 'webp'), thumb(jpegOnly, 'jpg')]);
+      // With no thumbnail at all, the initials show.
+      requested.clear();
+      expect(await paintsImage(missing), isFalse);
+      expect(requested, [thumb(missing, 'webp'), thumb(missing, 'jpg')]);
+      // Known-missing thumbnails are skipped on the next rasterization.
+      requested.clear();
+      expect(await paintsImage(missing), isFalse);
+      expect(requested, isEmpty);
+      // Any other failure stops at the initials.
+      expect(await paintsImage(broken), isFalse);
+      expect(requested, [thumb(broken, 'webp')]);
     });
   });
 
@@ -66,7 +137,7 @@ void main() {
             initial: 'A',
             background: Colors.white,
             foreground: Colors.black,
-            networkImage: (_) => throw StateError('Unexpected network image'),
+            networkImages: (_) => throw StateError('Unexpected network image'),
           );
           expect(png, isNotNull);
           // The first image is the codec frame, before the final 72px canvas.
@@ -92,7 +163,7 @@ void main() {
           initial: 'K',
           background: Colors.black,
           foreground: Colors.white,
-          networkImage: (_) => throw StateError('Unexpected network image'),
+          networkImages: (_) => throw StateError('Unexpected network image'),
         );
         expect(png, isNotNull);
         final codec = await ui.instantiateImageCodec(png!);

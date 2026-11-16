@@ -2,8 +2,10 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/agents/agent_avatar_catalog.dart';
+import '../../shared/relay/media_image.dart';
 import '../../shared/widgets/agent_navigation_icon.dart';
 import '../../shared/widgets/avatar_image.dart';
 
@@ -19,11 +21,11 @@ final emptyBestieCharacters = [
 ];
 
 /// A quiet invitation to create a first companion, cycling every five seconds.
-class EmptyBestieAvatar extends HookWidget {
+class EmptyBestieAvatar extends HookConsumerWidget {
   const EmptyBestieAvatar({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final index = useState(0);
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
     final lifecycle = useAppLifecycleState();
@@ -51,7 +53,7 @@ class EmptyBestieAvatar extends HookWidget {
           if (cancelled || !context.mounted) return;
           unawaited(
             precacheImage(
-              NetworkImage(nextPoster),
+              mediaImageProviderFor(ref, nextPoster),
               context,
               onError: (_, _) {}, // Keep the offline avatar fallback.
             ),

@@ -1,3 +1,4 @@
+import 'composer_geometry.dart';
 import 'package:buzz/shared/widgets/buzz_toast.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'composer_send_origin.dart';
@@ -8,6 +9,8 @@ import 'dart:math' as math;
 import 'dart:ui' show FlutterView;
 
 import 'package:camera/camera.dart' as camera;
+import 'package:duo_kit/duo_kit.dart';
+import '../../shared/widgets/duo_toolbar.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
@@ -17,6 +20,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
+
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import 'package:nostr/nostr.dart' as nostr;
@@ -41,11 +45,13 @@ import '../../shared/profile/user_profile.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/deeplink/deep_link.dart';
+import '../../shared/share/pending_share.dart';
 import '../activity/compose_drafts_provider.dart';
 import 'camera_capture_cleanup.dart';
 import 'channel.dart';
 import 'channel_management_provider.dart';
 import 'channels_provider.dart';
+import 'timeline_message.dart';
 import '../../shared/emoji/emoji_picker.dart';
 import 'mentions/mention_candidates.dart';
 import 'mentions/mention_candidates_provider.dart';
@@ -59,12 +65,14 @@ import 'package:buzz/shared/crypto/event_signing.dart';
 
 part 'compose_bar/helpers.dart';
 part 'compose_bar/agent_mention_labels.dart';
+part 'compose_bar/agent_mention_prefill.dart';
 part 'compose_bar/markdown_editing_controller.dart';
 part 'compose_bar/draft_lifecycle.dart';
 part 'compose_bar/suggestions.dart';
 part 'compose_bar/mention_chooser.dart';
 part 'compose_bar/formatting_toolbar.dart';
 part 'compose_bar/attachments.dart';
+part 'compose_bar/video_thumbnail.dart';
 part 'compose_bar/upload_progress_pill.dart';
 part 'compose_bar/photo_gallery_picker.dart';
 part 'compose_bar/ios_photo_picker.dart';
@@ -74,6 +82,7 @@ part 'compose_bar/send_button.dart';
 part 'compose_bar/voice_note.dart';
 part 'compose_bar/layout.dart';
 part 'compose_bar/dock.dart';
+part 'compose_bar/share_delivery.dart';
 part 'compose_bar/compose_bar_widget.dart';
 
 /// Callback used by channels and threads to submit composer content.
