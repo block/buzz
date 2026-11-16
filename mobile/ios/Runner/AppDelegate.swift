@@ -48,6 +48,7 @@ import os.log
   private var nativeAttachmentPopoverCoordinator: NativeAttachmentPopoverCoordinator?
   private var nativeEmojiPickerCoordinator: NativeEmojiPickerCoordinator?
   private var nativeCreateChannelSheetCoordinator: NativeCreateChannelSheetCoordinator?
+  private var nativeChannelActionsSheetCoordinator: NativeChannelActionsSheetCoordinator?
   private var nativeAddMembersSheetCoordinator: NativeAddMembersSheetCoordinator?
   private var nativeConfirmationDialogCoordinator: NativeConfirmationDialogCoordinator?
   private var nativeProfileSetupCoordinator: NativeProfileSetupCoordinator?
@@ -344,6 +345,11 @@ import os.log
       parentViewController: engineBridge.pluginRegistry.registrar(
         forPlugin: "BuzzNativeCreateChannelSheet"
       )?.viewController
+    )
+
+    nativeChannelActionsSheetCoordinator = NativeChannelActionsSheetCoordinator(
+      messenger: messenger,
+      parentViewController: engineBridge.pluginRegistry.registrar(forPlugin: "BuzzNativeChannelActionsSheet")?.viewController
     )
 
     nativeAddMembersSheetCoordinator = NativeAddMembersSheetCoordinator(

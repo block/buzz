@@ -41,7 +41,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   bool _initInFlight = false;
   Future<bool>? _olderInFlight;
   bool _usingChannelWindow = false;
-  NostrEvent? _legacyHistoryCursor;
+  ChannelPageCursor? _legacyHistoryCursor;
   bool _initialWindowQueryInFlight = false;
   int _initVersion = 0;
   ChannelWindowStore _windowStore = const ChannelWindowStore.empty();
@@ -260,7 +260,11 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       final historyVersion = ++_threadQuerySerial;
       final history = await _fetchNewestHistory(session);
       if (!_isCurrentInit(initVersion)) return;
-      if (!_usingChannelWindow) _legacyHistoryCursor = history.firstOrNull;
+      if (!_usingChannelWindow) {
+        _legacyHistoryCursor = history.isEmpty
+            ? null
+            : _nextCursor(history, null, 'Channel history');
+      }
       _confirmLocalMessages(history.map((event) => event.id));
 
       final existing = state.value ?? const <NostrEvent>[];
