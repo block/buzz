@@ -2245,6 +2245,180 @@ impl Db {
     }
 }
 
+/// A relay-provisioned system channel (see
+/// [`Db::ensure_provisioned_system_channel`]).
+#[derive(Debug, Clone)]
+pub struct ProvisionedChannel {
+    /// The channel row.
+    pub channel: ChannelRecord,
+    /// This call created it.
+    pub created: bool,
+    /// A relay-signed kind:39000 for it is stored.
+    pub has_metadata: bool,
+}
+
+/// SQL matching the open, unarchived system channel `$2` created with label
+/// `$3`, as `ch`. Only the relay key creates one: other keys are refused a
+/// provisioned label at ingest.
+macro_rules! provisioned_channel_match {
+    () => {
+        "ch.channel_type = 'system' AND ch.visibility = 'open' \
+         AND ch.created_by = $2 AND $3 = ANY(ch.labels) \
+         AND ch.archived_at IS NULL AND ch.deleted_at IS NULL"
+    };
+}
+
+async fn ensure_provisioned_system_channel(
+    pool: &PgPool,
+    community_id: CommunityId,
+    label: &str,
+    relay_pubkey: &[u8],
+) -> Result<ProvisionedChannel> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "buzz_provisioned_channel:{}:{label}",
+            community_id.as_uuid()
+        ))
+        .execute(tx.conn())
+        .await?;
+    let existing: Option<Uuid> = sqlx::query_scalar(concat!(
+        "SELECT ch.id FROM channels AS ch WHERE ch.community_id = $1 AND ",
+        provisioned_channel_match!(),
+        " ORDER BY ch.created_at, ch.id LIMIT 1"
+    ))
+    .bind(community_id.as_uuid())
+    .bind(relay_pubkey)
+    .bind(label)
+    .fetch_optional(tx.conn())
+    .await?;
+    let (channel_id, created) = match existing {
+        Some(id) => (id, false),
+        None => {
+            let id = Uuid::new_v4();
+            let labels = [label.to_owned()];
+            insert_channel_rows(
+                &mut tx,
+                id,
+                NewChannel {
+                    name: label,
+                    channel_type: ChannelType::System,
+                    visibility: ChannelVisibility::Open,
+                    description: None,
+                    created_by: relay_pubkey,
+                    ttl_seconds: None,
+                    labels: &labels,
+                    unlisted: false,
+                    members: &[],
+                },
+            )
+            .await?;
+            (id, true)
+        }
+    };
+    let row = sqlx::query(
+        r#"
+        SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
+               description, canvas,
+               created_by, created_at, updated_at, archived_at, deleted_at,
+               nip29_group_id, topic_required, max_members,
+               topic, topic_set_by, topic_set_at,
+               purpose, purpose_set_by, purpose_set_at,
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
+        FROM channels WHERE community_id = $1 AND id = $2
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_one(tx.conn())
+    .await?;
+    let channel = row_to_channel_record(row)?;
+    let has_metadata = !created
+        && sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE community_id = $1 AND kind = $2 \
+             AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL)",
+        )
+        // Not a cached prepared statement: a generic plan would lock every
+        // `events` partition.
+        .persistent(false)
+        .bind(community_id.as_uuid())
+        .bind(buzz_core::kind::KIND_NIP29_GROUP_METADATA as i32)
+        .bind(relay_pubkey)
+        .bind(channel_id.to_string())
+        .fetch_one(tx.conn())
+        .await?;
+    tx.commit().await?;
+    Ok(ProvisionedChannel {
+        channel,
+        created,
+        has_metadata,
+    })
+}
+
+impl Db {
+    /// Find or create the open system channel that `relay_pubkey` owns with
+    /// `label` in `community_id`. Concurrent callers on any pod serialize on
+    /// a per-(community, label) advisory lock, so a community has at most one.
+    /// An archived or deleted one is replaced by a new one.
+    pub async fn ensure_provisioned_system_channel(
+        &self,
+        community_id: CommunityId,
+        label: &str,
+        relay_pubkey: &[u8],
+    ) -> Result<ProvisionedChannel> {
+        ensure_provisioned_system_channel(&self.pool, community_id, label, relay_pubkey).await
+    }
+
+    /// Up to `limit` active communities after `after` (by id) that have no
+    /// provisioned `label` channel owned by `relay_pubkey`, with their hosts.
+    /// With `require_metadata`, a community whose channel has no relay-signed
+    /// kind:39000 also counts as missing one.
+    pub async fn communities_missing_provisioned_channel(
+        &self,
+        label: &str,
+        relay_pubkey: &[u8],
+        require_metadata: bool,
+        after: Option<CommunityId>,
+        limit: i64,
+    ) -> Result<Vec<(CommunityId, String)>> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Maintenance,
+        )
+        .await?;
+        let rows: Vec<(Uuid, String)> = sqlx::query_as(concat!(
+            "SELECT c.id, c.host FROM communities AS c \
+             WHERE c.archived_at IS NULL AND c.deleted_at IS NULL AND c.deletion_state = 'active' \
+               AND ($4::uuid IS NULL OR c.id > $4) \
+               AND NOT EXISTS (SELECT 1 FROM channels AS ch \
+                 WHERE ch.community_id = c.id AND ",
+            provisioned_channel_match!(),
+            " AND (NOT $5 OR EXISTS (SELECT 1 FROM events AS e \
+                     WHERE e.community_id = c.id AND e.kind = $6 AND e.pubkey = $2 \
+                       AND e.d_tag = ch.id::text AND e.deleted_at IS NULL))) \
+             ORDER BY c.id LIMIT $1"
+        ))
+        .persistent(false)
+        .bind(limit)
+        .bind(relay_pubkey)
+        .bind(label)
+        .bind(after.map(|community| *community.as_uuid()))
+        .bind(require_metadata)
+        .bind(buzz_core::kind::KIND_NIP29_GROUP_METADATA as i32)
+        .fetch_all(&mut *connection)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, host)| (CommunityId::from_uuid(id), host))
+            .collect())
+    }
+}
+
 /// The per-channel TTL advisory lock key. Event commits take it SHARED
 /// (`event_follow_up::refresh_channel_ttls`); TTL transitions in
 /// [`update_channel`] and [`apply_channel_metadata_event`] take it EXCLUSIVE. Both sides build it here, so the keys

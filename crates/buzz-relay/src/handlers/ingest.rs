@@ -3313,6 +3313,13 @@ async fn ingest_event_inner(
             .transpose()
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?
             .unwrap_or_default();
+        if let Some(label) =
+            super::provisioned_channels::reserved_label(state, &event.pubkey, &labels)
+        {
+            return Err(IngestError::Rejected(format!(
+                "restricted: label {label} is reserved for the relay"
+            )));
+        }
         let unlisted = super::side_effects::create_unlisted_from_tags(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
 
@@ -7220,7 +7227,7 @@ mod postgres_tests {
             let env = buzz_core::artifact::validate(&create).expect("valid create");
             healthy
                 .db
-                .accept_artifact(community, &create, &env, None, &healthy.relay_keypair)
+                .accept_artifact(community, &create, &env, None, &healthy.relay_keypair, &[])
                 .await
                 .map_err(db_err)?;
 

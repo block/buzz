@@ -228,6 +228,23 @@ pub(crate) fn record_binding_creation(
     }
 }
 
+/// Give a newly provisioned community its provisioned system channels. A
+/// failure leaves the community without them until the reconciler's next pass
+/// (see [`crate::handlers::provisioned_channels`]); it does not fail the
+/// provisioning request.
+async fn ensure_provisioned_channels(
+    state: &Arc<AppState>,
+    community: buzz_core::CommunityId,
+    host: &str,
+) {
+    let tenant = TenantContext::resolved(community, host);
+    if let Err(e) =
+        crate::handlers::provisioned_channels::ensure_for_community(state, &tenant).await
+    {
+        tracing::error!(community = %community, error = %e, "provisioned channels not created; the reconciler retries");
+    }
+}
+
 /// Validate and execute a relay-operator community provisioning request.
 ///
 /// The caller is an HTTP operator endpoint, not the Nostr event ingest path.
@@ -334,6 +351,7 @@ pub async fn provision_community(
         );
         state.invalidate_community_host(&TenantContext::resolved(record.id, &record.host));
         fan_out_membership_snapshot(state, record.id, &record.host, write.snapshot).await;
+        ensure_provisioned_channels(state, record.id, &record.host).await;
         return Ok(ProvisionCommunityResponse {
             community_id: record.id.to_string(),
             host: record.host,
@@ -390,6 +408,8 @@ pub async fn provision_community(
         }
         fan_out_membership_snapshot(state, record.id, &record.host, write.snapshot).await;
     }
+
+    ensure_provisioned_channels(state, record.id, &record.host).await;
 
     info!(
         operator = %operator_hex,

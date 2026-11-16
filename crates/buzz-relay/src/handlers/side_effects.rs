@@ -870,7 +870,12 @@ pub async fn validate_admin_event(
 
             // Validate label (`t`) values before storage.
             if let Some(labels) = channel_labels_from_tags(event) {
-                labels.map_err(|e| anyhow::anyhow!("{e}"))?;
+                let labels = labels.map_err(|e| anyhow::anyhow!("{e}"))?;
+                if let Some(label) =
+                    super::provisioned_channels::reserved_label(state, &event.pubkey, &labels)
+                {
+                    return Err(anyhow::anyhow!("label {label} is reserved for the relay"));
+                }
             }
 
             // name/about/archived/visibility/ttl/labels/join_role/unlisted

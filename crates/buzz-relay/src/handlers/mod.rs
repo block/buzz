@@ -48,6 +48,10 @@ pub mod moderation_notices;
 pub mod multinode_fanout;
 /// Product-feedback validation + deployment sidecar persistence.
 pub mod product_feedback;
+/// Relay-provisioned system channels.
+pub mod provisioned_channels;
+#[cfg(test)]
+mod provisioned_channels_postgres_tests;
 #[allow(dead_code, missing_docs)]
 pub mod push_lease;
 #[cfg(test)]

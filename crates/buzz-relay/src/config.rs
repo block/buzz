@@ -291,6 +291,22 @@ pub struct Config {
     /// skipped — a typo must not silently disable an operator.
     pub relay_operator_pubkeys: Vec<String>,
 
+    /// Labels of the system channels the relay creates and owns in every
+    /// community: one open system channel per label, created by the relay
+    /// key. A non-relay key may not create or label a channel with one of
+    /// these labels, and in these channels only an artifact's author may
+    /// change it (see `provisioned_channels`). Empty (the default) turns this
+    /// off. Requires `BUZZ_RELAY_PRIVATE_KEY`, so the channels' creator stays
+    /// the same across restarts.
+    ///
+    /// Set via `BUZZ_PROVISIONED_SYSTEM_CHANNELS` as a comma-separated list of
+    /// channel labels. An invalid label is a startup error.
+    pub provisioned_system_channels: Vec<String>,
+
+    /// Seconds between passes that create missing provisioned system channels
+    /// (default 300). Set via `BUZZ_PROVISIONED_SYSTEM_CHANNELS_INTERVAL_SECS`.
+    pub provisioned_system_channels_interval_secs: u64,
+
     /// Serve multiple communities (default true). When false, only the
     /// normalized `relay_url` authority serves ordinary traffic; existing extra
     /// communities remain available to authenticated management and cleanup.
@@ -439,6 +455,26 @@ pub struct Config {
     /// `BUZZ_NIP_FI_SNAPSHOT_*`). Validated in every mode, so a bad value
     /// fails the deploy that sets it, not the later switch to shadow.
     pub nip_fi_resolver_bounds: crate::nip_fi_resolver::ResolverBounds,
+}
+
+/// Parse `BUZZ_PROVISIONED_SYSTEM_CHANNELS`: comma-separated channel labels,
+/// trimmed and deduplicated. Each must be a valid channel label.
+fn parse_provisioned_system_channels(raw: Option<&str>) -> Result<Vec<String>, ConfigError> {
+    let mut labels: Vec<String> = Vec::new();
+    for entry in raw.unwrap_or_default().split(',').map(str::trim) {
+        if entry.is_empty() {
+            continue;
+        }
+        let parsed = buzz_core::channel::parse_channel_labels([entry]).map_err(|e| {
+            ConfigError::InvalidValue(format!("BUZZ_PROVISIONED_SYSTEM_CHANNELS: {e}"))
+        })?;
+        for label in parsed {
+            if !labels.contains(&label) {
+                labels.push(label);
+            }
+        }
+    }
+    Ok(labels)
 }
 
 fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
@@ -984,6 +1020,23 @@ impl Config {
             }
             Err(_) => Vec::new(),
         };
+        let provisioned_system_channels = parse_provisioned_system_channels(
+            std::env::var("BUZZ_PROVISIONED_SYSTEM_CHANNELS")
+                .ok()
+                .as_deref(),
+        )?;
+        let provisioned_system_channels_interval_secs =
+            match std::env::var("BUZZ_PROVISIONED_SYSTEM_CHANNELS_INTERVAL_SECS") {
+                Ok(raw) => match raw.trim().parse::<u64>() {
+                    Ok(secs) if secs > 0 => secs,
+                    _ => {
+                        return Err(ConfigError::InvalidValue(format!(
+                            "BUZZ_PROVISIONED_SYSTEM_CHANNELS_INTERVAL_SECS must be a positive integer, got {raw:?}"
+                        )))
+                    }
+                },
+                Err(_) => 300,
+            };
         if !relay_operator_pubkeys.is_empty() && relay_operator_api_origin.is_none() {
             // Do NOT fail closed at boot: RELAY_OPERATOR_PUBKEYS is the shared
             // allowlist for BOTH the community-provisioning endpoints and the
@@ -1569,6 +1622,8 @@ impl Config {
             relay_owner_pubkey,
             relay_operator_api_origin,
             relay_operator_pubkeys,
+            provisioned_system_channels,
+            provisioned_system_channels_interval_secs,
             multi_community_relay,
             operator_listener_delivery_urls,
             storage_usage_delivery_url,
@@ -2815,6 +2870,35 @@ mod tests {
                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn provisioned_system_channels_parse_trim_and_dedupe() {
+        assert_eq!(
+            parse_provisioned_system_channels(None).expect("unset"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            parse_provisioned_system_channels(Some(
+                " example-records , ,example.notes,example-records"
+            ))
+            .expect("valid"),
+            vec!["example-records".to_string(), "example.notes".to_string()]
+        );
+    }
+
+    #[test]
+    fn provisioned_system_channels_invalid_label_is_error() {
+        for raw in ["Example", "system", "has space"] {
+            assert!(
+                matches!(
+                    parse_provisioned_system_channels(Some(raw)),
+                    Err(ConfigError::InvalidValue(ref message))
+                        if message.contains("BUZZ_PROVISIONED_SYSTEM_CHANNELS")
+                ),
+                "{raw}"
+            );
+        }
     }
 
     #[test]
