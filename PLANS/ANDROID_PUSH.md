@@ -42,7 +42,7 @@ Android installations get the same mobile push notifications as iOS: the same tr
 23. As a Buzz member, I want push wakes to carry nothing about my messages, so that Google and Apple learn nothing beyond the fact that a wake happened.
 24. As a relay operator, I want one push gateway per app distribution to serve both platforms, so that I configure push once per app.
 25. As a push gateway operator, I want enrollment to require hardware attestation, so that scripted clients can't abuse the public enrollment endpoints.
-26. As a push gateway operator, I want per-attested-key rate limits alongside the existing challenge quotas, so that one device can't flood enrollment.
+26. As a push gateway operator, I want each installation's signed calls rate limited per attested key, and the enrollment challenge quota sized for both platforms, so that one installation can't flood the gateway and an Android launch can't starve iOS enrollment.
 27. As a push gateway operator, I want the gateway to refresh Google's attestation revocation list itself, so that revoked keys stop enrolling without manual work.
 28. As a distributor of a fork, I want to run my own gateway with my own Firebase project and Android signing key, so that my app's push is independent of anyone else's.
 29. As a distributor, I want Firebase configuration supplied at build and deploy time, so that no distributor-specific values live in the open-source code.
@@ -57,11 +57,16 @@ Decisions recorded as ADRs: [0004](../docs/adr/0004-push-gateway-hides-device-pl
 
 - One gateway serves one app distribution on both platforms. Its configuration names the iOS app and APNs credentials as today, plus the Android package name, its accepted signing-certificate digests, and the Firebase project and service-account credentials for FCM HTTP v1.
 - An installation records its platform and push endpoint. The platform lives only in gateway state reached through the sealed grant; nothing the relay sees reveals it. Existing installations are iOS. Android endpoints are FCM registration tokens, which are not hex, so endpoint validation and size limits become per platform.
-- Enrollment takes a platform-specific attestation. iOS keeps App Attest. Android sends a Key Attestation certificate chain for a key the app generates with the gateway's challenge. The gateway accepts it only when the chain reaches a Google attestation root, no certificate in it is revoked, the challenge matches, the app identity matches the configured package and a signing digest, the key is hardware-backed, and the root of trust reports a locked bootloader with verified boot state Verified or SelfSigned.
+- Enrollment takes a platform-specific attestation. iOS keeps App Attest. Android sends a Key Attestation certificate chain for a fresh key generated after the push token and gateway challenge are known. As App Attest's client data does on iOS, the attestation challenge binds the whole enrollment transcript: it is the SHA-256 of the transcript bytes, which contain the gateway challenge, so the push token, epoch and expiry are attested too, and the existing exact-replay recovery rule works unchanged. The gateway accepts the chain only when:
+  - it reaches a configured Google attestation root (Google publishes more than one; the list comes from Google's current documentation, and a root change is a reviewed configuration rollout, as for App Attest) and no certificate in it is revoked;
+  - the attestation challenge matches the transcript;
+  - the root of trust and key properties, read only from the hardware-enforced list (values in the software-enforced list are attacker-controlled), report a locked bootloader with verified boot state Verified or SelfSigned;
+  - both the attestation and KeyMint security levels are TrustedEnvironment or StrongBox, the key origin is generated, and the key is EC P-256 with a sign-only purpose;
+  - the attested application id names exactly one package, matching the configured package and a configured signing digest.
 - The gateway fetches Google's revocation list periodically. A stale list fails closed only after a generous grace period.
 - After enrollment, every installation call (delegate, revoke a delegation, rotate the endpoint, revoke the installation) is signed, as on iOS. iOS signs with an App Attest assertion. Android signs the same transcript bytes with the attested Keystore key, an ECDSA signature the gateway checks against the public key stored at enrollment. Keystore keys have no signature counter, so replay protection for Android rests on the single-use challenge already in each transcript.
 - The enrollment request carries no platform field. It holds either an App Attest object or an Android attestation chain, and the gateway derives the platform from which one is present.
-- Enrollment and endpoint rotation add a rate limit per attested key on top of the existing challenge quotas.
+- Signed installation calls are rate limited per attested key. Attestation carries no stable device id and each enrollment makes a fresh key, so enrollment itself stays bounded by the deployment-wide challenge quota and by one installation per push token. That quota is sized for both platforms, and the Android client jitters its first enrollment so a release doesn't make every phone enroll at once.
 - Delivery moves to one platform-neutral route. The existing APNs-named route stays as an alias until relays have moved over. The gateway maps the lease's priority class to each platform.
 - For Android, the wake signal is a high-priority, data-only FCM message whose payload is fixed and compiled in, like today's APNs payload. It contains no relay-supplied bytes.
 - One delegation per installation and relay stays the rule for now (ADR 0004 keeps per-identity grants possible later).
@@ -95,7 +100,7 @@ Prototype evidence ([`prototype/android-push-headless-dart`](https://github.com/
 Tests check behavior at two points, through public interfaces, with fakes only at external boundaries.
 
 - **Push gateway HTTP API.** Extend the existing HTTP delivery and attestation tests with a fake FCM sender and generated Key Attestation chains: enroll, delegate, deliver, rotate endpoint and revoke for an Android installation, and table rows for each rejected attestation (unlocked bootloader, Unverified or Failed boot state, wrong package or signing digest, wrong challenge, revoked certificate, software-backed key), plus the per-key rate limit. Signed installation calls get matching rows: wrong key, altered transcript, reused challenge. Prior art: the gateway's HTTP delivery tests and App Attest assertion tests.
-- **Dart wake-to-notification function.** Run it against a fake relay as a journey: DM and mention notify; self-authored, muted and hellthread messages don't; an already shown message doesn't notify again; several communities; slow and unreachable relays return a fallback inside the time budget. The ported body formatter runs the shared notification-body fixtures. Prior art: the iOS resolver tests in BuzzPushKit.
+- **Dart wake-to-notification function.** Run it against a fake relay as a journey: DM and mention notify; self-authored, muted and hellthread messages don't; an already shown message doesn't notify again; several communities; slow and unreachable relays return a fallback inside the time budget; two overlapping wakes, and the foreground app writing the shown record during a background run, never notify twice or lose a message. The ported body formatter runs the shared notification-body fixtures. Prior art: the iOS resolver tests in BuzzPushKit.
 - **Relay.** The delivery URL setting accepts the platform-neutral route, in the existing relay configuration tests.
 - **End to end.** Before readiness, exercise the real flow on a physical Android phone and an iOS device: enroll, receive a DM and a mention with the app killed, tap through, rotate the token, and sign out.
 
@@ -114,7 +119,8 @@ Tests check behavior at two points, through public interfaces, with fakes only a
 
 - Real network latency over cellular is the main remaining performance risk; the prototype's relay ran on the same machine.
 - Android deprioritizes apps whose high-priority pushes don't show a notification, which is one reason for posting the generic notification first.
-- Each distributor sets up a Firebase project, its service account and the Play signing certificate digests once.
+- Each distributor sets up a Firebase project, registers its Android app, creates a service account for the gateway and records its signing certificate digests once. An agent can do most of this with the Firebase and Google Cloud CLIs, using a signed-in browser only for console-only steps.
+- Known platform limits we don't control: after a user force-stops the app, FCM delivers nothing until the app is opened again, and some vendors' battery managers delay high-priority data messages.
 
 ## Tickets
 
@@ -124,6 +130,6 @@ Work blockers first. Each ticket is a vertical slice that can be verified on its
 2. **Gateway records installation platform and sends FCM wakes.** Adds the platform (derived from the attestation type) and per-platform endpoints, Keystore-signed installation calls, the FCM HTTP v1 sender and the Android configuration. Enrollment is tested end to end with a test-only attestation verifier, using a fake FCM sender. Blocked by: 1.
 3. **Gateway verifies Android Key Attestation.** Adds Google roots, the revocation list refresh, the boot-state and app-identity checks, and the per-key rate limit. Tested with the table of rejected attestations. Blocked by: 2.
 4. **Dart notification body formatter.** Ports the formatter to Dart, passing the shared notification-body fixtures. Blocked by: none.
-5. **Dart wake-to-notification function.** Headless and journey-tested against a fake relay, including the already-shown record and the fallback inside the time budget. Blocked by: 4.
+5. **Dart wake-to-notification function.** Headless and journey-tested against a fake relay, including the already-shown record, overlapping wakes and the fallback inside the time budget. Blocked by: 4.
 6. **Android wake handling.** Firebase messaging service, generic notification first, background engine, watchdog, categories, grouping and tap-to-open, with wakes triggered locally, starting from the [prototype](https://github.com/block/buzz/tree/prototype/android-push-headless-dart). Verified on a physical phone. Blocked by: 5.
 7. **Android enrollment and lease publication.** FCM token, Keystore attestation, enrollment, signed installation calls, token rotation, the permission prompt and sign-out revocation, wired into the shared push layer. End to end on a physical phone against a test gateway and relay. Blocked by: 3, 6.
