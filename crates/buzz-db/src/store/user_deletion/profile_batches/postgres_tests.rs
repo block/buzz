@@ -55,7 +55,6 @@ impl Fixture {
         ProfileBatchOptions {
             community: self.community,
             pubkey: self.human.public_key().to_hex(),
-            agent_pubkeys: vec![self.agent.public_key().to_hex()],
             relay_pubkeys: vec![self.relay.public_key().to_hex()],
             batch_size,
             max_items: 1000,
@@ -398,12 +397,30 @@ async fn changed_source_rolls_back_batch_and_changed_owner_is_refused() {
         .execute(&f.pool)
         .await
         .unwrap();
-    assert!(f
+    let mut tx = f.pool.begin().await.unwrap();
+    assert!(
+        ownership::recheck(&mut tx, &plan.scope, &plan.scope.targets)
+            .await
+            .is_err()
+    );
+    tx.rollback().await.unwrap();
+    assert_eq!(before["events"], export(&f.pool).await["events"]);
+    // A new invocation excludes the transferred agent instead of trusting the old plan.
+    let result = f
         .store
         .run_profile_batches(&f.options(100), true, None, &mut Vec::new())
         .await
-        .is_err());
-    assert_eq!(before["events"], export(&f.pool).await["events"]);
+        .unwrap();
+    assert_eq!(result.target_pubkeys, vec![f.human.public_key().to_hex()]);
+    let owner: Vec<u8> = sqlx::query_scalar(
+        "SELECT agent_owner_pubkey FROM users WHERE community_id=$1 AND pubkey=$2",
+    )
+    .bind(f.community)
+    .bind(f.agent.public_key().to_bytes().as_slice())
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(owner, f.other.public_key().to_bytes());
 }
 
 #[tokio::test]
@@ -428,4 +445,246 @@ async fn mismatched_verified_subject_and_survivor_archive_actor_are_not_erased()
         .await
         .is_err());
     assert_eq!(before, export(&f.pool).await);
+}
+
+// Hooks run at the public handler's output boundary, exercising the real batch path.
+struct RecordHook<F>(F);
+impl<F: FnMut(Value) -> std::io::Result<()>> Write for RecordHook<F> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if let Ok(record) = serde_json::from_slice(bytes) {
+            (self.0)(record)?;
+        }
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn community_ownership_and_retry_after_identity_removal() {
+    // Ownership elsewhere is neither conflicting local ownership nor missing local evidence.
+    for missing in [false, true] {
+        let f = Fixture::new().await;
+        f.event(f.community, &f.human, 0, vec![], "human").await;
+        f.event(f.community, &f.agent, 10100, vec![], "retain agent")
+            .await;
+        if missing {
+            sqlx::query("DELETE FROM users WHERE community_id=$1 AND pubkey=$2")
+                .bind(f.community)
+                .bind(f.agent.public_key().to_bytes().as_slice())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+        } else {
+            sqlx::query(
+                "UPDATE users SET agent_owner_pubkey=$3 WHERE community_id=$1 AND pubkey=$2",
+            )
+            .bind(f.community)
+            .bind(f.agent.public_key().to_bytes().as_slice())
+            .bind(f.other.public_key().to_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        }
+        let before = export(&f.pool).await;
+        let preview = f
+            .store
+            .run_profile_batches(&f.options(1), false, None, &mut Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(preview.target_pubkeys, vec![f.human.public_key().to_hex()]);
+        assert_eq!(before, export(&f.pool).await);
+        f.store
+            .run_profile_batches(&f.options(1), true, None, &mut Vec::new())
+            .await
+            .unwrap();
+        let after = export(&f.pool).await;
+        for (table, rows) in &before {
+            for row in rows.as_array().unwrap() {
+                if row["community_id"] == json!(f.elsewhere)
+                    || row["pubkey"] == format!("\\x{}", f.agent.public_key())
+                {
+                    assert!(
+                        after[table].as_array().unwrap().contains(row),
+                        "survivor changed in {table}"
+                    );
+                }
+            }
+        }
+    }
+    let f = Fixture::new().await;
+    f.event(f.community, &f.human, 0, vec![], "human").await;
+    f.event(f.community, &f.agent, 10100, vec![], "agent").await;
+    let mut removing_agent = false;
+    let mut output = RecordHook(|record: Value| {
+        if record["record"] == "proposed_batch" {
+            removing_agent = record["items"][0]["table"] == "users"
+                && record["items"][0]["key"]["pubkey"] == format!("\\x{}", f.agent.public_key());
+        }
+        if record["record"] == "batch_committed" && removing_agent {
+            return Err(std::io::Error::other(
+                "lost output after agent identity commit",
+            ));
+        }
+        Ok(())
+    });
+    assert!(f
+        .store
+        .run_profile_batches(&f.options(1), true, None, &mut output)
+        .await
+        .is_err());
+    let remaining: Vec<Vec<u8>> =
+        sqlx::query_scalar("SELECT pubkey FROM users WHERE community_id=$1")
+            .bind(f.community)
+            .fetch_all(&f.pool)
+            .await
+            .unwrap();
+    assert!(!remaining.contains(&f.agent.public_key().to_bytes().to_vec()));
+    assert!(remaining.contains(&f.human.public_key().to_bytes().to_vec()));
+    let agent_events: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id=$1 AND pubkey=$2")
+            .bind(f.community)
+            .bind(f.agent.public_key().to_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        agent_events, 0,
+        "identity removal stranded undiscoverable profile data"
+    );
+
+    let retry = f
+        .store
+        .run_profile_batches(&f.options(1), true, None, &mut Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(retry.target_pubkeys, vec![f.human.public_key().to_hex()]);
+    assert_eq!(retry.items, 1);
+    assert_eq!(
+        f.store
+            .run_profile_batches(&f.options(1), true, None, &mut Vec::new())
+            .await
+            .unwrap()
+            .items,
+        0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Postgres"]
+async fn ownership_changes_before_write_are_refused_and_retry_rediscovers() {
+    for change in ["transfer", "missing", "new"] {
+        let f = Fixture::new().await;
+        f.event(f.community, &f.human, 0, vec![], "human").await;
+        f.event(f.community, &f.agent, 10100, vec![], "agent").await;
+        let mut changed = false;
+        let mut output = RecordHook(|record: Value| {
+            if record["record"] == "proposed_batch" && !changed {
+                changed = true;
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                    let sql = match change {
+                        "transfer" => "UPDATE users SET agent_owner_pubkey=$3 WHERE community_id=$1 AND pubkey=$2",
+                        "missing" => "UPDATE users SET agent_owner_pubkey=NULL WHERE community_id=$1 AND pubkey=$2 AND $3::bytea IS NOT NULL",
+                        _ => "UPDATE users SET agent_owner_pubkey=$2 WHERE community_id=$1 AND pubkey=$3",
+                    };
+                    let key = if change == "new" { &f.human } else { &f.agent };
+                    sqlx::query(sql).bind(f.community).bind(key.public_key().to_bytes().as_slice())
+                        .bind(f.other.public_key().to_bytes().as_slice()).execute(&f.pool).await.unwrap();
+                })
+                });
+            }
+            Ok(())
+        });
+        let before = export(&f.pool).await;
+        let error = f
+            .store
+            .run_profile_batches(&f.options(1), true, None, &mut output)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("ownership changed"), "{error}");
+        assert!(changed);
+        assert_eq!(before["events"], export(&f.pool).await["events"]);
+        let retry = f
+            .store
+            .run_profile_batches(&f.options(1), true, None, &mut Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            retry.target_pubkeys.len(),
+            if change == "new" { 3 } else { 1 }
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Postgres"]
+async fn final_check_keeps_removed_agent_scope_and_locks_ownership() {
+    let f = Fixture::new().await;
+    f.event(f.community, &f.agent, 10100, vec![], "initial")
+        .await;
+    let mut conn = f.pool.acquire().await.unwrap();
+    let plan = plan::build(&mut conn, &f.options(1)).await.unwrap();
+    let mut checked = f.pool.begin().await.unwrap();
+    ownership::recheck(&mut checked, &plan.scope, &plan.scope.targets)
+        .await
+        .unwrap();
+    let mut transfer = f.pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL lock_timeout='100ms'")
+        .execute(&mut *transfer)
+        .await
+        .unwrap();
+    let error =
+        sqlx::query("UPDATE users SET agent_owner_pubkey=$3 WHERE community_id=$1 AND pubkey=$2")
+            .bind(f.community)
+            .bind(f.agent.public_key().to_bytes().as_slice())
+            .bind(f.other.public_key().to_bytes().as_slice())
+            .execute(&mut *transfer)
+            .await
+            .unwrap_err();
+    assert_eq!(
+        error.as_database_error().unwrap().code().as_deref(),
+        Some("55P03")
+    );
+    transfer.rollback().await.unwrap();
+    checked.rollback().await.unwrap();
+    drop(conn);
+
+    let mut removing_human = false;
+    let mut inserted = false;
+    let mut output = RecordHook(|record: Value| {
+        if record["record"] == "proposed_batch" {
+            removing_human = record["items"][0]["table"] == "users"
+                && record["items"][0]["key"]["pubkey"] == format!("\\x{}", f.human.public_key());
+        }
+        if record["record"] == "batch_committed" && removing_human {
+            // Simulate an out-of-contract writer: final verification must still see
+            // the erased agent's residual data after ownership discovery shrinks.
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(f.event(
+                    f.community,
+                    &f.agent,
+                    10100,
+                    vec![],
+                    "late residual profile",
+                ))
+            });
+            inserted = true;
+        }
+        Ok(())
+    });
+    let error = f
+        .store
+        .run_profile_batches(&f.options(1), true, None, &mut output)
+        .await
+        .unwrap_err();
+    assert!(inserted);
+    assert!(
+        error
+            .to_string()
+            .contains("profile rows or dependencies remain"),
+        "{error}"
+    );
 }

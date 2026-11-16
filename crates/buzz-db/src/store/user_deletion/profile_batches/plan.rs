@@ -1,21 +1,9 @@
 use super::*;
 use sqlx::Row;
-use std::collections::BTreeSet;
 
 pub(super) async fn build(conn: &mut PgConnection, options: &ProfileBatchOptions) -> Result<Plan> {
     let human = normalize_user_deletion_pubkey(&options.pubkey)?;
-    let mut targets = BTreeSet::from([human.clone()]);
-    for p in &options.agent_pubkeys {
-        targets.insert(normalize_user_deletion_pubkey(p)?);
-    }
-    // Match the content command's cross-community ownership discovery; mutation stays tenant-scoped.
-    let agents: Vec<Vec<u8>> = sqlx::query_scalar("SELECT DISTINCT pubkey FROM users WHERE agent_owner_pubkey=decode($1,'hex') ORDER BY pubkey LIMIT 10001")
-        .bind(&human).fetch_all(&mut *conn).await?;
-    targets.extend(agents.iter().map(hex::encode));
-    if targets.len() > 10_000 {
-        return Err(invalid("profile target limit exceeded (10000)"));
-    }
-    let targets: Vec<String> = targets.into_iter().collect();
+    let targets = ownership::targets(conn, options.community, &human, false).await?;
     let relays: Vec<String> = options
         .relay_pubkeys
         .iter()
@@ -43,13 +31,19 @@ pub(super) async fn build(conn: &mut PgConnection, options: &ProfileBatchOptions
         ));
     }
     validate_ownership(conn, &scope).await?;
+    inspect(conn, scope, options.max_items).await
+}
+
+// Only callers with a scope freshly discovered by this invocation may inspect it.
+// This never executes mutations; final inspection may include identities we removed.
+pub(super) async fn inspect(conn: &mut PgConnection, scope: Scope, max_items: u32) -> Result<Plan> {
     let blockers = dependencies(conn, &scope).await?;
     let mut plan = Plan {
         scope,
         ops: Vec::new(),
         blockers,
     };
-    let selected = events::select(conn, &plan.scope, options.max_items).await?;
+    let selected = events::select(conn, &plan.scope, max_items).await?;
     let ids: Vec<Vec<u8>> = selected.iter().map(|e| e.id.clone()).collect();
     // Threaded/channel-bearing data belongs to content cleanup; never break a surviving discussion.
     let threaded: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM thread_metadata WHERE community_id=$1 AND (event_id=ANY($2::bytea[]) OR parent_event_id=ANY($2::bytea[]) OR root_event_id=ANY($2::bytea[])))")
@@ -59,7 +53,7 @@ pub(super) async fn build(conn: &mut PgConnection, options: &ProfileBatchOptions
             .push("selected profiles have thread dependencies; content cleanup required".into());
     }
     for table in rows::CHILDREN {
-        rows::collect(conn, &mut plan, table, &ids, options.max_items).await?;
+        rows::collect(conn, &mut plan, table, &ids, max_items).await?;
     }
     let mut snapshots = Vec::new();
     for event in selected {
@@ -72,17 +66,17 @@ pub(super) async fn build(conn: &mut PgConnection, options: &ProfileBatchOptions
         if op.snapshot.is_some() {
             snapshots.push(op);
         } else {
-            rows::push(&mut plan, op, options.max_items)?;
+            rows::push(&mut plan, op, max_items)?;
         }
     }
-    rows::collect(conn, &mut plan, &rows::HEADS, &[], options.max_items).await?;
-    rows::collect(conn, &mut plan, &rows::ARCHIVES, &[], options.max_items).await?;
+    rows::collect(conn, &mut plan, &rows::HEADS, &[], max_items).await?;
+    rows::collect(conn, &mut plan, &rows::ARCHIVES, &[], max_items).await?;
     // Archive rows go first, then snapshots; retries can find stale snapshots while identities remain.
     for op in snapshots {
-        rows::push(&mut plan, op, options.max_items)?;
+        rows::push(&mut plan, op, max_items)?;
     }
     let before_users = plan.ops.len();
-    rows::collect(conn, &mut plan, &rows::USERS, &[], options.max_items).await?;
+    rows::collect(conn, &mut plan, &rows::USERS, &[], max_items).await?;
     let human_bytea = format!("\\x{}", plan.scope.human);
     plan.ops[before_users..].sort_by_key(|op| op.key["pubkey"].as_str() == Some(&human_bytea));
     Ok(plan)

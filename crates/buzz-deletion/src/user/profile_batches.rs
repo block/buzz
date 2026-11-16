@@ -12,9 +12,6 @@ pub struct Args {
     /// One explicit surviving community, including former memberships.
     #[arg(long)]
     community: Uuid,
-    /// Saved agent key for retry after its identity row disappeared; repeatable.
-    #[arg(long, value_parser = parse_key)]
-    agent_pubkey: Vec<String>,
     /// Trusted relay signer for verified profiles and archive events; repeatable.
     #[arg(long, value_parser = parse_key)]
     relay_pubkey: Vec<String>,
@@ -59,7 +56,6 @@ pub(super) async fn run(args: Args) -> Result<i32> {
             &ProfileBatchOptions {
                 community: args.community,
                 pubkey: args.pubkey,
-                agent_pubkeys: args.agent_pubkey,
                 relay_pubkeys: args.relay_pubkey,
                 batch_size: args.batch_size,
                 max_items: args.max_items,
@@ -113,6 +109,7 @@ mod tests {
             ["--batch-size", "101"],
             ["--max-items", "0"],
             ["--pubkey", "bad"],
+            ["--agent-pubkey", base[2]],
         ] {
             assert!(Cli::try_parse_from(base.into_iter().chain(extra)).is_err());
         }

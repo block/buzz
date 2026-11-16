@@ -9,6 +9,7 @@ use std::io::Write;
 use uuid::Uuid;
 
 mod events;
+mod ownership;
 mod plan;
 #[cfg(test)]
 mod postgres_tests;
@@ -20,8 +21,6 @@ pub struct ProfileBatchOptions {
     pub community: Uuid,
     /// Human key as hex or npub.
     pub pubkey: String,
-    /// Additional previously inventoried agents, retained across retries.
-    pub agent_pubkeys: Vec<String>,
     /// Explicitly trusted current/historical relay signing keys.
     pub relay_pubkeys: Vec<String>,
     /// Row mutations per transaction, 1..=100.
@@ -39,12 +38,13 @@ pub struct ProfileBatchSummary {
     pub items: usize,
     /// Proposed or committed transactions.
     pub batches: usize,
-    /// Frozen human/agent keys. Supply agent keys on retries after row removal.
+    /// Human and current community agents discovered for this invocation.
     pub target_pubkeys: Vec<String>,
     /// Always false; the independent final verifier owns that claim.
     pub account_erasure_complete: bool,
 }
 
+#[derive(Clone)]
 struct Scope {
     community: Uuid,
     human: String,
@@ -147,6 +147,7 @@ impl UserDeletionStore {
             ));
         }
         let mut batches = 0;
+        let mut remaining_targets = plan.scope.targets.clone();
         for (batch_index, batch) in groups.iter().enumerate() {
             line(
                 writer,
@@ -169,11 +170,24 @@ impl UserDeletionStore {
                     buzz_core::CommunityId::from_uuid(plan.scope.community),
                 )
                 .await?;
-                plan::validate_ownership(tx.conn(), &plan.scope).await?;
+                ownership::recheck(tx.conn(), &plan.scope, &remaining_targets).await?;
                 for op in *batch {
                     rows::apply(&mut tx, &plan.scope, op, &replacements).await?;
                 }
                 tx.commit().await?;
+                for op in *batch {
+                    if op.table.name == "users" {
+                        let key = op.key["pubkey"]
+                            .as_str()
+                            .ok_or_else(|| invalid("invalid identity key"))?;
+                        let key = key
+                            .strip_prefix("\\x")
+                            .ok_or_else(|| invalid("invalid identity key"))?;
+                        if key != plan.scope.human {
+                            remaining_targets.retain(|p| p != key);
+                        }
+                    }
+                }
                 line(
                     writer,
                     &json!({"record":"batch_committed","number":batch_index+1,"items":batch.iter().map(rows::Operation::cost).sum::<usize>()}),
@@ -187,27 +201,15 @@ impl UserDeletionStore {
             ));
         }
         if delete {
-            // Replan using the saved targets: identity deletion must not shrink verification scope.
-            let check = ProfileBatchOptions {
-                community: options.community,
-                pubkey: plan.scope.human.clone(),
-                agent_pubkeys: plan
-                    .scope
-                    .targets
-                    .iter()
-                    .filter(|p| *p != &plan.scope.human)
-                    .cloned()
-                    .collect(),
-                relay_pubkeys: plan.scope.relays.clone(),
-                batch_size: options.batch_size,
-                max_items: options.max_items,
-            };
+            // Original proven keys are inspection-only: removed identities must not shrink
+            // final verification or become imported authority for a later invocation.
             let mut tx = conn.begin().await?;
             lock(&mut tx, &plan.scope).await?;
-            let remaining = plan::build(&mut tx, &check).await?;
+            ownership::recheck(&mut tx, &plan.scope, &remaining_targets).await?;
+            let remaining = plan::inspect(&mut tx, plan.scope.clone(), options.max_items).await?;
             if !remaining.ops.is_empty() || !remaining.blockers.is_empty() {
                 return Err(invalid(
-                    "profile rows or dependencies remain; rerun with the printed target keys",
+                    "profile rows or dependencies remain; cleanup did not complete",
                 ));
             }
             tx.commit().await?;

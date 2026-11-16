@@ -16,13 +16,12 @@ buzz-admin user-deletions profile-batches \
   --pubkey <human-hex-or-npub> --community <uuid> --delete
 ```
 
-The human and directly owned agent keys are resolved through `users`, including
-ownership found in other communities. Every mutation is limited to `--community`.
-A local agent row owned by someone else, a changed owner, or an unselected child
-agent blocks execution. The output prints the complete `target_pubkeys`. Save it;
-repeat `--agent-pubkey <key>` for those agents on retries after identity rows have
-been removed. Explicit agent keys are operator-supplied saved scope, not evidence
-of authorization. This command requires privileged database access.
+The human and directly owned agents are discovered afresh from `users` in the
+selected community on every preview, delete and retry. Ownership in another
+community never authorizes cleanup here. A changed ownership set or unselected
+child agent blocks a write batch. The output prints the discovered `target_pubkeys`
+for inspection; saved agent keys are not accepted as deletion authority.
+This command requires privileged database access.
 
 The supported families are ordinary profiles (0/10100), owner-authored managed
 agent records (30177/30179), verified profiles (30382), archive requests and
@@ -62,9 +61,11 @@ references. It retains replay watermarks, deletion fences, requests, approvals,
 history, repositories and media objects. Media cleanup must preserve its source
 evidence before this command removes avatar/configuration references.
 
-Each committed batch survives interruption. Rerun with the saved target keys to
-plan the remaining rows. Source fingerprints and ownership are rechecked inside
-the batch transaction; a mismatch rolls back that batch. A failure after commit
+Each committed batch survives interruption. Rerun with the same human and community
+to discover the remaining agents. All profile data is removed before any identity
+row, so interruption during identity removal leaves no unfinished profile data
+for an agent that can no longer be discovered. Source fingerprints and the full
+current ownership set are rechecked inside the batch transaction; a mismatch rolls back that batch. A failure after commit
 but before output is an error and does not mean the batch rolled back. No success
 marker is printed if prerequisites or final profile checks fail. The final
 summary always has `account_erasure_complete: false`.
@@ -90,8 +91,8 @@ shared archive snapshot. Complete content/account cleanup in the first community
 2. Stop writers. Run delete with the same scope and relay signing key. Compare
    proposed and committed keys and the surviving data, including the second
    community. Verify the new shared snapshot signature and survivor list.
-3. Rerun with the saved agent keys; expect zero operations. Interrupt a multi-batch
-   run and repeat to confirm recovery. Introduce an unresolved dependency or a
+3. Rerun with the same human and community; expect zero operations. Interrupt a
+   multi-batch run and repeat to confirm recovery. Introduce an unresolved dependency or a
    wrong signer and confirm no deletion occurs.
 4. Restart the isolated relay and reload clients. Check profile-event queries,
    directory/name search and NIP-05. Test old-event replay and fresh admission

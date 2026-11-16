@@ -103,7 +103,7 @@ pub(super) async fn select(
                 let agent = subject(&tags, "d")?;
                 if authored && !scope.targets.contains(&agent) {
                     return Err(invalid(
-                        "managed definition names an unselected agent; save its inventory first",
+                        "managed definition names an agent not currently owned in this community",
                     ));
                 }
                 if scope.targets.contains(&agent) && author != scope.human {
