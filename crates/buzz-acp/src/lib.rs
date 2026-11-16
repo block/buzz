@@ -554,11 +554,15 @@ mod inbound_author_gate {
     pub(crate) struct AuthorizedListenerEvent {
         buzz_event: relay::BuzzEvent,
         effective_author: String,
+        /// The gate's own DM classification (fail-closed: unresolved counts as
+        /// a DM). Carried so later stages share one decision instead of
+        /// re-resolving with different failure semantics.
+        is_dm: bool,
     }
 
     impl AuthorizedListenerEvent {
-        pub(crate) fn into_parts(self) -> (relay::BuzzEvent, String) {
-            (self.buzz_event, self.effective_author)
+        pub(crate) fn into_parts(self) -> (relay::BuzzEvent, String, bool) {
+            (self.buzz_event, self.effective_author, self.is_dm)
         }
     }
 
@@ -754,6 +758,7 @@ mod inbound_author_gate {
             Some(AuthorizedListenerEvent {
                 buzz_event,
                 effective_author: decision.effective_author,
+                is_dm: decision.is_dm,
             })
         }
 
@@ -798,12 +803,40 @@ impl AuthorizedNormalListenerEvent {
         self,
         rules: &[SubscriptionRule],
         agent_pubkey_hex: &str,
+        owner_pubkey: Option<&str>,
+        dm_member_counts: &HashMap<Uuid, usize>,
     ) -> Option<NormalListenerIngress> {
-        let (buzz_event, effective_author) = self.0.into_parts();
+        let (buzz_event, effective_author, is_dm) = self.0.into_parts();
+        // DM events carry no recipient `p` tag (the relay hides DM membership),
+        // so a require_mention rule can never match them. Waive the mention
+        // only where it is safe — owner-authored events in 1:1 DMs (see
+        // `config::dm_mention_waived`); group DMs and sibling agents keep
+        // their p-tag addressing. Author authorization already ran in the
+        // inbound author gate.
+        let author_is_owner = owner_pubkey == Some(effective_author.as_str());
+        let waived = config::dm_mention_waived(
+            is_dm,
+            dm_member_counts.get(&buzz_event.channel_id).copied(),
+            author_is_owner,
+        );
+        let dm_rules: Vec<SubscriptionRule>;
+        let rules_ref: &[SubscriptionRule] = if waived {
+            dm_rules = rules
+                .iter()
+                .map(|rule| {
+                    let mut rule = rule.clone();
+                    rule.require_mention = false;
+                    rule
+                })
+                .collect();
+            &dm_rules
+        } else {
+            rules
+        };
         let matched = filter::match_event(
             &buzz_event.event,
             buzz_event.channel_id,
-            rules,
+            rules_ref,
             agent_pubkey_hex,
         )
         .await?;
@@ -3045,7 +3078,44 @@ async fn run_harness(
 
     let rules = startup_subscription_rules(config)?;
 
-    let channel_filters = config::resolve_channel_filters(config, &channel_ids, &rules);
+    // DM member counts power the mention waiver (see config::dm_mention_waived).
+    // Only channels the metadata already classifies as "dm" are queried; a
+    // channel whose member list is not visible yet keeps the mention-only
+    // subscription and is re-evaluated on its next membership update.
+    let dm_channel_ids: Vec<Uuid> = channel_info_map
+        .iter()
+        .filter(|(_, info)| info.channel_type == "dm")
+        .map(|(id, _)| *id)
+        .collect();
+    let mut dm_member_counts: HashMap<Uuid, usize> =
+        relay.discover_dm_member_counts(&dm_channel_ids).await;
+    for id in &dm_channel_ids {
+        if !dm_member_counts.contains_key(id) {
+            tracing::warn!(
+                channel_id = %id,
+                "dm member list not visible at startup — mention waiver disabled for this channel until a membership update"
+            );
+        }
+    }
+
+    let mut channel_filters = config::resolve_channel_filters(config, &channel_ids, &rules);
+    // DM events carry no recipient `p` tag (the relay hides DM membership), so
+    // a require_mention REQ filter would drop every DM message relay-side.
+    // Deliver DM events to the process for precise matching instead: the
+    // waiver applies only to owner-authored 1:1 DM messages (see
+    // config::dm_mention_waived). Member-count resolution is bounded (single
+    // query) — see discover_dm_member_counts.
+    let mut dm_waived_subs: HashSet<Uuid> = HashSet::new();
+    for (channel_id, filter) in channel_filters.iter_mut() {
+        let is_dm = channel_info_map
+            .get(channel_id)
+            .map(|info| info.channel_type == "dm")
+            .unwrap_or(false);
+        if config::dm_mention_waived(is_dm, dm_member_counts.get(channel_id).copied(), true) {
+            filter.require_mention = false;
+            dm_waived_subs.insert(*channel_id);
+        }
+    }
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
@@ -3539,8 +3609,106 @@ async fn run_harness(
                                     removed_channels.remove(&ch);
 
                                     if subscribed_channel_ids.contains(&ch) {
-                                        tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
-                                    } else if let Some(filter) = config::resolve_dynamic_channel_filter(config, ch, &rules) {
+                                        // A membership change can flip a channel between
+                                        // 1:1 DM and group DM (or resolve a previously
+                                        // unknown type). Re-resolve the mention decision
+                                        // and re-subscribe when it flipped: the REQ with
+                                        // the same subscription id replaces the old one.
+                                        // The lookups are bounded single queries.
+                                        let is_dm = ctx
+                                            .channel_info
+                                            .resolve_channel_metadata(ch)
+                                            .await
+                                            .map(|info| info.channel_type == "dm")
+                                            .unwrap_or(false);
+                                        let count = if is_dm {
+                                            relay
+                                                .discover_dm_member_counts(std::slice::from_ref(&ch))
+                                                .await
+                                                .get(&ch)
+                                                .copied()
+                                        } else {
+                                            None
+                                        };
+                                        if let Some(c) = count {
+                                            dm_member_counts.insert(ch, c);
+                                        } else if is_dm {
+                                            dm_member_counts.remove(&ch);
+                                        }
+                                        let waived_now =
+                                            config::dm_mention_waived(is_dm, count, true);
+                                        match (dm_waived_subs.contains(&ch), waived_now) {
+                                            (false, true) | (true, false) => {
+                                                if let Some(mut filter) = config::
+                                                    resolve_dynamic_channel_filter(config, ch, &rules)
+                                                {
+                                                    if waived_now {
+                                                        filter.require_mention = false;
+                                                        dm_waived_subs.insert(ch);
+                                                    } else {
+                                                        dm_waived_subs.remove(&ch);
+                                                    }
+                                                    tracing::info!(
+                                                        channel_id = %ch,
+                                                        waived = waived_now,
+                                                        "membership notification: re-subscribing with updated mention decision"
+                                                    );
+                                                    if let Err(e) =
+                                                        relay.subscribe_channel_from(ch, filter, None).await
+                                                    {
+                                                        tracing::warn!(
+                                                            "failed to re-subscribe to channel {ch}: {e}"
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            _ => {
+                                                tracing::debug!(
+                                                    channel_id = %ch,
+                                                    "membership notification: channel already subscribed"
+                                                );
+                                            }
+                                        }
+                                    } else if let Some(mut filter) = config::resolve_dynamic_channel_filter(config, ch, &rules) {
+                                        // Resolve DM status and member count for the
+                                        // new channel (bounded single query): the
+                                        // mention waiver applies only to confirmed 1:1
+                                        // DMs; an unresolved channel keeps the
+                                        // mention-only subscription and is re-evaluated
+                                        // on its next membership update.
+                                        let is_dm = ctx
+                                            .channel_info
+                                            .resolve_channel_metadata(ch)
+                                            .await
+                                            .map(|info| info.channel_type == "dm")
+                                            .unwrap_or(false);
+                                        let mut count = None;
+                                        if is_dm {
+                                            count = relay
+                                                .discover_dm_member_counts(std::slice::from_ref(&ch))
+                                                .await
+                                                .get(&ch)
+                                                .copied();
+                                        }
+                                        if config::dm_mention_waived(is_dm, count, true) {
+                                            filter.require_mention = false;
+                                            dm_waived_subs.insert(ch);
+                                        } else if is_dm {
+                                            tracing::warn!(
+                                                channel_id = %ch,
+                                                "dm member list unresolved — channel stays mention-only until its next membership update"
+                                            );
+                                        }
+                                        if is_dm {
+                                            match count {
+                                                Some(c) => {
+                                                    dm_member_counts.insert(ch, c);
+                                                }
+                                                None => {
+                                                    dm_member_counts.remove(&ch);
+                                                }
+                                            }
+                                        }
                                         tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
                                         if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
                                             tracing::warn!("failed to subscribe to new channel {ch}: {e}");
@@ -3764,7 +3932,12 @@ async fn run_harness(
                             };
                             let Some(ingress) =
                                 AuthorizedNormalListenerEvent(authorized_event)
-                                    .match_subscription(&rules, &pubkey_hex)
+                                    .match_subscription(
+                                        &rules,
+                                        &pubkey_hex,
+                                        owner_cache.get(),
+                                        &dm_member_counts,
+                                    )
                                     .await
                             else {
                                 tracing::debug!("authorized event matched no rule — dropping");

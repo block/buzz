@@ -896,6 +896,73 @@ impl HarnessRelay {
         Ok(map)
     }
 
+    /// Latest member count per channel, from the channel's kind 39002
+    /// (NIP-29 group members) event: lowercase `p` tags are the members, and
+    /// the newest event per `#d` channel is the current list. Single query,
+    /// single attempt — callers treat a missing entry as "unknown" and keep
+    /// the mention-only subscription until a membership update re-resolves it.
+    pub async fn discover_dm_member_counts(&self, channel_ids: &[Uuid]) -> HashMap<Uuid, usize> {
+        use nostr::{Alphabet, SingleLetterTag};
+
+        if channel_ids.is_empty() {
+            return HashMap::new();
+        }
+        let rest = self.rest_client();
+        let d_tag = SingleLetterTag::lowercase(Alphabet::D);
+        let d_values: Vec<String> = channel_ids.iter().map(|u| u.to_string()).collect();
+        let filter = nostr::Filter::new()
+            .kind(Kind::Custom(
+                buzz_core::kind::KIND_NIP29_GROUP_MEMBERS as u16,
+            ))
+            .custom_tags(d_tag, d_values)
+            .limit(500);
+        let mut counts: HashMap<Uuid, usize> = HashMap::new();
+        let events = match rest.query(&[filter]).await {
+            Ok(events) => events,
+            Err(e) => {
+                debug!("dm member count query failed: {e}");
+                return counts;
+            }
+        };
+        let Some(arr) = events.as_array() else {
+            return counts;
+        };
+        // Newest member-list event per channel wins.
+        let mut latest: HashMap<Uuid, (i64, usize)> = HashMap::new();
+        for ev in arr {
+            let created = ev.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
+            let Some(tags) = ev.get("tags").and_then(|t| t.as_array()) else {
+                continue;
+            };
+            let mut channel: Option<Uuid> = None;
+            let mut members = 0usize;
+            for tag in tags {
+                if let Some(arr) = tag.as_array() {
+                    match arr.first().and_then(|v| v.as_str()) {
+                        Some("d") => {
+                            channel = arr
+                                .get(1)
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| s.parse().ok());
+                        }
+                        Some("p") => members += 1,
+                        _ => {}
+                    }
+                }
+            }
+            if let Some(id) = channel {
+                let entry = latest.entry(id).or_insert((0, 0));
+                if created >= entry.0 {
+                    *entry = (created, members);
+                }
+            }
+        }
+        for (id, (_, members)) in latest {
+            counts.insert(id, members);
+        }
+        counts
+    }
+
     /// Build a [`RestClient`] that shares this relay's HTTP credentials.
     ///
     /// The returned client is cheap to clone (wraps `reqwest::Client` which is
