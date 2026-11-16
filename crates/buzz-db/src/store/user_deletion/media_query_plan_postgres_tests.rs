@@ -63,10 +63,8 @@ async fn media_discovery_and_sharing_use_indexes_without_current_membership() {
         .await
         .unwrap();
     let db = Db::from_pool(pool.clone());
-    let actual = db
-        .user_media_candidates(std::slice::from_ref(&alice), "", 500)
-        .await
-        .unwrap();
+    let targets = db.user_media_targets(&alice).await.unwrap();
+    let actual = db.user_media_candidates(&targets, "", 500).await.unwrap();
     assert_eq!(
         actual,
         [1, 20001, 40001, 40002].map(|n| (format!("{n:064x}"), n < 40000))
@@ -74,9 +72,12 @@ async fn media_discovery_and_sharing_use_indexes_without_current_membership() {
     // Only a fixed EXPLAIN prefix and the production SQL constant are concatenated.
     let explain = format!("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {CANDIDATES_SQL}");
     let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(explain.as_str()))
-        .bind(validate_keys(&[alice]).unwrap())
+        .bind(validate_keys(&targets.pubkeys()).unwrap())
         .bind("")
         .bind(500_i64)
+        .bind(decode_key(&targets.human).unwrap())
+        .bind(targets.communities())
+        .bind(targets.agent_keys().unwrap())
         .fetch_one(&pool)
         .await
         .unwrap();

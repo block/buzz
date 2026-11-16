@@ -1,60 +1,111 @@
 //! Bounded upload evidence queries for user media cleanup.
 use crate::{Db, DbError, Result};
+use uuid::Uuid;
+
+/// Fresh human ownership and direct agents, retaining each agent’s community.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct UserMediaTargets {
+    /// The human remains the global discovery root.
+    pub human: String,
+    /// Agent authority applies only in the recorded community.
+    pub agents: Vec<(Uuid, String)>,
+}
+
+impl UserMediaTargets {
+    /// Whether an upload claim belongs to this deletion scope.
+    pub fn contains(&self, community: Uuid, pubkey: &str) -> bool {
+        pubkey == self.human
+            || self
+                .agents
+                .iter()
+                .any(|(c, key)| *c == community && key == pubkey)
+    }
+
+    /// Unique public keys for indexed candidate discovery and display only.
+    pub fn pubkeys(&self) -> Vec<String> {
+        let mut keys = vec![self.human.clone()];
+        keys.extend(self.agents.iter().map(|(_, key)| key.clone()));
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    fn communities(&self) -> Vec<Uuid> {
+        self.agents
+            .iter()
+            .map(|(community, _)| *community)
+            .collect()
+    }
+
+    fn agent_keys(&self) -> Result<Vec<Vec<u8>>> {
+        self.agents.iter().map(|(_, key)| decode_key(key)).collect()
+    }
+}
+
+fn decode_key(key: &str) -> Result<Vec<u8>> {
+    hex::decode(super::normalize_user_deletion_pubkey(key)?)
+        .map_err(|error| DbError::InvalidData(error.to_string()))
+}
 
 const MAX_MEDIA_TARGETS: usize = 10_000;
 
 const CANDIDATES_SQL: &str = r#"WITH candidates AS MATERIALIZED (SELECT sha256 FROM (
                 SELECT sha256 COLLATE "C" AS sha256 FROM media_uploaders
-                WHERE pubkey = ANY($1::bytea[]) AND sha256 COLLATE "C" > $2
+                WHERE pubkey = ANY($1::bytea[])
+                  AND (pubkey = $4 OR (community_id, pubkey) IN (SELECT * FROM unnest($5::uuid[], $6::bytea[])))
+                  AND sha256 COLLATE "C" > $2
                 UNION
                 SELECT object_id COLLATE "C" AS sha256 FROM audit_log
                 WHERE action = 'media_uploaded' AND actor_pubkey = ANY($1::bytea[])
+                  AND (actor_pubkey = $4 OR (community_id, actor_pubkey) IN (SELECT * FROM unnest($5::uuid[], $6::bytea[])))
                   AND object_id COLLATE "C" > $2
              ) uploads ORDER BY sha256 COLLATE "C" LIMIT $3)
              SELECT sha256, EXISTS (
                  SELECT 1 FROM media_uploaders m
-                 WHERE m.sha256 = candidates.sha256 COLLATE "default" AND m.pubkey <> ALL($1::bytea[])
+                 WHERE m.sha256 = candidates.sha256 COLLATE "default" AND NOT (m.pubkey = $4 OR (m.community_id, m.pubkey) IN (SELECT * FROM unnest($5::uuid[], $6::bytea[])))
              ) OR EXISTS (
                  SELECT 1 FROM audit_log a
                  WHERE a.action = 'media_uploaded' AND a.object_id = candidates.sha256 COLLATE "default"
-                   AND a.actor_pubkey <> ALL($1::bytea[])
+                   AND NOT (a.actor_pubkey = $4 OR (a.community_id, a.actor_pubkey) IN (SELECT * FROM unnest($5::uuid[], $6::bytea[])))
              ) AS shared FROM candidates ORDER BY sha256 COLLATE "C""#;
 
 impl Db {
-    /// Resolve the human and their directly owned agents once across communities.
-    /// Every returned key is a global media target, including its uploads elsewhere.
-    pub async fn user_media_targets(&self, pubkey: &str) -> Result<Vec<String>> {
-        let pubkey = super::normalize_user_deletion_pubkey(pubkey)?;
+    /// Fetch direct agent ownership per community on every invocation and retry.
+    pub async fn user_media_targets(&self, pubkey: &str) -> Result<UserMediaTargets> {
+        let human = super::normalize_user_deletion_pubkey(pubkey)?;
         let mut tx = self.pool().begin().await?;
         sqlx::query("SET LOCAL statement_timeout = '120s'")
             .execute(&mut *tx)
             .await?;
-        let keys: Vec<String> = sqlx::query_scalar(
-            "SELECT key FROM (
-                SELECT $1::text AS key
-                UNION
-                SELECT encode(pubkey, 'hex') FROM users
-                WHERE agent_owner_pubkey = decode($1, 'hex')
-             ) targets ORDER BY key LIMIT $2",
+        let agents: Vec<(Uuid, String)> = sqlx::query_as(
+            "SELECT community_id, encode(pubkey, 'hex') FROM users
+             WHERE agent_owner_pubkey = decode($1, 'hex') AND pubkey <> decode($1, 'hex')
+             ORDER BY community_id, pubkey LIMIT $2",
         )
-        .bind(pubkey)
+        .bind(&human)
         .bind((MAX_MEDIA_TARGETS + 1) as i64)
         .fetch_all(&mut *tx)
         .await?;
-        validate_keys(&keys)?;
+        if agents.len() > MAX_MEDIA_TARGETS {
+            return Err(DbError::InvalidData(
+                "media agent scope exceeds 10000 entries".into(),
+            ));
+        }
+        let targets = UserMediaTargets { human, agents };
+        validate_keys(&targets.pubkeys())?;
         tx.commit().await?;
-        Ok(keys)
+        Ok(targets)
     }
 
     /// Page through target upload hashes and classify sharing across all communities.
     /// An empty cursor starts the scan. Storage-only claims are discovered separately.
     pub async fn user_media_candidates(
         &self,
-        pubkeys: &[String],
+        targets: &UserMediaTargets,
         after: &str,
         limit: u16,
     ) -> Result<Vec<(String, bool)>> {
-        let keys = validate_keys(pubkeys)?;
+        let keys = validate_keys(&targets.pubkeys())?;
         if !(1..=500).contains(&limit) {
             return Err(DbError::InvalidData(
                 "media page size must be 1..=500".into(),
@@ -71,6 +122,9 @@ impl Db {
             .bind(keys)
             .bind(after)
             .bind(i64::from(limit))
+            .bind(decode_key(&targets.human)?)
+            .bind(targets.communities())
+            .bind(targets.agent_keys()?)
             .fetch_all(&mut *tx)
             .await?;
         for (hash, _) in &hashes {
@@ -84,10 +138,10 @@ impl Db {
     /// Call this for storage-discovered candidates too, before deleting anything.
     pub async fn user_media_shared_hashes(
         &self,
-        pubkeys: &[String],
+        targets: &UserMediaTargets,
         hashes: &[String],
     ) -> Result<Vec<String>> {
-        let keys = validate_keys(pubkeys)?;
+        validate_keys(&targets.pubkeys())?;
         if hashes.len() > 500 {
             return Err(DbError::InvalidData(
                 "media evidence batch exceeds 500 hashes".into(),
@@ -104,15 +158,17 @@ impl Db {
             r#"SELECT candidate FROM unnest($2::text[]) AS candidates(candidate)
              WHERE EXISTS (
                  SELECT 1 FROM media_uploaders
-                 WHERE sha256 = candidate AND pubkey <> ALL($1::bytea[])
+                 WHERE sha256 = candidate AND NOT (pubkey = $1 OR (community_id, pubkey) IN (SELECT * FROM unnest($3::uuid[], $4::bytea[])))
              ) OR EXISTS (
                  SELECT 1 FROM audit_log
                  WHERE action = 'media_uploaded' AND object_id = candidate
-                   AND actor_pubkey <> ALL($1::bytea[])
+                   AND NOT (actor_pubkey = $1 OR (community_id, actor_pubkey) IN (SELECT * FROM unnest($3::uuid[], $4::bytea[])))
              ) ORDER BY candidate COLLATE "C""#,
         )
-        .bind(keys)
+        .bind(decode_key(&targets.human)?)
         .bind(hashes)
+        .bind(targets.communities())
+        .bind(targets.agent_keys()?)
         .fetch_all(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -121,14 +177,21 @@ impl Db {
 
     /// Remove the target set's ownership rows only after storage cleanup succeeds.
     /// Audit history and publication moderation records are retained.
-    pub async fn remove_user_media_uploader(&self, pubkeys: &[String], hash: &str) -> Result<u64> {
-        let keys = validate_keys(pubkeys)?;
+    pub async fn remove_user_media_uploader(
+        &self,
+        targets: &UserMediaTargets,
+        hash: &str,
+    ) -> Result<u64> {
+        validate_keys(&targets.pubkeys())?;
         validate_hash(hash)?;
         Ok(sqlx::query(
-            "DELETE FROM media_uploaders WHERE pubkey = ANY($1::bytea[]) AND sha256 = $2",
+            "DELETE FROM media_uploaders WHERE sha256 = $2
+             AND (pubkey = $1 OR (community_id, pubkey) IN (SELECT * FROM unnest($3::uuid[], $4::bytea[])))",
         )
-        .bind(keys)
+        .bind(decode_key(&targets.human)?)
         .bind(hash)
+        .bind(targets.communities())
+        .bind(targets.agent_keys()?)
         .execute(self.pool())
         .await?
         .rows_affected())
@@ -215,7 +278,7 @@ mod postgres_tests {
         sqlx::query("INSERT INTO media_uploaders(community_id, sha256, pubkey) VALUES ($1, $2, decode($3, 'hex'))")
             .bind(community).bind(format!("{:064x}", 502)).bind(&bob)
             .execute(&pool).await.unwrap();
-        let keys = vec![alice.clone()];
+        let keys = db.user_media_targets(&alice).await.unwrap();
         let first = db.user_media_candidates(&keys, "", 500).await.unwrap();
         assert_eq!(first.len(), 500);
         assert_eq!(first[0], (format!("{:064x}", 1), false));
@@ -257,7 +320,7 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn owned_agents_form_one_global_media_target_set() {
+    async fn direct_agents_retain_community_scope_and_upload_history() {
         use nostr::nips::nip19::ToBech32;
         let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
             .await
@@ -305,9 +368,10 @@ mod postgres_tests {
             .unwrap();
         let mut expected = vec![alice.clone(), agent.clone()];
         expected.sort();
-        assert_eq!(keys, expected); // Duplicate/deactivated profiles still yield one agent key.
+        assert_eq!(keys.pubkeys(), expected);
+        assert_eq!(keys.agents.len(), 2); // Deactivated profiles retain ownership for retries.
         assert_eq!(
-            db.user_media_targets(&agent).await.unwrap(),
+            db.user_media_targets(&agent).await.unwrap().pubkeys(),
             vec![agent.clone()]
         );
         let hashes: Vec<_> = (1..=5).map(|n| format!("{n:064x}")).collect();
@@ -397,9 +461,14 @@ mod postgres_tests {
             .await
             .unwrap()
             .contains(&(hashes[0].clone(), false)));
-        assert!(db.user_media_candidates(&[], "", 500).await.is_err());
         assert!(db
-            .remove_user_media_uploader(&["invalid".into()], &hashes[0])
+            .remove_user_media_uploader(
+                &UserMediaTargets {
+                    human: "invalid".into(),
+                    agents: vec![]
+                },
+                &hashes[0]
+            )
             .await
             .is_err());
     }
@@ -408,3 +477,7 @@ mod postgres_tests {
 #[cfg(test)]
 #[path = "media_query_plan_postgres_tests.rs"]
 mod query_plan_postgres_tests;
+
+#[cfg(test)]
+#[path = "media_ownership_postgres_tests.rs"]
+mod ownership_postgres_tests;

@@ -250,7 +250,12 @@ Ctrl-C releases the worker lease; after an abrupt kill wait for lease expiry.
 
 ## Media discovery and remaining limits
 
-The target set is the human and directly owned agents across communities.
+Every invocation and retry fetches the human's current directly owned agents
+from `users`, retaining each `(community_id, agent_pubkey)` pair. The human's
+own uploads are global targets; an agent's uploads are targets only in communities
+where that human currently owns it. A missing profile or a different owner in
+another community does not authorize cleanup there. Ownership rows must remain
+until media and other dependent handlers finish.
 Candidate hashes come from `media_uploaders`, `media_uploaded` audit entries,
 and storage upload claims. A bounded database query combines candidate discovery
 with outside-uploader classification. Storage-only candidates receive the same
@@ -259,7 +264,9 @@ history filter: relay membership rows can be deleted on departure.
 
 Sharing checks span all communities for the selected hashes. Any outside
 uploader in either database source or an upload-record version protects the
-file. No per-file owner-list query is made.
+file, including the same agent's uploads in an unowned community. No per-file
+owner-list query is made. The report includes `agent_communities` alongside the
+deduplicated `target_pubkeys`; the latter alone is not deletion authority.
 
 Storage discovery scans `_uploads/` for target claims, then reads candidate
 claims in a second `_uploads/` listing to protect outside claims encountered
@@ -280,6 +287,11 @@ pages and database/HTTP clients allocate separately. It replaces the former
 1 GiB disk inventory, so large jobs may reach capacity sooner. Exhausting a
 limit aborts before mutation, with a capacity error; no partial inventory is
 used for deletion. Retries rebuild discovery from PostgreSQL and storage.
+The handler re-fetches the full ownership set before each storage delete and
+uploader-row removal, and before returning success. Any change aborts for a
+fresh retry. These checks do not serialize a remote storage write with ownership
+updates: the existing requirement to stop all writers during deletion still
+applies.
 Unversioned exclusive objects also abort. Upload claim objects are deleted
 last, and the target's database uploader rows are removed only after that
 file's storage processing succeeds, so a partial failure can be retried.

@@ -10,6 +10,7 @@ mod inventory;
 mod media;
 /// Standalone, offline profile cleanup with read-only preview.
 pub mod profile_batches;
+pub use media::UserMediaTargets;
 mod requests;
 pub use discovery::normalize_user_deletion_pubkey;
 pub use inventory::UserDeletionInventory;

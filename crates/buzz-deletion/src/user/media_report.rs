@@ -1,5 +1,5 @@
 //! One JSON document, streamed from bounded inventory pages even for large files.
-use super::{Database, Inventory, Storage};
+use super::{require_current_targets, Database, Inventory, Storage, UserMediaTargets};
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::io::Write;
@@ -7,7 +7,7 @@ use std::io::Write;
 pub(super) async fn execute(
     db: &impl Database,
     media: &impl Storage,
-    pubkeys: &[String],
+    pubkeys: &UserMediaTargets,
     delete: bool,
     inventory: &mut Inventory,
     output: &mut impl Write,
@@ -17,7 +17,9 @@ pub(super) async fn execute(
         output,
         "{{\n  \"mode\": \"{mode}\",\n  \"target_pubkeys\": "
     )?;
-    serde_json::to_writer(&mut *output, pubkeys)?;
+    serde_json::to_writer(&mut *output, &pubkeys.pubkeys())?;
+    write!(output, ",\n  \"agent_communities\": ")?;
+    serde_json::to_writer(&mut *output, &pubkeys.agents)?;
     write!(output, ",\n  \"files\": [")?;
     let (mut selected, mut kept, mut deleted_versions) = (0usize, 0usize, 0usize);
     let mut after = String::new();
@@ -64,6 +66,7 @@ pub(super) async fn execute(
                     serde_json::to_writer(&mut *output, &version)?;
                     first_version = false;
                     if delete && !shared {
+                        require_current_targets(db, pubkeys).await?;
                         media.delete(&version).await?;
                         handled += 1;
                     }
@@ -71,6 +74,7 @@ pub(super) async fn execute(
                 }
             }
             let removed = if delete {
+                require_current_targets(db, pubkeys).await?;
                 db.remove(pubkeys, &hash).await?
             } else {
                 0
@@ -80,6 +84,7 @@ pub(super) async fn execute(
             after = hash;
         }
     }
+    require_current_targets(db, pubkeys).await?;
     let summary = json!({"mode": mode, "selected_files": selected,
         "kept_files": kept, "deleted_versions": deleted_versions,
         "account_erasure_complete": false});
