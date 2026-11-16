@@ -625,13 +625,15 @@ async fn grow_with_agents(
 /// With `["history", "include"]`, people and agents join in place, with the
 /// DM's history. People move the DM's identity to the grown set of people, or,
 /// if a DM of those people already exists, that DM is returned instead and
-/// nothing changes here. Without the tag, everyone starts a new DM of its
-/// people and the additions (no history), unless those people already have
-/// one: the caller lands there, and named agents join it. So do people added
-/// to a DM of at most one person, even with the tag. With `["history", "ask"]`, the relay adds
-/// agents alone and people to a DM of at most one person as with `include`,
-/// and refuses people joining any other DM with [`NEEDS_HISTORY_CHOICE`],
-/// changing nothing. An agent cannot send either tag.
+/// named agents join it there. People added to a DM of at most one person
+/// start a new DM of its people and the additions (no history), or land in
+/// the DM those people already have, which named agents join. Without the
+/// tag, as older clients send, the add finds or makes a DM of exactly this
+/// DM's people and the additions and adds no one to an existing DM. With
+/// `["history", "ask"]`, the relay adds agents alone and people to a DM of at
+/// most one person as with `include`, and refuses people joining any other
+/// DM with [`NEEDS_HISTORY_CHOICE`], changing nothing. An agent cannot send
+/// either tag.
 async fn handle_dm_add_member(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -766,10 +768,11 @@ async fn handle_dm_add_member(
         }
         // Start a new DM of its people and the additions (no history); this
         // DM and its agents stay put. A DM of at most one person never gains
-        // people, even with the tag. If those people already have a DM, the
-        // caller lands there, and named agents join it with its history, as
-        // agents do; only people share it, so an agent adding finds only a DM
-        // of exactly these members.
+        // people, even with the tag. With the tag (sent only by people), if
+        // those people already have a DM, the caller lands there, and named
+        // agents join it with its history, as agents do. Without it, as older
+        // clients send, the add finds or makes a DM of exactly these members
+        // and puts no one into a DM they weren't already in.
         Some(DmGrowth::PeopleStartNewDm) | None => {
             let (channel, created, participants) = state
                 .db
@@ -778,12 +781,12 @@ async fn handle_dm_add_member(
                     channel_id,
                     &self_bytes,
                     &addition_refs,
-                    !actor_is_agent,
+                    include_history,
                     &policy,
                 )
                 .await
                 .map_err(dm_write_error)?;
-            let added = if created || actor_is_agent {
+            let added = if created || !include_history {
                 Vec::new()
             } else {
                 let agents: Vec<Vec<u8>> = dm_agents(tenant, state, &additions)

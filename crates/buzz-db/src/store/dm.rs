@@ -736,15 +736,15 @@ pub async fn grow_dm(
 
     // The DM takes the grown set's identity: its people's, or all its members'
     // when it has at most one person. If another DM has it, people meet there;
-    // agents join this DM in place, which keeps the identity it has.
+    // agents join this DM in place, and it stops being any group's DM, since
+    // the identity it had no longer matches who is in it.
     let hash = dm_identity_hash(&grown, &agents);
     let moves = match &stored {
         Some(stored) => stored.as_slice() != hash.as_slice(),
         None => people_join,
     };
-    if moves {
-        let claimed = claim_dm_identity(tx.conn(), community_id, channel_id, &hash).await?;
-        if !claimed && people_join {
+    if moves && !claim_dm_identity(tx.conn(), community_id, channel_id, &hash).await? {
+        if people_join {
             tx.rollback().await?;
             return match find_dm_by_participants(pool, community_id, &hash).await? {
                 Some(existing) => existing_for(pool, community_id, existing.id, actor).await,
@@ -753,6 +753,14 @@ pub async fn grow_dm(
                 )),
             };
         }
+        sqlx::query(
+            "UPDATE channels SET participant_hash = NULL, updated_at = NOW() \
+             WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_id.as_uuid())
+        .bind(channel_id)
+        .execute(tx.conn())
+        .await?;
     }
 
     // Checked only once they are sure to join this DM, not one of its people

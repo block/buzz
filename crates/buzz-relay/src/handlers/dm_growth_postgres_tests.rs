@@ -838,6 +838,39 @@ async fn an_agent_joining_a_one_person_dm_moves_its_identity() {
     );
 }
 
+/// When the grown identity is taken, an agent still joins a one-person DM in
+/// place, and the DM stops answering to its old members, so reopening them
+/// starts a new DM instead of one that now holds the agent.
+/// Mutation: keep the old fingerprint on a lost claim → reopening A+X returns
+/// the DM with Y in it → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn an_agent_joining_a_one_person_dm_whose_grown_identity_is_taken_drops_its_identity() {
+    let state = state().await;
+    let tenant = community(&state, "dm-one-person-grow-taken").await;
+    let (a, x, y) = (Keys::generate(), Keys::generate(), Keys::generate());
+    make_agent(&state, &tenant, &x, &a, "anyone").await;
+    make_agent(&state, &tenant, &y, &a, "anyone").await;
+    let both = open(&state, &tenant, &a, &[&x, &y])
+        .await
+        .expect("open both");
+    let dm = open(&state, &tenant, &a, &[&x]).await.expect("open one");
+
+    let (target, created) = add(&state, &tenant, &a, dm, &[&y], true)
+        .await
+        .expect("add agent");
+
+    assert_eq!((target, created), (dm, false));
+    assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a, &x, &y]));
+    assert_ne!(open(&state, &tenant, &a, &[&x]).await.expect("reopen"), dm);
+    assert_eq!(
+        open(&state, &tenant, &a, &[&x, &y])
+            .await
+            .expect("both again"),
+        both
+    );
+}
+
 /// A DM of one person and their agents never gains a person in place, even
 /// with the history tag: adding one starts a DM of its people, and adding them
 /// again opens that DM. The original keeps its members and its identity.
@@ -1114,17 +1147,34 @@ async fn a_new_dm_from_a_dm_carries_only_its_people() {
     );
     assert_eq!(members(&state, &tenant, trio).await, set_of(&[&a, &b, &x]));
 
-    // These people now have a DM, so starting another lands there, and an
-    // agent named in the add joins it, with its history.
+    // These people now have a DM, but an add without the tag, as older
+    // clients send, puts no one into it: it starts a DM of exactly these
+    // members.
     let (named, created) = add(&state, &tenant, &a, trio, &[&c, &m], false)
         .await
         .expect("start new DM with an agent");
+    assert!(created);
+    assert_ne!(named, forked);
+    assert_eq!(
+        members(&state, &tenant, named).await,
+        set_of(&[&a, &b, &c, &m])
+    );
+    assert_eq!(
+        members(&state, &tenant, forked).await,
+        set_of(&[&a, &b, &c])
+    );
+    assert_eq!(members(&state, &tenant, trio).await, set_of(&[&a, &b, &x]));
+
+    // With the tag, the add lands in the DM these people already have, and
+    // the agent joins it, with its history.
+    let (named, created) = add(&state, &tenant, &a, trio, &[&c, &m], true)
+        .await
+        .expect("join their DM with an agent");
     assert_eq!((named, created), (forked, false));
     assert_eq!(
         members(&state, &tenant, forked).await,
         set_of(&[&a, &b, &c, &m])
     );
-    assert_eq!(members(&state, &tenant, trio).await, set_of(&[&a, &b, &x]));
 
     // A DM of one person and agents, theirs or not: the new DM is people
     // only, and the next one opens it.
@@ -1141,13 +1191,24 @@ async fn a_new_dm_from_a_dm_carries_only_its_people() {
     }
     let pair = pair.expect("a DM of A and C");
 
-    // From a DM of one person, an agent named with a person joins the DM
-    // those people already have, with its history.
+    // From a DM of one person, an agent named with a person: without the
+    // tag, a DM of exactly these members; with it, the DM those people
+    // already have, which the agent joins with its history.
     let solo = open(&state, &tenant, &a, &[&y]).await.expect("solo");
+    let (untagged, created) = add(&state, &tenant, &a, solo, &[&c, &m], false)
+        .await
+        .expect("add a person and an agent");
+    assert!(created);
+    assert_ne!(untagged, pair);
     assert_eq!(
-        add(&state, &tenant, &a, solo, &[&c, &m], false)
+        members(&state, &tenant, untagged).await,
+        set_of(&[&a, &c, &m])
+    );
+    assert_eq!(members(&state, &tenant, pair).await, set_of(&[&a, &c]));
+    assert_eq!(
+        add(&state, &tenant, &a, solo, &[&c, &m], true)
             .await
-            .expect("add a person and an agent"),
+            .expect("add a person and an agent, with history"),
         (pair, false)
     );
     assert_eq!(members(&state, &tenant, pair).await, set_of(&[&a, &c, &m]));

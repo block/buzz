@@ -2025,9 +2025,17 @@ fn dm_open(pubkeys: &[&str], include_history: bool) -> Result<EventBuilder, SdkE
 ///
 /// With `include_history`, the member joins this DM and sees its history,
 /// unless a person is joining a DM of at most one person and their agents.
-/// Otherwise it starts a new DM of this DM's people and the member; agents
-/// already here stay behind. Only people may send the history tag: the relay
-/// refuses it from an agent.
+/// Otherwise it finds or makes a DM of exactly this DM's people and the
+/// member; agents already here stay behind. Only people may send the history
+/// tag: the relay refuses it from an agent.
+///
+/// The relay also accepts `["history", "ask"]` on kind 41011, which this
+/// builder does not send: agents, and people added to a DM of at most one
+/// person, are added as with `include`, while people who would join a DM of
+/// two or more people are refused with the exact message
+/// `needs-choice: history` and nothing changes. The client then asks whether
+/// they should see the DM's history and sends the add again, tagged `include`
+/// or untagged.
 pub fn build_dm_add_member(
     channel_id: Uuid,
     pubkey: &str,
