@@ -25,6 +25,40 @@ use crate::state::AppState;
 
 type AppStateRef = State<Arc<AppState>>;
 
+/// Operator-only ownership preview; never a retirement command or complete
+/// inventory of external agent hosts, issuer enrollments, or credentials.
+pub(super) async fn identity_inventory(
+    State(state): AppStateRef,
+    slot: crate::access::AccessSlot,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    Path(pubkey_hex): Path<String>,
+    Query(query): Query<CommunityQuery>,
+) -> Result<Json<buzz_db::admin_moderation::IdentityInventory>, ApiError> {
+    authorize_read(&state, &slot, &headers, &method, &uri)
+        .await?
+        .operator(&slot)?;
+    identity_inventory_in(&state, &pubkey_hex, &query.community_host)
+        .await
+        .map(Json)
+}
+
+/// The ownership preview for an already-authorized Operator. Shared by the
+/// admin-host and `/operator` routes.
+pub(crate) async fn identity_inventory_in(
+    state: &AppState,
+    pubkey_hex: &str,
+    community_host: &str,
+) -> Result<buzz_db::admin_moderation::IdentityInventory, ApiError> {
+    let pubkey = decode_hex_pubkey(pubkey_hex)?;
+    let community = community_for_host(state, community_host).await?;
+    Ok(state
+        .db
+        .admin_identity_inventory(community, &pubkey)
+        .await?)
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct CommunitiesQuery {
@@ -92,7 +126,7 @@ pub(super) async fn communities(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(super) struct MemberSearchQuery {
+pub(crate) struct MemberSearchQuery {
     community_host: String,
     q: String,
     limit: Option<i64>,
@@ -108,7 +142,7 @@ struct MemberSearchItem {
 }
 
 #[derive(Serialize)]
-pub(super) struct MemberSearchPage {
+pub(crate) struct MemberSearchPage {
     items: Vec<MemberSearchItem>,
 }
 
@@ -124,6 +158,15 @@ pub(super) async fn search_members(
     Query(query): Query<MemberSearchQuery>,
 ) -> Result<Json<MemberSearchPage>, ApiError> {
     authorize_read(&state, &slot, &headers, &method, &uri).await?;
+    search_members_in(&state, &query).await.map(Json)
+}
+
+/// Member search for an already-authorized caller. Shared by the admin-host
+/// and `/operator` routes.
+pub(crate) async fn search_members_in(
+    state: &AppState,
+    query: &MemberSearchQuery,
+) -> Result<MemberSearchPage, ApiError> {
     let q = query.q.trim();
     if q.is_empty() || q.chars().count() > 100 {
         return Err(ApiError::bad_request(
@@ -132,7 +175,7 @@ pub(super) async fn search_members(
         ));
     }
     let limit = u32::try_from(limit(query.limit, 20, 50)?).map_err(|_| ApiError::internal())?;
-    let community = community_for_host(&state, &query.community_host).await?;
+    let community = community_for_host(state, &query.community_host).await?;
     let items = state
         .db
         .search_users(community, q, limit)
@@ -145,7 +188,7 @@ pub(super) async fn search_members(
             avatar_url: user.avatar_url,
         })
         .collect();
-    Ok(Json(MemberSearchPage { items }))
+    Ok(MemberSearchPage { items })
 }
 
 #[derive(Serialize)]

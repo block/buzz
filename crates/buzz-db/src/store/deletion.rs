@@ -107,6 +107,9 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "join_policy_acceptances",
     "media_uploaders",
     "media_publications",
+    "identity_retirement_actions",
+    "identity_retirement_holds",
+    "identity_retirement_workflows",
     "moderation_actions",
     "moderation_reports",
     "parameterized_event_watermarks",
@@ -126,6 +129,33 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "workflow_approvals",
     "workflow_runs",
     "workflows",
+];
+
+/// Tenant tables that a later release's expand migration adds.
+///
+/// The catalog accepts each one present or absent; when present, the purge
+/// deletes its rows and verification proves it empty. Listing a table here in
+/// a release deployed before its migration keeps community deletion working
+/// before and after the migration, in a mixed fleet, and after a rollback to
+/// this release. The release that ships the table moves it to
+/// [`EXPECTED_SCOPED_TABLES`] and [`PURGE_SCOPED_TABLES`]. These tables have
+/// no foreign keys, so purge order does not matter.
+pub const PENDING_SCOPED_TABLES: &[&str] = &[];
+
+/// Tenant tables an expand migration may add between a deletion's approval
+/// and its execution.
+///
+/// An approved catalog is otherwise exact: the executor rejects a frozen table
+/// that is gone and any table added after approval that is not listed here
+/// (`validate_approved_schema` in `buzz-deletion`). Each entry must be one
+/// this release purges and verifies, in [`EXPECTED_SCOPED_TABLES`] or
+/// [`PENDING_SCOPED_TABLES`]. A table stays here after it moves out of
+/// `PENDING_SCOPED_TABLES`, so a request approved before its migration still
+/// runs on the release that requires it.
+pub const APPROVAL_FORWARD_TABLES: &[&str] = &[
+    "identity_retirement_actions",
+    "identity_retirement_holds",
+    "identity_retirement_workflows",
 ];
 
 /// Control-plane tables with community provenance that the tenant purge does
@@ -154,6 +184,9 @@ pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "join_policy_acceptances",
     "media_uploaders",
     "media_publications",
+    "identity_retirement_actions",
+    "identity_retirement_holds",
+    "identity_retirement_workflows",
     "moderation_reports",
     "subscriptions",
     "api_tokens",
@@ -2372,7 +2405,8 @@ impl DeletionStore {
         }
         // The order is child-before-parent/FK-safe, not alphabetical. Cascades
         // can make later units observe zero rows; each scoped WHERE stays idempotent.
-        for table in PURGE_SCOPED_TABLES {
+        let pending = live_pending_tables_on(&mut tx).await?;
+        for table in pending.iter().chain(PURGE_SCOPED_TABLES) {
             let sql = format!("DELETE FROM {table} WHERE community_id = $1");
             let affected = sqlx::query(AssertSqlSafe(sql))
                 .bind(token.community_id.as_uuid())
@@ -2478,8 +2512,10 @@ impl DeletionStore {
                 token.community_id
             )));
         }
+        let pending = live_pending_tables_on(&mut tx).await?;
         let scoped = EXPECTED_SCOPED_TABLES
             .iter()
+            .chain(&pending)
             .map(|table| (*table, format!("FROM {table} WHERE community_id = $1")));
         let relay_admin = RELAY_ADMIN_TABLES
             .iter()
@@ -3480,7 +3516,8 @@ async fn validate_catalog_on(conn: &mut PgConnection) -> Result<()> {
         .copied()
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
-    let live_tables = live_scoped_tables_on(conn).await?;
+    let mut live_tables = live_scoped_tables_on(conn).await?;
+    live_tables.retain(|table| !PENDING_SCOPED_TABLES.contains(&table.as_str()));
     if live_tables != expected {
         let missing = expected
             .difference(&live_tables)
@@ -3498,6 +3535,17 @@ async fn validate_catalog_on(conn: &mut PgConnection) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The [`PENDING_SCOPED_TABLES`] that exist. Call under the shared
+/// schema/destruction lock so the answer holds until the transaction ends.
+async fn live_pending_tables_on(conn: &mut PgConnection) -> Result<Vec<&'static str>> {
+    let live = live_scoped_tables_on(conn).await?;
+    Ok(PENDING_SCOPED_TABLES
+        .iter()
+        .copied()
+        .filter(|table| live.contains(*table))
+        .collect())
 }
 
 async fn live_scoped_tables_on(conn: &mut PgConnection) -> Result<BTreeSet<String>> {
@@ -3992,6 +4040,23 @@ fn bound_text(input: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every table an approval may gain is one this release purges and
+    /// verifies, and every pending table may be gained after approval.
+    #[test]
+    fn approval_forward_tables_are_purged_and_cover_pending_tables() {
+        for table in APPROVAL_FORWARD_TABLES {
+            assert!(
+                EXPECTED_SCOPED_TABLES.contains(table) || PENDING_SCOPED_TABLES.contains(table),
+                "{table} is not purged by this release"
+            );
+        }
+        for table in PENDING_SCOPED_TABLES {
+            assert!(APPROVAL_FORWARD_TABLES.contains(table), "{table}");
+            assert!(!EXPECTED_SCOPED_TABLES.contains(table), "{table}");
+            assert!(!PURGE_SCOPED_TABLES.contains(table), "{table}");
+        }
+    }
 
     #[test]
     fn scoped_table_exclusions_match_sql_during_transition() {
@@ -8140,6 +8205,23 @@ DROP FUNCTION community_deletion_lock_key(UUID);
         db.record_media_publications(request.community_id, vec![media_hash.clone()])
             .await
             .expect("publication boundary");
+        for insert in [
+            "INSERT INTO identity_retirement_actions \
+             (community_id, id, request_id, operation, target_pubkey, actor_pubkey, request, result) \
+             VALUES ($1, gen_random_uuid(), gen_random_uuid(), 'archive', $2, $2, '{}', '{}')",
+            "INSERT INTO identity_retirement_holds (community_id, pubkey, action_id) \
+             VALUES ($1, $2, gen_random_uuid())",
+            "INSERT INTO identity_retirement_workflows \
+             (community_id, workflow_id, owner_pubkey, action_id, archived_at) \
+             VALUES ($1, gen_random_uuid(), $2, gen_random_uuid(), now())",
+        ] {
+            sqlx::query(insert)
+                .bind(request.community_id.as_uuid())
+                .bind(vec![9_u8; 32])
+                .execute(&db.pool)
+                .await
+                .expect("insert identity retirement row");
+        }
         store
             .approve(request.id, "approver", None)
             .await
@@ -8156,6 +8238,23 @@ DROP FUNCTION community_deletion_lock_key(UUID);
             .is_err());
         assert!(db
             .record_media_publications(request.community_id, vec!["b".repeat(64)])
+            .await
+            .is_err());
+        let retirement = crate::identity_retirement::RetirementRequest {
+            community: request.community_id,
+            request_id: Uuid::new_v4(),
+            operation: crate::identity_retirement::RetirementOperation::Release,
+            target: [9; 32],
+            actor: [8; 32],
+            payload: crate::identity_retirement::RetirementPayload {
+                reason: None,
+                replaced_by: None,
+                inventory_version: None,
+            },
+        };
+        assert!(db.apply_identity_retirement(&retirement).await.is_err());
+        assert!(db
+            .mark_identity_retirement_published(request.community_id, Uuid::new_v4())
             .await
             .is_err());
         let generation = store.fence(&claim.lease).await.expect("fence");
@@ -8215,6 +8314,13 @@ DROP FUNCTION community_deletion_lock_key(UUID);
         let first = store.purge_postgres(&token).await.expect("purge postgres");
         assert_eq!(first["media_uploaders"], 1);
         assert_eq!(first["media_publications"], 1);
+        for table in [
+            "identity_retirement_actions",
+            "identity_retirement_holds",
+            "identity_retirement_workflows",
+        ] {
+            assert_eq!(first[table], 1, "{table}");
+        }
         let expected_tables: BTreeSet<&str> = EXPECTED_SCOPED_TABLES
             .iter()
             .chain(RELAY_ADMIN_TABLES.iter().map(|(table, _)| table))

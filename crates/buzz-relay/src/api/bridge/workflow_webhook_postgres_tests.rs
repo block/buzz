@@ -313,6 +313,29 @@ async fn webhook_admission_enforces_owner_ban_tenant_scope_and_lookup_failure() 
     );
     assert_eq!(workflow_run_count(&pool, community_a, workflow_id).await, 2);
 
+    // An identity-retirement hold on the owner in community A denies the same
+    // way, and does not reach the same owner in community B.
+    sqlx::query(
+        "INSERT INTO identity_retirement_holds (community_id, pubkey, action_id) \
+         VALUES ($1, $2, $3)",
+    )
+    .bind(community_a)
+    .bind(owner_pubkey.as_slice())
+    .bind(Uuid::new_v4())
+    .execute(&pool)
+    .await
+    .expect("hold workflow owner");
+    let (status, body) = post_webhook(&state, workflow_id, &host_a, &secret).await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (StatusCode::NOT_FOUND, Some("workflow not found")),
+        "a held owner is denied generically"
+    );
+    assert_eq!(workflow_run_count(&pool, community_a, workflow_id).await, 2);
+    let (status, _) = post_webhook(&state, workflow_id, &host_b, &secret).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "the hold is per community");
+    assert_eq!(workflow_run_count(&pool, community_b, workflow_id).await, 2);
+
     let (status, _) = post_webhook(&state, member_workflow_id, &host_a, &secret).await;
     assert_eq!(
         status,

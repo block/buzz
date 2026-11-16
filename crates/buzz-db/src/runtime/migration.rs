@@ -902,7 +902,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 88);
+        assert_eq!(migrations.len(), 90);
         assert!(migrations[83]
             .sql
             .as_str()
@@ -923,6 +923,14 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("VALIDATE CONSTRAINT workflow_runs_cause_pubkey_check"));
+        assert!(migrations[88]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE identity_retirement_holds"));
+        assert!(migrations[89]
+            .sql
+            .as_str()
+            .contains("VALIDATE CONSTRAINT archived_identities_consent_path_check"));
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }
@@ -3052,6 +3060,10 @@ mod postgres_tests {
         for table in [
             "media_uploaders",
             "media_publications",
+            "archived_identities",
+            "identity_retirement_actions",
+            "identity_retirement_holds",
+            "identity_retirement_workflows",
             "relay_members",
             "relay_admin_actions",
             "relay_admin_outbox",

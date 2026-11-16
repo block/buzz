@@ -14,6 +14,9 @@ use uuid::Uuid;
 use crate::error::Result;
 use crate::Db;
 
+mod ownership;
+pub use ownership::{IdentityInventory, InventoryIdentity, InventoryWorkflow};
+
 /// Maximum rows accepted by one admin query.
 pub const MAX_PAGE_SIZE: i64 = 200;
 

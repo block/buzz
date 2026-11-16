@@ -109,7 +109,8 @@ in `crates/buzz-db/src/store/deletion.rs`). Two things still matter:
   `EXPECTED_SCOPED_TABLES`, fenced or not, fails it
   (`community deletion catalog drift (missing=…, unknown=…)`), and deletion
   fails closed for every community, not only the new table's. Listing the
-  table is enough to pass.
+  table passes once its release is deployed; a relay deployed before the
+  migration needs the table in `PENDING_SCOPED_TABLES` (see the checklist).
 - Desired-state bootstraps install only the legacy fences explicitly listed
   under `schema/triggers/`. They do not discover and fence new tables.
   Keep those existing backstops until their own retirement is verified;
@@ -122,8 +123,15 @@ Do not add a trigger, or an entry in
 
 #### Checklist: adding a tenant-owned `community_id` table
 
-All in the same PR:
+First, ship a release that lists the table in `PENDING_SCOPED_TABLES` and
+`APPROVAL_FORWARD_TABLES`, and deploy it to every relay, deletion executor and
+operator CLI before the migration runs. Deletion then keeps working across the
+migration, a mixed fleet and a rollback (see *What breaks the old relay*).
 
+Then, all in the same PR:
+
+- [ ] The table moved from `PENDING_SCOPED_TABLES` to the required catalog
+      below, and kept in `APPROVAL_FORWARD_TABLES`.
 - [ ] Every writer of the table goes through community admission
       (`begin_community_write_transaction` or another constructor that returns
       `AdmittedTx`). Nothing writes the table outside it.
@@ -140,6 +148,17 @@ All in the same PR:
 - [ ] A run of the Postgres-gated migration-mode tests (see
       [crates/buzz-db/TESTING.md](../crates/buzz-db/TESTING.md)). Most tests
       use desired state, which builds the catalog differently.
+
+An approved deletion binds the structural catalog frozen in its inventory. The
+executor refuses, before fencing, an approval whose frozen tables are no longer
+all live, or whose live catalog gained a table the approval did not freeze.
+`APPROVAL_FORWARD_TABLES` is the one bounded exception: a live table outside
+the frozen set is accepted only if it is on that list, which names only tables
+the binary purges and verifies. The frozen manifest and digest are never
+rewritten. An approval made before the expand migration therefore still
+executes after it, and still purges the new table's rows. A table that is not
+on the list is not covered by an older approval, even when it is in
+`EXPECTED_SCOPED_TABLES`.
 
 #### Checklist: adding a provenance-only table
 
@@ -364,7 +383,7 @@ before the contract have already committed, so an old pod that restarts hits
 | Add `CHECK`, `UNIQUE`, or a narrower index | Old writes violate it, or an old `ON CONFLICT` target no longer matches an index | Deploy writers that satisfy it, backfill, then add it. Add a `CHECK` as `NOT VALID`, then `VALIDATE CONSTRAINT` in a later step. Keep every index an old `ON CONFLICT` names until no deployed code uses it |
 | Add an enum value that new code writes | Old code fails to decode the unknown variant | Deploy readers that accept the value, then deploy writers that produce it |
 | Drop a column, table, index, trigger, function, or FK | Old code reads it or relies on its side effect | Contract step only, after the release that stops relying on it is fully deployed |
-| Add a table with a `community_id` column | The old relay's exact-set deletion catalog check (`EXPECTED_SCOPED_TABLES`) sees an unknown table, so community deletion fails closed until the new release deploys. Serving is unaffected, apart from the auto-migration restart case in Rule 5 | Allowed. For a tenant-owned table, only after the desired-state change in Rule 1. Keep the gap between expand and deploy short, and do not run community deletion during it |
+| Add a table with a `community_id` column | The old relay's exact-set deletion catalog check (`EXPECTED_SCOPED_TABLES`) sees an unknown table, so community deletion fails closed for every community until the new release deploys, and again after any rollback to it. Serving is unaffected, apart from the auto-migration restart case in Rule 5 | First ship a release that lists the table in `PENDING_SCOPED_TABLES` and deploy it everywhere; that release deletes communities with the table absent or present. Then migrate, then deploy the release that moves the table to `EXPECTED_SCOPED_TABLES`. The pending release becomes the rollback floor once the migration runs. For a tenant-owned table, only after the desired-state change in Rule 1 |
 | `SELECT *` or `RETURNING *` decoded by position | Column order differs between desired-state and migrated databases and changes when columns are added | Select named columns |
 
 #### Adding `NOT NULL` to a populated table
