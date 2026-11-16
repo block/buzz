@@ -224,40 +224,52 @@ impl StatusListSource for HttpStatusListSource {
     }
 }
 
+impl RevocationList {
+    /// The longest wait between refresh attempts that still leaves room inside
+    /// the grace period for jitter (up to 10%), the fetch timeout and a retry,
+    /// so a list refreshed on schedule never goes stale.
+    fn longest_refresh_wait(&self) -> u64 {
+        u64::try_from(self.grace_seconds / 2)
+            .unwrap_or(0)
+            .saturating_sub(FETCH_TIMEOUT.as_secs())
+            .max(1)
+    }
+}
+
 /// One refresh attempt: fetch, parse, and install on success. The previous
 /// snapshot stays in place on failure. Returns the seconds to wait before the
-/// next attempt, before jitter.
+/// next attempt, before jitter, never longer than the grace period allows.
 pub async fn refresh_once(
     list: &RevocationList,
     source: &dyn StatusListSource,
     now: i64,
     consecutive_failures: &mut u32,
 ) -> u64 {
-    match source
-        .fetch()
-        .await
-        .and_then(|download| parse_status_list(&download.body).map(|set| (set, download.max_age)))
-    {
-        Ok((serials, max_age)) => {
-            *consecutive_failures = 0;
-            list.replace(serials, now);
-            max_age
-                .unwrap_or(DEFAULT_REFRESH_SECONDS)
-                .clamp(MIN_REFRESH_SECONDS, MAX_REFRESH_SECONDS)
-        }
-        Err(error) => {
-            *consecutive_failures = consecutive_failures.saturating_add(1);
-            tracing::warn!(
-                operation = "attestation_status_list",
-                %error,
-                failures = *consecutive_failures,
-                "Android attestation status list refresh failed"
-            );
-            BACKOFF_START_SECONDS
-                .saturating_mul(1u64 << (*consecutive_failures - 1).min(16))
-                .min(BACKOFF_CAP_SECONDS)
-        }
-    }
+    let wait =
+        match source.fetch().await.and_then(|download| {
+            parse_status_list(&download.body).map(|set| (set, download.max_age))
+        }) {
+            Ok((serials, max_age)) => {
+                *consecutive_failures = 0;
+                list.replace(serials, now);
+                max_age
+                    .unwrap_or(DEFAULT_REFRESH_SECONDS)
+                    .clamp(MIN_REFRESH_SECONDS, MAX_REFRESH_SECONDS)
+            }
+            Err(error) => {
+                *consecutive_failures = consecutive_failures.saturating_add(1);
+                tracing::warn!(
+                    operation = "attestation_status_list",
+                    %error,
+                    failures = *consecutive_failures,
+                    "Android attestation status list refresh failed"
+                );
+                BACKOFF_START_SECONDS
+                    .saturating_mul(1u64 << (*consecutive_failures - 1).min(16))
+                    .min(BACKOFF_CAP_SECONDS)
+            }
+        };
+    wait.min(list.longest_refresh_wait())
 }
 
 /// Refresh the list forever: immediately, then on Google's cache lifetime, with
@@ -333,7 +345,7 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_installs_good_lists_and_keeps_the_last_one_through_failures() {
-        let list = RevocationList::new(100);
+        let list = RevocationList::new(200_000);
         let source = Script(Mutex::new(vec![
             download(LIST, Some(60)),
             Err(FetchError::Request),
@@ -361,7 +373,7 @@ mod tests {
         assert_eq!(waits, [30, 60, 120]);
         assert_eq!(list.check(&listed, 1_050), Err(RevocationFailure::Listed));
         // Past the grace period without a fresh list, checks fail closed.
-        assert_eq!(list.check(&[], 1_101), Err(RevocationFailure::Stale));
+        assert_eq!(list.check(&[], 201_001), Err(RevocationFailure::Stale));
 
         assert_eq!(
             refresh_once(&list, &source, 1_200, &mut failures).await,
@@ -373,11 +385,26 @@ mod tests {
             RevocationList::new(1).check(&[], 0),
             Err(RevocationFailure::Unavailable)
         );
+
+        // A short grace period caps the wait, even when Google's cache
+        // lifetime is longer, so a list refreshed on schedule never goes stale.
+        let short = RevocationList::new(3600);
+        let source = Script(Mutex::new(vec![
+            download(LIST, Some(3600)),
+            download(LIST, None),
+            download(LIST, Some(86_400)),
+        ]));
+        let mut failures = 0;
+        for _ in 0..3 {
+            let wait = refresh_once(&short, &source, 0, &mut failures).await;
+            assert_eq!(wait, 1770);
+            assert!(wait + wait / 10 + FETCH_TIMEOUT.as_secs() < 3600);
+        }
     }
 
     #[tokio::test]
     async fn backoff_is_capped_and_cache_control_is_read() {
-        let list = RevocationList::new(1);
+        let list = RevocationList::new(604_800);
         let mut failures = 40;
         let source = Script(Mutex::new(vec![Err(FetchError::Request)]));
         let wait = refresh_once(&list, &source, 0, &mut failures).await;
