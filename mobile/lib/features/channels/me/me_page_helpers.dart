@@ -32,7 +32,6 @@ class _MeChatRow extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final archiving = useState(false);
-    final isMounted = useIsMounted();
     Future<void> archive() async {
       if (archiving.value) return;
       archiving.value = true;
@@ -46,7 +45,7 @@ class _MeChatRow extends HookConsumerWidget {
           );
         }
       } finally {
-        if (isMounted()) archiving.value = false;
+        if (context.mounted) archiving.value = false;
       }
     }
 

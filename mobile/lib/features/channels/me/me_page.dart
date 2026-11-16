@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart' show CustomSemanticsAction;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
