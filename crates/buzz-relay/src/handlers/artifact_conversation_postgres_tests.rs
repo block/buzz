@@ -20,7 +20,11 @@ use crate::handlers::parent_access_postgres_tests::{
 use crate::state::AppState;
 
 /// Ingest `event` as its signer; `Err` carries the refusal.
-async fn send(state: &Arc<AppState>, tenant: &TenantContext, event: Event) -> Result<(), String> {
+pub(crate) async fn send(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    event: Event,
+) -> Result<(), String> {
     let auth = IngestAuth::Http {
         pubkey: event.pubkey,
         scopes: vec![
@@ -39,7 +43,7 @@ async fn send(state: &Arc<AppState>, tenant: &TenantContext, event: Event) -> Re
 }
 
 /// A `buzz.task` revision of `id` in `home`, signed by `key`.
-fn task(key: &Keys, home: Uuid, id: Uuid, op: &str, prev: Option<&Event>) -> Event {
+pub(crate) fn task(key: &Keys, home: Uuid, id: Uuid, op: &str, prev: Option<&Event>) -> Event {
     let mut tags = vec![
         vec!["ar".to_owned(), "1".into()],
         vec!["d".into(), id.to_string()],
@@ -60,7 +64,7 @@ fn task(key: &Keys, home: Uuid, id: Uuid, op: &str, prev: Option<&Event>) -> Eve
 }
 
 /// Create a task in `home` as `key`: its ID and create revision.
-async fn create_task(
+pub(crate) async fn create_task(
     state: &Arc<AppState>,
     tenant: &TenantContext,
     key: &Keys,
@@ -86,7 +90,7 @@ fn open_event(key: &Keys, artifact: &str, h: Uuid) -> Event {
 }
 
 /// Open `artifact`'s conversation as `key`, at its derived address.
-async fn open(
+pub(crate) async fn open(
     state: &Arc<AppState>,
     tenant: &TenantContext,
     key: &Keys,

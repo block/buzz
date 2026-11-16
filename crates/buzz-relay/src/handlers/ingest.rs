@@ -1011,6 +1011,32 @@ pub(crate) async fn check_channel_membership(
     Ok(())
 }
 
+/// Whether `channel` refuses posts because it is archived. An artifact's
+/// conversation is archived with its home.
+pub(crate) async fn closed_by_archive(
+    community_id: CommunityId,
+    state: &AppState,
+    channel: &buzz_db::channel::ChannelRecord,
+) -> Result<bool, buzz_db::DbError> {
+    if channel.archived_at.is_some() {
+        return Ok(true);
+    }
+    match channel.parent_id {
+        Some(home) if channel.channel_type == buzz_db::channel::ChannelType::Artifact.as_str() => {
+            match state
+                .db
+                .get_channel_for_event_write(community_id, home)
+                .await
+            {
+                Ok(home) => Ok(home.archived_at.is_some()),
+                Err(buzz_db::DbError::ChannelNotFound(_)) => Ok(false),
+                Err(e) => Err(e),
+            }
+        }
+        _ => Ok(false),
+    }
+}
+
 /// The role-table write rule, for an actor that already passed the
 /// read/membership gate of `channel`.
 ///
@@ -3190,19 +3216,10 @@ async fn ingest_event_inner(
 
         if !is_edit_metadata && !is_self_departure {
             if let Some(channel) = &channel_row {
-                // An artifact's conversation is archived with its home.
-                let home_archived = match channel.parent_id {
-                    Some(home)
-                        if channel.channel_type
-                            == buzz_db::channel::ChannelType::Artifact.as_str() =>
-                    {
-                        load_channel_for_write(tenant, state, home)
-                            .await?
-                            .is_some_and(|home| home.archived_at.is_some())
-                    }
-                    _ => false,
-                };
-                if channel.archived_at.is_some() || home_archived {
+                let archived = closed_by_archive(tenant.community(), state, channel)
+                    .await
+                    .map_err(|e| IngestError::Internal(format!("error: database error: {e}")))?;
+                if archived {
                     return Err(match target_denial {
                         Some(reason) => target_denied(reason),
                         None => IngestError::Rejected("invalid: channel is archived".into()),

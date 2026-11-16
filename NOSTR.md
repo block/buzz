@@ -64,6 +64,7 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **Membership notifications** | ✅ | kind:44100 (added) / kind:44101 (removed); relay-signed, community-global scope (`channel_id=None` inside the connected community) |
 | **Presence (kind:20001)** | ✅ | Ephemeral; arbitrary status string (truncated to 128 chars); writes to Redis (`set_presence`/`clear_presence` on `"offline"`), then fan-out to local subscribers. In multi-community mode presence is scoped to the connected community. |
 | **Agent presence (kind:20003)** | ✅ | Ephemeral; an owner's presence for the agents it owns, named by `p` tags (at most 256); `online`/`away` set and `offline` clears each agent's presence as its own kind:20001 would. Not fanned out. |
+| **Channel access changed (kind:20004)** | ✅ | Ephemeral, relay-signed and relay-only: tells a channel's live subscribers to ask again what they may do there (see [Channel access](#channel-access)). A client may not send it. |
 | **Typing indicators (kind:20002)** | ✅ | Ephemeral, not stored; published via Redis pub/sub (multi-node capable unlike presence fan-out) |
 | **NIP-42 authentication** | ✅ | Proactive challenge; optional pubkey allowlist |
 | **NIP-11 relay info** | ✅ | `GET /` with `Accept: application/nostr+json` |
@@ -299,6 +300,54 @@ for its comments. It belongs to the artifact, not to anyone who posts in it.
 - Relays that support conversations advertise `buzz-artifact-conversations`
   in NIP-11 `supported_extensions`. They also include artifacts in
   auto-archiving channels in incremental artifact sync.
+
+### Channel access
+
+A client asks what its signer may do in named channels, and is told when
+to ask again. Conversations, channels read through parents and open
+channels the signer has not joined all get the same answer.
+
+- **Asking.** `POST /query` with exactly
+  `[{"access":"channels","ids":[<channel id>, ...]}]`: 1 to 100 distinct
+  lowercase channel IDs. The NIP-98 proof must carry a `payload` tag. Any
+  other shape is refused with 400.
+- **Listing.** Without `ids`, `[{"access":"channels"}]` answers for every
+  channel the signer can reach, ordered by channel ID: the channels they
+  joined, listed open channels, and the children and grandchildren of
+  both that the parents' grants reach. These are the channels a read that
+  names no channel covers, so conversations and unlisted channels stay
+  out. Past 500 such channels the request is refused with 400, and the
+  client names channels instead.
+- **Answer.** A JSON array with one entry per readable channel, in request
+  order:
+  `{"id":<channel id>,"read":true,"post":<bool>,"joined":<bool>,"role":<role>}`.
+  `joined` is whether the signer has a member row. `role` is the one they
+  act with: their row's (`owner`, `admin`, `member` or `guest`; a bot acts
+  as `member`), else an open channel's `join_role`, else what the parents
+  give, capped at `member`. `post` is whether a kind:9 from them would pass
+  the post gates now: false for a `guest` role, an archived channel, or a
+  conversation whose home is archived. A channel left out cannot be read:
+  it is private to them, deleted or missing. If any channel cannot be
+  answered, the whole request fails with 503 and is retried; a channel is
+  only ever left out of a complete answer. The answer is a snapshot, and
+  every post is still checked when it arrives: `post` does not reflect a
+  community ban or timeout, which refuse the post itself.
+- **Ask again.** After a committed change to who may read or post in a
+  channel, the relay sends an ephemeral kind:20004, signed by the relay,
+  with empty content and only `["h", <channel id>]`, to that channel and to
+  every private channel under it, conversations included. A subscription
+  receives it like any event, so include kind 20004 in the channel's
+  filter. It goes only to subscribers who can still read the channel;
+  those who cannot have their subscriptions closed. It is sent for a
+  member added, removed, leaving, joining or changing role; a change to
+  visibility, `join_role`, archiving, `parent` or `parent_access`; and an
+  artifact's move, delete or restore; a channel's deletion; and a
+  huddle's auto-archive or auto-join. It carries no answer: ask again. It
+  is best effort, so a client also asks again when it reconnects and when
+  a post is refused.
+- Relays that support this advertise `buzz-channel-access` in NIP-11
+  `supported_extensions`. Without it, a client cannot learn whether it may
+  post in a channel it has not joined.
 
 ### Default channels
 

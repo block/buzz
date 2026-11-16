@@ -277,6 +277,11 @@ impl RelayInfo {
             // conversation (NOSTR.md, Artifact conversations), and task
             // sync includes auto-archiving channels.
             "buzz-artifact-conversations".to_string(),
+            // `POST /query` answers `{"access":"channels"}` with what the
+            // signer may do in each named channel, and kind:20004 tells a
+            // channel's live subscribers to ask again (NOSTR.md, Channel
+            // access).
+            "buzz-channel-access".to_string(),
         ];
         let gif = gif_provider.map(|provider| {
             supported_extensions.push("buzz-gif".to_string());
@@ -849,6 +854,7 @@ mod tests {
         assert!(extensions.contains(&"buzz-channel-parents".to_string()));
         assert!(extensions.contains(&"buzz-channel-parent-access".to_string()));
         assert!(extensions.contains(&"buzz-artifact-conversations".to_string()));
+        assert!(extensions.contains(&"buzz-channel-access".to_string()));
     }
 
     /// NIP-WP → NIP-11 mirror: a set workspace icon is served in the standard

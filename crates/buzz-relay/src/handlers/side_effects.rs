@@ -161,6 +161,7 @@ pub(crate) async fn apply_kick_live_side_effects(
     }
     // The fence is released, so the channels under this one can be read.
     evict_departed_descendant_reader(tenant, state, channel_id, target_pubkey).await;
+    super::channel_access::announce_changed(tenant, state, channel_id);
 
     // The removal is committed: refresh the channel's discovery roster, then
     // tell the kicked member, as a kind:9001 removal does. The notice tells a
@@ -355,6 +356,7 @@ pub(crate) async fn artifact_conversation_access_changed(
     if let Err(e) = evict_non_reader_channel_subscriptions(tenant, state, conversation).await {
         warn!(channel = %conversation, error = %e, "non-reader subscription eviction failed");
     }
+    super::channel_access::announce_changed(tenant, state, conversation);
 }
 
 async fn evict_non_reader_channel_subscriptions(
@@ -2419,6 +2421,9 @@ pub(crate) async fn persist_put_user(
             warn!(channel = %channel_id, error = %e, "NIP-29 group discovery emission failed");
         }
     }
+    if !report.added.is_empty() || !report.updated.is_empty() {
+        super::channel_access::announce_changed(tenant, state, channel_id);
+    }
 
     info!(
         channel = %channel_id,
@@ -2473,6 +2478,7 @@ async fn handle_remove_user(
     evict_live_channel_subscriptions(tenant, state, channel_id, &target_pubkey).await;
     evict_departed_descendant_reader(tenant, state, channel_id, &target_pubkey).await;
     disable_departed_member_workflows(tenant, state, channel_id, &target_pubkey).await;
+    super::channel_access::announce_changed(tenant, state, channel_id);
 
     let actor_hex = hex::encode(&actor_bytes);
     let target_hex = hex::encode(&target_pubkey);
@@ -2668,6 +2674,11 @@ pub(crate) async fn persist_edit_metadata(
     let unlisted_changed = edit.columns.unlisted.is_some();
     let parent_changed = edit.columns.parent_id.is_some() || edit.columns.parent_access.is_some();
     let unarchived = edit.archived == Some(false);
+    // What the channel access answer reads: who may read and who may post.
+    let access_changed = new_visibility.is_some()
+        || parent_changed
+        || edit.archived.is_some()
+        || edit.columns.join_role.is_some();
     let write = state
         .db
         .apply_channel_metadata_event(
@@ -2724,6 +2735,9 @@ pub(crate) async fn persist_edit_metadata(
     }
     for message in &system_messages {
         fan_out_system_message(tenant, state, channel_id, message).await;
+    }
+    if access_changed {
+        super::channel_access::announce_changed(tenant, state, channel_id);
     }
     if unarchived {
         resubscribe_members_after_unarchive(tenant, state, channel_id, &actor_bytes).await;
@@ -3114,6 +3128,7 @@ async fn handle_delete_group(
     // Deleted channel: clear both membership and accessible-channels caches.
     // Stale is_member=true entries would bypass the DB's deleted_at guard.
     state.invalidate_channel_deleted(tenant);
+    super::channel_access::announce_changed(tenant, state, channel_id);
 
     // Notify every member only after the delete and discovery cleanup, so a
     // client that re-reads on the notice no longer sees the channel. The
@@ -3228,6 +3243,7 @@ async fn announce_self_join(
     pubkey: &[u8],
 ) -> anyhow::Result<()> {
     state.invalidate_membership(tenant, channel_id, pubkey);
+    super::channel_access::announce_changed(tenant, state, channel_id);
 
     let actor_hex = hex::encode(pubkey);
     emit_system_message(
@@ -3511,6 +3527,7 @@ async fn handle_leave_request(
     evict_live_channel_subscriptions(tenant, state, channel_id, &actor_bytes).await;
     evict_departed_descendant_reader(tenant, state, channel_id, &actor_bytes).await;
     disable_departed_member_workflows(tenant, state, channel_id, &actor_bytes).await;
+    super::channel_access::announce_changed(tenant, state, channel_id);
 
     let actor_hex = hex::encode(&actor_bytes);
     emit_system_message(

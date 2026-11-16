@@ -2416,6 +2416,7 @@ async fn run_active_audio_connection(
                 room_emptied = false;
             }
             Ok(()) => {
+                crate::handlers::channel_access::announce_changed(&tenant, &state, channel_id);
                 room_emptied = state
                     .audio_rooms
                     .cleanup_if_empty(tenant.community(), channel_id);
@@ -3888,6 +3889,7 @@ async fn commit_participant_join(
         MembershipAdmission::AutoAddRequired { .. }
     ) {
         state.invalidate_membership(tenant, channel_id, pubkey_bytes);
+        crate::handlers::channel_access::announce_changed(tenant, state, channel_id);
     }
 
     Ok(outcome)

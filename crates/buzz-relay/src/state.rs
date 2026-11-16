@@ -3619,6 +3619,21 @@ pub(crate) mod tests {
         build_test_state(config, pool).await
     }
 
+    /// [`test_state_with_database_url_and_pool_options`] with a live Redis
+    /// at `redis_url`, for tests that publish and fan out through it.
+    pub(crate) async fn test_state_with_database_and_redis_url(
+        database_url: &str,
+        redis_url: &str,
+    ) -> Arc<AppState> {
+        let mut config = crate::config::Config::for_test();
+        config.require_relay_membership = false;
+        config.redis_url = redis_url.to_owned();
+        config.database_url = database_url.to_owned();
+        config.read_database_url = None;
+        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
+        build_test_state(config, pool).await
+    }
+
     /// Build test state around a caller-owned writer pool. Production-path
     /// lifecycle tests use this to hold the sole connection as a deterministic
     /// barrier while AUTH waits in the real database acquisition path.
