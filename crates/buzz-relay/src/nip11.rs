@@ -268,6 +268,11 @@ impl RelayInfo {
             // kind:9002 `parent` (NOSTR.md, Channel parents). An older relay
             // refuses the tag, and reads a child by membership only.
             "buzz-channel-parents".to_string(),
+            // kind:9002 `parent_access` (NOSTR.md, Channel parents). A relay
+            // with parents but without it ignores the tag beside `parent`,
+            // filing a channel without narrowing it, so a client checks this
+            // before filing a narrowed channel.
+            "buzz-channel-parent-access".to_string(),
         ];
         let gif = gif_provider.map(|provider| {
             supported_extensions.push("buzz-gif".to_string());
@@ -838,6 +843,7 @@ mod tests {
         assert!(extensions.contains(&"buzz-search-sort".to_string()));
         assert!(extensions.contains(&"buzz-unlisted-channels".to_string()));
         assert!(extensions.contains(&"buzz-channel-parents".to_string()));
+        assert!(extensions.contains(&"buzz-channel-parent-access".to_string()));
     }
 
     /// NIP-WP → NIP-11 mirror: a set workspace icon is served in the standard
