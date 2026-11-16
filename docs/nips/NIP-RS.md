@@ -484,8 +484,12 @@ are unchanged.
 - **Displayed.** A message is *displayed* when it is rendered on screen while
   the app is in the foreground and its window has focus.
 - **Semantic retention:** `floor = max(0, now - 2592000)` (30 days, Unix
-  seconds). Every effective frontier includes this floor in its maximum,
-  including missing contexts and unresolved parents. A message at the floor is
+  seconds). Every effective frontier used to determine whether a
+  message is read includes this floor in its maximum, including missing
+  contexts and unresolved parents; however, the manual-unread override layer
+  MUST exclude the semantic retention floor and use the context's merged
+  stored frontier (0 if absent), captured at Mark-unread for baseline B and
+  evaluated at liveness and canonical publication for F. A message at the floor is
   read; a message one second newer is not read without a covering frontier.
   Forced-unread overrides still take precedence.
 - **Per-message entries.** Legacy per-message entries remain readable. A

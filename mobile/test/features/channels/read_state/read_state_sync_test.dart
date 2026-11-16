@@ -9,6 +9,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/read_state/read_state_manager.dart';
+import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/read_state/thread_follows_format.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
@@ -665,15 +666,145 @@ void main() {
       );
     });
 
-    test(
-      'a group with no frontier dies once the retention floor passes it',
-      () async {
+    Map<String, int> ownGroup(ReadStateManager from) => readStateBlobs()
+        .where((blob) => blob.containsKey('ov_s:$channel'))
+        .map(
+          (blob) => {
+            for (final key in [
+              channel,
+              'ov_s:$channel',
+              'ov_c:$channel',
+              'ov_b:$channel',
+            ])
+              key: ?blob[key],
+          },
+        )
+        .first;
+
+    for (final (name, frontier) in [
+      ('never read', null),
+      ('read over 30 days ago', 1800000000 - 40 * 24 * 3600),
+    ]) {
+      test('mark unread on a channel $name publishes a live group after the '
+          'debounce', () async {
         final phone = await device('phone');
+        if (frontier != null) phone.markContextRead(channel, frontier);
         expect(phone.markChannelUnread(channel), isTrue);
-        clock += 2 * 24 * 3600;
-        expect(phone.activeChannelOverrides, isEmpty);
-      },
-    );
+        clock += 6;
+        await Future<void>.delayed(const Duration(seconds: 6));
+
+        final base = frontier ?? 0;
+        expect(ownGroup(phone), {
+          channel: base,
+          'ov_s:$channel': 1,
+          'ov_c:$channel': 0,
+          'ov_b:$channel': base,
+        });
+        final desktop = await device('desktop');
+        expect(desktop.activeChannelOverrides, {channel});
+        // The floor still reads the channel's old messages.
+        final state = ReadStateState(
+          isReady: true,
+          pubkey: keys.public,
+          contexts: phone.effectiveContexts,
+          version: 1,
+          retentionFloor: readStateFloor(clock),
+        );
+        expect(state.effectiveTimestamp(channel), readStateFloor(clock));
+      });
+    }
+
+    test('a peer group with a zero frontier survives receive, journal and an '
+        'offline restart', () async {
+      relay.retained['read-state:peer'] = _readStateEvent(
+        keys: keys,
+        crypto: crypto,
+        clientId: 'peer',
+        slot: 'peer',
+        contexts: {
+          channel: 0,
+          'ov_s:$channel': 1,
+          'ov_c:$channel': 0,
+          'ov_b:$channel': 0,
+        },
+        createdAt: clock - 10,
+      );
+      final phone = await device('phone');
+      expect(phone.activeChannelOverrides, {channel});
+      await phone.flush();
+      expect(ownGroup(phone), {
+        channel: 0,
+        'ov_s:$channel': 1,
+        'ov_c:$channel': 0,
+        'ov_b:$channel': 0,
+      });
+
+      relay.offline = true;
+      final restarted = await device('phone');
+      expect(restarted.activeChannelOverrides, {channel});
+    });
+
+    test('a real advance, or a same-frontier clear, still ends a mark on a '
+        'never-read channel', () async {
+      final phone = await device('phone');
+      expect(phone.markChannelUnread(channel), isTrue);
+      phone.markContextRead(channel, clock - 1);
+      expect(phone.activeChannelOverrides, isEmpty);
+
+      final other = '${channel}b';
+      expect(phone.markChannelUnread(other), isTrue);
+      expect(phone.clearChannelOverride(other), isTrue);
+      expect(phone.activeChannelOverrides, isEmpty);
+      await phone.flush();
+      final blob = readStateBlobs().firstWhere(
+        (blob) => blob.containsKey('ov_c:$other'),
+      );
+      expect(blob[other], 0);
+      expect(blob['ov_c:$other'], 2);
+      expect(blob.containsKey('ov_s:$other'), isFalse);
+    });
+
+    test('the overfull fallback keeps live groups with a zero or old '
+        'frontier', () async {
+      final phone = await device('phone');
+      final old = clock - 40 * 24 * 3600;
+      final stale = '${channel}b';
+      phone.markContextRead(stale, old);
+      expect(phone.markChannelUnread(channel), isTrue);
+      expect(phone.markChannelUnread(stale), isTrue);
+      await phone.flush();
+      await overfill();
+      await phone.reinitializeRemote();
+
+      clock += 3600;
+      phone.markContextRead('${channel}c', clock - 1);
+      await phone.flush();
+      expect(phone.syncError, isNull);
+      final own = readStateBlobs().firstWhere(
+        (blob) => blob.containsKey('${channel}c'),
+      );
+      expect(
+        {
+          for (final key in [
+            channel,
+            'ov_s:$channel',
+            'ov_b:$channel',
+            stale,
+            'ov_s:$stale',
+            'ov_b:$stale',
+          ])
+            key: own[key],
+        },
+        {
+          channel: 0,
+          'ov_s:$channel': 1,
+          'ov_b:$channel': 0,
+          stale: old,
+          'ov_s:$stale': 1,
+          'ov_b:$stale': old,
+        },
+      );
+    });
   });
 
   group('follow slot packing', () {

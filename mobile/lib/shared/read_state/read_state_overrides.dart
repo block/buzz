@@ -17,22 +17,17 @@ extension ReadStateOverrides on ReadStateManager {
     final register = previous ?? (s: 0, c: 0, b: 0);
     final top = max(register.s, register.c);
     if (top == 4294967295) return false;
-    // The group travels with its frontier; a channel never read keeps the
-    // retention floor as both.
-    final previousFrontier = _effectiveState[channelId];
-    final frontier = max(previousFrontier ?? 0, readStateFloor(_now()));
-    _effectiveState[channelId] = frontier;
-    _overrides[channelId] = (s: top + 1, c: register.c, b: frontier);
+    // Baseline is the stored frontier, never the moving retention floor.
+    _overrides[channelId] = (
+      s: top + 1,
+      c: register.c,
+      b: _frontierOf(channelId),
+    );
     if (!_primaryFits()) {
       if (previous == null) {
         _overrides.remove(channelId);
       } else {
         _overrides[channelId] = previous;
-      }
-      if (previousFrontier == null) {
-        _effectiveState.remove(channelId);
-      } else {
-        _effectiveState[channelId] = previousFrontier;
       }
       return false;
     }

@@ -336,9 +336,9 @@ class ReadStateManager {
   /// Whether the last full-state load succeeded, as override actions need.
   bool get _hasFullState => _lastSnapshotSucceeded;
 
-  /// The effective frontier synced groups use: never below the floor.
-  int _frontierOf(String contextId) =>
-      max(_effectiveState[contextId] ?? 0, readStateFloor(_now()));
+  /// The merged stored frontier synced overrides use, 0 if absent: the
+  /// retention floor decides message reads only, never override liveness.
+  int _frontierOf(String contextId) => _effectiveState[contextId] ?? 0;
 
   Map<String, int> _publishableLocalContexts() {
     final horizon = _now() - readStateHorizonSeconds;
@@ -1120,10 +1120,9 @@ class ReadStateManager {
         _effectiveState,
         nowUnixSeconds: _now(),
       );
+      // Every retained register keeps its frontier, an explicit 0 included.
       for (final channelId in _overrides.keys) {
-        if (_effectiveState[channelId] case final value?) {
-          observed[overrideFrontierKey(channelId)] = value;
-        }
+        observed[overrideFrontierKey(channelId)] = _frontierOf(channelId);
       }
       final encoded = jsonEncode({
         'v': 1,
