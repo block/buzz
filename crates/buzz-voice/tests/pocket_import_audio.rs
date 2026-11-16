@@ -17,8 +17,7 @@ fn required_path(name: &str) -> PathBuf {
 }
 
 fn checked_in_voice() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../desktop/src-tauri/resources/pocket-voices/eve.wav")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pocket-voices/eve.wav")
 }
 
 fn evidence_dir() -> PathBuf {

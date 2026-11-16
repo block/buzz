@@ -1,1 +1,0 @@
-../../../desktop/src-tauri/src/managed_agents/screenshot_skill.md

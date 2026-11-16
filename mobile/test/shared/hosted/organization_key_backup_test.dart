@@ -34,7 +34,7 @@ void main() {
   final fixture =
       jsonDecode(
             File(
-              '../desktop/src-tauri/src/testdata/hpke_nsec_backup_v1.json',
+              '../test-fixtures/hpke_nsec_backup_v1.json',
             ).readAsStringSync(),
           )
           as Map<String, dynamic>;

@@ -1,7 +1,6 @@
 // Advisory pull-request flake check. `select` maps a diff to the tests it
-// changed, per runner; `rust`, `node` and `dart` repeat a selection and report
-// every iteration. Playwright repeats natively with --repeat-each, and
-// `playwright-summary` tabulates its JSON report afterwards.
+// changed, per runner; `rust` and `dart` repeat a selection and report every
+// iteration.
 import { spawnSync } from "node:child_process";
 import {
   appendFileSync,
@@ -12,90 +11,33 @@ import {
   readFileSync,
   rmSync,
 } from "node:fs";
-import { createRequire } from "node:module";
 import { posix as path } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 export const ITERATIONS = 10;
-// Repetitions spread across shards, so a whole-file selection stays inside
-// the Playwright lane's 45-minute job timeout. Playwright shards at file ×
-// repetition granularity (workers: 1, no fullyParallel). The regular smoke
-// lane runs ~150 journeys per shard in ~11 minutes, about 4.5 s each, so five
-// journeys × ten repetitions is a few minutes of test time per shard; it never
-// uses more than ten runners, so neither does this one. Past ten shards each
-// one grows instead, and the timeout minus dependency setup and the E2E build
-// (~10 minutes, more when apt retries) leaves room for about 250 journey-runs
-// (~19 minutes) per shard, so a selection beyond that many journeys skips the
-// lane with a note rather than timing out.
-const JOURNEYS_PER_SHARD = 5;
-const MAX_SHARDS = 10;
-const MAX_JOURNEY_RUNS_PER_SHARD = 250;
-export const playwrightShards = (journeys) =>
-  Math.min(MAX_SHARDS, Math.max(1, Math.ceil(journeys / JOURNEYS_PER_SHARD)));
-export const MAX_PLAYWRIGHT_JOURNEYS = Math.floor(
-  (MAX_JOURNEY_RUNS_PER_SHARD * MAX_SHARDS) / ITERATIONS,
-);
-// GitHub caps a job's outputs at 1 MiB in total. A selection this large, like
-// one past the journey cap, is a sweeping refactor rather than a test change
-// worth ten repetitions, so the lane skips rather than overrunning its timeout.
+// GitHub caps a job's outputs at 1 MiB in total. A selection this large is a
+// sweeping refactor rather than a test change worth ten repetitions, so the
+// lane skips rather than overrunning its timeout.
 export const MAX_OUTPUT_BYTES = 64 * 1024;
-export const runners = ["rust", "tauri", "node", "playwright", "dart"];
-// The two cargo workspaces, by runner: the root workspace's crates, and the
-// desktop Tauri workspace (desktop/src-tauri and its crates/*), which the
-// Desktop Tauri lane (_ci-desktop.yml) builds with its own manifest, system
-// dependencies and cache. Each is repeated by its own lane with nextest run
-// against that manifest.
-export const rustWorkspaces = {
-  rust: "Cargo.toml",
-  tauri: "desktop/src-tauri/Cargo.toml",
-};
-const rustLayouts = [
-  {
-    runner: "rust",
-    pattern: /^(crates\/[^/]+)\/(src|tests)\/((?!fixtures\/).*)\.rs$/,
-  },
-  {
-    runner: "tauri",
-    pattern:
-      /^(desktop\/src-tauri(?:\/crates\/[^/]+)?)\/(src|tests)\/((?!fixtures\/).*)\.rs$/,
-  },
-];
+export const runners = ["rust", "dart"];
+// A test file of the root cargo workspace's crates (crates/*), which the
+// `rust` lane repeats with nextest.
+const rustLayout = /^(crates\/[^/]+)\/(src|tests)\/((?!fixtures\/).*)\.rs$/;
 
-// A Rust file's place in its workspace: the runner, its package directory,
-// whether it is under src or tests, and its path below that without `.rs`.
+// A Rust file's place in its workspace: its package directory, whether it is
+// under src or tests, and its path below that without `.rs`.
 export function rustFile(file) {
-  for (const { runner, pattern } of rustLayouts) {
-    const match = pattern.exec(file);
-    if (match)
-      return {
-        runner,
-        dir: match[1],
-        kind: match[2],
-        parts: match[3].split("/"),
-      };
-  }
-  return undefined;
+  const match = rustLayout.exec(file);
+  return match
+    ? { dir: match[1], kind: match[2], parts: match[3].split("/") }
+    : undefined;
 }
-// Mirrors desktop/package.json "test": plain helpers run under the TS loader;
-// jsdom tests also preload the DOM shim and force-exit past their timers.
-export const nodeTestArgs = (file) =>
-  file.endsWith(".jsdom-test.mjs")
-    ? [
-        "--import",
-        "./test-jsdom-setup.mjs",
-        "--import",
-        "./test-loader.mjs",
-        "--experimental-strip-types",
-        "--test-force-exit",
-        "--test",
-      ]
-    : ["--import", "./test-loader.mjs", "--experimental-strip-types", "--test"];
 // Mirrors the postgres-ci default-filter in .config/nextest.toml
 // (`test(/postgres_tests::/)`, `binary(/^postgres_/)` and
 // `test(/(^|::)external_infra[^:]*::/)`): those tests need Postgres, Redis,
 // S3 or MinIO, so a selection that reached one would fail every repetition
-// without being flaky. Only the root workspace has such tests.
+// without being flaky.
 export const infraTest = (binaryName, name) =>
   /postgres_tests::/.test(name) ||
   /^postgres_/.test(binaryName) ||
@@ -104,35 +46,22 @@ export const infraTest = (binaryName, name) =>
 // The feature graphs the regular lanes test a package in, in order, where
 // that is not just its default graph: the Justfile's test-unit runs
 // buzz-push-gateway without and with its feature and buzz-feature-flags only
-// with LaunchDarkly, and desktop-tauri-test-mesh runs the desktop crate's lib
-// tests (`lib`: no other target) under mesh-llm. A test behind
-// `#[cfg(feature = …)]` is listed only in its graph, and one listed in several
-// can compile differently in each (`#[cfg(not(feature = …))]` arms).
+// with LaunchDarkly. A test behind `#[cfg(feature = …)]` is listed only in its
+// graph, and one listed in several can compile differently in each
+// (`#[cfg(not(feature = …))]` arms).
 export const rustFeatureGraphs = {
   "buzz-feature-flags": [{ features: ["launchdarkly"] }],
   "buzz-push-gateway": [
     { features: [] },
     { features: ["personal-dev-app-attest"] },
   ],
-  "buzz-desktop": [{ features: [] }, { features: ["mesh-llm"], lib: true }],
 };
 
-// Mirrors desktop/package.json "test", desktop/playwright.config.ts testDir,
-// the two cargo workspaces' packages and mobile's test directory. Paths are
-// later split on whitespace in a shell, so admit only plain names. The
-// desktop `*.perf.ts` measurements are deliberately not specs here: they time
-// the app rather than assert on it, so a slow repetition is not a flake.
+// Mirrors the root cargo workspace's packages and mobile's test directory.
+// Paths are later split on whitespace in a shell, so admit only plain names.
 export function classify(file) {
   if (!/^[\w./@-]+$/.test(file)) return undefined;
-  const rust = rustFile(file);
-  if (rust) return rust.runner;
-  if (
-    /^desktop\/(?:src\/.*\.(?:test|jsdom-test)\.mjs|scripts\/[^/]+\.test\.mjs)$/.test(
-      file,
-    )
-  )
-    return "node";
-  if (/^desktop\/tests\/e2e\/[^/]+\.spec\.ts$/.test(file)) return "playwright";
+  if (rustFile(file)) return "rust";
   if (/^mobile\/test\/.*_test\.dart$/.test(file)) return "dart";
   return undefined;
 }
@@ -152,72 +81,6 @@ export function hunkRanges(diff) {
       end: Number(oldStart) + Number(oldCount) - 1,
     },
   }));
-}
-
-// Members that keep a `test`/`it` chain a test declaration. Anything else on
-// the chain is a group (`describe`), a hook (`test.beforeEach`), configuration
-// (`test.use`) or a harness object that happens to be named `test`.
-const declaring = [
-  "only",
-  "skip",
-  "fixme",
-  "fail",
-  "fails",
-  "todo",
-  "concurrent",
-  "sequential",
-  "each",
-  "for",
-  "runIf",
-  "skipIf",
-];
-
-// The desktop app's TypeScript parses the specs; load it only for a selection
-// that needs it, so Rust-only runs work without desktop dependencies.
-let typescript;
-const ts = () =>
-  (typescript ??= createRequire(
-    new URL("../desktop/package.json", import.meta.url),
-  )("typescript"));
-
-// Line spans of every test declaration in a TypeScript spec, from its first
-// line to its closing parenthesis.
-export function testCalls(source, file) {
-  const t = ts();
-  const sourceFile = t.createSourceFile(
-    file,
-    source,
-    t.ScriptTarget.Latest,
-    true,
-  );
-  const lineAt = (position) =>
-    sourceFile.getLineAndCharacterOfPosition(position).line + 1;
-  const names = (callee) =>
-    t.isIdentifier(callee)
-      ? [callee.text]
-      : t.isPropertyAccessExpression(callee)
-        ? names(callee.expression)?.concat(callee.name.text)
-        : t.isCallExpression(callee)
-          ? names(callee.expression)
-          : undefined;
-  const calls = [];
-  const visit = (node) => {
-    const chain = t.isCallExpression(node) ? names(node.expression) : undefined;
-    if (
-      chain &&
-      ["test", "it"].includes(chain[0]) &&
-      chain.slice(1).every((member) => declaring.includes(member))
-    ) {
-      calls.push({
-        start: lineAt(node.getStart(sourceFile)),
-        end: lineAt(node.end - 1),
-      });
-      return;
-    }
-    t.forEachChild(node, visit);
-  };
-  visit(sourceFile);
-  return calls;
 }
 
 // Rust source with every comment and literal blanked to spaces, newlines kept,
@@ -351,28 +214,15 @@ export function rustTests(source) {
   return tests;
 }
 
-// Bodies of the listed tests: their calls, keyed by the line the runner
-// listed. Runners only report a call-site line, which may sit inside the call,
-// so each listed line is owned by the enclosing test call; a listed line
-// outside every call leaves its lines to the whole-file rule.
-export function testBodies(calls, lines) {
-  const bodies = new Map();
-  for (const line of [...lines].sort((a, b) => a - b)) {
-    const call = calls.find(({ start, end }) => start <= line && line <= end);
-    if (call && !bodies.has(call)) bodies.set(call, { ...call, line });
-  }
-  return [...bodies.values()].sort((a, b) => a.start - b.start);
-}
-
-// The calls owning every line of a range, or undefined once a line lies
+// The test spans owning every line of a range, or undefined once a line lies
 // outside them all.
-function owners(calls, { start, end }) {
+function owners(spans, { start, end }) {
   const found = [];
   for (let line = start; line <= end; ) {
-    const call = calls.find((c) => c.start <= line && line <= c.end);
-    if (!call) return undefined;
-    found.push(call);
-    line = call.end + 1;
+    const span = spans.find((s) => s.start <= line && line <= s.end);
+    if (!span) return undefined;
+    found.push(span);
+    line = span.end + 1;
   }
   return found;
 }
@@ -381,7 +231,7 @@ function owners(calls, { start, end }) {
 // line outside every body (imports, helpers, hooks or constants before,
 // between or after tests, or the code under test in a Rust module) can change
 // every test, so it, a new file, or a file with no listed tests selects the
-// whole file. Removed lines are judged by the old file's calls (`previous`): a
+// whole file. Removed lines are judged by the old file's tests (`previous`): a
 // deletion attaches to its preceding line, which belongs to the test before a
 // removed hook, not to the hook.
 export function selectTests(
@@ -611,44 +461,6 @@ export function rustIncludedTests(file, source, seen = new Set([file])) {
   });
 }
 
-// Smoke journeys per spec file as Playwright lists them, each line once (a
-// looped declaration is listed once per iteration). Integration-only specs
-// list nothing for the smoke project, which Playwright reports as its "No
-// tests found" error, so a selection of them stays empty.
-export function listPlaywright(files) {
-  const result = run(`${root}bin/pnpm`, [
-    "-C",
-    "desktop",
-    "--silent",
-    "exec",
-    "playwright",
-    "test",
-    "--project=smoke",
-    "--list",
-    "--reporter=json",
-    ...files,
-  ]);
-  const report = JSON.parse(result.stdout);
-  const empty =
-    report.errors.length === 1 &&
-    /No tests found/.test(report.errors[0].message);
-  if ((result.status !== 0 || report.errors.length) && !empty)
-    throw new Error(
-      `playwright --list: ${report.errors.map((error) => error.message).join("\n") || result.stderr}`,
-    );
-  const specs = new Map(files.map((file) => [file, new Set()]));
-  const collect = (suites) => {
-    for (const suite of suites) {
-      for (const spec of suite.specs ?? [])
-        if (spec.tests?.length)
-          specs.get(`desktop/tests/e2e/${spec.file}`)?.add(spec.line);
-      collect(suite.suites ?? []);
-    }
-  };
-  collect(empty ? [] : report.suites);
-  return new Map([...specs].map(([file, lines]) => [file, [...lines]]));
-}
-
 function select(base = "HEAD^1", head = "HEAD") {
   const changed = git(
     "diff",
@@ -668,9 +480,6 @@ function select(base = "HEAD^1", head = "HEAD") {
     if (runner) files[runner].push(file);
     if (status === "A") added.add(file);
   }
-  const journeys = files.playwright.length
-    ? listPlaywright(files.playwright)
-    : new Map();
   const outputs = Object.fromEntries(runners.map((runner) => [runner, []]));
   const rows = [];
   const previous = (file) =>
@@ -692,7 +501,7 @@ function select(base = "HEAD^1", head = "HEAD") {
     for (const file of files[runner]) {
       let entries = [file];
       let note = "whole file";
-      if (rustWorkspaces[runner]) {
+      if (runner === "rust") {
         const source = readFileSync(`${root}${file}`, "utf8");
         const selection = selectRust(diff(file), source, {
           added: added.has(file),
@@ -738,25 +547,6 @@ function select(base = "HEAD^1", head = "HEAD") {
           rows.push(`| ${cell(file)} | ${runner} | no test functions |`);
           continue;
         }
-      } else if (runner === "playwright") {
-        const listed = journeys.get(file) ?? [];
-        const source = readFileSync(`${root}${file}`, "utf8");
-        const selection = selectTests(
-          hunkRanges(diff(file)),
-          testBodies(testCalls(source, file), listed),
-          {
-            added: added.has(file),
-            previous: added.has(file) ? [] : testCalls(previous(file), file),
-          },
-        );
-        const lines = selection.whole ? listed : selection.lines;
-        entries = lines.map((line) => `${file}:${line}`);
-        note =
-          lines.length === 0
-            ? "excluded (no smoke journeys)"
-            : selection.whole
-              ? `whole file (${selection.reason}): ${lines.length} journey(s)`
-              : `${lines.length} changed journey(s)`;
       }
       outputs[runner].push(...entries);
       rows.push(`| ${cell(file)} | ${runner} | ${cell(note)} |`);
@@ -764,16 +554,9 @@ function select(base = "HEAD^1", head = "HEAD") {
     // A helper and a file that includes it, changed together, select the
     // same tests twice.
     outputs[runner] = [...new Set(outputs[runner])];
-    const exceeded =
-      Buffer.byteLength(outputs[runner].join(" ")) > MAX_OUTPUT_BYTES
-        ? `selection exceeds ${MAX_OUTPUT_BYTES} bytes`
-        : runner === "playwright" &&
-            outputs[runner].length > MAX_PLAYWRIGHT_JOURNEYS
-          ? `selection exceeds ${MAX_PLAYWRIGHT_JOURNEYS} journeys, which ${ITERATIONS} repetitions would not finish in time`
-          : undefined;
-    if (exceeded) {
+    if (Buffer.byteLength(outputs[runner].join(" ")) > MAX_OUTPUT_BYTES) {
       rows.push(
-        `| *(${outputs[runner].length} ${runner} entries)* | ${runner} | ${exceeded}; lane skipped |`,
+        `| *(${outputs[runner].length} ${runner} entries)* | ${runner} | selection exceeds ${MAX_OUTPUT_BYTES} bytes; lane skipped |`,
       );
       outputs[runner] = [];
     }
@@ -784,21 +567,14 @@ function select(base = "HEAD^1", head = "HEAD") {
       "",
       ...(rows.length
         ? ["| File | Runner | Selection |", "| --- | --- | --- |", ...rows]
-        : [
-            "No Rust, desktop Tauri, node:test, Playwright or Flutter test files changed.",
-          ]),
+        : ["No Rust or Flutter test files changed."]),
       "",
       "",
     ].join("\n"),
   );
-  const shards = playwrightShards(outputs.playwright.length);
-  const text = [
-    ...Object.entries(outputs).map(
-      ([key, entries]) => `${key}=${entries.join(" ")}\n`,
-    ),
-    `playwright_shards=${JSON.stringify(Array.from({ length: shards }, (_, i) => i + 1))}\n`,
-    `playwright_shard_total=${shards}\n`,
-  ].join("");
+  const text = Object.entries(outputs)
+    .map(([key, entries]) => `${key}=${entries.join(" ")}\n`)
+    .join("");
   if (process.env.GITHUB_OUTPUT)
     appendFileSync(process.env.GITHUB_OUTPUT, text);
   else process.stdout.write(text);
@@ -900,17 +676,14 @@ export function chooseRust(tests, candidates) {
 // connection`; merging tokens instead gave `--test codec connection`, which
 // nextest reads as a test-name filter that matches nothing), the feature
 // graphs to list them in with each graph's full arguments, and the tests to
-// list in those targets. Every entry must belong to one workspace, whose
-// runner is returned with the groups.
+// list in those targets.
 export function rustGroups(entries) {
   const groups = new Map();
-  const workspaces = new Set();
   for (const entry of entries) {
     const [, file, test] = /^([^:]+\.rs)::((?:\w+::)*\w+)$/.exec(entry) ?? [];
     const place = file && rustFile(file);
     if (!place)
       throw new Error(`rust entry must be <file>::<module::test>: ${entry}`);
-    workspaces.add(place.runner);
     const crate = cratePackage(file);
     const group = groups.get(crate) ?? { targets: new Map(), tests: [] };
     const targets = rustTarget(file);
@@ -923,28 +696,23 @@ export function rustGroups(entries) {
     });
     groups.set(crate, group);
   }
-  if (workspaces.size > 1)
-    throw new Error(
-      `rust entries span workspaces: ${[...workspaces].join(", ")}`,
-    );
   for (const [crate, group] of groups) {
     group.args = [
       "-p",
       crate,
       ...(group.every ? [] : [...group.targets.values()].flat()),
     ];
-    // A lib-only graph applies only where the selection can reach the lib.
-    group.graphs = (rustFeatureGraphs[crate] ?? [{ features: [] }])
-      .filter(({ lib }) => !lib || group.every || group.targets.has("--lib"))
-      .map(({ features, lib }) => ({
+    group.graphs = (rustFeatureGraphs[crate] ?? [{ features: [] }]).map(
+      ({ features }) => ({
         features,
         args: [
-          ...(lib ? ["-p", crate, "--lib"] : group.args),
+          ...group.args,
           ...(features.length ? ["--features", features.join(",")] : []),
         ],
-      }));
+      }),
+    );
   }
-  return { groups, runner: [...workspaces][0] };
+  return groups;
 }
 
 // nextest has no repeat flag, so run the selection once per iteration under
@@ -960,14 +728,10 @@ export function rustGroups(entries) {
 // keyed per graph, so one graph's pass cannot stand for another's failure.
 // An entry standing only for ignored or infrastructure-backed tests is
 // excluded; one no graph lists (a test behind a cfg the regular lanes do not
-// build here) fails the lane rather than passing unrepeated. The Tauri
-// workspace is addressed by its manifest; the root one is cargo's default.
+// build here) fails the lane rather than passing unrepeated.
 function repeatRust(entries, iterations) {
-  const { groups, runner } = rustGroups(entries);
-  const title =
-    runner === "rust" ? "Flake check (Rust)" : "Flake check (Desktop Tauri)";
-  const manifest = rustWorkspaces[runner];
-  const cargoArgs = runner === "rust" ? [] : ["--manifest-path", manifest];
+  const groups = rustGroups(entries);
+  const title = "Flake check (Rust)";
   const invocations = [];
   const unlisted = [];
   for (const [crate, group] of groups) {
@@ -976,7 +740,6 @@ function repeatRust(entries, iterations) {
       const listed = run("cargo", [
         "nextest",
         "list",
-        ...cargoArgs,
         ...args,
         "--message-format",
         "json",
@@ -1039,12 +802,8 @@ function repeatRust(entries, iterations) {
   }
   // nextest keeps its store under the workspace root's target/nextest, not
   // CARGO_TARGET_DIR; the `flake` profile writes its JUnit report there.
-  const junit = path.join(
-    root,
-    path.dirname(manifest),
-    "target/nextest/flake/junit.xml",
-  );
-  const dir = resultsDir(runner);
+  const junit = path.join(root, "target/nextest/flake/junit.xml");
+  const dir = resultsDir("rust");
   const runs = [];
   for (let i = 1; i <= iterations; i += 1) {
     const statuses = new Map();
@@ -1053,16 +812,7 @@ function repeatRust(entries, iterations) {
       rmSync(junit, { force: true });
       const result = run(
         "cargo",
-        [
-          "nextest",
-          "run",
-          ...cargoArgs,
-          "--profile",
-          "flake",
-          ...args,
-          "-E",
-          filterset,
-        ],
+        ["nextest", "run", "--profile", "flake", ...args, "-E", filterset],
         { stdio: "inherit" },
       );
       ok &&= result.status === 0;
@@ -1080,34 +830,6 @@ function repeatRust(entries, iterations) {
   }
   report(title, runs);
   if (unlisted.length) process.exitCode = 1;
-}
-
-// node:test has no repeat flag either. Each file runs alone, so a failure is
-// attributed to its file; the regular lane's cross-file concurrency is not
-// reproduced here.
-function repeatNode(files, iterations) {
-  const dir = resultsDir("node");
-  const runs = [];
-  for (let i = 1; i <= iterations; i += 1) {
-    const statuses = new Map();
-    for (const file of files) {
-      const path = file.replace(/^desktop\//, "");
-      const result = run(process.execPath, [...nodeTestArgs(path), path], {
-        cwd: `${root}desktop`,
-      });
-      process.stdout.write(result.stdout);
-      process.stderr.write(result.stderr);
-      appendFileSync(
-        `${dir}/iter-${i}.log`,
-        `# ${file}\n${result.stdout}${result.stderr}\n`,
-      );
-      statuses.set(file, result.status === 0 ? "passed" : "failed");
-    }
-    const ok = [...statuses.values()].every((status) => status === "passed");
-    runs.push({ ok, statuses });
-    progress(i, iterations, ok);
-  }
-  report("Flake check (node:test)", runs);
 }
 
 // Per-test statuses of a `dart test` JSON report (one event per line), keyed
@@ -1178,61 +900,10 @@ function repeatDart(files, iterations) {
   report("Flake check (Flutter)", runs);
 }
 
-// Playwright's JSON report lists a `--repeat-each` journey once per
-// repetition, in order; `unexpected` is a failed repetition since the lane
-// runs with --retries=0.
-export function playwrightRepetitions(report) {
-  const repetitions = new Map();
-  const collect = (suites) => {
-    for (const suite of suites) {
-      for (const spec of suite.specs ?? []) {
-        const key = `${spec.file}:${spec.line} › ${spec.title}`;
-        const statuses = repetitions.get(key) ?? [];
-        for (const test of spec.tests ?? [])
-          statuses.push(
-            { expected: "passed", unexpected: "failed", flaky: "failed" }[
-              test.status
-            ] ?? "skipped",
-          );
-        repetitions.set(key, statuses);
-      }
-      collect(suite.suites ?? []);
-    }
-  };
-  collect(report.suites ?? []);
-  return repetitions;
-}
-
-function playwrightSummary(reportPath, title) {
-  const repetitions = playwrightRepetitions(
-    JSON.parse(readFileSync(reportPath, "utf8")),
-  );
-  const iterations = Math.max(
-    0,
-    ...[...repetitions.values()].map((s) => s.length),
-  );
-  const runs = Array.from({ length: iterations }, (_, i) => ({
-    ok: [...repetitions.values()].every((statuses) => statuses[i] !== "failed"),
-    statuses: new Map(
-      [...repetitions].map(([test, statuses]) => [test, statuses[i]]),
-    ),
-  }));
-  report(title, runs);
-  // Playwright already failed its own step; the summary only reports.
-  process.exitCode = 0;
-}
-
 function main() {
   const [command, ...args] = process.argv.slice(2);
   if (command === "select" && args.length <= 2) return select(...args);
-  if (command === "playwright-summary" && args.length === 2)
-    return playwrightSummary(...args);
-  const repeat = {
-    rust: repeatRust,
-    tauri: repeatRust,
-    node: repeatNode,
-    dart: repeatDart,
-  }[command];
+  const repeat = { rust: repeatRust, dart: repeatDart }[command];
   if (repeat) {
     const iterations = Number(
       args
@@ -1244,7 +915,7 @@ function main() {
       return repeat(entries, iterations);
   }
   throw new Error(
-    "usage: flake-check select [base] [head] | rust|tauri|node|dart [--iterations=N] <entry…> | playwright-summary <report.json> <title>",
+    "usage: flake-check select [base] [head] | rust|dart [--iterations=N] <entry…>",
   );
 }
 

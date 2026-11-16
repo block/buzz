@@ -1,9 +1,0 @@
-{
-  "extends": ["../biome.json"],
-  "overrides": [
-    {
-      "includes": ["src-tauri/tests/fixtures/nip_fi/*.json"],
-      "formatter": { "enabled": false }
-    }
-  ]
-}

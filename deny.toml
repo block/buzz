@@ -30,7 +30,7 @@ ignore = [
     # unsafe-libyaml 0.2.11 — unmaintained (repository archived 2024-03-25), not a
     # vulnerability report. Transitive dep: serde_yaml → unsafe-libyaml. The serde_yaml_ng
     # fork uses the same crate, so removing it means migrating YAML parsing in
-    # buzz-agent, buzz-persona, buzz-relay, buzz-workflow and desktop.
+    # buzz-agent, buzz-persona, buzz-relay and buzz-workflow.
     { id = "RUSTSEC-2024-0449", reason = "transitive via serde_yaml; unmaintained, not vulnerable; removal needs a YAML parser migration" },
     # NetEQ =0.8.3 declares ringbuf but its published Rust sources never use it,
     # so Consumer::skip/clear and their panic-unsafe Drop path are unreachable.
@@ -85,7 +85,7 @@ allow = [
     # minicbor's permissive, OSI-approved license. Used for strict App Attest
     # assertion CBOR parsing and also transitively by appattest.
     "BlueOak-1.0.0",
-    # bzip2/libbzip2's permissive BSD-like license. New via desktop zip/bzip2
+    # bzip2/libbzip2's permissive BSD-like license. Reached via zip/bzip2
     # transitive deps; compatible with Apache-2.0 distribution.
     "bzip2-1.0.6",
 ]
@@ -124,11 +124,6 @@ license-files = []
 [[licenses.clarify]]
 crate = "mesh-mixture-of-agents"
 expression = "MIT OR Apache-2.0"
-license-files = []
-
-[[licenses.clarify]]
-crate = "buzz-desktop"
-expression = "Apache-2.0"
 license-files = []
 
 [licenses.private]

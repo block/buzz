@@ -321,8 +321,7 @@ mod tests {
     const CAROL: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
     const EVE: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
-    /// Recorded sequences shared with `tests/huddle_interop.mjs`, which replays
-    /// the same events through desktop's own tracker.
+    /// Recorded huddle event sequences, kept as a cross-client interop fixture.
     const SEQUENCES: &str = include_str!("../../tests/fixtures/huddle_sequences.json");
 
     fn event(
