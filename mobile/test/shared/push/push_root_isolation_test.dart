@@ -11,6 +11,7 @@ import 'package:buzz/features/settings/settings_page.dart';
 import 'package:buzz/shared/push/push_setup_recovery.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../community/community_storage_test.dart' show FakeSecureStorage;
 import 'package:buzz/features/age_gate/age_signal_provider.dart';
 import 'package:buzz/features/home/home_page.dart';
@@ -34,6 +35,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   final nativeChannels = <MethodChannel>[];
   setUp(() {
+    FlutterSecureStorage.setMockInitialValues({});
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     messenger.setMockMethodCallHandler(SystemChannels.platform_views, (

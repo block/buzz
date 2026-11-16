@@ -344,6 +344,7 @@ class PresenceTestRelay extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String)? onClosed,
     required void Function(RelaySubscriptionStatus) onStatusChanged,
+    bool resumeSince = true,
   }) async {
     if (!filter.kinds.contains(EventKind.presenceUpdate)) {
       onStatusChanged(RelaySubscriptionStatus.ready);
