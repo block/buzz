@@ -10,7 +10,12 @@ use std::io::Write;
 use uuid::Uuid;
 
 mod operations;
-use operations::{Operation, OPERATIONS};
+mod scope;
+use operations::{Operation, GLOBAL_OPERATIONS, OPERATIONS};
+pub use scope::{AccountCommunityScope, AccountScope};
+
+#[cfg(test)]
+mod postgres_tests;
 
 /// Scope and output bounds for the offline account command.
 pub struct AccountBatchOptions {
@@ -22,6 +27,36 @@ pub struct AccountBatchOptions {
     pub batch_size: u16,
     /// Maximum row operations in one invocation, 1..=1,000,000.
     pub max_items: u32,
+}
+
+/// Explicit deployment-wide cleanup; never implied by a community invocation.
+pub struct GlobalAccountBatchOptions {
+    /// Exactly one human or agent key, hex or npub.
+    pub pubkey: String,
+    /// Operator performing the offline action, recorded for role revocations.
+    pub actor: String,
+    /// Maximum rows per transaction, 1..=100.
+    pub batch_size: u16,
+    /// Maximum row operations per invocation, 1..=1,000,000.
+    pub max_items: u32,
+}
+
+struct Options {
+    community: Option<Uuid>,
+    pubkey: String,
+    actor: Option<String>,
+    batch_size: u16,
+    max_items: u32,
+}
+
+impl Options {
+    fn scope_sql(&self) -> &'static str {
+        if self.community.is_some() {
+            "community_id=$1"
+        } else {
+            "$1::uuid IS NULL"
+        }
+    }
 }
 
 /// Outcome limited to the explicitly supported account-table operations.
@@ -36,7 +71,7 @@ pub struct AccountBatchSummary {
     pub batches: u32,
     /// False if the invocation limit stopped before all supported operations.
     pub supported_scope_exhausted: bool,
-    /// Always false: archive/replay, moderation, devices and global work remain.
+    /// Always false: profile, shared-state, device and access verification remain.
     pub account_erasure_complete: bool,
 }
 
@@ -51,6 +86,39 @@ impl UserDeletionStore {
         stage: Option<(&crate::entity_deletion::EntityLease, Uuid)>,
     ) -> Result<AccountBatchSummary> {
         let options = validated(options)?;
+        self.run_batches(&options, OPERATIONS, mode, writer, stage)
+            .await
+    }
+
+    /// Clean global listeners, feedback and DB roles for one explicitly selected
+    /// key. The caller supplies the audit actor. No workflow stage can imply this
+    /// deployment-wide authority. Config-backed roles must be removed separately.
+    pub async fn run_global_account_batches(
+        &self,
+        options: &GlobalAccountBatchOptions,
+        mode: ExecutionMode,
+        writer: &mut impl Write,
+    ) -> Result<AccountBatchSummary> {
+        let options = Options {
+            community: None,
+            pubkey: normalize_user_deletion_pubkey(&options.pubkey)?,
+            actor: Some(normalize_user_deletion_pubkey(&options.actor)?),
+            batch_size: options.batch_size,
+            max_items: options.max_items,
+        };
+        bounds(options.batch_size, options.max_items)?;
+        self.run_batches(&options, GLOBAL_OPERATIONS, mode, writer, None)
+            .await
+    }
+
+    async fn run_batches(
+        &self,
+        options: &Options,
+        operations: &[Operation],
+        mode: ExecutionMode,
+        writer: &mut impl Write,
+        stage: Option<(&crate::entity_deletion::EntityLease, Uuid)>,
+    ) -> Result<AccountBatchSummary> {
         let delete = mode == ExecutionMode::Delete;
         // Close on return/cancellation rather than leaking session timeouts to the pool.
         let mut conn = self.pool.acquire().await?.detach();
@@ -69,14 +137,17 @@ impl UserDeletionStore {
             account_erasure_complete: false,
         };
         if delete {
-            start(&mut conn, &options, writer, true).await?;
-            for op in OPERATIONS {
+            start(&mut conn, options, writer, true).await?;
+            for op in operations {
                 loop {
                     let mut tx = conn.begin().await?;
                     if let Some((lease, id)) = stage {
-                        validate_stage(&mut tx, lease, id, &options).await?;
+                        validate_stage(&mut tx, lease, id, options).await?;
                     }
-                    let keys = select(&mut tx, &options, op, None, true, &summary).await?;
+                    if op.table == "relay_operators" {
+                        crate::store::relay_operators::acquire_roster_lock(&mut tx).await?;
+                    }
+                    let keys = select(&mut tx, options, op, None, true, &summary).await?;
                     if keys.is_empty() {
                         tx.commit().await?;
                         break;
@@ -86,10 +157,10 @@ impl UserDeletionStore {
                         tx.rollback().await?;
                         break;
                     }
-                    batch(writer, &options, op, &keys, &summary)?;
-                    mutate(&mut tx, &options, op, &keys).await?;
+                    batch(writer, options, op, &keys, &summary)?;
+                    mutate(&mut tx, options, op, &keys).await?;
                     if let Some((lease, id)) = stage {
-                        validate_stage(&mut tx, lease, id, &options).await?;
+                        validate_stage(&mut tx, lease, id, options).await?;
                     }
                     tx.commit().await?;
                     summary.items += keys.len() as u32;
@@ -106,8 +177,8 @@ impl UserDeletionStore {
             }
             // Independent absence checks; never infer completion from counters.
             if summary.supported_scope_exhausted {
-                for op in OPERATIONS {
-                    if !select(&mut conn, &options, op, None, false, &summary)
+                for op in operations {
+                    if !select(&mut conn, options, op, None, false, &summary)
                         .await?
                         .is_empty()
                     {
@@ -120,12 +191,12 @@ impl UserDeletionStore {
             sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
                 .execute(&mut *tx)
                 .await?;
-            start(&mut tx, &options, writer, false).await?;
-            for op in OPERATIONS {
+            start(&mut tx, options, writer, false).await?;
+            for op in operations {
                 let mut cursor = None;
                 loop {
                     let keys =
-                        select(&mut tx, &options, op, cursor.as_ref(), false, &summary).await?;
+                        select(&mut tx, options, op, cursor.as_ref(), false, &summary).await?;
                     if keys.is_empty() {
                         break;
                     }
@@ -133,7 +204,7 @@ impl UserDeletionStore {
                         summary.supported_scope_exhausted = false;
                         break;
                     }
-                    batch(writer, &options, op, &keys, &summary)?;
+                    batch(writer, options, op, &keys, &summary)?;
                     cursor = keys.last().cloned();
                     summary.items += keys.len() as u32;
                     summary.batches += 1;
@@ -150,14 +221,20 @@ impl UserDeletionStore {
     }
 }
 
-fn validated(options: &AccountBatchOptions) -> Result<AccountBatchOptions> {
-    if !(1..=100).contains(&options.batch_size) || !(1..=1_000_000).contains(&options.max_items) {
+fn bounds(batch_size: u16, max_items: u32) -> Result<()> {
+    if !(1..=100).contains(&batch_size) || !(1..=1_000_000).contains(&max_items) {
         return Err(invalid(
             "batch-size must be 1..100 and max-items 1..1000000",
         ));
     }
-    Ok(AccountBatchOptions {
-        community: options.community,
+    Ok(())
+}
+
+fn validated(options: &AccountBatchOptions) -> Result<Options> {
+    bounds(options.batch_size, options.max_items)?;
+    Ok(Options {
+        community: Some(options.community),
+        actor: None,
         pubkey: normalize_user_deletion_pubkey(&options.pubkey)?,
         batch_size: options.batch_size,
         max_items: options.max_items,
@@ -166,16 +243,19 @@ fn validated(options: &AccountBatchOptions) -> Result<AccountBatchOptions> {
 
 async fn start(
     conn: &mut PgConnection,
-    options: &AccountBatchOptions,
+    options: &Options,
     writer: &mut impl Write,
     delete: bool,
 ) -> Result<()> {
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM communities WHERE id=$1)")
-        .bind(options.community)
-        .fetch_one(&mut *conn)
-        .await?;
-    if !exists {
-        return Err(invalid("community does not exist"));
+    if let Some(community) = options.community {
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM communities WHERE id=$1)")
+                .bind(community)
+                .fetch_one(&mut *conn)
+                .await?;
+        if !exists {
+            return Err(invalid("community does not exist"));
+        }
     }
     let (archives, watermarks): (i64,i64) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM archived_identities WHERE community_id=$1 AND (pubkey=$2 OR actor=$2)),
@@ -185,17 +265,23 @@ async fn start(
         writer,
         &json!({"record":"account_batches_start","read_only":!delete,"community":options.community,
         "pubkey":options.pubkey,"batch_size":options.batch_size,"max_items":options.max_items,
-        "deferred":{"archived_identities":archives,"parameterized_event_watermarks":watermarks},
-        "unsupported":["archive visibility and required actor erasure","replay watermark removal",
-            "moderation and audit erasure","global account records and device attribution",
-            "cache and live-session invalidation"],
+        "scope":if options.community.is_some() {"community"} else {"deployment_global"},
+        "actor":options.actor,
+        "deferred":{"archived_identities":archives},
+        "retained":{"parameterized_event_watermarks":watermarks,
+            "policy":["replay protection and deletion evidence","shared creator and repository routing references",
+                "moderation, enforcement and audit history","shared or uncertain device registrations",
+                "shared signed membership snapshots"]},
+        "unsupported":["profile cleanup","workflow frozen user-and-agent scope integration",
+            "shared membership snapshot reconciliation","device ownership attribution",
+            "repository and config-backed authority revocation","cache and live-session invalidation"],
         "account_erasure_complete":false}),
     )
 }
 
 async fn select(
     conn: &mut PgConnection,
-    options: &AccountBatchOptions,
+    options: &Options,
     op: &Operation,
     cursor: Option<&Value>,
     lock: bool,
@@ -205,7 +291,7 @@ async fn select(
         u32::from(options.batch_size).min(options.max_items.saturating_sub(summary.items).max(1));
     let lock = if lock { " FOR UPDATE" } else { "" };
     let (order, after) = op.pagination();
-    let sql = format!("SELECT {} FROM {} WHERE community_id=$1 AND ({}) AND ($3::jsonb IS NULL OR {after}) ORDER BY {order} LIMIT $4{lock}", op.key, op.table, op.selector);
+    let sql = format!("SELECT {} FROM {} WHERE {} AND ({}) AND ($3::jsonb IS NULL OR {after}) ORDER BY {order} LIMIT $4{lock}", op.key, op.table, options.scope_sql(), op.selector);
     // All interpolated fragments come exclusively from OPERATIONS.
     Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
         .bind(options.community)
@@ -217,18 +303,45 @@ async fn select(
 }
 
 async fn mutate(
-    conn: &mut PgConnection,
-    options: &AccountBatchOptions,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    options: &Options,
     op: &Operation,
     keys: &[Value],
 ) -> Result<()> {
+    if op.table == "relay_operators" {
+        let target = hex::decode(&options.pubkey).map_err(|_| invalid("invalid target"))?;
+        let actor = hex::decode(
+            options
+                .actor
+                .as_deref()
+                .ok_or_else(|| invalid("missing audit actor"))?,
+        )
+        .map_err(|_| invalid("invalid actor"))?;
+        // Conservatively require a surviving DB operator: local CLI environment
+        // is not evidence of the configuration on every serving relay.
+        if !crate::store::relay_operators::remove_in_transaction(tx, &target, &actor, false).await?
+        {
+            return Err(invalid("selected role changed; current batch rolled back"));
+        }
+        return Ok(());
+    }
+    let conn = &mut **tx;
+    if op.table == "events" {
+        // Migration-created NIP-RS guard requires this supported opt-in. The
+        // desired-state schema no longer installs the legacy guard.
+        sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete','on',true)")
+            .execute(&mut *conn)
+            .await?;
+    }
     let verb = match op.update {
         Some(update) => format!("UPDATE {} SET {update}", op.table),
         None => format!("DELETE FROM {}", op.table),
     };
     let sql = format!(
-        "{verb} WHERE community_id=$1 AND ({}) AND ({})",
-        op.selector, op.identity
+        "{verb} WHERE {} AND ({}) AND ({})",
+        options.scope_sql(),
+        op.selector,
+        op.identity
     );
     for key in keys {
         let changed = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
@@ -247,7 +360,7 @@ async fn mutate(
 
 fn batch(
     writer: &mut impl Write,
-    options: &AccountBatchOptions,
+    options: &Options,
     op: &Operation,
     keys: &[Value],
     summary: &AccountBatchSummary,
@@ -279,13 +392,13 @@ async fn validate_stage(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     lease: &crate::entity_deletion::EntityLease,
     stage_id: Uuid,
-    options: &AccountBatchOptions,
+    options: &Options,
 ) -> Result<()> {
     use crate::store::entity_deletion::{lock_owned, validate_approved_inventory};
     let request = lock_owned(tx, lease).await?;
     validate_approved_inventory(tx, &request).await?;
-    let inputs = super::UserDeletionInventory::read(&request)?
-        .inputs(&request.target, Some(options.community))?;
+    let inputs =
+        super::UserDeletionInventory::read(&request)?.inputs(&request.target, options.community)?;
     if request.status != "running"
         || normalize_user_deletion_pubkey(&request.target)? != options.pubkey
     {

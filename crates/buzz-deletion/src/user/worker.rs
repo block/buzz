@@ -154,6 +154,10 @@ async fn run_stage_with_heartbeat(
 mod postgres_tests;
 
 #[cfg(test)]
+#[path = "account_worker_postgres_tests.rs"]
+mod account_postgres_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

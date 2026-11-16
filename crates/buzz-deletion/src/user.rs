@@ -1,7 +1,7 @@
 //! User inventory, offline account cleanup and persisted deletion workflows.
 
 use anyhow::Result;
-use buzz_db::user_deletion::{account_batches::AccountBatchOptions, ExecutionMode};
+use buzz_db::user_deletion::ExecutionMode;
 use clap::Subcommand;
 use uuid::Uuid;
 
@@ -10,6 +10,12 @@ use uuid::Uuid;
 pub enum Command {
     /// Print account-table batches for one community; --delete executes offline.
     AccountBatches(account_batches::Args),
+    /// Capture frozen human/agent inputs across stored communities, read-only.
+    AccountScope {
+        /// Human public key, hex or npub.
+        #[arg(long, value_parser = inventory::parse_subject)]
+        pubkey: String,
+    },
     /// Print real current memberships as JSON; does not save or execute a request.
     Inventory {
         /// Demo fixture (default), hex public key, or npub. Current memberships only.
@@ -105,25 +111,17 @@ pub async fn run(command: Command) -> Result<i32> {
             "user_account_batches",
         )
         .await?;
-        let summary = account_batches::run(
-            &db,
-            &AccountBatchOptions {
-                community: args.community,
-                pubkey: args.pubkey,
-                batch_size: args.batch_size,
-                max_items: args.max_items,
-            },
-            mode,
-            None,
-        )
-        .await?;
+        let summary = account_batches::run_command(&db, args, mode).await?;
         return Ok(if summary.supported_scope_exhausted {
             0
         } else {
             2
         });
     }
-    let db = if matches!(command, Command::Inventory { .. }) {
+    let db = if matches!(
+        command,
+        Command::Inventory { .. } | Command::AccountScope { .. }
+    ) {
         buzz_db::Db::connect_cold_start(
             buzz_db::DbConfig {
                 database_url: crate::required_env("DATABASE_URL")?,
@@ -141,6 +139,13 @@ pub async fn run(command: Command) -> Result<i32> {
     let store = db.entity_deletion_store();
     match command {
         Command::AccountBatches(_) => anyhow::bail!("account command dispatched above"),
+        Command::AccountScope { pubkey } => {
+            crate::print_json(
+                &db.user_deletion_store()
+                    .generate_account_scope(&pubkey)
+                    .await?,
+            )?;
+        }
         Command::Inventory { pubkey } => {
             crate::print_json(&inventory::generate(&db, &pubkey).await?)?;
         }
