@@ -8,7 +8,9 @@ use buzz_db::event::EventQuery;
 use nostr::{Event, EventBuilder, Keys, Kind, Tag};
 use uuid::Uuid;
 
-use crate::handlers::group_state_postgres_tests::{community, group_state_tags, http_auth, state};
+use crate::handlers::group_state_postgres_tests::{
+    community, group_state_tags, http_auth, req_event_ids, state,
+};
 use crate::handlers::ingest::{ingest_event, IngestError, IngestResult};
 use crate::state::AppState;
 
@@ -58,6 +60,109 @@ async fn roles(
         .collect();
     roles.sort();
     roles
+}
+
+/// Generic private DMs remain supported, with or without an explicit
+/// visibility. An explicit open DM is refused without durable side effects.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn dm_visibility_create_requests_are_atomic() {
+    let state = state().await;
+    let tenant = community(&state, "dm-visibility-create").await;
+    let (creator, participant, outsider) = (Keys::generate(), Keys::generate(), Keys::generate());
+    for visibility in [Some("open"), None, Some("private")] {
+        let channel_id = Uuid::new_v4();
+        let mut tags = vec![
+            Tag::parse(["h", &channel_id.to_string()]).unwrap(),
+            Tag::parse(["name", "Direct message"]).unwrap(),
+            Tag::parse(["channel_type", "dm"]).unwrap(),
+            Tag::parse(["p", &participant.public_key().to_hex()]).unwrap(),
+        ];
+        if let Some(visibility) = visibility {
+            tags.push(Tag::parse(["visibility", visibility]).unwrap());
+        }
+        let event = EventBuilder::new(Kind::Custom(9007), "")
+            .tags(tags)
+            .sign_with_keys(&creator)
+            .expect("sign DM creation");
+        let result = ingest(&state, &tenant, event, &creator).await;
+        if visibility == Some("open") {
+            let error = result.err().expect("open DM must be refused");
+            assert!(
+                matches!(error, IngestError::Rejected(ref reason)
+                if reason == "invalid: DMs must be private"),
+                "{error:?}"
+            );
+            let counts: (i64, i64, i64) = sqlx::query_as(
+                "SELECT (SELECT count(*) FROM channels WHERE community_id=$1), \
+                        (SELECT count(*) FROM channel_members WHERE community_id=$1), \
+                        (SELECT count(*) FROM events WHERE community_id=$1)",
+            )
+            .bind(tenant.community().as_uuid())
+            .fetch_one(state.db.pool())
+            .await
+            .expect("count refused create effects");
+            assert_eq!(
+                counts,
+                (0, 0, 0),
+                "no channel, roster, event or notice survives"
+            );
+            continue;
+        }
+        assert!(result.expect("private DM creation").accepted);
+        let channel = state
+            .db
+            .get_channel(tenant.community(), channel_id)
+            .await
+            .expect("DM");
+        assert_eq!(channel.channel_type, "dm");
+        assert_eq!(channel.visibility, "private");
+        assert_eq!(roles(&state, &tenant, channel_id).await.len(), 2);
+        let metadata = group_state_tags(&state, &tenant, channel_id, 39000).await;
+        assert!(metadata.iter().any(|tag| tag[0] == "private"));
+        assert!(!metadata.iter().any(|tag| tag[0] == "public"));
+
+        let message = message_event(&participant, channel_id);
+        let id = message.id.to_hex();
+        assert!(
+            ingest(&state, &tenant, message, &participant)
+                .await
+                .expect("participant posts")
+                .accepted
+        );
+        for reader in [&creator, &participant] {
+            let ids = req_event_ids(
+                &state,
+                &tenant,
+                reader,
+                serde_json::json!({"kinds": [9], "#h": [channel_id.to_string()]}),
+            )
+            .await;
+            assert!(ids.contains(&id), "participants can read their DM");
+        }
+        let ids = req_event_ids(
+            &state,
+            &tenant,
+            &outsider,
+            serde_json::json!({"kinds": [9, 39000, 39001, 39002]}),
+        )
+        .await;
+        assert!(
+            ids.is_empty(),
+            "global history does not expose DMs or their rosters"
+        );
+        assert!(
+            ingest(
+                &state,
+                &tenant,
+                message_event(&outsider, channel_id),
+                &outsider
+            )
+            .await
+            .is_err(),
+            "an outsider cannot post to a DM"
+        );
+    }
 }
 
 /// The `p` tags join in the create's transaction, the roster lists them, and

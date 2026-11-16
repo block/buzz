@@ -120,6 +120,7 @@ pub async fn create_channel(
     labels: &[String],
     unlisted: bool,
 ) -> Result<ChannelRecord> {
+    validate_channel_visibility(channel_type.as_str(), visibility.as_str())?;
     if created_by.len() != 32 {
         return Err(DbError::InvalidData(format!(
             "pubkey must be 32 bytes, got {}",
@@ -367,6 +368,7 @@ async fn insert_channel_rows(
         unlisted,
         members,
     } = channel;
+    validate_channel_visibility(channel_type.as_str(), visibility.as_str())?;
     let community_id = tx.community();
     if created_by.len() != 32 {
         return Err(DbError::InvalidData(format!(
@@ -458,6 +460,14 @@ async fn insert_channel_rows(
     }
 
     Ok(was_created)
+}
+
+fn validate_channel_visibility(channel_type: &str, visibility: &str) -> Result<()> {
+    if channel_type == ChannelType::Dm.as_str() && visibility != ChannelVisibility::Private.as_str()
+    {
+        return Err(DbError::AccessDenied("DMs must be private".into()));
+    }
+    Ok(())
 }
 
 /// The unique index (migration 0083) that keeps two channels the channel
@@ -1168,6 +1178,7 @@ pub(crate) struct ChannelSettingsWriter<'tx> {
     admission: bool,
     ttl: TtlLock,
     previous_visibility: String,
+    channel_type: String,
     archived: bool,
     listed: bool,
 }
@@ -1278,9 +1289,9 @@ async fn lock_channel_row(
     // `FOR NO KEY UPDATE`, like a huddle join: it orders this write against
     // every other settings write and a huddle join, but not against the
     // `KEY SHARE` lock that a membership INSERT takes for its foreign key.
-    let (previous_visibility, archived, listed): (String, bool, bool) =
+    let (previous_visibility, channel_type, archived, listed): (String, String, bool, bool) =
         sqlx::query_as(sqlx::AssertSqlSafe(format!(
-            "SELECT visibility::text, archived_at IS NOT NULL, {LISTED_CHANNEL_SQL} FROM channels \
+            "SELECT visibility::text, channel_type::text, archived_at IS NOT NULL, {LISTED_CHANNEL_SQL} FROM channels \
              WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL FOR NO KEY UPDATE"
         )))
         .bind(community_id.as_uuid())
@@ -1294,6 +1305,7 @@ async fn lock_channel_row(
         admission,
         ttl,
         previous_visibility,
+        channel_type,
         archived,
         listed,
     })
@@ -1306,6 +1318,9 @@ async fn update_channel_on(
     mut updates: ChannelUpdate,
 ) -> Result<()> {
     w.check_covers(&updates)?;
+    if let Some(visibility) = updates.visibility.as_deref() {
+        validate_channel_visibility(&w.channel_type, visibility)?;
+    }
     let channel_id = w.channel_id;
     let tx = &mut *w.tx;
     let community_id = tx.community();
@@ -2759,6 +2774,130 @@ mod postgres_tests {
             labels: &[],
             unlisted: false,
             members,
+        }
+    }
+
+    /// Every generic creator and the shared settings writer enforce DM
+    /// privacy. Other channel types retain both visibility settings.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dm_visibility_is_enforced_by_channel_writers() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let creator = Keys::generate();
+        let creator_bytes = creator.public_key().to_bytes();
+        let counts = || async {
+            sqlx::query_as::<_, (i64, i64, i64)>(
+                "SELECT (SELECT count(*) FROM channels WHERE community_id=$1), \
+                        (SELECT count(*) FROM channel_members WHERE community_id=$1), \
+                        (SELECT count(*) FROM events WHERE community_id=$1)",
+            )
+            .bind(community.as_uuid())
+            .fetch_one(&pool)
+            .await
+            .expect("count durable create effects")
+        };
+
+        for channel_type in [
+            ChannelType::Dm,
+            ChannelType::Stream,
+            ChannelType::Forum,
+            ChannelType::Workflow,
+            ChannelType::System,
+        ] {
+            for visibility in [ChannelVisibility::Open, ChannelVisibility::Private] {
+                for writer in ["generated", "supplied", "event"] {
+                    let id = Uuid::new_v4();
+                    let name = format!("visibility-{id}");
+                    let before = counts().await;
+                    let result = match writer {
+                        "generated" => create_channel(
+                            &pool,
+                            community,
+                            &name,
+                            channel_type,
+                            visibility,
+                            None,
+                            &creator_bytes,
+                            None,
+                            &[],
+                            false,
+                        )
+                        .await
+                        .map(|channel| channel.id),
+                        "supplied" => create_channel_with_id(
+                            &pool,
+                            community,
+                            id,
+                            &name,
+                            channel_type,
+                            visibility,
+                            None,
+                            &creator_bytes,
+                            None,
+                            &[],
+                        )
+                        .await
+                        .map(|(channel, created)| {
+                            assert!(created);
+                            channel.id
+                        }),
+                        _ => create_channel_with_event(
+                            &pool,
+                            None,
+                            community,
+                            id,
+                            NewChannel {
+                                name: &name,
+                                channel_type,
+                                visibility,
+                                ..new_channel(&creator_bytes, &[])
+                            },
+                            &create_event(&creator, id),
+                        )
+                        .await
+                        .map(|created| {
+                            assert!(matches!(created, ChannelCreate::Created(_)));
+                            id
+                        }),
+                    };
+                    if channel_type == ChannelType::Dm && visibility == ChannelVisibility::Open {
+                        assert!(
+                            matches!(result, Err(DbError::AccessDenied(ref reason))
+                            if reason == "DMs must be private"),
+                            "{writer}: {result:?}"
+                        );
+                        assert_eq!(counts().await, before, "{writer}: refused create is atomic");
+                        continue;
+                    }
+                    let id = result.expect("supported channel visibility");
+                    for visibility in [ChannelVisibility::Open, ChannelVisibility::Private] {
+                        let before = get_channel(&pool, community, id).await.expect("channel");
+                        let result = update_channel(
+                            &pool,
+                            community,
+                            id,
+                            ChannelUpdate {
+                                description: Some("updated together".into()),
+                                visibility: Some(visibility.as_str().into()),
+                                ..Default::default()
+                            },
+                        )
+                        .await;
+                        if channel_type == ChannelType::Dm && visibility == ChannelVisibility::Open
+                        {
+                            assert!(matches!(result, Err(DbError::AccessDenied(_))));
+                            let after = get_channel(&pool, community, id).await.expect("channel");
+                            assert_eq!(after.visibility, before.visibility);
+                            assert_eq!(after.description, before.description);
+                        } else {
+                            let after = result.expect("supported metadata update");
+                            assert_eq!(after.visibility, visibility.as_str());
+                            assert_eq!(after.description.as_deref(), Some("updated together"));
+                        }
+                    }
+                }
+            }
         }
     }
 

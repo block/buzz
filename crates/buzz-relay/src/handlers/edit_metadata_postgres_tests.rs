@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::handlers::group_state_postgres_tests::{
     community, create_channel, edit_channel, group_state_tags, http_auth, state,
 };
-use crate::handlers::ingest::ingest_event;
+use crate::handlers::ingest::{ingest_event, IngestError};
 
 /// Count stored events of `kind` in `channel_id`.
 async fn count_kind(
@@ -27,6 +27,85 @@ async fn count_kind(
         .await
         .expect("query events")
         .len()
+}
+
+/// The database refuses the final visibility under the settings lock. The
+/// event, other metadata changes, notices and discovery updates roll back.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn dm_visibility_edits_are_atomic() {
+    let state = state().await;
+    let tenant = community(&state, "dm-visibility-edit").await;
+    let owner = Keys::generate();
+    let channel_id = create_channel(
+        &state,
+        &tenant,
+        &owner,
+        &[&["channel_type", "dm"], &["visibility", "private"]],
+    )
+    .await;
+    let before = state
+        .db
+        .get_channel(tenant.community(), channel_id)
+        .await
+        .expect("DM");
+    let metadata_before = group_state_tags(&state, &tenant, channel_id, 39000).await;
+    let notices_before = count_kind(&state, &tenant, channel_id, 40099).await;
+    let event = EventBuilder::new(Kind::Custom(9002), "")
+        .tags([
+            Tag::parse(["h", &channel_id.to_string()]).unwrap(),
+            Tag::parse(["about", "must roll back"]).unwrap(),
+            Tag::parse(["visibility", "private"]).unwrap(),
+            Tag::parse(["visibility", "open"]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .expect("sign metadata edit");
+    for _ in 0..2 {
+        let result = ingest_event(&state, &tenant, event.clone(), http_auth(&owner)).await;
+        let error = result.err().expect("DM cannot become open");
+        assert!(
+            matches!(error, IngestError::Rejected(ref reason)
+            if reason == "invalid: DMs must be private"),
+            "{error:?}"
+        );
+        let after = state
+            .db
+            .get_channel(tenant.community(), channel_id)
+            .await
+            .expect("DM");
+        assert_eq!(after.visibility, "private");
+        assert_eq!(after.description, before.description);
+        assert_eq!(count_kind(&state, &tenant, channel_id, 9002).await, 0);
+        assert_eq!(
+            count_kind(&state, &tenant, channel_id, 40099).await,
+            notices_before
+        );
+        assert_eq!(
+            group_state_tags(&state, &tenant, channel_id, 39000).await,
+            metadata_before
+        );
+    }
+    // Repeated settings retain their established last-value-wins behavior.
+    edit_channel(
+        &state,
+        &tenant,
+        &owner,
+        channel_id,
+        &[
+            &["visibility", "open"],
+            &["visibility", "private"],
+            &["about", "updated privately"],
+        ],
+    )
+    .await
+    .expect("private metadata edit");
+    let after = state
+        .db
+        .get_channel(tenant.community(), channel_id)
+        .await
+        .expect("DM");
+    assert_eq!(after.visibility, "private");
+    assert_eq!(after.description.as_deref(), Some("updated privately"));
 }
 
 /// A change that fails inside the write stores nothing and changes nothing,
