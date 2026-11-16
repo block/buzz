@@ -522,6 +522,45 @@ pub async fn open_dm(
     by_people: bool,
     policy: AgentAddPolicy<'_>,
 ) -> Result<(ChannelRecord, bool)> {
+    // Only an open that asks can decline.
+    open_dm_in(
+        pool,
+        community_id,
+        pubkeys,
+        created_by,
+        by_people,
+        false,
+        policy,
+    )
+    .await?
+    .ok_or_else(|| DbError::InvalidData("the DM did not open".to_string()))
+}
+
+/// [`open_dm`] of its people's DM that grants no one access to an existing
+/// DM's history. When a DM of these people exists and lacks an agent among
+/// `pubkeys`, nothing is written and `None` is returned, so the caller can
+/// say who would see its history before opening it by its people. A new
+/// DM, or one already holding every agent named, is opened as by
+/// [`open_dm`].
+pub async fn open_dm_asking(
+    pool: &PgPool,
+    community_id: CommunityId,
+    pubkeys: &[&[u8]],
+    created_by: &[u8],
+    policy: AgentAddPolicy<'_>,
+) -> Result<Option<(ChannelRecord, bool)>> {
+    open_dm_in(pool, community_id, pubkeys, created_by, true, true, policy).await
+}
+
+async fn open_dm_in(
+    pool: &PgPool,
+    community_id: CommunityId,
+    pubkeys: &[&[u8]],
+    created_by: &[u8],
+    by_people: bool,
+    ask: bool,
+    policy: AgentAddPolicy<'_>,
+) -> Result<Option<(ChannelRecord, bool)>> {
     let mut all: Vec<&[u8]> = vec![created_by];
     for pk in pubkeys {
         if !all.contains(pk) {
@@ -546,34 +585,67 @@ pub async fn open_dm(
         existing = find_dm_by_participants(pool, community_id, &legacy).await?;
     }
     if let Some(existing) = existing {
-        return reopen_dm(pool, community_id, existing, created_by).await;
+        return reopen_dm(
+            pool,
+            community_id,
+            existing,
+            created_by,
+            ask.then_some(&agents),
+        )
+        .await;
     }
 
     let (channel, created) =
         create_dm(pool, community_id, &all, created_by, by_people, policy).await?;
     if created {
-        Ok((channel, true))
+        Ok(Some((channel, true)))
     } else {
         // A concurrent open made it first.
-        reopen_dm(pool, community_id, channel, created_by).await
+        reopen_dm(
+            pool,
+            community_id,
+            channel,
+            created_by,
+            ask.then_some(&agents),
+        )
+        .await
     }
 }
 
 /// Return the existing DM `existing` to `caller`, who must be an active member
-/// of it, and show it in their sidebar again.
+/// of it, and show it in their sidebar again. With `asking`, the agents
+/// named: if any of them is not an active member, nothing is written and
+/// `None` is returned.
 async fn reopen_dm(
     pool: &PgPool,
     community_id: CommunityId,
     existing: ChannelRecord,
     caller: &[u8],
-) -> Result<(ChannelRecord, bool)> {
+    asking: Option<&HashSet<Vec<u8>>>,
+) -> Result<Option<(ChannelRecord, bool)>> {
     if !crate::channel_members::is_member(pool, community_id, existing.id, caller).await? {
         return Err(DbError::AccessDenied(
             "a DM with these people already exists".to_string(),
         ));
     }
+    if let Some(agents) = asking {
+        let named: Vec<Vec<u8>> = agents.iter().cloned().collect();
+        let present: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM channel_members \
+             WHERE community_id = $1 AND channel_id = $2 AND pubkey = ANY($3) \
+               AND removed_at IS NULL",
+        )
+        .bind(community_id.as_uuid())
+        .bind(existing.id)
+        .bind(&named)
+        .fetch_one(pool)
+        .await?;
+        if usize::try_from(present).ok() != Some(named.len()) {
+            return Ok(None);
+        }
+    }
     unhide_dm(pool, community_id, existing.id, caller).await?;
-    Ok((existing, false))
+    Ok(Some((existing, false)))
 }
 
 /// The outcome of [`grow_dm`].
@@ -1178,6 +1250,19 @@ impl Db {
             policy,
         )
         .await
+    }
+
+    /// Open the DM of these people without sharing its history: `None` when
+    /// it exists and lacks a named agent.
+    #[datastore_span(name = "open_dm_asking", system = "postgresql")]
+    pub async fn open_dm_asking(
+        &self,
+        community_id: CommunityId,
+        pubkeys: &[&[u8]],
+        created_by: &[u8],
+        policy: AgentAddPolicy<'_>,
+    ) -> Result<Option<(ChannelRecord, bool)>> {
+        crate::dm::open_dm_asking(&self.pool, community_id, pubkeys, created_by, policy).await
     }
 
     /// Add members to a DM in place, keeping its history.

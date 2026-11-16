@@ -1569,12 +1569,11 @@ async fn asking_starts_a_new_dm_for_a_person_added_to_a_dm_of_one_person() {
     assert_eq!(members(&state, &tenant, target).await, set_of(&[&a, &c]));
 }
 
-/// An agent cannot ask either, and only adds take `ask`.
-/// Mutations: let agents ask → the agent's add is answered → RED; accept
-/// `ask` on kind:41010 → the open succeeds → RED.
+/// An agent cannot ask, on an add or an open.
+/// Mutation: let agents ask → the agent's add or open is answered → RED.
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn only_people_ask_and_only_when_adding() {
+async fn only_people_ask() {
     let state = state().await;
     let tenant = community(&state, "dm-ask-who").await;
     let (a, b, c, agent) = (
@@ -1590,12 +1589,171 @@ async fn only_people_ask_and_only_when_adding() {
         .expect("add agent");
 
     rejected(ask(&state, &tenant, &agent, dm, &[&c]).await, "only people");
-    let tags = vec![
-        vec!["p".into(), hex(&b)],
-        vec!["history".into(), "ask".into()],
-    ];
     rejected(
-        submit(&state, &tenant, &a, 41010, tags).await.map(|_| ()),
-        "history",
+        open_asking(&state, &tenant, &agent, &[&a, &b]).await,
+        "only people",
+    );
+}
+
+/// Opens a DM with `others` tagged `["history", "ask"]`.
+async fn open_asking(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    actor: &Keys,
+    others: &[&Keys],
+) -> Result<(Uuid, bool), IngestError> {
+    let mut tags: Vec<Vec<String>> = others.iter().map(|k| vec!["p".into(), hex(k)]).collect();
+    tags.push(vec!["history".into(), "ask".into()]);
+    submit(state, tenant, actor, 41010, tags)
+        .await
+        .map(|r| response_channel(&r))
+}
+
+/// Asking, an open that would add a named agent to the DM of these people is
+/// refused with the exact reason and writes nothing: the agent does not join,
+/// the DM stays hidden, and the refused command is not remembered, so the same
+/// event is refused again. Sent again with `include`, the agent joins.
+/// Mutations: open as with `include` → the agent joins → RED; reopen before
+/// checking → the DM is shown again → RED; commit the command before refusing
+/// → the second send is a duplicate → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn asking_refuses_an_open_that_adds_an_agent_and_writes_nothing() {
+    let state = state().await;
+    let tenant = community(&state, "dm-ask-open").await;
+    let (a, b, agent) = (Keys::generate(), Keys::generate(), Keys::generate());
+    make_agent(&state, &tenant, &agent, &a, "anyone").await;
+    let dm = open(&state, &tenant, &a, &[&b]).await.expect("open");
+    let viewer = a.public_key().to_bytes();
+    state
+        .db
+        .hide_dm(tenant.community(), dm, &viewer)
+        .await
+        .expect("hide");
+
+    let event = EventBuilder::new(Kind::Custom(41010), "")
+        .tags(
+            [
+                vec!["p".to_string(), hex(&b)],
+                vec!["p".into(), hex(&agent)],
+                vec!["history".into(), "ask".into()],
+            ]
+            .into_iter()
+            .map(|tag| Tag::parse(tag).expect("tag")),
+        )
+        .sign_with_keys(&a)
+        .expect("sign");
+    for _ in 0..2 {
+        match ingest_event(&state, &tenant, event.clone(), http_auth(&a)).await {
+            Err(IngestError::Rejected(message)) => assert_eq!(message, "needs-choice: history"),
+            Err(other) => panic!("expected the history choice, got {other:?}"),
+            Ok(result) => panic!("expected the history choice, got {:?}", result.message),
+        }
+    }
+
+    assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a, &b]));
+    assert_eq!(
+        state
+            .db
+            .list_hidden_dms(tenant.community(), &viewer)
+            .await
+            .expect("hidden"),
+        vec![dm]
+    );
+    assert_eq!(
+        open_with_history(&state, &tenant, &a, &[&b, &agent])
+            .await
+            .expect("open with history"),
+        dm
+    );
+    assert_eq!(
+        members(&state, &tenant, dm).await,
+        set_of(&[&a, &b, &agent])
+    );
+}
+
+/// Asking, an open finds the DM of these people even when an older DM of
+/// exactly the named members holds the agent, so it asks for the people's DM,
+/// every time. Once the agent is in the people's DM, the open needs no choice
+/// and returns it.
+/// Mutation: look for the DM of exactly the named members first → the old DM
+/// is returned without asking → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn asking_asks_for_the_peoples_dm_over_an_older_dm_of_the_named_members() {
+    let state = state().await;
+    let tenant = community(&state, "dm-ask-open-legacy").await;
+    let (a, b, agent) = (Keys::generate(), Keys::generate(), Keys::generate());
+    make_agent(&state, &tenant, &agent, &a, "anyone").await;
+    let peoples = open(&state, &tenant, &a, &[&b]).await.expect("people");
+    let old = open(&state, &tenant, &a, &[&b, &agent]).await.expect("old");
+    assert_ne!(old, peoples);
+
+    for _ in 0..2 {
+        rejected(
+            open_asking(&state, &tenant, &a, &[&b, &agent]).await,
+            "needs-choice: history",
+        );
+    }
+    assert_eq!(members(&state, &tenant, peoples).await, set_of(&[&a, &b]));
+
+    assert_eq!(
+        open_with_history(&state, &tenant, &a, &[&b, &agent])
+            .await
+            .expect("open with history"),
+        peoples
+    );
+    assert_eq!(
+        open_asking(&state, &tenant, &a, &[&b, &agent])
+            .await
+            .expect("ask again"),
+        (peoples, false)
+    );
+    assert_eq!(
+        members(&state, &tenant, old).await,
+        set_of(&[&a, &b, &agent])
+    );
+}
+
+/// Asking, an open with no history to share opens as with `include`: a new
+/// DM of people and an agent, a DM of someone and their agent, and the
+/// people's DM when no agent is named.
+/// Mutation: refuse every asking open → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn asking_opens_a_dm_with_no_history_to_share() {
+    let state = state().await;
+    let tenant = community(&state, "dm-ask-open-new").await;
+    let (a, b, agent) = (Keys::generate(), Keys::generate(), Keys::generate());
+    make_agent(&state, &tenant, &agent, &a, "anyone").await;
+
+    let (dm, created) = open_asking(&state, &tenant, &a, &[&b, &agent])
+        .await
+        .expect("new");
+    assert!(created);
+    assert_eq!(
+        members(&state, &tenant, dm).await,
+        set_of(&[&a, &b, &agent])
+    );
+    assert_eq!(
+        open_asking(&state, &tenant, &a, &[&b])
+            .await
+            .expect("people"),
+        (dm, false)
+    );
+
+    let (direct, created) = open_asking(&state, &tenant, &a, &[&agent])
+        .await
+        .expect("agent alone");
+    assert!(created);
+    assert_eq!(
+        members(&state, &tenant, direct).await,
+        set_of(&[&a, &agent])
+    );
+    assert_eq!(
+        open_asking(&state, &tenant, &a, &[&agent])
+            .await
+            .expect("agent alone again"),
+        (direct, false)
     );
 }
