@@ -3,20 +3,21 @@ part of 'avatar_image.dart';
 /// Renders the same avatar sources used by Flutter as a PNG for native bars.
 Future<Uint8List?> nativeAvatarImage({
   required String? url,
+  ValueListenable<bool>? cancelled,
   required String initial,
   bool isAgent = false,
   bool circular = false,
+  double dimension = 72,
   required Color background,
   required Color foreground,
   required List<ImageProvider> Function(String url) networkImages,
 }) async {
-  const dimension = 72.0;
   final animatedAvatar = parseAnimatedAvatarUrl(url);
   final poster = animatedAvatar?.posterUrl ?? url;
   final source = _AvatarSource.parse(poster);
   final recorder = ui.PictureRecorder();
   final canvas = Canvas(recorder);
-  final bounds = const Rect.fromLTWH(0, 0, dimension, dimension);
+  final bounds = Rect.fromLTWH(0, 0, dimension, dimension);
   canvas.clipPath(avatarPath(bounds, isAgent: isAgent && !circular));
   canvas.drawColor(background, BlendMode.src);
   final imageBounds = isAgent && usesInsetAgentArtwork(url)
@@ -73,7 +74,11 @@ Future<Uint8List?> nativeAvatarImage({
         for (var i = 0; i < providers.length; i++) {
           final ImageInfo image;
           try {
-            image = await _loadNativeAvatar(providers[i], dimension.toInt());
+            image = await _loadNativeAvatar(
+              providers[i],
+              dimension.toInt(),
+              cancelled,
+            );
           } on NetworkImageLoadException catch (error) {
             // A missing relay thumbnail moves on to the next one.
             if (error.statusCode == 404 && i < providers.length - 1) continue;
@@ -95,6 +100,10 @@ Future<Uint8List?> nativeAvatarImage({
   } catch (_) {
     // Match the normal avatar's initial fallback when media is unavailable.
   }
+  if (cancelled?.value == true) {
+    recorder.endRecording().dispose();
+    return null;
+  }
   if (!rendered) _paintNativeAvatarText(canvas, initial, 32, foreground);
   final picture = recorder.endRecording();
   final image = await picture.toImage(dimension.toInt(), dimension.toInt());
@@ -111,28 +120,59 @@ Future<Uint8List?> nativeAvatarImage({
 Future<ImageInfo> _loadNativeAvatar(
   ImageProvider provider,
   int dimension,
+  ValueListenable<bool>? cancelled,
 ) async {
-  final stream = ResizeImage(
+  if (cancelled?.value == true) throw StateError('Avatar load cancelled');
+  final resized = ResizeImage(
     provider,
     width: dimension,
     height: dimension,
     policy: ResizeImagePolicy.fit,
-  ).resolve(ImageConfiguration.empty);
-  final completer = Completer<ImageInfo>();
-  final listener = ImageStreamListener(
+  );
+  final stream = resized.resolve(ImageConfiguration.empty);
+  final completer = Completer<ImageInfo?>();
+  var displayExpired = false;
+  var settled = false;
+  late final ImageStreamListener listener;
+  late final VoidCallback onCancelled;
+  void finish({bool abandon = false}) {
+    if (settled) return;
+    settled = true;
+    cancelled?.removeListener(onCancelled);
+    stream.removeListener(listener);
+    if (abandon) abandonPendingImage(stream, resized, ImageConfiguration.empty);
+  }
+
+  onCancelled = () {
+    if (cancelled?.value != true || settled) return;
+    completer.completeError(StateError('Avatar load cancelled'));
+    finish(abandon: true);
+  };
+  listener = ImageStreamListener(
     (image, _) {
-      if (!completer.isCompleted) completer.complete(image.clone());
+      if (settled) return;
+      completer.complete(displayExpired ? null : image.clone());
+      finish();
     },
     onError: (Object error, StackTrace? stack) {
-      if (!completer.isCompleted) completer.completeError(error, stack);
+      if (settled) return;
+      completer.completeError(error, stack);
+      finish();
     },
   );
+  cancelled?.addListener(onCancelled);
   stream.addListener(listener);
-  try {
-    return await completer.future.timeout(const Duration(seconds: 10));
-  } finally {
-    stream.removeListener(listener);
-  }
+  // This bounds how long the UI waits, not the network request. Keep listening
+  // until the load settles so a later sheet dismissal can still cancel it.
+  final image = await completer.future.timeout(
+    const Duration(seconds: 10),
+    onTimeout: () {
+      displayExpired = true;
+      return null;
+    },
+  );
+  if (image == null) throw TimeoutException('Avatar display wait expired');
+  return image;
 }
 
 void _paintNativeAvatarText(

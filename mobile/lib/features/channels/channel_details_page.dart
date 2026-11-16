@@ -9,7 +9,8 @@ Future<bool?> showChannelDetailsPage({
   required BuildContext context,
   required Channel channel,
   required String? currentPubkey,
-  required void Function(BuildContext context, String pubkey) onMemberTap,
+  required FutureOr<void> Function(BuildContext context, String pubkey)
+  onMemberTap,
   String? sectionId,
   bool personalChat = false,
 }) => Navigator.of(context).push<bool>(
@@ -32,26 +33,24 @@ Future<bool?> showChannelDetailsSheet({
   required BuildContext context,
   required Channel channel,
   required String? currentPubkey,
-  required void Function(BuildContext context, String pubkey) onMemberTap,
+  required FutureOr<void> Function(BuildContext context, String pubkey)
+  onMemberTap,
   String? sectionId,
   bool personalChat = false,
-}) => showBuzzModalBottomSheet<bool>(
-  context: context,
-  isScrollControlled: true,
-  showDragHandle: true,
-  constraints: BoxConstraints(
-    maxWidth: 640,
-    maxHeight: MediaQuery.sizeOf(context).height * 0.7,
-  ),
-  builder: (_) => ChannelDetailsPage(
+}) {
+  final native = _usesNativeChannelSheet(context);
+  Widget content(BuildContext context) => ChannelDetailsPage(
     channel: channel,
     currentPubkey: currentPubkey,
     onMemberTap: onMemberTap,
     sectionId: sectionId,
     personalChat: personalChat,
     inSheet: true,
-  ),
-);
+    nativePresentation: native,
+  );
+  if (native) return _showNativeChannelSheet(context, content);
+  return _showChannelLongPressSheet(context: context, builder: content);
+}
 
 /// Combined channel identity, membership, organization, and lifecycle page.
 class ChannelDetailsPage extends HookConsumerWidget {
@@ -63,11 +62,13 @@ class ChannelDetailsPage extends HookConsumerWidget {
     this.sectionId,
     this.personalChat = false,
     this.inSheet = false,
+    this.nativePresentation = false,
   });
 
   final Channel channel;
   final String? currentPubkey;
-  final void Function(BuildContext context, String pubkey) onMemberTap;
+  final FutureOr<void> Function(BuildContext context, String pubkey)
+  onMemberTap;
   final String? sectionId;
 
   /// Solo chats are organized into Solo workspaces, not channel sections, so
@@ -77,6 +78,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
   /// Renders only the scrolling content, without the page's app bar, for a
   /// bottom sheet that supplies its own drag handle.
   final bool inSheet;
+  final bool nativePresentation;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -327,6 +329,189 @@ class ChannelDetailsPage extends HookConsumerWidget {
       } finally {
         isJoining.value = false;
       }
+    }
+
+    if (nativePresentation) {
+      Widget action(
+        String label,
+        IconData icon,
+        FutureOr<void> Function()? callback, {
+        bool destructive = false,
+      }) => _ActionTile(
+        icon: icon,
+        label: label,
+        onTap: callback,
+        destructive: destructive,
+      );
+      return _NativeChannelActions(
+        title: displayName,
+        detailsChannel: resolvedChannel,
+        heroAvatarUrl: counterpartProfile?.avatarUrl,
+        heroIsAgent: counterpartProfile?.isAgent ?? false,
+        memberLabel: isDirectDm ? null : memberLabel,
+        groups: [
+          SheetActionSection(
+            children: [
+              action(isStarred ? 'Unstar' : 'Star', BuzzIcons.star, toggleStar),
+              action(
+                isMuted ? 'Unmute' : 'Mute',
+                isMuted ? BuzzIcons.bell : BuzzIcons.bellOff,
+                toggleMute,
+              ),
+              if (!resolvedChannel.isDm)
+                action(
+                  'Edit',
+                  BuzzIcons.pencil,
+                  canEdit ? openManageChannel : null,
+                ),
+            ],
+          ),
+          if (!isDirectDm)
+            SheetActionSection(
+              children: [
+                if (canAddMembers)
+                  action('Add members', BuzzIcons.plus, openAddMembers),
+                if (membersAsync.isLoading && members.isEmpty)
+                  action('Loading members…', BuzzIcons.loaderCircle, null)
+                else if (membersAsync.hasError && members.isEmpty)
+                  action('Members unavailable', BuzzIcons.triangleAlert, null)
+                else ...[
+                  for (final member in previewMembers)
+                    _ChannelMemberPreviewRow(
+                      member: member,
+                      currentPubkey: resolvedCurrentPubkey,
+                      onMemberTap: onMemberTap,
+                      displayName:
+                          userCache[member.pubkey.toLowerCase()]?.displayName,
+                      contextualLabel:
+                          memberLabels[member.pubkey.toLowerCase()],
+                      avatarUrl:
+                          userCache[member.pubkey.toLowerCase()]?.avatarUrl,
+                      isArchived: isArchived(member),
+                    ),
+                  if (memberCount > _channelMemberPreviewLimit)
+                    action('See all', BuzzIcons.users, openMembers),
+                ],
+              ],
+            ),
+          SheetActionSection(
+            children: [
+              if (!personalChat)
+                action(
+                  'Move to section…',
+                  BuzzIcons.folderInput,
+                  () => _showMoveSectionSheet(
+                    context,
+                    ref,
+                    channel: resolvedChannel,
+                    sectionId: currentSectionId,
+                  ),
+                ),
+              action(
+                'Copy channel name',
+                BuzzIcons.copy,
+                () => copyToClipboard(
+                  context,
+                  resolvedChannel.name,
+                  message: 'Channel name copied',
+                ),
+              ),
+              action(
+                'Copy channel ID',
+                BuzzIcons.hash,
+                () => copyToClipboard(
+                  context,
+                  resolvedChannel.id,
+                  message: 'Channel ID copied',
+                ),
+              ),
+            ],
+          ),
+          SheetActionSection(
+            children: [
+              if (canJoin)
+                action(
+                  isJoining.value ? 'Joining channel…' : 'Join channel',
+                  BuzzIcons.logIn,
+                  isJoining.value ? null : joinChannel,
+                ),
+              if (resolvedChannel.isMember && !resolvedChannel.isArchived)
+                action(
+                  'Leave channel',
+                  BuzzIcons.logOut,
+                  () => _confirmAndRun(
+                    context,
+                    ref,
+                    title: 'Leave #${resolvedChannel.name}?',
+                    body: 'You’ll stop receiving messages from this channel.',
+                    confirmLabel: 'Leave',
+                    action: () => ref
+                        .read(channelActionsProvider)
+                        .leaveChannel(resolvedChannel.id),
+                  ),
+                  destructive: true,
+                ),
+              if (lifecycleCapabilitiesLoading)
+                action('Loading channel actions…', BuzzIcons.loaderCircle, null)
+              else if (lifecycleCapabilitiesUnavailable)
+                action(
+                  'Channel actions unavailable',
+                  BuzzIcons.triangleAlert,
+                  null,
+                )
+              else ...[
+                if (canArchive)
+                  action(
+                    'Archive channel',
+                    BuzzIcons.archive,
+                    () => _confirmAndRun(
+                      context,
+                      ref,
+                      title: 'Archive #${resolvedChannel.name}?',
+                      body: 'The channel will become read-only.',
+                      confirmLabel: 'Archive',
+                      action: () => ref
+                          .read(channelActionsProvider)
+                          .archiveChannel(resolvedChannel.id),
+                    ),
+                  ),
+                if (canUnarchive)
+                  action(
+                    'Unarchive channel',
+                    BuzzIcons.archiveRestore,
+                    () => _confirmAndRun(
+                      context,
+                      ref,
+                      title: 'Unarchive #${resolvedChannel.name}?',
+                      body: 'The channel will become active again.',
+                      confirmLabel: 'Unarchive',
+                      action: () => ref
+                          .read(channelActionsProvider)
+                          .unarchiveChannel(resolvedChannel.id),
+                    ),
+                  ),
+                if (canDelete)
+                  action(
+                    'Delete channel',
+                    BuzzIcons.trash2,
+                    () => _confirmAndRun(
+                      context,
+                      ref,
+                      title: 'Delete #${resolvedChannel.name}?',
+                      body:
+                          'This permanently deletes the channel and cannot be undone.',
+                      confirmLabel: 'Delete',
+                      action: () => ref
+                          .read(channelActionsProvider)
+                          .deleteChannel(resolvedChannel.id),
+                    ),
+                    destructive: true,
+                  ),
+              ],
+            ],
+          ),
+        ],
+      );
     }
 
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
@@ -768,7 +953,8 @@ class _ChannelMemberPreviewRow extends StatelessWidget {
 
   final ChannelMember member;
   final String? currentPubkey;
-  final void Function(BuildContext context, String pubkey) onMemberTap;
+  final FutureOr<void> Function(BuildContext context, String pubkey)
+  onMemberTap;
   final String? displayName;
 
   /// The channel's contextual label for this member, when resolved.

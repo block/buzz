@@ -3,6 +3,7 @@ use crate::Db;
 use sqlx::PgPool;
 mod discovery;
 mod inventory;
+mod media;
 /// Standalone, offline profile cleanup with read-only preview.
 pub mod profile_batches;
 mod requests;

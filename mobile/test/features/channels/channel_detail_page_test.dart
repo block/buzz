@@ -16357,6 +16357,64 @@ void main() {
       expect(highlightedDecoration.color!.a, lessThan(0.12));
     });
 
+    testWidgets(
+      'same-second cached replies keep their order as the query lands',
+      (tester) async {
+        final root = _textMsg(
+          id: threadIdRoot,
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        NostrEvent reply(String id, String ms) => _textMsg(
+          id: id,
+          pubkey: 'bob',
+          content: 'Reply $id',
+          createdAt: 1100,
+          extraTags: [
+            ['e', threadIdRoot, '', 'reply'],
+            ['ms', ms],
+          ],
+        );
+        // Millisecond order is the reverse of id order.
+        final z = reply('z', '100');
+        final a = reply('a', '900');
+        final timelineMessages = formatTimeline([root, z, a]);
+        final replyCompleter = Completer<List<NostrEvent>>();
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [root, z, a],
+            pendingThreadReplies: {threadIdRoot: replyCompleter.future},
+            disableRetries: true,
+            home: ThreadDetailPage(
+              threadHead: timelineMessages.first,
+              allMessages: timelineMessages,
+              channelId: _testChannel.id,
+              currentPubkey: null,
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        for (var i = 0; i < 8; i++) {
+          await tester.pump();
+        }
+
+        void expectZThenA() {
+          expect(
+            tester.getTopLeft(find.text('Reply z')).dy,
+            lessThan(tester.getTopLeft(find.text('Reply a')).dy),
+          );
+        }
+
+        expectZThenA();
+        replyCompleter.complete([z, a]);
+        await tester.pumpAndSettle();
+        expectZThenA();
+      },
+    );
+
     group('after a first-load deadline', () {
       final root = _textMsg(
         id: threadIdRoot,
