@@ -3036,15 +3036,15 @@ async fn ingest_event_inner(
         }
     }
 
-    // An artifact's conversation has no members or settings of its own:
-    // everyone reaches it through its home.
+    // An artifact's conversation holds only comments: everything it does
+    // not list is refused, so a new kind stays out until it is added.
     if channel_row
         .as_ref()
         .is_some_and(|ch| ch.channel_type == buzz_db::channel::ChannelType::Artifact.as_str())
-        && super::artifact::conversation_refuses_kind(kind_u32)
+        && !super::artifact::conversation_accepts_kind(kind_u32)
     {
         return Err(IngestError::Rejected(
-            "invalid: an artifact's conversation has no members or settings of its own".into(),
+            "invalid: an artifact's conversation only holds comments".into(),
         ));
     }
 

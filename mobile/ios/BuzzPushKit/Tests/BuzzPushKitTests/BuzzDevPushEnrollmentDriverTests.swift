@@ -1315,8 +1315,13 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
     installationIdBytes: @escaping () throws -> Data = {
       Data(0..<16)
     },
+    // The phone's clock reads `now` plus the skew allowance, so the grant window it starts
+    // in the past begins exactly at `now`, which the pinned transcript vectors sign.
     now: @escaping () -> Date = {
-      Date(timeIntervalSince1970: TimeInterval(BuzzDevPushEnrollmentDriverTests.now))
+      Date(
+        timeIntervalSince1970: TimeInterval(
+          BuzzDevPushEnrollmentDriverTests.now
+            + BuzzDevPushEnrollmentDriver.clockSkewAllowanceSeconds))
     },
     lifetimeSeconds: Int64 = BuzzDevPushEnrollmentDriverTests.expiresAt
       - BuzzDevPushEnrollmentDriverTests.now

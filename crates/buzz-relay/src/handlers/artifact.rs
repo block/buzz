@@ -91,10 +91,23 @@ pub(crate) fn opens_conversation(event: &Event) -> bool {
         .any(|t| t.kind().to_string() == CONVERSATION_ARTIFACT_TAG)
 }
 
-/// Kinds refused in an artifact's conversation: it has no members or
-/// settings of its own (add, remove, edit, delete, join, leave).
-pub(crate) fn conversation_refuses_kind(kind: u32) -> bool {
-    matches!(kind, 9000 | 9001 | 9002 | 9008 | 9021 | 9022)
+/// The only kinds an artifact's conversation accepts: what comments need.
+/// It has no members or settings of its own, so every other kind, including
+/// any added later, is refused there.
+pub(crate) fn conversation_accepts_kind(kind: u32) -> bool {
+    use buzz_core::kind::{
+        KIND_DELETION, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_REACTION,
+        KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_EDIT,
+    };
+    matches!(
+        kind,
+        KIND_STREAM_MESSAGE
+            | KIND_STREAM_MESSAGE_EDIT
+            | KIND_REACTION
+            | KIND_DELETION
+            | KIND_NIP29_DELETE_EVENT
+            | KIND_NIP29_CREATE_GROUP
+    )
 }
 
 /// Open the conversation of the artifact named by a kind:9007's `artifact`

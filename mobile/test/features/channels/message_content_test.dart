@@ -7,7 +7,8 @@ import 'package:buzz/shared/widgets/media_loading_placeholder.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 import 'dart:ui' as ui;
 
-import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
+import 'package:flutter/rendering.dart'
+    show RenderParagraph, RenderRepaintBoundary;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -40,6 +41,8 @@ import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 
+import '../../helpers/message_link_finders.dart';
+
 part 'message_content_bubble_cases.dart';
 part 'message_carousel_preview_cases.dart';
 part 'message_stack_cases.dart';
@@ -69,6 +72,51 @@ Widget _testable(
       home: Scaffold(body: child),
     ),
   );
+}
+
+/// Answers connectivity queries, which tables' scroll views trigger.
+void _mockConnectivity(WidgetTester tester) {
+  const connectivity = MethodChannel(
+    'dev.fluttercommunity.plus/connectivity_status',
+  );
+  final messenger = tester.binding.defaultBinaryMessenger;
+  messenger.setMockMethodCallHandler(connectivity, (_) async => null);
+  addTearDown(() => messenger.setMockMethodCallHandler(connectivity, null));
+}
+
+/// The RGBA pixels of the [RepaintBoundary] at [key], at a pixel ratio of 1.
+Future<({int width, Uint8List bytes})> _capturePixels(
+  WidgetTester tester,
+  GlobalKey key,
+) async => (await tester.runAsync(() async {
+  final boundary =
+      key.currentContext!.findRenderObject()! as RenderRepaintBoundary;
+  final image = await boundary.toImage(pixelRatio: 1);
+  final data = (await image.toByteData(format: ui.ImageByteFormat.rawRgba))!;
+  final width = image.width;
+  image.dispose();
+  return (width: width, bytes: Uint8List.fromList(data.buffer.asUint8List()));
+}))!;
+
+/// How many pixels differ between [before] and [after], counting only
+/// columns that pass [where].
+int _changedPixels(
+  ({int width, Uint8List bytes}) before,
+  ({int width, Uint8List bytes}) after, {
+  bool Function(int x)? where,
+}) {
+  expect(after.bytes.length, before.bytes.length);
+  var changed = 0;
+  for (var i = 0; i < before.bytes.length; i += 4) {
+    if (where != null && !where((i ~/ 4) % before.width)) continue;
+    for (var c = 0; c < 4; c++) {
+      if (before.bytes[i + c] != after.bytes[i + c]) {
+        changed++;
+        break;
+      }
+    }
+  }
+  return changed;
 }
 
 void _setSurfaceSize(WidgetTester tester, Size size) {
@@ -725,7 +773,7 @@ void main() {
           ),
         );
 
-        await tester.tap(find.text('report.pdf'));
+        await tester.tapAt(linkCenter(tester, 'report.pdf'));
         await tester.pump();
 
         expect(openedUrl, url, reason: content);
@@ -744,7 +792,7 @@ void main() {
           ),
         ),
       );
-      await tester.longPress(find.text('support'));
+      await tester.longPressAt(linkCenter(tester, 'support'));
       await tester.pumpAndSettle();
       expect(find.text('mailto:support@example.com'), findsOneWidget);
       expect(find.text('Copy link'), findsOneWidget);
@@ -752,8 +800,40 @@ void main() {
       expect(find.text('Open link'), findsNothing);
     });
 
-    for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
-      testWidgets('holding a link opens link actions on ${platform.name}', (
+    testWidgets('tapping a link nothing can open shows its actions', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      await tester.pumpWidget(
+        _testable(
+          const MessageContent(
+            content: 'Write to [support](mailto:support@example.com)',
+          ),
+        ),
+      );
+      await tester.tapAt(linkCenter(tester, 'support'));
+      await tester.pumpAndSettle();
+      expect(find.text('Copy link'), findsOneWidget);
+      expect(find.text('Share link'), findsOneWidget);
+      expect(find.text('Open link'), findsNothing);
+
+      // A screen reader's activate reaches the same actions.
+      await tester.drag(find.text('Copy link'), const Offset(0, 500));
+      await tester.pumpAndSettle();
+      expect(find.text('Copy link'), findsNothing);
+      tester.semantics.tap(find.semantics.byLabel('support'));
+      await tester.pumpAndSettle();
+      expect(find.text('Copy link'), findsOneWidget);
+      semantics.dispose();
+    });
+
+    for (final (platform, label) in [
+      (TargetPlatform.iOS, 'report'),
+      (TargetPlatform.android, 'report'),
+      (TargetPlatform.iOS, '`report`'),
+      (TargetPlatform.android, '`report`'),
+    ]) {
+      testWidgets('holding $label opens link actions on ${platform.name}', (
         tester,
       ) async {
         debugDefaultTargetPlatformOverride = platform;
@@ -786,8 +866,8 @@ void main() {
           _testable(
             MessageLongPressInkWell(
               onLongPress: (_) => messageMenus++,
-              child: const MessageContent(
-                content: 'See the [report]($url) before standup',
+              child: MessageContent(
+                content: 'See the [$label]($url) before standup',
               ),
             ),
             overrides: [
@@ -800,41 +880,24 @@ void main() {
         );
 
         // A hold on the surrounding text still opens the message menu.
-        await tester.longPress(find.textContaining('before standup'));
+        await tester.longPressAt(textCenter(tester, 'standup'));
         await tester.pumpAndSettle();
         expect(messageMenus, 1);
         expect(find.text('Copy link'), findsNothing);
 
-        // A finger on the link tints it until the pointer moves away.
-        Color? linkTint() =>
-            (tester
-                        .widget<DecoratedBox>(
-                          find
-                              .ancestor(
-                                of: find.text('report'),
-                                matching: find.byType(DecoratedBox),
-                              )
-                              .first,
-                        )
-                        .decoration
-                    as BoxDecoration)
-                .color;
-        expect(linkTint(), isNull);
-        final press = await tester.startGesture(
-          tester.getCenter(find.text('report')),
-        );
-        await tester.pump();
-        expect(linkTint(), isNotNull);
+        // A finger that slides off the link before the hold is up scrolls:
+        // no link actions, no message menu and nothing opened.
+        final press = await tester.startGesture(textCenter(tester, 'report'));
         await press.moveBy(const Offset(0, 40));
-        await tester.pump();
-        expect(linkTint(), isNull);
+        await tester.pump(const Duration(seconds: 1));
         await press.up();
         await tester.pumpAndSettle();
+        expect(find.text('Copy link'), findsNothing);
         expect(messageMenus, 1);
         expect(opened, isEmpty);
 
         // A hold on the link opens its own actions instead.
-        await tester.longPress(find.text('report'));
+        await tester.longPressAt(textCenter(tester, 'report'));
         await tester.pumpAndSettle();
         expect(messageMenus, 1);
         expect(find.text(url), findsOneWidget);
@@ -845,14 +908,14 @@ void main() {
         expect(clipboard, [url]);
         expect(find.text('Copy link'), findsNothing);
 
-        await tester.longPress(find.text('report'));
+        await tester.longPressAt(textCenter(tester, 'report'));
         await tester.pumpAndSettle();
         await tester.tap(find.text('Open link'));
         await tester.pumpAndSettle();
         expect(opened, [url]);
 
         // An ordinary tap still opens the link directly.
-        await tester.tap(find.text('report'));
+        await tester.tapAt(textCenter(tester, 'report'));
         await tester.pumpAndSettle();
         expect(opened, [url, url]);
         expect(messageMenus, 1);
@@ -861,7 +924,7 @@ void main() {
         _setSurfaceSize(tester, const Size(640, 260));
         addTearDown(tester.view.reset);
         await tester.pumpAndSettle();
-        await tester.longPress(find.text('report'));
+        await tester.longPressAt(textCenter(tester, 'report'));
         await tester.pumpAndSettle();
         await tester.ensureVisible(find.text('Share link'));
         await tester.pumpAndSettle();
@@ -869,6 +932,206 @@ void main() {
         debugDefaultTargetPlatformOverride = null;
       });
     }
+
+    testWidgets('removing a link during a hold cancels its actions', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final content = ValueNotifier('See [report](https://example.com/report)');
+      addTearDown(content.dispose);
+      await tester.pumpWidget(
+        _testable(
+          ValueListenableBuilder<String>(
+            valueListenable: content,
+            builder: (context, value, child) => MessageContent(content: value),
+          ),
+        ),
+      );
+      final press = await tester.startGesture(textCenter(tester, 'report'));
+      await tester.pump(const Duration(milliseconds: 150));
+      content.value = 'The report was removed';
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+      await press.up();
+      expect(tester.takeException(), isNull);
+      expect(find.text('Copy link'), findsNothing);
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets('pressing a text link tints it until the finger lifts', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _testable(
+          const MessageContent(
+            content: 'See [report](https://example.com/report) now',
+          ),
+        ),
+      );
+      RenderObject content() =>
+          tester.renderObject(find.byType(MessageContent));
+      expect(content(), isNot(paints..rrect()));
+
+      final press = await tester.startGesture(textCenter(tester, 'report'));
+      await tester.pump();
+      expect(content(), paints..rrect());
+
+      // A finger that slides off scrolls, which clears the tint too.
+      await press.moveBy(const Offset(0, 40));
+      await tester.pump();
+      expect(content(), isNot(paints..rrect()));
+      await press.up();
+
+      final tap = await tester.startGesture(textCenter(tester, 'report'));
+      await tester.pump();
+      expect(content(), paints..rrect());
+      await tap.up();
+      await tester.pump();
+      expect(content(), isNot(paints..rrect()));
+
+      // Lifting a second finger keeps the first finger's tint.
+      final primary = await tester.startGesture(
+        textCenter(tester, 'report'),
+        pointer: 21,
+      );
+      final secondary = await tester.startGesture(
+        textCenter(tester, 'report'),
+        pointer: 22,
+      );
+      await secondary.up();
+      await tester.pump();
+      expect(content(), paints..rrect());
+      await primary.cancel();
+      await tester.pump();
+      expect(content(), isNot(paints..rrect()));
+
+      // Removing a message while its link is pressed cleans up safely.
+      final removed = await tester.startGesture(textCenter(tester, 'report'));
+      await tester.pump();
+      expect(content(), paints..rrect());
+      await tester.pumpWidget(_testable(const SizedBox()));
+      await tester.pump(const Duration(seconds: 1));
+      await removed.up();
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets(
+      'a pressed link in a scrolled table tints only inside the table',
+      (tester) async {
+        _mockConnectivity(tester);
+        _setSurfaceSize(tester, const Size(400, 300));
+        addTearDown(tester.view.reset);
+        final capture = GlobalKey();
+        await tester.pumpWidget(
+          _testable(
+            RepaintBoundary(
+              key: capture,
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 100),
+                child: MessageContent(
+                  content:
+                      '| Link |\n| --- |\n| [abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz](https://example.com) |',
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final paragraph = tester.renderObject<RenderParagraph>(
+          findLinkParagraph(
+            'abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz',
+          ),
+        );
+        final point = paragraph.localToGlobal(const Offset(10, 10));
+        final before = await _capturePixels(tester, capture);
+        final press = await tester.startGesture(point);
+        await tester.pump();
+        final after = await _capturePixels(tester, capture);
+        await press.cancel();
+        await tester.pump();
+        expect(
+          _changedPixels(before, after, where: (x) => x < 300),
+          greaterThan(0),
+          reason: 'The link is tinted inside the table viewport',
+        );
+        expect(
+          _changedPixels(before, after, where: (x) => x >= 300),
+          0,
+          reason: 'Nothing is tinted beyond the table viewport',
+        );
+      },
+    );
+
+    for (final (name, content, bubble) in [
+      ('inline code', 'See [`report`](https://example.com) now', false),
+      (
+        'inline code in a bubble',
+        'See [`report`](https://example.com) now',
+        true,
+      ),
+      (
+        'a table header',
+        '| [report](https://example.com) |\n| --- |\n| a value |',
+        false,
+      ),
+    ]) {
+      testWidgets('a pressed link in $name shows its tint', (tester) async {
+        _mockConnectivity(tester);
+        final capture = GlobalKey();
+        await tester.pumpWidget(
+          _testable(
+            RepaintBoundary(
+              key: capture,
+              child: Align(
+                alignment: Alignment.topLeft,
+                child: MessageContent(content: content, bubble: bubble),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final before = await _capturePixels(tester, capture);
+        final press = await tester.startGesture(textCenter(tester, 'report'));
+        await tester.pump();
+        final after = await _capturePixels(tester, capture);
+        await press.cancel();
+        await tester.pump();
+        // A tint hidden under the background changes only a few edge pixels.
+        expect(_changedPixels(before, after), greaterThan(100));
+      });
+    }
+
+    testWidgets('a second finger does not restart a link hold', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      var messageMenus = 0;
+      await tester.pumpWidget(
+        _testable(
+          MessageLongPressInkWell(
+            onLongPress: (_) => messageMenus++,
+            child: const MessageContent(
+              content: 'See [report](https://example.com/report) now',
+            ),
+          ),
+        ),
+      );
+      final point = textCenter(tester, 'report');
+      final first = await tester.startGesture(point, pointer: 1);
+      await tester.pump(const Duration(milliseconds: 200));
+      final second = await tester.startGesture(
+        point + const Offset(1, 0),
+        pointer: 2,
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+      await second.up();
+      await tester.pump(const Duration(milliseconds: 250));
+      await first.up();
+      await tester.pumpAndSettle();
+      expect(messageMenus, 0);
+      expect(find.text('Copy link'), findsOneWidget);
+      debugDefaultTargetPlatformOverride = null;
+    });
 
     test('buildImageViewerRoute uses modal-style page route builder', () {
       final route = buildImageViewerRoute(
@@ -1222,8 +1485,9 @@ void main() {
           find.byKey(ValueKey('buzz-link-chip:$messageUrl')),
           findsOneWidget,
         );
-        expect(find.text(joinUrl), findsOneWidget);
-        expect(_allRichText(tester), contains('See \u{FFFC}. Then \u{FFFC}!'));
+        expect(findLinkParagraph(joinUrl), findsOneWidget);
+        // The message link is a chip; the join link is text in the sentence.
+        expect(_allRichText(tester), contains('See \u{FFFC}. Then $joinUrl!'));
 
         await tester.tap(find.byKey(ValueKey('buzz-link-chip:$messageUrl')));
         await tester.pump();
@@ -1240,7 +1504,7 @@ void main() {
         );
 
         container.read(pendingDeepLinkProvider.notifier).consume();
-        await tester.tap(find.text(joinUrl));
+        await tester.tapAt(linkCenter(tester, joinUrl));
         await tester.pump();
         expect(
           container.read(pendingDeepLinkProvider),
@@ -1288,8 +1552,8 @@ void main() {
           _testable(const MessageContent(content: 'Join with $url')),
         );
 
-        expect(find.text(url), findsOneWidget);
-        await tester.tap(find.text(url));
+        expect(findLinkParagraph(url), findsOneWidget);
+        await tester.tapAt(linkCenter(tester, url));
         await tester.pump();
 
         final container = ProviderScope.containerOf(
@@ -1416,6 +1680,40 @@ void main() {
         expect(container.read(pendingDeepLinkProvider), isNull);
       });
 
+      testWidgets('a long link label wraps with its sentence', (tester) async {
+        _setSurfaceSize(tester, const Size(320, 600));
+        addTearDown(tester.view.reset);
+        const label = 'the release checklist for the next mobile build';
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'Heads up: [$label](https://example.com/c) is ready',
+            ),
+          ),
+        );
+
+        // One paragraph, so the label breaks mid-label and "is ready"
+        // continues on the line where the label ends.
+        final paragraph = tester.renderObject<RenderParagraph>(
+          findLinkParagraph(label),
+        );
+        expect(paragraph.text.toPlainText(), 'Heads up: $label is ready');
+        final start = 'Heads up: '.length;
+        final labelBoxes = paragraph.getBoxesForSelection(
+          TextSelection(baseOffset: start, extentOffset: start + label.length),
+        );
+        final after = paragraph
+            .getBoxesForSelection(
+              TextSelection(
+                baseOffset: start + label.length + 1,
+                extentOffset: start + label.length + 3,
+              ),
+            )
+            .first;
+        expect(labelBoxes.length, greaterThan(1));
+        expect(after.top, labelBoxes.last.top);
+      });
+
       testWidgets('renders bare URL as link', (tester) async {
         await tester.pumpWidget(
           _testable(
@@ -1423,12 +1721,14 @@ void main() {
           ),
         );
 
-        // The URL text should be rendered and tappable.
-        expect(find.text('https://example.com'), findsOneWidget);
-        final linkText = tester.widget<Text>(find.text('https://example.com'));
+        // The URL is drawn as link text in the sentence.
         expect(
-          linkText.style?.decoration ?? linkText.textSpan?.style?.decoration,
+          linkStyle(tester, 'https://example.com')?.decoration,
           TextDecoration.underline,
+        );
+        expect(
+          _allRichText(tester),
+          contains('Visit https://example.com today'),
         );
       });
     });
@@ -3010,7 +3310,13 @@ Photos
             find.byKey(ValueKey('buzz-link-chip:${entry.value}')),
             findsNothing,
           );
-          expect(find.text(entry.key), findsOneWidget);
+          // Repository links have no tap, so they stay a widget with a hold.
+          expect(
+            entry.key == 'Release candidate'
+                ? find.text(entry.key)
+                : findLinkParagraph(entry.key),
+            findsOneWidget,
+          );
         }
       });
 
