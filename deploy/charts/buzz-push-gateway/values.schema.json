@@ -396,7 +396,8 @@
         "bootKeyDigests",
         "revocationGraceSeconds",
         "fcmProjectId",
-        "fcmServiceAccount"
+        "fcmServiceAccount",
+        "attestationRoots"
       ],
       "properties": {
         "enabled": {
@@ -431,6 +432,23 @@
         },
         "fcmServiceAccount": {
           "$ref": "#/$defs/apnsCert"
+        },
+        "attestationRoots": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "secretName",
+            "secretKey"
+          ],
+          "properties": {
+            "secretName": {
+              "type": "string"
+            },
+            "secretKey": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
         }
       },
       "allOf": [

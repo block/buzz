@@ -50,6 +50,28 @@ for needle in BUZZ_PUSH_ANDROID_PACKAGE_NAME "$digest" BUZZ_PUSH_ANDROID_BOOT_KE
   BUZZ_PUSH_ANDROID_REVOCATION_GRACE_SECONDS BUZZ_PUSH_FCM_SERVICE_ACCOUNT_PATH; do
   grep -q "$needle" "$out/android.yaml" || { echo "Android render lacks $needle" >&2; exit 1; }
 done
+if grep -q 'ATTESTATION_ROOTS\|android-attestation' "$out/android.yaml"; then
+  echo 'an empty attestationRoots.secretName must keep the built-in roots' >&2
+  exit 1
+fi
+helm template push "$chart" --set android.enabled=true \
+  --set "android.signingCertDigests[0]=$digest" \
+  --set android.attestationRoots.secretName=attestation-roots >"$out/android-roots.yaml"
+env -u GEM_HOME -u GEM_PATH -u RUBYLIB -u RUBYOPT ruby -ryaml - "$out" <<'RUBY'
+docs = YAML.load_stream(File.read("#{ARGV[0]}/android-roots.yaml")).compact
+pod = docs.find { |r| r['kind'] == 'Deployment' }.dig('spec', 'template', 'spec')
+gateway = pod['containers'].find { |c| c['name'] == 'gateway' }
+env = gateway['env'].find { |e| e['name'] == 'BUZZ_PUSH_ANDROID_ATTESTATION_ROOTS_PATH' }
+raise 'roots override env missing' unless env && env['value'] == '/run/buzz/android-attestation/roots.pem'
+mount = gateway['volumeMounts'].find { |m| m['name'] == 'android-attestation-roots' }
+raise 'roots override mount missing' unless mount && mount['mountPath'] == '/run/buzz/android-attestation'
+volume = pod['volumes'].find { |v| v['name'] == 'android-attestation-roots' }
+expected = { 'secretName' => 'attestation-roots', 'items' => [{ 'key' => 'android-attestation-roots.pem', 'path' => 'roots.pem' }] }
+raise "roots override volume wrong: #{volume.inspect}" unless volume && volume['secret'] == expected
+RUBY
+helm template push "$chart" --set android.attestationRoots.secretName=attestation-roots >"$out/roots-disabled.yaml"
+cmp -s "$out/default.yaml" "$out/roots-disabled.yaml" || { echo 'roots override must not render while Android is disabled' >&2; exit 1; }
+reject --set android.attestationRoots.secretName=attestation-roots --set-string android.attestationRoots.secretKey=
 reject --set android.enabled=true
 reject --set 'android.signingCertDigests[0]=abcd'
 reject --set 'android.bootKeyDigests[0]=zz'

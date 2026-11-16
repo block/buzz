@@ -63,6 +63,9 @@ spec:
             - { name: BUZZ_PUSH_ANDROID_REVOCATION_GRACE_SECONDS, value: {{ .Values.android.revocationGraceSeconds | int64 | quote }} }
             - { name: BUZZ_PUSH_FCM_PROJECT_ID, value: {{ .Values.android.fcmProjectId | quote }} }
             - { name: BUZZ_PUSH_FCM_SERVICE_ACCOUNT_PATH, value: /run/buzz/fcm/service-account.json }
+            {{- if .Values.android.attestationRoots.secretName }}
+            - { name: BUZZ_PUSH_ANDROID_ATTESTATION_ROOTS_PATH, value: /run/buzz/android-attestation/roots.pem }
+            {{- end }}
             {{- end }}
             {{- range $name := list "DATABASE_URL" "BUZZ_PUSH_GRANT_KEYS" "BUZZ_PUSH_TOKEN_KEYS" }}
             - name: {{ $name }}
@@ -73,6 +76,9 @@ spec:
             - { name: apns, mountPath: /run/buzz/apns, readOnly: true }
             {{- if .Values.android.enabled }}
             - { name: fcm, mountPath: /run/buzz/fcm, readOnly: true }
+            {{- if .Values.android.attestationRoots.secretName }}
+            - { name: android-attestation-roots, mountPath: /run/buzz/android-attestation, readOnly: true }
+            {{- end }}
             {{- end }}
           livenessProbe: { httpGet: { path: /_liveness, port: health }, periodSeconds: 10, timeoutSeconds: 3, failureThreshold: 3 }
           readinessProbe: { httpGet: { path: /_readiness, port: health }, periodSeconds: 5, timeoutSeconds: 3, failureThreshold: 3 }
@@ -86,6 +92,12 @@ spec:
         {{- if .Values.android.enabled }}
         - name: fcm
           secret: { secretName: {{ .Values.android.fcmServiceAccount.secretName }}, defaultMode: 0400, items: [{ key: {{ .Values.android.fcmServiceAccount.secretKey }}, path: service-account.json }] }
+        {{- with .Values.android.attestationRoots }}
+        {{- if .secretName }}
+        - name: android-attestation-roots
+          secret: { secretName: {{ .secretName }}, items: [{ key: {{ .secretKey }}, path: roots.pem }] }
+        {{- end }}
+        {{- end }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector: {{- toYaml . | nindent 8 }}

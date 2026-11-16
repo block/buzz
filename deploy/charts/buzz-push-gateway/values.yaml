@@ -50,6 +50,11 @@ android:
   fcmServiceAccount:
     secretName: buzz-push-gateway
     secretKey: fcm-service-account.json
+  # Optional PEM bundle replacing the built-in Google attestation roots, for a
+  # reviewed root rollout. Empty secretName keeps the built-in roots.
+  attestationRoots:
+    secretName: ""
+    secretKey: android-attestation-roots.pem
 # Rate limit on signed installation calls, per attested key and replica.
 signedCallRateLimit:
   windowSeconds: 60

@@ -97,8 +97,11 @@ get no push; there is no software fallback.
 With the Helm chart, set `android.enabled=true` together with
 `android.packageName`, `android.signingCertDigests`, `android.fcmProjectId` and
 the Secret holding the service account key. `android.bootKeyDigests` and
-`android.revocationGraceSeconds` map to the settings above. Android is disabled
-by default.
+`android.revocationGraceSeconds` map to the settings above. To replace the
+built-in roots, name a Secret holding the PEM bundle in
+`android.attestationRoots.secretName` (and its key in `secretKey`); the chart
+mounts it and sets `BUZZ_PUSH_ANDROID_ATTESTATION_ROOTS_PATH`. Android is
+disabled by default.
 
 Optional endpoint quota policy variables are `BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS` (default `10`, max `86400`) and `BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES` (default `10`, max `10000`). These are Buzz policy hypotheses, not Apple-published limits; tune under load while retaining a hard ceiling.
 
