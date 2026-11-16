@@ -209,9 +209,11 @@ async fn find_dm_in<'e>(
 
 /// The existing DM that opening a DM of `participants`, of whom `agents` are
 /// agents, finds. With `by_people`, the DM of their people, or one made before
-/// agents were told apart, identified by all its members. Without, the DM of
-/// exactly these members: one identified by all of them, or their people's DM
-/// when it holds exactly them now, as a DM that agents joined in place does.
+/// agents were told apart, identified by all its members. Without, the DM
+/// identified by all of them, which for people alone is their DM, with any
+/// agents that joined it: there is one DM per group of people. Failing that,
+/// their people's DM when it holds exactly them now, as a DM that agents
+/// joined in place does.
 async fn find_opened_dm(
     conn: &mut sqlx::PgConnection,
     community_id: CommunityId,
@@ -553,9 +555,10 @@ pub async fn list_dms_for_user(
 /// With `by_people`, the DM is found by its people ([`dm_identity_hash`]), so
 /// it may hold agents that `pubkeys` does not name, and lack agents it does.
 /// Adding those is [`grow_dm`]'s job. A DM made before agents were told apart
-/// is still found by all its members. Without `by_people`, only a DM of
-/// exactly these members, agents included, is found or made, which may be
-/// the DM of their people that agents joined in place. A found DM is
+/// is still found by all its members. Without `by_people`, the DM found is
+/// the one of exactly these members, agents included, or, when they are all
+/// people, their DM, which agents may have joined: there is one DM per group
+/// of people. A DM made is one of exactly these members. A found DM is
 /// returned only to an active member of it, so naming a DM's people cannot be
 /// used to see or join it. A new DM's agents need `policy`'s permission.
 ///

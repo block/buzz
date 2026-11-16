@@ -1982,10 +1982,12 @@ pub fn build_workflow_approval(
 /// Build a DM open event (kind 41010).
 ///
 /// `pubkeys` are the hex-encoded pubkeys of everyone else in the DM, at least
-/// one. The relay finds or makes the DM of exactly these members, and refuses
+/// one. The relay finds the DM of exactly these members or, when they are all
+/// people, their DM, which agents may have joined (there is one DM per group
+/// of people). Otherwise it makes a DM of exactly these members. It refuses
 /// a DM of more than nine people, the caller included; agents do not count.
-/// To find the DM of the named people instead, use
-/// [`build_dm_open_with_history`].
+/// To find the DM of the named people whichever agents are named, and add
+/// the named agents to it, use [`build_dm_open_with_history`].
 ///
 /// The relay answers kind 41010 and kind 41011 with
 /// `response:{"channel_id":"<uuid>","created":<bool>}`, where `created` is
@@ -2025,8 +2027,8 @@ fn dm_open(pubkeys: &[&str], include_history: bool) -> Result<EventBuilder, SdkE
 ///
 /// With `include_history`, the member joins this DM and sees its history,
 /// unless a person is joining a DM of at most one person and their agents.
-/// Otherwise it finds or makes a DM of exactly this DM's people and the
-/// member; agents already here stay behind. Only people may send the history
+/// Otherwise it finds or makes a DM of this DM's people and the member, as
+/// [`build_dm_open`] does; agents already here stay behind. Only people may send the history
 /// tag: the relay refuses it from an agent.
 ///
 /// The relay also accepts `["history", "ask"]` on kind 41011, which this

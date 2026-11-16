@@ -542,7 +542,8 @@ async fn handle_dm_open(
 
     // 3. Execute. With history, open the DM of these people, bring it up to
     //    date and add any named agents it does not hold yet; without, the DM of
-    //    exactly these members. Each agent that joins needs its policy. Only
+    //    exactly these members or, for people alone, their DM, which agents may
+    //    have joined. Each agent that joins needs its policy. Only
     //    agents join a reopened DM: someone who left is not added back.
     let all_refs: Vec<&[u8]> = all_bytes.iter().map(|b| b.as_slice()).collect();
     let policy = agent_add_policy(&self_bytes);
@@ -628,8 +629,9 @@ async fn grow_with_agents(
 /// named agents join it there. People added to a DM of at most one person
 /// start a new DM of its people and the additions (no history), or land in
 /// the DM those people already have, which named agents join. Without the
-/// tag, as older clients send, the add finds or makes a DM of exactly this
-/// DM's people and the additions and adds no one to an existing DM. With
+/// tag, as older clients send, the add finds the DM of exactly this DM's
+/// people and the additions (for people alone, their DM, which agents may
+/// have joined) or makes one, and adds no one to an existing DM. With
 /// `["history", "ask"]`, the relay adds agents alone and people to a DM of at
 /// most one person as with `include`, and refuses people joining any other
 /// DM with [`NEEDS_HISTORY_CHOICE`], changing nothing. An agent cannot send

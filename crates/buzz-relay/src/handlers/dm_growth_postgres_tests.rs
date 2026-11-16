@@ -1254,6 +1254,60 @@ async fn an_untagged_open_finds_the_dm_agents_joined_in_place() {
     assert_eq!(members(&state, &tenant, other).await, set_of(&[&a, &b, &y]));
 }
 
+/// There is one DM per group of people, and agents joining it don't fork it.
+/// An open without the tag that names only the people, as an older client
+/// sends, opens their DM with the agents in it, whether an agent joined it
+/// in place or one of two agents left a DM first made with all of them.
+/// Mutation: require exact membership on the first lookup and refuse the
+/// people's DM on an insert conflict, giving A and B a separate DM → the
+/// open fails → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn an_untagged_open_of_the_people_finds_their_dm_with_its_agents() {
+    let state = state().await;
+    let tenant = community(&state, "dm-untagged-people").await;
+    let (a, b, c, x, y) = (
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+        Keys::generate(),
+    );
+    make_agent(&state, &tenant, &x, &a, "anyone").await;
+    make_agent(&state, &tenant, &y, &a, "anyone").await;
+
+    // An agent joins a DM of A and B in place.
+    let dm = open(&state, &tenant, &a, &[&b]).await.expect("open");
+    add(&state, &tenant, &a, dm, &[&x], true)
+        .await
+        .expect("agent joins");
+    assert_eq!(open(&state, &tenant, &b, &[&a]).await.expect("reopen"), dm);
+    assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a, &b, &x]));
+
+    // A DM first made with two agents, one of whom then leaves.
+    let group = open(&state, &tenant, &a, &[&c, &x, &y])
+        .await
+        .expect("open with agents");
+    let removed = submit(
+        &state,
+        &tenant,
+        &a,
+        9001,
+        vec![
+            vec!["h".to_string(), group.to_string()],
+            vec!["p".into(), hex(&x)],
+        ],
+    )
+    .await
+    .expect("remove");
+    assert!(removed.accepted, "{}", removed.message);
+    assert_eq!(
+        open(&state, &tenant, &c, &[&a]).await.expect("reopen"),
+        group
+    );
+    assert_eq!(members(&state, &tenant, group).await, set_of(&[&a, &c, &y]));
+}
+
 /// An agent already in a DM and named in an add joins whichever DM the add
 /// lands in: a new DM, the DM its people already have, or the new DM a DM of
 /// one person starts. It still needs its add policy in a new DM, and the DM
