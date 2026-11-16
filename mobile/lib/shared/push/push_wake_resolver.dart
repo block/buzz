@@ -120,6 +120,7 @@ class PushWakeResult {
   const PushWakeResult({
     required this.notifications,
     this.failedCommunityIds = const [],
+    this.interrupted = false,
   });
 
   /// Every eligible unshown message, newest first, within the caps.
@@ -129,9 +130,13 @@ class PushWakeResult {
   /// not recorded as shown, so the next wake retries them.
   final List<String> failedCommunityIds;
 
+  /// Whether a pass failed before it could look anywhere, so the wake can't
+  /// say which communities it missed.
+  final bool interrupted;
+
   /// Whether the wake could not look everywhere. With no [notifications] the
   /// caller shows its generic notification, so the wake is never silent.
-  bool get incomplete => failedCommunityIds.isNotEmpty;
+  bool get incomplete => interrupted || failedCommunityIds.isNotEmpty;
 }
 
 /// Sorts newest first and applies [pushWakeMaxPerConversation] and
