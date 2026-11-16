@@ -827,6 +827,11 @@ pub async fn execute_delete_with_marker(
         ));
     }
 
+    // A deleted emoji entry must leave the catalog in the same commit.
+    if target.is_some_and(|(kind, _)| kind == buzz_core::kind::KIND_EMOJI_ENTRY as i32) {
+        crate::custom_emoji::remove_entry_event_in_transaction(&mut tx, target_event_id).await?;
+    }
+
     // Canonical delete + thread_metadata counters, fenced by this transaction.
     // Counters move only when the row transitions to deleted, so a second
     // action against an already-deleted target leaves them unchanged.
@@ -3718,6 +3723,67 @@ mod postgres_tests {
             (1, 2),
             "root counts unchanged"
         );
+    }
+
+    /// A moderation delete of an emoji entry takes the emoji out of the
+    /// catalog in the same commit, as a new change, and frees the shortcode.
+    /// Mutation: drop the catalog removal in `execute_delete_with_marker` → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn admin_delete_of_an_emoji_entry_removes_it_from_the_catalog() {
+        let pool = setup_pool().await;
+        let community_id = make_community(&pool).await;
+        let cid = CommunityId::from_uuid(community_id);
+        let db = crate::Db::from_pool(pool.clone());
+        let author = nostr::Keys::generate();
+        let url = "https://example.com/e.png";
+        let entry = |shortcode: &str| {
+            nostr::EventBuilder::new(nostr::Kind::Custom(30180), shortcode)
+                .tags([
+                    nostr::Tag::parse(["d", shortcode]).expect("d tag"),
+                    nostr::Tag::parse(["emoji", shortcode, url]).expect("emoji tag"),
+                ])
+                .sign_with_keys(&author)
+                .expect("sign emoji entry")
+        };
+        let (kept, removed) = (entry("kept"), entry("removed"));
+        for (event, shortcode) in [(&removed, "removed"), (&kept, "kept")] {
+            let write = db
+                .put_custom_emoji_entry(cid, event, shortcode, Some(url))
+                .await
+                .expect("add emoji");
+            assert!(matches!(
+                write,
+                crate::custom_emoji::CustomEmojiWrite::Applied(_)
+            ));
+        }
+
+        let lease_until = Utc::now() + chrono::Duration::seconds(60);
+        let (action_id, token) = enforcing_action(&pool, community_id, lease_until).await;
+        assert!(execute_delete_with_marker(
+            &pool,
+            action_id,
+            token,
+            cid,
+            removed.id.as_bytes(),
+            None,
+            None
+        )
+        .await
+        .expect("delete emoji entry"));
+
+        let (changes, _) = db
+            .custom_emoji_changes(cid, 2, 10)
+            .await
+            .expect("changes after the delete");
+        let changes: Vec<_> = changes
+            .into_iter()
+            .map(|row| (row.shortcode, row.change, row.url))
+            .collect();
+        assert_eq!(changes, vec![("removed".to_owned(), 3, None)]);
+        let (live, _) = db.custom_emoji_changes(cid, 0, 10).await.expect("catalog");
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].shortcode, "kept");
     }
 
     #[tokio::test]

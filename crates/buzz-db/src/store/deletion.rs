@@ -100,6 +100,7 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "channels",
     "community_bans",
     "community_nip_fi_issuers",
+    "custom_emoji",
     "delivery_log",
     "event_mentions",
     "events",
@@ -154,6 +155,7 @@ pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "join_policy_acceptances",
     "media_uploaders",
     "media_publications",
+    "custom_emoji",
     "moderation_reports",
     "subscriptions",
     "api_tokens",
@@ -8140,6 +8142,28 @@ DROP FUNCTION community_deletion_lock_key(UUID);
         db.record_media_publications(request.community_id, vec![media_hash.clone()])
             .await
             .expect("publication boundary");
+        let emoji_author = nostr::Keys::generate();
+        let emoji_entry = |shortcode: &str| {
+            nostr::EventBuilder::new(nostr::Kind::Custom(30180), shortcode)
+                .tags([
+                    nostr::Tag::parse(["d", shortcode]).expect("d tag"),
+                    nostr::Tag::parse(["emoji", shortcode, "https://example.com/e.png"])
+                        .expect("emoji tag"),
+                ])
+                .sign_with_keys(&emoji_author)
+                .expect("sign emoji entry")
+        };
+        assert!(matches!(
+            db.put_custom_emoji_entry(
+                request.community_id,
+                &emoji_entry("kept"),
+                "kept",
+                Some("https://example.com/e.png"),
+            )
+            .await
+            .expect("catalog write"),
+            crate::custom_emoji::CustomEmojiWrite::Applied(_)
+        ));
         store
             .approve(request.id, "approver", None)
             .await
@@ -8150,6 +8174,15 @@ DROP FUNCTION community_deletion_lock_key(UUID);
             .expect("claim")
             .expect("won claim");
         store.begin_quiescing(&claim.lease).await.expect("quiesce");
+        assert!(db
+            .put_custom_emoji_entry(
+                request.community_id,
+                &emoji_entry("refused"),
+                "refused",
+                Some("https://example.com/e.png"),
+            )
+            .await
+            .is_err());
         assert!(db
             .record_media_upload(request.community_id, &media_hash, &[8; 32])
             .await
@@ -8215,6 +8248,7 @@ DROP FUNCTION community_deletion_lock_key(UUID);
         let first = store.purge_postgres(&token).await.expect("purge postgres");
         assert_eq!(first["media_uploaders"], 1);
         assert_eq!(first["media_publications"], 1);
+        assert_eq!(first["custom_emoji"], 1);
         let expected_tables: BTreeSet<&str> = EXPECTED_SCOPED_TABLES
             .iter()
             .chain(RELAY_ADMIN_TABLES.iter().map(|(table, _)| table))

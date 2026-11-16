@@ -129,6 +129,7 @@ jobs:
             --test e2e_event_reminder \
             --test e2e_author_only_deletion \
             --test e2e_existence_oracle \
+            --test e2e_emoji_catalog \
             --archive-file target/ci/backend-integration-tests.tar.zst
       - name: Build PostgreSQL test archive
         if: steps.relay-artifacts-cache.outputs.cache-hit != 'true' && matrix.artifact == 'postgres-tests'
@@ -648,7 +649,7 @@ jobs:
         run: |
           cargo nextest run \
             --archive-file target/ci/backend-integration-tests.tar.zst \
-            -E 'binary(e2e_event_reminder) | binary(e2e_author_only_deletion) | binary(e2e_existence_oracle)' \
+            -E 'binary(e2e_event_reminder) | binary(e2e_author_only_deletion) | binary(e2e_existence_oracle) | binary(e2e_emoji_catalog)' \
             --run-ignored ignored-only
         env:
           RELAY_URL: ws://localhost:3000

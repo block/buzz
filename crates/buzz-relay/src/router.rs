@@ -472,6 +472,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(api::gifs::SHARE_PATH, post(api::gifs::share))
         // Profile search over `name` and `display_name` only (NIP-98 auth).
         .route(api::profiles::SEARCH_PATH, post(api::profiles::search))
+        // The community's custom emoji catalog: changes since a point, or a
+        // lookup by shortcode (NIP-98 auth). A full catalog is megabytes of
+        // repetitive text, so this route compresses its responses.
+        .route(
+            api::emoji::CATALOG_PATH,
+            post(api::emoji::catalog).layer(tower_http::compression::CompressionLayer::new()),
+        )
         .route(
             "/workflows/{workflow_id}/runs",
             get(api::workflows::workflow_runs),
@@ -3427,6 +3434,11 @@ mod tests {
                     "/profiles/search".to_owned(),
                     br#"{"query":"wes"}"#.to_vec(),
                 ),
+                (
+                    "POST",
+                    "/emoji/catalog".to_owned(),
+                    br#"{"since":0}"#.to_vec(),
+                ),
                 ("POST", "/api/invites".to_owned(), b"{}".to_vec()),
                 (
                     "GET",
@@ -3897,6 +3909,10 @@ mod tests {
         assert!(
             !is_exempt("/profiles/search"),
             "POST /profiles/search must be protected"
+        );
+        assert!(
+            !is_exempt("/emoji/catalog"),
+            "POST /emoji/catalog must be protected"
         );
         assert!(
             !is_exempt("/workflows/abc/runs"),
@@ -4829,6 +4845,7 @@ mod tests {
             ("POST", "/gifs/search".to_owned(), Some(&signed)),
             ("POST", "/gifs/share".to_owned(), Some(&signed)),
             ("POST", "/profiles/search".to_owned(), Some(&signed)),
+            ("POST", "/emoji/catalog".to_owned(), Some(&signed)),
             ("GET", branch.clone(), Some(&signed)),
             ("POST", branch, Some(&signed)),
             ("POST", "/api/invites".to_owned(), Some(&signed)),

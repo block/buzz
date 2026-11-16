@@ -610,9 +610,10 @@ pub fn emoji_entry_search_text(normalized_shortcode: &str) -> String {
 
 /// Build one custom emoji entry event (kind:30180).
 ///
-/// User-signed and parameterized-replaceable, keyed by `(pubkey, 30180, d)`
-/// where `d` is the normalized shortcode. Publishing the same shortcode again
-/// replaces the caller's earlier entry. `content` is the search text from
+/// User-signed, with `d` set to the normalized shortcode. A shortcode is
+/// unique in its community: the relay refuses an entry for a shortcode another
+/// member owns, unless a community owner or admin signs it. Publishing your
+/// own shortcode again replaces its image. `content` is the search text from
 /// [`emoji_entry_search_text`].
 pub fn build_emoji_entry(shortcode: &str, url: &str) -> Result<EventBuilder, SdkError> {
     let shortcode = normalize_custom_emoji_shortcode(shortcode)?;
@@ -623,6 +624,17 @@ pub fn build_emoji_entry(shortcode: &str, url: &str) -> Result<EventBuilder, Sdk
         emoji_entry_search_text(&shortcode),
     )
     .tags(tags))
+}
+
+/// Build the removal of one custom emoji (kind:30180 with no `emoji` tag).
+///
+/// It replaces the entry for the shortcode, so the relay drops the emoji from
+/// the community's catalog. The shortcode's owner, or a community owner or
+/// admin, may publish it.
+pub fn build_emoji_entry_removal(shortcode: &str) -> Result<EventBuilder, SdkError> {
+    let shortcode = normalize_custom_emoji_shortcode(shortcode)?;
+    Ok(EventBuilder::new(Kind::Custom(KIND_EMOJI_ENTRY as u16), "")
+        .tags(vec![tag(&["d", &shortcode])?]))
 }
 
 /// Build a canvas update event (kind 40100).
@@ -3538,6 +3550,19 @@ mod tests {
             .tags
             .iter()
             .any(|t| t.as_slice().first().is_some_and(|k| k == "h")));
+    }
+
+    #[test]
+    fn emoji_entry_removal_has_only_the_shortcode() {
+        let ev = sign(build_emoji_entry_removal(":Party_Parrot:").unwrap());
+        assert_eq!(ev.kind.as_u16(), 30180);
+        assert_eq!(ev.content, "");
+        let tags: Vec<_> = ev.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+        assert_eq!(
+            tags,
+            vec![vec!["d".to_string(), "party_parrot".to_string()]]
+        );
+        assert!(build_emoji_entry_removal("bad name").is_err());
     }
 
     #[test]

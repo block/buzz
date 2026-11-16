@@ -495,6 +495,11 @@ async fn may_delete_channel_event(
         .await?)
 }
 
+/// A kind 5 cannot remove a custom emoji: it would delete the entry's event
+/// and leave its catalog row. The catalog is changed only by kind:30180.
+const EMOJI_ENTRY_DELETION_REFUSED: &str =
+    "custom emoji cannot be deleted with kind 5; publish a kind 30180 removal for the shortcode";
+
 /// Validate a standard NIP-09 deletion event before it is stored.
 ///
 /// Buzz accepts standard deletions for self-authored events, plus the owning
@@ -524,6 +529,9 @@ pub async fn validate_standard_deletion_event(
             if target_kind == KIND_VERIFIED_PROFILE {
                 anyhow::bail!(DELETION_TARGET_DENIED);
             }
+            if target_kind == buzz_core::kind::KIND_EMOJI_ENTRY {
+                anyhow::bail!(EMOJI_ENTRY_DELETION_REFUSED);
+            }
             check_deletion_privacy_k_tag(event, target_kind)?;
         }
         let target_pubkey_bytes =
@@ -550,6 +558,9 @@ pub async fn validate_standard_deletion_event(
             anyhow::bail!(
                 "artifacts cannot be deleted with kind 5; use op=delete or kind 9005 redaction"
             );
+        }
+        if event_kind_u32(&target_event.event) == buzz_core::kind::KIND_EMOJI_ENTRY {
+            anyhow::bail!(EMOJI_ENTRY_DELETION_REFUSED);
         }
         // A deletion of a private deletion would be stored publicly and reveal
         // the private one's id and timing; NIP-09 gives it no effect anyway.
