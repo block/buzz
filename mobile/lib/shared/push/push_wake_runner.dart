@@ -45,9 +45,21 @@ class PushWakeRunner {
     final elapsed = Stopwatch()..start();
     final notifications = <PushWakeNotification>[];
     final failed = <String>{};
+    var first = true;
     do {
       _rerun = false;
-      final result = await _resolve(budget - elapsed.elapsed);
+      final PushWakeResult result;
+      try {
+        result = await _resolve(budget - elapsed.elapsed);
+      } on Object {
+        // A rerun that fails must not discard what earlier passes claimed,
+        // since those messages are already recorded as shown. The run keeps
+        // the earlier pass's failures, and the next wake fetches from before
+        // the newest shown message, so it finds what the rerun missed.
+        if (first) rethrow;
+        break;
+      }
+      first = false;
       notifications.addAll(result.notifications);
       // Only the last pass says what is still unread, because a community
       // that failed once may have been read by the next.
