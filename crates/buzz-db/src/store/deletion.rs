@@ -141,6 +141,8 @@ pub const PENDING_SCOPED_TABLES: &[&str] = &[
     "identity_retirement_actions",
     "identity_retirement_holds",
     "identity_retirement_workflows",
+    "mention_group_commands",
+    "mention_groups",
 ];
 
 /// Tenant tables an expand migration may add between a deletion's approval
@@ -157,6 +159,8 @@ pub const APPROVAL_FORWARD_TABLES: &[&str] = &[
     "identity_retirement_actions",
     "identity_retirement_holds",
     "identity_retirement_workflows",
+    "mention_group_commands",
+    "mention_groups",
 ];
 
 /// Control-plane tables with community provenance that the tenant purge does
