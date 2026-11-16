@@ -465,6 +465,25 @@ void main() {
         expect(result.notifications.map((n) => n.eventId), [late.id]);
       }
       expect(passes, 3);
+
+      // A rerun that fails keeps what the first pass already claimed.
+      var failingPasses = 0;
+      final failing = PushWakeRunner((budget) {
+        if (++failingPasses > 1) throw StateError('storage unreadable');
+        return fixture.wake(timeouts: PushWakeTimeouts(total: budget));
+      });
+      final kept = relay.message(dm, friend, 'before a failed rerun');
+      final held = relay.hold = Completer<void>();
+      final queriesBefore = relay.queries.length;
+      final sixth = failing.wake();
+      await untilQueries(relay, queriesBefore + 1);
+      final seventh = failing.wake();
+      held.complete();
+      relay.hold = null;
+      for (final result in await Future.wait([sixth, seventh])) {
+        expect(result.notifications.map((n) => n.eventId), [kept.id]);
+      }
+      expect(failingPasses, 2);
     });
   });
 }
