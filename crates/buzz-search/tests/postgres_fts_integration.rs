@@ -124,6 +124,7 @@ async fn search_finds_event_in_same_community() {
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .expect("search ok");
@@ -173,6 +174,7 @@ async fn search_does_not_return_other_community_events() {
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .unwrap();
@@ -191,6 +193,7 @@ async fn search_does_not_return_other_community_events() {
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .unwrap();
@@ -236,6 +239,7 @@ async fn kind0_search_by_display_name_works_without_flattening() {
                 per_page: 10,
                 mode: buzz_search::SearchMode::FullText,
                 sort: buzz_search::SearchSort::Relevance,
+                post_filtered: false,
             })
             .await
             .unwrap();
@@ -297,6 +301,7 @@ async fn short_kind0_prefix_prioritizes_exact_lexeme_on_a_noisy_page() {
             per_page: 3,
             mode: buzz_search::SearchMode::Prefix,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .expect("short profile prefix search ok");
@@ -402,6 +407,7 @@ async fn prefix_mode_matches_final_token_prefix_without_changing_full_text() {
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .expect("full text search ok");
@@ -428,6 +434,7 @@ async fn prefix_mode_matches_final_token_prefix_without_changing_full_text() {
             per_page: 10,
             mode: buzz_search::SearchMode::Prefix,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .expect("prefix search ok");
@@ -558,6 +565,7 @@ async fn prefix_mode_matches_final_token_prefix_without_changing_full_text() {
                 per_page: 10,
                 mode: buzz_search::SearchMode::Prefix,
                 sort,
+                post_filtered: false,
             })
             .await
             .expect("prefix search ok");
@@ -582,6 +590,7 @@ async fn prefix_mode_matches_final_token_prefix_without_changing_full_text() {
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .expect("full text search ok");
@@ -607,6 +616,7 @@ async fn prefix_mode_matches_final_token_prefix_without_changing_full_text() {
             per_page: 10,
             mode: buzz_search::SearchMode::Prefix,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .expect("multi-token prefix search ok");
@@ -626,6 +636,7 @@ async fn prefix_mode_matches_final_token_prefix_without_changing_full_text() {
             per_page: 10,
             mode: buzz_search::SearchMode::Prefix,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .expect("completed-token exact + trailing-prefix search ok");
@@ -676,6 +687,7 @@ async fn prefix_mode_handles_tsquery_boundary_punctuation() {
             per_page: 10,
             mode: buzz_search::SearchMode::Prefix,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .expect("prefix punctuation search ok");
@@ -735,6 +747,7 @@ async fn prefix_mode_preserves_storage_level_privacy_exclusions() {
             per_page: 10,
             mode: buzz_search::SearchMode::Prefix,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .expect("prefix privacy search ok");
@@ -747,9 +760,10 @@ async fn prefix_mode_preserves_storage_level_privacy_exclusions() {
 
 /// Prefix and full-text relevance rank only the newest 1000 matches, so an
 /// older, better-ranked message drops out, and their pages end with that
-/// window; profile relevance still ranks every match.
+/// window; profile and post-filtered relevance still rank every match.
 /// Mutation: rank every prefix or full-text match → the old message tops the
-/// first page; window profiles too → the old profile drops off the first page.
+/// first page; window profiles or post-filtered searches too → the old
+/// profile or message drops off the first page.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn relevance_ranks_only_the_newest_matches() {
@@ -795,6 +809,7 @@ async fn relevance_ranks_only_the_newest_matches() {
         per_page: 20,
         mode,
         sort: buzz_search::SearchSort::Relevance,
+        post_filtered: false,
     };
     let ids = |r: buzz_search::SearchResult| r.hits.iter().map(|h| h.event_id).collect::<Vec<_>>();
 
@@ -815,6 +830,21 @@ async fn relevance_ranks_only_the_newest_matches() {
         assert!(!last.contains(&old), "{mode:?}");
         let past = svc.search(&query(q, mode, 51)).await.expect("page 51");
         assert!(past.hits.is_empty(), "{mode:?}: no page past the window");
+
+        // The caller drops hits the query cannot filter (a thread's `#e`),
+        // so the window could hold none it keeps.
+        let post_filtered = ids(svc
+            .search(&SearchQuery {
+                post_filtered: true,
+                ..query(q, mode, 1)
+            })
+            .await
+            .expect("post-filtered"));
+        assert_eq!(
+            post_filtered.first(),
+            Some(&old),
+            "{mode:?}: ranks every match"
+        );
     }
 
     let profiles = ids(svc
@@ -904,6 +934,7 @@ async fn channel_scope_restricts_results() {
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .unwrap();
@@ -924,6 +955,7 @@ async fn channel_scope_restricts_results() {
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .unwrap();
@@ -943,6 +975,7 @@ async fn channel_scope_restricts_results() {
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .unwrap();
@@ -962,6 +995,7 @@ async fn channel_scope_restricts_results() {
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .unwrap();
@@ -1002,6 +1036,7 @@ async fn deleted_events_are_excluded() {
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .unwrap();
@@ -1034,6 +1069,7 @@ async fn empty_query_returns_empty_result_no_roundtrip() {
                 per_page: 10,
                 mode: buzz_search::SearchMode::FullText,
                 sort: buzz_search::SearchSort::Relevance,
+                post_filtered: false,
             })
             .await
             .unwrap();
@@ -1102,6 +1138,7 @@ async fn since_until_filters() {
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .unwrap();
@@ -1147,6 +1184,7 @@ async fn pagination_works() {
             per_page: 3,
             mode: buzz_search::SearchMode::FullText,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .unwrap();
@@ -1165,6 +1203,7 @@ async fn pagination_works() {
             per_page: 3,
             mode: buzz_search::SearchMode::FullText,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .unwrap();
@@ -1231,6 +1270,7 @@ async fn newest_sort_pages_by_time_then_id_within_scope() {
                 per_page: 2,
                 mode: buzz_search::SearchMode::FullText,
                 sort,
+                post_filtered: false,
             })
             .await
             .unwrap()
@@ -1337,6 +1377,7 @@ async fn channel_less_only_excludes_per_channel_events() {
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .unwrap();
@@ -1386,6 +1427,7 @@ async fn nul_bytes_in_query_are_sanitized() {
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .expect("NUL-containing search query should not bubble a Postgres error");
@@ -1430,6 +1472,7 @@ async fn enormous_page_number_is_clamped() {
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .expect("huge page number should be bounded, not error");
@@ -1460,6 +1503,7 @@ async fn very_long_query_is_bounded_before_pg_parse() {
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .expect("long search query should be capped before Postgres parses it");
@@ -1602,6 +1646,7 @@ async fn excluded_kinds_are_storage_level_unsearchable() {
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .expect("search ok");
@@ -1699,6 +1744,7 @@ async fn author_only_kinds_are_storage_level_unsearchable() {
             per_page: 100,
             mode: buzz_search::SearchMode::FullText,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .expect("search ok");
@@ -1807,6 +1853,7 @@ async fn p_gated_persistent_kinds_have_storage_null_tsvector() {
             per_page: 100,
             mode: buzz_search::SearchMode::FullText,
             sort: buzz_search::SearchSort::Relevance,
+            post_filtered: false,
         })
         .await
         .expect("search ok");
@@ -1883,6 +1930,7 @@ async fn artifact_search_uses_only_live_current_head() {
         per_page: 10,
         mode: buzz_search::SearchMode::FullText,
         sort: buzz_search::SearchSort::Relevance,
+        post_filtered: false,
     };
     let result = svc.search(&query).await.unwrap();
     assert_eq!(result.hits.len(), 1);
@@ -2510,6 +2558,7 @@ async fn abandoned_search_cancels_its_statement() {
         per_page: 10,
         mode: buzz_search::SearchMode::Prefix,
         sort: buzz_search::SearchSort::Relevance,
+        post_filtered: false,
     };
     abandon_under_lock(&pool, "search", || svc.search(&message_query)).await;
     abandon_under_lock(&pool, "search_profile_names", || {

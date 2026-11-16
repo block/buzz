@@ -904,6 +904,13 @@ pub(crate) fn build_search_channel_scope_filter(
     })
 }
 
+/// Whether the relay drops search hits on constraints of `filter` that
+/// `buzz_search` cannot apply: `ids`, or any tag but `#h` (the channel scope).
+pub(crate) fn search_post_filtered(filter: &Filter) -> bool {
+    let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+    filter.ids.is_some() || filter.generic_tags.keys().any(|tag| *tag != h_tag)
+}
+
 /// Handle a NIP-50 search REQ: query Postgres FTS, fetch full events, deliver results, EOSE.
 /// Search subscriptions are one-shot — no persistent subscription is registered.
 #[allow(clippy::too_many_arguments)]
@@ -1019,6 +1026,7 @@ async fn handle_search_req(
                 per_page: SEARCH_PAGE_SIZE,
                 mode: buzz_search::SearchMode::FullText,
                 sort: buzz_search::SearchSort::Relevance,
+                post_filtered: search_post_filtered(filter),
             };
 
             let search_result = match state.search.search(&search_query).await {
@@ -3369,6 +3377,25 @@ mod tests {
             capacity - i64::from(SEARCH_PAGE_SIZE) < advertised,
             "scan budget has a spare page of slack — derive it from the ceiling"
         );
+    }
+
+    /// Mutation: ignore `ids` or tags beyond `#h` → a thread-scoped search
+    /// ranks only the newest 1000 matches and can drop every thread hit.
+    #[test]
+    fn search_filters_with_ids_or_tags_beyond_h_are_post_filtered() {
+        let tag = |letter| nostr::SingleLetterTag::lowercase(letter);
+        let search = || Filter::new().search("deploy");
+        assert!(!search_post_filtered(&search()));
+        assert!(!search_post_filtered(&search().custom_tag(
+            tag(nostr::Alphabet::H),
+            uuid::Uuid::nil().to_string()
+        )));
+        assert!(search_post_filtered(
+            &search().id(nostr::EventId::all_zeros())
+        ));
+        for letter in [nostr::Alphabet::E, nostr::Alphabet::P, nostr::Alphabet::T] {
+            assert!(search_post_filtered(&search().custom_tag(tag(letter), "x")));
+        }
     }
 
     #[test]

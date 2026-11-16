@@ -2798,6 +2798,7 @@ async fn handle_bridge_search(
             per_page: limit,
             mode: search_mode,
             sort: extract_search_sort(raw),
+            post_filtered: crate::handlers::req::search_post_filtered(filter),
         };
 
         let search_result = state

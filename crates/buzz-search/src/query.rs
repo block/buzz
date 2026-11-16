@@ -73,8 +73,8 @@ pub enum SearchMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchSort {
     /// `ts_rank_cd` relevance, newest first among equal ranks. Outside
-    /// profile search, only the newest 1000 matches are ranked, so pages end
-    /// with them.
+    /// profile and [`SearchQuery::post_filtered`] searches, only the newest
+    /// 1000 matches are ranked, so pages end with them.
     Relevance,
     /// Newest first, ignoring relevance; ties ordered by event id.
     Newest,
@@ -113,6 +113,11 @@ pub struct SearchQuery {
     pub mode: SearchMode,
     /// Result ordering. Paging is over this order.
     pub sort: SearchSort,
+    /// The caller drops some hits after the search, on constraints this
+    /// query cannot express (such as NIP-01 `ids`, or tags other than `#h`).
+    /// Relevance then ranks every match: the newest 1000 could hold none of
+    /// the hits the caller keeps.
+    pub post_filtered: bool,
 }
 
 /// A single FTS hit. The relay refetches the canonical `StoredEvent` and
@@ -292,7 +297,9 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
         && profile_only
         && search_text.chars().count() <= 2;
     // Profiles are few, so profile search keeps ranking every match.
-    let rank_window = (query.sort == SearchSort::Relevance && !profile_only).then_some(RANK_WINDOW);
+    let rank_window =
+        (query.sort == SearchSort::Relevance && !profile_only && !query.post_filtered)
+            .then_some(RANK_WINDOW);
 
     let min_prefix_chars = if profile_only { 0 } else { PREFIX_MIN_CHARS };
     // One checkout for both statements, so a busy pool queues a search once.

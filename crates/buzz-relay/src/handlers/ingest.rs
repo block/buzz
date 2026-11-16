@@ -4509,6 +4509,7 @@ mod postgres_tests {
                 per_page: 50,
                 mode: buzz_search::SearchMode::Prefix,
                 sort: buzz_search::SearchSort::Relevance,
+                post_filtered: false,
             };
             async move { service.search(&query).await.expect("search").hits.len() }
         };

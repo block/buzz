@@ -318,7 +318,8 @@ run_unit_tests() {
       handlers::req::tests::dropped_terminal_frame_cancels_connection \
       handlers::req::tests::revoke_dropped_terminal_frame_cancels_connection \
       handlers::req::tests::count_fallback_covers_filters_that_can_match_private_deletions \
-      handlers::req::tests::group_state_t_and_creator_tags_reach_sql_only_for_group_state_kinds
+      handlers::req::tests::group_state_t_and_creator_tags_reach_sql_only_for_group_state_kinds \
+      handlers::req::tests::search_filters_with_ids_or_tags_beyond_h_are_post_filtered
 
   # Access log line tests, mirroring `just test-unit`'s module filters.
   run_test_step "buzz-relay access log tests" \
