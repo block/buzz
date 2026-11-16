@@ -7,10 +7,28 @@ import 'push_wake_resolver.dart';
 /// wake looks again when it finishes, so a message that arrived after its
 /// fetch is still found. Every caller waiting gets one result, with the
 /// notifications of every pass.
+///
+/// All passes of a run share one [budget], which stays inside the native
+/// watchdog, so wakes that keep arriving can't extend a run past it. A rerun
+/// starts only when at least [minimumPass] of the budget is left; otherwise the
+/// run returns what it has, and a message it skipped is found by the next
+/// wake, which fetches from before the newest shown message.
 class PushWakeRunner {
-  PushWakeRunner(this._resolve);
+  PushWakeRunner(
+    this._resolve, {
+    this.budget = const Duration(seconds: 5),
+    this.minimumPass = const Duration(seconds: 1),
+  });
 
-  final Future<PushWakeResult> Function() _resolve;
+  /// Runs one pass within the time it is given.
+  final Future<PushWakeResult> Function(Duration budget) _resolve;
+
+  /// The longest a run may take, over all its passes.
+  final Duration budget;
+
+  /// The least time worth starting a rerun with.
+  final Duration minimumPass;
+
   Future<PushWakeResult>? _running;
   bool _rerun = false;
 
@@ -24,18 +42,19 @@ class PushWakeRunner {
   }
 
   Future<PushWakeResult> _loop() async {
+    final elapsed = Stopwatch()..start();
     final notifications = <PushWakeNotification>[];
     final failed = <String>{};
     do {
       _rerun = false;
-      final result = await _resolve();
+      final result = await _resolve(budget - elapsed.elapsed);
       notifications.addAll(result.notifications);
       // Only the last pass says what is still unread, because a community
       // that failed once may have been read by the next.
       failed
         ..clear()
         ..addAll(result.failedCommunityIds);
-    } while (_rerun);
+    } while (_rerun && budget - elapsed.elapsed >= minimumPass);
     return PushWakeResult(
       notifications: capPushWakeNotifications(notifications),
       failedCommunityIds: failed.toList()..sort(),

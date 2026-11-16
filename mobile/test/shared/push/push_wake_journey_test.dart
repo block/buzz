@@ -386,9 +386,9 @@ void main() {
       final before = relay.message(dm, friend, 'before the fetch');
       final release = relay.hold = Completer<void>();
       var passes = 0;
-      final runner = PushWakeRunner(() {
+      final runner = PushWakeRunner((budget) {
         passes++;
-        return fixture.wake();
+        return fixture.wake(timeouts: PushWakeTimeouts(total: budget));
       });
 
       final first = runner.wake();
@@ -410,6 +410,32 @@ void main() {
           before.id,
         ]);
       }
+
+      // All passes share one budget: when the first pass leaves too little
+      // of it, a wake mid-run does not start another pass, and the run
+      // returns what it found.
+      final short = PushWakeRunner(
+        (budget) {
+          passes++;
+          return fixture.wake(timeouts: PushWakeTimeouts(total: budget));
+        },
+        budget: const Duration(milliseconds: 800),
+        minimumPass: const Duration(milliseconds: 400),
+      );
+      final late = relay.message(dm, friend, 'during a slow pass');
+      final slow = relay.hold = Completer<void>();
+      final queries = relay.queries.length;
+      final fourth = short.wake();
+      await untilQueries(relay, queries + 1);
+      final fifth = short.wake();
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      slow.complete();
+      relay.hold = null;
+
+      for (final result in await Future.wait([fourth, fifth])) {
+        expect(result.notifications.map((n) => n.eventId), [late.id]);
+      }
+      expect(passes, 3);
     });
   });
 }
