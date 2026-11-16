@@ -387,6 +387,7 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
     required void Function(RelaySubscriptionStatus) onStatusChanged,
+    bool resumeSince = true,
   }) {
     final subscription = _FakeSubscription(
       this,

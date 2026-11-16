@@ -99,6 +99,7 @@ import os.log
       }
     }
     shareSuggestions?.attach(messenger: messenger)
+    QuickSendBridge.shared.attach(messenger: messenger)
     browserAuthBridge = BuzzBrowserAuthBridge(messenger: messenger)
     hostedHpkeChannel = FlutterMethodChannel(name: "buzz/hosted_hpke", binaryMessenger: messenger)
     hostedHpkeChannel?.setMethodCallHandler { call, result in
