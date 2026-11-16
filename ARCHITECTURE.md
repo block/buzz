@@ -582,9 +582,12 @@ script, which must happen before the emoji migration rollout.
 **Key behaviors:**
 - `SearchService::new(pool)` wraps a `PgPool`; `search(&SearchQuery)` runs a
   parameterized FTS query against the `events.search_tsv` GIN index and returns
-  `SearchResult` (candidate `SearchHit`s). Relevance search (outside
-  profile search) ranks only the newest 1000 matches, which Postgres may read
-  from the primary key backward instead of the GIN index.
+  `SearchResult` (candidate `SearchHit`s). Relevance search ranks only the
+  newest 1000 matches, which Postgres may read from the primary key backward
+  instead of the GIN index. Two kinds of search rank every match: profile
+  search, and a search the caller marks `post_filtered` because it drops hits
+  on constraints the query cannot express (the relay sets it for `ids` and
+  tags other than `#h`, such as a thread's `#e`).
 - `ChannelScope` makes the channel constraint explicit (`Any` /
   `ChannelLessOnly` / `Channels` / `ChannelsOrChannelLess`), closing the
   ambiguity the old `Option<Vec<Uuid>> + bool` matrix could not express.
@@ -965,10 +968,10 @@ kinds via `CASE WHEN kind IN (1059, 30300, 30622) THEN NULL`, so those rows are
 storage-level unsearchable (a `NULL` tsvector never matches `@@`). A GIN index
 (`idx_events_search_tsv`) backs the `@@` probe; in multi-community mode the
 community-leading btree filters BitmapAnd with the GIN probe so every query is
-fenced to its `community_id`. Relevance search outside profiles ranks only the
-newest 1000 matches; for a common word or prefix Postgres reads the
-`(community_id, created_at, id)` primary key backward and stops there, still
-fenced by its leading `community_id`.
+fenced to its `community_id`. Relevance search outside profiles and
+post-filtered searches ranks only the newest 1000 matches; for a common word or
+prefix Postgres reads the `(community_id, created_at, id)` primary key backward
+and stops there, still fenced by its leading `community_id`.
 
 ---
 

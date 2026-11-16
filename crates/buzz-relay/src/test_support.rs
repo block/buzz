@@ -217,3 +217,84 @@ pub(crate) async fn restriction_lookup_failing_db() -> (buzz_db::Db, sqlx::PgPoo
         .expect("failing restriction pool");
     (buzz_db::Db::from_pool(pool), admin, schema)
 }
+
+/// A thread search the relay checks after buzz-search returns: one channel
+/// holds a reply to a thread that says "planning" four times, then 1000 newer,
+/// weaker "planning" messages outside the thread. Those fill buzz-search's
+/// relevance window of the newest 1000 matches, so the reply is found only
+/// when the caller marks the search as post-filtered. Returns the tenant, the
+/// channel, the filter (`search` plus the thread's `#e`) and the reply's ID.
+pub(crate) async fn seed_thread_reply_behind_rank_window(
+    state: &crate::state::AppState,
+) -> (
+    buzz_core::tenant::TenantContext,
+    uuid::Uuid,
+    nostr::Filter,
+    nostr::EventId,
+) {
+    use nostr::{Alphabet, EventBuilder, Keys, Kind, SingleLetterTag, Tag, Timestamp};
+    let host = format!("rank-window-{}.example", uuid::Uuid::new_v4().simple());
+    let community = state
+        .db
+        .ensure_configured_community(&host)
+        .await
+        .expect("ensure community")
+        .id;
+    let channel = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO channels (id, community_id, name, created_by) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(channel)
+    .bind(*community.as_uuid())
+    .bind(format!("rank-window-{}", channel.simple()))
+    .bind(vec![7_u8; 32])
+    .execute(state.db.pool())
+    .await
+    .expect("insert channel");
+
+    let keys = Keys::generate();
+    let h = Tag::parse(["h", &channel.to_string()]).expect("h tag");
+    // Channel writes reject `created_at` more than 960 seconds old.
+    let reply_at = Timestamp::now().as_secs() - 600;
+    let message = |content: String, created_at: u64, tags: Vec<Tag>| {
+        EventBuilder::new(Kind::Custom(9), content)
+            .tags(tags)
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(&keys)
+            .expect("sign message")
+    };
+    let root = message("thread root".into(), reply_at, vec![h.clone()]);
+    let reply = message(
+        "planning planning planning planning".into(),
+        reply_at,
+        vec![h.clone(), Tag::event(root.id)],
+    );
+    state
+        .db
+        .insert_event(community, &reply, Some(channel))
+        .await
+        .expect("insert reply");
+    for g in 1..=1000 {
+        let newer = message(
+            format!("planning notes {g}"),
+            reply_at + 300,
+            vec![h.clone()],
+        );
+        state
+            .db
+            .insert_event(community, &newer, Some(channel))
+            .await
+            .expect("insert newer match");
+    }
+
+    let filter = nostr::Filter::new()
+        .kind(Kind::Custom(9))
+        .search("planning")
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::E), root.id.to_hex());
+    (
+        buzz_core::tenant::TenantContext::resolved(community, host),
+        channel,
+        filter,
+        reply.id,
+    )
+}

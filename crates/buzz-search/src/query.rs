@@ -258,7 +258,7 @@ fn normalized_search_text(q: &str) -> Option<String> {
 /// ```sql
 /// SELECT id, kind, pubkey, channel_id, EXTRACT(EPOCH FROM created_at)::bigint AS created_at_s,
 ///        ts_rank_cd(search_tsv, $q) AS rank
-/// FROM events            -- relevance outside profiles: the newest RANK_WINDOW matches
+/// FROM events            -- relevance outside profile and post-filtered searches: the newest RANK_WINDOW matches
 /// WHERE community_id = $ctx
 ///   AND deleted_at IS NULL
 ///   AND search_tsv @@ $q

@@ -3481,6 +3481,38 @@ pub(crate) mod postgres_tests {
         )
     }
 
+    /// A `/query` search inside a thread finds a reply older than the newest
+    /// 1000 matches. The bridge drops the other matches after the search, so
+    /// the search must rank every match. Mutation: pass `post_filtered: false`
+    /// from `handle_bridge_search` → no events → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn bridge_thread_search_finds_a_reply_older_than_the_rank_window() {
+        let state = crate::state::tests::test_state().await;
+        let (tenant, channel, filter, reply) =
+            crate::test_support::seed_thread_reply_behind_rank_window(&state).await;
+        let raw = [serde_json::to_value(&filter).expect("filter json")];
+        let Json(events) = handle_bridge_search(
+            &state,
+            &raw,
+            std::slice::from_ref(&filter),
+            &[channel],
+            &crate::handlers::system_channels::NamedOnlyChannels::default(),
+            &tenant,
+            &Keys::generate().public_key().to_hex(),
+            &[0; 32],
+        )
+        .await
+        .expect("search");
+        let ids: Vec<_> = events
+            .as_array()
+            .expect("event array")
+            .iter()
+            .map(|event| event["id"].clone())
+            .collect();
+        assert_eq!(ids, vec![serde_json::json!(reply.to_hex())]);
+    }
+
     /// An artifact read's summary survives a WARN-only filter on a failed
     /// request, without the search text or the artifact-only predicates.
     #[test]

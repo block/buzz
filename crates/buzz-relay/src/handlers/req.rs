@@ -4900,5 +4900,46 @@ mod tests {
                 .collect();
             assert_eq!(ids, vec![bare.id], "two-value #p reads match NIP-01");
         }
+
+        /// A WebSocket search inside a thread finds a reply older than the
+        /// newest 1000 matches. The relay drops the other matches after the
+        /// search, so the search must rank every match. Mutation: pass
+        /// `post_filtered: false` from `handle_search_req` → no EVENT → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn thread_search_finds_a_reply_older_than_the_rank_window() {
+            let state = crate::state::tests::test_state().await;
+            let (tenant, channel, filter, reply) =
+                crate::test_support::seed_thread_reply_behind_rank_window(&state).await;
+            let (conn, mut send_rx) = lifecycle_conn();
+            let owner = claim_search_subscription("s", &conn, &state)
+                .await
+                .expect("claim");
+            let filters = vec![filter];
+            let mut access = crate::access::ReadLog::req(&conn, "s", &filters);
+            handle_search_req(
+                "s",
+                owner,
+                &filters,
+                &[channel],
+                &crate::handlers::system_channels::NamedOnlyChannels::default(),
+                false,
+                &tenant,
+                &[0; 32],
+                &conn,
+                &state,
+                None,
+                &mut access,
+            )
+            .await;
+            drop(access);
+
+            let frames = closed_frames(&mut send_rx);
+            assert_eq!(frames.len(), 2, "one EVENT, then EOSE: {frames:?}");
+            let event: serde_json::Value = serde_json::from_str(&frames[0]).expect("EVENT json");
+            assert_eq!(event[0], "EVENT", "{event}");
+            assert_eq!(event[2]["id"], reply.to_hex(), "{event}");
+            assert_eq!(frames[1], r#"["EOSE","s"]"#);
+        }
     }
 }
