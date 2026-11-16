@@ -27,27 +27,29 @@ Android installations get the same mobile push notifications as iOS: the same tr
 8. As an Android user, I want Buzz to ask for notification permission at the same point the iOS app asks, so that the prompt arrives when its purpose is clear.
 9. As an Android user who declined notification permission, I want the app to keep working normally, so that declining has no other cost.
 10. As an Android user, I want a notification even when the app's fetch is slow or fails, so that a message is never silently missed.
-11. As an Android user, I want the generic notification replaced by the real one when the fetch completes, so that I don't see two notifications for one message.
-12. As an Android user, I want no notification for messages I sent myself from another device, so that my own activity doesn't buzz my phone.
-13. As an Android user, I want muted channels to stay silent, so that muting means the same thing on every platform.
-14. As an Android user, I want no notifications from hellthreads (messages tagging very many people), so that broadcast noise doesn't reach me, as on iOS.
-15. As an Android user, I want a message I already saw in the app not to notify me again, so that notifications only show new things.
-16. As an Android user signed into several communities, I want notifications from each of them, so that I don't need to switch communities to stay up to date.
-17. As an Android user who signs out of a community, I want its notifications to stop, so that a signed-out account can't reach my phone.
-18. As an Android user who reinstalls the app, I want notifications to resume after I sign in again, with no leftover state from the old install.
-19. As an Android user whose push token rotates, I want notifications to keep arriving, so that token rotation is invisible to me.
-20. As an Android user on GrapheneOS or another locked-bootloader build with Google Play services, I want push to work, so that a privacy-focused phone isn't excluded.
-21. As an Android user whose phone can't provide hardware-backed attestation, or whose bootloader is unlocked, I want the app to work normally without push, and to see that push is unavailable, so that I understand why nothing arrives.
-22. As a Buzz member, I want my relay unable to tell which platform each of my devices runs, so that platform details can't help correlate my identities.
-23. As a Buzz member, I want push wakes to carry nothing about my messages, so that Google and Apple learn nothing beyond the fact that a wake happened.
-24. As a relay operator, I want one push gateway per app distribution to serve both platforms, so that I configure push once per app.
-25. As a push gateway operator, I want enrollment to require hardware attestation, so that scripted clients can't abuse the public enrollment endpoints.
-26. As a push gateway operator, I want each installation's signed calls rate limited per attested key, and the enrollment challenge quota sized for both platforms, so that one installation can't flood the gateway and an Android launch can't starve iOS enrollment.
-27. As a push gateway operator, I want the gateway to refresh Google's attestation revocation list itself, so that revoked keys stop enrolling without manual work.
-28. As a distributor of a fork, I want to run my own gateway with my own Firebase project and Android signing key, so that my app's push is independent of anyone else's.
-29. As a distributor, I want Firebase configuration supplied at build and deploy time, so that no distributor-specific values live in the open-source code.
-30. As an iOS user, I want my notifications to keep working through the rollout, so that adding Android doesn't break iOS.
-31. As a developer, I want Android notification building to reuse the app's Dart relay, sign-in and formatting code, so that there is one implementation to keep correct.
+11. As an Android user, I want the real notification to appear directly, with a generic one shown only when the fetch is slow and then replaced, so that one message never alerts twice.
+12. As an Android user using the app, I want no system notification for a message while the app is open, so that the app doesn't notify me about what I'm looking at.
+13. As an Android user whose phone was offline, I want a notification for each message I missed, grouped per conversation, so that coming back online doesn't hide all but the newest.
+14. As an Android user, I want no notification for messages I sent myself from another device, so that my own activity doesn't buzz my phone.
+15. As an Android user, I want muted channels to stay silent, so that muting means the same thing on every platform.
+16. As an Android user, I want no notifications from hellthreads (messages tagging very many people), so that broadcast noise doesn't reach me, as on iOS.
+17. As an Android user, I want a message I already saw in the app not to notify me again, so that notifications only show new things.
+18. As an Android user signed into several communities, I want notifications from each of them, so that I don't need to switch communities to stay up to date.
+19. As an Android user who signs out of a community, I want its notifications to stop, so that a signed-out account can't reach my phone.
+20. As an Android user who reinstalls the app, I want notifications to resume after I sign in again, with no leftover state from the old install.
+21. As an Android user whose push token rotates, I want notifications to keep arriving, so that token rotation is invisible to me.
+22. As an Android user on GrapheneOS or another locked-bootloader build with Google Play services, I want push to work, so that a privacy-focused phone isn't excluded.
+23. As an Android user whose phone can't provide hardware-backed attestation, or whose bootloader is unlocked, I want the app to work normally without push, and to see that push is unavailable, so that I understand why nothing arrives.
+24. As a Buzz member, I want my relay unable to tell which platform each of my devices runs, so that platform details can't help correlate my identities.
+25. As a Buzz member, I want push wakes to carry nothing about my messages, so that Google and Apple learn nothing beyond the fact that a wake happened.
+26. As a relay operator, I want one push gateway per app distribution to serve both platforms, so that I configure push once per app.
+27. As a push gateway operator, I want enrollment to require hardware attestation, so that scripted clients can't abuse the public enrollment endpoints.
+28. As a push gateway operator, I want each installation's signed calls rate limited per attested key, and the enrollment challenge quota sized for both platforms, so that one installation can't flood the gateway and an Android launch can't starve iOS enrollment.
+29. As a push gateway operator, I want the gateway to refresh Google's attestation revocation list itself, so that revoked keys stop enrolling without manual work.
+30. As a distributor of a fork, I want to run my own gateway with my own Firebase project and Android signing key, so that my app's push is independent of anyone else's.
+31. As a distributor, I want Firebase configuration supplied at build and deploy time, so that no distributor-specific values live in the open-source code.
+32. As an iOS user, I want my notifications to keep working through the rollout, so that adding Android doesn't break iOS.
+33. As a developer, I want Android notification building to reuse the app's Dart relay, sign-in and formatting code, so that there is one implementation to keep correct.
 
 ## Implementation Decisions
 
@@ -69,6 +71,7 @@ Decisions recorded as ADRs: [0004](../docs/adr/0004-push-gateway-hides-device-pl
 - Signed installation calls are rate limited per attested key. Attestation carries no stable device id and each enrollment makes a fresh key, so enrollment itself stays bounded by the deployment-wide challenge quota and by one installation per push token. That quota is sized for both platforms, and the Android client jitters its first enrollment so a release doesn't make every phone enroll at once.
 - Delivery moves to one platform-neutral route. The existing APNs-named route stays as an alias until relays have moved over. The gateway maps the lease's priority class to each platform.
 - For Android, the wake signal is a high-priority, data-only FCM message whose payload is fixed and compiled in, like today's APNs payload. It contains no relay-supplied bytes.
+- Android wakes carry one constant collapse key and a time to live taken from the delivery's expiry. A collapse key only replaces a wake FCM is still holding for an unreachable phone, so an online phone still gets one wake per message, and a phone coming back online gets one wake instead of a burst (FCM keeps at most 100 uncollapsed messages per device and discards them all past that). The app treats FCM's deleted-messages callback as a wake.
 - One delegation per installation and relay stays the rule for now (ADR 0004 keeps per-identity grants possible later).
 
 **Relay**
@@ -79,16 +82,16 @@ Decisions recorded as ADRs: [0004](../docs/adr/0004-push-gateway-hides-device-pl
 
 **Mobile, Android native**
 
-- A Firebase messaging service receives the wake and immediately posts a generic notification in the matching category. It then starts a background Flutter engine running the wake-to-notification entrypoint, and updates or removes the notification from the result. A native watchdog finishes the work inside the platform's time limit even if Dart never answers.
+- A Firebase messaging service receives the wake. When the app is in the foreground (a native lifecycle check), it does nothing: the running app already shows new messages. Otherwise it starts a background Flutter engine running the wake-to-notification entrypoint and posts the result directly. The category is known only after the fetch, so no notification is posted before it. If nothing has been posted after about 2 s, it posts a generic "New activity" notification in a third "Other" category, which the real result replaces silently, and which is removed when the result is that there is nothing to show. A native watchdog finishes the work inside the platform's time limit even if Dart never answers.
 - FCM token registration and rotation feed the same enrollment and endpoint-rotation flow iOS uses.
 - The app generates an Android Keystore key with the gateway's challenge and sends its attestation chain at enrollment.
-- Notification categories are "Direct messages" and "Mentions". Notifications use the platform's messaging style, grouped per conversation. A tap opens the conversation through the app's existing deep-link handling.
+- Notification categories are "Direct messages", "Mentions" and "Other" (only the slow-fetch generic notification). Notifications use the platform's messaging style, grouped per conversation. A tap opens the conversation through the app's existing deep-link handling.
 - The Android 13+ notification permission prompt appears at the same point iOS asks.
 - Firebase configuration is a build-time setting supplied by each distributor, never committed.
 
 **Mobile, shared Dart**
 
-- One wake-to-notification function does what the iOS extension's resolver does. It reads the configured communities, signs in to each relay, fetches events newer than what was already shown, applies the same eligibility rules (self-authored, muted, hellthread), picks the newest unshown message, and returns title, body, conversation and navigation target. It runs headless, with no UI and no Riverpod app state, and uses short network timeouts of its own.
+- One wake-to-notification function does what the iOS extension's resolver does. It reads the configured communities, signs in to each relay, fetches events newer than what was already shown, applies the same eligibility rules (self-authored, muted, hellthread), and returns every eligible unshown message, bounded (newest 20 overall, with a per-conversation cap that fits the messaging style), each with title, body, conversation and navigation target. The Android handler posts or updates one notification per conversation, each alerting once. A wake therefore means "sync now", so a lost wake is recovered by the next one. iOS keeps one notification per push, because its extension can only rewrite the push it was handed. It runs headless, with no UI and no Riverpod app state, and uses short network timeouts of its own.
 - The notification body formatter is ported to Dart and checked against the shared notification-body fixtures, as ADR 0002 requires of every platform.
 - The background path records which messages it has shown, so the app and later wakes don't notify for them again. A process runs one background fetch at a time: a wake that arrives mid-run sets a rerun flag instead of starting a second engine. The shown record is updated in one atomic step together with the decision to post, in a store a headless isolate can read, since the foreground app writes the same record.
 - Enrollment gains the Android attestation, and every later gateway call is signed with the attested key. The rest of the push layer (subscriptions, renewal, revocation outbox, setup recovery) is shared with iOS unchanged.
@@ -100,7 +103,7 @@ Prototype evidence ([`prototype/android-push-headless-dart`](https://github.com/
 Tests check behavior at two points, through public interfaces, with fakes only at external boundaries.
 
 - **Push gateway HTTP API.** Extend the existing HTTP delivery and attestation tests with a fake FCM sender and generated Key Attestation chains: enroll, delegate, deliver, rotate endpoint and revoke for an Android installation, and table rows for each rejected attestation (unlocked bootloader, Unverified or Failed boot state, wrong package or signing digest, wrong challenge, revoked certificate, software-backed key), plus the per-key rate limit. Signed installation calls get matching rows: wrong key, altered transcript, reused challenge. Prior art: the gateway's HTTP delivery tests and App Attest assertion tests.
-- **Dart wake-to-notification function.** Run it against a fake relay as a journey: DM and mention notify; self-authored, muted and hellthread messages don't; an already shown message doesn't notify again; several communities; slow and unreachable relays return a fallback inside the time budget; two overlapping wakes, and the foreground app writing the shown record during a background run, never notify twice or lose a message. The ported body formatter runs the shared notification-body fixtures. Prior art: the iOS resolver tests in BuzzPushKit.
+- **Dart wake-to-notification function.** Run it against a fake relay as a journey: DM and mention notify; self-authored, muted and hellthread messages don't; an already shown message doesn't notify again; several messages across two conversations after one wake; a missed wake recovered by the next one; several communities; slow and unreachable relays return a fallback inside the time budget; two overlapping wakes, and the foreground app writing the shown record during a background run, never notify twice or lose a message. The ported body formatter runs the shared notification-body fixtures. Prior art: the iOS resolver tests in BuzzPushKit.
 - **Relay.** The delivery URL setting accepts the platform-neutral route, in the existing relay configuration tests.
 - **End to end.** Before readiness, exercise the real flow on a physical Android phone and an iOS device: enroll, receive a DM and a mention with the app killed, tap through, rotate the token, and sign out.
 
@@ -118,7 +121,7 @@ Tests check behavior at two points, through public interfaces, with fakes only a
 ## Further Notes
 
 - Real network latency over cellular is the main remaining performance risk; the prototype's relay ran on the same machine.
-- Android deprioritizes apps whose high-priority pushes don't show a notification, which is one reason for posting the generic notification first.
+- Android deprioritizes apps whose high-priority pushes don't show a notification, which is why a slow fetch still ends in the generic notification.
 - Each distributor sets up a Firebase project, registers its Android app, creates a service account for the gateway and records its signing certificate digests once. An agent can do most of this with the Firebase and Google Cloud CLIs, using a signed-in browser only for console-only steps.
 - Known platform limits we don't control: after a user force-stops the app, FCM delivers nothing until the app is opened again, and some vendors' battery managers delay high-priority data messages.
 
@@ -127,9 +130,9 @@ Tests check behavior at two points, through public interfaces, with fakes only a
 Work blockers first. Each ticket is a vertical slice that can be verified on its own.
 
 1. **Platform-neutral delivery route.** The gateway accepts deliveries on a platform-neutral route, keeping the APNs route as an alias, and the relay's delivery URL setting accepts it. iOS keeps working. Blocked by: none.
-2. **Gateway records installation platform and sends FCM wakes.** Adds the platform (derived from the attestation type) and per-platform endpoints, Keystore-signed installation calls, the FCM HTTP v1 sender and the Android configuration. Enrollment is tested end to end with a test-only attestation verifier, using a fake FCM sender. Blocked by: 1.
+2. **Gateway records installation platform and sends FCM wakes.** Adds the platform (derived from the attestation type) and per-platform endpoints, Keystore-signed installation calls, the FCM HTTP v1 sender (constant collapse key, time to live from the delivery expiry) and the Android configuration. Enrollment is tested end to end with a test-only attestation verifier, using a fake FCM sender. Blocked by: 1.
 3. **Gateway verifies Android Key Attestation.** Adds Google roots, the revocation list refresh, the boot-state and app-identity checks, and the per-key rate limit. Tested with the table of rejected attestations. Blocked by: 2.
 4. **Dart notification body formatter.** Ports the formatter to Dart, passing the shared notification-body fixtures. Blocked by: none.
-5. **Dart wake-to-notification function.** Headless and journey-tested against a fake relay, including the already-shown record, overlapping wakes and the fallback inside the time budget. Blocked by: 4.
-6. **Android wake handling.** Firebase messaging service, generic notification first, background engine, watchdog, categories, grouping and tap-to-open, with wakes triggered locally, starting from the [prototype](https://github.com/block/buzz/tree/prototype/android-push-headless-dart). Verified on a physical phone. Blocked by: 5.
+5. **Dart wake-to-notification function.** Headless and journey-tested against a fake relay, returning every eligible unshown message, including the already-shown record, several messages after one wake, overlapping wakes and the fallback inside the time budget. Blocked by: 4.
+6. **Android wake handling.** Firebase messaging service, the foreground check, background engine, the 2 s generic notification, deleted-messages handling, watchdog, categories, per-conversation grouping and tap-to-open, with wakes triggered locally, starting from the [prototype](https://github.com/block/buzz/tree/prototype/android-push-headless-dart). Verified on a physical phone. Blocked by: 5.
 7. **Android enrollment and lease publication.** FCM token, Keystore attestation, enrollment, signed installation calls, token rotation, the permission prompt and sign-out revocation, wired into the shared push layer. End to end on a physical phone against a test gateway and relay. Blocked by: 3, 6.
