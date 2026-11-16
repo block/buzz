@@ -130,8 +130,6 @@ void main() {
       final prefs = await SharedPreferences.getInstance();
       final owner = nostr.Keys.generate();
       final relay = _ArchiveRelay(owner.public);
-      final semantics = tester.ensureSemantics();
-      addTearDown(semantics.dispose);
       final embedded = platform == TargetPlatform.android;
       await tester.pumpWidget(
         ProviderScope(
@@ -183,13 +181,14 @@ void main() {
 
       // Scrolling, a short left drag, and a right drag never archive.
       for (final offset in [
-        const Offset(0, -10),
+        const Offset(0, -60),
         const Offset(-30, 0),
         const Offset(500, 0),
       ]) {
         await tester.drag(find.text('Project chat'), offset);
         await tester.pumpAndSettle();
         expect(relay.submitted, isEmpty);
+        expect(find.byType(Dismissible), findsNWidgets(3));
       }
 
       // Keep a write in flight, reject it (including permission/offline
@@ -257,6 +256,6 @@ void main() {
       expect(relay.archived, containsAll(['grouped', 'legacy']));
       expect(find.text('Loose chat').hitTestable(), findsOneWidget);
       expect(tester.takeException(), isNull);
-    });
+    }, variant: TargetPlatformVariant.only(platform));
   }
 }
