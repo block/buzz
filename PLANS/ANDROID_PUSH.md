@@ -38,7 +38,7 @@ Android installations get the same mobile push notifications as iOS: the same tr
 19. As an Android user who signs out of a community, I want its notifications to stop, so that a signed-out account can't reach my phone.
 20. As an Android user who reinstalls the app, I want notifications to resume after I sign in again, with no leftover state from the old install.
 21. As an Android user whose push token rotates, I want notifications to keep arriving, so that token rotation is invisible to me.
-22. As an Android user on GrapheneOS, or another custom OS with Google Play services whose boot key the gateway operator has listed, I want push to work, so that a privacy-focused phone isn't excluded.
+22. As an Android user on a custom OS with Google Play services whose boot key the gateway operator has listed, such as GrapheneOS, I want push to work, so that a privacy-focused phone isn't excluded.
 23. As an Android user whose phone can't provide hardware-backed attestation, or whose bootloader is unlocked, or that runs a custom OS whose boot key isn't listed, I want the app to work normally without push, and to see that push is unavailable, so that I understand why nothing arrives.
 24. As a Buzz member, I want my relay unable to tell which platform each of my devices runs, so that platform details can't help correlate my identities.
 25. As a Buzz member, I want push wakes to carry nothing about my messages, so that Google and Apple learn nothing beyond the fact that a wake happened.
