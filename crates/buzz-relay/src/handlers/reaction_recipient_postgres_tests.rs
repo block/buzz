@@ -367,3 +367,122 @@ async fn a_derived_recipient_outside_the_channel_reads_nothing() {
     );
     assert_eq!(count(&state, &tenant, &author, by_author).await, 0);
 }
+
+/// Register `reader` on `state` as a connected client holding one live
+/// subscription to `filter` in `channel_id`, and return its outbound frames.
+fn subscribe(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    reader: &Keys,
+    channel_id: uuid::Uuid,
+    filter: Value,
+) -> tokio::sync::mpsc::Receiver<axum::extract::ws::Message> {
+    let conn_id = uuid::Uuid::new_v4();
+    let (tx, rx) = tokio::sync::mpsc::channel(32);
+    state.conn_manager.register(
+        conn_id,
+        tx,
+        tokio::sync::mpsc::channel(4).0,
+        tokio::sync::mpsc::channel(1).0,
+        None,
+        tokio_util::sync::CancellationToken::new(),
+        tenant.community(),
+        Arc::new(std::sync::atomic::AtomicU8::new(0)),
+        Arc::new(tokio::sync::Mutex::new(Default::default())),
+        3,
+        crate::state::CommunityConnectionControl::new(tokio_util::sync::CancellationToken::new()),
+    );
+    state
+        .conn_manager
+        .set_authenticated_pubkey(conn_id, reader.public_key().to_bytes().to_vec());
+    state.sub_registry.register_scoped(
+        tenant.community(),
+        conn_id,
+        "live".into(),
+        vec![serde_json::from_value(filter).expect("filter")],
+        Some(channel_id),
+    );
+    rx
+}
+
+/// The ids of every EVENT frame delivered so far.
+fn delivered_ids(rx: &mut tokio::sync::mpsc::Receiver<axum::extract::ws::Message>) -> Vec<String> {
+    let mut ids = Vec::new();
+    while let Ok(frame) = rx.try_recv() {
+        let axum::extract::ws::Message::Text(text) = frame else {
+            continue;
+        };
+        let message: Value = serde_json::from_str(&text).expect("relay frame");
+        if message[0] == "EVENT" {
+            ids.push(message[2]["id"].as_str().expect("event id").to_owned());
+        }
+    }
+    ids
+}
+
+/// An untagged reaction reaches its target's author live on another relay
+/// node. Redis carries only the event, so the receiving node reads the
+/// reaction's derived recipient from `event_mentions` before matching `#p`
+/// subscriptions. Mutation: skip that read → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn an_untagged_reaction_reaches_its_author_live_on_another_node() {
+    let accepting = state().await;
+    let receiving = state().await;
+    let tenant = community(&accepting, "reaction-recipient-cross-node").await;
+    let owner = Keys::generate();
+    let author = Keys::generate();
+    let reactor = Keys::generate();
+    let author_hex = author.public_key().to_hex();
+    let channel_id =
+        create_channel(&accepting, &tenant, &owner, &[&["visibility", "private"]]).await;
+    let channel = channel_id.to_string();
+    for member in [&author_hex, &reactor.public_key().to_hex()] {
+        publish(
+            &accepting,
+            &tenant,
+            &owner,
+            9000,
+            "",
+            &[&["h", &channel], &["p", member]],
+        )
+        .await;
+    }
+    let message = publish(
+        &accepting,
+        &tenant,
+        &author,
+        9,
+        "hello",
+        &[&["h", &channel]],
+    )
+    .await;
+    let mut frames = subscribe(
+        &receiving,
+        &tenant,
+        &author,
+        channel_id,
+        json!({"kinds": [7], "#h": [channel], "#p": [author_hex]}),
+    );
+    let reaction = publish(
+        &accepting,
+        &tenant,
+        &reactor,
+        7,
+        "+",
+        &[&["h", &channel], &["e", &message.id.to_hex()]],
+    )
+    .await;
+
+    crate::handlers::event::fan_out_pubsub_event(
+        &receiving,
+        buzz_pubsub::ChannelEvent {
+            community_id: tenant.community(),
+            topic: buzz_pubsub::EventTopic::Channel(channel_id),
+            event: reaction.clone(),
+        },
+    )
+    .await;
+
+    assert_eq!(delivered_ids(&mut frames), vec![reaction.id.to_hex()]);
+}

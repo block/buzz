@@ -289,6 +289,30 @@ async fn insert_derived_recipient_mention(
     Ok(result.rows_affected() != 0)
 }
 
+/// The pubkeys `event_mentions` indexes reaction `reaction_event_id` under:
+/// its `p` tags and its target's effective author, as `#p` reads match it.
+/// Read on the writer, so a reaction another relay node just stored is found.
+pub async fn get_reaction_recipients(
+    pool: &PgPool,
+    community: CommunityId,
+    reaction_event_id: &[u8],
+) -> Result<Vec<String>> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::SubscriptionHistory,
+    )
+    .await?;
+    let recipients = sqlx::query_scalar(
+        "SELECT pubkey_hex FROM event_mentions \
+         WHERE community_id = $1 AND event_id = $2 AND event_kind = 7",
+    )
+    .bind(community.as_uuid())
+    .bind(reaction_event_id)
+    .fetch_all(&mut *connection)
+    .await?;
+    Ok(recipients)
+}
+
 /// Soft-delete a reaction by setting `removed_at`.
 ///
 /// Returns `true` if a row was updated, `false` if not found or already removed.
@@ -643,6 +667,16 @@ impl Db {
             derived_recipient,
         )
         .await
+    }
+
+    /// The pubkeys reaction `reaction_event_id` is indexed under for `#p`.
+    #[datastore_span(name = "get_reaction_recipients", system = "postgresql")]
+    pub async fn get_reaction_recipients(
+        &self,
+        community: CommunityId,
+        reaction_event_id: &[u8],
+    ) -> Result<Vec<String>> {
+        crate::reaction::get_reaction_recipients(&self.pool, community, reaction_event_id).await
     }
 
     /// Add (or re-activate) a reaction.

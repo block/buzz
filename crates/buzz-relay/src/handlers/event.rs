@@ -420,6 +420,34 @@ pub(crate) fn pubsub_stored_event(channel_event: buzz_pubsub::ChannelEvent) -> S
     StoredEvent::new(channel_event.event, channel_id)
 }
 
+/// The recipients a reaction from Redis is indexed under, so that `#p`
+/// subscriptions match it as they do on the node that accepted it. Redis
+/// carries only the event, so the derived recipient is read back from the
+/// database. A failed read leaves the reaction matching its `p` tags only.
+async fn pubsub_reaction_recipients(
+    state: &AppState,
+    community_id: CommunityId,
+    stored: &StoredEvent,
+) -> Option<Vec<String>> {
+    if stored.event.kind != nostr::Kind::Reaction {
+        return None;
+    }
+    match state
+        .db
+        .get_reaction_recipients(community_id, stored.event.id.as_bytes())
+        .await
+    {
+        Ok(recipients) => Some(recipients),
+        Err(error) => {
+            tracing::warn!(
+                event_id = %stored.event.id.to_hex(),
+                "multi-node fan-out: reaction recipient read failed: {error}"
+            );
+            None
+        }
+    }
+}
+
 /// Deliver one Redis event that is not a local echo to this relay's local
 /// subscribers, through the access gate.
 pub(crate) async fn deliver_pubsub_event(
@@ -427,6 +455,14 @@ pub(crate) async fn deliver_pubsub_event(
     community_id: CommunityId,
     stored: &StoredEvent,
 ) {
+    let with_recipients;
+    let stored = match pubsub_reaction_recipients(state, community_id, stored).await {
+        Some(recipients) => {
+            with_recipients = stored.clone().with_derived_recipients(recipients);
+            &with_recipients
+        }
+        None => stored,
+    };
     let matches = state.sub_registry.fan_out_scoped(community_id, stored);
     let matches = route_fanout_matches(state, community_id, stored, matches, None).await;
     metrics::counter!("buzz_multinode_fanout_total").increment(1);
