@@ -830,6 +830,34 @@ void main() {
         await tester.pumpWidget(const SizedBox());
       }
     }
+
+    // Opening a Solo chat refetches its roster. While that fetch is in
+    // flight, the header draws the roster it already knows instead of the
+    // viewer alone, so the agent portrait doesn't flash away and back.
+    final listed = [
+      ChannelMember(pubkey: 'self', role: 'owner', joinedAt: DateTime(2025)),
+      ChannelMember(pubkey: 'agent-1', role: 'bot', joinedAt: DateTime(2025)),
+    ];
+    final fetch = Completer<List<ChannelMember>>();
+    await tester.pumpWidget(
+      _buildTestable(
+        personalChat: true,
+        messages: const [],
+        loadMembers: () => fetch.future,
+        channelsNotifier: _FakeChannelsNotifier([_testChannel])
+          ..listedMembers = listed,
+      ),
+    );
+    await tester.pump();
+    final portrait = tester.widget<DmHeaderPortrait>(
+      find.descendant(
+        of: find.byKey(const ValueKey('dm-header-avatar')),
+        matching: find.byType(DmHeaderPortrait),
+      ),
+    );
+    expect(portrait.isAgent, isTrue);
+    fetch.complete(listed);
+    await tester.pumpWidget(const SizedBox());
   });
 
   testWidgets('Solo ellipsis opens agent and workspace settings directly', (
@@ -21501,10 +21529,11 @@ NostrEvent _channelMetadataEvent(
 class _FakeChannelsNotifier extends ChannelsNotifier {
   List<Channel> _channels;
   List<ChannelMember> backingMembers = [];
+  List<ChannelMember> listedMembers = const [];
 
   @override
   List<ChannelMember> cachedMembersForChannel(String channelId) =>
-      channelId == _huddleChannelId ? backingMembers : const [];
+      channelId == _huddleChannelId ? backingMembers : listedMembers;
 
   final Map<String, Map<String, ObservedUnreadEvent>> _observedUnread;
 
