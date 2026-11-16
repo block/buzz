@@ -466,7 +466,9 @@ void main() {
       }
       expect(passes, 3);
 
-      // A rerun that fails keeps what the first pass already claimed.
+      // A rerun that fails keeps what the first pass already claimed, and
+      // reports the run incomplete, so an empty first pass still ends in the
+      // generic notification.
       var failingPasses = 0;
       final failing = PushWakeRunner((budget) {
         if (++failingPasses > 1) throw StateError('storage unreadable');
@@ -482,6 +484,21 @@ void main() {
       relay.hold = null;
       for (final result in await Future.wait([sixth, seventh])) {
         expect(result.notifications.map((n) => n.eventId), [kept.id]);
+        expect(result.incomplete, isTrue);
+      }
+      expect(failingPasses, 2);
+
+      failingPasses = 0;
+      final emptyHeld = relay.hold = Completer<void>();
+      final emptyBefore = relay.queries.length;
+      final eighth = failing.wake();
+      await untilQueries(relay, emptyBefore + 1);
+      final ninth = failing.wake();
+      emptyHeld.complete();
+      relay.hold = null;
+      for (final result in await Future.wait([eighth, ninth])) {
+        expect(result.notifications, isEmpty);
+        expect(result.incomplete, isTrue);
       }
       expect(failingPasses, 2);
     });

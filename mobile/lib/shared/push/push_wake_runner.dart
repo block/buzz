@@ -46,6 +46,7 @@ class PushWakeRunner {
     final notifications = <PushWakeNotification>[];
     final failed = <String>{};
     var first = true;
+    var interrupted = false;
     do {
       _rerun = false;
       final PushWakeResult result;
@@ -53,10 +54,12 @@ class PushWakeRunner {
         result = await _resolve(budget - elapsed.elapsed);
       } on Object {
         // A rerun that fails must not discard what earlier passes claimed,
-        // since those messages are already recorded as shown. The run keeps
-        // the earlier pass's failures, and the next wake fetches from before
-        // the newest shown message, so it finds what the rerun missed.
+        // since those messages are already recorded as shown. The run is
+        // still incomplete: the rerun was for a message it never looked for,
+        // so the caller falls back to its generic notification when nothing
+        // else was found.
         if (first) rethrow;
+        interrupted = true;
         break;
       }
       first = false;
@@ -70,6 +73,7 @@ class PushWakeRunner {
     return PushWakeResult(
       notifications: capPushWakeNotifications(notifications),
       failedCommunityIds: failed.toList()..sort(),
+      interrupted: interrupted,
     );
   }
 }
