@@ -7,6 +7,7 @@ import 'package:buzz/features/activity/inbox_read_state.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/read_state/read_state_manager.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
@@ -1031,6 +1032,130 @@ void main() {
       expect(restarted.activeChannelOverrides, isEmpty);
     });
 
+    /// A peer group stamped [ahead] seconds past the clock, so it is held.
+    NostrEvent heldPeer(String target, {int ahead = 700, int? frontier}) =>
+        _readStateEvent(
+          unread: true,
+          keys: keys,
+          crypto: crypto,
+          clientId: 'peer',
+          slot: 'peer',
+          contexts: {
+            target: frontier ?? clock - 100,
+            'ov_s:$target': clock + ahead,
+            'ov_c:$target': 0,
+            'ov_b:$target': frontier ?? clock - 100,
+          },
+          createdAt: clock - 10,
+        );
+
+    bool ownRecordPublished() => relay.retained.values.any(
+      (event) =>
+          hasValidUnreadStateTags(event) &&
+          decodeReadStateBlob(
+                crypto.decrypt(event.content),
+                version: 2,
+              )!.clientId !=
+              'peer',
+    );
+
+    test('a pending unread packet waits while a group is held back', () async {
+      final phone = await device('phone');
+      phone.markContextRead(channel, clock - 100);
+      await phone.flush();
+      expect(phone.markChannelUnread(channel), isTrue);
+      relay.failNext = true;
+      await phone.flush().catchError((_) {});
+      expect(ownRecordPublished(), isFalse);
+
+      relay.deliver(heldPeer('${channel}b'));
+      await phone.flush().catchError((_) {});
+      expect(ownRecordPublished(), isFalse);
+
+      clock += 100;
+      phone.maintainOverrideClock();
+      await phone.flush();
+      expect(ownRecordPublished(), isTrue);
+    });
+
+    test(
+      'a group held back mid-pass stops that pass sending unread state',
+      () async {
+        final phone = await device('phone');
+        phone.markContextRead(channel, clock - 100);
+        expect(phone.markChannelUnread(channel), isTrue);
+        relay.beforePublish = (event) {
+          if (hasValidReadStateTags(event)) {
+            relay.beforePublish = null;
+            relay.deliver(heldPeer('${channel}b'));
+          }
+        };
+        await phone.flush().catchError((_) {});
+        expect(ownRecordPublished(), isFalse);
+
+        clock += 100;
+        phone.maintainOverrideClock();
+        await phone.flush();
+        expect(ownRecordPublished(), isTrue);
+      },
+    );
+
+    test('a held-back incoming group meets the replay cutoff, not the local '
+        'grace', () async {
+      final other = '${channel}b';
+      final phone = await device('phone');
+      relay.deliver(heldPeer(other));
+      final stamp = clock + 700;
+      clock = stamp + lifetime + 300;
+      phone.maintainOverrideClock();
+      expect(phone.markChannelUnread(channel), isTrue);
+      await phone.flush();
+      expect(ownUnread(phone).keys, isNot(contains('ov_c:$other')));
+    });
+
+    test('a failed expiry save is retried by idle upkeep', () async {
+      final store = _FailingStore();
+      SharedPreferencesStorePlatform.instance = store;
+      SharedPreferences.resetStatic();
+      prefs = await SharedPreferences.getInstance();
+      final phone = await device('phone');
+      phone.markContextRead(channel, clock - 100);
+      final marked = clock;
+      expect(phone.markChannelUnread(channel), isTrue);
+      await phone.flush();
+
+      clock = marked + lifetime + 1;
+      store.fail = true;
+      expect(phone.activeChannelOverrides, isEmpty);
+      await pumpEventQueue();
+      store.fail = false;
+      phone.maintainOverrideClock();
+      await pumpEventQueue();
+
+      // A crash: only what reached storage survives.
+      SharedPreferences.resetStatic();
+      prefs = await SharedPreferences.getInstance();
+      clock = marked + lifetime;
+      relay.offline = true;
+      final restarted = await device('phone');
+      expect(restarted.activeChannelOverrides, isEmpty);
+    });
+
+    test('a held group keeps its old read position across a restart', () async {
+      final old = clock - lifetime - 1000;
+      final phone = await device('phone');
+      relay.deliver(heldPeer(channel, frontier: old - 500));
+      phone.markContextRead(channel, old);
+      await phone.flush();
+      expect(phone.getEffectiveTimestamp(channel), old);
+
+      relay.offline = true;
+      final restarted = await device('phone');
+      clock += 100;
+      restarted.maintainOverrideClock();
+      expect(restarted.activeChannelOverrides, isEmpty);
+    });
+
     test('a v1 override group is not imported', () async {
       relay.retained['read-state:old'] = _readStateEvent(
         keys: keys,
@@ -1184,6 +1309,9 @@ class _MemoryRelay extends RelaySessionNotifier {
   final retained = <String, NostrEvent>{};
   final _live = <void Function(NostrEvent)>[];
   bool failNext = false;
+
+  /// Runs as each event reaches the relay, before it is stored.
+  void Function(NostrEvent event)? beforePublish;
   bool offline = false;
 
   /// Delivers [event] to live subscribers without retaining it.
@@ -1252,6 +1380,7 @@ class _MemoryRelay extends RelaySessionNotifier {
       failNext = false;
       throw TimeoutException('relay timeout');
     }
+    beforePublish?.call(event);
     final d = event.tags.firstWhere((tag) => tag.first == 'd')[1];
     final head = retained[d];
     // NIP-01 replaceable: a newer created_at wins, then the lower id.
@@ -1280,3 +1409,15 @@ String _unreadSlot(String name) => name.codeUnits
     .join()
     .padRight(32, '0')
     .substring(0, 32);
+
+/// Shared preferences whose journal writes fail while [fail] is set.
+class _FailingStore extends InMemorySharedPreferencesStore {
+  _FailingStore() : super.empty();
+  bool fail = false;
+
+  @override
+  Future<bool> setValue(String valueType, String key, Object value) async {
+    if (fail && key.contains('buzz.nip-rs.journal')) return false;
+    return super.setValue(valueType, key, value);
+  }
+}

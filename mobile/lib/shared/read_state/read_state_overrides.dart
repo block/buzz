@@ -127,11 +127,16 @@ extension ReadStateOverrides on ReadStateManager {
         : isOverrideExpired(register, now: now)) {
       return;
     }
-    final target = isOverrideDeferred(register, now: _now())
-        ? _deferredOverrides
-        : _overrides;
-    final current = target[channelId];
-    target[channelId] = current == null
+    if (isOverrideDeferred(register, now: _now())) {
+      _deferredOverrides.add((
+        channelId: channelId,
+        register: register,
+        local: local,
+      ));
+      return;
+    }
+    final current = _overrides[channelId];
+    _overrides[channelId] = current == null
         ? register
         : mergeOverrideRegisters(current, register);
   }
@@ -140,12 +145,13 @@ extension ReadStateOverrides on ReadStateManager {
   /// remain: until then the override view is incomplete.
   bool _resolveDeferred() {
     if (_deferredOverrides.isEmpty) return true;
-    final waiting = Map.of(_deferredOverrides);
+    final waiting = List.of(_deferredOverrides);
     _deferredOverrides.clear();
-    // Already admitted: only the discard guard can drop one now.
-    waiting.forEach(
-      (channelId, register) => _mergeRegister(channelId, register, local: true),
-    );
+    // Each contribution meets its own rule: an incoming one the replay
+    // cutoff, before its baseline can merge; accepted local state the guard.
+    for (final held in waiting) {
+      _mergeRegister(held.channelId, held.register, local: held.local);
+    }
     if (_deferredOverrides.length == waiting.length) return false;
     _persistLocalState();
     _onChanged();

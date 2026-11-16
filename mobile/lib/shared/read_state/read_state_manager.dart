@@ -184,7 +184,10 @@ class ReadStateManager {
   // peers. The primary carries all of them (NIP-RS, Buzz profile).
   final Map<String, OverrideRegister> _overrides = {};
   // Received groups stamped too far ahead, held until the clock reaches them.
-  final Map<String, OverrideRegister> _deferredOverrides = {};
+  /// Groups stamped too far ahead, each contribution kept apart with where
+  /// it came from, so each meets its own admission rule once due.
+  final List<({String channelId, OverrideRegister register, bool local})>
+  _deferredOverrides = [];
   // The unread record's coordinate slot and its last published contexts.
   String _unreadSlot = generateReadStateSlotId();
   Map<String, int> _unreadPublished = const {};
@@ -857,9 +860,10 @@ class ReadStateManager {
           ),
         );
       }
+      final unreadReady = _unreadPublishable;
       final unread = _planUnread();
       final unreadCoordinate = _unreadCoordinate;
-      if (_unreadPublishable &&
+      if (unreadReady &&
           (!mapEquals(_unreadPublished, unread) ||
               _pending.containsKey(unreadCoordinate))) {
         prepared[unreadCoordinate] = NostrEvent(
@@ -929,6 +933,9 @@ class ReadStateManager {
             !_canPublishFollows) {
           continue; // Held with its edits; the pass reports why below.
         }
+        if (entry.key == unreadCoordinate && !_unreadPublishable) {
+          continue; // Kept until no held-back group could need its carrier.
+        }
         if (_relaySession == null) {
           throw StateError('No relay for pending retry');
         }
@@ -991,7 +998,7 @@ class ReadStateManager {
         await _persistLocalState();
       }
       if (prepared[unreadCoordinate] case final event?
-          when !mapEquals(_unreadPublished, unread)) {
+          when !mapEquals(_unreadPublished, unread) && _unreadPublishable) {
         if (!_servesThisCommunity ||
             !_ownsJournal ||
             (_disposed && !allowDisposed)) {
@@ -1007,6 +1014,9 @@ class ReadStateManager {
             _pending[unreadCoordinate] = event;
             await _persistLocalState();
             checkConnection?.call();
+            if (!_unreadPublishable) {
+              throw StateError('A held-back unread group defers publication');
+            }
             if (!_servesThisCommunity ||
                 !_ownsJournal ||
                 (_disposed && !allowDisposed) ||

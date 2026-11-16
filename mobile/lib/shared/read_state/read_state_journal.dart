@@ -26,15 +26,11 @@ extension ReadStateJournal on ReadStateManager {
             ...contexts(journal['overrides']),
           }),
         );
-        _hydrateOverrides({
-          for (final MapEntry(:key, :value)
-              in ((journal['deferredOverrides'] as Map?) ?? const {}).entries)
-            key as String: (
-              s: (value as List)[0] as int,
-              c: value[1] as int,
-              b: value[2] as int,
-            ),
-        });
+        for (final held
+            in (journal['deferredOverrides'] as List?) ?? const []) {
+          final [String id, int s, int c, int b, int local] = held as List;
+          _mergeRegister(id, (s: s, c: c, b: b), local: local == 1);
+        }
       }
       _followSlots.addAll(
         ((journal['followSlots'] as List?) ?? const []).cast<String>(),
@@ -137,9 +133,13 @@ extension ReadStateJournal on ReadStateManager {
         nowUnixSeconds: _now(),
       );
       // Every retained register keeps its frontier, an explicit 0 included.
-      for (final channelId in _overrides.keys) {
+      for (final channelId in {
+        ..._overrides.keys,
+        for (final held in _deferredOverrides) held.channelId,
+      }) {
         observed[overrideFrontierKey(channelId)] = _frontierOf(channelId);
       }
+      final watermark = _expiryNow;
       final encoded = jsonEncode({
         'v': 1,
         'clientId': _clientId,
@@ -152,11 +152,11 @@ extension ReadStateJournal on ReadStateManager {
         ),
         'unreadSlot': _unreadSlot,
         'unreadPublished': _unreadPublished,
-        'expiryWatermark': _savedExpiryWatermark = _expiryNow,
-        'deferredOverrides': {
-          for (final MapEntry(:key, value: r) in _deferredOverrides.entries)
-            key: [r.s, r.c, r.b],
-        },
+        'expiryWatermark': watermark,
+        'deferredOverrides': [
+          for (final (:channelId, register: r, :local) in _deferredOverrides)
+            [channelId, r.s, r.c, r.b, if (local) 1 else 0],
+        ],
         'followSlots': _followSlots,
         'followPlacement': [
           for (final keys in _followPlacement) keys.toList()..sort(),
@@ -183,6 +183,9 @@ extension ReadStateJournal on ReadStateManager {
         for (final key in threadFollows.keys) key: _followEdits[key] ?? 0,
       };
       await _storage.writeJournal(_journalKey, encoded, owner: _journalOwner);
+      // Only a saved watermark is safe to compare against; a failed save
+      // leaves the next expiry check asking again.
+      _savedExpiryWatermark = max(_savedExpiryWatermark, watermark);
       return follows;
     }
 
