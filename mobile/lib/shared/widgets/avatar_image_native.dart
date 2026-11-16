@@ -130,33 +130,49 @@ Future<ImageInfo> _loadNativeAvatar(
     policy: ResizeImagePolicy.fit,
   );
   final stream = resized.resolve(ImageConfiguration.empty);
-  final completer = Completer<ImageInfo>();
-  final listener = ImageStreamListener(
-    (image, _) {
-      if (!completer.isCompleted) completer.complete(image.clone());
-    },
-    onError: (Object error, StackTrace? stack) {
-      if (!completer.isCompleted) completer.completeError(error, stack);
-    },
-  );
-  void onCancelled() {
-    if (cancelled?.value == true && !completer.isCompleted) {
-      completer.completeError(StateError('Avatar load cancelled'));
-    }
-  }
-
-  var loaded = false;
-  stream.addListener(listener);
-  cancelled?.addListener(onCancelled);
-  try {
-    final image = await completer.future.timeout(const Duration(seconds: 10));
-    loaded = true;
-    return image;
-  } finally {
+  final completer = Completer<ImageInfo?>();
+  var displayExpired = false;
+  var settled = false;
+  late final ImageStreamListener listener;
+  late final VoidCallback onCancelled;
+  void finish({bool abandon = false}) {
+    if (settled) return;
+    settled = true;
     cancelled?.removeListener(onCancelled);
     stream.removeListener(listener);
-    if (!loaded) abandonPendingImage(stream, resized, ImageConfiguration.empty);
+    if (abandon) abandonPendingImage(stream, resized, ImageConfiguration.empty);
   }
+
+  onCancelled = () {
+    if (cancelled?.value != true || settled) return;
+    completer.completeError(StateError('Avatar load cancelled'));
+    finish(abandon: true);
+  };
+  listener = ImageStreamListener(
+    (image, _) {
+      if (settled) return;
+      completer.complete(displayExpired ? null : image.clone());
+      finish();
+    },
+    onError: (Object error, StackTrace? stack) {
+      if (settled) return;
+      completer.completeError(error, stack);
+      finish();
+    },
+  );
+  cancelled?.addListener(onCancelled);
+  stream.addListener(listener);
+  // This bounds how long the UI waits, not the network request. Keep listening
+  // until the load settles so a later sheet dismissal can still cancel it.
+  final image = await completer.future.timeout(
+    const Duration(seconds: 10),
+    onTimeout: () {
+      displayExpired = true;
+      return null;
+    },
+  );
+  if (image == null) throw TimeoutException('Avatar display wait expired');
+  return image;
 }
 
 void _paintNativeAvatarText(

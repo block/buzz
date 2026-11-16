@@ -1,6 +1,7 @@
 import 'dart:ui' as ui;
 import 'dart:convert';
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:buzz/shared/emoji/emoji_avatar.dart';
 import 'package:buzz/shared/relay/media_auth.dart';
@@ -107,51 +108,93 @@ void main() {
     });
   });
 
-  for (final timeout in [false, true]) {
-    testWidgets('native avatar aborts pending download (timeout: $timeout)', (
-      tester,
-    ) async {
+  for (final scenario in [
+    'cancel',
+    'timeout then cancel',
+    'timeout then finish',
+    'timeout without owner',
+  ]) {
+    testWidgets('native avatar $scenario', (tester) async {
       final started = Completer<void>();
       final aborted = Completer<void>();
+      final response = Completer<http.StreamedResponse>();
       final cancelled = ValueNotifier(false);
+      var requests = 0;
       final client = _StreamingClient((request) async {
+        requests++;
         (request as http.AbortableRequest).abortTrigger!.then((_) {
-          if (!aborted.isCompleted) aborted.complete();
+          if (!response.isCompleted) {
+            if (!aborted.isCompleted) aborted.complete();
+            response.completeError(http.RequestAbortedException(request.url));
+          }
         });
-        started.complete();
-        await aborted.future;
-        throw http.RequestAbortedException(request.url);
+        if (!started.isCompleted) started.complete();
+        return response.future;
       });
-      final pending = nativeAvatarImage(
-        url: 'https://relay.example/media/held.png',
-        cancelled: cancelled,
+      final provider = MediaImageProvider(
+        url: 'https://relay.example/media/held-$scenario.png',
+        auth: MediaGetAuthService(baseUrl: 'https://relay.example', nsec: null),
+        client: client,
+      );
+      Future<Uint8List?> render() => nativeAvatarImage(
+        url: provider.url,
+        cancelled: scenario == 'timeout without owner' ? null : cancelled,
         initial: 'A',
         background: Colors.black,
         foreground: Colors.white,
-        networkImages: (url) => [
-          MediaImageProvider(
-            url: url,
-            auth: MediaGetAuthService(
-              baseUrl: 'https://relay.example',
-              nsec: null,
-            ),
-            client: client,
-          ),
-        ],
+        networkImages: (_) => [provider],
       );
+      final pending = render();
       await tester.pump();
       expect(started.isCompleted, isTrue);
-      if (timeout) {
+      if (scenario != 'cancel') {
         await tester.pump(const Duration(seconds: 11));
-      } else {
-        cancelled.value = true;
+        expect(aborted.isCompleted, isFalse);
       }
-      await tester.pump();
-      expect(aborted.isCompleted, isTrue);
-      // Raster fallback after timeout needs the real engine's image codec.
-      await tester.runAsync(() async {
-        await pending;
-      });
+      if (scenario.contains('cancel')) {
+        cancelled.value = true;
+        await tester.pump();
+        expect(aborted.isCompleted, isTrue);
+        await tester.runAsync(() async {
+          await pending;
+        });
+      } else {
+        await tester.runAsync(() async {
+          await pending;
+        });
+        var loaded = false;
+        final stream = ResizeImage(
+          provider,
+          width: 72,
+          height: 72,
+          policy: ResizeImagePolicy.fit,
+        ).resolve(ImageConfiguration.empty);
+        final listener = ImageStreamListener((_, _) {
+          loaded = true;
+        });
+        stream.addListener(listener);
+        final bytes = base64Decode(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAA'
+          'AAYAAjCB0C8AAAAASUVORK5CYII=',
+        );
+        response.complete(http.StreamedResponse(Stream.value(bytes), 200));
+        // Drain engine decode events and the test zone's microtasks until the
+        // real image stream settles, without advancing the request's timeout.
+        while (!loaded) {
+          await tester.runAsync(() => Future<void>(() {}));
+          await tester.pump();
+        }
+        stream.removeListener(listener);
+        await tester.runAsync(() async {
+          expect(await render(), isNotNull);
+          expect(await render(), isNotNull);
+        });
+        expect(requests, 1);
+        expect(aborted.isCompleted, isFalse);
+        cancelled.value = true;
+        await tester.pump();
+        expect(aborted.isCompleted, isFalse);
+      }
       cancelled.dispose();
       client.close();
     });
