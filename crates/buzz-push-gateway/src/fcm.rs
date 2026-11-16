@@ -4,7 +4,10 @@
 //! from the compiled-in constants below, the FCM registration token and a time
 //! to live derived from the delivery's expiry: no relay-supplied bytes reach it.
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use aws_lc_rs::{rand::SystemRandom, rsa::KeyPair, signature::RSA_PKCS1_SHA256};
@@ -33,6 +36,8 @@ const ACCESS_TOKEN_REFRESH_MARGIN_SECONDS: i64 = 120;
 /// After a failed token request, fail fast for this long instead of sending
 /// every delivery to Google's token endpoint.
 const TOKEN_FAILURE_BACKOFF: Duration = Duration::from_secs(5);
+/// FCM asks senders to wait at least a minute after a quota error.
+const QUOTA_RETRY_FLOOR_SECONDS: i64 = 60;
 
 /// Service account setup failure. It carries no credential material.
 #[derive(Debug, Error)]
@@ -51,13 +56,26 @@ struct ServiceAccountKey {
 
 struct CachedToken {
     value: String,
+    /// When to start fetching a replacement in the background.
     refresh_at: i64,
+    /// When Google stops accepting this token.
+    expires_at: i64,
 }
 
-enum TokenState {
-    Empty,
-    Fresh(CachedToken),
-    Failed(Instant),
+#[derive(Default)]
+struct TokenState {
+    token: Option<CachedToken>,
+    /// A background refresh is in flight.
+    refreshing: bool,
+    /// The last token request failed at this instant.
+    failed_at: Option<Instant>,
+}
+
+impl TokenState {
+    fn recently_failed(&self) -> bool {
+        self.failed_at
+            .is_some_and(|at| at.elapsed() < TOKEN_FAILURE_BACKOFF)
+    }
 }
 
 /// The ways a delivery cannot obtain an access token.
@@ -72,11 +90,23 @@ enum TokenFault {
 pub struct FcmTransport {
     client: reqwest::Client,
     send_url: String,
+    tokens: Arc<TokenSource>,
+}
+
+/// The service account's OAuth access tokens. A cached token is served until
+/// it expires; a replacement is fetched by one background task from
+/// `refresh_at`, so deliveries wait on Google's token endpoint only when no
+/// unexpired token exists (cold start, expiry or a refused token).
+struct TokenSource {
+    client: reqwest::Client,
     client_email: String,
     token_uri: String,
     key: KeyPair,
-    token: Mutex<TokenState>,
     now: fn() -> i64,
+    /// Never held across a network call.
+    state: Mutex<TokenState>,
+    /// Held across the one in-flight token request.
+    fetch: Mutex<()>,
 }
 
 impl FcmTransport {
@@ -107,37 +137,89 @@ impl FcmTransport {
             .build()
             .map_err(|_| FcmError::Credential)?;
         Ok(Self {
-            client,
+            client: client.clone(),
             send_url: format!("{base_url}/v1/projects/{project_id}/messages:send"),
-            client_email: account.client_email,
-            token_uri: account.token_uri,
-            key,
-            token: Mutex::new(TokenState::Empty),
-            now,
+            tokens: Arc::new(TokenSource {
+                client,
+                client_email: account.client_email,
+                token_uri: account.token_uri,
+                key,
+                now,
+                state: Mutex::new(TokenState::default()),
+                fetch: Mutex::new(()),
+            }),
         })
     }
+}
 
-    /// Short-lived OAuth access token, refreshed through one in-flight request.
-    async fn access_token(&self) -> Result<String, TokenFault> {
-        let mut state = self.token.lock().await;
-        let now = (self.now)();
-        match &*state {
-            TokenState::Fresh(token) if token.refresh_at > now => return Ok(token.value.clone()),
-            TokenState::Failed(at) if at.elapsed() < TOKEN_FAILURE_BACKOFF => {
-                return Err(TokenFault::Unavailable)
+impl TokenSource {
+    /// Short-lived OAuth access token.
+    async fn access_token(self: &Arc<Self>) -> Result<String, TokenFault> {
+        {
+            let mut state = self.state.lock().await;
+            let now = (self.now)();
+            if let Some(token) = state.token.as_ref().filter(|t| t.expires_at > now) {
+                let value = token.value.clone();
+                if token.refresh_at <= now && !state.refreshing && !state.recently_failed() {
+                    state.refreshing = true;
+                    tokio::spawn(Arc::clone(self).refresh_in_background());
+                }
+                return Ok(value);
             }
-            _ => {}
         }
-        match self.request_access_token(now).await {
+        // No unexpired token: wait for the one in-flight request.
+        let _fetch = self.fetch.lock().await;
+        {
+            let state = self.state.lock().await;
+            if let Some(token) = state.token.as_ref().filter(|t| t.expires_at > (self.now)()) {
+                return Ok(token.value.clone());
+            }
+            if state.recently_failed() {
+                return Err(TokenFault::Unavailable);
+            }
+        }
+        self.fetch_token().await
+    }
+
+    async fn refresh_in_background(self: Arc<Self>) {
+        let _fetch = self.fetch.lock().await;
+        let due = {
+            let state = self.state.lock().await;
+            let now = (self.now)();
+            state.token.as_ref().is_none_or(|t| t.refresh_at <= now)
+        };
+        if due {
+            // A failure keeps the cached token and is recorded in
+            // `failed_at`; deliveries see it once that token expires.
+            let _ = self.fetch_token().await;
+        }
+        self.state.lock().await.refreshing = false;
+    }
+
+    /// Request a token and record the result. Callers hold `fetch`.
+    async fn fetch_token(&self) -> Result<String, TokenFault> {
+        let result = self.request_access_token((self.now)()).await;
+        let mut state = self.state.lock().await;
+        match result {
             Ok(token) => {
                 let value = token.value.clone();
-                *state = TokenState::Fresh(token);
+                state.token = Some(token);
+                state.failed_at = None;
                 Ok(value)
             }
             Err(fault) => {
-                *state = TokenState::Failed(Instant::now());
+                state.failed_at = Some(Instant::now());
                 Err(fault)
             }
+        }
+    }
+
+    /// Drop the cached token if it is still `refused`, so a late 401 for an
+    /// older token cannot discard a newer one.
+    async fn discard(&self, refused: &str) {
+        let mut state = self.state.lock().await;
+        if state.token.as_ref().is_some_and(|t| t.value == refused) {
+            state.token = None;
         }
     }
 
@@ -183,6 +265,7 @@ impl FcmTransport {
         Ok(CachedToken {
             value: token.access_token,
             refresh_at: now + lifetime - ACCESS_TOKEN_REFRESH_MARGIN_SECONDS,
+            expires_at: now + lifetime,
         })
     }
 
@@ -213,12 +296,14 @@ impl FcmTransport {
             URL_SAFE_NO_PAD.encode(signature)
         ))
     }
+}
 
+impl FcmTransport {
     /// The only FCM request body in the program.
     fn message(&self, attempt: DeliveryAttempt, token: &str) -> serde_json::Value {
         let ttl = attempt
             .expires_at
-            .saturating_sub((self.now)())
+            .saturating_sub((self.tokens.now)())
             .clamp(0, MAX_TTL_SECONDS);
         serde_json::json!({
             "message": {
@@ -276,11 +361,11 @@ pub fn classify(code: u16, error_code: Option<&str>) -> DeliveryOutcome {
             DeliveryOutcome::ConfigurationFault
         }
         (401 | 403, _) => DeliveryOutcome::ConfigurationFault,
-        (429 | 500 | 503, _) | (_, Some("QUOTA_EXCEEDED" | "UNAVAILABLE" | "INTERNAL")) => {
-            DeliveryOutcome::Retry {
-                retry_after_seconds: None,
-            }
-        }
+        // 502 and 504 come from Google's front end, with no FCM error body.
+        (429 | 500 | 502 | 503 | 504, _)
+        | (_, Some("QUOTA_EXCEEDED" | "UNAVAILABLE" | "INTERNAL")) => DeliveryOutcome::Retry {
+            retry_after_seconds: None,
+        },
         _ => DeliveryOutcome::PermanentRequestFault,
     }
 }
@@ -289,7 +374,7 @@ pub fn classify(code: u16, error_code: Option<&str>) -> DeliveryOutcome {
 impl PushTransport for FcmTransport {
     async fn send(&self, attempt: DeliveryAttempt, endpoint: &str) -> DeliveryOutcome {
         crate::metrics::record_fcm_send_attempt();
-        let access_token = match self.access_token().await {
+        let access_token = match self.tokens.access_token().await {
             Ok(token) => token,
             Err(TokenFault::Rejected) => return DeliveryOutcome::ConfigurationFault,
             Err(TokenFault::Unavailable) => {
@@ -301,7 +386,7 @@ impl PushTransport for FcmTransport {
         let response = match self
             .client
             .post(&self.send_url)
-            .bearer_auth(access_token)
+            .bearer_auth(&access_token)
             .json(&self.message(attempt, endpoint))
             .send()
             .await
@@ -318,8 +403,8 @@ impl PushTransport for FcmTransport {
             return DeliveryOutcome::Accepted;
         }
         if code == 401 {
-            // The cached token was refused: fetch a new one on the next send.
-            *self.token.lock().await = TokenState::Empty;
+            // The token was refused: fetch a new one on the next send.
+            self.tokens.discard(&access_token).await;
         }
         let retry_after = response
             .headers()
@@ -338,7 +423,13 @@ impl PushTransport for FcmTransport {
                     .into_iter()
                     .find_map(|detail| detail.error_code)
             });
+        let quota = code == 429 || error_code.as_deref() == Some("QUOTA_EXCEEDED");
         match classify(code, error_code.as_deref()) {
+            DeliveryOutcome::Retry { .. } if quota => DeliveryOutcome::Retry {
+                retry_after_seconds: Some(retry_after.map_or(QUOTA_RETRY_FLOOR_SECONDS, |s| {
+                    s.max(QUOTA_RETRY_FLOOR_SECONDS)
+                })),
+            },
             DeliveryOutcome::Retry { .. } => DeliveryOutcome::Retry {
                 retry_after_seconds: retry_after,
             },
@@ -493,16 +584,39 @@ mod tests {
                 r#"{"error":{"details":[{"errorCode":"SENDER_ID_MISMATCH"}]}}"#,
                 DeliveryOutcome::ConfigurationFault,
             ),
+            // FCM asks for at least a minute after a quota error.
             (
                 429,
                 r#"{"error":{"details":[{"errorCode":"QUOTA_EXCEEDED"}]}}"#,
                 DeliveryOutcome::Retry {
-                    retry_after_seconds: None,
+                    retry_after_seconds: Some(60),
+                },
+            ),
+            (
+                429,
+                "not json",
+                DeliveryOutcome::Retry {
+                    retry_after_seconds: Some(60),
                 },
             ),
             (
                 503,
                 "not json",
+                DeliveryOutcome::Retry {
+                    retry_after_seconds: None,
+                },
+            ),
+            // Google's front end answers 502 and 504 without an FCM error body.
+            (
+                502,
+                "<html>bad gateway</html>",
+                DeliveryOutcome::Retry {
+                    retry_after_seconds: None,
+                },
+            ),
+            (
+                504,
+                "<html>gateway timeout</html>",
                 DeliveryOutcome::Retry {
                     retry_after_seconds: None,
                 },
@@ -533,6 +647,178 @@ mod tests {
             fake.sends.last().unwrap().0["authorization"],
             "Bearer access-2"
         );
+    }
+
+    /// Serve a token endpoint and a send endpoint from `app` and build a
+    /// transport against them with the clock `now`.
+    async fn serve(
+        app: Router,
+        now: fn() -> i64,
+    ) -> (Arc<FcmTransport>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let transport = FcmTransport::with_endpoints(
+            "example-project",
+            &service_account(&format!("{base}/token")),
+            &base,
+            now,
+        )
+        .unwrap();
+        (Arc::new(transport), server)
+    }
+
+    #[tokio::test]
+    async fn a_due_refresh_keeps_serving_the_valid_token_even_when_it_fails() {
+        use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+        use tokio::sync::Notify;
+
+        static CLOCK: AtomicI64 = AtomicI64::new(NOW);
+        fn clock() -> i64 {
+            CLOCK.load(Ordering::SeqCst)
+        }
+        #[derive(Default)]
+        struct TokenEndpoint {
+            requests: AtomicUsize,
+            refresh_arrived: Notify,
+            release_refresh: Notify,
+        }
+        let tokens = Arc::new(TokenEndpoint::default());
+        let app = Router::new()
+            .route(
+                "/token",
+                post(|State(t): State<Arc<TokenEndpoint>>| async move {
+                    if t.requests.fetch_add(1, Ordering::SeqCst) == 0 {
+                        return (
+                            Status::OK,
+                            r#"{"access_token":"access-1","expires_in":3600}"#,
+                        );
+                    }
+                    // The refresh hangs until released, then fails.
+                    t.refresh_arrived.notify_one();
+                    t.release_refresh.notified().await;
+                    (Status::SERVICE_UNAVAILABLE, "{}")
+                }),
+            )
+            .route(
+                "/v1/projects/example-project/messages:send",
+                post(|headers: HeaderMap| async move {
+                    assert_eq!(headers["authorization"], "Bearer access-1");
+                    (Status::OK, "{}")
+                }),
+            )
+            .with_state(tokens.clone());
+        let (transport, server) = serve(app, clock).await;
+        assert_eq!(
+            transport.send(attempt(600), TOKEN).await,
+            DeliveryOutcome::Accepted
+        );
+
+        // Refresh is due but access-1 is still valid for another minute.
+        CLOCK.store(NOW + 3600 - 60, Ordering::SeqCst);
+        let send =
+            tokio::time::timeout(Duration::from_secs(5), transport.send(attempt(600), TOKEN));
+        assert_eq!(
+            send.await.expect("a due refresh must not block deliveries"),
+            DeliveryOutcome::Accepted
+        );
+        tokio::time::timeout(Duration::from_secs(5), tokens.refresh_arrived.notified())
+            .await
+            .expect("a due refresh starts in the background");
+        // While the refresh is in flight, and after it fails, access-1 serves.
+        assert_eq!(
+            transport.send(attempt(600), TOKEN).await,
+            DeliveryOutcome::Accepted
+        );
+        tokens.release_refresh.notify_one();
+        // The background refresh holds `fetch` until it has recorded its failure.
+        drop(transport.tokens.fetch.lock().await);
+        assert_eq!(
+            transport.send(attempt(600), TOKEN).await,
+            DeliveryOutcome::Accepted
+        );
+        assert_eq!(tokens.requests.load(Ordering::SeqCst), 2);
+
+        // Once access-1 has expired, the recent failure fails fast.
+        CLOCK.store(NOW + 3600, Ordering::SeqCst);
+        assert_eq!(
+            transport.send(attempt(600), TOKEN).await,
+            DeliveryOutcome::Retry {
+                retry_after_seconds: None
+            }
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_late_401_does_not_discard_a_refreshed_token() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::Notify;
+
+        #[derive(Default)]
+        struct RefreshOrder {
+            token_requests: AtomicUsize,
+            delayed_request_arrived: Notify,
+            release_old_response: Notify,
+        }
+        let order = Arc::new(RefreshOrder::default());
+        let app = Router::new()
+            .route(
+                "/token",
+                post(|State(order): State<Arc<RefreshOrder>>| async move {
+                    let number = order.token_requests.fetch_add(1, Ordering::SeqCst) + 1;
+                    format!(r#"{{"access_token":"access-{number}","expires_in":3600}}"#)
+                }),
+            )
+            .route(
+                "/v1/projects/example-project/messages:send",
+                post(
+                    |State(order): State<Arc<RefreshOrder>>, body: Bytes| async move {
+                        let message: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        match message["message"]["token"].as_str().unwrap() {
+                            "delayed-old" => {
+                                order.delayed_request_arrived.notify_one();
+                                order.release_old_response.notified().await;
+                                (Status::UNAUTHORIZED, "{}")
+                            }
+                            "reject-old" => (Status::UNAUTHORIZED, "{}"),
+                            _ => (Status::OK, "{}"),
+                        }
+                    },
+                ),
+            )
+            .with_state(order.clone());
+        let (transport, server) = serve(app, || NOW).await;
+        assert_eq!(
+            transport.send(attempt(600), TOKEN).await,
+            DeliveryOutcome::Accepted
+        );
+        // Two sends on access-1; the first 401 is answered at once, the other late.
+        let pending = transport.clone();
+        let delayed = tokio::spawn(async move { pending.send(attempt(600), "delayed-old").await });
+        order.delayed_request_arrived.notified().await;
+        assert_eq!(
+            transport.send(attempt(600), "reject-old").await,
+            DeliveryOutcome::ConfigurationFault
+        );
+        // The next send fetches access-2.
+        assert_eq!(
+            transport.send(attempt(600), TOKEN).await,
+            DeliveryOutcome::Accepted
+        );
+        assert_eq!(order.token_requests.load(Ordering::SeqCst), 2);
+        order.release_old_response.notify_one();
+        assert_eq!(delayed.await.unwrap(), DeliveryOutcome::ConfigurationFault);
+        assert_eq!(
+            transport.send(attempt(600), TOKEN).await,
+            DeliveryOutcome::Accepted
+        );
+        assert_eq!(
+            order.token_requests.load(Ordering::SeqCst),
+            2,
+            "a 401 for access-1 must not evict access-2"
+        );
+        server.abort();
     }
 
     #[test]
