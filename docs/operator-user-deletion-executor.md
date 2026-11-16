@@ -122,6 +122,13 @@ error, not an implicit skip. The inventory's version selects the currently
 supported rules; future versions must retain the rules needed by active requests.
 No full execution plan is created upfront.
 
+If the real `purge_db` keeps any of the user's messages in a channel, it must
+also keep the user's `channel_members` row for that channel, marked removed. The
+relay refuses to open a private channel that has or had a member other than the
+sender and the sender's own agents (kind:9002 in `NOSTR.md`), and it finds former
+members only through these rows. Without the row, the channel could be opened and
+its history, those messages included, made public.
+
 `previous_stage_id` is bookkeeping for uninterrupted execution. It must belong
 to this request. After restart pass `None`; the database current row is the
 source of truth. An old non-current stage is never transitioned twice.

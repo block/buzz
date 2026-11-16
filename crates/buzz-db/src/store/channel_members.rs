@@ -2955,6 +2955,7 @@ mod postgres_tests {
                     join_role: join_role.map(str::to_string),
                     ..Default::default()
                 },
+                &owner,
             )
             .await
             .expect("flag channel");
@@ -4175,6 +4176,7 @@ mod postgres_tests {
                 join_role: Some("guest".into()),
                 ..Default::default()
             },
+            &owner,
         )
         .await
         .expect("make announce channel");
@@ -4326,6 +4328,7 @@ mod postgres_tests {
         let update = tokio::spawn({
             let pool = pool.clone();
             let channel_id = channel.id;
+            let owner = owner.clone();
             async move {
                 crate::channel::update_channel(
                     &pool,
@@ -4335,6 +4338,7 @@ mod postgres_tests {
                         join_role: Some("member".into()),
                         ..Default::default()
                     },
+                    &owner,
                 )
                 .await
             }
@@ -4615,6 +4619,7 @@ mod postgres_tests {
         let update = tokio::spawn({
             let pool = pool.clone();
             let channel_id = channel.id;
+            let owner = owner.clone();
             async move {
                 let updates = crate::channel::ChannelUpdate {
                     join_role: Some("guest".into()),
@@ -4622,7 +4627,10 @@ mod postgres_tests {
                 };
                 match writer {
                     SettingsWriter::UpdateChannel => {
-                        crate::channel::update_channel(&pool, community, channel_id, updates).await
+                        crate::channel::update_channel(
+                            &pool, community, channel_id, updates, &owner,
+                        )
+                        .await
                     }
                     SettingsWriter::Kind9002 => {
                         let edit_event = nostr::EventBuilder::new(nostr::Kind::Custom(9002), "")
@@ -5767,6 +5775,7 @@ mod postgres_tests {
                 visibility: Some("private".into()),
                 ..Default::default()
             },
+            &other_owner,
         )
         .await
         .expect("make the channel private");
