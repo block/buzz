@@ -125,7 +125,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   SessionState build() {
     final config = ref.watch(relayConfigProvider);
     _relayUrl = config.baseUrl;
-    final authState = ref.watch(authProvider);
+    final auth = ref.watch(authProvider.select(_sessionAuthKey));
     _ageRestricted = ref.watch(ageSignalProvider) == AgeSignalState.restricted;
 
     // Reset disposed flag — build() may re-run on the same Notifier instance
@@ -135,7 +135,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     ref.onDispose(_dispose);
 
     // Auto-connect when authenticated and we have a signing key (NIP-42 AUTH).
-    final isAuthenticated = authState.value?.status == AuthStatus.authenticated;
+    final isAuthenticated = auth.status == AuthStatus.authenticated;
     if (!_ageRestricted && isAuthenticated && config.nsec != null) {
       // Schedule connection after build completes.
       Future.microtask(() => _connect(config));
