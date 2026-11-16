@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+
 import 'package:buzz/shared/relay/relay_author_provider.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
@@ -91,112 +93,137 @@ void main() {
     }
   });
 
-  test(
-    'instruction sources preserve precedence and do not revive unavailable config',
-    () async {
-      for (final row
-          in <
-            ({
-              List<NostrEvent> channels,
-              List<NostrEvent> artifacts,
-              String? expected,
-            })
-          >[
-            (
-              channels: [config],
-              artifacts: [current],
-              expected: 'Current instructions',
-            ),
-            (channels: [config], artifacts: [], expected: null),
-            (
-              channels: [config],
-              artifacts: [
-                event(45010, current.tags, {'version': 1, 'text': ''}),
-              ],
-              expected: '',
-            ),
-            (
-              channels: [config],
-              artifacts: [
-                event(45010, [
-                  ['d', artifact],
-                  ['op', 'delete'],
-                ], {}),
-              ],
-              expected: null,
-            ),
-            (
-              channels: [
-                event(39000, [
-                  ...config.tags,
-                  ['archived', 'true'],
-                ], {}),
-              ],
-              artifacts: [current],
-              expected: null,
-            ),
-            (channels: [], artifacts: [], expected: null),
-            (
-              channels: [event(39000, config.tags, {}, author: owner)],
-              artifacts: [current],
-              expected: null,
-            ),
-            (
-              channels: [
-                event(39000, [
-                  ['d', channel],
-                  ['P', 'f' * 64],
-                  ['t', 'system'],
-                  ['t', 'agent-config'],
-                  ['t', agent],
-                ], {}),
-              ],
-              artifacts: [current],
-              expected: null,
-            ),
-          ]) {
-        final result = await loadAgentInstructions(
-          agent,
-          owner,
-          relayAuthor,
-          (filter) async => switch (filter.kinds.single) {
-            39000 => () {
-              expect(filter.authors, [relayAuthor]);
-              return row.channels;
-            }(),
-            45010 =>
-              filter.extensions['artifact'] == 'current' &&
-                      filter.tags['#h']?.single == channel
-                  ? row.artifacts
-                  : [],
-            30177 => [legacy],
-            _ => [],
-          },
-        );
-        expect(result, row.expected);
-      }
-      await expectLater(
-        loadAgentInstructions(
-          agent,
-          owner,
-          relayAuthor,
-          (_) async => throw StateError('offline'),
+  test('a refused relay information response is aborted', () async {
+    Future<void>? aborted;
+    final container = ProviderContainer(
+      overrides: [
+        relayInformationClientProvider.overrideWithValue(
+          MockClient.streaming((request, _) async {
+            aborted = (request as http.Abortable).abortTrigger;
+            return http.StreamedResponse(
+              StreamController<List<int>>().stream,
+              503,
+            );
+          }),
         ),
-        throwsStateError,
+      ],
+    );
+    addTearDown(container.dispose);
+    final subscription = container.listen(
+      relayAuthorProvider('wss://relay.example'),
+      (_, _) {},
+    );
+    addTearDown(subscription.close);
+    expect(
+      await container.read(relayAuthorProvider('wss://relay.example').future),
+      isNull,
+    );
+    await aborted!.timeout(const Duration(seconds: 1));
+  });
+
+  test('instruction sources preserve precedence and do not revive unavailable config', () async {
+    for (final row
+        in <
+          ({
+            List<NostrEvent> channels,
+            List<NostrEvent> artifacts,
+            String? expected,
+          })
+        >[
+          (
+            channels: [config],
+            artifacts: [current],
+            expected: 'Current instructions',
+          ),
+          (channels: [config], artifacts: [], expected: null),
+          (
+            channels: [config],
+            artifacts: [
+              event(45010, current.tags, {'version': 1, 'text': ''}),
+            ],
+            expected: '',
+          ),
+          (
+            channels: [config],
+            artifacts: [
+              event(45010, [
+                ['d', artifact],
+                ['op', 'delete'],
+              ], {}),
+            ],
+            expected: null,
+          ),
+          (
+            channels: [
+              event(39000, [
+                ...config.tags,
+                ['archived', 'true'],
+              ], {}),
+            ],
+            artifacts: [current],
+            expected: null,
+          ),
+          (channels: [], artifacts: [], expected: null),
+          (
+            channels: [event(39000, config.tags, {}, author: owner)],
+            artifacts: [current],
+            expected: null,
+          ),
+          (
+            channels: [
+              event(39000, [
+                ['d', channel],
+                ['P', 'f' * 64],
+                ['t', 'system'],
+                ['t', 'agent-config'],
+                ['t', agent],
+              ], {}),
+            ],
+            artifacts: [current],
+            expected: null,
+          ),
+        ]) {
+      final result = await loadAgentInstructions(
+        agent,
+        owner,
+        relayAuthor,
+        (filter) async => switch (filter.kinds.single) {
+          39000 => () {
+            expect(filter.authors, [relayAuthor]);
+            return row.channels;
+          }(),
+          45010 =>
+            filter.extensions['artifact'] == 'current' &&
+                    filter.tags['#h']?.single == channel
+                ? row.artifacts
+                : [],
+          30177 => [legacy],
+          _ => [],
+        },
       );
-      await expectLater(
-        loadAgentInstructions(
-          agent,
-          owner,
-          relayAuthor,
-          (filter) async => filter.kinds.single == 39000
-              ? [config]
-              : [
-                  event(45010, current.tags, {'version': 2, 'text': 'Invalid'}),
-                ],
-        ),
-        throwsFormatException,
-      );
-    },
-  );
+      expect(result, row.expected);
+    }
+    await expectLater(
+      loadAgentInstructions(
+        agent,
+        owner,
+        relayAuthor,
+        (_) async => throw StateError('offline'),
+      ),
+      throwsStateError,
+    );
+    await expectLater(
+      loadAgentInstructions(
+        agent,
+        owner,
+        relayAuthor,
+        (filter) async => filter.kinds.single == 39000
+            ? [config]
+            : [
+                event(45010, current.tags, {'version': 2, 'text': 'Invalid'}),
+              ],
+      ),
+      throwsFormatException,
+    );
+  });
 }

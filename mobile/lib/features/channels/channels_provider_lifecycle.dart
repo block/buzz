@@ -26,9 +26,9 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     // A changed filter may be admitted, but an unchanged terminal rejection
     // cannot recover just because a timer or manual refresh fetched it again.
     // Drop obsolete keys so this quarantine stays bounded by desired chunks.
-    final desiredKeys = chunkChannelIdsForLiveSubscriptions(
-      channelIds,
-    ).map(_liveChunkKey).toSet();
+    final desiredKeys = chunkChannelIdsForLiveSubscriptions(channelIds)
+        .map(_liveChunkKey)
+        .toSet();
     _terminallyClosedLiveChunks.retainAll(desiredKeys);
     _refusedLiveChunks.retainAll(desiredKeys);
     _liveFence = fence;
@@ -248,10 +248,9 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     if (!_lifecycleRef.mounted) return;
     _noteReopenedSubscriptions();
     // Resume and reconnect read the list anyway, so a read that comes due
-    // in the background or offline is left to them.
-    if (_lifecycleRef.read(appLifecycleProvider) != AppLifecycleState.resumed) {
-      return;
-    }
+    // in the background or offline is left to them. Control Center and the
+    // like stay in the foreground and end in no resume, so they don't wait.
+    if (!_lifecycleRef.read(appForegroundProvider)) return;
     // A retry can come due inside the gap after the read it retries.
     if (_listReadGap != null) {
       _listReadDueAfterGap = true;
@@ -331,9 +330,8 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     // REQ, with backoff, rather than a fresh membership/history read, and
     // only when the relay was short of capacity: a refusal for any other
     // reason waits for the next connection.
-    if (chunkChannelIdsForLiveSubscriptions(
-      _desiredLiveChannelIds,
-    ).any((chunk) => _liveChunkKey(chunk) == chunkKey)) {
+    if (chunkChannelIdsForLiveSubscriptions(_desiredLiveChannelIds)
+        .any((chunk) => _liveChunkKey(chunk) == chunkKey)) {
       if (_isRelayCapacityClose(message)) {
         _terminallyClosedLiveChunks.add(chunkKey);
         _retryClosedLiveChunks();

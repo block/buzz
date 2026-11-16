@@ -1,9 +1,11 @@
 import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/hosted/builderlab_account.dart';
+import '../../shared/hosted/clock_hint.dart';
 import '../../shared/widgets/buzz_toast.dart';
 import '../../shared/hosted/hosted_flow.dart';
 import '../../shared/hosted/hosted_relay_auth.dart';
@@ -30,6 +32,7 @@ class HostedReconnectBanner extends HookConsumerWidget {
         auth.failure != null;
     final signIn = active && auth.failure == AccountFailure.signedOut;
     final changeAccount = auth.failure == AccountFailure.denied;
+    final clockHint = changeAccount ? auth.failureClockHint : null;
     return Stack(
       children: [
         ReconnectCapsule(
@@ -55,6 +58,7 @@ class HostedReconnectBanner extends HookConsumerWidget {
                             ? 'This account cannot reconnect to this community with its saved key.'
                             : 'Could not reconnect to Builderlab.',
                       ),
+                      if (clockHint != null) Text(clockHintText(clockHint)),
                       if (changeAccount)
                         TextButton(
                           onPressed: () => unawaited(

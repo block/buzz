@@ -14,8 +14,11 @@ class InventoryAccount extends BuilderlabAccountClient {
   Map<String, dynamic> recovery = {};
   final calls = <String>[];
   @override
-  BuilderlabAccount get account =>
-      BuilderlabAccount(subject: 'fixture', expiresAt: DateTime.utc(2100));
+  BuilderlabAccount get account => BuilderlabAccount(
+    subject: 'fixture',
+    email: 'owner@example.com',
+    expiresAt: DateTime.utc(2100),
+  );
   @override
   Future<BuilderlabAccount?> restore() async => account;
   @override
@@ -104,34 +107,31 @@ void main() {
     });
   }
 
-  test(
-    'multiple current and hidden legacy keys require choice; no writes before choice',
-    () async {
-      await secure.write(
-        key: 'buzz_communities',
-        value: jsonEncode([record(first, 'Current')]),
-      );
-      await secure.write(key: 'buzz_nsec', value: second.nsec);
-      final before = await secure.readAll();
-      final pending = await service.resolve();
-      expect(pending.state, HostedIdentityState.needsSelection);
-      expect(pending.choices.map((item) => item.pubkey), [
-        first.public,
-        second.public,
-      ]);
-      expect(await secure.readAll(), before);
-      final selected = await service.resolve(selectedPubkey: second.public);
-      expect(selected.pubkey, second.public);
-      for (final entry in before.entries) {
-        expect(await secure.read(key: entry.key), entry.value);
-      }
-      expect(account.calls.every((path) => path.endsWith('/status')), isTrue);
-      expect(
-        (await service.resolve(selectedPubkey: first.public)).pubkey,
-        second.public,
-      );
-    },
-  );
+  test('multiple current and hidden legacy keys require choice; no writes before choice', () async {
+    await secure.write(
+      key: 'buzz_communities',
+      value: jsonEncode([record(first, 'Current')]),
+    );
+    await secure.write(key: 'buzz_nsec', value: second.nsec);
+    final before = await secure.readAll();
+    final pending = await service.resolve();
+    expect(pending.state, HostedIdentityState.needsSelection);
+    expect(pending.choices.map((item) => item.pubkey), [
+      first.public,
+      second.public,
+    ]);
+    expect(await secure.readAll(), before);
+    final selected = await service.resolve(selectedPubkey: second.public);
+    expect(selected.pubkey, second.public);
+    for (final entry in before.entries) {
+      expect(await secure.read(key: entry.key), entry.value);
+    }
+    expect(account.calls.every((path) => path.endsWith('/status')), isTrue);
+    expect(
+      (await service.resolve(selectedPubkey: first.public)).pubkey,
+      second.public,
+    );
+  });
 
   test('duplicate device identities offer one explicit reuse choice', () async {
     FlutterSecureStorage.setMockInitialValues({
@@ -147,92 +147,81 @@ void main() {
     );
   });
 
-  test(
-    'corrupt, incomplete and mismatched legacy records never authorize generation',
-    () async {
-      for (final data in [
-        {'buzz_workspaces': '{broken'},
-        {'buzz_nsec': ''},
-        {
-          'buzz_communities': jsonEncode([
-            {'nsec': first.nsec, 'pubkey': second.public},
-          ]),
-        },
-      ]) {
-        FlutterSecureStorage.setMockInitialValues(data);
-        await expectLater(
-          service.resolve(),
-          throwsA(AccountIdentityFailure.unreadable),
-        );
-        expect(await secure.readAll(), data);
-      }
-      // Another account's scoped key must remain a choice, even when an
-      // unrelated Android entry prevents bulk enumeration. Never mint a key
-      // from that incomplete inventory; retry after storage recovers.
-      FlutterSecureStorage.setMockInitialValues({});
-      final storage = _InventoryStorage();
-      store = AccountIdentityStore(storage: storage, subject: 'fixture');
-      await store.forSubject('other-account').create(first.nsec);
-      service = HostedIdentityService(account: account, store: store);
-      final before = await secure.readAll();
-      expect(
-        (await service.resolve()).state,
-        HostedIdentityState.needsSelection,
-      );
-      storage.failEnumeration = true;
+  test('corrupt, incomplete and mismatched legacy records never authorize generation', () async {
+    for (final data in [
+      {'buzz_workspaces': '{broken'},
+      {'buzz_nsec': ''},
+      {
+        'buzz_communities': jsonEncode([
+          {'nsec': first.nsec, 'pubkey': second.public},
+        ]),
+      },
+    ]) {
+      FlutterSecureStorage.setMockInitialValues(data);
       await expectLater(
         service.resolve(),
         throwsA(AccountIdentityFailure.unreadable),
       );
-      expect(await secure.readAll(), before);
-      expect(await store.read(), isNull);
-      storage.failEnumeration = false;
-      expect((await service.resolve()).choices.single.pubkey, first.public);
-      expect(
-        (await service.resolve(selectedPubkey: first.public)).pubkey,
-        first.public,
-      );
-      expect(
-        (await store.forSubject('other-account').read())!.pubkey,
-        first.public,
-      );
-    },
-  );
+      expect(await secure.readAll(), data);
+    }
+    // Another account's scoped key must remain a choice, even when an
+    // unrelated Android entry prevents bulk enumeration. Never mint a key
+    // from that incomplete inventory; retry after storage recovers.
+    FlutterSecureStorage.setMockInitialValues({});
+    final storage = _InventoryStorage();
+    store = AccountIdentityStore(storage: storage, subject: 'fixture');
+    await store.forSubject('other-account').create(first.nsec);
+    service = HostedIdentityService(account: account, store: store);
+    final before = await secure.readAll();
+    expect((await service.resolve()).state, HostedIdentityState.needsSelection);
+    storage.failEnumeration = true;
+    await expectLater(
+      service.resolve(),
+      throwsA(AccountIdentityFailure.unreadable),
+    );
+    expect(await secure.readAll(), before);
+    expect(await store.read(), isNull);
+    storage.failEnumeration = false;
+    expect((await service.resolve()).choices.single.pubkey, first.public);
+    expect(
+      (await service.resolve(selectedPubkey: first.public)).pubkey,
+      first.public,
+    );
+    expect(
+      (await store.forSubject('other-account').read())!.pubkey,
+      first.public,
+    );
+  });
 
-  test(
-    'token-only legacy records do not prevent recovering the same cloud identity',
-    () async {
-      final raw = jsonEncode([
-        {'pubkey': first.public, 'name': 'Token-only community'},
-      ]);
-      await secure.write(key: 'buzz_communities', value: raw);
-      await secure.write(key: 'buzz_pubkey', value: first.public);
-      account.bound = first.public;
-      account.backups = [first.public];
-      account.recovery = {
-        'backups': [
-          {
-            'backup_id': 'fixture-backup',
-            'nostr_pubkey': first.public,
-            'secret_key': base64UrlEncode([
-              ...List.filled(31, 0),
-              1,
-            ]).replaceAll('=', ''),
-          },
-        ],
-        'failed_backup_ids': [],
-      };
-      final result = await service.resolve();
-      expect(result.state, HostedIdentityState.ready);
-      expect(result.pubkey, first.public);
-      expect(account.calls, [
-        '/v1/buzz/nsec-backups/status',
-        '/v1/buzz/nsec-backups/recovery',
-      ]);
-      expect(await secure.read(key: 'buzz_communities'), raw);
-      expect(await secure.read(key: 'buzz_pubkey'), first.public);
-    },
-  );
+  test('token-only legacy records do not prevent recovering the same cloud identity', () async {
+    final raw = jsonEncode([
+      {'pubkey': first.public, 'name': 'Token-only community'},
+    ]);
+    await secure.write(key: 'buzz_communities', value: raw);
+    await secure.write(key: 'buzz_pubkey', value: first.public);
+    account.bound = first.public;
+    account.backups = [first.public];
+    account.recovery = {
+      'backups': [
+        {
+          'backup_id': 'fixture-backup',
+          'nostr_pubkey': first.public,
+          'secret_key': base64UrlEncode([...List.filled(31, 0), 1])
+              .replaceAll('=', ''),
+        },
+      ],
+      'failed_backup_ids': [],
+    };
+    final result = await service.resolve();
+    expect(result.state, HostedIdentityState.ready);
+    expect(result.pubkey, first.public);
+    expect(account.calls, [
+      '/v1/buzz/nsec-backups/status',
+      '/v1/buzz/nsec-backups/recovery',
+    ]);
+    expect(await secure.read(key: 'buzz_communities'), raw);
+    expect(await secure.read(key: 'buzz_pubkey'), first.public);
+  });
 
   test(
     'inventory labels are deduplicated and empty names get a fallback',

@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
+import 'package:buzz/shared/http/app_http_client.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:url_launcher/url_launcher.dart';
@@ -55,8 +56,9 @@ class InviteJoinRecoveryScope {
 }
 
 /// Constructs a fresh recovery operation for one scoped setup attempt.
-typedef InviteJoinRecoveryFactory =
-    InviteJoinRecovery Function(InviteJoinRecoveryScope scope);
+typedef InviteJoinRecoveryFactory = InviteJoinRecovery Function(
+  InviteJoinRecoveryScope scope,
+);
 
 /// Provides recovery construction after the active community is authenticated.
 final inviteJoinRecoveryProvider = Provider<InviteJoinRecoveryFactory>((ref) {
@@ -211,8 +213,7 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
       if (state.isStarterSetupRecovery) {
         state = state.copyWith(
           status: InviteJoinStatus.error,
-          errorMessage:
-              'This community is no longer available. Re-open the invite link to try again.',
+          errorMessage: 'This community is no longer available. Re-open the invite link to try again.',
         );
         return;
       }
@@ -307,8 +308,7 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
       // Keep the pending identity and expose the same action for another try.
     }
     state = state.copyWith(
-      errorMessage:
-          'Could not open the browser. Try reviewing the join requirements again.',
+      errorMessage: 'Could not open the browser. Try reviewing the join requirements again.',
     );
     return false;
   }
@@ -515,7 +515,15 @@ String _friendlyInviteError(Object error) {
   if (message.contains('join_policy_required')) {
     return 'Review this community’s join requirements in your browser, then return to Buzz.';
   }
-  if (message.contains('SocketException') ||
+  final failure = transportFailure(error);
+  if (failure == TransportFailure.insecure) {
+    return 'Secure connection failed. Check your network settings and try again.';
+  }
+  if (failure == TransportFailure.timedOut) {
+    return 'Connection timed out. Check your internet connection and try again.';
+  }
+  if (failure == TransportFailure.unreachable ||
+      message.contains('SocketException') ||
       message.contains('Connection refused') ||
       message.contains('Network is unreachable') ||
       message.contains('No route to host')) {
@@ -526,7 +534,8 @@ String _friendlyInviteError(Object error) {
 
 String _friendlyStarterSetupError(Object error) {
   final message = error.toString();
-  if (message.contains('SocketException') ||
+  if (transportFailure(error) == TransportFailure.unreachable ||
+      message.contains('SocketException') ||
       message.contains('Connection refused') ||
       message.contains('Network is unreachable') ||
       message.contains('No route to host')) {

@@ -4,6 +4,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:buzz/shared/http/app_http_client.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/auth/auth.dart';
@@ -18,21 +19,23 @@ import '../../shared/relay/relay.dart';
 import '../../shared/security/sensitive_action_authorizer.dart';
 import 'pairing_crypto.dart';
 import 'pairing_socket.dart';
+
 import 'package:buzz/shared/crypto/event_signing.dart';
 
 part 'pairing_provider_helpers.dart';
 part 'pairing_state.dart';
 
-typedef PairingSocketFactory =
-    PairingSocket Function({
-      required String wsUrl,
-      required String ephemeralPrivkey,
-      required void Function(List<dynamic> message) onMessage,
-      required void Function(Object? error) onDisconnected,
-    });
+typedef PairingSocketFactory = PairingSocket Function({
+  required String wsUrl,
+  required String ephemeralPrivkey,
+  required void Function(List<dynamic> message) onMessage,
+  required void Function(Object? error) onDisconnected,
+});
 
-typedef PairingCredentialValidator =
-    Future<void> Function({required String relayUrl, required String? nsec});
+typedef PairingCredentialValidator = Future<void> Function({
+  required String relayUrl,
+  required String? nsec,
+});
 
 const identityExportAuthorizationTtl = Duration(minutes: 2);
 
@@ -277,8 +280,7 @@ class PairingNotifier extends Notifier<PairingState> {
   ) => switch (result) {
     DeviceAuthResult.cancelled =>
       'Biometric setup was cancelled. Nothing was transferred.',
-    DeviceAuthResult.unavailable =>
-      'Biometrics are unavailable. Enroll Face ID or biometrics and try again, or turn this option off.',
+    DeviceAuthResult.unavailable => 'Biometrics are unavailable. Enroll Face ID or biometrics and try again, or turn this option off.',
     DeviceAuthResult.lockedOut =>
       'Biometrics are locked. Unlock them in system settings and try again.',
     DeviceAuthResult.failed =>
@@ -286,19 +288,16 @@ class PairingNotifier extends Notifier<PairingState> {
     DeviceAuthResult.success => '',
   };
 
-  static String _authorizationError(
-    DeviceAuthResult result,
-  ) => switch (result) {
-    DeviceAuthResult.cancelled =>
-      'Identity confirmation was cancelled. Nothing was transferred.',
-    DeviceAuthResult.unavailable =>
-      'Device authentication is unavailable. Configure a device passcode or biometrics and try again.',
-    DeviceAuthResult.lockedOut =>
-      'Device authentication is locked. Unlock it in system settings and try again.',
-    DeviceAuthResult.failed =>
-      'Identity confirmation failed. Nothing was transferred.',
-    DeviceAuthResult.success => '',
-  };
+  static String _authorizationError(DeviceAuthResult result) =>
+      switch (result) {
+        DeviceAuthResult.cancelled =>
+          'Identity confirmation was cancelled. Nothing was transferred.',
+        DeviceAuthResult.unavailable => 'Device authentication is unavailable. Configure a device passcode or biometrics and try again.',
+        DeviceAuthResult.lockedOut => 'Device authentication is locked. Unlock it in system settings and try again.',
+        DeviceAuthResult.failed =>
+          'Identity confirmation failed. Nothing was transferred.',
+        DeviceAuthResult.success => '',
+      };
 
   /// Deny the SAS code. Send abort and terminate.
   void denySas() {
@@ -483,8 +482,7 @@ class PairingNotifier extends Notifier<PairingState> {
       _cleanup();
       state = const PairingState(
         status: PairingStatus.error,
-        errorMessage:
-            'Pairing couldn’t continue. Scan a new desktop QR code and try again.',
+        errorMessage: 'Pairing couldn’t continue. Scan a new desktop QR code and try again.',
       );
       return;
     }
@@ -556,8 +554,7 @@ class PairingNotifier extends Notifier<PairingState> {
               _cleanup();
               state = const PairingState(
                 status: PairingStatus.error,
-                errorMessage:
-                    'Too many incorrect codes. Scan a new desktop QR code and try again.',
+                errorMessage: 'Too many incorrect codes. Scan a new desktop QR code and try again.',
               );
             }
           }

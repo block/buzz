@@ -1,6 +1,9 @@
 import 'package:flutter/scheduler.dart';
+
 import 'dart:async';
+
 import 'package:buzz/features/channels/composer_send_origin.dart';
+
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
@@ -11,12 +14,22 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
 import 'package:image_picker/image_picker.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/deep_link_dispatcher.dart';
+import 'package:buzz/features/channels/open_channel_routes.dart';
+import 'package:buzz/shared/auth/auth.dart';
+import 'package:buzz/shared/deeplink/deep_link.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
+
+import '../../shared/community/community_storage_test.dart';
+
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
@@ -32,6 +45,7 @@ import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/share/pending_share.dart';
 import 'package:buzz/features/activity/compose_drafts_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
@@ -47,6 +61,7 @@ part 'compose_bar_test/mixed_gallery_tests.dart';
 part 'compose_bar_test/solo_draft_tests.dart';
 part 'compose_bar_test/durable_mention_tests.dart';
 part 'compose_bar_test/agent_prefill_tests.dart';
+part 'compose_bar_test/share_delivery_tests.dart';
 
 final _pngBytes = Uint8List.fromList([
   0x89,
@@ -220,9 +235,40 @@ Widget _buildComposeBar({
   List<OwnedAgentDirectoryEntry>? ownedAgents,
   bool ownedAgentsUnknown = false,
   List<TimelineMessage>? prefillScopeMessages,
+  List<Override> overrides = const [],
+  Widget Function(Widget page)? wrapPage,
 }) {
+  final page = Scaffold(
+    body: SafeArea(
+      child: Align(
+        alignment: Alignment.bottomCenter,
+        child: Builder(
+          builder: (context) {
+            final composeBar = ComposeBar(
+              key: ValueKey(composeBarKey),
+              channelId: 'channel-1',
+              draftMembers: draftMembers,
+              onSendingChanged: onSendingChanged,
+              threadHeadId: threadHeadId,
+              focusNode: focusNode,
+              onFocusRestorerChanged: onFocusRestorerChanged,
+              onFocusRequested: onFocusRequested,
+              prefillScopeMessages: prefillScopeMessages,
+              onSend: onSend,
+            );
+            if (viewPadding == null) return composeBar;
+            return MediaQuery(
+              data: MediaQuery.of(context).copyWith(viewPadding: viewPadding),
+              child: composeBar,
+            );
+          },
+        ),
+      ),
+    ),
+  );
   return ProviderScope(
     overrides: [
+      ...overrides,
       if (ownedAgents != null)
         ownedAgentDirectoryProvider.overrideWith((ref) async => ownedAgents),
       if (ownedAgentsUnknown)
@@ -292,36 +338,7 @@ Widget _buildComposeBar({
               ),
               child: child!,
             ),
-      home: Scaffold(
-        body: SafeArea(
-          child: Align(
-            alignment: Alignment.bottomCenter,
-            child: Builder(
-              builder: (context) {
-                final composeBar = ComposeBar(
-                  key: ValueKey(composeBarKey),
-                  channelId: 'channel-1',
-                  draftMembers: draftMembers,
-                  onSendingChanged: onSendingChanged,
-                  threadHeadId: threadHeadId,
-                  focusNode: focusNode,
-                  onFocusRestorerChanged: onFocusRestorerChanged,
-                  onFocusRequested: onFocusRequested,
-                  prefillScopeMessages: prefillScopeMessages,
-                  onSend: onSend,
-                );
-                if (viewPadding == null) return composeBar;
-                return MediaQuery(
-                  data: MediaQuery.of(
-                    context,
-                  ).copyWith(viewPadding: viewPadding),
-                  child: composeBar,
-                );
-              },
-            ),
-          ),
-        ),
-      ),
+      home: wrapPage?.call(page) ?? page,
     ),
   );
 }
@@ -336,9 +353,8 @@ Widget _buildNativePopoverOwnershipHarness({
       mediaUploadServiceProvider.overrideWithValue(uploadService),
       photoLibraryProvider.overrideWithValue(const _EmptyPhotoLibrary()),
       currentPubkeyProvider.overrideWith((ref) => null),
-      channelMembersProvider(
-        'channel-1',
-      ).overrideWith((ref) => Future.value(const <ChannelMember>[])),
+      channelMembersProvider('channel-1')
+          .overrideWith((ref) => Future.value(const <ChannelMember>[])),
       agentDirectoryProvider.overrideWith(
         (ref) async => const <AgentDirectoryEntry>[],
       ),
@@ -744,6 +760,7 @@ void main() {
   exactMentionTests();
   durableMentionTests();
   agentPrefillTests();
+  shareDeliveryTests();
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() async {
@@ -778,12 +795,11 @@ void main() {
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
 
@@ -858,12 +874,11 @@ void main() {
         _buildComposeBar(
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
           onFocusRequested: () => focusRequested = true,
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
 
@@ -886,12 +901,11 @@ void main() {
         _buildComposeBar(
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
           focusNode: focusNode,
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
 
@@ -917,12 +931,11 @@ void main() {
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
           focusNode: focusNode,
           onFocusRestorerChanged: (callback) => restoreFocus = callback,
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
 
@@ -951,35 +964,32 @@ void main() {
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
           focusNode: focusNode,
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
 
@@ -994,12 +1004,11 @@ void main() {
         _buildComposeBar(
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
           onFocusRestorerChanged: callbacks.add,
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
       final registeredRestorer = callbacks.single;
@@ -1021,12 +1030,11 @@ void main() {
           composeBarKey: 'first-compose-bar',
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
           onFocusRestorerChanged: callbacks.add,
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
       final oldRestorer = callbacks.single;
@@ -1035,12 +1043,11 @@ void main() {
           composeBarKey: 'second-compose-bar',
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
           onFocusRestorerChanged: callbacks.add,
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
       expect(callbacks, hasLength(2));
@@ -1066,12 +1073,11 @@ void main() {
         await tester.pumpWidget(
           _buildComposeBar(
             uploadService: _testUploadService(nostr.Keys.generate().nsec),
-            onSend:
-                (
-                  content,
-                  mentionPubkeys, {
-                  mediaTags = const <List<String>>[],
-                }) async {},
+            onSend: (
+              content,
+              mentionPubkeys, {
+              mediaTags = const <List<String>>[],
+            }) async {},
           ),
         );
         final widthFinder = find.byKey(
@@ -1110,12 +1116,11 @@ void main() {
         await tester.pumpWidget(
           _buildComposeBar(
             uploadService: _testUploadService(nostr.Keys.generate().nsec),
-            onSend:
-                (
-                  content,
-                  mentionPubkeys, {
-                  mediaTags = const <List<String>>[],
-                }) async {},
+            onSend: (
+              content,
+              mentionPubkeys, {
+              mediaTags = const <List<String>>[],
+            }) async {},
           ),
         );
         final widthFinder = find.byKey(
@@ -1138,12 +1143,11 @@ void main() {
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
       await _expandComposer(tester);
@@ -1267,9 +1271,11 @@ void main() {
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
-          onSend:
-              (content, mentionPubkeys, {mediaTags = const <List<String>>[]}) =>
-                  delivery.future,
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) => delivery.future,
         ),
       );
 
@@ -1304,9 +1310,11 @@ void main() {
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
-          onSend:
-              (content, mentionPubkeys, {mediaTags = const <List<String>>[]}) =>
-                  delivery.future,
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) => delivery.future,
         ),
       );
 
@@ -1343,9 +1351,11 @@ void main() {
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
-          onSend:
-              (content, mentionPubkeys, {mediaTags = const <List<String>>[]}) =>
-                  delivery.future,
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) => delivery.future,
         ),
       );
 
@@ -1384,12 +1394,11 @@ void main() {
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
 
@@ -1426,12 +1435,11 @@ void main() {
         _buildComposeBar(
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
           disableAnimations: true,
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
 
@@ -1452,12 +1460,11 @@ void main() {
         await tester.pumpWidget(
           _buildComposeBar(
             uploadService: _testUploadService(nostr.Keys.generate().nsec),
-            onSend:
-                (
-                  content,
-                  mentionPubkeys, {
-                  mediaTags = const <List<String>>[],
-                }) async {},
+            onSend: (
+              content,
+              mentionPubkeys, {
+              mediaTags = const <List<String>>[],
+            }) async {},
           ),
         );
 
@@ -1494,12 +1501,11 @@ void main() {
           relayConfig: () => _SwitchableRelayConfigNotifier(
             RelayConfig(baseUrl: relayUrl, nsec: keysA.nsec),
           ),
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
 
@@ -1566,12 +1572,11 @@ void main() {
           customEmoji: const [
             CustomEmoji(shortcode: 'meow', url: 'https://example.com/meow.png'),
           ],
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
 
@@ -1606,12 +1611,11 @@ void main() {
           _buildComposeBar(
             uploadService: _testUploadService(nostr.Keys.generate().nsec),
             supportsShowingSystemContextMenu: true,
-            onSend:
-                (
-                  content,
-                  mentionPubkeys, {
-                  mediaTags = const <List<String>>[],
-                }) async {},
+            onSend: (
+              content,
+              mentionPubkeys, {
+              mediaTags = const <List<String>>[],
+            }) async {},
           ),
         );
         await _expandComposer(tester);
@@ -1704,12 +1708,11 @@ void main() {
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
       await _expandComposer(tester);
@@ -1745,12 +1748,11 @@ void main() {
         _buildComposeBar(
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
           channels: [_makeChannel(name: 'general', channelType: 'stream')],
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
       await _expandComposer(tester);
@@ -1810,12 +1812,11 @@ void main() {
             ),
           ],
           channels: [_makeCurrentChannel()],
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
 
@@ -1981,8 +1982,7 @@ void main() {
         tester,
       ) async {
         const saba = UserProfile(
-          pubkey:
-              'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+          pubkey: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
           displayName: 'Saba Saba',
         );
         await pumpMembers(tester, [
@@ -2005,8 +2005,7 @@ void main() {
         tester,
       ) async {
         const saba = UserProfile(
-          pubkey:
-              'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+          pubkey: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
           displayName: 'Saba Saba',
         );
         var searches = 0;
@@ -2139,12 +2138,11 @@ void main() {
           currentPubkey: signer.public,
           relayAgents: [_testAgent('f' * 64)],
           channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
 
@@ -2189,12 +2187,11 @@ void main() {
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
       await _expandComposer(tester);
@@ -2248,12 +2245,11 @@ void main() {
         await tester.pumpWidget(
           _buildComposeBar(
             uploadService: uploadService,
-            onSend:
-                (
-                  content,
-                  mentionPubkeys, {
-                  mediaTags = const <List<String>>[],
-                }) async {},
+            onSend: (
+              content,
+              mentionPubkeys, {
+              mediaTags = const <List<String>>[],
+            }) async {},
           ),
         );
 
@@ -2295,12 +2291,11 @@ void main() {
         await tester.pumpWidget(
           _buildComposeBar(
             uploadService: _testUploadService(nostr.Keys.generate().nsec),
-            onSend:
-                (
-                  content,
-                  mentionPubkeys, {
-                  mediaTags = const <List<String>>[],
-                }) async {},
+            onSend: (
+              content,
+              mentionPubkeys, {
+              mediaTags = const <List<String>>[],
+            }) async {},
           ),
         );
 
@@ -2344,12 +2339,11 @@ void main() {
             _buildComposeBar(
               uploadService: _testUploadService(nostr.Keys.generate().nsec),
               voiceNoteRecorderFactory: () => recorder,
-              onSend:
-                  (
-                    content,
-                    mentionPubkeys, {
-                    mediaTags = const <List<String>>[],
-                  }) async {},
+              onSend: (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
             ),
           );
 
@@ -2424,12 +2418,11 @@ void main() {
         await tester.pumpWidget(
           _buildComposeBar(
             uploadService: _testUploadService(nostr.Keys.generate().nsec),
-            onSend:
-                (
-                  content,
-                  mentionPubkeys, {
-                  mediaTags = const <List<String>>[],
-                }) async {},
+            onSend: (
+              content,
+              mentionPubkeys, {
+              mediaTags = const <List<String>>[],
+            }) async {},
           ),
         );
 
@@ -2473,12 +2466,11 @@ void main() {
           await tester.pumpWidget(
             _buildComposeBar(
               uploadService: _testUploadService(nostr.Keys.generate().nsec),
-              onSend:
-                  (
-                    content,
-                    mentionPubkeys, {
-                    mediaTags = const <List<String>>[],
-                  }) async {},
+              onSend: (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
             ),
           );
 
@@ -2839,8 +2831,7 @@ void main() {
           return http.Response(
             jsonEncode({
               'url': 'https://relay.example/media/test.png',
-              'sha256':
-                  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+              'sha256': '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
               'size': 16,
               'type': 'image/png',
               'uploaded': 1,
@@ -2985,8 +2976,7 @@ void main() {
           return http.Response(
             jsonEncode({
               'url': 'https://relay.example/media/photo-$requestNumber.png',
-              'sha256':
-                  '1111111111111111111111111111111111111111111111111111111111111111',
+              'sha256': '1111111111111111111111111111111111111111111111111111111111111111',
               'size': request.bodyBytes.length,
               'type': 'image/png',
               'uploaded': 1,
@@ -3005,12 +2995,11 @@ void main() {
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: uploadService,
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
 
@@ -3032,12 +3021,11 @@ void main() {
         _buildComposeBar(
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
           photoLibrary: photoLibrary,
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
 
@@ -3113,12 +3101,11 @@ void main() {
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
 
@@ -3200,12 +3187,11 @@ void main() {
         await tester.pumpWidget(
           _buildComposeBar(
             uploadService: _testUploadService(nostr.Keys.generate().nsec),
-            onSend:
-                (
-                  content,
-                  mentionPubkeys, {
-                  mediaTags = const <List<String>>[],
-                }) async {},
+            onSend: (
+              content,
+              mentionPubkeys, {
+              mediaTags = const <List<String>>[],
+            }) async {},
           ),
         );
 
@@ -3240,12 +3226,11 @@ void main() {
           _buildComposeBar(
             uploadService: _testUploadService(nostr.Keys.generate().nsec),
             textScaler: const TextScaler.linear(4),
-            onSend:
-                (
-                  content,
-                  mentionPubkeys, {
-                  mediaTags = const <List<String>>[],
-                }) async {},
+            onSend: (
+              content,
+              mentionPubkeys, {
+              mediaTags = const <List<String>>[],
+            }) async {},
           ),
         );
 
@@ -3282,12 +3267,11 @@ void main() {
         await tester.pumpWidget(
           _buildComposeBar(
             uploadService: _testUploadService(nostr.Keys.generate().nsec),
-            onSend:
-                (
-                  content,
-                  mentionPubkeys, {
-                  mediaTags = const <List<String>>[],
-                }) async {},
+            onSend: (
+              content,
+              mentionPubkeys, {
+              mediaTags = const <List<String>>[],
+            }) async {},
           ),
         );
         final compactComposerWidth = tester
@@ -3347,12 +3331,11 @@ void main() {
             RecentPhoto(id: 'three', thumbnailBytes: _gifBytes),
             RecentPhoto(id: 'four', thumbnailBytes: _gifBytes),
           ]),
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
 
@@ -3424,8 +3407,7 @@ void main() {
         http.Response(
           jsonEncode({
             'url': 'https://relay.example/media/test.png',
-            'sha256':
-                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+            'sha256': '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
             'size': 16,
             'type': 'image/png',
             'uploaded': 1,
@@ -3546,8 +3528,7 @@ void main() {
           http.Response(
             jsonEncode({
               'url': 'https://relay.example/media/test.png',
-              'sha256':
-                  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+              'sha256': '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
               'size': 16,
               'type': 'image/png',
               'uploaded': 1,
@@ -3759,8 +3740,7 @@ void main() {
           http.Response(
             jsonEncode({
               'url': 'https://relay.example/media/test.png',
-              'sha256':
-                  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+              'sha256': '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
               'size': 16,
               'type': 'image/png',
               'uploaded': 1,
@@ -3783,12 +3763,11 @@ void main() {
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
 
@@ -4348,12 +4327,11 @@ void main() {
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
 
@@ -4383,8 +4361,7 @@ void main() {
           return http.Response(
             jsonEncode({
               'url': 'https://relay.example/media/pasted.png',
-              'sha256':
-                  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+              'sha256': '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
               'size': 16,
               'type': 'image/png',
               'uploaded': 1,
@@ -4485,8 +4462,7 @@ void main() {
             (request) async => http.Response(
               jsonEncode({
                 'url': 'https://relay.example/media/ios-native-paste.png',
-                'sha256':
-                    '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'sha256': '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
                 'size': 16,
                 'type': 'image/png',
                 'uploaded': 1,
@@ -4502,12 +4478,11 @@ void main() {
           _buildComposeBar(
             uploadService: uploadService,
             supportsShowingSystemContextMenu: true,
-            onSend:
-                (
-                  content,
-                  mentionPubkeys, {
-                  mediaTags = const <List<String>>[],
-                }) async {},
+            onSend: (
+              content,
+              mentionPubkeys, {
+              mediaTags = const <List<String>>[],
+            }) async {},
           ),
         );
 
@@ -4519,19 +4494,15 @@ void main() {
         final defaultItems = SystemContextMenu.getDefaultItems(
           editableTextState,
         );
-        final menu =
-            textField.contextMenuBuilder!(
-                  tester.element(find.byType(TextField)),
-                  editableTextState,
-                )
-                as SystemContextMenu;
+        final menu = textField.contextMenuBuilder!(
+          tester.element(find.byType(TextField)),
+          editableTextState,
+        ) as SystemContextMenu;
         final pasteImage = menu.items.first as IOSSystemContextMenuItemCustom;
-        final rebuiltMenu =
-            textField.contextMenuBuilder!(
-                  tester.element(find.byType(TextField)),
-                  editableTextState,
-                )
-                as SystemContextMenu;
+        final rebuiltMenu = textField.contextMenuBuilder!(
+          tester.element(find.byType(TextField)),
+          editableTextState,
+        ) as SystemContextMenu;
         final rebuiltPasteImage =
             rebuiltMenu.items.first as IOSSystemContextMenuItemCustom;
 
@@ -4567,12 +4538,11 @@ void main() {
           _buildComposeBar(
             uploadService: uploadService,
             supportsShowingSystemContextMenu: true,
-            onSend:
-                (
-                  content,
-                  mentionPubkeys, {
-                  mediaTags = const <List<String>>[],
-                }) async {},
+            onSend: (
+              content,
+              mentionPubkeys, {
+              mediaTags = const <List<String>>[],
+            }) async {},
           ),
         );
         await tester.pump();
@@ -4582,12 +4552,10 @@ void main() {
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
         );
-        final menu =
-            textField.contextMenuBuilder!(
-                  tester.element(find.byType(TextField)),
-                  editableTextState,
-                )
-                as SystemContextMenu;
+        final menu = textField.contextMenuBuilder!(
+          tester.element(find.byType(TextField)),
+          editableTextState,
+        ) as SystemContextMenu;
 
         expect(menu.items.whereType<IOSSystemContextMenuItemCustom>(), isEmpty);
       } finally {
@@ -4608,66 +4576,63 @@ void main() {
       }
     });
 
-    testWidgets('iOS adaptive Paste Image reads the clipboard into shared path', (
-      tester,
-    ) async {
-      final previousPlatform = debugDefaultTargetPlatformOverride;
-      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-      try {
-        final uploadService = MediaUploadService(
-          baseUrl: 'https://relay.example',
-          nsec: nostr.Keys.generate().nsec,
-          httpClient: http_testing.MockClient(
-            (request) async => http.Response(
-              jsonEncode({
-                'url': 'https://relay.example/media/ios-paste.png',
-                'sha256':
-                    '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
-                'size': 16,
-                'type': 'image/png',
-                'uploaded': 1,
-              }),
-              200,
+    testWidgets(
+      'iOS adaptive Paste Image reads the clipboard into shared path',
+      (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        try {
+          final uploadService = MediaUploadService(
+            baseUrl: 'https://relay.example',
+            nsec: nostr.Keys.generate().nsec,
+            httpClient: http_testing.MockClient(
+              (request) async => http.Response(
+                jsonEncode({
+                  'url': 'https://relay.example/media/ios-paste.png',
+                  'sha256': '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                  'size': 16,
+                  'type': 'image/png',
+                  'uploaded': 1,
+                }),
+                200,
+              ),
             ),
-          ),
-          pickGalleryVideo: () async => null,
-          pickGalleryImage: () async => null,
-          readClipboardImage: () async => _pngBytes,
-        );
-        await tester.pumpWidget(
-          _buildComposeBar(
-            uploadService: uploadService,
-            onSend:
-                (
-                  content,
-                  mentionPubkeys, {
-                  mediaTags = const <List<String>>[],
-                }) async {},
-          ),
-        );
+            pickGalleryVideo: () async => null,
+            pickGalleryImage: () async => null,
+            readClipboardImage: () async => _pngBytes,
+          );
+          await tester.pumpWidget(
+            _buildComposeBar(
+              uploadService: uploadService,
+              onSend: (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+            ),
+          );
 
-        await _expandComposer(tester);
-        final textField = tester.widget<TextField>(find.byType(TextField));
-        final editableTextState = tester.state<EditableTextState>(
-          find.byType(EditableText),
-        );
-        final menu =
-            textField.contextMenuBuilder!(
-                  tester.element(find.byType(TextField)),
-                  editableTextState,
-                )
-                as AdaptiveTextSelectionToolbar;
-        final pasteImage = menu.buttonItems!.singleWhere(
-          (item) => item.label == 'Paste Image',
-        );
-        pasteImage.onPressed!();
-        await tester.pumpAndSettle();
+          await _expandComposer(tester);
+          final textField = tester.widget<TextField>(find.byType(TextField));
+          final editableTextState = tester.state<EditableTextState>(
+            find.byType(EditableText),
+          );
+          final menu = textField.contextMenuBuilder!(
+            tester.element(find.byType(TextField)),
+            editableTextState,
+          ) as AdaptiveTextSelectionToolbar;
+          final pasteImage = menu.buttonItems!.singleWhere(
+            (item) => item.label == 'Paste Image',
+          );
+          pasteImage.onPressed!();
+          await tester.pumpAndSettle();
 
-        expect(find.byTooltip('Remove attachment'), findsOneWidget);
-      } finally {
-        debugDefaultTargetPlatformOverride = previousPlatform;
-      }
-    });
+          expect(find.byTooltip('Remove attachment'), findsOneWidget);
+        } finally {
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      },
+    );
 
     testWidgets('shows an error when pasted image bytes are unavailable', (
       tester,
@@ -4681,12 +4646,11 @@ void main() {
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: uploadService,
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
 
@@ -4723,12 +4687,11 @@ void main() {
             uploadService: uploadService,
             draftMembers: const [],
             onSendingChanged: (value) => busy = value,
-            onSend:
-                (
-                  content,
-                  mentionPubkeys, {
-                  mediaTags = const <List<String>>[],
-                }) async {},
+            onSend: (
+              content,
+              mentionPubkeys, {
+              mediaTags = const <List<String>>[],
+            }) async {},
           ),
         );
 
@@ -4737,12 +4700,10 @@ void main() {
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
         );
-        final menu =
-            textField.contextMenuBuilder!(
-                  tester.element(find.byType(TextField)),
-                  editableTextState,
-                )
-                as AdaptiveTextSelectionToolbar;
+        final menu = textField.contextMenuBuilder!(
+          tester.element(find.byType(TextField)),
+          editableTextState,
+        ) as AdaptiveTextSelectionToolbar;
         menu.buttonItems!
             .singleWhere((item) => item.label == 'Paste Image')
             .onPressed!();
@@ -4768,12 +4729,11 @@ void main() {
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: uploadService,
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
 
@@ -4782,12 +4742,10 @@ void main() {
       final editableTextState = tester.state<EditableTextState>(
         find.byType(EditableText),
       );
-      final menu =
-          textField.contextMenuBuilder!(
-                tester.element(find.byType(TextField)),
-                editableTextState,
-              )
-              as AdaptiveTextSelectionToolbar;
+      final menu = textField.contextMenuBuilder!(
+        tester.element(find.byType(TextField)),
+        editableTextState,
+      ) as AdaptiveTextSelectionToolbar;
 
       expect(
         menu.buttonItems!.where((item) => item.label == 'Paste Image'),
@@ -4807,8 +4765,7 @@ void main() {
           return http.Response(
             jsonEncode({
               'url': 'https://relay.example/media/test.png',
-              'sha256':
-                  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+              'sha256': '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
               'size': 16,
               'type': 'image/png',
               'uploaded': 1,
@@ -4824,12 +4781,11 @@ void main() {
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: uploadService,
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
 
@@ -4881,12 +4837,11 @@ void main() {
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: uploadService,
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
 
@@ -4927,12 +4882,11 @@ void main() {
         await tester.pumpWidget(
           _buildComposeBar(
             uploadService: uploadService,
-            onSend:
-                (
-                  content,
-                  mentionPubkeys, {
-                  mediaTags = const <List<String>>[],
-                }) async {},
+            onSend: (
+              content,
+              mentionPubkeys, {
+              mediaTags = const <List<String>>[],
+            }) async {},
           ),
         );
 
@@ -4961,8 +4915,7 @@ void main() {
           return http.Response(
             jsonEncode({
               'url': 'https://relay.example/media/animated.gif',
-              'sha256':
-                  '4444444444444444444444444444444444444444444444444444444444444444',
+              'sha256': '4444444444444444444444444444444444444444444444444444444444444444',
               'size': request.bodyBytes.length,
               'type': 'image/gif',
               'uploaded': 1,
@@ -4978,12 +4931,11 @@ void main() {
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: uploadService,
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
 
@@ -5159,12 +5111,11 @@ void main() {
             currentPubkey: signer.public,
             relayAgents: [_testAgent('f' * 64)],
             channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
-            onSend:
-                (
-                  content,
-                  mentionPubkeys, {
-                  mediaTags = const <List<String>>[],
-                }) async {},
+            onSend: (
+              content,
+              mentionPubkeys, {
+              mediaTags = const <List<String>>[],
+            }) async {},
           ),
         );
 
@@ -5635,9 +5586,8 @@ void main() {
 
         // The membership comes back, as after the relay's own retry.
         membersReady = true;
-        ProviderScope.containerOf(
-          tester.element(find.byType(ComposeBar)),
-        ).invalidate(channelMembersProvider('channel-1'));
+        ProviderScope.containerOf(tester.element(find.byType(ComposeBar)))
+            .invalidate(channelMembersProvider('channel-1'));
         await tester.pumpAndSettle();
         await tester.tap(find.text('Retry'));
         await tester.pumpAndSettle();
@@ -5906,8 +5856,7 @@ void main() {
           return http.Response(
             jsonEncode({
               'url': 'https://relay.example/media/animated.png',
-              'sha256':
-                  '5555555555555555555555555555555555555555555555555555555555555555',
+              'sha256': '5555555555555555555555555555555555555555555555555555555555555555',
               'size': request.bodyBytes.length,
               'type': 'image/png',
               'uploaded': 1,
@@ -5923,12 +5872,11 @@ void main() {
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: uploadService,
-          onSend:
-              (
-                content,
-                mentionPubkeys, {
-                mediaTags = const <List<String>>[],
-              }) async {},
+          onSend: (
+            content,
+            mentionPubkeys, {
+            mediaTags = const <List<String>>[],
+          }) async {},
         ),
       );
 
@@ -6572,9 +6520,8 @@ void main() {
         find.byKey(const ValueKey('voice-note-recorder')),
       );
       unawaited(
-        Navigator.of(
-          context,
-        ).push(MaterialPageRoute<void>(builder: (_) => const Scaffold())),
+        Navigator.of(context)
+            .push(MaterialPageRoute<void>(builder: (_) => const Scaffold())),
       );
       await tester.pumpAndSettle();
 

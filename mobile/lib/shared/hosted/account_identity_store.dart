@@ -1,4 +1,5 @@
 import '../storage/serial_queue.dart';
+
 import 'dart:async';
 import 'dart:convert';
 
@@ -175,8 +176,10 @@ class AccountIdentityStore implements BackupIdentity {
 
   /// Authorization runs under the identity writer lock and must not reenter it.
   /// A completed but unacknowledged write is reused on retry, never regenerated.
+  /// [onGenerated] runs only after this call confirmed a newly generated key.
   Future<AccountIdentitySnapshot?> generateIfAbsent({
     required Future<bool> Function() authorize,
+    void Function()? onGenerated,
   }) => _serialized(() async {
     final existing = await _read();
     if (existing != null) return existing.snapshot;
@@ -184,6 +187,7 @@ class AccountIdentityStore implements BackupIdentity {
     final keys = nostr.Keys.generate();
     final record = _Record(keys.nsec, keys.public, null);
     await _write(record);
+    onGenerated?.call();
     return record.snapshot;
   });
 

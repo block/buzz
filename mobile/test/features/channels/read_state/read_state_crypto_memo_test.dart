@@ -146,9 +146,8 @@ void main() {
         remoteEnabled: true,
         onChanged: () {},
       );
-      final slotId = ReadStateStorage(
-        prefs,
-      ).getOrCreateSlotId(keys.public, _relayUrl);
+      final slotId = ReadStateStorage(prefs)
+          .getOrCreateSlotId(keys.public, _relayUrl);
       final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
       NostrEvent event(String content, String id, int createdAt, String slot) =>
@@ -232,6 +231,15 @@ class _CapturingRelaySession extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchReadStateSnapshot({
     Duration timeout = const Duration(seconds: 8),
   }) async => history;
+
+  @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
+    bool resumeSince = true,
+  }) => subscribe(filter, onEvent, onClosed: onClosed);
 
   @override
   Future<void Function()> subscribe(

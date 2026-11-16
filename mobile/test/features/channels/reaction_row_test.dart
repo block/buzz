@@ -6,8 +6,10 @@ import 'package:buzz/shared/emoji/native_emoji_glyph.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:buzz/shared/emoji/emoji_avatar.dart';
+
 import 'dart:async';
 import 'dart:ui' show SemanticsAction;
+
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:buzz/features/channels/channel_identity_names_provider.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
@@ -19,7 +21,9 @@ import 'package:buzz/shared/hosted/native_media_headers.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:nostr/nostr.dart' as nostr;
+
 import 'dart:convert';
+
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/emoji/emoji_burst.dart';
 import 'package:buzz/shared/emoji/emoji_data.dart';
@@ -35,6 +39,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart' show Override;
 
 import '../../helpers/widget_helpers.dart';
+import '../../helpers/test_assertion.dart';
 
 part 'reaction_row_test/combined_tests.dart';
 part 'reaction_row_test/shortcode_tests.dart';
@@ -451,7 +456,7 @@ void main() {
               ),
               '/api/goose/v1/buzz/identity/assertions' => http.Response(
                 jsonEncode({
-                  'assertion': 'token-${++issued}',
+                  'assertion': testAssertion('token-${++issued}'),
                   'nostr_pubkey': keys.public,
                   'expires_at': clock.millisecondsSinceEpoch ~/ 1000 + 120,
                 }),
@@ -467,7 +472,7 @@ void main() {
       addTearDown(auth.dispose);
       // The live socket's assertion, issued when the session connected.
       expect(await auth.headers(config), {
-        'Nostr-Federated-Identity': 'Bearer token-1',
+        'Nostr-Federated-Identity': 'Bearer ${testAssertion('token-1')}',
       });
       final payloads = <Map<Object?, Object?>>[];
       final reactionUpdates = <List<Object?>>[];
@@ -513,9 +518,9 @@ void main() {
               }),
             ),
             channelIdentityNamesProvider('channel').overrideWith(
-              (ref) => IdentityNameSources(
-                profiles: ref.watch(userCacheProvider),
-              ).scope([_alice]),
+              (ref) =>
+                  IdentityNameSources(profiles: ref.watch(userCacheProvider))
+                      .scope([_alice]),
             ),
           ],
           child: ReactionRow(
@@ -561,8 +566,14 @@ void main() {
       issuerGate.complete();
       await tester.pumpAndSettle();
       expect(issued, issuedBeforeSheet + 1);
-      expect(authOf(reactionUpdates.last.single), 'Bearer token-$issued');
-      expect(authOf(profileUpdates.last[_alice]), 'Bearer token-$issued');
+      expect(
+        authOf(reactionUpdates.last.single),
+        'Bearer ${testAssertion('token-$issued')}',
+      );
+      expect(
+        authOf(profileUpdates.last[_alice]),
+        'Bearer ${testAssertion('token-$issued')}',
+      );
       completion.complete(<String, Object?>{});
       await tester.pumpAndSettle();
 
@@ -576,7 +587,7 @@ void main() {
       expect(payloads, hasLength(2));
       expect(
         authOf((payloads.last['reactions'] as List).single),
-        'Bearer token-$issued',
+        'Bearer ${testAssertion('token-$issued')}',
       );
       expect(reactionUpdates, isEmpty);
       completion.complete(<String, Object?>{});
@@ -637,9 +648,9 @@ void main() {
             emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
             userCacheProvider.overrideWith(() => _FakeUserCacheNotifier({})),
             channelIdentityNamesProvider('channel').overrideWith(
-              (ref) => IdentityNameSources(
-                profiles: ref.watch(userCacheProvider),
-              ).scope(pubkeys),
+              (ref) =>
+                  IdentityNameSources(profiles: ref.watch(userCacheProvider))
+                      .scope(pubkeys),
             ),
           ],
           child: ReactionRow(

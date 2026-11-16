@@ -1,4 +1,7 @@
 import 'dart:async';
+
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
 import 'dart:convert';
 
 import 'package:buzz/app.dart';
@@ -11,8 +14,10 @@ import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/huddle/huddle.dart';
 import 'package:nostr/nostr.dart' as nostr;
+
 import '../../shared/community/community_storage_test.dart'
     show FakeSecureStorage;
+
 import 'package:buzz/shared/push/push_bootstrap.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
@@ -24,6 +29,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  setUp(() => FlutterSecureStorage.setMockInitialValues({}));
   const appBadgeChannel = MethodChannel('app_badge_plus');
 
   tearDown(() {
@@ -65,8 +71,10 @@ void main() {
           relaySessionProvider.overrideWith(() => relay),
           pairingProvider.overrideWith(
             () => PairingNotifier(
-              credentialValidator:
-                  ({required relayUrl, required nsec}) async {},
+              credentialValidator: ({
+                required relayUrl,
+                required nsec,
+              }) async {},
             ),
           ),
         ],

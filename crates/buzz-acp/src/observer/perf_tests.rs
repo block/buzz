@@ -25,7 +25,9 @@ fn concurrent_emitters_keep_live_and_replay_sequence_order() {
         "turn".into(),
         "2026-11-01T00:00:00Z".into(),
     );
-    let payload = json!({"text":"hello 🐝\n\"world\"", "body":"x".repeat(70_000)});
+    // Keep the payload below the frame cap so this checks ordering separately
+    // from the retention suite's oversized-payload fitting cases.
+    let payload = json!({"text":"hello 🐝\n\"world\"", "body":"x".repeat(40_000)});
     let (started_tx, started_rx) = std::sync::mpsc::channel();
     let (resume_tx, resume_rx) = std::sync::mpsc::channel();
     let (observer_ref, context_ref, payload_ref) = (&observer, &context, &payload);

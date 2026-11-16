@@ -12,6 +12,8 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../../helpers/test_assertion.dart';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   final keys = nostr.Keys(
@@ -75,7 +77,7 @@ void main() {
                       ? stalled.future
                       : http.Response(
                           jsonEncode({
-                            'assertion': 'hosted-token',
+                            'assertion': testAssertion('hosted-token'),
                             'nostr_pubkey': keys.public,
                             'expires_at':
                                 DateTime.now().millisecondsSinceEpoch ~/ 1000 +
@@ -99,10 +101,14 @@ void main() {
       await pumpEventQueue();
       expect(
         await auth.headers(hostedRelay).timeout(const Duration(seconds: 2)),
-        {'Nostr-Federated-Identity': 'Bearer hosted-token'},
+        {'Nostr-Federated-Identity': 'Bearer ${testAssertion('hosted-token')}'},
       );
       // The hosted relay then refuses this key.
-      auth.rejected(hostedRelay, 'Bearer hosted-token', terminal: true);
+      auth.rejected(
+        hostedRelay,
+        'Bearer ${testAssertion('hosted-token')}',
+        terminal: true,
+      );
       stalled.complete(http.Response('{}', 503));
       await expectLater(orgHeaders, throwsA(isA<AccountFailure>()));
       // The stale organization failure never hides the hosted recovery.

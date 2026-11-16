@@ -16,6 +16,7 @@ import 'package:buzz/features/channels/agent_reply_handoff.dart';
 import 'package:buzz/features/channels/me/me_messages_provider.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
 import 'package:buzz/shared/me/me_sync.dart';
+import 'package:buzz/features/channels/me/me_page.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 import 'package:flutter/semantics.dart';
 import 'package:buzz/features/channels/message_media_avatar.dart';
@@ -82,6 +83,7 @@ import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
+import 'package:buzz/shared/read_state/message_read_state.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/channels/small_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
@@ -109,6 +111,7 @@ import 'package:buzz/shared/widgets/tabler_star_icon.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../helpers/message_link_finders.dart';
 import '../../helpers/thread_ids.dart';
 import '../../helpers/widget_helpers.dart';
 
@@ -363,8 +366,7 @@ Widget _buildTestable({
               baseUrl: 'https://relay.test',
               nsec: nostr.Nip19.encode(
                 prefix: nostr.Nip19Prefix.nsec,
-                data:
-                    '0000000000000000000000000000000000000000000000000000000000000001',
+                data: '0000000000000000000000000000000000000000000000000000000000000001',
               ),
             ),
           ),
@@ -384,9 +386,8 @@ Widget _buildTestable({
           summaries: huddleSummaries,
         ),
       ),
-      channelTypingProvider(
-        _channelId,
-      ).overrideWith(() => typingNotifier ?? _FakeTypingNotifier(typing)),
+      channelTypingProvider(_channelId)
+          .overrideWith(() => typingNotifier ?? _FakeTypingNotifier(typing)),
       channelTypingProvider(_huddleChannelId).overrideWith(
         () =>
             huddleTypingNotifier ??
@@ -421,9 +422,10 @@ Widget _buildTestable({
           authorPubkey: null,
         ),
       ),
-      channelMembersProvider(_channelId).overrideWith(
-        (ref) async => loadMembers != null ? loadMembers() : members,
-      ),
+      if (!watchChannelMembershipUpdates)
+        channelMembersProvider(_channelId).overrideWith(
+          (ref) async => loadMembers != null ? loadMembers() : members,
+        ),
       channelMembersProvider(_huddleChannelId).overrideWith(
         (ref) async => huddleMembersNotifier == null
             ? huddleMembers
@@ -513,9 +515,8 @@ Widget _buildTestable({
         ),
       if (huddleHumanCountLoader != null)
         huddleHumanCountProvider.overrideWithValue(huddleHumanCountLoader),
-      huddleLifecycleProvider(
-        _channelId,
-      ).overrideWith((ref) async => huddleLifecycle),
+      huddleLifecycleProvider(_channelId)
+          .overrideWith((ref) async => huddleLifecycle),
       if (huddleCurrentPubkey != null)
         currentPubkeyProvider.overrideWith((ref) => huddleCurrentPubkey),
       appLifecycleProvider.overrideWith(_TestAppLifecycleNotifier.new),
@@ -569,24 +570,18 @@ Widget _buildNavigationTestable({
       channelMessagesProvider(
         channelB.id,
       ).overrideWith(() => _FakeMessagesNotifier([], channelId: channelB.id)),
-      channelTypingProvider(
-        channelA.id,
-      ).overrideWith(() => _FakeTypingNotifier([], channelId: channelA.id)),
-      channelTypingProvider(
-        channelB.id,
-      ).overrideWith(() => _FakeTypingNotifier([], channelId: channelB.id)),
-      channelDetailsProvider(
-        channelA.id,
-      ).overrideWith((ref) async => ChannelDetails.fromChannel(channelA)),
-      channelDetailsProvider(
-        channelB.id,
-      ).overrideWith((ref) async => ChannelDetails.fromChannel(channelB)),
-      channelMembersProvider(
-        channelA.id,
-      ).overrideWith((ref) async => const <ChannelMember>[]),
-      channelMembersProvider(
-        channelB.id,
-      ).overrideWith((ref) async => const <ChannelMember>[]),
+      channelTypingProvider(channelA.id)
+          .overrideWith(() => _FakeTypingNotifier([], channelId: channelA.id)),
+      channelTypingProvider(channelB.id)
+          .overrideWith(() => _FakeTypingNotifier([], channelId: channelB.id)),
+      channelDetailsProvider(channelA.id)
+          .overrideWith((ref) async => ChannelDetails.fromChannel(channelA)),
+      channelDetailsProvider(channelB.id)
+          .overrideWith((ref) async => ChannelDetails.fromChannel(channelB)),
+      channelMembersProvider(channelA.id)
+          .overrideWith((ref) async => const <ChannelMember>[]),
+      channelMembersProvider(channelB.id)
+          .overrideWith((ref) async => const <ChannelMember>[]),
       userCacheProvider.overrideWith(() => _FakeUserCacheNotifier({})),
       profileProvider.overrideWith(() => _FakeProfileNotifier()),
       channelsProvider.overrideWith(
@@ -827,6 +822,34 @@ void main() {
         await tester.pumpWidget(const SizedBox());
       }
     }
+
+    // Opening a Solo chat refetches its roster. While that fetch is in
+    // flight, the header draws the roster it already knows instead of the
+    // viewer alone, so the agent portrait doesn't flash away and back.
+    final listed = [
+      ChannelMember(pubkey: 'self', role: 'owner', joinedAt: DateTime(2025)),
+      ChannelMember(pubkey: 'agent-1', role: 'bot', joinedAt: DateTime(2025)),
+    ];
+    final fetch = Completer<List<ChannelMember>>();
+    await tester.pumpWidget(
+      _buildTestable(
+        personalChat: true,
+        messages: const [],
+        loadMembers: () => fetch.future,
+        channelsNotifier: _FakeChannelsNotifier([_testChannel])
+          ..listedMembers = listed,
+      ),
+    );
+    await tester.pump();
+    final portrait = tester.widget<DmHeaderPortrait>(
+      find.descendant(
+        of: find.byKey(const ValueKey('dm-header-avatar')),
+        matching: find.byType(DmHeaderPortrait),
+      ),
+    );
+    expect(portrait.isAgent, isTrue);
+    fetch.complete(listed);
+    await tester.pumpWidget(const SizedBox());
   });
 
   testWidgets('Solo ellipsis opens agent and workspace settings directly', (
@@ -1241,9 +1264,9 @@ void main() {
       expect(find.byType(BestieWelcome), findsOneWidget);
       expect(find.text('Hello!'), hasHistory ? findsOneWidget : findsNothing);
       if (!hasHistory) {
-        final messages =
-            container.read(channelMessagesProvider(_channelId).notifier)
-                as _FakeMessagesNotifier;
+        final messages = container.read(
+          channelMessagesProvider(_channelId).notifier,
+        ) as _FakeMessagesNotifier;
         messages.setMessages([
           _textMsg(
             id: threadIdRoot,
@@ -1332,9 +1355,8 @@ void main() {
       );
       expect(solo.sent, ['After refresh']);
       expect(
-        (await container.read(
-          channelDetailsProvider(_channelId).future,
-        )).labels,
+        (await container.read(channelDetailsProvider(_channelId).future))
+            .labels,
         ['buzz.solo'],
       );
       session.solo = false;
@@ -1342,9 +1364,8 @@ void main() {
       await tester.pumpAndSettle();
       await refresh;
       expect(
-        (await container.read(
-          channelDetailsProvider(_channelId).future,
-        )).labels,
+        (await container.read(channelDetailsProvider(_channelId).future))
+            .labels,
         isEmpty,
       );
       await expectLater(
@@ -1382,9 +1403,9 @@ void main() {
       first: UserProfile(pubkey: first, displayName: 'Scout'),
       second: UserProfile(pubkey: second, displayName: 'Scout'),
     };
-    final expected = IdentityNameSources(
-      profiles: users,
-    ).scope([first, second]).labelFor(first);
+    final expected = IdentityNameSources(profiles: users)
+        .scope([first, second])
+        .labelFor(first);
     expect(expected, isNot('Scout'));
     await tester.pumpWidget(
       _buildTestable(
@@ -2664,18 +2685,6 @@ void main() {
           channel: dmChannel,
           relaySessionNotifier: relaySession,
           watchChannelMembershipUpdates: true,
-          members: [
-            ChannelMember(
-              pubkey: 'self',
-              role: 'member',
-              joinedAt: DateTime(2025),
-            ),
-            ChannelMember(
-              pubkey: 'alice',
-              role: 'member',
-              joinedAt: DateTime(2025),
-            ),
-          ],
         ),
       );
       await tester.pumpAndSettle();
@@ -3178,13 +3187,12 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        Navigator.of(
-          tester.element(find.byType(ChannelDetailPage)),
-        ).pushReplacement(
-          MaterialPageRoute<void>(
-            builder: (_) => ChannelDetailPage(channel: channelB),
-          ),
-        );
+        Navigator.of(tester.element(find.byType(ChannelDetailPage)))
+            .pushReplacement(
+              MaterialPageRoute<void>(
+                builder: (_) => ChannelDetailPage(channel: channelB),
+              ),
+            );
         await tester.pumpAndSettle();
 
         socket.messages.clear();
@@ -3426,8 +3434,9 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets('reading the bottom of an archived Solo chat reads a tall '
-        'newest mention', (tester) async {
+    testWidgets('opening an archived Solo chat reads a tall newest mention', (
+      tester,
+    ) async {
       final readState = _SynchronousReadStateNotifier(
         const ReadStateState(
           isReady: true,
@@ -3478,12 +3487,9 @@ void main() {
         find.text('This channel is archived and read-only on mobile.'),
         findsOneWidget,
       );
-      // Only its end shows at the bottom, so it neither fits nor fills the
-      // screen; being the newest message reads it.
-      expect(readState.markedContexts, {
-        'activity:$_channelId': 1100,
-        'msg:tall': 1100,
-      });
+      // Opening a Solo chat reads it through its newest message, archived or
+      // not.
+      expect(readState.markedContexts, {_channelId: 1100});
       expect(tester.takeException(), isNull);
     });
 
@@ -3588,65 +3594,6 @@ void main() {
       expect(row.top, lessThan(screen.top));
       expect(row.bottom, lessThan(screen.bottom));
       expect(readState.markedContexts, {'msg:tall': 1100});
-    });
-
-    testWidgets('reading the bottom of a Solo chat reads a tall newest '
-        'inline reply mention', (tester) async {
-      final readState = _SynchronousReadStateNotifier(
-        const ReadStateState(
-          isReady: true,
-          pubkey: 'self',
-          contexts: {},
-          version: 0,
-        ),
-      );
-      final solo = Channel(
-        id: _channelId,
-        name: 'Solo',
-        channelType: 'stream',
-        visibility: 'private',
-        labels: const ['buzz.solo'],
-        description: '',
-        createdBy: 'self',
-        createdAt: DateTime(2025),
-        memberCount: 2,
-        isMember: true,
-      );
-      final rootId = 'a' * 64;
-      final messages = [
-        _textMsg(
-          id: 'root',
-          pubkey: 'self',
-          content: 'Question',
-          createdAt: 1000,
-        ),
-        _textMsg(
-          id: 'tall-reply',
-          pubkey: 'alice',
-          content: List.filled(120, 'A long answer line.').join('\n\n'),
-          createdAt: 1100,
-          extraTags: [
-            ['e', rootId, '', 'reply'],
-            ['p', 'self'],
-          ],
-        ),
-      ];
-
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: messages,
-          channel: solo,
-          personalChat: true,
-          signingPubkey: 'self',
-          channelMessagesNotifier: _FakeMessagesNotifier(messages),
-          readStateNotifier: readState,
-        ),
-      );
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
-
-      expect(readState.markedContexts['msg:tall-reply'], 1100);
-      expect(tester.takeException(), isNull);
     });
 
     testWidgets('hidden huddle end does not block bottom catch-up', (
@@ -3796,6 +3743,72 @@ void main() {
       // No dwell needed: opening the DM reads through its newest message,
       // replies included.
       expect(readState.markedContexts[_channelId], 1300);
+    });
+
+    testWidgets('opening a Solo chat reads the whole chat', (tester) async {
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      final solo = Channel(
+        id: _channelId,
+        name: 'Solo chat',
+        channelType: 'stream',
+        visibility: 'private',
+        description: '',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        isMember: true,
+      );
+      final messages = [
+        // An agent message that addresses the reader is not covered by the
+        // bottom catch-up mark, and it sits above the viewport.
+        _textMsg(
+          id: 'addressed',
+          pubkey: 'agent',
+          content: 'Here is the walkthrough',
+          createdAt: 1100,
+          extraTags: const [
+            ['p', 'self'],
+          ],
+        ),
+        _textMsg(
+          id: 'tall',
+          pubkey: 'agent',
+          content: List.filled(120, 'A long update line.').join('\n\n'),
+          createdAt: 1300,
+        ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: messages,
+          channel: solo,
+          personalChat: true,
+          signingPubkey: 'self',
+          channelMessagesNotifier: _FakeMessagesNotifier(messages),
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pump();
+
+      // No dwell or scrolling needed: opening the Solo chat reads through its
+      // newest message, which covers the addressed message off screen.
+      expect(readState.markedContexts[_channelId], 1300);
+      expect(
+        isMessageUnread(
+          readState.state,
+          channelId: _channelId,
+          messageId: 'addressed',
+          createdAt: 1100,
+        ),
+        isFalse,
+      );
     });
 
     for (final covered in ['a sheet', 'the app switcher']) {
@@ -8666,8 +8679,7 @@ void main() {
       final messages = [
         _textMsg(
           id: 'msg1',
-          pubkey:
-              'abcdef0000000000000000000000000000000000000000000000000000000000',
+          pubkey: 'abcdef0000000000000000000000000000000000000000000000000000000000',
           content: 'Hi',
           createdAt: 1000,
         ),
@@ -13847,7 +13859,7 @@ void main() {
   });
 
   for (final own in [true, false]) {
-    testWidgets('label-only Solo uses owner-aware sending: $own', (
+    testWidgets('Solo inventory preserves owner-aware sending: $own', (
       tester,
     ) async {
       final ordinary = _RecordingOrdinarySender(),
@@ -13869,8 +13881,9 @@ void main() {
           messages: [],
           channel: channel,
           signingPubkey: 'self',
-          personalChat: own,
-          organization: Stream.value(const MeGroups()),
+          bestie: 'agent',
+          personalChat: true,
+          organization: Stream.value(const MeGroups(channels: [_channelId])),
           sender: ordinary,
           soloSender: solo,
           members: [
@@ -13880,10 +13893,18 @@ void main() {
               joinedAt: DateTime(2026),
             ),
           ],
-          home: ChannelDetailPage(channel: channel),
+          home: own ? ChannelDetailPage(channel: channel) : const MePage(),
         ),
       );
       await tester.pumpAndSettle();
+      if (!own) {
+        await tester.tap(find.text('Labeled Solo'));
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('me-chat-settings-button')),
+          findsNothing,
+        );
+      }
       await tester
           .widget<ComposeBar>(find.byType(ComposeBar))
           .onSend('Label message', own ? ['agent'] : []);
@@ -14046,9 +14067,9 @@ void main() {
       final container = ProviderScope.containerOf(
         tester.element(find.byType(ChannelDetailPage)),
       );
-      final notifier =
-          container.read(meMessagesProvider(_channelId).notifier)
-              as _FakeMessagesNotifier;
+      final notifier = container.read(
+        meMessagesProvider(_channelId).notifier,
+      ) as _FakeMessagesNotifier;
       expect(notifier.loadedEventIds, contains(threadIdReplyZero));
     },
   );
@@ -14089,9 +14110,9 @@ void main() {
       final container = ProviderScope.containerOf(
         tester.element(find.byType(ChannelDetailPage)),
       );
-      final messages =
-          container.read(meMessagesProvider(_channelId).notifier)
-              as _FakeMessagesNotifier;
+      final messages = container.read(
+        meMessagesProvider(_channelId).notifier,
+      ) as _FakeMessagesNotifier;
       messages.setMessages([
         prompt,
         _textMsg(
@@ -14382,9 +14403,9 @@ void main() {
       final container = ProviderScope.containerOf(
         tester.element(find.byType(ChannelDetailPage)),
       );
-      final messages =
-          container.read(channelMessagesProvider(_channelId).notifier)
-              as _FakeMessagesNotifier;
+      final messages = container.read(
+        channelMessagesProvider(_channelId).notifier,
+      ) as _FakeMessagesNotifier;
       messages.setMessages([
         prompt,
         _textMsg(
@@ -15566,9 +15587,8 @@ void main() {
     Widget errorScope(ChannelMessagesNotifier notifier) => ProviderScope(
       overrides: [
         channelMessagesProvider(_channelId).overrideWith(() => notifier),
-        channelTypingProvider(
-          _channelId,
-        ).overrideWith(() => _FakeTypingNotifier([])),
+        channelTypingProvider(_channelId)
+            .overrideWith(() => _FakeTypingNotifier([])),
         userCacheProvider.overrideWith(() => _FakeUserCacheNotifier({})),
         channelsProvider.overrideWith(
           () => _FakeChannelsNotifier([_testChannel]),
@@ -15623,12 +15643,10 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
-            channelMessagesProvider(
-              _channelId,
-            ).overrideWith(() => _ErrorMessagesNotifier()),
-            channelTypingProvider(
-              _channelId,
-            ).overrideWith(() => _FakeTypingNotifier([])),
+            channelMessagesProvider(_channelId)
+                .overrideWith(() => _ErrorMessagesNotifier()),
+            channelTypingProvider(_channelId)
+                .overrideWith(() => _FakeTypingNotifier([])),
             userCacheProvider.overrideWith(() => _FakeUserCacheNotifier({})),
             channelsProvider.overrideWith(
               () => _FakeChannelsNotifier([_testChannel]),
@@ -16974,8 +16992,7 @@ void main() {
               _textMsg(
                 id: 'msg1',
                 pubkey: 'alice',
-                content:
-                    '[#random](buzz://channel/8c1d2e3f-0000-4000-8000-00000000000a)',
+                content: '[#random](buzz://channel/8c1d2e3f-0000-4000-8000-00000000000a)',
                 createdAt: 1000,
               ),
             ],
@@ -17127,9 +17144,8 @@ void main() {
           await tester.pumpAndSettle();
           await tester.tap(link.last);
           await tester.pump();
-          Navigator.of(
-            tester.element(find.byType(ChannelDetailPage).last),
-          ).pop();
+          Navigator.of(tester.element(find.byType(ChannelDetailPage).last))
+              .pop();
           await tester.pumpAndSettle();
         }
         await tester.tap(link);
@@ -19883,10 +19899,8 @@ void main() {
         await tester.pumpAndSettle();
 
         final threadHead = formatTimeline([rootEvent]).single;
-        final target = formatTimeline([
-          rootEvent,
-          replies[5],
-        ]).where((message) => message.id == 'reply-5');
+        final target = formatTimeline([rootEvent, replies[5]])
+            .where((message) => message.id == 'reply-5');
         Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
           MaterialPageRoute<void>(
             builder: (_) => ThreadDetailPage(
@@ -21073,6 +21087,7 @@ class _IdentityUpdateRelaySession extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
     required void Function(RelaySubscriptionStatus status) onStatusChanged,
+    bool resumeSince = true,
   }) async {
     if (filter.kinds.contains(10100)) {
       identityFilter = filter;
@@ -21500,10 +21515,11 @@ NostrEvent _channelMetadataEvent(
 class _FakeChannelsNotifier extends ChannelsNotifier {
   List<Channel> _channels;
   List<ChannelMember> backingMembers = [];
+  List<ChannelMember> listedMembers = const [];
 
   @override
   List<ChannelMember> cachedMembersForChannel(String channelId) =>
-      channelId == _huddleChannelId ? backingMembers : const [];
+      channelId == _huddleChannelId ? backingMembers : listedMembers;
 
   final Map<String, Map<String, ObservedUnreadEvent>> _observedUnread;
 
@@ -21969,9 +21985,9 @@ class _RecordingOrdinarySender implements SendMessage {
 }
 
 class _SoloMetadataRelaySession extends RelaySessionNotifier {
-  final fixture =
-      jsonDecode(File('../test-fixtures/solo-creation.json').readAsStringSync())
-          as Map<String, dynamic>;
+  final fixture = jsonDecode(
+    File('../test-fixtures/solo-creation.json').readAsStringSync(),
+  ) as Map<String, dynamic>;
   String get creator => fixture['creator'] as String;
   @override
   Future<List<NostrEvent>> queryRelay(

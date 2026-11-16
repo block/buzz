@@ -15,6 +15,8 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../../helpers/test_assertion.dart';
+
 class _FakeHpke extends HpkeBackup {
   _FakeHpke(this.envelope);
   final Map<String, dynamic> envelope;
@@ -31,13 +33,10 @@ class _FakeHpke extends HpkeBackup {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  final fixture =
-      jsonDecode(
-            File(
-              '../desktop/src-tauri/src/testdata/hpke_nsec_backup_v1.json',
-            ).readAsStringSync(),
-          )
-          as Map<String, dynamic>;
+  final fixture = jsonDecode(
+    File('../desktop/src-tauri/src/testdata/hpke_nsec_backup_v1.json')
+        .readAsStringSync(),
+  ) as Map<String, dynamic>;
   final envelope = Map<String, dynamic>.from(fixture['envelope'] as Map);
   final keys = nostr.Keys(fixture['nostr_secret_key_hex'] as String);
   final organization = Uri.parse('https://block.example.com');
@@ -80,7 +79,7 @@ void main() {
         ),
         '/v1/buzz/identity/assertions' => http.Response(
           jsonEncode({
-            'assertion': 'org-token',
+            'assertion': testAssertion('org-token'),
             'nostr_pubkey': keys.public,
             'expires_at': DateTime.now().millisecondsSinceEpoch ~/ 1000 + 300,
           }),
@@ -132,7 +131,7 @@ void main() {
       enabled: true,
     );
     expect(await auth.headers(relay), {
-      'Nostr-Federated-Identity': 'Bearer org-token',
+      'Nostr-Federated-Identity': 'Bearer ${testAssertion('org-token')}',
     });
   }
 

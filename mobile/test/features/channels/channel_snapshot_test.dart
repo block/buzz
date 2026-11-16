@@ -159,9 +159,10 @@ void main() {
         .lastMessageAt;
     expect(latest, DateTime.fromMillisecondsSinceEpoch(100000, isUtc: true));
     expect(
-      ChannelListSnapshotStorage(
-        prefs,
-      ).read('me', 'https://a.example')!.channels.single['last_message_at'],
+      ChannelListSnapshotStorage(prefs)
+          .read('me', 'https://a.example')!
+          .channels
+          .single['last_message_at'],
       isNull,
     );
     session.disconnect();
@@ -172,105 +173,96 @@ void main() {
     );
   });
 
-  test(
-    'cached discovery survives offline restart and failed refresh, then replaces removed channels',
-    () async {
-      SharedPreferences.setMockInitialValues({});
-      final prefs = await SharedPreferences.getInstance();
-      final session = _SnapshotSession(['alpha', 'bravo']);
-      var container = _container(prefs, session);
-      expect((await container.read(channelsProvider.future)).map((c) => c.id), [
+  test('cached discovery survives offline restart and failed refresh, then replaces removed channels', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final session = _SnapshotSession(['alpha', 'bravo']);
+    var container = _container(prefs, session);
+    expect((await container.read(channelsProvider.future)).map((c) => c.id), [
+      'alpha',
+      'bravo',
+    ]);
+    await _settle();
+    container.dispose();
+
+    fakeAsync((clock) {
+      final offline = _SnapshotSession([], connected: false);
+      container = _container(prefs, offline);
+      container.listen(channelsProvider, (_, _) {});
+      clock.flushMicrotasks();
+      expect(container.read(channelsProvider).requireValue.map((c) => c.id), [
         'alpha',
         'bravo',
       ]);
-      await _settle();
-      container.dispose();
-
-      fakeAsync((clock) {
-        final offline = _SnapshotSession([], connected: false);
-        container = _container(prefs, offline);
-        container.listen(channelsProvider, (_, _) {});
-        clock.flushMicrotasks();
-        expect(container.read(channelsProvider).requireValue.map((c) => c.id), [
-          'alpha',
-          'bravo',
-        ]);
-        expect(
-          container.read(channelsProvider.notifier).hasCachedSnapshot,
-          isTrue,
-        );
-        expect(container.read(channelsProvider.notifier).hiddenDmIds, {
-          'hidden-dm',
-        });
-        expect(offline.membershipRequests, 0);
-
-        offline.fail = true;
-        offline.connect();
-        clock.flushMicrotasks();
-        clock.elapse(const Duration(minutes: 2));
-        clock.flushMicrotasks();
-        // Retried ever less often: 5s doubling, +/-25%.
-        expect(offline.membershipRequests, inInclusiveRange(5, 6));
-        expect(offline.listeners, isEmpty);
-        // A slow attempt cannot accumulate overlapping retries.
-        final gate = Completer<void>();
-        offline.gate = gate;
-        clock.elapse(const Duration(minutes: 7));
-        clock.flushMicrotasks();
-        final parkedRequests = offline.membershipRequests;
-        clock.elapse(const Duration(minutes: 7));
-        clock.flushMicrotasks();
-        expect(offline.membershipRequests, parkedRequests);
-        gate.complete();
-        clock.flushMicrotasks();
-        offline.gate = null;
-        expect(container.read(channelsProvider).hasError, isFalse);
-        expect(container.read(channelsProvider).requireValue, hasLength(2));
-
-        offline.fail = false;
-        offline.ids = ['bravo'];
-        clock.elapse(const Duration(minutes: 7));
-        clock.flushMicrotasks();
-        expect(
-          container.read(channelsProvider).requireValue.single.id,
-          'bravo',
-        );
-        expect(offline.listeners, isNotEmpty);
-        final latestReads = offline.latestReads;
-        expect(latestReads, greaterThan(0));
-        // Live updates work after recovery, and ordinary reconnects stay light.
-        final live = offline.event(9, [
-          ['h', 'bravo'],
-          ['p', 'me'],
-        ]);
-        for (final listener in offline.listeners.toList()) {
-          listener(live);
-        }
-        expect(
-          container.read(channelsProvider).requireValue.single.lastMessageAt,
-          DateTime.fromMillisecondsSinceEpoch(1000, isUtc: true),
-        );
-        offline.disconnect();
-        offline.connect();
-        clock.flushMicrotasks();
-        expect(offline.latestReads, latestReads);
-        expect(
-          container.read(channelsProvider).requireValue.single.lastMessageAt,
-          DateTime.fromMillisecondsSinceEpoch(1000, isUtc: true),
-        );
-        container.dispose();
-        clock.elapse(const Duration(minutes: 2));
-        expect(clock.pendingTimers, isEmpty);
-      });
-
-      container = _container(prefs, _SnapshotSession([], connected: false));
-      addTearDown(container.dispose);
       expect(
-        (await container.read(channelsProvider.future)).single.id,
-        'bravo',
+        container.read(channelsProvider.notifier).hasCachedSnapshot,
+        isTrue,
       );
-    },
-  );
+      expect(container.read(channelsProvider.notifier).hiddenDmIds, {
+        'hidden-dm',
+      });
+      expect(offline.membershipRequests, 0);
+
+      offline.fail = true;
+      offline.connect();
+      clock.flushMicrotasks();
+      clock.elapse(const Duration(minutes: 2));
+      clock.flushMicrotasks();
+      // Retried ever less often: 5s doubling, +/-25%.
+      expect(offline.membershipRequests, inInclusiveRange(5, 6));
+      expect(offline.listeners, isEmpty);
+      // A slow attempt cannot accumulate overlapping retries.
+      final gate = Completer<void>();
+      offline.gate = gate;
+      clock.elapse(const Duration(minutes: 7));
+      clock.flushMicrotasks();
+      final parkedRequests = offline.membershipRequests;
+      clock.elapse(const Duration(minutes: 7));
+      clock.flushMicrotasks();
+      expect(offline.membershipRequests, parkedRequests);
+      gate.complete();
+      clock.flushMicrotasks();
+      offline.gate = null;
+      expect(container.read(channelsProvider).hasError, isFalse);
+      expect(container.read(channelsProvider).requireValue, hasLength(2));
+
+      offline.fail = false;
+      offline.ids = ['bravo'];
+      clock.elapse(const Duration(minutes: 7));
+      clock.flushMicrotasks();
+      expect(container.read(channelsProvider).requireValue.single.id, 'bravo');
+      expect(offline.listeners, isNotEmpty);
+      final latestReads = offline.latestReads;
+      expect(latestReads, greaterThan(0));
+      // Live updates work after recovery, and ordinary reconnects stay light.
+      final live = offline.event(9, [
+        ['h', 'bravo'],
+        ['p', 'me'],
+      ]);
+      for (final listener in offline.listeners.toList()) {
+        listener(live);
+      }
+      expect(
+        container.read(channelsProvider).requireValue.single.lastMessageAt,
+        DateTime.fromMillisecondsSinceEpoch(1000, isUtc: true),
+      );
+      offline.disconnect();
+      offline.connect();
+      clock.flushMicrotasks();
+      expect(offline.latestReads, latestReads);
+      expect(
+        container.read(channelsProvider).requireValue.single.lastMessageAt,
+        DateTime.fromMillisecondsSinceEpoch(1000, isUtc: true),
+      );
+      container.dispose();
+      clock.elapse(const Duration(minutes: 2));
+      expect(clock.pendingTimers, isEmpty);
+    });
+
+    container = _container(prefs, _SnapshotSession([], connected: false));
+    addTearDown(container.dispose);
+    expect((await container.read(channelsProvider.future)).single.id, 'bravo');
+  });
 
   test(
     'removal retires both a parked fetch and later refreshes of that build',
@@ -503,6 +495,7 @@ class _SnapshotSession extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
     required void Function(RelaySubscriptionStatus) onStatusChanged,
+    bool resumeSince = true,
   }) => subscribe(filter, onEvent, onClosed: onClosed);
 
   @override

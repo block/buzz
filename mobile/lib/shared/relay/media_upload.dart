@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
+import 'package:buzz/shared/http/app_http_client.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:crypto/crypto.dart' as crypto;
@@ -17,6 +18,7 @@ import 'media_auth.dart';
 import 'mp4_fast_start.dart';
 import 'relay_provider.dart';
 import '../hosted/hosted_relay_auth.dart';
+
 import 'package:buzz/shared/crypto/event_signing.dart';
 
 part 'media_upload/platform_bindings.dart';
@@ -68,8 +70,10 @@ typedef PickGalleryImage = Future<XFile?> Function();
 typedef PickGalleryImages = Future<List<XFile>> Function();
 typedef PickGalleryVideo = Future<XFile?> Function();
 typedef PickAttachmentFile = Future<XFile?> Function();
-typedef SanitizeImageBytes =
-    Future<Uint8List> Function(Uint8List bytes, String mimeType);
+typedef SanitizeImageBytes = Future<Uint8List> Function(
+  Uint8List bytes,
+  String mimeType,
+);
 typedef TranscodeImageToJpeg = Future<Uint8List> Function(Uint8List bytes);
 typedef TranscodeVideoToMp4 = Future<String> Function(String filePath);
 
@@ -285,7 +289,7 @@ class MediaUploadService {
        _generateVideoPoster = generateVideoPoster ?? _generatePickedVideoPoster,
        _readClipboardImage = readClipboardImage ?? _readPlatformClipboardImage,
        _now = now ?? DateTime.now,
-       _http = httpClient ?? http.Client(),
+       _http = httpClient ?? newAppHttpClient(HttpTraffic.media),
        _ownsHttpClient = httpClient == null;
 
   void dispose() {

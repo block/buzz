@@ -14,6 +14,8 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../../helpers/test_assertion.dart';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   final keys = nostr.Keys(
@@ -47,8 +49,11 @@ void main() {
     late int assertionLifetime;
     late String Function(String relayUrl) tokenFor;
 
-    BuilderlabAccountClient organizationClient() => BuilderlabAccountClient(
+    BuilderlabAccountClient organizationClient({
+      Future<void> Function(String?)? onSessionChanged,
+    }) => BuilderlabAccountClient(
       accountOrigin: organization,
+      onSessionChanged: onSessionChanged,
       httpClient: MockClient((request) async {
         requests.add(request);
         expect(request.url.origin, organization.origin);
@@ -71,7 +76,9 @@ void main() {
           ),
           '/api/goose/v1/buzz/identity/assertions' => http.Response(
             jsonEncode({
-              'assertion': tokenFor(jsonDecode(request.body)['relay_url']),
+              'assertion': testAssertion(
+                tokenFor(jsonDecode(request.body)['relay_url']),
+              ),
               'nostr_pubkey': keys.public,
               'expires_at':
                   DateTime.now().millisecondsSinceEpoch ~/ 1000 +
@@ -126,7 +133,7 @@ void main() {
         expect(auth.protects(relay), isTrue);
         expect(auth.organizationProtects(relay), isTrue);
         expect(await auth.headers(relay), {
-          'Nostr-Federated-Identity': 'Bearer org-token',
+          'Nostr-Federated-Identity': 'Bearer ${testAssertion('org-token')}',
         });
         final issue = requests.last;
         expect(issue.url.path, '/api/goose/v1/buzz/identity/assertions');
@@ -156,7 +163,7 @@ void main() {
         final auth = relayAuth(organizationClient());
         if (accepted) {
           expect(await auth.headers(relay), {
-            'Nostr-Federated-Identity': 'Bearer org-token',
+            'Nostr-Federated-Identity': 'Bearer ${testAssertion('org-token')}',
           });
         } else {
           await expectLater(
@@ -181,7 +188,7 @@ void main() {
       expect(auth.cachedHeaders(relay), isNull);
       await auth.headers(relay);
       expect(auth.cachedHeaders(relay), {
-        'Nostr-Federated-Identity': 'Bearer org-token',
+        'Nostr-Federated-Identity': 'Bearer ${testAssertion('org-token')}',
       });
       // Cached reads never present a signed-out or replaced account's
       // assertion.
@@ -214,18 +221,27 @@ void main() {
         // community while `relay` stays the active session.
         await auth.headers(other);
         expect(auth.cachedHeaders(relay), {
-          'Nostr-Federated-Identity': 'Bearer token-for-$relayHost',
+          'Nostr-Federated-Identity':
+              'Bearer ${testAssertion('token-for-$relayHost')}',
         });
         expect(auth.cachedHeaders(other), {
-          'Nostr-Federated-Identity': 'Bearer token-for-$otherRelayHost',
+          'Nostr-Federated-Identity':
+              'Bearer ${testAssertion('token-for-$otherRelayHost')}',
         });
         // A refusal evicts only the assertion that was refused.
-        auth.rejected(other, 'Bearer token-for-$otherRelayHost');
+        auth.rejected(
+          other,
+          'Bearer ${testAssertion('token-for-$otherRelayHost')}',
+        );
         expect(auth.cachedHeaders(other), isNull);
         expect(auth.cachedHeaders(relay), isNotNull);
         // After the active relay's terminal refusal, a failed background
         // issuance for the other community leaves the active recovery intact.
-        auth.rejected(relay, 'Bearer token-for-$relayHost', terminal: true);
+        auth.rejected(
+          relay,
+          'Bearer ${testAssertion('token-for-$relayHost')}',
+          terminal: true,
+        );
         boundIdentity = {'pubkey_hex': 'f' * 64};
         expect(await auth.headers(other, background: true), isEmpty);
         expect(auth.failedRelay, relay.baseUrl);
@@ -242,79 +258,77 @@ void main() {
           completion(isEmpty),
         );
         expect(await auth.headers(relay), {
-          'Nostr-Federated-Identity': 'Bearer token-for-$relayHost',
+          'Nostr-Federated-Identity':
+              'Bearer ${testAssertion('token-for-$relayHost')}',
         });
         await revocation;
       },
     );
 
-    test(
-      'background issuance never binds a key, shares the cache or fails a foreground caller',
-      () async {
-        await saveSession();
-        var issued = 0;
-        tokenFor = (_) => 'token-${++issued}';
-        final organizationAccount = organizationClient();
-        final backup = _RecordingKeyBackup(organizationAccount);
-        final auth = relayAuth(organizationAccount, backup: backup);
-        int assertions() =>
-            requests.where((r) => r.url.path.endsWith('/assertions')).length;
+    test('background issuance never binds a key, shares the cache or fails a foreground caller', () async {
+      await saveSession();
+      var issued = 0;
+      tokenFor = (_) => 'token-${++issued}';
+      final organizationAccount = organizationClient();
+      final backup = _RecordingKeyBackup(organizationAccount);
+      final auth = relayAuth(organizationAccount, backup: backup);
+      int assertions() =>
+          requests.where((r) => r.url.path.endsWith('/assertions')).length;
 
-        // An unbound account is never bound by cleanup with a key the user
-        // may have discarded. Cleanup goes out without an assertion and the
-        // relay decides; an enforcing relay's refusal is retried durably.
-        expect(await auth.headers(relay, background: true), isEmpty);
-        expect(assertions(), 0);
-        expect(auth.failure, isNull);
+      // An unbound account is never bound by cleanup with a key the user
+      // may have discarded. Cleanup goes out without an assertion and the
+      // relay decides; an enforcing relay's refusal is retried durably.
+      expect(await auth.headers(relay, background: true), isEmpty);
+      expect(assertions(), 0);
+      expect(auth.failure, isNull);
 
-        // Each background attempt gets its own assertion, so a retry never
-        // resends one the relay refused, and nothing enters the shared cache.
-        boundIdentity = {'pubkey_hex': keys.public};
-        expect(await auth.headers(relay, background: true), {
-          'Nostr-Federated-Identity': 'Bearer token-1',
-        });
-        expect(await auth.headers(relay, background: true), {
-          'Nostr-Federated-Identity': 'Bearer token-2',
-        });
-        expect(auth.cachedHeaders(relay), isNull);
-        expect(backup.backedUp, isEmpty);
+      // Each background attempt gets its own assertion, so a retry never
+      // resends one the relay refused, and nothing enters the shared cache.
+      boundIdentity = {'pubkey_hex': keys.public};
+      expect(await auth.headers(relay, background: true), {
+        'Nostr-Federated-Identity': 'Bearer ${testAssertion('token-1')}',
+      });
+      expect(await auth.headers(relay, background: true), {
+        'Nostr-Federated-Identity': 'Bearer ${testAssertion('token-2')}',
+      });
+      expect(auth.cachedHeaders(relay), isNull);
+      expect(backup.backedUp, isEmpty);
 
-        // Foreground use issues its own assertion and backs the key up.
-        expect(await auth.headers(relay), {
-          'Nostr-Federated-Identity': 'Bearer token-3',
-        });
-        expect(backup.backedUp, [keys.public]);
-        // Nor does cleanup reuse the session's cached assertion, which the
-        // relay may already refuse.
-        expect(await auth.headers(relay, background: true), {
-          'Nostr-Federated-Identity': 'Bearer token-4',
-        });
+      // Foreground use issues its own assertion and backs the key up.
+      expect(await auth.headers(relay), {
+        'Nostr-Federated-Identity': 'Bearer ${testAssertion('token-3')}',
+      });
+      expect(backup.backedUp, [keys.public]);
+      // Nor does cleanup reuse the session's cached assertion, which the
+      // relay may already refuse.
+      expect(await auth.headers(relay, background: true), {
+        'Nostr-Federated-Identity': 'Bearer ${testAssertion('token-4')}',
+      });
 
-        // After a recorded foreground failure, a background denial for the
-        // same relay and key is not handed to a foreground caller waiting on
-        // it: that caller issues for itself.
-        auth.rejected(relay, 'Bearer token-3');
-        tokenFor = (_) => '';
-        await expectLater(
-          auth.headers(relay),
-          throwsA(AccountFailure.invalidResponse),
-        );
-        expect(auth.failure, AccountFailure.invalidResponse);
-        tokenFor = (_) => 'token-${++issued}';
-        nextIdentities = [
-          {'pubkey_hex': 'f' * 64},
-        ];
-        final revocation = expectLater(
-          auth.headers(relay, background: true),
-          completion(isEmpty),
-        );
-        expect(await auth.headers(relay), {
-          'Nostr-Federated-Identity': 'Bearer token-5',
-        });
-        await revocation;
-        expect(auth.failure, isNull);
-      },
-    );
+      // After a recorded foreground failure, a background denial for the
+      // same relay and key is not handed to a foreground caller waiting on
+      // it: that caller issues for itself.
+      auth.rejected(relay, 'Bearer ${testAssertion('token-3')}');
+      tokenFor = (_) => '';
+      await expectLater(
+        auth.headers(relay),
+        throwsA(AccountFailure.invalidResponse),
+      );
+      expect(auth.failure, AccountFailure.invalidResponse);
+      tokenFor = (_) => 'token-${++issued}';
+      nextIdentities = [
+        {'pubkey_hex': 'f' * 64},
+      ];
+      final revocation = expectLater(
+        auth.headers(relay, background: true),
+        completion(isEmpty),
+      );
+      expect(await auth.headers(relay), {
+        'Nostr-Federated-Identity': 'Bearer ${testAssertion('token-5')}',
+      });
+      await revocation;
+      expect(auth.failure, isNull);
+    });
 
     test('a different bound key is refused before issuance', () async {
       await saveSession();
@@ -343,7 +357,7 @@ void main() {
           relay,
           Uri.parse('https://$relayHost/media/emoji.png'),
         ),
-        {'Nostr-Federated-Identity': 'Bearer org-token'},
+        {'Nostr-Federated-Identity': 'Bearer ${testAssertion('org-token')}'},
       );
       for (final other in [
         'https://other.example.com/media/emoji.png',
@@ -374,7 +388,8 @@ void main() {
       requests.clear();
       tokenFor = (_) => 'push-stop-token';
       expect(await auth.headers(relay, background: true), {
-        'Nostr-Federated-Identity': 'Bearer push-stop-token',
+        'Nostr-Federated-Identity':
+            'Bearer ${testAssertion('push-stop-token')}',
       });
       expect(requests.last.headers['X-BB-Session-Credential'], 'org-secret');
       expect(await auth.headers(relay), isEmpty);
@@ -388,6 +403,38 @@ void main() {
         requests.map((request) => request.url.path),
         isNot(contains('/api/goose/v1/buzz/identity/assertions')),
       );
+    });
+
+    test('a push stop still gets an assertion after signing out a saved '
+        'session that was never restored, across a failed cleanup', () async {
+      // An offline launch keeps the saved session without adopting it.
+      await saveSession();
+      // The first cleanup deletes the record, then fails to unshare.
+      var unshareFails = true;
+      final account = organizationClient(
+        onSessionChanged: (_) async {
+          if (unshareFails) throw StateError('unshare failed');
+        },
+      );
+      final auth = relayAuth(account);
+      boundIdentity = {'pubkey_hex': keys.public};
+
+      await expectLater(
+        account.clearLocalSession(),
+        throwsA(AccountFailure.storage),
+      );
+      unshareFails = false;
+      await account.clearLocalSession();
+      expect(await account.restore(), isNull);
+      requests.clear();
+      tokenFor = (_) => 'push-stop-token';
+      expect(await auth.headers(relay, background: true), {
+        'Nostr-Federated-Identity':
+            'Bearer ${testAssertion('push-stop-token')}',
+      });
+      expect(requests.last.headers['X-BB-Session-Credential'], 'org-secret');
+      expect(await auth.headers(relay), isEmpty);
+      expect(account.account, isNull);
     });
 
     test('other relays never receive the organization assertion', () async {

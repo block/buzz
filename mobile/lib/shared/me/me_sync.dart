@@ -5,6 +5,7 @@ import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
+
 import '../theme/theme_provider.dart';
 
 import '../crypto/nip44.dart';
@@ -12,6 +13,7 @@ import '../relay/relay.dart';
 import 'me_groups.dart';
 import 'me_recovery.dart';
 import 'me_journal.dart';
+
 import 'package:buzz/shared/crypto/event_signing.dart';
 
 /// A live, account/community-scoped reader for desktop's encrypted Solo record.
@@ -124,8 +126,8 @@ final meGroupsProvider = StreamProvider<MeGroups>((ref) {
     }
   }
 
-  ref.listen(appLifecycleProvider, (_, next) {
-    if (next != AppLifecycleState.resumed) return;
+  ref.listen(appForegroundProvider, (_, foreground) {
+    if (!foreground) return;
     // Recover an interrupted reader by resubscribing instead of asking the user.
     // Before reconnecting, leave recovery to the reconnect listener above.
     if (subscriptionClosed || syncFailed) {

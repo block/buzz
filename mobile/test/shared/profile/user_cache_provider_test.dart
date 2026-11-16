@@ -335,63 +335,92 @@ void main() {
     expect(cache.state['agent']?.displayName, 'New');
   });
 
-  test(
-    'refresh and preload share one verification worker and coalesce pending lookups',
-    () async {
-      final started = Completer<void>();
-      final release = Completer<void>();
-      var running = 0;
-      var maxRunning = 0;
-      var calls = 0;
-      final session = _RecordingProfileSession(
-        results: [
-          Future.value([
-            _profileEvent(id: 'a', pubkey: 'a', createdAt: 1, name: 'A'),
-          ]),
-          Future.value([
-            _profileEvent(id: 'b', pubkey: 'b', createdAt: 1, name: 'B'),
-          ]),
-          Future.value([
-            _profileEvent(id: 'c', pubkey: 'c', createdAt: 1, name: 'C'),
-          ]),
-        ],
-      );
-      final container = ProviderContainer(
-        overrides: [
-          relaySessionProvider.overrideWith(() => session),
-          profileEventBatchParserProvider.overrideWithValue((events) async {
-            running++;
-            if (running > maxRunning) maxRunning = running;
-            if (calls++ == 0) {
-              started.complete();
-              await release.future;
-            }
-            final parsed = await parseProfileEventBatch(events);
-            running--;
-            return parsed;
-          }),
-        ],
-      );
-      addTearDown(container.dispose);
-      final cache = container.read(userCacheProvider.notifier);
-      final first = cache.preload(['a']);
-      await started.future;
-      final refresh = cache.refresh(['b']);
-      final next = cache.preload(['c']);
-      final duplicate = cache.preload(['c']);
-      // Let the refresh reach the worker queue before releasing its predecessor.
-      await Future<void>.delayed(Duration.zero);
-      expect(calls, 1);
-      release.complete();
-      expect(
-        await Future.wait([first, refresh, next, duplicate]),
-        everyElement(isTrue),
-      );
-      expect(maxRunning, 1);
-      expect(calls, 3);
-      expect(session.requestCount, 3);
-    },
-  );
+  test('refresh and preload share one verification worker and coalesce pending lookups', () async {
+    final started = Completer<void>();
+    final release = Completer<void>();
+    var running = 0;
+    var maxRunning = 0;
+    var calls = 0;
+    final session = _RecordingProfileSession(
+      results: [
+        Future.value([
+          _profileEvent(id: 'a', pubkey: 'a', createdAt: 1, name: 'A'),
+        ]),
+        Future.value([
+          _profileEvent(id: 'b', pubkey: 'b', createdAt: 1, name: 'B'),
+        ]),
+        Future.value([
+          _profileEvent(id: 'c', pubkey: 'c', createdAt: 1, name: 'C'),
+        ]),
+      ],
+    );
+    final container = ProviderContainer(
+      overrides: [
+        relaySessionProvider.overrideWith(() => session),
+        profileEventBatchParserProvider.overrideWithValue((events) async {
+          running++;
+          if (running > maxRunning) maxRunning = running;
+          if (calls++ == 0) {
+            started.complete();
+            await release.future;
+          }
+          final parsed = await parseProfileEventBatch(events);
+          running--;
+          return parsed;
+        }),
+      ],
+    );
+    addTearDown(container.dispose);
+    final cache = container.read(userCacheProvider.notifier);
+    final first = cache.preload(['a']);
+    await started.future;
+    final refresh = cache.refresh(['b']);
+    final next = cache.preload(['c']);
+    final duplicate = cache.preload(['c']);
+    // Let the refresh reach the worker queue before releasing its predecessor.
+    await Future<void>.delayed(Duration.zero);
+    expect(calls, 1);
+    release.complete();
+    expect(
+      await Future.wait([first, refresh, next, duplicate]),
+      everyElement(isTrue),
+    );
+    expect(maxRunning, 1);
+    expect(calls, 3);
+    expect(session.requestCount, 3);
+  });
+
+  test('a preload never asks again for profiles already on the wire', () async {
+    final firstBatch = Completer<List<NostrEvent>>();
+    final session = _RecordingProfileSession(
+      results: [
+        firstBatch.future,
+        Future.value([
+          _profileEvent(id: 'c', pubkey: 'c', createdAt: 1, name: 'C'),
+        ]),
+      ],
+    );
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => session)],
+    );
+    addTearDown(container.dispose);
+    final cache = container.read(userCacheProvider.notifier);
+    final first = cache.preload(['a', 'b']);
+    await session.firstRequest.future;
+    expect(session.requestCount, 1);
+
+    // b is on the wire; only c is new.
+    final again = cache.preload(['b']);
+    final more = cache.preload(['b', 'c']);
+    firstBatch.complete([
+      _profileEvent(id: 'a', pubkey: 'a', createdAt: 1, name: 'A'),
+      _profileEvent(id: 'b', pubkey: 'b', createdAt: 1, name: 'B'),
+    ]);
+    expect(await Future.wait([first, again, more]), everyElement(isTrue));
+    expect(session.requestCount, 2);
+    expect(session.requestedFilter?.authors, ['c']);
+    expect(cache.state.keys, containsAll(['a', 'b', 'c']));
+  });
 
   test(
     'refresh verifies real OA batch while allowing main-isolate timers',
@@ -495,6 +524,7 @@ class _RecordingProfileSession extends RelaySessionNotifier {
   final List<Future<List<NostrEvent>>> _results;
   NostrFilter? requestedFilter;
   int requestCount = 0;
+  final firstRequest = Completer<void>();
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
@@ -506,6 +536,7 @@ class _RecordingProfileSession extends RelaySessionNotifier {
   }) async {
     requestCount++;
     requestedFilter = filter;
+    if (!firstRequest.isCompleted) firstRequest.complete();
     return _results.isEmpty ? const [] : _results.removeAt(0);
   }
 }

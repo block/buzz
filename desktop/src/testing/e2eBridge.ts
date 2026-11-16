@@ -34,6 +34,12 @@ import { getAudioMediaLoadSchedulerSnapshot } from "@/features/messages/lib/audi
 import { mockSearchHitMatches } from "./e2eBridgeSearch.ts";
 import { selectMockHistory } from "./e2eBridgeHistory.ts";
 import {
+  handleMockInstallerCancel,
+  handleMockInstallerDownload,
+  handleMockInstallerReveal,
+  installMockInstallerDownloadControls,
+} from "./e2eBridgeInstallerDownload.ts";
+import {
   createMockSubscription,
   hasMockSubscription,
 } from "./e2eBridgeSubscriptions.ts";
@@ -499,6 +505,9 @@ type E2eConfig = {
      *  Linux .deb install where Tauri's updater cannot swap the binary).
      *  Defaults to true for all existing tests. */
     autoUpdateSupported?: boolean;
+    /** Manifest key `new_app_installer_target` returns. Defaults to none, so
+     *  the deprecation banner never fetches the installer manifest. */
+    newAppInstallerTarget?: string;
     /** Reject `plugin:opener|open_url` to exercise browser-return fallback UI. */
     openerError?: string;
     /** Delay binding signatures so specs can exercise request supersession. */
@@ -1422,6 +1431,8 @@ declare global {
       content: string;
       tags: string[][];
     }>;
+    /** While set, applying a community to the mock backend fails with this message. */
+    __BUZZ_E2E_APPLY_COMMUNITY_ERROR__?: string;
     /** Structured merge error returned by the mock native merge command. */
     __BUZZ_E2E_PROJECT_MERGE_ERROR__?: {
       code: string;
@@ -11556,6 +11567,7 @@ export function maybeInstallE2eTauriMocks() {
     (window as Window & { isTauri?: boolean }).isTauri = true;
   }
   mockWindows(config.mock?.windowLabel ?? "main");
+  installMockInstallerDownloadControls();
   window.__BUZZ_E2E_COMMANDS__ = [];
   window.__BUZZ_E2E_COMMAND_PAYLOADS__ = [];
   window.__BUZZ_E2E_COMMAND_LOG__ = [];
@@ -12951,6 +12963,9 @@ export function maybeInstallE2eTauriMocks() {
         return activeConfig?.mock?.linkPreviewMetadata ?? null;
       }
       case "apply_workspace": {
+        if (window.__BUZZ_E2E_APPLY_COMMUNITY_ERROR__) {
+          throw new Error(window.__BUZZ_E2E_APPLY_COMMUNITY_ERROR__);
+        }
         const applyDelayMs = activeConfig?.mock?.applyCommunityDelayMs ?? 0;
         if (applyDelayMs > 0) {
           return new Promise((resolve) =>
@@ -14882,6 +14897,14 @@ export function maybeInstallE2eTauriMocks() {
         // Default true so all existing tests continue to use the auto-update
         // path. Set mock.autoUpdateSupported: false to simulate a .deb install.
         return activeConfig?.mock?.autoUpdateSupported !== false;
+      case "new_app_installer_target":
+        return activeConfig?.mock?.newAppInstallerTarget ?? null;
+      case "download_new_app_installer":
+        return handleMockInstallerDownload(payload);
+      case "cancel_new_app_installer_download":
+        return handleMockInstallerCancel();
+      case "reveal_new_app_installer":
+        return handleMockInstallerReveal();
       case "relay_reconnect_hook":
         return null;
       case "relay_reconnect_hook_configured":

@@ -38,9 +38,8 @@ void main() {
         child: MaterialApp(
           theme: AppTheme.light(),
           builder: (context, child) => MediaQuery(
-            data: MediaQuery.of(
-              context,
-            ).copyWith(textScaler: TextScaler.linear(2)),
+            data: MediaQuery.of(context)
+                .copyWith(textScaler: TextScaler.linear(2)),
             child: child!,
           ),
           home: SettingsPage(
@@ -62,6 +61,12 @@ void main() {
       'buildSignature': '',
     });
     await tester.pumpAndSettle();
+    // At large text the footer starts below the fold.
+    await tester.scrollUntilVisible(
+      find.text('v0.16.0 (432)'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
     expect(find.text('v0.16.0 (432)'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });

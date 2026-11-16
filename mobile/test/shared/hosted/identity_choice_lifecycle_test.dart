@@ -78,32 +78,31 @@ void main() {
     },
   );
 
-  test(
-    'choices are retired on selection and on leaving; late tap cannot cancel leave',
-    () async {
-      await flow.start(target);
-      browser.cancelling = Completer<void>();
-      final calls = List.of(account.calls);
-      final leaving = flow.leave();
-      await flow.chooseIdentity(first.public);
-      expect(account.calls, calls);
-      expect(await store.read(), isNull);
-      browser.cancelling!.complete();
-      await leaving;
-      expect(browser.cleared, 1);
-      expect(flow.stage, HostedFlowStage.idle);
-      expect(flow.identityChoices, isEmpty);
-      await flow.start(target);
-      final choosing = flow.chooseIdentity(second.public);
-      expect(flow.identityChoices, isEmpty);
-      await choosing;
-      expect(flow.problem, HostedFlowProblem.denied);
-      final completedCalls = List.of(account.calls);
-      await flow.chooseIdentity(first.public);
-      expect(account.calls, completedCalls);
-      expect((await store.read())!.pubkey, second.public);
-    },
-  );
+  test('choices are retired on selection and on leaving; late tap cannot cancel leave', () async {
+    await flow.start(target);
+    browser.cancelling = Completer<void>();
+    final calls = List.of(account.calls);
+    final leaving = flow.leave();
+    await flow.chooseIdentity(first.public);
+    expect(account.calls, calls);
+    expect(await store.read(), isNull);
+    browser.cancelling!.complete();
+    await leaving;
+    expect(browser.cleared, 1);
+    expect(flow.stage, HostedFlowStage.idle);
+    expect(flow.identityChoices, isEmpty);
+    await flow.start(target);
+    final choosing = flow.chooseIdentity(second.public);
+    expect(flow.identityChoices, isEmpty);
+    await choosing;
+    expect(flow.stage, HostedFlowStage.confirmBackup);
+    await flow.confirmBackup!();
+    expect(flow.problem, HostedFlowProblem.denied);
+    final completedCalls = List.of(account.calls);
+    await flow.chooseIdentity(first.public);
+    expect(account.calls, completedCalls);
+    expect((await store.read())!.pubkey, second.public);
+  });
 
   test(
     'choosing creates a new identity beside offered keys and keeps them',

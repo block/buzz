@@ -1,4 +1,3 @@
-import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../../shared/relay/relay.dart';
@@ -74,8 +73,8 @@ class ChannelSortNotifier extends Notifier<ChannelSortState> {
     _manager = manager;
 
     // Resume re-read catches an EVENT a healthy socket never delivered.
-    ref.listen(appLifecycleProvider, (_, next) {
-      if (next == AppLifecycleState.resumed) manager.refreshFromRelay();
+    ref.listen(appForegroundProvider, (_, foreground) {
+      if (foreground) manager.refreshFromRelay();
     });
 
     ref.onDispose(() {

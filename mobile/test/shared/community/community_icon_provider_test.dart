@@ -31,7 +31,9 @@ void main() {
     final container = ProviderContainer(
       overrides: [
         savedPrefsProvider.overrideWithValue(prefs),
-        communityIconHttpClientProvider.overrideWithValue(MockClient(handler)),
+        communityIconHttpClientProvider.overrideWith(
+          (ref, _) => MockClient(handler),
+        ),
       ],
     );
     addTearDown(container.dispose);
@@ -246,7 +248,7 @@ void main() {
       final container = ProviderContainer(
         overrides: [
           savedPrefsProvider.overrideWithValue(prefs),
-          communityIconHttpClientProvider.overrideWithValue(client),
+          communityIconHttpClientProvider.overrideWith((ref, _) => client),
         ],
       );
       addTearDown(container.dispose);
@@ -367,9 +369,9 @@ void main() {
 
   for (final radius in ['', ' rx="112"', ' rx="256"']) {
     test('retains desktop emoji artwork with radius $radius', () async {
-      final svg = UriData.parse(
-        artwork,
-      ).contentAsString(encoding: utf8).replaceFirst(' rx="256"', radius);
+      final svg = UriData.parse(artwork)
+          .contentAsString(encoding: utf8)
+          .replaceFirst(' rx="256"', radius);
       final container = containerFor(
         (_) async => http.Response(
           jsonEncode({
@@ -395,9 +397,9 @@ void main() {
     '<style>text { fill: url(https://relay.example.com/resource); }</style>',
   ]) {
     test('rejects resource added to otherwise valid emoji: $extra', () async {
-      final svg = UriData.parse(
-        artwork,
-      ).contentAsString(encoding: utf8).replaceFirst('</svg>', '$extra</svg>');
+      final svg = UriData.parse(artwork)
+          .contentAsString(encoding: utf8)
+          .replaceFirst('</svg>', '$extra</svg>');
       final container = containerFor(
         (_) async => http.Response(
           jsonEncode({
@@ -485,7 +487,7 @@ void main() {
         final container = ProviderContainer(
           overrides: [
             savedPrefsProvider.overrideWithValue(prefs),
-            communityIconHttpClientProvider.overrideWithValue(client),
+            communityIconHttpClientProvider.overrideWith((ref, _) => client),
           ],
         );
         addTearDown(container.dispose);

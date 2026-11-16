@@ -65,67 +65,62 @@ void bubbleContentTests() {
   }
 
   for (final dark in [false, true]) {
-    testWidgets('outgoing headings, mentions and links contrast in dark=$dark', (
-      tester,
-    ) async {
-      String? tapped;
-      await tester.pumpWidget(
-        _testable(
-          MessageContent(
-            content:
-                '# H1\n\n## H2\n\n### H3\n\n#### H4\n\n##### H5\n\n###### H6\n\n@Alice @Helper [Website](https://example.com)',
-            bubble: true,
-            ownMessage: true,
-            mentionNames: const {'person': 'Alice', 'agent': 'Helper'},
-            agentMentionPubkeys: const {'agent'},
-            onMentionTap: (pubkey) => tapped = pubkey,
+    testWidgets(
+      'outgoing headings, mentions and links contrast in dark=$dark',
+      (tester) async {
+        String? tapped;
+        await tester.pumpWidget(
+          _testable(
+            MessageContent(
+              content: '# H1\n\n## H2\n\n### H3\n\n#### H4\n\n##### H5\n\n###### H6\n\n@Alice @Helper [Website](https://example.com)',
+              bubble: true,
+              ownMessage: true,
+              mentionNames: const {'person': 'Alice', 'agent': 'Helper'},
+              agentMentionPubkeys: const {'agent'},
+              onMentionTap: (pubkey) => tapped = pubkey,
+            ),
+            dark: dark,
           ),
-          dark: dark,
-        ),
-      );
-      await tester.pumpAndSettle();
-      final foreground = ChatColors.of(
-        tester.element(find.byType(MessageContent)),
-      ).foreground;
-      for (final heading in ['H1', 'H2', 'H3', 'H4', 'H5', 'H6']) {
-        final text = tester.widget<RichText>(_findRich(heading).last);
-        final colors = <Color?>[];
-        void inspect(InlineSpan span, TextStyle? inherited) {
-          final effective = inherited?.merge(span.style) ?? span.style;
-          if (span is TextSpan) {
-            if (span.text?.contains(heading) == true) {
-              colors.add(effective?.color);
-            }
-            for (final child in span.children ?? const <InlineSpan>[]) {
-              inspect(child, effective);
+        );
+        await tester.pumpAndSettle();
+        final foreground = ChatColors.of(
+          tester.element(find.byType(MessageContent)),
+        ).foreground;
+        for (final heading in ['H1', 'H2', 'H3', 'H4', 'H5', 'H6']) {
+          final text = tester.widget<RichText>(_findRich(heading).last);
+          final colors = <Color?>[];
+          void inspect(InlineSpan span, TextStyle? inherited) {
+            final effective = inherited?.merge(span.style) ?? span.style;
+            if (span is TextSpan) {
+              if (span.text?.contains(heading) == true) {
+                colors.add(effective?.color);
+              }
+              for (final child in span.children ?? const <InlineSpan>[]) {
+                inspect(child, effective);
+              }
             }
           }
-        }
 
-        inspect(text.text, null);
-        expect(colors, [foreground]);
-      }
-      final linkColor = ChatColors.of(
-        tester.element(find.byType(MessageContent)),
-      ).foreground;
-      for (final label in ['Alice', 'Helper']) {
-        expect(tester.widget<Text>(find.text(label)).style?.color, linkColor);
-      }
-      expect(
-        tester.widget<BuzzAgentIcon>(find.byType(BuzzAgentIcon)).color,
-        linkColor,
-      );
-      final link = tester.widget<Text>(
-        find.byWidgetPredicate(
-          (w) => w is Text && w.textSpan?.toPlainText() == 'Website',
-        ),
-      );
-      expect(link.textSpan?.style?.color, linkColor);
-      await tester.tap(find.text('Alice'));
-      expect(tapped, 'person');
-      await tester.tap(find.text('Helper'));
-      expect(tapped, 'agent');
-    });
+          inspect(text.text, null);
+          expect(colors, [foreground]);
+        }
+        final linkColor = ChatColors.of(
+          tester.element(find.byType(MessageContent)),
+        ).foreground;
+        for (final label in ['Alice', 'Helper']) {
+          expect(tester.widget<Text>(find.text(label)).style?.color, linkColor);
+        }
+        expect(
+          tester.widget<BuzzAgentIcon>(find.byType(BuzzAgentIcon)).color,
+          linkColor,
+        );
+        expect(linkStyle(tester, 'Website')?.color, linkColor);
+        await tester.tap(find.text('Alice'));
+        expect(tapped, 'person');
+        await tester.tap(find.text('Helper'));
+        expect(tapped, 'agent');
+      },
+    );
   }
 
   for (final content in [
@@ -190,8 +185,7 @@ void bubbleContentTests() {
     await tester.pumpWidget(
       _testable(
         const MessageContent(
-          content:
-              'Photos\n![one](https://example.com/one.png)\n![two](https://example.com/two.png)',
+          content: 'Photos\n![one](https://example.com/one.png)\n![two](https://example.com/two.png)',
           bubble: true,
         ),
       ),
@@ -304,8 +298,7 @@ void bubbleContentTests() {
           child: const SizedBox(
             width: 230,
             child: MessageContent(
-              content:
-                  'A longer message that wraps across multiple lines without clipping.',
+              content: 'A longer message that wraps across multiple lines without clipping.',
               bubble: true,
             ),
           ),
@@ -353,10 +346,7 @@ void editedMarkerTests() {
 
     // Prose: inline after the last line, in the muted metadata colour.
     await show('First\n\nHi how are ya.');
-    expect(
-      plainTexts(tester),
-      anyElement(endsWith('\nHi how are ya. (edited)')),
-    );
+    expect(plainTexts(tester), contains('Hi how are ya. (edited)'));
     final context = tester.element(find.byType(MessageContent));
     expect(markerSpan(tester)?.style?.color, context.colors.onSurfaceVariant);
 

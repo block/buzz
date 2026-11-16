@@ -5,12 +5,14 @@ import 'message_author_visibility.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+
 import 'message_swipe_reply.dart';
 import 'bestie_welcome.dart';
 import 'bestie_welcome_storage.dart';
 import 'agent_reply_handoff.dart';
 import 'huddle_timeline.dart';
 import '../../shared/widgets/confirmation_dialog.dart';
+import '../../shared/share/share_suggestions.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
 import 'message_footer_layout.dart';
@@ -115,6 +117,7 @@ import 'sticky_date_header.dart';
 import 'date_header_scroll_activity.dart';
 import 'thread_detail_page.dart';
 import 'thread_replies_provider.dart';
+import 'open_channel_routes.dart';
 import 'reading_marks.dart';
 import 'timeline_message.dart';
 
@@ -376,9 +379,8 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       personalChat
           ? ''
           : ref.watch(
-              channelTypingProvider(
-                channel.id,
-              ).select((all) => _threadTypingKey(all, currentPubkey)),
+              channelTypingProvider(channel.id)
+                  .select((all) => _threadTypingKey(all, currentPubkey)),
             ),
       additionalAgents: resolvedChannel.isDm ? agentPubkeys : const {},
     );
@@ -505,12 +507,14 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
           )
         : _twoLineAppBarTitleContentHeight(context) + 64;
 
-    // Opening a forum or a DM reads the whole channel: a forum has no
-    // timeline to read row by row, and a DM is all for the reader. Other
+    // Opening a forum, a DM or a Solo chat reads the whole channel: a forum
+    // has no timeline to read row by row, and a DM or a Solo chat is all for
+    // the reader. Other
     // timelines write their read marks while the reader looks at rows; see
     // `readingMarks`.
     final openReadTimestamp = _openReadTimestamp(
       channel: resolvedChannel,
+      personalChat: personalChat,
       messagesState: messagesState,
     );
 
@@ -518,6 +522,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       final session = ref.read(relaySessionProvider.notifier);
       return session.registerVisibleChannel(channel.id);
     }, [channel.id]);
+    useOpenChannelRoute(ref, channel.id);
 
     useEffect(
       () {
@@ -563,13 +568,15 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       });
     }, [channel.id, readState.isReady, openReadActive, openReadTimestamp]);
 
-    final headerMembers = ref.watch(channelMembersProvider(resolvedChannel.id));
+    final headerMembers = ref.watch(
+      latestChannelMembersProvider(resolvedChannel.id),
+    );
     final dmHeader = _watchDmHeader(
       ref,
       resolvedChannel,
       currentPubkey,
       agentPubkeys,
-      soloMembers: headerMembers.value,
+      soloMembers: headerMembers,
       personalChat: personalChat,
     );
     Future<void> openChannelDetails() async {
@@ -966,12 +973,21 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                                   mentionPubkeys,
                                 );
                               }
+                              final donate = activeShareSuggestionDonor(ref);
+                              final displayName = resolvedChannel.displayLabel(
+                                currentPubkey: ref.read(myPubkeyProvider),
+                              );
                               await sendMessage.call(
                                 channelId: channel.id,
                                 content: content,
                                 mentionPubkeys: recipients,
                                 channel: resolvedChannel,
                                 mediaTags: mediaTags,
+                              );
+                              donate(
+                                channelId: channel.id,
+                                displayName: displayName,
+                                recipientCount: resolvedChannel.memberCount - 1,
                               );
                             },
                       ),

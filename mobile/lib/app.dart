@@ -1,6 +1,7 @@
 import 'features/activity/activity_provider.dart';
 import 'features/channels/bestie_conversation.dart';
 import 'features/channels/default_agent_launcher.dart';
+import 'features/channels/quick_send_host.dart';
 import 'features/agents/agents_page.dart';
 
 import 'dart:async';
@@ -8,12 +9,14 @@ import 'dart:async';
 import 'hosted_app_gate.dart';
 import 'onboarding_app_entry.dart';
 import 'organization_app_entry.dart';
+import 'shared/share/signed_out_share_notice.dart';
 import 'shared/hosted/organization_environment.dart';
 import 'shared/widgets/ios_navigation_metrics.dart';
 import 'shared/community/paired_community_landing.dart';
 import 'shared/community/community_loading_surface.dart';
 
 import 'package:app_badge_plus/app_badge_plus.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
@@ -37,6 +40,7 @@ import 'features/channels/agent_activity/observer_subscription.dart';
 import 'features/channels/channel_detail_page.dart';
 import 'shared/widgets/app_route_observer.dart';
 import 'shared/widgets/root_page_route.dart';
+import 'features/profile/profile_provider.dart';
 import 'features/profile/user_status_cache_provider.dart';
 import 'features/profile/settings_profile_header.dart';
 import 'features/profile/set_status_sheet.dart';
@@ -391,6 +395,8 @@ class App extends HookConsumerWidget {
       ref.listen(observerRelayProvider, (_, _) {});
       ref.watch(appLifecycleProvider);
       ref.listen(userStatusCacheProvider, (_, _) {});
+      // Presence heartbeats run only while something holds this provider.
+      ref.listen(presenceProvider, (_, _) {});
       // Activity owns hidden-DM recovery even when Inbox is never opened.
       ref.listen(activityProvider, (_, _) {});
       // Preserve initial read seeding even while Solo is hidden.
@@ -447,6 +453,9 @@ class App extends HookConsumerWidget {
                 newChatAction: chat,
                 newWorkspaceAction: workspace,
               ),
+              backgroundHost: defaultTargetPlatform == TargetPlatform.iOS
+                  ? const QuickSendHost()
+                  : null,
               settingsPageBuilder: _buildSettingsPage,
               communityInvitePageBuilder: (_) => const CommunityInvitePage(),
               communityAppearancePageBuilder: (_) => const ThemePickerPage(),
@@ -455,7 +464,7 @@ class App extends HookConsumerWidget {
         ),
         _ => const HostedAppGate(
           authenticated: false,
-          child: OnboardingAppEntry(),
+          child: SignedOutShareNotice(child: OnboardingAppEntry()),
         ),
       },
     );
