@@ -3,6 +3,7 @@ part of 'avatar_image.dart';
 /// Renders the same avatar sources used by Flutter as a PNG for native bars.
 Future<Uint8List?> nativeAvatarImage({
   required String? url,
+  ValueListenable<bool>? cancelled,
   required String initial,
   bool isAgent = false,
   bool circular = false,
@@ -73,7 +74,11 @@ Future<Uint8List?> nativeAvatarImage({
         for (var i = 0; i < providers.length; i++) {
           final ImageInfo image;
           try {
-            image = await _loadNativeAvatar(providers[i], dimension.toInt());
+            image = await _loadNativeAvatar(
+              providers[i],
+              dimension.toInt(),
+              cancelled,
+            );
           } on NetworkImageLoadException catch (error) {
             // A missing relay thumbnail moves on to the next one.
             if (error.statusCode == 404 && i < providers.length - 1) continue;
@@ -95,6 +100,10 @@ Future<Uint8List?> nativeAvatarImage({
   } catch (_) {
     // Match the normal avatar's initial fallback when media is unavailable.
   }
+  if (cancelled?.value == true) {
+    recorder.endRecording().dispose();
+    return null;
+  }
   if (!rendered) _paintNativeAvatarText(canvas, initial, 32, foreground);
   final picture = recorder.endRecording();
   final image = await picture.toImage(dimension.toInt(), dimension.toInt());
@@ -111,13 +120,16 @@ Future<Uint8List?> nativeAvatarImage({
 Future<ImageInfo> _loadNativeAvatar(
   ImageProvider provider,
   int dimension,
+  ValueListenable<bool>? cancelled,
 ) async {
-  final stream = ResizeImage(
+  if (cancelled?.value == true) throw StateError('Avatar load cancelled');
+  final resized = ResizeImage(
     provider,
     width: dimension,
     height: dimension,
     policy: ResizeImagePolicy.fit,
-  ).resolve(ImageConfiguration.empty);
+  );
+  final stream = resized.resolve(ImageConfiguration.empty);
   final completer = Completer<ImageInfo>();
   final listener = ImageStreamListener(
     (image, _) {
@@ -127,11 +139,23 @@ Future<ImageInfo> _loadNativeAvatar(
       if (!completer.isCompleted) completer.completeError(error, stack);
     },
   );
+  void onCancelled() {
+    if (cancelled?.value == true && !completer.isCompleted) {
+      completer.completeError(StateError('Avatar load cancelled'));
+    }
+  }
+
+  var loaded = false;
   stream.addListener(listener);
+  cancelled?.addListener(onCancelled);
   try {
-    return await completer.future.timeout(const Duration(seconds: 10));
+    final image = await completer.future.timeout(const Duration(seconds: 10));
+    loaded = true;
+    return image;
   } finally {
+    cancelled?.removeListener(onCancelled);
     stream.removeListener(listener);
+    if (!loaded) abandonPendingImage(stream, resized, ImageConfiguration.empty);
   }
 }
 

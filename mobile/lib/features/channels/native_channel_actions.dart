@@ -43,6 +43,8 @@ class _NativeChannelActions extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final session = useMemoized(() => '${_channelActionsSession++}');
+    final presentationEnded = useRef(false);
+    final avatarCancellation = useRef<ValueNotifier<bool>?>(null);
     final resolvedImages = useState(<String, String>{});
     final imageSources = <String, bool>{
       if (heroAvatarUrl?.isNotEmpty == true) heroAvatarUrl!: heroIsAgent,
@@ -54,7 +56,10 @@ class _NativeChannelActions extends HookConsumerWidget {
     final colors = context.colors;
     useEffect(
       () {
+        if (presentationEnded.value) return null;
         var active = true;
+        final cancelled = ValueNotifier(false);
+        avatarCancellation.value = cancelled;
         if (imageSources.isNotEmpty) {
           final auth = ref.read(mediaGetAuthServiceProvider);
           final client = ref.read(mediaHttpClientProvider);
@@ -63,6 +68,7 @@ class _NativeChannelActions extends HookConsumerWidget {
             final images = <String, String>{};
             for (final entry in imageSources.entries) {
               final bytes = await nativeAvatarImage(
+                cancelled: cancelled,
                 dimension: entry.key == heroAvatarUrl ? 240 : 120,
                 url: entry.key,
                 initial: '?',
@@ -76,7 +82,7 @@ class _NativeChannelActions extends HookConsumerWidget {
                   diskCache: diskCache,
                 ),
               );
-              if (!active) return;
+              if (!active || cancelled.value) return;
               if (bytes != null) {
                 images[entry.key] =
                     'data:image/png;base64,${base64Encode(bytes)}';
@@ -87,7 +93,11 @@ class _NativeChannelActions extends HookConsumerWidget {
 
           unawaited(resolveImages());
         }
-        return () => active = false;
+        return () {
+          active = false;
+          cancelled.value = true;
+          cancelled.dispose();
+        };
       },
       [
         imageSources.toString(),
@@ -212,6 +222,8 @@ class _NativeChannelActions extends HookConsumerWidget {
             latestPayload.value,
           );
           if (disposed || !context.mounted) return;
+          presentationEnded.value = true;
+          avatarCancellation.value?.value = true;
           final action = latest.value[selected];
           if (action != null) await action();
         } on PlatformException catch (error) {

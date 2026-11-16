@@ -77,21 +77,32 @@ bool _usesNativeChannelSheet(BuildContext context) {
       (DuoToolbarScope.maybeOf(context)?.strip ??
               FoldGeometry.of(context).strip) !=
           null &&
-      size.width > size.height;
+      size.width > size.height &&
+      !isCompactDuoWindow(context);
+}
+
+// Keep the result alive after retiring the invisible route for relay work.
+class _NativeChannelSheetRoute extends PageRouteBuilder<bool> {
+  _NativeChannelSheetRoute(WidgetBuilder builder)
+    : super(
+        opaque: false,
+        barrierColor: null,
+        transitionDuration: Duration.zero,
+        reverseTransitionDuration: Duration.zero,
+        pageBuilder: (context, _, _) => builder(context),
+      );
+
+  Future<bool?>? lifecycleResult;
 }
 
 Future<bool?> _showNativeChannelSheet(
   BuildContext context,
   WidgetBuilder builder,
-) => Navigator.of(context, rootNavigator: true).push<bool>(
-  PageRouteBuilder<bool>(
-    opaque: false,
-    barrierColor: null,
-    transitionDuration: Duration.zero,
-    reverseTransitionDuration: Duration.zero,
-    pageBuilder: (context, _, _) => builder(context),
-  ),
-);
+) async {
+  final route = _NativeChannelSheetRoute(builder);
+  final result = await Navigator.of(context, rootNavigator: true).push(route);
+  return route.lifecycleResult == null ? result : await route.lifecycleResult;
+}
 
 // Other postures retain the existing bottom-sheet presentation.
 Future<bool?> _showChannelLongPressSheet({
@@ -531,6 +542,7 @@ Future<void> _confirmAndRun(
   final ownerNavigator = Navigator.of(sheetContext);
   final ownerRoute = ModalRoute.of(sheetContext);
   final pageContext = Navigator.of(sheetContext, rootNavigator: true).context;
+  final messenger = ScaffoldMessenger.maybeOf(sheetContext);
   final confirmed = await showBuzzDialog<bool>(
     context: pageContext,
     builder: (dialogContext) => AlertDialog(
@@ -548,15 +560,25 @@ Future<void> _confirmAndRun(
       ],
     ),
   );
-  if (confirmed != true) return;
+  if (confirmed != true || !sheetContext.mounted) return;
+  Completer<bool?>? detachedResult;
   try {
-    await action();
+    // Resolve provider-backed dependencies before disposing their owner.
+    final pending = action();
+    if (ownerRoute is _NativeChannelSheetRoute && ownerNavigator.mounted) {
+      detachedResult = Completer<bool?>();
+      ownerRoute.lifecycleResult = detachedResult.future;
+      ownerNavigator.removeRoute(ownerRoute);
+    }
+    await pending;
+    detachedResult?.complete(true);
     if (ownerNavigator.mounted && ownerRoute?.isCurrent == true) {
       ownerNavigator.pop(true);
     }
   } catch (error) {
-    if (!pageContext.mounted) return;
-    ScaffoldMessenger.of(pageContext).showFeedbackSnackBar(
+    detachedResult?.complete(null);
+    if (messenger == null || !messenger.mounted) return;
+    messenger.showFeedbackSnackBar(
       SnackBar(
         content: Text(
           'Couldn’t ${confirmLabel.toLowerCase()} channel. Try again.',

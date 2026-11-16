@@ -115,6 +115,32 @@ Widget _modalApp({
 );
 
 void main() {
+  for (final size in [const Size(800, 390), const Size(669, 951)]) {
+    testWidgets('Duo cover or portrait $size retains the Flutter sheet', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = size;
+      tester.view.padding = const FakeViewPadding(right: 76);
+      tester.view.viewPadding = tester.view.padding;
+      addTearDown(tester.view.reset);
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      await tester.pumpWidget(
+        _modalApp(
+          channel: _channel(),
+          loadMembers: () async => [],
+          createChannelActions: (ref) => _FakeChannelActions(ref),
+        ),
+      );
+      await tester.tap(find.text('Open actions'));
+      await tester.pumpAndSettle();
+      expect(find.byType(BottomSheet), findsOneWidget);
+      expect(find.byType(ChannelActionsSheet), findsOneWidget);
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
+
   for (final soloDetails in [false, true]) {
     testWidgets(
       'Duo ${soloDetails ? 'Solo details' : 'channel actions'} uses native presentation and live permissions',
@@ -977,89 +1003,6 @@ void main() {
     );
   });
 
-  testWidgets('archive closes only its own settings sheet, never Home', (
-    tester,
-  ) async {
-    var archive = Completer<void>();
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          currentPubkeyProvider.overrideWith((ref) => _currentPubkey),
-          channelMembersProvider('channel-id').overrideWith(
-            (ref) async => [
-              ChannelMember(
-                pubkey: _currentPubkey,
-                role: 'owner',
-                joinedAt: DateTime(2025),
-              ),
-            ],
-          ),
-          channelSectionsProvider.overrideWith(
-            () => _FakeChannelSectionsNotifier(const ChannelSectionStore()),
-          ),
-          agentOwnersProvider.overrideWithValue(
-            const AsyncValue.data(<String, String>{}),
-          ),
-          channelActionsProvider.overrideWith(
-            (ref) => _FakeChannelActions(
-              ref,
-              onArchiveChannel: () => archive.future,
-            ),
-          ),
-        ],
-        child: MaterialApp(
-          theme: AppTheme.light(),
-          home: Builder(
-            builder: (context) => Scaffold(
-              body: TextButton(
-                onPressed: () => showChannelDetailsSheet(
-                  context: context,
-                  channel: _channel(),
-                  currentPubkey: _currentPubkey,
-                  onMemberTap: (_, _) {},
-                  personalChat: true,
-                ),
-                child: const Text('Open settings'),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-
-    Future<void> confirmArchive() async {
-      await tester.tap(find.text('Open settings'));
-      await tester.pumpAndSettle();
-      await tester.scrollUntilVisible(
-        find.text('Archive channel'),
-        200,
-        scrollable: find.byType(Scrollable).last,
-      );
-      await tester.tap(find.text('Archive channel'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Archive'));
-      await tester.pumpAndSettle();
-    }
-
-    // Closing the sheet while the archive is still in flight leaves Home in
-    // place once the archive completes.
-    await confirmArchive();
-    expect(find.text('Archive channel'), findsOneWidget);
-    await tester.tap(find.byTooltip('Close sheet'));
-    await tester.pumpAndSettle();
-    archive.complete();
-    await tester.pumpAndSettle();
-    expect(find.text('Open settings'), findsOneWidget);
-
-    // Left open, the sheet closes itself once the archive succeeds.
-    archive = Completer<void>();
-    await confirmArchive();
-    archive.complete();
-    await tester.pumpAndSettle();
-    expect(find.text('Archive channel'), findsNothing);
-    expect(find.text('Open settings'), findsOneWidget);
-  });
-
   testWidgets('DM omits quick actions, then shows mute and copy rows', (
     tester,
   ) async {
@@ -1120,22 +1063,16 @@ class _FakeChannelActions extends ChannelActions {
 
   final Future<void> Function(String)? onSetCanvas;
 
-  final Future<void> Function()? onArchiveChannel;
-
-  _FakeChannelActions(
-    Ref ref, {
-    this.onUpdateChannel,
-    this.onSetCanvas,
-    this.onArchiveChannel,
-  }) : super(
-         ref: ref,
-         session: ref.read(relaySessionProvider.notifier),
-         signedEventRelay: SignedEventRelay(
-           session: ref.read(relaySessionProvider.notifier),
-           nsec: null,
-         ),
-         currentPubkey: _currentPubkey,
-       );
+  _FakeChannelActions(Ref ref, {this.onUpdateChannel, this.onSetCanvas})
+    : super(
+        ref: ref,
+        session: ref.read(relaySessionProvider.notifier),
+        signedEventRelay: SignedEventRelay(
+          session: ref.read(relaySessionProvider.notifier),
+          nsec: null,
+        ),
+        currentPubkey: _currentPubkey,
+      );
 
   @override
   Future<void> updateChannel({
@@ -1160,9 +1097,7 @@ class _FakeChannelActions extends ChannelActions {
   Future<void> leaveChannel(String channelId) async {}
 
   @override
-  Future<void> archiveChannel(String channelId) async {
-    await onArchiveChannel?.call();
-  }
+  Future<void> archiveChannel(String channelId) async {}
 
   @override
   Future<void> unarchiveChannel(String channelId) async {

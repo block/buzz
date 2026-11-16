@@ -1,5 +1,6 @@
 import 'dart:ui' as ui;
 import 'dart:convert';
+import 'dart:async';
 
 import 'package:buzz/shared/emoji/emoji_avatar.dart';
 import 'package:buzz/shared/relay/media_auth.dart';
@@ -105,6 +106,56 @@ void main() {
       expect(requested, [thumb(broken, 'webp')]);
     });
   });
+
+  for (final timeout in [false, true]) {
+    testWidgets('native avatar aborts pending download (timeout: $timeout)', (
+      tester,
+    ) async {
+      final started = Completer<void>();
+      final aborted = Completer<void>();
+      final cancelled = ValueNotifier(false);
+      final client = _StreamingClient((request) async {
+        (request as http.AbortableRequest).abortTrigger!.then((_) {
+          if (!aborted.isCompleted) aborted.complete();
+        });
+        started.complete();
+        await aborted.future;
+        throw http.RequestAbortedException(request.url);
+      });
+      final pending = nativeAvatarImage(
+        url: 'https://relay.example/media/held.png',
+        cancelled: cancelled,
+        initial: 'A',
+        background: Colors.black,
+        foreground: Colors.white,
+        networkImages: (url) => [
+          MediaImageProvider(
+            url: url,
+            auth: MediaGetAuthService(
+              baseUrl: 'https://relay.example',
+              nsec: null,
+            ),
+            client: client,
+          ),
+        ],
+      );
+      await tester.pump();
+      expect(started.isCompleted, isTrue);
+      if (timeout) {
+        await tester.pump(const Duration(seconds: 11));
+      } else {
+        cancelled.value = true;
+      }
+      await tester.pump();
+      expect(aborted.isCompleted, isTrue);
+      // Raster fallback after timeout needs the real engine's image codec.
+      await tester.runAsync(() async {
+        await pending;
+      });
+      cancelled.dispose();
+      client.close();
+    });
+  }
 
   for (final size in [const Size(1440, 720), const Size(720, 1440)]) {
     testWidgets('bounds inline raster decode at $size before native painting', (
@@ -220,4 +271,12 @@ class _RecordingImage extends MemoryImage {
     frame.image.dispose();
     return codec;
   }
+}
+
+class _StreamingClient extends http.BaseClient {
+  _StreamingClient(this.onSend);
+  final Future<http.StreamedResponse> Function(http.BaseRequest) onSend;
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) =>
+      onSend(request);
 }

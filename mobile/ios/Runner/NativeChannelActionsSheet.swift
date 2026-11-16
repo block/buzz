@@ -13,7 +13,6 @@ final class NativeChannelActionsSheetCoordinator: NSObject, UIAdaptivePresentati
   private var contentChannel: FlutterMethodChannel?
   private var payload: [String: Any] = [:]
   private var readinessTimeout: DispatchWorkItem?
-  private var initialReply: FlutterResult?
   private var contentReady = false
   private var needsContentUpdate = false
 
@@ -56,11 +55,7 @@ final class NativeChannelActionsSheetCoordinator: NSObject, UIAdaptivePresentati
           self.resolve(FlutterError(code: "engine_failed", message: "Could not start channel settings", details: nil))
           return
         }
-        // A prewarmed isolate waits for this request without loading a second
-        // account or rendering stale content from an earlier presentation.
-        let initialReply = self.initialReply
-        self.initialReply = nil
-        initialReply?(data)
+        // Supply the model without loading a second account.
         let flutter = FlutterViewController(engine: engine, nibName: nil, bundle: nil)
         let content = NativeChannelContentController(flutter: flutter, data: data)
         content.close = { [weak self] in self?.finish(nil) }
@@ -85,11 +80,10 @@ final class NativeChannelActionsSheetCoordinator: NSObject, UIAdaptivePresentati
       default: result(FlutterMethodNotImplemented)
       }
     }
-    DispatchQueue.main.async { [weak self] in self?.prepareContent() }
   }
 
-  /// Start the presentation-only isolate before the user long-presses. None of
-  /// the app's camera, audio, storage or account plugins are used by this view.
+  /// Start only for an eligible presentation, never at app launch or dismissal.
+  /// The app's camera, audio, storage and account plugins are not used here.
   @discardableResult
   private func prepareContent() -> Bool {
     if contentEngine != nil { return true }
@@ -106,12 +100,8 @@ final class NativeChannelActionsSheetCoordinator: NSObject, UIAdaptivePresentati
       guard let self, let engine, self.contentEngine === engine else { reply(nil); return }
       switch call.method {
       case "initial":
-        if self.session != nil {
-          self.needsContentUpdate = false
-          reply(self.payload)
-        } else {
-          self.initialReply = reply
-        }
+        self.needsContentUpdate = false
+        reply(self.session == nil ? nil : self.payload)
       case "ready":
         guard self.session != nil else { reply(nil); return }
         self.contentReady = true
@@ -152,15 +142,12 @@ final class NativeChannelActionsSheetCoordinator: NSObject, UIAdaptivePresentati
     contentChannel = nil
     contentEngine?.destroyContext()
     contentEngine = nil
-    initialReply = nil
     contentReady = false
     needsContentUpdate = false
     payload = [:]
     session = nil
     finishing = false
     callback?(action)
-    // Prepare the next clean isolate after dismissal, outside the next gesture.
-    DispatchQueue.main.async { [weak self] in self?.prepareContent() }
   }
 
   deinit {
