@@ -1237,6 +1237,7 @@ fn reject_code(msg: &str) -> &'static str {
 pub async fn submit_event(
     State(state): State<Arc<AppState>>,
     slot: AccessSlot,
+    event_type: Option<axum::Extension<crate::metrics::EventMetricType>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<axum::response::Response, axum::response::Response> {
@@ -1297,7 +1298,15 @@ pub async fn submit_event(
     // Everything after auth — admission, replay, membership, parse, ingest —
     // runs inside the helper; the caller's access line is the request's one
     // line, covering every outcome including a refused login.
-    let outcome = submit_event_authed(&state, &tenant, &headers, &body, &mut caller).await;
+    let outcome = submit_event_authed(
+        &state,
+        &tenant,
+        &headers,
+        &body,
+        &mut caller,
+        event_type.as_ref().map(|extension| &extension.0),
+    )
+    .await;
     caller.complete(outcome.fields());
     Ok(outcome.into_response().into_response())
 }
@@ -1398,6 +1407,7 @@ async fn submit_event_authed(
     headers: &HeaderMap,
     body: &[u8],
     caller: &mut ProvenCaller,
+    event_type: Option<&crate::metrics::EventMetricType>,
 ) -> SubmitOutcome {
     // Admission and replay checks fire before body parse — a 429 or replay
     // reject on a malformed body must still be attributed.
@@ -1413,6 +1423,9 @@ async fn submit_event_authed(
     let event: nostr::Event = match serde_json::from_slice(body) {
         Ok(ev) => ev,
         Err(e) => {
+            if let Some(event_type) = event_type {
+                event_type.invalid();
+            }
             // Never log `e`'s Display string: serde_json embeds the offending
             // input verbatim in its error message, so a malformed field of
             // arbitrary size (the router allows 1 MiB bodies) would otherwise
@@ -1435,6 +1448,9 @@ async fn submit_event_authed(
     };
 
     let kind_u32 = buzz_core::kind::event_kind_u32(&event);
+    if let Some(event_type) = event_type {
+        event_type.parsed(kind_u32);
+    }
     let is_typing = kind_u32 == buzz_core::kind::KIND_TYPING_INDICATOR;
 
     // Enforce relay membership (with NIP-OA fallback via x-auth-tag header).
@@ -5078,6 +5094,84 @@ pub(crate) mod postgres_tests {
             .await
             .expect("read response body");
         (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres and Redis"]
+    async fn event_type_metrics_cover_real_bridge_success_and_rejections() {
+        let state = bridge_handler_test_state()
+            .await
+            .expect("local Postgres and Redis");
+        let host = with_community(&state).await;
+        let keys = Keys::generate();
+        let profile = EventBuilder::new(Kind::Metadata, r#"{"name":"Example"}"#)
+            .sign_with_keys(&keys)
+            .expect("sign profile");
+        let archive = EventBuilder::new(Kind::Custom(9035), "")
+            .sign_with_keys(&keys)
+            .expect("sign archive without required tags");
+        let contacts = EventBuilder::new(Kind::ContactList, "")
+            .sign_with_keys(&keys)
+            .expect("sign registered contact list");
+        let cases = [
+            (
+                serde_json::to_vec(&contacts).expect("contact list JSON"),
+                true,
+                StatusCode::OK,
+                "kind_3",
+            ),
+            (
+                serde_json::to_vec(&profile).expect("profile JSON"),
+                true,
+                StatusCode::OK,
+                "profile_update",
+            ),
+            (
+                serde_json::to_vec(&archive).expect("archive JSON"),
+                true,
+                StatusCode::BAD_REQUEST,
+                "identity_archive",
+            ),
+            (
+                b"not JSON".to_vec(),
+                true,
+                StatusCode::BAD_REQUEST,
+                "invalid",
+            ),
+            (
+                b"not JSON".to_vec(),
+                false,
+                StatusCode::UNAUTHORIZED,
+                "unknown",
+            ),
+        ];
+        let (recorder, handle) = crate::metrics::readiness_test_recorder();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        for (body, authenticated, status, event_type) in cases {
+            let mut headers = HeaderMap::new();
+            if authenticated {
+                headers.insert(
+                    "x-pubkey",
+                    keys.public_key().to_hex().parse().expect("pubkey header"),
+                );
+            }
+            assert_eq!(
+                oneshot_request(state.clone(), "POST", "/events", &host, headers, &body).await,
+                status,
+                "{event_type}"
+            );
+            let exported = handle.render();
+            for metric in ["http_requests_total{", "http_request_latency_ms_count{"] {
+                assert!(
+                    exported.lines().any(|line| line.starts_with(metric)
+                        && line.contains("action=\"/events\"")
+                        && line.contains(&format!("code=\"{}\"", status.as_u16()))
+                        && line.contains(&format!("event_type=\"{event_type}\""))
+                        && line.ends_with(" 1")),
+                    "{exported}"
+                );
+            }
+        }
     }
 
     /// A workflow row without a channel has no readers, so even its owner
@@ -11179,6 +11273,7 @@ pub(crate) mod postgres_tests {
                     token_owner: None,
                     slot: AccessSlot::default(),
                 },
+                None,
             )
             .await;
             assert!(
