@@ -438,6 +438,13 @@ void swipeReplyTests() {
       messageId: threadIdA,
       threadRootId: threadIdRoot,
     );
+    // The link arrives while the user is typing a reply.
+    await tester.tap(find.text('Reply in thread\u2026'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).focusNode?.hasFocus,
+      isTrue,
+    );
 
     // Tapping the reply's notification while its thread is in front lands on
     // that reply in the same page, the way opening the thread from it does.
@@ -459,8 +466,17 @@ void swipeReplyTests() {
             as BoxDecoration;
     expect(highlight.color!.a, greaterThan(0));
     await tester.pumpAndSettle();
-    // Landing on an older reply exposes Latest, as a deep-link entry does.
-    expect(find.byTooltip('Jump to latest message'), findsOneWidget);
+    // Landing on an older reply exposes Latest, as a deep-link entry does,
+    // and Latest returns to the tail. A second link lands in place again.
+    await tester.tap(find.byTooltip('Jump to latest message'));
+    await tester.pumpAndSettle();
+    expect(find.text('Later reply 29').hitTestable(), findsOneWidget);
+    expect(linkedRow.hitTestable(), findsNothing);
+    pendingPushNotificationLink.value = null;
+    pendingPushNotificationLink.value = link;
+    await tester.pumpAndSettle();
+    expect(navigator.canPop(), isFalse);
+    expect(linkedRow.hitTestable(), findsOneWidget);
 
     // A reply below the head still opens its own branch on top.
     final swipe = await tester.startGesture(
