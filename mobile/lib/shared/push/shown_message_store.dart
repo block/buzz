@@ -32,20 +32,25 @@ abstract interface class ShownMessageStore {
   Future<bool> claim(String community, String eventId, DateTime createdAt);
 }
 
-/// A [ShownMessageStore] kept as one empty marker file per message.
+/// A [ShownMessageStore] kept as two empty marker files per message.
 ///
-/// Creating a file exclusively is atomic across isolates and processes, with
-/// no lock to take, so [claim] needs nothing else. The marker's name carries
-/// two times, so [newestShown] needs no second file whose concurrent
-/// read-modify-write could move it backwards: the watermark, which is the
-/// message's time capped at the present and moves the fetch cursor, and the
-/// message's own time, which decides how long the marker is kept.
+/// The claim marker's name holds only the message's own time and id, which
+/// never change, so every claim for one message names the same file, and
+/// creating it exclusively is atomic across isolates and processes with no
+/// lock to take. The claim that creates it wins.
+///
+/// The winner then writes a watermark marker: the message's time capped at the
+/// present, so a future-dated message can't hold back later ones.
+/// [newestShown] is the newest watermark, so it needs no shared cursor file
+/// whose concurrent read-modify-write could move it backwards. If the process
+/// dies between the two files, the fetch only starts earlier, and the claim
+/// markers drop what was already shown.
 ///
 /// Markers whose message is older than the reorder window before the newest
 /// watermark can never be claimed again, so they are deleted. Retention
 /// follows the message's own time, not the capped watermark: a future-dated
 /// message still matches the fetch window after its watermark has aged out, so
-/// its marker must outlive that.
+/// its claim marker must outlive that.
 class DirectoryShownMessageStore implements ShownMessageStore {
   DirectoryShownMessageStore(this._root, {DateTime Function()? now})
     : _now = now ?? DateTime.now;
@@ -57,22 +62,16 @@ class DirectoryShownMessageStore implements ShownMessageStore {
     '${_root.path}/${sha256.convert(community.codeUnits).toString()}',
   );
 
-  /// The time a marker holds is capped at the present, so a future-dated
-  /// message can't hold back later ones.
-  int _watermark(DateTime createdAt) {
-    final now = _now().millisecondsSinceEpoch ~/ 1000;
-    final seconds = createdAt.millisecondsSinceEpoch ~/ 1000;
-    return seconds < now ? seconds : now;
-  }
-
   static const _maxMarkerSeconds = 999999999999;
 
-  static String _digits(int seconds) =>
-      seconds.clamp(0, _maxMarkerSeconds).toString().padLeft(12, '0');
+  static int _seconds(DateTime time) =>
+      (time.millisecondsSinceEpoch ~/ 1000).clamp(0, _maxMarkerSeconds);
 
-  static final _marker = RegExp(r'^([0-9]{12})-([0-9]{12})-([0-9a-f]{64})$');
+  static String _digits(int seconds) => seconds.toString().padLeft(12, '0');
 
-  Future<List<({int watermark, int created, File file})>> _markers(
+  static final _marker = RegExp(r'^([cw])-([0-9]{12})-([0-9a-f]{64})$');
+
+  Future<List<({bool claim, int seconds, File file})>> _markers(
     Directory directory,
   ) async {
     if (!await directory.exists()) return const [];
@@ -81,18 +80,25 @@ class DirectoryShownMessageStore implements ShownMessageStore {
         if (entry is File)
           if (_marker.firstMatch(entry.uri.pathSegments.last) case final match?)
             (
-              watermark: int.parse(match.group(1)!),
-              created: int.parse(match.group(2)!),
+              claim: match.group(1) == 'c',
+              seconds: int.parse(match.group(2)!),
               file: entry,
             ),
     ];
   }
 
+  static int? _newest(Iterable<({bool claim, int seconds, File file})> all) {
+    final watermarks = [
+      for (final marker in all)
+        if (!marker.claim) marker.seconds,
+    ];
+    return watermarks.isEmpty ? null : watermarks.reduce(_max);
+  }
+
   @override
   Future<DateTime?> newestShown(String community) async {
-    final markers = await _markers(_directory(community));
-    if (markers.isEmpty) return null;
-    final newest = markers.map((m) => m.watermark).reduce(_max);
+    final newest = _newest(await _markers(_directory(community)));
+    if (newest == null) return null;
     return DateTime.fromMillisecondsSinceEpoch(newest * 1000, isUtc: true);
   }
 
@@ -107,35 +113,26 @@ class DirectoryShownMessageStore implements ShownMessageStore {
     }
     final directory = _directory(community);
     await directory.create(recursive: true);
-    final watermark = _watermark(createdAt);
-    final created = (createdAt.millisecondsSinceEpoch ~/ 1000).clamp(
-      0,
-      _maxMarkerSeconds,
-    );
-    // An existing marker for this message may carry another watermark if the
-    // clock moved, so look for it by id.
-    final markers = await _markers(directory);
-    if (markers.any((m) => m.file.uri.pathSegments.last.endsWith(eventId))) {
-      return false;
-    }
-    final file = File(
-      '${directory.path}/${_digits(watermark)}-${_digits(created)}-$eventId',
-    );
+    final created = _seconds(createdAt);
     try {
-      await file.create(exclusive: true);
+      await File(
+        '${directory.path}/c-${_digits(created)}-$eventId',
+      ).create(exclusive: true);
     } on PathExistsException {
       return false;
     }
-    // Check the window only after the marker exists. A concurrent claim that
-    // advances the newest time may delete markers below its cutoff, and the
-    // newest time never moves backwards because it is the maximum of marker
-    // names, so a message that was shown and then pruned is rejected here
-    // instead of being claimed a second time.
+    final now = _seconds(_now());
+    final watermark = created < now ? created : now;
+    await File('${directory.path}/w-${_digits(watermark)}-$eventId').create();
+    // Check the window only after the markers exist. A concurrent claim that
+    // advances the newest watermark may delete markers below its cutoff, and
+    // the newest watermark never moves backwards because it is the maximum of
+    // marker names and is never itself below a cutoff, so a message that was
+    // shown and then pruned is rejected here instead of being claimed again.
     final all = await _markers(directory);
-    final newest = all.map((m) => m.watermark).reduce(_max);
-    final cutoff = newest - shownMessageReorderWindow.inSeconds;
+    final cutoff = _newest(all)! - shownMessageReorderWindow.inSeconds;
     for (final marker in all) {
-      if (marker.created < cutoff) {
+      if (marker.seconds < cutoff) {
         try {
           await marker.file.delete();
         } on PathNotFoundException {

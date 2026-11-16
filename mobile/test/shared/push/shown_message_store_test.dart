@@ -22,6 +22,19 @@ void main() {
     expect(results.where((won) => won), hasLength(1));
   });
 
+  test('claims for a future-dated message from clocks a second apart race '
+      'to one winner', () async {
+    final future = now.add(const Duration(hours: 1));
+    final results = await Future.wait([
+      for (var i = 0; i < 20; i++)
+        DirectoryShownMessageStore(
+          directory,
+          now: () => now.add(Duration(seconds: i)),
+        ).claim('community', _id(1), future),
+    ]);
+    expect(results.where((won) => won), hasLength(1));
+  });
+
   test('history is rejected, reordering and future dates are not', () async {
     final store = open();
     Future<bool> claim(int n, Duration age) =>
