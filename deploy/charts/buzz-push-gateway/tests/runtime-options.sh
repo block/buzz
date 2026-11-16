@@ -37,6 +37,24 @@ reject --set networkPolicy.enabled=false --set-string 'networkPolicy.externalPol
 reject --set networkPolicy.externalPolicyName=conflicting-policy
 reject --set terminationGracePeriodSeconds=59
 reject --set podLabels.invalid=true
+
+# Android stays off by default, and enabling it needs a signing digest.
+if grep -q 'BUZZ_PUSH_ANDROID\|BUZZ_PUSH_FCM' "$out/default.yaml"; then
+  echo 'default values must leave Android disabled' >&2
+  exit 1
+fi
+digest=$(printf 'ab%.0s' {1..32})
+helm template push "$chart" --set android.enabled=true \
+  --set "android.signingCertDigests[0]=$digest" >"$out/android.yaml"
+for needle in BUZZ_PUSH_ANDROID_PACKAGE_NAME "$digest" BUZZ_PUSH_ANDROID_BOOT_KEY_DIGESTS \
+  BUZZ_PUSH_ANDROID_REVOCATION_GRACE_SECONDS BUZZ_PUSH_FCM_SERVICE_ACCOUNT_PATH; do
+  grep -q "$needle" "$out/android.yaml" || { echo "Android render lacks $needle" >&2; exit 1; }
+done
+reject --set android.enabled=true
+reject --set 'android.signingCertDigests[0]=abcd'
+reject --set 'android.bootKeyDigests[0]=zz'
+reject --set android.revocationGraceSeconds=60
+reject --set signedCallRateLimit.maxCalls=0
 for label in name instance component; do
   reject --set-string "podLabels.app\\.kubernetes\\.io/$label=override"
 done
