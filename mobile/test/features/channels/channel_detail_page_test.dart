@@ -83,6 +83,7 @@ import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
+import 'package:buzz/shared/read_state/message_read_state.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/channels/small_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
@@ -3445,8 +3446,9 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets('reading the bottom of an archived Solo chat reads a tall '
-        'newest mention', (tester) async {
+    testWidgets('opening an archived Solo chat reads a tall newest mention', (
+      tester,
+    ) async {
       final readState = _SynchronousReadStateNotifier(
         const ReadStateState(
           isReady: true,
@@ -3497,12 +3499,9 @@ void main() {
         find.text('This channel is archived and read-only on mobile.'),
         findsOneWidget,
       );
-      // Only its end shows at the bottom, so it neither fits nor fills the
-      // screen; being the newest message reads it.
-      expect(readState.markedContexts, {
-        'activity:$_channelId': 1100,
-        'msg:tall': 1100,
-      });
+      // Opening a Solo chat reads it through its newest message, archived or
+      // not.
+      expect(readState.markedContexts, {_channelId: 1100});
       expect(tester.takeException(), isNull);
     });
 
@@ -3607,65 +3606,6 @@ void main() {
       expect(row.top, lessThan(screen.top));
       expect(row.bottom, lessThan(screen.bottom));
       expect(readState.markedContexts, {'msg:tall': 1100});
-    });
-
-    testWidgets('reading the bottom of a Solo chat reads a tall newest '
-        'inline reply mention', (tester) async {
-      final readState = _SynchronousReadStateNotifier(
-        const ReadStateState(
-          isReady: true,
-          pubkey: 'self',
-          contexts: {},
-          version: 0,
-        ),
-      );
-      final solo = Channel(
-        id: _channelId,
-        name: 'Solo',
-        channelType: 'stream',
-        visibility: 'private',
-        labels: const ['buzz.solo'],
-        description: '',
-        createdBy: 'self',
-        createdAt: DateTime(2025),
-        memberCount: 2,
-        isMember: true,
-      );
-      final rootId = 'a' * 64;
-      final messages = [
-        _textMsg(
-          id: 'root',
-          pubkey: 'self',
-          content: 'Question',
-          createdAt: 1000,
-        ),
-        _textMsg(
-          id: 'tall-reply',
-          pubkey: 'alice',
-          content: List.filled(120, 'A long answer line.').join('\n\n'),
-          createdAt: 1100,
-          extraTags: [
-            ['e', rootId, '', 'reply'],
-            ['p', 'self'],
-          ],
-        ),
-      ];
-
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: messages,
-          channel: solo,
-          personalChat: true,
-          signingPubkey: 'self',
-          channelMessagesNotifier: _FakeMessagesNotifier(messages),
-          readStateNotifier: readState,
-        ),
-      );
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
-
-      expect(readState.markedContexts['msg:tall-reply'], 1100);
-      expect(tester.takeException(), isNull);
     });
 
     testWidgets('hidden huddle end does not block bottom catch-up', (
@@ -3815,6 +3755,72 @@ void main() {
       // No dwell needed: opening the DM reads through its newest message,
       // replies included.
       expect(readState.markedContexts[_channelId], 1300);
+    });
+
+    testWidgets('opening a Solo chat reads the whole chat', (tester) async {
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      final solo = Channel(
+        id: _channelId,
+        name: 'Solo chat',
+        channelType: 'stream',
+        visibility: 'private',
+        description: '',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        isMember: true,
+      );
+      final messages = [
+        // An agent message that addresses the reader is not covered by the
+        // bottom catch-up mark, and it sits above the viewport.
+        _textMsg(
+          id: 'addressed',
+          pubkey: 'agent',
+          content: 'Here is the walkthrough',
+          createdAt: 1100,
+          extraTags: const [
+            ['p', 'self'],
+          ],
+        ),
+        _textMsg(
+          id: 'tall',
+          pubkey: 'agent',
+          content: List.filled(120, 'A long update line.').join('\n\n'),
+          createdAt: 1300,
+        ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: messages,
+          channel: solo,
+          personalChat: true,
+          signingPubkey: 'self',
+          channelMessagesNotifier: _FakeMessagesNotifier(messages),
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pump();
+
+      // No dwell or scrolling needed: opening the Solo chat reads through its
+      // newest message, which covers the addressed message off screen.
+      expect(readState.markedContexts[_channelId], 1300);
+      expect(
+        isMessageUnread(
+          readState.state,
+          channelId: _channelId,
+          messageId: 'addressed',
+          createdAt: 1100,
+        ),
+        isFalse,
+      );
     });
 
     for (final covered in ['a sheet', 'the app switcher']) {
