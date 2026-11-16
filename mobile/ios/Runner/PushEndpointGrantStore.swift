@@ -45,6 +45,10 @@ final class BuzzPushEndpointGrantKeychainStore: BuzzPushEndpointGrantStore {
     try replaceValue(all, account: Self.recordsAccount)
   }
 
+  func replaceAll(_ records: [BuzzPushEndpointGrantRecord]) throws {
+    try replaceValue(records, account: Self.recordsAccount)
+  }
+
   func pendingEnrollment(
     gatewayOrigin: String,
     relayOrigin: String
@@ -74,7 +78,7 @@ final class BuzzPushEndpointGrantKeychainStore: BuzzPushEndpointGrantStore {
     try replaceValue(all, account: Self.pendingAccount)
   }
 
-  private func pendingEnrollments() throws -> [BuzzPushPendingEnrollmentRecord] {
+  func pendingEnrollments() throws -> [BuzzPushPendingEnrollmentRecord] {
     var query = baseQuery(account: Self.pendingAccount)
     query[kSecReturnData as String] = true
     query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -141,7 +145,8 @@ final class BuzzPushEndpointGrantKeychainStore: BuzzPushEndpointGrantStore {
 
 extension BuzzPushEndpointGrantRecord {
   var flutterArguments: [String: Any] {
-    let arguments: [String: Any] = [
+    var arguments: [String: Any] = [
+      "appAttestKeyId": appAttestKeyId,
       "relayOrigin": relayOrigin,
       "relayPubkey": relayPubkey,
       "installationId": installationId,
@@ -151,6 +156,7 @@ extension BuzzPushEndpointGrantRecord {
       "generation": generation,
       "expiresAt": expiresAt,
     ]
+    if let gatewayInstallationHandle { arguments["gatewayInstallationHandle"] = gatewayInstallationHandle }
     return arguments
   }
 }
