@@ -203,8 +203,11 @@ the child, without joining it.
   `parent` and any other metadata tag is refused. Setting takes a direct owner or admin role in the
   child and a role that may post in the new parent. Clearing takes a direct
   owner or admin role in the child or in its current parent.
-- Only streams and forums without a TTL take part, and a channel with a
-  parent or children cannot be given a TTL. A tree is at most three channels
+- Only streams and forums take part. A channel with a parent may have a TTL
+  and auto-archive; it still reads and grants as before once archived. A
+  project, a channel with children and no parent, may not: the relay refuses
+  a TTL on it, filing a channel under a channel that has a TTL and no parent,
+  and clearing the parent of a channel that has a TTL and children. A tree is at most three channels
   deep (channel, parent, grandparent) and has no loops; the relay refuses a
   change that breaks either. A new parent must not be archived.
 - **Reading.** A private child is readable by its members and by anyone who

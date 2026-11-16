@@ -9,9 +9,13 @@
 //!
 //! A tree is at most three channels deep: a top channel, a child, and a
 //! grandchild ([`MAX_ANCESTORS`] parents above any channel). Only streams and
-//! forums take part, never an ephemeral (TTL) channel. Both rules, and the
-//! absence of loops, are enforced when a parent is written
-//! ([`decide_parent_change`]), under row locks on every channel involved.
+//! forums take part. A channel filed under a parent may auto-archive (have a
+//! TTL); a project, a channel with children and no parent of its own, may
+//! not ([`PROJECTS_MAY_AUTO_ARCHIVE`]). Auto-archive only archives, and an
+//! archived channel still reads and grants as before. These rules, and the
+//! absence of loops, are enforced when a parent or a TTL is written
+//! ([`decide_parent_change`], [`refuse_ttl_on_project`]), under row locks on
+//! every channel involved.
 //!
 //! ## The rule: the closest grant wins
 //!
@@ -434,8 +438,10 @@ pub type ParentChange = Option<Uuid>;
 /// - **Clearing** needs a direct owner or admin row in the child or in its
 ///   current parent. Clearing only narrows who can read the child.
 ///
-/// Both channels must be streams or forums with no TTL, and the new parent
-/// must be live and unarchived. The tree stays at most [`MAX_ANCESTORS`] + 1
+/// Both channels must be streams or forums, and the new parent must be live
+/// and unarchived. Neither the new parent nor a child whose parent is
+/// cleared may be left an auto-archiving project
+/// ([`refuse_auto_archiving_project`]). The tree stays at most [`MAX_ANCESTORS`] + 1
 /// deep and loop-free.
 pub(crate) async fn decide_parent_change(
     tx: &mut crate::AdmittedTx,
@@ -461,17 +467,24 @@ pub(crate) async fn decide_parent_change(
     let actor_role_in_child = direct_role(tx, child, actor).await?;
 
     let Some(parent) = change else {
-        if elevated_in(actor_role_in_child) {
-            return Ok(());
+        let authorized = elevated_in(actor_role_in_child)
+            || match current_parent {
+                Some(current) => elevated_in(direct_role(tx, current, actor).await?),
+                None => false,
+            };
+        if !authorized {
+            return Err(DbError::AccessDenied(
+                "only an owner or admin of the channel or of its parent may clear its parent"
+                    .into(),
+            ));
         }
-        if let Some(current) = current_parent {
-            if elevated_in(direct_role(tx, current, actor).await?) {
-                return Ok(());
-            }
+        // Without a parent, an auto-archiving channel with children would
+        // become an auto-archiving project. A channel filed under `child`
+        // locks `child` first, which this transaction holds.
+        if child_ttl.is_some() {
+            refuse_auto_archiving_project(false, has_live_children(tx, child).await?)?;
         }
-        return Err(DbError::AccessDenied(
-            "only an owner or admin of the channel or of its parent may clear its parent".into(),
-        ));
+        return Ok(());
     };
 
     if !elevated_in(actor_role_in_child) {
@@ -479,9 +492,9 @@ pub(crate) async fn decide_parent_change(
             "only an owner or admin of the channel may set its parent".into(),
         ));
     }
-    if !PARENTABLE_CHANNEL_TYPES.contains(&child_type.as_str()) || child_ttl.is_some() {
+    if !PARENTABLE_CHANNEL_TYPES.contains(&child_type.as_str()) {
         return Err(DbError::InvalidData(
-            "only a stream or forum without a ttl can have a parent".into(),
+            "only a stream or forum can have a parent".into(),
         ));
     }
 
@@ -518,10 +531,14 @@ pub(crate) async fn decide_parent_change(
             let channel_type: String = row.try_get("channel_type")?;
             let ttl: Option<i32> = row.try_get("ttl_seconds")?;
             let archived: bool = row.try_get("archived")?;
-            if !PARENTABLE_CHANNEL_TYPES.contains(&channel_type.as_str()) || ttl.is_some() {
+            if !PARENTABLE_CHANNEL_TYPES.contains(&channel_type.as_str()) {
                 return Err(DbError::InvalidData(
-                    "only a stream or forum without a ttl can be a parent".into(),
+                    "only a stream or forum can be a parent".into(),
                 ));
+            }
+            if ttl.is_some() {
+                let has_parent = row.try_get::<Option<Uuid>, _>("parent_id")?.is_some();
+                refuse_auto_archiving_project(has_parent, true)?;
             }
             if archived {
                 return Err(DbError::AccessDenied(
@@ -621,28 +638,53 @@ async fn subtree_height(tx: &mut crate::AdmittedTx, channel_id: Uuid) -> Result<
     })
 }
 
-/// Refuse, on `tx`, giving `channel_id` a TTL while it has a parent or a
-/// live child: only channels without a TTL take part in a tree. The caller
-/// holds `channel_id`'s row lock, and a parent change locks the new parent
-/// too, so neither can slip past the other.
-pub(crate) async fn refuse_ttl_in_tree(tx: &mut crate::AdmittedTx, channel_id: Uuid) -> Result<()> {
+/// Whether a project, a channel with live children and no parent of its
+/// own, may auto-archive (have a TTL). A channel filed under a parent may,
+/// whatever it holds. Allowing projects too means flipping this, the one
+/// check every path goes through ([`refuse_auto_archiving_project`]).
+const PROJECTS_MAY_AUTO_ARCHIVE: bool = false;
+
+/// Refuse leaving an auto-archiving channel as a project: with live children
+/// and no parent.
+fn refuse_auto_archiving_project(has_parent: bool, has_live_children: bool) -> Result<()> {
+    if PROJECTS_MAY_AUTO_ARCHIVE || has_parent || !has_live_children {
+        return Ok(());
+    }
+    Err(DbError::InvalidData(
+        "a project (a channel with children and no parent) cannot have a ttl".into(),
+    ))
+}
+
+/// Whether `channel_id` has a live child.
+async fn has_live_children(tx: &mut crate::AdmittedTx, channel_id: Uuid) -> Result<bool> {
     let community_id = tx.community();
-    let in_tree: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM channels WHERE community_id = $1 AND id = $2 \
-                        AND parent_id IS NOT NULL) \
-             OR EXISTS (SELECT 1 FROM channels WHERE community_id = $1 AND parent_id = $2 \
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM channels WHERE community_id = $1 AND parent_id = $2 \
                         AND deleted_at IS NULL)",
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .fetch_one(tx.conn())
+    .await?)
+}
+
+/// Refuse, on `tx`, giving `channel_id` a TTL while it is a project
+/// ([`refuse_auto_archiving_project`]). The caller holds `channel_id`'s row
+/// lock, and filing a channel under it locks it too, so neither can slip
+/// past the other.
+pub(crate) async fn refuse_ttl_on_project(
+    tx: &mut crate::AdmittedTx,
+    channel_id: Uuid,
+) -> Result<()> {
+    let community_id = tx.community();
+    let has_parent: bool = sqlx::query_scalar(
+        "SELECT parent_id IS NOT NULL FROM channels WHERE community_id = $1 AND id = $2",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_one(tx.conn())
     .await?;
-    if in_tree {
-        return Err(DbError::InvalidData(
-            "a channel with a parent or children cannot have a TTL".to_string(),
-        ));
-    }
-    Ok(())
+    refuse_auto_archiving_project(has_parent, has_live_children(tx, channel_id).await?)
 }
 
 /// The live private channels under `channel_id`, children and grandchildren.
