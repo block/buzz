@@ -28,7 +28,7 @@ mod usage;
 pub use usage::TurnUsage;
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use acp::{AcpClient, EnvVar, McpServer};
@@ -804,7 +804,7 @@ impl AuthorizedNormalListenerEvent {
         rules: &[SubscriptionRule],
         agent_pubkey_hex: &str,
         owner_pubkey: Option<&str>,
-        dm_member_counts: &HashMap<Uuid, usize>,
+        dm_member_counts: &Arc<Mutex<HashMap<Uuid, usize>>>,
     ) -> Option<NormalListenerIngress> {
         let (buzz_event, effective_author, is_dm) = self.0.into_parts();
         // DM events carry no recipient `p` tag (the relay hides DM membership),
@@ -816,7 +816,10 @@ impl AuthorizedNormalListenerEvent {
         let author_is_owner = owner_pubkey == Some(effective_author.as_str());
         let waived = config::dm_mention_waived(
             is_dm,
-            dm_member_counts.get(&buzz_event.channel_id).copied(),
+            dm_member_counts
+                .lock()
+                .ok()
+                .and_then(|counts| counts.get(&buzz_event.channel_id).copied()),
             author_is_owner,
         );
         let dm_rules: Vec<SubscriptionRule>;
@@ -3079,39 +3082,55 @@ async fn run_harness(
     let rules = startup_subscription_rules(config)?;
 
     // DM member counts power the mention waiver (see config::dm_mention_waived).
-    // Only channels the metadata already classifies as "dm" are queried; a
-    // channel whose member list is not visible yet keeps the mention-only
-    // subscription and is re-evaluated on its next membership update.
+    // Startup resolves them best-effort (single query): a failed or missing
+    // member list only disables the *unmentioned* wake for that channel — the
+    // subscription still delivers its DMs, @mentions keep working, and the
+    // count is retried lazily (see the dm_member_count spawn below) and on
+    // membership updates.
     let dm_channel_ids: Vec<Uuid> = channel_info_map
         .iter()
         .filter(|(_, info)| info.channel_type == "dm")
         .map(|(id, _)| *id)
         .collect();
-    let mut dm_member_counts: HashMap<Uuid, usize> =
-        relay.discover_dm_member_counts(&dm_channel_ids).await;
-    for id in &dm_channel_ids {
-        if !dm_member_counts.contains_key(id) {
+    let dm_member_counts: Arc<Mutex<HashMap<Uuid, usize>>> = Arc::new(Mutex::new(HashMap::new()));
+    match relay.discover_dm_member_counts(&dm_channel_ids).await {
+        Ok(counts) => {
+            *dm_member_counts.lock().unwrap() = counts.clone();
+            for id in &dm_channel_ids {
+                if !counts.contains_key(id) {
+                    tracing::warn!(
+                        channel_id = %id,
+                        "dm member list not visible at startup — unmentioned DM wakes stay disabled for this channel until the count resolves"
+                    );
+                }
+            }
+        }
+        Err(e) => {
             tracing::warn!(
-                channel_id = %id,
-                "dm member list not visible at startup — mention waiver disabled for this channel until a membership update"
+                error = %e,
+                "dm member count lookup failed at startup — unmentioned DM wakes stay disabled until the counts resolve"
             );
         }
     }
+    // Track in-flight lazy member-count resolutions so a busy DM does not
+    // spawn one query per message.
+    let dm_count_inflight: Arc<Mutex<HashSet<Uuid>>> = Arc::new(Mutex::new(HashSet::new()));
 
     let mut channel_filters = config::resolve_channel_filters(config, &channel_ids, &rules);
-    // DM events carry no recipient `p` tag (the relay hides DM membership), so
-    // a require_mention REQ filter would drop every DM message relay-side.
-    // Deliver DM events to the process for precise matching instead: the
-    // waiver applies only to owner-authored 1:1 DM messages (see
-    // config::dm_mention_waived). Member-count resolution is bounded (single
-    // query) — see discover_dm_member_counts.
+    // DM events can never carry a recipient `p` tag (the relay hides DM
+    // membership), so a #p REQ filter would drop every DM message relay-side
+    // and a startup lookup failure could never recover. Deliver every
+    // dm-type channel to the process instead and let the in-process waiver
+    // (config::dm_mention_waived) decide per event — it fails closed when
+    // the member count is unknown, so only confirmed 1:1 owner DMs get
+    // unmentioned wakes.
     let mut dm_waived_subs: HashSet<Uuid> = HashSet::new();
     for (channel_id, filter) in channel_filters.iter_mut() {
-        let is_dm = channel_info_map
+        if channel_info_map
             .get(channel_id)
             .map(|info| info.channel_type == "dm")
-            .unwrap_or(false);
-        if config::dm_mention_waived(is_dm, dm_member_counts.get(channel_id).copied(), true) {
+            .unwrap_or(false)
+        {
             filter.require_mention = false;
             dm_waived_subs.insert(*channel_id);
         }
@@ -3614,26 +3633,47 @@ async fn run_harness(
                                         // unknown type). Re-resolve the mention decision
                                         // and re-subscribe when it flipped: the REQ with
                                         // the same subscription id replaces the old one.
-                                        // The lookups are bounded single queries.
-                                        let is_dm = ctx
+                                        // Membership notifications replay after a
+                                        // reconnect — exactly when lookups can fail —
+                                        // so a failed lookup is NOT definitive: the
+                                        // previous decision is kept and only a resolved
+                                        // answer flips it.
+                                        let metadata = ctx
                                             .channel_info
                                             .resolve_channel_metadata(ch)
-                                            .await
-                                            .map(|info| info.channel_type == "dm")
-                                            .unwrap_or(false);
+                                            .await;
+                                        let Some(info) = metadata else {
+                                            tracing::debug!(
+                                                channel_id = %ch,
+                                                "membership notification: channel metadata unresolved — keeping the previous mention decision"
+                                            );
+                                            continue;
+                                        };
+                                        let is_dm = info.channel_type == "dm";
                                         let count = if is_dm {
-                                            relay
+                                            match relay
                                                 .discover_dm_member_counts(std::slice::from_ref(&ch))
                                                 .await
-                                                .get(&ch)
-                                                .copied()
+                                            {
+                                                // A successful query with no member list
+                                                // for this channel is definitive.
+                                                Ok(counts) => counts.get(&ch).copied(),
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        channel_id = %ch,
+                                                        error = %e,
+                                                        "dm member count lookup failed — keeping the previous mention decision"
+                                                    );
+                                                    continue;
+                                                }
+                                            }
                                         } else {
                                             None
                                         };
                                         if let Some(c) = count {
-                                            dm_member_counts.insert(ch, c);
+                                            dm_member_counts.lock().unwrap().insert(ch, c);
                                         } else if is_dm {
-                                            dm_member_counts.remove(&ch);
+                                            dm_member_counts.lock().unwrap().remove(&ch);
                                         }
                                         let waived_now =
                                             config::dm_mention_waived(is_dm, count, true);
@@ -3684,11 +3724,20 @@ async fn run_harness(
                                             .unwrap_or(false);
                                         let mut count = None;
                                         if is_dm {
-                                            count = relay
+                                            count = match relay
                                                 .discover_dm_member_counts(std::slice::from_ref(&ch))
                                                 .await
-                                                .get(&ch)
-                                                .copied();
+                                            {
+                                                Ok(counts) => counts.get(&ch).copied(),
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        channel_id = %ch,
+                                                        error = %e,
+                                                        "dm member count lookup failed — channel stays mention-only until its next membership update"
+                                                    );
+                                                    None
+                                                }
+                                            };
                                         }
                                         if config::dm_mention_waived(is_dm, count, true) {
                                             filter.require_mention = false;
@@ -3702,10 +3751,10 @@ async fn run_harness(
                                         if is_dm {
                                             match count {
                                                 Some(c) => {
-                                                    dm_member_counts.insert(ch, c);
+                                                    dm_member_counts.lock().unwrap().insert(ch, c);
                                                 }
                                                 None => {
-                                                    dm_member_counts.remove(&ch);
+                                                    dm_member_counts.lock().unwrap().remove(&ch);
                                                 }
                                             }
                                         }
@@ -3956,6 +4005,60 @@ async fn run_harness(
                                 &ctx.channel_info,
                             )
                             .await;
+                            // Lazy DM member-count resolution: a dm-type channel
+                            // whose count is still unknown (failed startup lookup,
+                            // brand-new DM whose member list is not visible yet)
+                            // gets one background query, so the unmentioned wake
+                            // starts working without a restart. Guarded by an
+                            // in-flight set — one query per channel at a time.
+                            if channel_is_dm {
+                                let channel = ingress.buzz_event.channel_id;
+                                let unknown = dm_member_counts
+                                    .lock()
+                                    .ok()
+                                    .map(|counts| !counts.contains_key(&channel))
+                                    .unwrap_or(false);
+                                let in_flight =
+                                    dm_count_inflight.lock().ok().map(|set| {
+                                        !set.contains(&channel)
+                                    });
+                                if unknown && in_flight == Some(true) {
+                                    dm_count_inflight.lock().unwrap().insert(channel);
+                                    let rest = ctx.rest_client.clone();
+                                    let counts = dm_member_counts.clone();
+                                    let inflight = dm_count_inflight.clone();
+                                    tokio::spawn(async move {
+                                        match rest.query_dm_member_count(channel).await {
+                                            Ok(Some(c)) => {
+                                                if let Ok(mut map) = counts.lock() {
+                                                    map.insert(channel, c);
+                                                }
+                                                tracing::info!(
+                                                    channel_id = %channel,
+                                                    members = c,
+                                                    "lazy dm member count resolved"
+                                                );
+                                            }
+                                            Ok(None) => {
+                                                tracing::debug!(
+                                                    channel_id = %channel,
+                                                    "lazy dm member count: no member list yet"
+                                                );
+                                            }
+                                            Err(e) => {
+                                                tracing::debug!(
+                                                    channel_id = %channel,
+                                                    error = %e,
+                                                    "lazy dm member count lookup failed"
+                                                );
+                                            }
+                                        }
+                                        if let Ok(mut set) = inflight.lock() {
+                                            set.remove(&channel);
+                                        }
+                                    });
+                                }
+                            }
                             let session_scope =
                                 ingress.session_scope(config.session_policy, channel_is_dm);
                             tracing::debug!(

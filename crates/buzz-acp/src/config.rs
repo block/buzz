@@ -3299,9 +3299,9 @@ channels = "ALL"
 
     #[test]
     fn dm_mention_not_waived_outside_dm_channels() {
+        // Stream/forum channels never waive, whatever the member count.
         assert!(!dm_mention_waived(false, Some(2), true));
-        // Unknown channel type: not a confirmed DM.
-        assert!(!dm_mention_waived(false, Some(2), true));
+        assert!(!dm_mention_waived(false, Some(5), true));
     }
 
     #[test]

@@ -292,6 +292,29 @@ fn unix_now_secs() -> u64 {
 }
 
 impl RestClient {
+    /// Member count of a single channel from its newest kind 39002 member
+    /// list, for the lazy background resolution path. `Ok(None)` is
+    /// definitive (no member list); `Err` means the lookup failed.
+    pub async fn query_dm_member_count(
+        &self,
+        channel_id: Uuid,
+    ) -> Result<Option<usize>, RelayError> {
+        use nostr::{Alphabet, SingleLetterTag};
+
+        let events = self
+            .query(&[nostr::Filter::new()
+                .kind(Kind::Custom(
+                    buzz_core::kind::KIND_NIP29_GROUP_MEMBERS as u16,
+                ))
+                .custom_tags(
+                    SingleLetterTag::lowercase(Alphabet::D),
+                    [channel_id.to_string()],
+                )
+                .limit(1)])
+            .await?;
+        Ok(dm_member_counts_from_events(&events, &[channel_id]).remove(&channel_id))
+    }
+
     /// Fetch the relay's stable signing identity from its NIP-11 document.
     ///
     /// Relay-authored workflow attribution is trusted only when the event signer
@@ -772,6 +795,50 @@ impl RelayEventPublisher {
     }
 }
 
+/// Reduce raw kind 39002 member-list events to the newest member count per
+/// `#d` channel, restricted to `channel_ids`. Lowercase `p` tags are members.
+fn dm_member_counts_from_events(
+    events: &serde_json::Value,
+    channel_ids: &[Uuid],
+) -> HashMap<Uuid, usize> {
+    let Some(arr) = events.as_array() else {
+        return HashMap::new();
+    };
+    let mut latest: HashMap<Uuid, (i64, usize)> = HashMap::new();
+    for ev in arr {
+        let created = ev.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
+        let Some(tags) = ev.get("tags").and_then(|t| t.as_array()) else {
+            continue;
+        };
+        let mut channel: Option<Uuid> = None;
+        let mut members = 0usize;
+        for tag in tags {
+            if let Some(arr) = tag.as_array() {
+                match arr.first().and_then(|v| v.as_str()) {
+                    Some("d") => {
+                        channel = arr
+                            .get(1)
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse().ok());
+                    }
+                    Some("p") => members += 1,
+                    _ => {}
+                }
+            }
+        }
+        if let Some(id) = channel.filter(|id| channel_ids.contains(id)) {
+            let entry = latest.entry(id).or_insert((0, 0));
+            if created >= entry.0 {
+                *entry = (created, members);
+            }
+        }
+    }
+    latest
+        .into_iter()
+        .map(|(id, (_, members))| (id, members))
+        .collect()
+}
+
 impl HarnessRelay {
     /// Connect to relay and authenticate via NIP-42.
     ///
@@ -896,16 +963,20 @@ impl HarnessRelay {
         Ok(map)
     }
 
-    /// Latest member count per channel, from the channel's kind 39002
+    /// Latest member count per channel, from each channel's kind 39002
     /// (NIP-29 group members) event: lowercase `p` tags are the members, and
     /// the newest event per `#d` channel is the current list. Single query,
-    /// single attempt — callers treat a missing entry as "unknown" and keep
-    /// the mention-only subscription until a membership update re-resolves it.
-    pub async fn discover_dm_member_counts(&self, channel_ids: &[Uuid]) -> HashMap<Uuid, usize> {
+    /// single attempt. `Err` means the lookup itself failed (callers keep
+    /// their previous decision); a successful map simply omits channels with
+    /// no member list, which is definitive.
+    pub async fn discover_dm_member_counts(
+        &self,
+        channel_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, usize>, RelayError> {
         use nostr::{Alphabet, SingleLetterTag};
 
         if channel_ids.is_empty() {
-            return HashMap::new();
+            return Ok(HashMap::new());
         }
         let rest = self.rest_client();
         let d_tag = SingleLetterTag::lowercase(Alphabet::D);
@@ -916,51 +987,8 @@ impl HarnessRelay {
             ))
             .custom_tags(d_tag, d_values)
             .limit(500);
-        let mut counts: HashMap<Uuid, usize> = HashMap::new();
-        let events = match rest.query(&[filter]).await {
-            Ok(events) => events,
-            Err(e) => {
-                debug!("dm member count query failed: {e}");
-                return counts;
-            }
-        };
-        let Some(arr) = events.as_array() else {
-            return counts;
-        };
-        // Newest member-list event per channel wins.
-        let mut latest: HashMap<Uuid, (i64, usize)> = HashMap::new();
-        for ev in arr {
-            let created = ev.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
-            let Some(tags) = ev.get("tags").and_then(|t| t.as_array()) else {
-                continue;
-            };
-            let mut channel: Option<Uuid> = None;
-            let mut members = 0usize;
-            for tag in tags {
-                if let Some(arr) = tag.as_array() {
-                    match arr.first().and_then(|v| v.as_str()) {
-                        Some("d") => {
-                            channel = arr
-                                .get(1)
-                                .and_then(|v| v.as_str())
-                                .and_then(|s| s.parse().ok());
-                        }
-                        Some("p") => members += 1,
-                        _ => {}
-                    }
-                }
-            }
-            if let Some(id) = channel {
-                let entry = latest.entry(id).or_insert((0, 0));
-                if created >= entry.0 {
-                    *entry = (created, members);
-                }
-            }
-        }
-        for (id, (_, members)) in latest {
-            counts.insert(id, members);
-        }
-        counts
+        let events = rest.query(&[filter]).await?;
+        Ok(dm_member_counts_from_events(&events, channel_ids))
     }
 
     /// Build a [`RestClient`] that shares this relay's HTTP credentials.
