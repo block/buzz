@@ -335,9 +335,13 @@ the environment's GitOps values; the chart then renders
 `ghcr.io/block/buzz-push-gateway@sha256:...` and ignores the mutable tag.
 `values-production.yaml` remains an intentionally invalid production-input
 contract: deployment CI must inject the verified image digest, the provisioned
-distributed Apple application identifier, its matching APNs topic, and the actual PostgreSQL network. Set
-`gatewayOrigin` only when enabling the chart’s optional HTTPRoute; it supplies
-the routing hostname and is not passed to the gateway binary. In an
+distributed Apple application identifier, its matching APNs topic, the actual PostgreSQL network, and
+`gatewayOrigin`. `gatewayOrigin` is required in every ingress mode: it is the
+deployment's canonical public HTTPS origin (the origin clients are built with,
+with no port, path or trailing slash). The chart passes it to the binary as
+`BUZZ_PUSH_GATEWAY_ORIGIN`, every management assertion is bound to it (a
+mismatch is `400 invalid_request`), and it also supplies the HTTPRoute hostname
+when the route is enabled. In an
 environment with an existing ingress or service mesh route, keep
 `httpRoute.enabled=false`. If this chart owns a Gateway API route, enable it and
 inject an environment-owned `parentRef`; schema validation rejects an enabled
