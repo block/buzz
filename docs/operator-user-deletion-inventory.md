@@ -24,7 +24,7 @@ cargo build -p buzz-admin
 ```
 
 Set `DATABASE_URL` explicitly. Preview needs SELECT on `communities`,
-`relay_members`, and `channel_members`. The complete workflow also needs write
+`relay_members`, `channel_members`, and `users`. The complete workflow also needs write
 access to the `entity_deletion_*` tables. A production read-only account cannot
 submit, approve, or checkpoint a run.
 
@@ -71,8 +71,12 @@ Preview the inventory:
 ./target/debug/buzz-admin user-deletions inventory --pubkey "$SUBJECT"
 ```
 
-The default is demo if `--pubkey` is omitted. Its two fixed communities have the
-same shape as real discovery:
+Real discovery also includes `agents: [{"pubkey": "<hex>"}]` on each community,
+capturing currently owned agents in the approved inventory. Existing saved
+inventories are not rewritten. The standalone agent DB handler requires this
+explicit list; it is not wired into the dummy workflow.
+
+The default is demo if `--pubkey` is omitted. Its two fixed communities are:
 
 ```json
 {

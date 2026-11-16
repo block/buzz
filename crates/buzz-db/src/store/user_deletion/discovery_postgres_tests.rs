@@ -128,7 +128,7 @@ async fn channel_memberships_discover_participants_deduplicate_and_preserve_owne
                 "participant"
             }
         );
-        assert_eq!(actual.as_object().unwrap().len(), 3);
+        assert_eq!(actual.as_object().unwrap().len(), 4);
     }
     let npub = nostr::PublicKey::parse(PUBKEY)
         .unwrap()
@@ -179,6 +179,7 @@ async fn current_inventory_includes_all_lifecycle_states_and_excludes_removed_me
         expected.push(json!({
             "community_id": id, "label": host,
             "relationship": if role == "owner" { "owner" } else { "participant" },
+            "agents": [],
         }));
     }
     let former = Uuid::new_v4();
