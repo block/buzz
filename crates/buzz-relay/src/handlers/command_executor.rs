@@ -685,7 +685,7 @@ async fn handle_workflow_def(
         .map_err(|e| IngestError::Rejected(format!("invalid: workflow YAML parse error: {e}")))?;
     let workflow_name = extract_tag(event, "name").unwrap_or_else(|| def.name.clone());
 
-    // SEC-006: definitions with exfiltration-capable actions (call_webhook)
+    // SEC-006: definitions with exfiltration-capable actions (call_webhook or send_dm)
     // require elevated channel authority to save — plain membership is not
     // enough, because the workflow will forward channel content outward with
     // the owner's standing authority. Fail-closed on lookup errors.
@@ -697,7 +697,7 @@ async fn handle_workflow_def(
             .map_err(|e| IngestError::Internal(format!("error: role check: {e}")))?;
         if !matches!(role.as_deref(), Some("owner") | Some("admin")) {
             return Err(IngestError::Rejected(
-                "forbidden: workflows with call_webhook actions require the channel owner or admin role"
+                "forbidden: workflows with call_webhook or send_dm actions require the channel owner or admin role"
                     .into(),
             ));
         }
