@@ -7,7 +7,7 @@ use uuid::Uuid;
 /// Inspect user data, run content cleanup, or advance a deletion request.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Inspect or delete one human's community content with relay/workers stopped.
+    /// Inspect or delete one human's community content.
     ContentBatches(content_batches::Args),
     /// Run the media handler directly, without a workflow request.
     MediaBatches(media::Args),
@@ -47,7 +47,7 @@ pub enum Command {
     Run {
         /// Approved request UUID.
         id: Uuid,
-        /// Execute implemented handlers for a real request; stop relay/workers first.
+        /// Execute implemented handlers for a real request.
         #[arg(long)]
         delete: bool,
         /// Trusted relay signer for historical content attribution.

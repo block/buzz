@@ -6,7 +6,7 @@ use buzz_db::{
 };
 use uuid::Uuid;
 
-/// Arguments for direct offline content cleanup.
+/// Arguments for direct content cleanup.
 #[derive(Debug, clap::Args)]
 pub struct Args {
     /// Human public key, as npub or hex. Includes directly owned agents.
@@ -18,7 +18,7 @@ pub struct Args {
     /// Print selected rows without changing data (the default).
     #[arg(long, alias = "print-only", conflicts_with = "delete")]
     read_only: bool,
-    /// Delete selected rows. Stop relay and external workers first.
+    /// Delete selected rows.
     #[arg(long)]
     delete: bool,
     /// Trusted relay signer for historical actor/p attribution.

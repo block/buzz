@@ -6,9 +6,11 @@ complete through placeholder handlers. Demo requests simulate all stages and
 never delete media or content.
 
 Direct `media-batches` and `content-batches` commands remain available for
-operator-controlled cleanup with writers stopped. Neither command proves full
-account erasure. Use a disposable database and versioned storage bucket when
-testing. Owned-community workflow execution is unsupported.
+operator-controlled cleanup. Neither command installs or enforces the account
+gate. Protection against concurrent writes by the target or their agents remains
+unimplemented; neither command proves full account erasure. Use a disposable
+database and versioned storage bucket when testing. Owned-community workflow
+execution is unsupported.
 
 ## Code map: worker, policy, and persistence
 

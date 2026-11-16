@@ -38,6 +38,6 @@ mod discovery_postgres_tests;
 pub enum ExecutionMode {
     /// Print the selected rows without changing source data.
     ReadOnly,
-    /// Delete the selected rows with relay and external workers stopped.
+    /// Delete the selected rows.
     Delete,
 }
