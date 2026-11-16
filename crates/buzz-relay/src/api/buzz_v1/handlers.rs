@@ -6,6 +6,7 @@ use axum::{
     http::HeaderMap,
     response::Response,
 };
+use buzz_db::channel_heads::{ChannelHeads, MAX_CHANNEL_IDS};
 use buzz_db::personal_read::{
     ChannelReadSummary, ReadIntent, SidebarPage, MAX_CHANNELS, MAX_INTENTS,
 };
@@ -16,12 +17,17 @@ use uuid::Uuid;
 
 /// 1..=MAX_CHANNELS unique UUIDs, comma-separated; anything else is invalid.
 fn parse_channel_ids(value: &str) -> Option<Vec<Uuid>> {
+    parse_ids(value, MAX_CHANNELS)
+}
+
+/// 1..=`max` unique UUIDs, comma-separated; anything else is invalid.
+fn parse_ids(value: &str, max: usize) -> Option<Vec<Uuid>> {
     let ids = value
         .split(',')
         .map(|id| Uuid::parse_str(id).ok())
         .collect::<Option<Vec<_>>>()?;
     let unique: std::collections::HashSet<_> = ids.iter().collect();
-    ((1..=MAX_CHANNELS).contains(&ids.len()) && unique.len() == ids.len()).then_some(ids)
+    ((1..=max).contains(&ids.len()) && unique.len() == ids.len()).then_some(ids)
 }
 
 #[derive(Deserialize)]
@@ -130,6 +136,94 @@ async fn refreshed(
         rows.extend(release(state, headers, principal, page).await?.channels);
     }
     Ok(rows)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ChannelHeadsQuery {
+    /// Return only rows changed at or after this `as_of`, Unix seconds.
+    since: Option<i64>,
+    /// Comma-separated channel UUIDs to read; exclusive with `since`.
+    channel_ids: Option<String>,
+}
+
+/// Leaves headroom under [`auth::MAX_RESPONSE_BYTES`] for the envelope.
+const CHANNEL_HEADS_BYTES: usize = auth::MAX_RESPONSE_BYTES - 1024;
+
+/// Keep the most recent rows that fit the response limit. Dropped rows are
+/// the oldest, and `truncated` tells the caller to ask for them by id.
+fn fit_channel_heads(mut page: ChannelHeads) -> Result<ChannelHeads, Error> {
+    let mut bytes = 0;
+    for (index, row) in page.channels.iter().enumerate() {
+        bytes += serde_json::to_vec(row)
+            .map_err(|_| Error::unavailable())?
+            .len()
+            + 1;
+        if bytes > CHANNEL_HEADS_BYTES {
+            page.channels.truncate(index);
+            page.truncated = true;
+            break;
+        }
+    }
+    Ok(page)
+}
+
+/// Every joined channel's stored row in one read: last activity and the
+/// newest top-level message. Display state only; unread is not included.
+pub(super) async fn channel_heads(
+    State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+    query: Result<Query<ChannelHeadsQuery>, axum::extract::rejection::QueryRejection>,
+) -> Result<Response, Error> {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        let principal = auth::authorize(&state, &slot, &headers, &uri, "GET", None).await?;
+        let Query(query) = query.map_err(|_| Error::invalid())?;
+        let ids = match query.channel_ids {
+            Some(ids) => Some(
+                parse_ids(&ids, MAX_CHANNEL_IDS)
+                    .filter(|_| query.since.is_none())
+                    .ok_or_else(Error::invalid)?,
+            ),
+            None => None,
+        };
+        // Unix seconds through year 9999; anything else is not a timestamp.
+        if query
+            .since
+            .is_some_and(|since| !(0..=253_402_300_799).contains(&since))
+        {
+            return Err(Error::invalid());
+        }
+        let page = state
+            .db
+            .channel_heads(
+                principal.tenant.community(),
+                &principal.actor,
+                query.since,
+                ids.as_deref(),
+            )
+            .await
+            .map_err(|_| Error::unavailable())?;
+        let page = fit_channel_heads(page)?;
+        auth::recheck(&state, &headers, &principal).await?;
+        let channels: Vec<_> = page.channels.iter().map(|c| c.channel_id).collect();
+        let memberships = state
+            .db
+            .membership_pairs(
+                principal.tenant.community(),
+                &channels,
+                &[principal.actor.to_bytes().to_vec()],
+            )
+            .await
+            .map_err(|_| Error::unavailable())?;
+        if memberships.len() != channels.len() {
+            return Err(Error::unavailable());
+        }
+        auth::response(page)
+    })
+    .await
+    .map_err(|_| Error::unavailable())?
 }
 
 #[derive(Deserialize)]
@@ -244,5 +338,35 @@ mod tests {
         let body = json!({ "outcomes": outcomes, "channels": channels });
         let bytes = serde_json::to_vec(&body).unwrap().len();
         assert!(bytes <= auth::MAX_RESPONSE_BYTES, "{bytes} bytes");
+    }
+
+    /// Head text is bounded in characters, not bytes: a full list of worst
+    /// case rows is cut to the newest that fit instead of becoming a 503.
+    #[test]
+    fn largest_channel_heads_response_is_cut_to_fit() {
+        use buzz_db::channel_heads::{ChannelHead, Head, HEAD_TEXT_CHARS, MAX_CHANNELS};
+        let row = |text: String| ChannelHead {
+            channel_id: Uuid::max(),
+            activity_at: Some(i64::MAX),
+            activity_pubkey: Some("f".repeat(64)),
+            head: Some(Head {
+                id: "f".repeat(64),
+                pubkey: "f".repeat(64),
+                created_at: i64::MAX,
+                text,
+                edited: true,
+            }),
+        };
+        let page = |text: &str| ChannelHeads {
+            as_of: i64::MAX,
+            channels: vec![row(text.repeat(HEAD_TEXT_CHARS)); MAX_CHANNELS],
+            truncated: false,
+        };
+        // A control character is six bytes of JSON.
+        let cut = fit_channel_heads(page("\u{1}")).ok().unwrap();
+        assert!(cut.truncated && !cut.channels.is_empty() && cut.channels.len() < MAX_CHANNELS);
+        assert!(serde_json::to_vec(&cut).unwrap().len() <= auth::MAX_RESPONSE_BYTES);
+        let whole = fit_channel_heads(page("a")).ok().unwrap();
+        assert!(!whole.truncated && whole.channels.len() == MAX_CHANNELS);
     }
 }

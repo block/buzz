@@ -1,6 +1,6 @@
 //! Community-admitted write transactions.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use buzz_core::CommunityId;
 use chrono::{DateTime, Utc};
@@ -75,6 +75,10 @@ pub struct AdmittedTx {
     community: CommunityId,
     /// Channels whose TTL deadline [`AdmittedTx::commit`] refreshes.
     ttl_refresh_channels: BTreeSet<Uuid>,
+    /// Channel head rows [`AdmittedTx::commit`] hands off once committed.
+    channel_heads: BTreeMap<Uuid, crate::store::channel_heads::Staged>,
+    /// The pool this transaction came from, for that hand-off.
+    pool: sqlx::PgPool,
     push_enqueue: Option<super::push_enqueue::PushEnqueue>,
     push_events: Vec<StagedPushEvent>,
 }
@@ -96,6 +100,8 @@ impl AdmittedTx {
             tx,
             community,
             ttl_refresh_channels: BTreeSet::new(),
+            channel_heads: BTreeMap::new(),
+            pool: store.pool().clone(),
             push_enqueue: None,
             push_events: Vec::new(),
         })
@@ -115,6 +121,8 @@ impl AdmittedTx {
             tx,
             community: lease.community_id,
             ttl_refresh_channels: BTreeSet::new(),
+            channel_heads: BTreeMap::new(),
+            pool: store.pool().clone(),
             push_enqueue: None,
             push_events: Vec::new(),
         })
@@ -168,11 +176,20 @@ impl AdmittedTx {
         }
     }
 
+    /// What this transaction contributes to `channel`'s head row.
+    pub(crate) fn channel_head(
+        &mut self,
+        channel: Uuid,
+    ) -> &mut crate::store::channel_heads::Staged {
+        self.channel_heads.entry(channel).or_default()
+    }
+
     /// Commit the transaction. This is the only commit path for admitted
     /// writes.
     ///
-    /// Refreshes the TTL of every channel that received an event first, as
-    /// the last statement before COMMIT.
+    /// Refreshes the TTL of every channel that received an event as the last
+    /// statements before COMMIT. Channel head rows are handed off only after
+    /// the commit, so no message waits on another message's row.
     pub async fn commit(mut self) -> Result<()> {
         if !self.ttl_refresh_channels.is_empty() {
             crate::store::event_follow_up::refresh_channel_ttls(
@@ -183,6 +200,9 @@ impl AdmittedTx {
             .await?;
         }
         self.tx.commit().await?;
+        if !self.channel_heads.is_empty() {
+            crate::store::channel_heads::submit(&self.pool, self.community, self.channel_heads);
+        }
         if let Some(producer) = self.push_enqueue {
             for event in self.push_events {
                 producer.submit(self.community, event.event_id, event.created_at);

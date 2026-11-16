@@ -525,7 +525,8 @@ async fn accessory_discovery_is_host_bound_and_opt_in() {
                         doc["buzz_v1"],
                         json!({"version":1,"base_path":"/buzz/v1","retention_seconds":1234,
                             "max_channels":20,"max_intents":100,
-                            "eligible_kinds":[9, 40002, 45001, 45003]})
+                            "eligible_kinds":[9, 40002, 45001, 45003],
+                            "channel_heads":true})
                     );
                 }
             }
@@ -749,4 +750,130 @@ async fn accessory_signed_kind5_deletion_clears_another_readers_sidebar_count() 
 #[ignore = "requires Postgres"]
 async fn accessory_signed_kind9005_deletion_clears_another_readers_sidebar_count() {
     signed_sidebar_deletion(9005).await;
+}
+
+/// The channel-heads route returns the caller's own rows and nobody else's,
+/// behind the same proof as the rest of the accessory API.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn channel_heads_route_returns_joined_rows_only() {
+    use buzz_db::channel::{ChannelType, ChannelVisibility};
+    let fixture = crate::api::bridge::postgres_tests::bridge_handler_test_state()
+        .await
+        .unwrap();
+    let mut state = (*fixture).clone();
+    let config = Arc::make_mut(&mut state.config);
+    config.require_auth_token = true;
+    config.require_relay_membership = true;
+    config.buzz_v1_enabled = true;
+    state.nip98_replay = Arc::new(buzz_pubsub::RedisNip98ReplayGuard::new(
+        state.redis_pool.clone(),
+    ));
+    let state = Arc::new(state);
+    let host = format!("heads-{}.local", uuid::Uuid::new_v4());
+    let community = state
+        .db
+        .ensure_configured_community(&host)
+        .await
+        .unwrap()
+        .id;
+    let actor = Keys::generate();
+    let other = Keys::generate();
+    let mut channels = Vec::new();
+    for key in [&actor, &other] {
+        state
+            .db
+            .add_relay_member(
+                community,
+                &key.public_key().to_hex(),
+                "member",
+                None,
+                &nostr::Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .unwrap();
+        let channel = state
+            .db
+            .create_channel(
+                community,
+                &format!("heads-{}", uuid::Uuid::new_v4().simple()),
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                &key.public_key().to_bytes(),
+                None,
+            )
+            .await
+            .unwrap()
+            .id;
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey) \
+             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+        )
+        .bind(community.as_uuid())
+        .bind(channel)
+        .bind(key.public_key().to_bytes().as_slice())
+        .execute(state.db.pool())
+        .await
+        .unwrap();
+        let event = EventBuilder::new(Kind::Custom(9), "hello")
+            .sign_with_keys(key)
+            .unwrap();
+        state
+            .db
+            .insert_event(community, &event, Some(channel))
+            .await
+            .unwrap();
+        channels.push((channel, event));
+    }
+    let get = |path: String| {
+        let (state, host, auth) = (
+            state.clone(),
+            host.clone(),
+            proof(&actor, &host, &path, "GET", None),
+        );
+        async move { request(state, &host, &path, "GET", Some(&auth), b"").await }
+    };
+    let (mine, event) = &channels[0];
+    let (theirs, _) = &channels[1];
+
+    let (status, body) = get("/buzz/v1/me/channel-heads".into()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["truncated"], json!(false));
+    assert_eq!(body["channels"].as_array().unwrap().len(), 1, "{body}");
+    let row = &body["channels"][0];
+    assert_eq!(row["channel_id"], json!(mine));
+    assert_eq!(row["activity_pubkey"], json!(actor.public_key().to_hex()));
+    assert_eq!(row["head"]["id"], json!(event.id.to_hex()));
+    assert_eq!(row["head"]["text"], json!("hello"));
+    let as_of = body["as_of"].as_i64().unwrap();
+
+    // Another member's channel is absent even when named.
+    let (status, body) = get(format!(
+        "/buzz/v1/me/channel-heads?channel_ids={mine},{theirs}"
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["channels"].as_array().unwrap().len(), 1, "{body}");
+
+    let (status, _) = get(format!("/buzz/v1/me/channel-heads?since={}", as_of + 3600)).await;
+    assert_eq!(status, StatusCode::OK);
+    for query in [
+        format!("since={as_of}&channel_ids={mine}"),
+        "since=-1".to_owned(),
+        "since=soon".to_owned(),
+        format!("channel_ids={mine},{mine}"),
+        "limit=1".to_owned(),
+    ] {
+        let (status, body) = get(format!("/buzz/v1/me/channel-heads?{query}")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
+    }
+    let path = "/buzz/v1/me/channel-heads";
+    assert_eq!(
+        request(state.clone(), &host, path, "GET", None, b"")
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
 }

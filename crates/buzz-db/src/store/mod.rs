@@ -10,6 +10,8 @@ pub mod api_token;
 pub mod archived_identities;
 /// Channel lifecycle and metadata persistence.
 pub mod channel;
+/// Stored per-channel sidebar rows: last activity and newest top-level message.
+pub mod channel_heads;
 /// Channel membership and roster persistence.
 pub mod channel_members;
 /// Community lifecycle and host-map persistence.
@@ -124,3 +126,6 @@ pub mod media;
 mod media_postgres_tests;
 #[cfg(test)]
 mod message_edit_state_postgres_tests;
+
+#[cfg(test)]
+mod channel_heads_postgres_tests;
