@@ -1,6 +1,8 @@
 /// NIP-42 authentication handler.
 pub mod admin_action_worker;
 pub mod admin_outbox_worker;
+#[cfg(test)]
+mod artifact_conversation_postgres_tests;
 /// NIP-AR Sync subscriptions.
 pub mod artifact_sync;
 #[cfg(test)]
@@ -49,7 +51,7 @@ pub mod multinode_fanout;
 /// Reading and writing a private channel through its parents.
 pub(crate) mod parent_access;
 #[cfg(test)]
-mod parent_access_postgres_tests;
+pub(crate) mod parent_access_postgres_tests;
 /// Product-feedback validation + deployment sidecar persistence.
 pub mod product_feedback;
 #[allow(dead_code, missing_docs)]

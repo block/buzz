@@ -140,7 +140,6 @@ impl Db {
         let mut qb = QueryBuilder::new("SELECT e.id,e.pubkey,e.created_at,e.kind,e.tags,e.content,e.sig,e.received_at,e.channel_id FROM events e ");
         super::artifact_query::predicates(&mut qb, community, reader, query);
         qb.push(" AND a.artifact_id=ANY(").push_bind(ids).push(")");
-        qb.push(" AND EXISTS (SELECT 1 FROM channels c WHERE c.community_id=e.community_id AND c.id=e.channel_id AND c.ttl_seconds IS NULL)");
         qb.push(" LIMIT ").push_bind(PAGE_ROWS as i64);
         let mut events = Vec::new();
         let mut bytes = 0;
@@ -176,7 +175,7 @@ const CANDIDATES: &str = concat!(
     r#"
 WITH readable AS NOT MATERIALIZED (
     SELECT c.id FROM channels c
-    WHERE c.community_id=$1 AND c.deleted_at IS NULL AND c.ttl_seconds IS NULL
+    WHERE c.community_id=$1 AND c.deleted_at IS NULL
       AND (NOT $12::boolean OR c.id=ANY($9))
       AND (c.channel_type::text=ANY($11) OR c.id=ANY($9))
       AND ((c.visibility='open' AND (NOT c.unlisted OR c.id=ANY($9))) OR EXISTS (

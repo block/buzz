@@ -130,14 +130,14 @@ async fn lifecycle_cas_queries_move_redaction_and_retention() {
     let create = f.revision(d, "create", f.a, None, &f.owner, project("A"));
     assert!(matches!(
         f.accept(&create, None).await,
-        ArtifactOutcome::Accepted(_)
+        ArtifactOutcome::Accepted { .. }
     ));
     let x = f.revision(d, "update", f.a, Some(&create), &f.owner, project("B"));
     let y = f.revision(d, "update", f.a, Some(&create), &f.peer, project("B"));
     let (rx, ry) = tokio::join!(f.accept(&x, None), f.accept(&y, None));
     let head = match (rx, ry) {
-        (ArtifactOutcome::Accepted(_), ArtifactOutcome::Conflict(..)) => &x,
-        (ArtifactOutcome::Conflict(..), ArtifactOutcome::Accepted(_)) => &y,
+        (ArtifactOutcome::Accepted { .. }, ArtifactOutcome::Conflict(..)) => &x,
+        (ArtifactOutcome::Conflict(..), ArtifactOutcome::Accepted { .. }) => &y,
         other => panic!("exactly one CAS winner: {other:?}"),
     };
     assert!(matches!(
@@ -161,7 +161,7 @@ async fn lifecycle_cas_queries_move_redaction_and_retention() {
     );
     assert!(matches!(
         f.accept(&wrong, None).await,
-        ArtifactOutcome::Accepted(_)
+        ArtifactOutcome::Accepted { .. }
     ));
     assert_eq!(f.count(&f.owner, current("B")).await, 0);
 
@@ -171,7 +171,7 @@ async fn lifecycle_cas_queries_move_redaction_and_retention() {
         f.accept(&moved, Some(f.b)).await,
         ArtifactOutcome::Conflict(..)
     ));
-    let ArtifactOutcome::Accepted(stored) = f.accept(&moved, Some(f.a)).await else {
+    let ArtifactOutcome::Accepted { events: stored, .. } = f.accept(&moved, Some(f.a)).await else {
         panic!("move accepted");
     };
     let removal = &stored[1];
@@ -231,7 +231,7 @@ async fn lifecycle_cas_queries_move_redaction_and_retention() {
     let deleted = f.revision(d, "delete", f.b, Some(&moved), &f.owner, vec![]);
     assert!(matches!(
         f.accept(&deleted, None).await,
-        ArtifactOutcome::Accepted(_)
+        ArtifactOutcome::Accepted { .. }
     ));
     assert_eq!(f.count(&f.owner, all.clone()).await, 0);
     let update = f.revision(d, "update", f.b, Some(&deleted), &f.owner, vec![]);
@@ -242,7 +242,7 @@ async fn lifecycle_cas_queries_move_redaction_and_retention() {
     let restore = f.revision(d, "restore", f.b, Some(&deleted), &f.peer, vec![]);
     assert!(matches!(
         f.accept(&restore, None).await,
-        ArtifactOutcome::Accepted(_)
+        ArtifactOutcome::Accepted { .. }
     ));
     assert_eq!(f.count(&f.owner, all.clone()).await, 1);
     // Reads observe removed private membership.
@@ -278,7 +278,7 @@ async fn system_channel_artifacts_are_read_only_by_name() {
         let create = f.revision(Uuid::new_v4(), "create", home, None, &f.owner, vec![]);
         assert!(matches!(
             f.accept(&create, None).await,
-            ArtifactOutcome::Accepted(_)
+            ArtifactOutcome::Accepted { .. }
         ));
     }
     for reader in [&f.owner, &f.peer] {
@@ -329,7 +329,7 @@ async fn unlisted_channel_artifacts_are_read_by_name_for_non_members() {
         let create = f.revision(Uuid::new_v4(), "create", home, None, &f.owner, vec![]);
         assert!(matches!(
             f.accept(&create, None).await,
-            ArtifactOutcome::Accepted(_)
+            ArtifactOutcome::Accepted { .. }
         ));
     }
     let unnamed = serde_json::json!({"artifact":"current"});
@@ -380,12 +380,12 @@ async fn artifacts_of_a_later_channel_type_are_read_only_by_name() {
         let create = f.revision(d, "create", home, None, &f.owner, vec![]);
         assert!(matches!(
             f.accept(&create, None).await,
-            ArtifactOutcome::Accepted(_)
+            ArtifactOutcome::Accepted { .. }
         ));
         let update = f.revision(d, "update", home, Some(&create), &f.owner, vec![]);
         assert!(matches!(
             f.accept(&update, None).await,
-            ArtifactOutcome::Accepted(_)
+            ArtifactOutcome::Accepted { .. }
         ));
         ds.push(d.to_string());
     }
@@ -420,7 +420,7 @@ async fn repeated_moves_get_distinct_source_safe_markers() {
     let again = f.revision(d, "move", f.b, Some(&back), &f.owner, vec![]);
     assert!(matches!(
         f.accept(&create, None).await,
-        ArtifactOutcome::Accepted(_)
+        ArtifactOutcome::Accepted { .. }
     ));
     let mut markers = Vec::new();
     for (event, source, replaced) in [
@@ -428,7 +428,8 @@ async fn repeated_moves_get_distinct_source_safe_markers() {
         (&back, f.b, &there),
         (&again, f.a, &back),
     ] {
-        let ArtifactOutcome::Accepted(stored) = f.accept(event, Some(source)).await else {
+        let ArtifactOutcome::Accepted { events: stored, .. } = f.accept(event, Some(source)).await
+        else {
             panic!("move accepted");
         };
         let marker = stored[1].event.clone();
@@ -477,7 +478,7 @@ async fn root_anchor_and_tenant_boundaries() {
     let create = f.revision(d, "create", f.a, None, &f.owner, root());
     assert!(matches!(
         f.accept(&create, None).await,
-        ArtifactOutcome::Accepted(_)
+        ArtifactOutcome::Accepted { .. }
     ));
     // Later loss of the anchor does not block edits that keep it.
     sqlx::query("UPDATE events SET deleted_at=now() WHERE community_id=$1 AND id=$2")
@@ -489,7 +490,7 @@ async fn root_anchor_and_tenant_boundaries() {
     let update = f.revision(d, "update", f.a, Some(&create), &f.peer, root());
     assert!(matches!(
         f.accept(&update, None).await,
-        ArtifactOutcome::Accepted(_)
+        ArtifactOutcome::Accepted { .. }
     ));
     let bad_delete = f.revision(d, "delete", f.a, Some(&update), &f.owner, vec![]);
     assert!(matches!(
@@ -505,7 +506,7 @@ async fn root_anchor_and_tenant_boundaries() {
     let same_id = other.revision(d, "create", other.a, None, &other.owner, vec![]);
     assert!(matches!(
         other.accept(&same_id, None).await,
-        ArtifactOutcome::Accepted(_)
+        ArtifactOutcome::Accepted { .. }
     ));
     assert_eq!(
         other
@@ -531,8 +532,8 @@ async fn concurrent_artifacts_on_ttl_channel_commit() {
     let a = f.revision(Uuid::new_v4(), "create", f.a, None, &f.owner, vec![]);
     let b = f.revision(Uuid::new_v4(), "create", f.a, None, &f.peer, vec![]);
     let (a, b) = tokio::join!(f.accept(&a, None), f.accept(&b, None));
-    assert!(matches!(a, ArtifactOutcome::Accepted(_)));
-    assert!(matches!(b, ArtifactOutcome::Accepted(_)));
+    assert!(matches!(a, ArtifactOutcome::Accepted { .. }));
+    assert!(matches!(b, ArtifactOutcome::Accepted { .. }));
     let live: bool = sqlx::query_scalar(
         "SELECT ttl_deadline>now() FROM channels WHERE community_id=$1 AND id=$2",
     )
@@ -602,14 +603,14 @@ async fn head_outside_authorized_channel_matches_missing_head() {
     let create = f.revision(d, "create", f.a, None, &f.owner, vec![]);
     assert!(matches!(
         f.accept(&create, None).await,
-        ArtifactOutcome::Accepted(_)
+        ArtifactOutcome::Accepted { .. }
     ));
     let gone = Uuid::new_v4();
     let deleted_d = Uuid::new_v4();
     let deleted_create = f.revision(deleted_d, "create", f.a, None, &f.owner, vec![]);
     assert!(matches!(
         f.accept(&deleted_create, None).await,
-        ArtifactOutcome::Accepted(_)
+        ArtifactOutcome::Accepted { .. }
     ));
     let deleted = f.revision(
         deleted_d,
@@ -621,7 +622,7 @@ async fn head_outside_authorized_channel_matches_missing_head() {
     );
     assert!(matches!(
         f.accept(&deleted, None).await,
-        ArtifactOutcome::Accepted(_)
+        ArtifactOutcome::Accepted { .. }
     ));
     let retyped = {
         let mut tags: Vec<Vec<String>> = vec![
@@ -688,7 +689,7 @@ async fn head_outside_authorized_channel_matches_missing_head() {
     let update = f.revision(d, "update", f.a, Some(&create), &f.peer, vec![]);
     assert!(matches!(
         f.accept(&update, None).await,
-        ArtifactOutcome::Accepted(_)
+        ArtifactOutcome::Accepted { .. }
     ));
 }
 
@@ -707,7 +708,7 @@ async fn sync_snapshot_pages_are_one_cut_and_head_includes_deletions() {
         let create = f.revision(*d, "create", f.a, None, &f.owner, vec![]);
         assert!(matches!(
             f.accept(&create, None).await,
-            ArtifactOutcome::Accepted(_)
+            ArtifactOutcome::Accepted { .. }
         ));
         heads.push(create);
     }
@@ -715,7 +716,7 @@ async fn sync_snapshot_pages_are_one_cut_and_head_includes_deletions() {
     let deleted = f.revision(ids[4], "delete", f.a, Some(&heads[4]), &f.owner, vec![]);
     assert!(matches!(
         f.accept(&deleted, None).await,
-        ArtifactOutcome::Accepted(_)
+        ArtifactOutcome::Accepted { .. }
     ));
     let reader = f.owner.public_key();
     let mut snapshot =
@@ -735,7 +736,7 @@ async fn sync_snapshot_pages_are_one_cut_and_head_includes_deletions() {
     let late_create = f.revision(late, "create", f.a, None, &f.owner, vec![]);
     assert!(matches!(
         f.accept(&late_create, None).await,
-        ArtifactOutcome::Accepted(_)
+        ArtifactOutcome::Accepted { .. }
     ));
     let mut seen: Vec<_> = first.iter().map(|e| e.event.id).collect();
     loop {
@@ -814,7 +815,7 @@ async fn sync_snapshot_pages_are_one_cut_and_head_includes_deletions() {
     let create = f.revision(private, "create", f.b, None, &f.owner, vec![]);
     assert!(matches!(
         f.accept(&create, None).await,
-        ArtifactOutcome::Accepted(_)
+        ArtifactOutcome::Accepted { .. }
     ));
     assert!(f
         .db
@@ -874,7 +875,7 @@ async fn artifacts_are_read_synced_and_revoked_through_a_parent() {
     for event in [&in_child, &in_hidden] {
         assert!(matches!(
             f.accept(event, None).await,
-            ArtifactOutcome::Accepted(_)
+            ArtifactOutcome::Accepted { .. }
         ));
     }
     let unnamed = serde_json::json!({"artifact":"current"});
@@ -984,7 +985,7 @@ async fn a_restricted_childs_artifacts_stay_hidden_from_the_project() {
     let in_child = f.revision(artifact, "create", f.b, None, &f.owner, vec![]);
     assert!(matches!(
         f.accept(&in_child, None).await,
-        ArtifactOutcome::Accepted(_)
+        ArtifactOutcome::Accepted { .. }
     ));
     let ids = |events: Vec<buzz_core::StoredEvent>| {
         events.into_iter().map(|e| e.event.id).collect::<Vec<_>>()

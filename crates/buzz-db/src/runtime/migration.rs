@@ -902,7 +902,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 90);
+        assert_eq!(migrations.len(), 91);
         assert!(migrations[83]
             .sql
             .as_str()
@@ -940,6 +940,12 @@ mod postgres_tests {
         assert!(parent_access
             .contains("ADD COLUMN IF NOT EXISTS parent_access TEXT NOT NULL DEFAULT 'member'"));
         assert!(!parent_access.to_ascii_uppercase().contains("UPDATE "));
+        // Artifact conversations (0091): one additive enum value.
+        let artifact_type = strip_sql_comments(migrations[90].sql.as_str());
+        assert_eq!(
+            artifact_type.trim(),
+            "ALTER TYPE channel_type ADD VALUE IF NOT EXISTS 'artifact';"
+        );
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }

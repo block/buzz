@@ -44,7 +44,8 @@ pub const MAX_CHANNEL_LABEL_LEN: usize = 64;
 /// Names a label may not take, because the channel type uses the same `t`
 /// tag. A label equal to one of these could make a channel look like
 /// another type. The list includes types that a later relay may add.
-pub const RESERVED_CHANNEL_LABELS: &[&str] = &["stream", "forum", "dm", "workflow", "system"];
+pub const RESERVED_CHANNEL_LABELS: &[&str] =
+    &["stream", "forum", "dm", "workflow", "system", "artifact"];
 
 /// Why a set of channel labels was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -377,6 +378,11 @@ pub enum ChannelType {
     /// filter names it, or asks for system channels with `#t:["system"]` on
     /// kinds 39000-39003.
     System,
+    /// A NIP-AR artifact's conversation, such as a task's comments. Its ID is
+    /// derived from the artifact ([`crate::artifact::conversation_id`]), its
+    /// parent is the artifact's home, and it has no members or settings of
+    /// its own: who reads and posts comes from the home.
+    Artifact,
 }
 
 /// The channel types that every client knew before NIP-CL added new ones.
@@ -401,6 +407,7 @@ impl ChannelType {
             Self::Dm => "dm",
             Self::Workflow => "workflow",
             Self::System => "system",
+            Self::Artifact => "artifact",
         }
     }
 
@@ -409,7 +416,7 @@ impl ChannelType {
     /// private unless its creator asks for open.
     pub fn default_visibility(&self) -> ChannelVisibility {
         match self {
-            Self::System => ChannelVisibility::Private,
+            Self::System | Self::Artifact => ChannelVisibility::Private,
             Self::Stream | Self::Forum | Self::Dm | Self::Workflow => ChannelVisibility::Open,
         }
     }
@@ -431,6 +438,7 @@ impl FromStr for ChannelType {
             "dm" => Ok(Self::Dm),
             "workflow" => Ok(Self::Workflow),
             "system" => Ok(Self::System),
+            "artifact" => Ok(Self::Artifact),
             other => Err(format!("unknown channel type: {other:?}")),
         }
     }
@@ -570,6 +578,7 @@ mod tests {
             let _: ChannelType = name.parse().expect("legacy type parses");
         }
         assert!(!LEGACY_CHANNEL_TYPES.contains(&ChannelType::System.as_str()));
+        assert!(!LEGACY_CHANNEL_TYPES.contains(&ChannelType::Artifact.as_str()));
     }
 
     /// Every channel type name is reserved, so a label cannot pose as a type.
@@ -578,12 +587,13 @@ mod tests {
     /// until its name is in `RESERVED_CHANNEL_LABELS`.
     #[test]
     fn every_channel_type_name_is_a_reserved_label() {
-        const ALL: [ChannelType; 5] = [
+        const ALL: [ChannelType; 6] = [
             ChannelType::Stream,
             ChannelType::Forum,
             ChannelType::Dm,
             ChannelType::Workflow,
             ChannelType::System,
+            ChannelType::Artifact,
         ];
         for channel_type in ALL {
             match channel_type {
@@ -591,7 +601,8 @@ mod tests {
                 | ChannelType::Forum
                 | ChannelType::Dm
                 | ChannelType::Workflow
-                | ChannelType::System => {}
+                | ChannelType::System
+                | ChannelType::Artifact => {}
             }
             assert!(
                 RESERVED_CHANNEL_LABELS.contains(&channel_type.as_str()),

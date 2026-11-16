@@ -14,9 +14,16 @@ use uuid::Uuid;
 /// which the caller discloses after authorizing its channel.
 #[derive(Debug)]
 pub enum ArtifactOutcome {
-    /// Accepted once; stored events to publish (the revision, plus the source
-    /// removal on a move).
-    Accepted(Vec<StoredEvent>),
+    /// Accepted once.
+    Accepted {
+        /// Stored events to publish (the revision, plus the source removal on
+        /// a move).
+        events: Vec<StoredEvent>,
+        /// The artifact's conversation, when this revision changed who may
+        /// read it (a move, delete or restore). Its readers' caches and live
+        /// subscriptions need refreshing after commit.
+        conversation: Option<Uuid>,
+    },
     /// Identical previously accepted event; no repeated side effects.
     Duplicate,
     /// `prev` or identity no longer matches; the client should reconcile.
@@ -24,6 +31,23 @@ pub enum ArtifactOutcome {
     /// Protocol violation with a public-safe reason.
     Rejected(&'static str),
 }
+
+/// Outcome of a request to open an artifact's conversation.
+#[derive(Debug)]
+pub enum ConversationOutcome {
+    /// Created, with the stored kind:9007 to publish.
+    Created(Box<StoredEvent>),
+    /// It already existed; nothing was written.
+    Exists,
+    /// The artifact is missing, deleted, or not in the home the caller
+    /// authorized. Answered like a missing artifact.
+    Unavailable,
+    /// Refused with a public-safe reason.
+    Rejected(&'static str),
+}
+
+/// Refusal for a move that would take a conversation where none may be.
+pub const CONVERSATION_CANNOT_MOVE: &str = "this artifact's comments can't move there";
 
 /// Conflict for a non-create revision whose artifact is missing or lives
 /// outside every channel the sender was authorized for.
@@ -173,6 +197,21 @@ impl Db {
                 }
             }
         }
+        if source != Some(env.home) {
+            // A conversation holds comments, never artifacts.
+            let home_type: Option<String> = sqlx::query_scalar(
+                "SELECT channel_type::text FROM channels WHERE community_id=$1 AND id=$2",
+            )
+            .bind(community.as_uuid())
+            .bind(env.home)
+            .fetch_optional(tx.conn())
+            .await?;
+            if home_type.as_deref() == Some(buzz_core::channel::ChannelType::Artifact.as_str()) {
+                return Ok(ArtifactOutcome::Rejected(
+                    "an artifact cannot live in a conversation",
+                ));
+            }
+        }
         if head.is_none() || env.root != old_root || source != Some(env.home) {
             if let Some(root) = &env.root {
                 let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM events WHERE community_id=$1 AND id=$2 AND channel_id=$3 AND deleted_at IS NULL AND kind IN (9,40002,45001,45003))")
@@ -195,6 +234,16 @@ impl Db {
         .await?;
         sqlx::query("INSERT INTO artifact_heads (community_id,artifact_id,event_id,channel_id,artifact_type,root,deleted,modified_at) VALUES ($1,$2,$3,$4,$5,$6,$7,clock_timestamp()) ON CONFLICT (community_id,artifact_id) DO UPDATE SET event_id=EXCLUDED.event_id,channel_id=EXCLUDED.channel_id,root=EXCLUDED.root,deleted=EXCLUDED.deleted,modified_at=clock_timestamp()")
             .bind(community.as_uuid()).bind(env.id).bind(event.id.as_bytes().as_slice()).bind(env.home).bind(&env.artifact_type).bind(&env.root).bind(env.op == ArtifactOp::Delete).execute(tx.conn()).await?;
+        let conversation = match env.op {
+            ArtifactOp::Move | ArtifactOp::Delete | ArtifactOp::Restore => {
+                match follow_artifact(&mut tx, env).await? {
+                    Follow::Unchanged => None,
+                    Follow::Changed(id) => Some(id),
+                    Follow::Refused(reason) => return Ok(ArtifactOutcome::Rejected(reason)),
+                }
+            }
+            _ => None,
+        };
         let (stored, _) =
             crate::event::insert_event_in_transaction(&mut tx, event, Some(env.home)).await?;
         crate::insert_mentions_in_transaction(&mut tx, event, Some(env.home)).await?;
@@ -206,6 +255,151 @@ impl Db {
             accepted.push(stored);
         }
         tx.commit().await?;
-        Ok(ArtifactOutcome::Accepted(accepted))
+        Ok(ArtifactOutcome::Accepted {
+            events: accepted,
+            conversation,
+        })
     }
+
+    /// Open `artifact`'s conversation with the kind:9007 `event`, whose `h`
+    /// the caller checked is [`buzz_core::artifact::conversation_id`]. The
+    /// caller authorized the sender to post in `authorized_home`; the
+    /// artifact must live there and not be deleted. The conversation is a
+    /// private `artifact` channel filed under the home, with no members:
+    /// everyone reaches it through the home. Opening one that exists writes
+    /// nothing.
+    pub async fn ensure_artifact_conversation(
+        &self,
+        community: CommunityId,
+        event: &Event,
+        artifact: Uuid,
+        authorized_home: Uuid,
+    ) -> Result<ConversationOutcome> {
+        let conversation = buzz_core::artifact::conversation_id(&artifact.to_string());
+        let mut tx = self.begin_event_write_transaction(community).await?;
+        sqlx::query("SET LOCAL statement_timeout='5s'")
+            .execute(tx.conn())
+            .await?;
+        // The artifact's own lock: a revision that moves or deletes it waits.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(format!("artifact:{}:{}", community.as_uuid(), artifact))
+            .execute(tx.conn())
+            .await?;
+        let head: Option<(Uuid, bool)> = sqlx::query_as(
+            "SELECT channel_id, deleted FROM artifact_heads WHERE community_id=$1 AND artifact_id=$2",
+        )
+        .bind(community.as_uuid())
+        .bind(artifact)
+        .fetch_optional(tx.conn())
+        .await?;
+        let Some((home, false)) = head else {
+            return Ok(ConversationOutcome::Unavailable);
+        };
+        if home != authorized_home {
+            return Ok(ConversationOutcome::Unavailable);
+        }
+        let existing: Option<String> = sqlx::query_scalar(
+            "SELECT channel_type::text FROM channels WHERE community_id=$1 AND id=$2",
+        )
+        .bind(community.as_uuid())
+        .bind(conversation)
+        .fetch_optional(tx.conn())
+        .await?;
+        match existing.as_deref() {
+            None => {}
+            Some(t) if t == buzz_core::channel::ChannelType::Artifact.as_str() => {
+                return Ok(ConversationOutcome::Exists)
+            }
+            // Ingest refuses other channels at derived addresses; one made
+            // before that rule is never treated as the conversation.
+            Some(_) => {
+                return Ok(ConversationOutcome::Rejected(
+                    "conversation address is taken",
+                ))
+            }
+        }
+        if let Some(reason) = crate::channel_tree::refuse_conversation_home(&mut tx, home).await? {
+            return Ok(ConversationOutcome::Rejected(reason));
+        }
+        sqlx::query(
+            "INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by, parent_id) \
+             VALUES ($1, $2, $3, 'artifact', 'private', $4, $5)",
+        )
+        .bind(conversation)
+        .bind(community.as_uuid())
+        .bind(artifact.to_string())
+        .bind(event.pubkey.to_bytes().as_slice())
+        .bind(home)
+        .execute(tx.conn())
+        .await?;
+        let (stored, _) =
+            crate::event::insert_event_in_transaction(&mut tx, event, Some(conversation)).await?;
+        tx.commit().await?;
+        Ok(ConversationOutcome::Created(Box::new(stored)))
+    }
+}
+
+/// What a move, delete or restore did to the artifact's conversation.
+enum Follow {
+    /// There is no conversation.
+    Unchanged,
+    /// The conversation was refiled or its access changed.
+    Changed(Uuid),
+    /// The conversation cannot follow, so the revision is refused.
+    Refused(&'static str),
+}
+
+/// Keep `env`'s conversation, if it has one, with its artifact, on the
+/// revision's transaction. A move refiles it under the new home, a delete
+/// closes it to the home's readers (`parent_access = 'none'`; it has no rows
+/// of its own), and a restore reopens it.
+async fn follow_artifact(tx: &mut crate::AdmittedTx, env: &ArtifactEnvelope) -> Result<Follow> {
+    let community = tx.community();
+    let conversation = buzz_core::artifact::conversation_id(&env.id.to_string());
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM channels WHERE community_id=$1 AND id=$2 \
+                        AND channel_type='artifact')",
+    )
+    .bind(community.as_uuid())
+    .bind(conversation)
+    .fetch_one(tx.conn())
+    .await?;
+    if !exists {
+        return Ok(Follow::Unchanged);
+    }
+    match env.op {
+        ArtifactOp::Move => {
+            if crate::channel_tree::refuse_conversation_home(tx, env.home)
+                .await?
+                .is_some()
+            {
+                return Ok(Follow::Refused(CONVERSATION_CANNOT_MOVE));
+            }
+            sqlx::query(
+                "UPDATE channels SET parent_id=$3, updated_at=NOW() WHERE community_id=$1 AND id=$2",
+            )
+            .bind(community.as_uuid())
+            .bind(conversation)
+            .bind(env.home)
+            .execute(tx.conn())
+            .await?;
+        }
+        ArtifactOp::Delete | ArtifactOp::Restore => {
+            let access = if env.op == ArtifactOp::Delete {
+                crate::channel_tree::ParentAccess::NoAccess
+            } else {
+                crate::channel_tree::ParentAccess::Member
+            };
+            sqlx::query(
+                "UPDATE channels SET parent_access=$3, updated_at=NOW() WHERE community_id=$1 AND id=$2",
+            )
+            .bind(community.as_uuid())
+            .bind(conversation)
+            .bind(access.as_str())
+            .execute(tx.conn())
+            .await?;
+        }
+        _ => return Ok(Follow::Unchanged),
+    }
+    Ok(Follow::Changed(conversation))
 }

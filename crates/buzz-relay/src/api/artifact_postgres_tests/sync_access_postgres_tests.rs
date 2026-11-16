@@ -126,7 +126,7 @@ async fn sync_rejoin_replays_old_heads_without_resetting_on_task_edits() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn sync_ignores_unchanged_visibility_and_resets_on_ttl_changes() {
+async fn sync_includes_auto_archiving_channels_and_resets_on_ttl_changes() {
     let _guard = SERIAL.lock().await;
     let f = fixture().await;
     let permanent_id = Uuid::new_v4();
@@ -171,13 +171,30 @@ async fn sync_ignores_unchanged_visibility_and_resets_on_ttl_changes() {
     let expiring_id = Uuid::new_v4();
     let expiring = f.revision_as(&f.owner, f.private, expiring_id, "create", None);
     accept(&f, &expiring).await;
-    for checkpoint in [None, Some(&next["checkpoint"])] {
-        let page = sync(&f, checkpoint).await;
-        assert_eq!(page["changes"].as_array().unwrap().len(), 1);
-        assert_eq!(page["changes"][0]["artifactId"], permanent_id.to_string());
-        assert_eq!(page["changes"][0]["type"], "upsert");
-        assert!(page["checkpoint"].is_string());
-    }
+    // An auto-archiving channel's artifacts sync like any other.
+    let ids = |page: &serde_json::Value| {
+        let mut ids: Vec<(String, String)> = page["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["artifactId"].as_str().unwrap().to_owned(),
+                    c["type"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        ids.sort();
+        ids
+    };
+    let upsert = |id: Uuid| (id.to_string(), "upsert".to_owned());
+    let mut both = vec![upsert(permanent_id), upsert(expiring_id)];
+    both.sort();
+    let initial = sync(&f, None).await;
+    assert_eq!(ids(&initial), both);
+    // A checkpoint replays its overlap, so the permanent artifact repeats.
+    let delta = sync(&f, Some(&next["checkpoint"])).await;
+    assert_eq!(ids(&delta), both);
     let (status, current) = f
         .request(
             "/query",
@@ -188,11 +205,7 @@ async fn sync_ignores_unchanged_visibility_and_resets_on_ttl_changes() {
         )
         .await;
     assert!(status.is_success(), "{status}: {current}");
-    assert_eq!(current["changes"][0]["type"], "upsert");
-    assert_eq!(
-        current["changes"][1],
-        json!({"type":"remove","artifactId":expiring_id})
-    );
+    assert_eq!(ids(&current), both);
     let (status, named) = f
         .request(
             "/query",
@@ -202,14 +215,12 @@ async fn sync_ignores_unchanged_visibility_and_resets_on_ttl_changes() {
         )
         .await;
     assert!(status.is_success(), "{status}: {named}");
-    assert_eq!(named["changes"], json!([]));
+    assert_eq!(ids(&named), vec![upsert(expiring_id)]);
+    // A move into an auto-archiving channel is an upsert there, not a removal.
     let moved = f.revision_as(&f.owner, f.private, permanent_id, "move", Some(&permanent));
     accept(&f, &moved).await;
     let delta = sync(&f, Some(&next["checkpoint"])).await;
-    assert_eq!(
-        delta["changes"],
-        json!([{"type":"remove","artifactId":permanent_id}])
-    );
+    assert_eq!(ids(&delta), both);
     let (status, scoped) = f
         .request(
             "/query",

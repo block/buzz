@@ -273,6 +273,10 @@ impl RelayInfo {
             // filing a channel without narrowing it, so a client checks this
             // before filing a narrowed channel.
             "buzz-channel-parent-access".to_string(),
+            // kind:9007 with an `artifact` tag opens an artifact's
+            // conversation (NOSTR.md, Artifact conversations), and task
+            // sync includes auto-archiving channels.
+            "buzz-artifact-conversations".to_string(),
         ];
         let gif = gif_provider.map(|provider| {
             supported_extensions.push("buzz-gif".to_string());
@@ -844,6 +848,7 @@ mod tests {
         assert!(extensions.contains(&"buzz-unlisted-channels".to_string()));
         assert!(extensions.contains(&"buzz-channel-parents".to_string()));
         assert!(extensions.contains(&"buzz-channel-parent-access".to_string()));
+        assert!(extensions.contains(&"buzz-artifact-conversations".to_string()));
     }
 
     /// NIP-WP → NIP-11 mirror: a set workspace icon is served in the standard
