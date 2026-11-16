@@ -947,3 +947,107 @@ async fn artifacts_are_read_synced_and_revoked_through_a_parent() {
     assert!(ids(events).is_empty(), "revoked");
     assert!(!snapshot_allowed(vec![f.b]).await);
 }
+
+/// A restricted child (`parent_access` `none`) keeps its artifacts from the
+/// project: a project member reads none of them, named or unnamed, opens no
+/// snapshot over it, gets nothing replayed on joining the project, and no
+/// removeChannel naming it on leaving, which would tell them it exists. A
+/// view-only child (`guest`) still lends its artifacts to the project.
+/// Mutation: drop the `parent_access` gates from `through_parent_sql`, or
+/// from `reached` in `CANDIDATES` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_restricted_childs_artifacts_stay_hidden_from_the_project() {
+    let fixture = Fixture::new().await;
+    let f = &fixture;
+    let pool = &f.db.pool;
+    let owner = f.owner.public_key().to_bytes();
+    let peer = f.peer.public_key();
+    let project = Uuid::new_v4();
+    sqlx::query("INSERT INTO channels(community_id,id,name,visibility,channel_type,created_by) VALUES($1,$2,$3,'private','stream',$4)")
+        .bind(f.community.as_uuid()).bind(project).bind(project.to_string())
+        .bind(owner.as_slice()).execute(pool).await.unwrap();
+    let set_tree = |parent_access: &'static str| async move {
+        sqlx::query(
+            "UPDATE channels SET parent_id=$3, parent_access=$4 WHERE community_id=$1 AND id=$2",
+        )
+        .bind(f.community.as_uuid())
+        .bind(f.b)
+        .bind(project)
+        .bind(parent_access)
+        .execute(pool)
+        .await
+        .unwrap();
+    };
+    set_tree("none").await;
+    let artifact = Uuid::new_v4();
+    let in_child = f.revision(artifact, "create", f.b, None, &f.owner, vec![]);
+    assert!(matches!(
+        f.accept(&in_child, None).await,
+        ArtifactOutcome::Accepted(_)
+    ));
+    let ids = |events: Vec<buzz_core::StoredEvent>| {
+        events.into_iter().map(|e| e.event.id).collect::<Vec<_>>()
+    };
+    let unnamed = serde_json::json!({"artifact":"current"});
+    let named = serde_json::json!({"artifact":"current","#h":[f.b.to_string()]});
+    let sync = |since| async move {
+        let (until, _) = f.db.artifact_sync_boundary(f.community).await.unwrap();
+        f.db.artifact_sync_candidates(
+            f.community,
+            peer.as_bytes(),
+            Some(since),
+            until,
+            None,
+            &artifact::parse_query(&serde_json::json!({"artifact":"current"})).unwrap(),
+        )
+        .await
+        .unwrap()
+    };
+    let membership = |removed: bool| async move {
+        let sql = if removed {
+            "UPDATE channel_members SET removed_at=clock_timestamp(), sync_modified_at=clock_timestamp() WHERE community_id=$1 AND channel_id=$2 AND pubkey=$3"
+        } else {
+            "INSERT INTO channel_members(community_id,channel_id,pubkey,role) VALUES($1,$2,$3,'member')"
+        };
+        sqlx::query(sql)
+            .bind(f.community.as_uuid())
+            .bind(project)
+            .bind(peer.to_bytes().as_slice())
+            .execute(pool)
+            .await
+            .unwrap();
+    };
+
+    let (before_add, _) = f.db.artifact_sync_boundary(f.community).await.unwrap();
+    membership(false).await;
+    let replay = sync(before_add).await;
+    assert!(
+        !replay.iter().any(|c| c.artifact_id == Some(artifact)),
+        "joining the project replays nothing from a restricted child: {replay:?}"
+    );
+    for filter in [&unnamed, &named] {
+        let (events, _) = f.query(&f.peer, filter.clone(), false).await;
+        assert!(ids(events).is_empty(), "hidden: {filter}");
+    }
+    assert!(f
+        .db
+        .open_artifact_snapshot(f.community, peer.as_bytes(), &[f.b])
+        .await
+        .unwrap()
+        .is_err());
+
+    // View only still reads.
+    set_tree("guest").await;
+    let (events, _) = f.query(&f.peer, unnamed.clone(), false).await;
+    assert_eq!(ids(events), [in_child.id], "a view-only child reads");
+    set_tree("none").await;
+
+    let (before_remove, _) = f.db.artifact_sync_boundary(f.community).await.unwrap();
+    membership(true).await;
+    let removal = sync(before_remove).await;
+    assert!(
+        !removal.iter().any(|c| c.removed_channel == Some(f.b)),
+        "leaving the project names no restricted child: {removal:?}"
+    );
+}
