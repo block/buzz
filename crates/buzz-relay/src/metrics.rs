@@ -709,45 +709,47 @@ pub(crate) fn readiness_test_recorder_with_idle_timeout(
 /// Request-local event classification shared by the bridge and outer timer.
 /// Unknown covers failures before parsing; invalid covers malformed event JSON.
 #[derive(Clone, Default)]
-pub struct EventMetricType(std::sync::Arc<std::sync::atomic::AtomicU32>);
+pub struct EventMetricType(std::sync::Arc<std::sync::atomic::AtomicU64>);
 
 impl EventMetricType {
     pub(crate) fn parsed(&self, kind: u32) {
-        use buzz_core::kind::*;
-
-        self.0.store(
-            match kind {
-                KIND_STREAM_MESSAGE
-                | KIND_STREAM_MESSAGE_V2
-                | KIND_TEXT_NOTE
-                | KIND_FORUM_POST
-                | KIND_FORUM_COMMENT => 1,
-                KIND_PROFILE | KIND_AGENT_PROFILE => 2,
-                KIND_IA_ARCHIVE_REQUEST => 3,
-                KIND_IA_UNARCHIVE_REQUEST => 4,
-                KIND_REACTION => 5,
-                KIND_TYPING_INDICATOR => 6,
-                _ => 7,
-            },
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        // Reserve 0 and 1 for pre-parse outcomes without colliding with event kinds.
+        self.0
+            .store(u64::from(kind) + 2, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub(crate) fn invalid(&self) {
-        self.0.store(8, std::sync::atomic::Ordering::Relaxed);
+        self.0.store(1, std::sync::atomic::Ordering::Relaxed);
     }
 
-    fn label(&self) -> &'static str {
-        match self.0.load(std::sync::atomic::Ordering::Relaxed) {
-            1 => "message",
-            2 => "profile_update",
-            3 => "identity_archive",
-            4 => "identity_unarchive",
-            5 => "reaction",
-            6 => "typing",
-            7 => "other",
-            8 => "invalid",
-            _ => "unknown",
+    fn label(&self) -> String {
+        use buzz_core::kind::*;
+
+        let kind = match self.0.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => return "unknown".to_owned(),
+            1 => return "invalid".to_owned(),
+            encoded => (encoded - 2) as u32,
+        };
+        match kind {
+            KIND_STREAM_MESSAGE
+            | KIND_STREAM_MESSAGE_V2
+            | KIND_TEXT_NOTE
+            | KIND_FORUM_POST
+            | KIND_FORUM_COMMENT => "message".to_owned(),
+            KIND_PROFILE | KIND_AGENT_PROFILE => "profile_update".to_owned(),
+            KIND_IA_ARCHIVE_REQUEST => "identity_archive".to_owned(),
+            KIND_IA_UNARCHIVE_REQUEST => "identity_unarchive".to_owned(),
+            KIND_REACTION => "reaction".to_owned(),
+            KIND_TYPING_INDICATOR => "typing".to_owned(),
+            _ => {
+                let registered =
+                    i32::try_from(kind).map_or_else(|_| "other".to_owned(), registered_kind_label);
+                if registered == "other" {
+                    registered
+                } else {
+                    format!("kind_{registered}")
+                }
+            }
         }
     }
 }
@@ -814,7 +816,7 @@ pub async fn track_metrics(mut req: Request, next: Next) -> Response {
 
     let mut labels = vec![("code", status), ("caller", caller), ("action", action)];
     if let Some(event_type) = event_type {
-        labels.push(("event_type", event_type.label().to_owned()));
+        labels.push(("event_type", event_type.label()));
     }
     metrics::counter!("http_requests_total", &labels).increment(1);
     metrics::histogram!("http_request_latency_ms", &labels).record(latency_ms);
@@ -844,10 +846,18 @@ mod contract_tests {
             (9036, "identity_unarchive"),
             (7, "reaction"),
             (20002, "typing"),
+            (3, "kind_3"),
+            (30621, "kind_30621"),
+            (30999, "other"),
+            (u32::MAX - 1, "other"),
             (u32::MAX, "other"),
         ] {
             classification.parsed(kind);
             assert_eq!(classification.label(), expected);
+        }
+        for &kind in buzz_core::kind::ALL_KINDS {
+            classification.parsed(kind);
+            assert_ne!(classification.label(), "other", "registered kind {kind}");
         }
         classification.invalid();
         assert_eq!(classification.label(), "invalid");
@@ -867,6 +877,10 @@ mod contract_tests {
                          body: String| async move {
                             if body == "archive" {
                                 classification.parsed(buzz_core::kind::KIND_IA_ARCHIVE_REQUEST);
+                            } else if body == "registered" {
+                                classification.parsed(buzz_core::kind::KIND_PROJECT);
+                            } else if body == "unregistered" {
+                                classification.parsed(30999);
                             } else {
                                 classification.invalid();
                             }
@@ -887,7 +901,13 @@ mod contract_tests {
                 .layer(middleware::from_fn(super::track_metrics));
         use axum::response::IntoResponse;
         let (recorder, handle) = super::readiness_test_recorder();
-        for body in ["archive", "invalid", "auth-refused"] {
+        for body in [
+            "archive",
+            "registered",
+            "unregistered",
+            "invalid",
+            "auth-refused",
+        ] {
             let mut request = axum::http::Request::builder().uri("/events").method("POST");
             if body == "auth-refused" {
                 request = request.header("x-refuse-admission", "true");
@@ -905,7 +925,13 @@ mod contract_tests {
             );
         }
         let exported = handle.render();
-        for label in ["identity_archive", "invalid", "unknown"] {
+        for label in [
+            "identity_archive",
+            "kind_30621",
+            "other",
+            "invalid",
+            "unknown",
+        ] {
             assert!(
                 exported
                     .lines()
@@ -922,7 +948,7 @@ mod contract_tests {
                 "{exported}"
             );
         }
-        for label in ["identity_archive", "invalid"] {
+        for label in ["identity_archive", "kind_30621", "other", "invalid"] {
             let sum: f64 = sample_value(
                 &exported,
                 "http_request_latency_ms_sum{",

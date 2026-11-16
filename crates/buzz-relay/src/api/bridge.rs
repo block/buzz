@@ -5110,7 +5110,16 @@ pub(crate) mod postgres_tests {
         let archive = EventBuilder::new(Kind::Custom(9035), "")
             .sign_with_keys(&keys)
             .expect("sign archive without required tags");
+        let contacts = EventBuilder::new(Kind::ContactList, "")
+            .sign_with_keys(&keys)
+            .expect("sign registered contact list");
         let cases = [
+            (
+                serde_json::to_vec(&contacts).expect("contact list JSON"),
+                true,
+                StatusCode::OK,
+                "kind_3",
+            ),
             (
                 serde_json::to_vec(&profile).expect("profile JSON"),
                 true,
