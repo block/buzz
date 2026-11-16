@@ -2582,6 +2582,74 @@ mod tests {
             builder.sign_with_keys(keys).unwrap()
         }
 
+        /// An owner ban landing after AUTH's first checks but before its final
+        /// check refuses the agent's sign-in, yet the verified owner stays
+        /// recorded: the accepted late-refusal rule. Paused at the AUTH commit
+        /// hook, so no timing sleeps.
+        /// Mutation: skip the owner write on this path → the owner is not
+        /// recorded → RED; drop `final_admission_denial` → admitted → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn late_refused_auth_keeps_the_recorded_owner() {
+            use std::sync::Arc;
+            let state = auth_test_state_real_db_expect().await;
+            let community = seeded_community(&state).await;
+            let (owner, agent) = (Keys::generate(), Keys::generate());
+            let tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+                .expect("sign NIP-OA credential");
+            let tag: Vec<String> = serde_json::from_str(&tag).expect("tag JSON");
+            let (conn, _ctrl) = registered_pending_conn(&state, community, "late-refusal");
+            let (arrived, release) =
+                crate::nip_fi_test_hooks::auth_commit_hook::arm(conn.tenant.community());
+            let handle = tokio::spawn(handle_auth(
+                signed_auth(&agent, "late-refusal", Some(tag)),
+                Arc::clone(&conn),
+                Arc::clone(&state),
+            ));
+            tokio::time::timeout(std::time::Duration::from_secs(5), arrived)
+                .await
+                .expect("AUTH must pause after its first checks")
+                .expect("hook channel closed");
+            state
+                .db
+                .ensure_user(community, owner.public_key().as_bytes())
+                .await
+                .expect("ensure owner");
+            state
+                .db
+                .ban_community_member(
+                    community,
+                    &owner.public_key().to_bytes(),
+                    &Keys::generate().public_key().to_bytes(),
+                    None,
+                    None,
+                )
+                .await
+                .expect("ban owner");
+            release.notify_one();
+            tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+                .await
+                .expect("AUTH must finish")
+                .expect("AUTH must not panic");
+
+            assert!(
+                !matches!(conn.auth_state_snapshot(), AuthState::Authenticated(_)),
+                "the sign-in is refused and the agent is not authenticated"
+            );
+            assert!(
+                state
+                    .db
+                    .is_agent_owner(
+                        community,
+                        agent.public_key().as_bytes(),
+                        owner.public_key().as_bytes(),
+                    )
+                    .await
+                    .expect("owner lookup"),
+                "the verified owner stays recorded"
+            );
+        }
+
         /// A ban whose disconnect lands after AUTH's policy reads but before it
         /// binds the socket must still refuse admission: the final check runs
         /// after the bind. A user in another community, paused at the same

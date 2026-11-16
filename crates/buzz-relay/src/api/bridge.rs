@@ -6190,6 +6190,118 @@ pub(crate) mod postgres_tests {
         (status, lines)
     }
 
+    /// Full NIP-98 sign-in on a closed relay with NIP-OA admission off: an
+    /// ownerless member agent's signed `/query` with a NIP-OA tag records its
+    /// owner; removing the owner removes the agent, whose next `/query` is
+    /// refused as a non-member. A tag naming another owner than the stored one
+    /// is refused as a mismatch, not as storage trouble.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres"]
+    async fn signed_query_records_owner_and_cascades_on_closed_relay() {
+        let mut state = (*nip_fi_off_test_state().await.expect("local Postgres")).clone();
+        {
+            let config = Arc::make_mut(&mut state.config);
+            config.require_relay_membership = true;
+            config.allow_nip_oa_auth = false;
+        }
+        let state = Arc::new(state);
+        let host = format!("owner-query-{}.local", uuid::Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community")
+            .id;
+        let (owner, agent, conflicted, other_owner) = (
+            Keys::generate(),
+            Keys::generate(),
+            Keys::generate(),
+            Keys::generate(),
+        );
+        for keys in [&owner, &agent, &conflicted] {
+            buzz_db::relay_members::add_relay_member(
+                state.db.pool(),
+                community,
+                &keys.public_key().to_hex(),
+                "member",
+                None,
+                &Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("add member");
+        }
+        let query = |keys: &Keys| {
+            let (state, host, keys) = (state.clone(), host.clone(), keys.clone());
+            let owner = owner.clone();
+            async move {
+                let mut headers =
+                    make_nip98_headers(&keys, &format!("https://{host}/query"), "POST", QUERY_BODY);
+                let tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &keys.public_key(), "")
+                    .expect("sign NIP-OA credential");
+                headers.insert("x-auth-tag", tag.parse().expect("header value"));
+                let (_guard, out) = crate::access::tests::capture_scoped();
+                let (status, _, body) =
+                    oneshot_request_full(state, "POST", "/query", &host, headers, QUERY_BODY).await;
+                let reason = out
+                    .lines()
+                    .into_iter()
+                    .find(|line| line["event"] == "http")
+                    .and_then(|line| line["reason"].as_str().map(str::to_owned));
+                (status, reason, String::from_utf8_lossy(&body).into_owned())
+            }
+        };
+
+        let (status, _, _) = query(&agent).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert!(state
+            .db
+            .is_agent_owner(
+                community,
+                agent.public_key().as_bytes(),
+                owner.public_key().as_bytes()
+            )
+            .await
+            .expect("owner lookup"));
+
+        buzz_db::relay_members::remove_relay_member(
+            state.db.pool(),
+            community,
+            &owner.public_key().to_hex(),
+            &Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("remove owner");
+        let (status, reason, _) = query(&agent).await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(reason.as_deref(), Some("not_relay_member"));
+
+        for keys in [&conflicted, &other_owner] {
+            state
+                .db
+                .ensure_user(community, keys.public_key().as_bytes())
+                .await
+                .expect("ensure user");
+        }
+        assert!(state
+            .db
+            .set_agent_owner(
+                community,
+                conflicted.public_key().as_bytes(),
+                other_owner.public_key().as_bytes(),
+            )
+            .await
+            .expect("seed other owner"));
+        let (status, reason, body) = query(&conflicted).await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(reason.as_deref(), Some("owner_mismatch"));
+        assert!(
+            body.contains(crate::api::relay_members::OWNER_MISMATCH),
+            "{body}"
+        );
+    }
+
     fn assert_one_auth_line(
         lines: &[serde_json::Value],
         outcome: &str,
@@ -11256,7 +11368,7 @@ pub(crate) mod postgres_tests {
             .expect("seed other owner"));
         assert!(
             !submit(&conflicted, &owner).await,
-            "an owner that cannot be recorded refuses the request"
+            "a different stored owner refuses the request"
         );
     }
 

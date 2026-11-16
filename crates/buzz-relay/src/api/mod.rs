@@ -464,14 +464,16 @@ pub mod relay_members {
             };
             match link_agent_owner(state, tenant, &agent, &recorded).await {
                 OwnerLink::Linked => {}
-                OwnerLink::Conflict if token_owner.is_some() => {
+                // A different stored owner is a permanent mismatch, not
+                // storage trouble; routes map it by its reason.
+                OwnerLink::Conflict => {
                     return Err((
                         AuthReason::OwnerMismatch,
                         super::api_error(StatusCode::FORBIDDEN, OWNER_MISMATCH),
-                        Some("not_stored_owner"),
+                        token_owner.map(|_| "not_stored_owner"),
                     ))
                 }
-                OwnerLink::Conflict | OwnerLink::Unavailable => {
+                OwnerLink::Unavailable => {
                     return Err((
                         AuthReason::NipOaOwnerUnlinked,
                         super::api_error(
