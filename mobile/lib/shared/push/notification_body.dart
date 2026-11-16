@@ -77,9 +77,11 @@ String notificationBody(String content) {
 }
 
 // The patterns below keep ICU regex semantics, which the iOS formatter uses,
-// not Dart's: ICU's `\s` is [\t\n\f\r\p{Z}] and its `.` also excludes U+0085.
-const _space = r'\t\n\f\r    -     　';
-const _notLineEnd = r'[^\n\r\u0085  ]';
+// not Dart's. ICU's `\s` is `\p{White_Space}`, listed here, and its `.`
+// excludes every line terminator: U+000A to U+000D, U+0085, U+2028, U+2029.
+const _space =
+    r'\t-\r \u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000';
+const _notLineEnd = r'[^\n-\r\u0085\u2028\u2029]';
 
 /// A fenced span on one line, a fenced code block, or an inline code span. A
 /// block's opening line (a fence of three or more backticks, then an optional
@@ -96,8 +98,8 @@ final _code = RegExp(
 
 /// Stands in for a code span while the prose rules run. Private-use
 /// characters, removed from the content first, so they can't collide.
-const _codeOpen = '';
-const _codeClose = '';
+const _codeOpen = '\uE000';
+const _codeClose = '\uE001';
 final _codePlaceholder = RegExp('$_codeOpen([0-9]+)$_codeClose');
 
 final _link = RegExp(r'!?\[([^\]]*)\]\([^)]*\)');
@@ -111,11 +113,8 @@ String _stripProse(String prose) => prose
     .replaceAllMapped(_emphasis, (match) => match.group(2)!)
     .replaceAll(_spaces, ' ');
 
-/// Trims the characters Swift's `whitespacesAndNewlines` does, which, unlike
-/// Dart's `String.trim`, leaves U+FEFF alone.
-final _edgeWhitespace = RegExp(
-  '^[\\t-\\r \\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]+'
-  '|[\\t-\\r \\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]+\$',
-);
+/// Trims the characters Swift's `whitespacesAndNewlines` does: ICU's
+/// whitespace and U+200B. Unlike Dart's `String.trim`, it leaves U+FEFF alone.
+final _edgeWhitespace = RegExp('^[$_space\\u200B]+|[$_space\\u200B]+\$');
 
 String _trim(String text) => text.replaceAll(_edgeWhitespace, '');
