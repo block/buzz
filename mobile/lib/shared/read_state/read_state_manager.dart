@@ -183,6 +183,13 @@ class ReadStateManager {
   // Merged whole-channel override registers, from this installation and its
   // peers. The primary carries all of them (NIP-RS, Buzz profile).
   final Map<String, OverrideRegister> _overrides = {};
+  // Received groups stamped too far ahead, held until the clock reaches them.
+  final Map<String, OverrideRegister> _deferredOverrides = {};
+  // The unread record's coordinate slot and its last published contexts.
+  String _unreadSlot = generateReadStateSlotId();
+  Map<String, int> _unreadPublished = const {};
+  // The durable, never-decreasing expiry clock; see [_expiryNow].
+  int _expiryWatermark = 0;
 
   // Synced thread follow choices. [_ownFollows] is this installation's own
   // entries (raw, so unknown fields are carried), placed into
@@ -327,11 +334,12 @@ class ReadStateManager {
   /// The channels whose synced manual unread is live.
   Set<String> get activeChannelOverrides => {
     for (final MapEntry(key: channelId, value: register) in _overrides.entries)
-      if (isOverrideActive(register, _frontierOf(channelId))) channelId,
+      if (_isLive(channelId, register)) channelId,
   };
 
   /// Whether the last full-state load succeeded, as override actions need.
-  bool get _hasFullState => _lastSnapshotSucceeded;
+  /// Deferred future groups leave it incomplete until they resolve.
+  bool get _hasFullState => _lastSnapshotSucceeded && _resolveDeferred();
 
   /// The merged stored frontier synced overrides use, 0 if absent: the
   /// retention floor decides message reads only, never override liveness.
@@ -345,15 +353,13 @@ class ReadStateManager {
     };
   }
 
-  void _mergeOverrides(Map<String, int> contexts) {
-    for (final MapEntry(key: channelId, value: register)
-        in channelOverrideRegisters(contexts).entries) {
-      final current = _overrides[channelId];
-      _overrides[channelId] = current == null
-          ? register
-          : mergeOverrideRegisters(current, register);
-    }
-  }
+  /// The read-position slot plan. Override groups travel in the unread
+  /// record instead ([_planUnread]).
+  List<Map<String, int>> _planSlots() => packReadStateContexts(
+    _publishableLocalContexts(),
+    clientId: _clientId,
+    previous: _placement,
+  );
 
   void seedContextRead(String contextId, int unixTimestamp) {
     seedContextsRead({contextId: unixTimestamp});
@@ -518,6 +524,13 @@ class ReadStateManager {
       if (_isPlausibleCreatedAt(event.createdAt)) {
         _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
       }
+      if (decoded.blob.version == 2) {
+        _mergeUnreadRecord(
+          decoded.dTag.substring(readStateUnreadDTagPrefix.length),
+          decoded.blob,
+        );
+        continue;
+      }
       final slot = decoded.dTag.substring(readStateDTagPrefix.length);
       final index = _slots.indexOf(slot);
       if (index >= 0 && decoded.blob.clientId != _clientId) {
@@ -534,7 +547,6 @@ class ReadStateManager {
           _placement.add({});
         }
       }
-      _mergeOverrides(decoded.blob.contexts);
       for (final entry in decoded.blob.contexts.entries) {
         if (isOverrideContext(entry.key)) continue;
         if (_applyRemoteContextTimestamp(
@@ -595,7 +607,7 @@ class ReadStateManager {
           kinds: const [EventKind.readState],
           authors: [pubkey],
           tags: const {
-            '#t': ['read-state', threadFollowsTag],
+            '#t': ['read-state', readStateUnreadTag, threadFollowsTag],
           },
           // Change notifications only: the snapshot that follows reads the
           // stored blobs, so a stored replay here would download them twice.
@@ -704,6 +716,7 @@ class ReadStateManager {
       return true;
     }
     if (placement.length > _slots.length) return true;
+    if (!mapEquals(_unreadPublished, _planUnread())) return true;
     for (var index = 0; index < placement.length; index++) {
       final published = _published[_slots[index]] ?? const <String, int>{};
       if (!mapEquals(published, placement[index])) return true;
@@ -756,6 +769,27 @@ class ReadStateManager {
         _onChanged();
         if (events.any(
           (event) =>
+              hasValidUnreadStateTags(event) &&
+              event.tags.any(
+                (tag) =>
+                    tag.length >= 2 &&
+                    tag.first == 'd' &&
+                    tag[1] == _unreadCoordinate,
+              ) &&
+              decodeReadStateEvent(
+                    event,
+                    pubkey: pubkey,
+                    decrypt: _crypto.decrypt,
+                  ) ==
+                  null,
+        )) {
+          throw StateError(
+            'Unreadable unread-state coordinate blocks '
+            'publication',
+          );
+        }
+        if (events.any(
+          (event) =>
               hasValidReadStateTags(event) &&
               event.tags.any(
                 (tag) =>
@@ -781,6 +815,7 @@ class ReadStateManager {
       _localContexts.removeWhere(
         (key, value) => value < _now() - readStateHorizonSeconds,
       );
+      _discardOverrides();
       _placement = _planSlots();
       while (_slots.length < _placement.length) {
         _slots.add(generateReadStateSlotId());
@@ -813,6 +848,31 @@ class ReadStateManager {
           content: _crypto.encrypt(
             jsonEncode(
               ReadStateBlob(clientId: _clientId, contexts: contexts).toJson(),
+            ),
+          ),
+        );
+      }
+      final unread = _planUnread();
+      final unreadCoordinate = _unreadCoordinate;
+      if (!mapEquals(_unreadPublished, unread) ||
+          _pending.containsKey(unreadCoordinate)) {
+        prepared[unreadCoordinate] = NostrEvent(
+          id: '0' * 64,
+          pubkey: pubkey,
+          sig: '0' * 128,
+          kind: EventKind.readState,
+          createdAt: _reserve(),
+          tags: [
+            ['d', unreadCoordinate],
+            ['t', readStateUnreadTag],
+          ],
+          content: _crypto.encrypt(
+            jsonEncode(
+              ReadStateBlob(
+                clientId: _clientId,
+                contexts: unread,
+                version: 2,
+              ).toJson(),
             ),
           ),
         );
@@ -921,6 +981,43 @@ class ReadStateManager {
         }
         _published[slot] = contexts;
         _pending.remove(slot);
+        _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
+        await _persistLocalState();
+      }
+      if (prepared[unreadCoordinate] case final event?
+          when !mapEquals(_unreadPublished, unread)) {
+        if (!_servesThisCommunity ||
+            !_ownsJournal ||
+            (_disposed && !allowDisposed)) {
+          return;
+        }
+        checkConnection?.call();
+        await signedEventRelay.submit(
+          kind: event.kind,
+          content: event.content,
+          tags: event.tags,
+          createdAt: event.createdAt,
+          onSigned: (event) async {
+            _pending[unreadCoordinate] = event;
+            await _persistLocalState();
+            checkConnection?.call();
+            if (!_servesThisCommunity ||
+                !_ownsJournal ||
+                (_disposed && !allowDisposed) ||
+                _unreadCoordinate != unreadCoordinate) {
+              throw StateError(
+                'Unread-state owner or coordinate retired before publication',
+              );
+            }
+          },
+        );
+        if (!_servesThisCommunity ||
+            !_ownsJournal ||
+            (_disposed && !allowDisposed)) {
+          return;
+        }
+        _unreadPublished = unread;
+        _pending.remove(unreadCoordinate);
         _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
         await _persistLocalState();
       }
@@ -1036,9 +1133,17 @@ class ReadStateManager {
       _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
       return;
     }
-    final blob = decodeReadStateBlob(_crypto.decrypt(event.content));
+    final unread = slot.startsWith(readStateUnreadDTagPrefix);
+    final blob = decodeReadStateBlob(
+      _crypto.decrypt(event.content),
+      version: unread ? 2 : 1,
+    );
     if (blob == null) throw StateError('Invalid pending read-state event');
-    _published[slot] = Map.of(blob.contexts);
+    if (unread) {
+      if (slot == _unreadCoordinate) _unreadPublished = Map.of(blob.contexts);
+    } else {
+      _published[slot] = Map.of(blob.contexts);
+    }
     _pending.remove(slot);
     _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
   }

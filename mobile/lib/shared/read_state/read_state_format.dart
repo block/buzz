@@ -6,6 +6,23 @@ import 'package:flutter/foundation.dart';
 import '../relay/nostr_models.dart';
 
 const readStateDTagPrefix = 'read-state:';
+
+/// The isolated version-2 record for whole-channel manual unread (NIP-RS,
+/// Expiring unread state). Read positions stay in the `read-state:` record.
+const readStateUnreadDTagPrefix = 'read-state-unread-v2:';
+const readStateUnreadTag = 'read-state-unread-v2';
+
+/// A mark stays live at most this long after its set stamp.
+const overrideLifetimeSeconds = 30 * 24 * 60 * 60;
+
+/// A dead group is kept this much longer than the lifetime before discard.
+const overrideDiscardGuardSeconds = 600;
+
+/// A group stamped further ahead than this is deferred, not merged.
+const overrideFutureLimitSeconds = 660;
+
+/// An action stamp may run at most this far ahead of the local clock.
+const overrideAllocationAheadSeconds = 60;
 const readStateFetchLimit = 500;
 const readStateHorizonSeconds = 30 * 24 * 60 * 60;
 const _maxContexts = 10000;
@@ -129,18 +146,52 @@ OverrideRegister mergeOverrideRegisters(
   OverrideRegister b,
 ) => (s: max(a.s, b.s), c: max(a.c, b.c), b: max(a.b, b.b));
 
-/// NIP-RS's Liveness Predicate against the merged frontier [frontier].
-bool isOverrideActive(OverrideRegister register, int frontier) =>
-    register.s > 0 && frontier <= register.b && register.s > register.c;
+/// NIP-RS's Liveness Predicate against the merged frontier [frontier], at
+/// expiry clock [now]: a mark expires [overrideLifetimeSeconds] after its set.
+bool isOverrideActive(
+  OverrideRegister register,
+  int frontier, {
+  required int now,
+}) =>
+    register.s > 0 &&
+    frontier <= register.b &&
+    register.s > register.c &&
+    register.s >= now - overrideLifetimeSeconds;
+
+/// The greatest action stamp of [register]: its canonical floor K once dead.
+int overrideStamp(OverrideRegister register) => max(register.s, register.c);
+
+/// Whether a received group is a replay too old to merge.
+bool isOverrideExpired(OverrideRegister register, {required int now}) =>
+    overrideStamp(register) < now - overrideLifetimeSeconds;
+
+/// Whether a dead group, its ceiling and its paired frontier may be dropped.
+bool isOverrideDiscardable(OverrideRegister register, {required int now}) =>
+    overrideStamp(register) <
+    now - overrideLifetimeSeconds - overrideDiscardGuardSeconds;
 
 /// The canonical wire keys of [registers]: a live group publishes all three
 /// counters, a dead one only its tombstone floor `ov_c: = max(S, C)`.
+/// The stamp an action on [register] takes (NIP-RS Expiring unread state),
+/// or null when it would pass uint32 or run more than 60 seconds ahead.
+int? allocateOverrideStamp(OverrideRegister register, {required int now}) {
+  final stamp = max(now, overrideStamp(register) + 1);
+  return stamp > 4294967295 || stamp > now + overrideAllocationAheadSeconds
+      ? null
+      : stamp;
+}
+
+/// Whether a received group is too far ahead to merge yet.
+bool isOverrideDeferred(OverrideRegister register, {required int now}) =>
+    overrideStamp(register) > now + overrideFutureLimitSeconds;
+
 Map<String, int> canonicalOverrideEntries(
   Map<String, OverrideRegister> registers,
-  int Function(String target) frontierOf,
-) => {
+  int Function(String target) frontierOf, {
+  required int now,
+}) => {
   for (final MapEntry(key: target, value: r) in registers.entries)
-    if (isOverrideActive(r, frontierOf(target))) ...{
+    if (isOverrideActive(r, frontierOf(target), now: now)) ...{
       'ov_s:$target': r.s,
       'ov_c:$target': r.c,
       'ov_b:$target': r.b,
@@ -190,11 +241,17 @@ class ReadStateBlob {
   final String clientId;
   final Map<String, int> contexts;
 
-  ReadStateBlob({required this.clientId, required Map<String, int> contexts})
-    : contexts = Map.unmodifiable(contexts);
+  /// 1 for read positions, 2 for the expiring unread record.
+  final int version;
+
+  ReadStateBlob({
+    required this.clientId,
+    required Map<String, int> contexts,
+    this.version = 1,
+  }) : contexts = Map.unmodifiable(contexts);
 
   Map<String, dynamic> toJson() => {
-    'v': 1,
+    'v': version,
     'client_id': clientId,
     'contexts': contexts,
   };
@@ -222,12 +279,13 @@ Map<String, Object?>? asStringObjectMap(Object? value) {
   return (value as Map).cast<String, Object?>();
 }
 
-bool isValidReadStateDTag(String? value) {
-  if (value == null || !value.startsWith(readStateDTagPrefix)) {
+bool isValidReadStateDTag(String? value, {bool unread = false}) {
+  final prefix = unread ? readStateUnreadDTagPrefix : readStateDTagPrefix;
+  if (value == null || !value.startsWith(prefix)) {
     return false;
   }
 
-  final slotId = value.substring(readStateDTagPrefix.length);
+  final slotId = value.substring(prefix.length);
   if (slotId.isEmpty || slotId.length > 64) {
     return false;
   }
@@ -240,23 +298,28 @@ bool isValidReadStateDTag(String? value) {
   return true;
 }
 
-bool hasValidReadStateTags(NostrEvent event) {
+/// Whether [event] carries the version-2 unread record's tags.
+bool hasValidUnreadStateTags(NostrEvent event) =>
+    hasValidReadStateTags(event, unread: true);
+
+bool hasValidReadStateTags(NostrEvent event, {bool unread = false}) {
   final dTags = event.tags.where((tag) => tag.isNotEmpty && tag[0] == 'd');
   if (dTags.length != 1) {
     return false;
   }
   final dTag = dTags.single;
-  if (dTag.length < 2 || !isValidReadStateDTag(dTag[1])) {
+  if (dTag.length < 2 || !isValidReadStateDTag(dTag[1], unread: unread)) {
     return false;
   }
 
+  final tag = unread ? readStateUnreadTag : 'read-state';
   final tTags = event.tags.where(
-    (tag) => tag.length >= 2 && tag[0] == 't' && tag[1] == 'read-state',
+    (t) => t.length >= 2 && t[0] == 't' && t[1] == tag,
   );
   return tTags.length == 1;
 }
 
-ReadStateBlob? decodeReadStateBlob(String plaintext) {
+ReadStateBlob? decodeReadStateBlob(String plaintext, {int version = 1}) {
   final Object? parsed;
   try {
     parsed = jsonDecode(plaintext);
@@ -267,7 +330,7 @@ ReadStateBlob? decodeReadStateBlob(String plaintext) {
   final record = asStringObjectMap(parsed);
   if (record == null) return null;
 
-  if (record['v'] != 1) return null;
+  if (record['v'] != version) return null;
 
   final clientId = record['client_id'];
   if (clientId is! String || clientId.isEmpty || clientId.runes.length > 64) {
@@ -279,9 +342,18 @@ ReadStateBlob? decodeReadStateBlob(String plaintext) {
     return null;
   }
 
+  final sanitized = sanitizeReadStateContexts(contexts);
   return ReadStateBlob(
     clientId: clientId,
-    contexts: sanitizeReadStateContexts(contexts),
+    version: version,
+    // Version 1 override keys are never v2 intent (no import); version 2
+    // carries only channel groups and their paired frontiers.
+    contexts: version == 1
+        ? {
+            for (final entry in sanitized.entries)
+              if (!entry.key.startsWith('ov_')) entry.key: entry.value,
+          }
+        : _unreadContexts(sanitized),
   );
 }
 
@@ -320,6 +392,20 @@ Map<String, int> sanitizeReadStateContexts(Map<String, Object?> contexts) {
   return sanitized;
 }
 
+/// A version-2 record's complete channel groups with their paired frontiers.
+Map<String, int> _unreadContexts(Map<String, int> contexts) {
+  final groups = completeOverrideGroups(contexts);
+  return {
+    for (final MapEntry(key: target, value: group) in _overrideGroups(
+      groups,
+    ).entries)
+      if (isChannelOverrideTarget(target)) ...{
+        ...group,
+        overrideFrontierKey(target): contexts[overrideFrontierKey(target)]!,
+      },
+  };
+}
+
 DecodedReadStateEvent? decodeReadStateEvent(
   NostrEvent event, {
   required String pubkey,
@@ -328,7 +414,8 @@ DecodedReadStateEvent? decodeReadStateEvent(
   if (event.pubkey.toLowerCase() != pubkey.toLowerCase()) {
     return null;
   }
-  if (!hasValidReadStateTags(event)) {
+  final unread = hasValidUnreadStateTags(event);
+  if (!unread && !hasValidReadStateTags(event)) {
     return null;
   }
 
@@ -346,7 +433,7 @@ DecodedReadStateEvent? decodeReadStateEvent(
     return null;
   }
 
-  final blob = decodeReadStateBlob(plaintext);
+  final blob = decodeReadStateBlob(plaintext, version: unread ? 2 : 1);
   if (blob == null) {
     debugPrint(
       '[ReadStateManager] blob decode failed for event ${event.id.substring(0, 8)}…',

@@ -71,8 +71,40 @@ void main() {
   Iterable<Map<String, int>> readStateBlobs() => [
     for (final event in relay.retained.values)
       if (hasValidReadStateTags(event))
-        decodeReadStateBlob(crypto.decrypt(event.content))!.contexts,
+        decodeReadStateBlob(crypto.decrypt(event.content))!.contexts
+      else if (hasValidUnreadStateTags(event))
+        decodeReadStateBlob(
+          crypto.decrypt(event.content),
+          version: 2,
+        )!.contexts,
   ];
+
+  /// [from]'s own unread record, as it last published it.
+  Map<String, int> ownUnread(ReadStateManager from) {
+    final journal = ReadStateStorage(prefs).readJournal(
+      '${keys.public}:${Uri.encodeComponent(normalizeCommunityRelayUrl(from.relayUrl))}',
+    )!;
+    final record =
+        relay.retained['$readStateUnreadDTagPrefix${journal['unreadSlot']}']!;
+    return decodeReadStateBlob(
+      crypto.decrypt(record.content),
+      version: 2,
+    )!.contexts;
+  }
+
+  /// The channel group in [from]'s own unread record.
+  Map<String, int> ownGroup(ReadStateManager from) {
+    final blob = ownUnread(from);
+    return {
+      for (final key in [
+        channel,
+        'ov_s:$channel',
+        'ov_c:$channel',
+        'ov_b:$channel',
+      ])
+        key: ?blob[key],
+    };
+  }
 
   test('whole-channel mark unread round-trips between devices', () async {
     final phone = await device('phone');
@@ -125,18 +157,19 @@ void main() {
     final phone = await device('phone');
     final message = msgContextKey('b' * 64);
     final thread = threadContextKey(root);
-    relay.retained['read-state:peer'] = _readStateEvent(
+    relay.retained['read-state-unread-v2:peer'] = _readStateEvent(
+      unread: true,
       keys: keys,
       crypto: crypto,
       clientId: 'peer',
       slot: 'peer',
       contexts: {
         message: 10,
-        'ov_s:$message': 1,
+        'ov_s:$message': clock - 20,
         'ov_c:$message': 0,
         'ov_b:$message': 10,
         thread: 10,
-        'ov_s:$thread': 1,
+        'ov_s:$thread': clock - 20,
         'ov_c:$thread': 0,
         'ov_b:$thread': 10,
       },
@@ -149,7 +182,9 @@ void main() {
     expect(phone.activeChannelOverrides, isEmpty);
     final own = relay.retained.entries
         .where(
-          (e) => e.key != 'read-state:peer' && hasValidReadStateTags(e.value),
+          (e) =>
+              e.key != 'read-state-unread-v2:peer' &&
+              hasValidReadStateTags(e.value),
         )
         .map((e) => decodeReadStateBlob(crypto.decrypt(e.value.content))!)
         .single
@@ -539,7 +574,8 @@ void main() {
       'an overfull merged primary still publishes reads and follows',
       () async {
         for (var peer = 0; peer < 3; peer++) {
-          relay.retained['read-state:peer$peer'] = _readStateEvent(
+          relay.retained['read-state-unread-v2:peer$peer'] = _readStateEvent(
+            unread: true,
             keys: keys,
             crypto: crypto,
             clientId: 'peer$peer',
@@ -548,7 +584,7 @@ void main() {
               for (var index = 0; index < 160; index++)
                 for (final id in ['$peer-$index'.padLeft(36, '0')]) ...{
                   id: clock - 100,
-                  'ov_s:$id': 1,
+                  'ov_s:$id': clock - 90,
                   'ov_c:$id': 0,
                   'ov_b:$id': clock - 100,
                 },
@@ -572,7 +608,8 @@ void main() {
 
     Future<void> overfill() async {
       for (var peer = 0; peer < 3; peer++) {
-        relay.retained['read-state:peer$peer'] = _readStateEvent(
+        relay.retained['read-state-unread-v2:peer$peer'] = _readStateEvent(
+          unread: true,
           keys: keys,
           crypto: crypto,
           clientId: 'peer$peer',
@@ -581,7 +618,7 @@ void main() {
             for (var index = 0; index < 160; index++)
               for (final id in ['$peer-$index'.padLeft(36, '0')]) ...{
                 id: clock - 100,
-                'ov_s:$id': 1,
+                'ov_s:$id': clock - 90,
                 'ov_c:$id': 0,
                 'ov_b:$id': clock - 100,
               },
@@ -596,6 +633,7 @@ void main() {
       () async {
         final phone = await device('phone');
         phone.markContextRead(channel, clock - 100);
+        final marked = clock;
         expect(phone.markChannelUnread(channel), isTrue);
         await phone.flush();
         await overfill();
@@ -603,10 +641,10 @@ void main() {
 
         phone.markContextRead(channel, clock - 1);
         await phone.flush();
-        final own = readStateBlobs().where((blob) => blob.containsKey(channel));
-        expect(own.single[channel], clock - 1);
-        expect(own.single.containsKey('ov_s:$channel'), isFalse);
-        expect(own.single['ov_c:$channel'], 1);
+        final own = ownUnread(phone);
+        expect(own[channel], clock - 1);
+        expect(own.containsKey('ov_s:$channel'), isFalse);
+        expect(own['ov_c:$channel'], marked);
       },
     );
 
@@ -624,14 +662,17 @@ void main() {
 
       relay.retained.clear();
       final other = 'f' * 36;
-      relay.retained['read-state:max'] = _readStateEvent(
+      // A peer stamped 10 minutes ahead: within the deferral bound, but no
+      // later stamp can be allocated within a minute of this clock.
+      relay.retained['read-state-unread-v2:max'] = _readStateEvent(
+        unread: true,
         keys: keys,
         crypto: crypto,
         clientId: 'max',
         slot: 'max',
         contexts: {
           other: clock - 100,
-          'ov_s:$other': 4294967295,
+          'ov_s:$other': clock + 600,
           'ov_c:$other': 0,
           'ov_b:$other': clock - 100,
         },
@@ -677,27 +718,6 @@ void main() {
       );
     });
 
-    /// The channel group in [from]'s own primary, as it last published it.
-    Map<String, int> ownGroup(ReadStateManager from) {
-      final journal = ReadStateStorage(prefs).readJournal(
-        '${keys.public}:${Uri.encodeComponent(normalizeCommunityRelayUrl(from.relayUrl))}',
-      )!;
-      final primary = relay
-          .retained['$readStateDTagPrefix${(journal['slots'] as List).first}']!;
-      final blob = decodeReadStateBlob(
-        crypto.decrypt(primary.content),
-      )!.contexts;
-      return {
-        for (final key in [
-          channel,
-          'ov_s:$channel',
-          'ov_c:$channel',
-          'ov_b:$channel',
-        ])
-          key: ?blob[key],
-      };
-    }
-
     for (final (name, frontier) in [
       ('never read', null),
       ('read over 30 days ago', 1800000000 - 40 * 24 * 3600),
@@ -713,7 +733,7 @@ void main() {
         final base = frontier ?? 0;
         expect(ownGroup(phone), {
           channel: base,
-          'ov_s:$channel': 1,
+          'ov_s:$channel': clock - 6,
           'ov_c:$channel': 0,
           'ov_b:$channel': base,
         });
@@ -733,14 +753,15 @@ void main() {
 
     test('a peer group with a zero frontier survives receive, journal and an '
         'offline restart', () async {
-      relay.retained['read-state:peer'] = _readStateEvent(
+      relay.retained['read-state-unread-v2:peer'] = _readStateEvent(
+        unread: true,
         keys: keys,
         crypto: crypto,
         clientId: 'peer',
         slot: 'peer',
         contexts: {
           channel: 0,
-          'ov_s:$channel': 1,
+          'ov_s:$channel': clock - 20,
           'ov_c:$channel': 0,
           'ov_b:$channel': 0,
         },
@@ -751,7 +772,7 @@ void main() {
       await phone.flush();
       expect(ownGroup(phone), {
         channel: 0,
-        'ov_s:$channel': 1,
+        'ov_s:$channel': clock - 20,
         'ov_c:$channel': 0,
         'ov_b:$channel': 0,
       });
@@ -773,11 +794,10 @@ void main() {
       expect(phone.clearChannelOverride(other), isTrue);
       expect(phone.activeChannelOverrides, isEmpty);
       await phone.flush();
-      final blob = readStateBlobs().firstWhere(
-        (blob) => blob.containsKey('ov_c:$other'),
-      );
+      final blob = ownUnread(phone);
       expect(blob[other], 0);
-      expect(blob['ov_c:$other'], 2);
+      // The clear takes a fresh stamp, after the mark's in the same second.
+      expect(blob['ov_c:$other'], clock + 1);
       expect(blob.containsKey('ov_s:$other'), isFalse);
     });
 
@@ -797,9 +817,7 @@ void main() {
       phone.markContextRead('${channel}c', clock - 1);
       await phone.flush();
       expect(phone.syncError, isNull);
-      final own = readStateBlobs().firstWhere(
-        (blob) => blob.containsKey('${channel}c'),
-      );
+      final own = ownUnread(phone);
       expect(
         {
           for (final key in [
@@ -814,13 +832,131 @@ void main() {
         },
         {
           channel: 0,
-          'ov_s:$channel': 1,
+          'ov_s:$channel': clock - 3600,
           'ov_b:$channel': 0,
           stale: old,
-          'ov_s:$stale': 1,
+          'ov_s:$stale': clock - 3600,
           'ov_b:$stale': old,
         },
       );
+    });
+  });
+
+  group('expiring unread (version 2)', () {
+    const lifetime = 30 * 24 * 3600;
+
+    test('a mark expires 30 days after it was made, even unread', () async {
+      final phone = await device('phone');
+      phone.markContextRead(channel, clock - 100);
+      final marked = clock;
+      expect(phone.markChannelUnread(channel), isTrue);
+      await phone.flush();
+
+      clock = marked + lifetime;
+      expect(phone.activeChannelOverrides, {channel});
+      clock += 1;
+      expect(phone.activeChannelOverrides, isEmpty);
+      await phone.flush();
+      expect(ownGroup(phone), {channel: marked - 100, 'ov_c:$channel': marked});
+      final desktop = await device('desktop');
+      expect(desktop.activeChannelOverrides, isEmpty);
+    });
+
+    test('a dead group is discarded only past the lifetime and guard, and its '
+        'replay stays dead', () async {
+      final phone = await device('phone');
+      phone.markContextRead(channel, clock - 100);
+      final marked = clock;
+      expect(phone.markChannelUnread(channel), isTrue);
+      await phone.flush();
+      final replay = relay.retained.entries
+          .firstWhere((e) => e.key.startsWith(readStateUnreadDTagPrefix))
+          .value;
+
+      clock = marked + lifetime + 600;
+      await phone.flush();
+      expect(ownUnread(phone), {
+        channel: marked - 100,
+        'ov_c:$channel': marked,
+      });
+      clock += 1;
+      await phone.flush();
+      expect(ownUnread(phone), isEmpty);
+
+      // The old live group, replayed by a peer, is too old to merge.
+      relay.retained['${readStateUnreadDTagPrefix}peer'] = replay;
+      await reconnect(phone);
+      expect(phone.activeChannelOverrides, isEmpty);
+      relay.offline = true;
+      final restarted = await device('phone');
+      expect(restarted.activeChannelOverrides, isEmpty);
+      // A new mark is newer than the discarded ceiling.
+      relay.offline = false;
+      await reconnect(restarted);
+      expect(restarted.markChannelUnread(channel), isTrue);
+      expect(restarted.activeChannelOverrides, {channel});
+    });
+
+    test('a clock rollback does not revive an expired mark', () async {
+      final phone = await device('phone');
+      phone.markContextRead(channel, clock - 100);
+      final marked = clock;
+      expect(phone.markChannelUnread(channel), isTrue);
+      await phone.flush();
+      clock = marked + lifetime + 1;
+      expect(phone.activeChannelOverrides, isEmpty);
+      await phone.flush();
+
+      clock = marked;
+      expect(phone.activeChannelOverrides, isEmpty);
+      relay.offline = true;
+      final restarted = await device('phone');
+      expect(restarted.activeChannelOverrides, isEmpty);
+    });
+
+    test('a group stamped too far ahead is deferred, and the view is '
+        'incomplete until the clock reaches it', () async {
+      final other = '${channel}b';
+      relay.retained['${readStateUnreadDTagPrefix}peer'] = _readStateEvent(
+        unread: true,
+        keys: keys,
+        crypto: crypto,
+        clientId: 'peer',
+        slot: 'peer',
+        contexts: {
+          other: clock - 100,
+          'ov_s:$other': clock + 700,
+          'ov_c:$other': 0,
+          'ov_b:$other': clock - 100,
+        },
+        createdAt: clock - 10,
+      );
+      final phone = await device('phone');
+      expect(phone.activeChannelOverrides, isEmpty);
+      expect(phone.markChannelUnread(channel), isFalse);
+
+      clock += 100;
+      expect(phone.markChannelUnread(channel), isTrue);
+      expect(phone.activeChannelOverrides, {channel, other});
+    });
+
+    test('a v1 override group is not imported', () async {
+      relay.retained['read-state:old'] = _readStateEvent(
+        keys: keys,
+        crypto: crypto,
+        clientId: 'old',
+        slot: 'old',
+        contexts: {
+          channel: clock - 100,
+          'ov_s:$channel': clock - 50,
+          'ov_c:$channel': 0,
+          'ov_b:$channel': clock - 100,
+        },
+        createdAt: clock - 10,
+      );
+      final phone = await device('phone');
+      expect(phone.activeChannelOverrides, isEmpty);
+      expect(phone.getEffectiveTimestamp(channel), clock - 100);
     });
   });
 
@@ -893,17 +1029,25 @@ NostrEvent _readStateEvent({
   required String slot,
   required Map<String, int> contexts,
   required int createdAt,
+  // The version-2 unread record instead of read positions.
+  bool unread = false,
 }) => NostrEvent(
   id: 'event-$clientId-$createdAt',
   pubkey: keys.public,
   createdAt: createdAt,
   kind: EventKind.readState,
   tags: [
-    ['d', '$readStateDTagPrefix$slot'],
-    ['t', 'read-state'],
+    ['d', '${unread ? readStateUnreadDTagPrefix : readStateDTagPrefix}$slot'],
+    ['t', unread ? readStateUnreadTag : 'read-state'],
   ],
   content: crypto.encrypt(
-    jsonEncode(ReadStateBlob(clientId: clientId, contexts: contexts).toJson()),
+    jsonEncode(
+      ReadStateBlob(
+        clientId: clientId,
+        contexts: contexts,
+        version: unread ? 2 : 1,
+      ).toJson(),
+    ),
   ),
   sig: 'sig',
 );

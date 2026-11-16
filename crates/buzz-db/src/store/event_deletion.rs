@@ -11,14 +11,15 @@ use crate::{
 };
 
 /// SQL predicate over an `events` row for coordinates that carry no
-/// historical value: NIP-RS read state and Buzz mesh heartbeats. Their
+/// historical value: NIP-RS read state (read positions and the version-2
+/// unread record, each with its own namespace tag) and Buzz mesh heartbeats. Their
 /// deletion is physical, including the mention index, so soft-deleted payloads
 /// never accumulate. This is exactly the classification used by the migration
 /// 0011 / 0019 purge triggers this path replaces.
 macro_rules! retention_free_event_predicate {
     () => {
         "((kind = 30078 \
-           AND d_tag ~ '^read-state:[0-9a-f]{32}$' \
+           AND d_tag ~ '^read-state(-unread-v2)?:[0-9a-f]{32}$' \
            AND (SELECT count(*) \
                 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(tags) = 'array' THEN tags ELSE '[]'::jsonb END) tag \
                 WHERE jsonb_typeof(tag) = 'array' AND tag->0 = '\"d\"'::jsonb) = 1 \
@@ -28,7 +29,7 @@ macro_rules! retention_free_event_predicate {
                   AND jsonb_typeof(tag->1) = 'string' AND tag->>0 = 'd' AND tag->>1 = d_tag) \
            AND (SELECT count(*) \
                 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(tags) = 'array' THEN tags ELSE '[]'::jsonb END) tag \
-                WHERE tag = '[\"t\", \"read-state\"]'::jsonb) = 1) \
+                WHERE tag = jsonb_build_array('t', split_part(d_tag, ':', 1))) = 1) \
           OR (kind = 30003 \
               AND d_tag LIKE 'buzz-mesh-member-status:%' \
               AND tags @> '[[\"k\", \"buzz-mesh-status\"]]'::jsonb))"

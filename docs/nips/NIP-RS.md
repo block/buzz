@@ -24,7 +24,7 @@ This NIP defines a minimal, privacy-preserving protocol for propagating read sta
 
 ## Non-Goals
 
-This NIP does not define a durable log of all read messages — frontier blobs are best-effort recent activity hints bounded by a time horizon. Exception: `ov_*` override entries, including tombstone floors, are durable state — they are exempt from age pruning, budget eviction, and horizon-bounded fetching, they live in a single coordinate per installation, and they MUST be carried forward before that coordinate is deleted or abandoned (see Manual-Unread Override Layer — Override State Durability).
+This NIP does not define a durable log of all read messages — frontier blobs are best-effort recent activity hints bounded by a time horizon. Exception: `ov_*` override entries, including tombstone floors, are durable state — they are exempt from age pruning, budget eviction, and horizon-bounded fetching (except for the expiry of the Buzz version-2 unread profile), they live in a single coordinate per installation, and they MUST be carried forward before that coordinate is deleted or abandoned (see Manual-Unread Override Layer — Override State Durability).
 This NIP does not define cross-client interoperability on context ID format — context identifiers are opaque by default and meaningful only within a single client family, except for OPTIONAL well-known schemes defined in this NIP (`thread:<root-event-id>` and `msg:<event-id>`, defined under Read Context Schemes), which are provided for cross-client thread/message-read interoperability.
 This NIP does not guarantee ordering of read events across devices.
 This NIP does not require relay-stored read-state logic: no new event kind, no new wire message, and nothing a relay must interpret about read state. Clients implementing the manual-unread override layer do depend on relay behaviour their full-state load cannot verify (see Full-State Load).
@@ -547,22 +547,24 @@ are unchanged.
   This is an accepted limitation of the Buzz profile: a manual unread MAY be
   lost to a concurrent or stale-baseline read on another installation, and
   clients MUST NOT attempt to restore it.
-- **Bounds and lifetime cap.** Every channel override group, and its
-  tombstone floor once dead, is permanent and lives with its frontier on the
-  primary coordinate (see Override State Durability, Override Group
-  Co-Location Rule). Each installation's primary MUST carry the merged union
+- **Bounds and expiry.** Every channel override group, and its tombstone
+  floor once dead, lives with its paired frontier on the installation's
+  version-2 unread record (see Expiring unread state (version 2), Override
+  Group Co-Location Rule) and is discarded only as that profile permits.
+  Read-position coordinates carry no override keys. Each installation's
+  unread record MUST carry the merged union
   of its own and its peers' channel groups, so the capacity is shared by the
   identity across all its installations, not per installation. A new group
   that does not fit MUST fail visibly. If the merged union no longer fits,
-  the client MUST rewrite its primary compactly from the groups its last
-  published primary carried: each group in its canonical form against the
+  the client MUST rewrite its unread record compactly from the nonexpired
+  groups its last published unread record carried: each group in its canonical form against the
   current frontiers (a dead group as its tombstone floor), with its
-  co-located frontier advanced. The rewrite MUST NOT omit merged groups or
-  tombstone floors that primary carried, and override actions, including the
+  co-located frontier advanced. The rewrite MUST NOT omit nonexpired groups or
+  tombstone floors that record carried, and override actions, including the
   synchronized clears above, MUST fail visibly while the union does not fit,
   per Bounds and Budget (Terminal behaviour at the ceiling); ordinary
   frontier advances and device-local overrides remain permitted. It MUST NOT
-  prune tombstones or peer groups to make room.
+  prune nonexpired tombstones or peer groups to make room.
 - **Catch-up advances the main frontier:** on a catch-up of a channel, the
   client advances that channel's own context (`<channel-id>`) to the newest
   top-level message the reader reached, following the Write Discipline (not
@@ -609,7 +611,8 @@ are unchanged.
   and assignments before publication. Publish changed coordinates only. Never
   remove a sole carrier before its replacement is accepted. Unused slots may be
   reused after their entries are below the floor, with read-before-write conflict
-  detection. Override groups and their frontiers remain on the primary.
+  detection. Override groups and their paired frontiers live only on the
+  version-2 unread record.
 - **Recovery:** save pending signed event bytes durably before sending. An
   unknown outcome retries those exact bytes. A partially accepted batch is not
   whole-revision success; successful slots need not be resent, and unsynced
@@ -623,11 +626,22 @@ are unchanged.
   or tag filter. The floor is evaluated on frontier values, not containing
   event age. An old blob can carry a newer frontier because message timestamps
   are author-controlled. Orphan slots are not automatically deleted or ignored.
-  No age policy applies to override tombstone floors.
+  Override groups expire only as specified in Expiring unread state
+  (version 2).
 
 Legacy clients do not gain the semantic floor automatically. A mixed-version
 installation may continue showing old messages unread; wire max-register
 interoperability alone does not imply identical unread presentation.
+
+**Expiring unread state (version 2).** Version-2 unread primaries use the isolated `read-state-unread-v2:` coordinate and `read-state-unread-v2` tag, NIP-44 encryption, `v:2`, `client_id`, and a `contexts` map. Override group validation, co-location, max merge and canonical publication are unchanged except as specified here. S and C are uint32 Unix-second action stamps. An action MUST use `q=max(now,max(S,C)+1)` for its edited S or C. It MUST refuse allocation beyond uint32 or more than 60 seconds ahead of its local clock. Republish, retry, restore and convergence MUST NOT re-stamp an action.
+
+This profile requires clocks within 300 seconds of real Unix time. A receiver MUST defer a group whose greatest action stamp is more than 660 seconds ahead of its local clock, MUST NOT advance its clock from received counters, and MUST not claim a complete usable override view while such a group is unresolved. A detected clock rollback MUST NOT lower the installation's persisted expiry watermark. Deployments unable to satisfy the time assumption MUST NOT advertise this profile's eviction guarantee.
+
+A manual-unread mark expires when `S < now-2592000`, even if it has not been read. Its baseline and liveness frontier still exclude the message-retention floor. A dead group MUST first canonicalize to `C=K=max(S,C)`. A publisher MAY discard that group, its causal counter ceiling and its no-longer-required paired frontier only when `K < now-2592000-600`. A reader MUST discard an incoming group whose greatest action stamp is below `now-2592000` before merging it, and MUST apply the S-expiry condition when evaluating liveness. Expired marks MUST NOT be restored by replay, backup import or automatic renewal.
+
+Current byte/key/snapshot limits remain enforced. Nonexpired groups MUST NOT be budget-evicted. A new mark that cannot fit MUST fail without discarding another nonexpired group. Expiry MUST apply consistently in memory, journal hydration/write, receive/merge, display, normal publication and overfull fallback. Pending signed events retain their original stamps; retry MUST NOT turn an expired action into a new one.
+
+Version-1 read-position coordinates continue to carry frontiers. Override keys found in version-1 coordinates MUST NOT be imported into, merged with, or dual-published as version-2 state.
 
 ### Buzz Thread Follow Choices
 
@@ -918,22 +932,22 @@ Clear-wins also matches the product semantics this layer is designed for: a fals
 
 Because legacy clients can carry and republish old `ov_*` keys indefinitely (they pass through `sanitizeContexts` as unknown opaque entries), there is no finite time after which all stale override components are guaranteed absent. Therefore:
 
-**Clients MUST NOT drop `ov_*` override entries (including tombstone floors) based on age pruning or budget eviction.** This exemption applies permanently. Age-based pruning applies to frontier entries only. Eviction strategies that respect byte/key budgets MUST apply to frontier and `msg:`/`thread:` entries first and MUST NOT touch `ov_*` entries.
+**Clients MUST NOT drop `ov_*` override entries (including tombstone floors) based on age pruning or budget eviction.** This exemption applies permanently, except that a client implementing Expiring unread state (version 2) expires and discards version-2 groups exactly as that profile specifies. Age-based pruning applies to frontier entries only. Eviction strategies that respect byte/key budgets MUST apply to frontier and `msg:`/`thread:` entries first and MUST NOT touch `ov_*` entries.
 
 **Durability is a property of retrievable logical state, not of keys within one blob.** An override register survives only if a client that loads its full state can still reach every component. Therefore, in addition to the per-entry rule above:
 
 - Full-state loads by clients implementing this layer MUST NOT be restricted by a finite event-level `since` window, and MUST establish completeness rather than assume it; the containing event must remain reachable, not merely retain its keys (see Full-State Load).
 - No coordinate carrying `ov_*` entries may be deleted or abandoned until the componentwise `max()` of every override register it holds — especially every tombstone ceiling — has been republished under the client's current primary coordinate and accepted on every relay from which the old coordinate will be deleted or allowed to lapse (see Client-ID Rotation, Orphaned Blob Deletion).
 
-**There is no safe finite GC horizon for override state.** Any protocol that proposes to delete tombstone floors after a bounded period requires a separately proved guarantee that no stale override component can re-enter the merge — this amendment does not provide such a guarantee.
+**Outside the version-2 profile there is no safe finite GC horizon for override state.** Deleting tombstone floors after a bounded period requires a guarantee that no stale override component can re-enter the merge. Expiring unread state (version 2) supplies it: its groups live in an isolated namespace that never imports version-1 override keys, every stamp is a bounded-skew action time, a reader discards any incoming group whose greatest stamp is older than the lifetime before merging it, and a publisher discards a dead group only after the lifetime plus a skew guard has passed.
 
 #### Bounds and Budget
 
 - **Key growth:** a live override adds 3 entries per context; a tombstoned override adds 1 entry per context. At 100 overridden channel contexts: ~300 live entries or ~100 tombstone entries.
 - **Byte cost (small-counter example, common case):** channel UUID context (36 chars), counters S=1/C=0/B=10 — live override ~138 bytes; tombstone ~45 bytes. **Byte cost at uint32 maximum** (S=4294967295, worst case): live override ~164 bytes; tombstone ~54 bytes.
-- **Hard ceiling on ever-overridden contexts.** Because all `ov_*` entries live in one coordinate (see `d` Tag) and tombstones can never be pruned (see Override State Durability — there is no safe finite GC horizon), the primary blob's plaintext budget is a hard ceiling on the number of contexts a single installation can ever have manually marked unread. Against a 32 KiB plaintext budget: roughly **600** tombstoned contexts at the worst-case ~54 bytes, ~730 at the common ~45 bytes, or ~199 simultaneously live overrides at ~164 bytes — and that is before frontier entries get any room at all.
+- **Hard ceiling on overridden contexts.** Because all `ov_*` entries live in one coordinate (see `d` Tag) and, outside the version-2 profile, tombstones can never be pruned (see Override State Durability), the primary blob's plaintext budget is a hard ceiling on the number of contexts a single installation can ever have manually marked unread. Under Expiring unread state (version 2) the same budget bounds only the groups marked or cleared within the last 2592000 seconds plus the 600-second guard; against its 40 KiB plaintext budget, with each group's paired frontier (about 50 bytes) included, that is roughly 390 dead or 190 live groups in that window. Against a 32 KiB plaintext budget: roughly **600** tombstoned contexts at the worst-case ~54 bytes, ~730 at the common ~45 bytes, or ~199 simultaneously live overrides at ~164 bytes — and that is before frontier entries get any room at all.
 - **Terminal behaviour at the ceiling.** When the primary blob cannot accommodate a new override group after all prunable frontier entries have been evicted, the client MUST refuse the mark-unread action and report it as failed. It MUST NOT split override state across coordinates and MUST NOT drop tombstone floors to make room. Likewise, a client whose merged override state — including tombstones merged in from peer installations — no longer fits in its primary blob MUST rewrite its primary compactly from the groups its last-published primary carried, each canonical against the current frontiers with its co-located frontier advanced; it MUST NOT omit merged groups or tombstone floors that primary carried, and MUST report override actions as failed; publishing a truncated override set is budget-driven override loss under another name. No floor is lost in this state, because the installations that originated those floors still carry them; the constrained installation simply stops acting as a replica until it has room. This is the same policy shape as counter exhaustion (see Actions): visible failure, never silent degradation.
-- **10,000-key limit:** override entries count toward the existing per-blob validation limit. Tombstones accumulate permanently with every distinct ever-overridden context; they cannot be pruned. Clients SHOULD compact dead overrides aggressively and MAY enforce an active-live-override cap. Note that a cap on live overrides does not bound the total `ov_*` entry count over an unbounded context lifetime — tombstones from all historical overrides remain. The 32 KiB and 10,000-entry limits are expressed per blob at write time; a client that has overridden many distinct contexts over its lifetime must account for all accumulated tombstones when evaluating budget headroom.
+- **10,000-key limit:** override entries count toward the existing per-blob validation limit. Outside the version-2 profile, tombstones accumulate permanently with every distinct ever-overridden context; they cannot be pruned. Clients SHOULD compact dead overrides aggressively and MAY enforce an active-live-override cap. Note that a cap on live overrides does not bound the total `ov_*` entry count over an unbounded context lifetime — tombstones from all historical overrides remain. The 32 KiB and 10,000-entry limits are expressed per blob at write time; a client that has overridden many distinct contexts over its lifetime must account for all accumulated tombstones when evaluating budget headroom.
 - **256-byte key limit:** override keys (`ov_s:`, `ov_c:`, `ov_b:` + context ID) count toward the per-entry 256-byte validation limit. Context IDs up to 251 bytes are safe. Buzz's own context ID shapes (UUID 36 bytes, `msg:hex64` 68 bytes, `thread:hex64` 71 bytes) are well within this limit.
 
 #### Verification Artifact

@@ -530,8 +530,105 @@ void main() {
     );
   });
 
+  test('carries merged unread groups in the unread record, and drops message '
+      'groups and v1 override keys', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    const ownGroup = {
+      'ov_s:channel-1': 1990,
+      'ov_c:channel-1': 1980,
+      'ov_b:channel-1': 90,
+    };
+    final oldMessage = 'msg:${'d' * 64}';
+    final session = _FakeRelaySession()
+      ..historyEvents = [
+        _readStateEvent(
+          pubkey: keychain.public,
+          crypto: crypto,
+          clientId: 'web-client',
+          slotId: 'web-unread',
+          unread: true,
+          // `ov_s:channel-9` alone is a partial group, rejected whole.
+          contexts: {
+            'channel-1': 90,
+            ...ownGroup,
+            'ov_s:channel-9': 1995,
+            oldMessage: 95,
+            'ov_c:$oldMessage': 1996,
+            'ov_c:channel-2': 1970,
+            'channel-2': 80,
+          },
+          createdAt: 100,
+        ),
+        // A v1 record's override keys are not v2 intent: never imported.
+        _readStateEvent(
+          pubkey: keychain.public,
+          crypto: crypto,
+          clientId: 'old-client',
+          slotId: 'old-slot',
+          contexts: {
+            'channel-4': 70,
+            'ov_s:channel-4': 1990,
+            'ov_c:channel-4': 0,
+            'ov_b:channel-4': 70,
+          },
+          createdAt: 100,
+        ),
+      ];
+    final relay = _FakeSignedEventRelay();
+    ReadStateManager open(_FakeSignedEventRelay relay, {bool live = true}) =>
+        ReadStateManager(
+          pubkey: keychain.public,
+          relayUrl: _relayUrl,
+          prefs: prefs,
+          crypto: crypto,
+          relaySession: live ? session : null,
+          signedEventRelay: relay,
+          remoteEnabled: true,
+          onChanged: () {},
+          now: () => 2000,
+        );
+    final manager = open(relay);
+
+    await manager.initialize();
+    expect(manager.activeChannelOverrides, {'channel-1'});
+    manager.markContextRead('channel-3', 200);
+    await manager.flush();
+
+    Map<String, int> unread(_FakeSignedEventRelay relay) => decodeReadStateBlob(
+      crypto.decrypt(relay.unreadContents.last),
+      version: 2,
+    )!.contexts;
+    // Groups and their frontiers only: no read positions, no v1 keys.
+    expect(unread(relay), {
+      'channel-1': 90,
+      ...ownGroup,
+      'channel-2': 80,
+      'ov_c:channel-2': 1970,
+    });
+    // Read positions stay in v1, without any override key.
+    final positions = decodeReadStateBlob(
+      crypto.decrypt(relay.contents.first),
+    )!.contexts;
+    expect(positions.keys.where((key) => key.startsWith('ov_')), isEmpty);
+    manager.dispose(flushPending: false);
+
+    // A restart without the relay still carries the groups.
+    final restartedRelay = _FakeSignedEventRelay();
+    final restarted = open(restartedRelay, live: false);
+    expect(restarted.activeChannelOverrides, {'channel-1'});
+    restarted.markContextRead('channel-3', 300);
+    await restarted.flush();
+    expect(restartedRelay.unreadContents, isEmpty);
+  });
+
   test(
-    'carries merged channel override groups and drops message groups',
+    'rejects unread groups that are malformed or have no frontier',
     () async {
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
@@ -540,41 +637,28 @@ void main() {
         nsec: keychain.nsec,
         pubkey: keychain.public,
       )!;
-      final storage = ReadStateStorage(prefs);
-      final clientId = storage.getOrCreateClientId(keychain.public, _relayUrl);
-      final slotId = storage.getOrCreateSlotId(keychain.public, _relayUrl);
-      const ownGroup = {
-        'ov_s:channel-1': 2,
-        'ov_c:channel-1': 1,
-        'ov_b:channel-1': 90,
-      };
-      final oldMessage = 'msg:${'d' * 64}';
-      final oldMessageGroup = {'ov_c:$oldMessage': 96};
       final session = _FakeRelaySession()
         ..historyEvents = [
           _readStateEvent(
             pubkey: keychain.public,
             crypto: crypto,
-            clientId: clientId,
-            slotId: slotId,
-            // `ov_s:channel-9` alone is a partial group, rejected whole.
-            contexts: {
+            clientId: 'peer',
+            slotId: 'peer-unread',
+            unread: true,
+            contexts: const {
+              // Its ov_b: sibling is invalid, so this is not a tombstone.
+              'bad-sibling': 100,
+              'ov_c:bad-sibling': 1907,
+              // Complete counters, but no frontier for `no-frontier`.
+              'ov_s:no-frontier': 1902,
+              'ov_c:no-frontier': 1901,
+              'ov_b:no-frontier': 50,
               'channel-1': 90,
-              ...ownGroup,
-              'ov_s:channel-9': 3,
-              // Older than the local save horizon, so saving prunes it unless
-              // its group protects it.
-              oldMessage: 95,
-              ...oldMessageGroup,
+              'ov_s:channel-1': 1902,
+              'ov_c:channel-1': 1901,
+              'ov_b:channel-1': 90,
             },
-            createdAt: 100,
-          ),
-          _readStateEvent(
-            pubkey: keychain.public,
-            crypto: crypto,
-            clientId: 'web-client',
-            slotId: 'web-slot',
-            contexts: {'ov_c:channel-2': 4, 'esc:ov_x': 5, 'channel-2': 80},
+            rawContexts: const {'ov_b:bad-sibling': 'invalid'},
             createdAt: 100,
           ),
         ];
@@ -592,181 +676,77 @@ void main() {
       );
 
       await manager.initialize();
-      // Local message feedback never schedules wire writes. A frontier advance
-      // triggers publication and must preserve complete own override groups.
-      for (var index = 0; index < 1400; index++) {
-        manager.markContextRead(
-          'msg:${index.toString().padLeft(64, '0')}',
-          200,
-        );
-      }
-      manager.markContextRead('channel-3', 200);
       await manager.flush();
 
-      final published = decodeReadStateBlob(
-        crypto.decrypt(relay.contents.last),
-      )!.contexts;
-      expect(published, containsPair('ov_s:channel-1', 2));
-      expect(published, containsPair('ov_c:channel-1', 1));
-      expect(published, containsPair('ov_b:channel-1', 90));
-      // The group's frontier travels with it.
-      expect(published, containsPair('channel-1', 90));
-      expect(published, isNot(contains('ov_s:channel-9')));
-      // A peer's channel tombstone is merged and carried with its frontier.
-      expect(published, containsPair('ov_c:channel-2', 4));
-      expect(published, containsPair('channel-2', 80));
-      expect(published, isNot(contains('esc:ov_x')));
-      // Message groups are not synced state: never carried.
-      expect(published, isNot(contains('ov_c:$oldMessage')));
-      expect(manager.getEffectiveTimestamp('ov_s:channel-1'), isNull);
+      expect(
+        decodeReadStateBlob(
+          crypto.decrypt(relay.unreadContents.single),
+          version: 2,
+        )!.contexts,
+        {
+          'channel-1': 90,
+          'ov_s:channel-1': 1902,
+          'ov_c:channel-1': 1901,
+          'ov_b:channel-1': 90,
+        },
+      );
       manager.dispose(flushPending: false);
+    },
+  );
 
-      // A restart without the relay still carries the group.
-      final restartedRelay = _FakeSignedEventRelay();
-      final restarted = ReadStateManager(
+  test(
+    'publishes the last unread record when merged groups do not fit',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final session = _FakeRelaySession()
+        ..historyEvents = [
+          _readStateEvent(
+            pubkey: keychain.public,
+            crypto: crypto,
+            clientId: 'peer',
+            slotId: 'peer-unread',
+            unread: true,
+            contexts: {
+              for (var index = 0; index < 320; index++) ...{
+                index.toString().padLeft(36, 'c'): 100,
+                'ov_s:${index.toString().padLeft(36, 'c')}': 1902,
+                'ov_c:${index.toString().padLeft(36, 'c')}': 1901,
+                'ov_b:${index.toString().padLeft(36, 'c')}': 100,
+              },
+            },
+            createdAt: 100,
+          ),
+        ];
+      final relay = _FakeSignedEventRelay();
+      final manager = ReadStateManager(
         pubkey: keychain.public,
         relayUrl: _relayUrl,
         prefs: prefs,
         crypto: crypto,
-        relaySession: null,
-        signedEventRelay: restartedRelay,
+        relaySession: session,
+        signedEventRelay: relay,
         remoteEnabled: true,
         onChanged: () {},
         now: () => 2000,
       );
-      restarted.markContextRead('channel-3', 300);
-      await restarted.flush();
-      final republished = decodeReadStateBlob(
-        crypto.decrypt(restartedRelay.contents.last),
-      )!.contexts;
-      for (final entry in ownGroup.entries) {
-        expect(republished, containsPair(entry.key, entry.value));
-      }
-      expect(republished, containsPair('channel-1', 90));
-      expect(republished, containsPair(oldMessage, 95));
-      expect(republished, isNot(contains('ov_c:$oldMessage')));
-      expect(republished, isNot(contains('ov_s:channel-9')));
-      expect(republished, containsPair('ov_c:channel-2', 4));
+
+      await manager.initialize();
+      expect(manager.markChannelUnread('channel-9'), isFalse);
+      manager.markContextRead('channel-1', 300);
+      await manager.flush();
+
+      // Read positions still publish; the unread record has nothing it may send.
+      expect(relay.submitCount, 1);
+      expect(relay.unreadContents, isEmpty);
+      expect(manager.getEffectiveTimestamp('channel-1'), 300);
     },
   );
-
-  test('rejects own-slot override groups that are malformed or have no '
-      'frontier', () async {
-    SharedPreferences.setMockInitialValues({});
-    final prefs = await SharedPreferences.getInstance();
-    final keychain = nostr.Keys.generate();
-    final crypto = ReadStateCrypto.tryCreate(
-      nsec: keychain.nsec,
-      pubkey: keychain.public,
-    )!;
-    final storage = ReadStateStorage(prefs);
-    final clientId = storage.getOrCreateClientId(keychain.public, _relayUrl);
-    final slotId = storage.getOrCreateSlotId(keychain.public, _relayUrl);
-    final session = _FakeRelaySession()
-      ..historyEvents = [
-        _readStateEvent(
-          pubkey: keychain.public,
-          crypto: crypto,
-          clientId: clientId,
-          slotId: slotId,
-          contexts: const {
-            // Its ov_b: sibling is invalid, so this is not a tombstone.
-            'bad-sibling': 100,
-            'ov_c:bad-sibling': 7,
-            // Complete counters, but no frontier for `no-frontier`.
-            'ov_s:no-frontier': 2,
-            'ov_c:no-frontier': 1,
-            'ov_b:no-frontier': 50,
-            'channel-1': 90,
-            'ov_s:channel-1': 2,
-            'ov_c:channel-1': 1,
-            'ov_b:channel-1': 90,
-          },
-          rawContexts: const {'ov_b:bad-sibling': 'invalid'},
-          createdAt: 100,
-        ),
-      ];
-    final relay = _FakeSignedEventRelay();
-    final manager = ReadStateManager(
-      pubkey: keychain.public,
-      relayUrl: _relayUrl,
-      prefs: prefs,
-      crypto: crypto,
-      relaySession: session,
-      signedEventRelay: relay,
-      remoteEnabled: true,
-      onChanged: () {},
-      now: () => 2000,
-    );
-
-    await manager.initialize();
-    manager.markContextRead('channel-2', 300);
-    await manager.flush();
-
-    final published = decodeReadStateBlob(
-      crypto.decrypt(relay.contents.last),
-    )!.contexts;
-    expect(published, {
-      // Frontiers stay, including the one whose group was rejected.
-      'bad-sibling': 100,
-      'channel-1': 90,
-      'channel-2': 300,
-      'ov_s:channel-1': 2,
-      'ov_c:channel-1': 1,
-      'ov_b:channel-1': 90,
-    });
-    manager.dispose(flushPending: false);
-  });
-
-  test('leaves the slot when carried override keys do not fit', () async {
-    SharedPreferences.setMockInitialValues({});
-    final prefs = await SharedPreferences.getInstance();
-    final keychain = nostr.Keys.generate();
-    final crypto = ReadStateCrypto.tryCreate(
-      nsec: keychain.nsec,
-      pubkey: keychain.public,
-    )!;
-    final storage = ReadStateStorage(prefs);
-    final clientId = storage.getOrCreateClientId(keychain.public, _relayUrl);
-    final slotId = storage.getOrCreateSlotId(keychain.public, _relayUrl);
-    final session = _FakeRelaySession()
-      ..historyEvents = [
-        _readStateEvent(
-          pubkey: keychain.public,
-          crypto: crypto,
-          clientId: clientId,
-          slotId: slotId,
-          contexts: {
-            for (var index = 0; index < 320; index++) ...{
-              index.toString().padLeft(36, 'c'): 100,
-              'ov_s:${index.toString().padLeft(36, 'c')}': 2,
-              'ov_c:${index.toString().padLeft(36, 'c')}': 1,
-              'ov_b:${index.toString().padLeft(36, 'c')}': 100,
-            },
-          },
-          createdAt: 100,
-        ),
-      ];
-    final relay = _FakeSignedEventRelay();
-    final manager = ReadStateManager(
-      pubkey: keychain.public,
-      relayUrl: _relayUrl,
-      prefs: prefs,
-      crypto: crypto,
-      relaySession: session,
-      signedEventRelay: relay,
-      remoteEnabled: true,
-      onChanged: () {},
-      now: () => 2000,
-    );
-
-    await manager.initialize();
-    manager.markContextRead('channel-1', 300);
-    await manager.flush();
-
-    expect(relay.submitCount, 0);
-    expect(manager.getEffectiveTimestamp('channel-1'), 300);
-  });
 
   test(
     'partial publication survives restart and retries exact signed bytes',
@@ -1511,6 +1491,8 @@ class _RecordingRelaySocket extends RelaySocket {
 class _FakeSignedEventRelay implements SignedEventRelay {
   final Completer<_SubmittedEvent> submitted = Completer<_SubmittedEvent>();
   final List<String> contents = [];
+  // The unread records among [contents].
+  final List<String> unreadContents = [];
   int submitCount = 0;
 
   @override
@@ -1526,6 +1508,9 @@ class _FakeSignedEventRelay implements SignedEventRelay {
   }) async {
     submitCount++;
     contents.add(content);
+    if (tags.any((tag) => tag.length >= 2 && tag[1] == readStateUnreadTag)) {
+      unreadContents.add(content);
+    }
     if (!submitted.isCompleted) {
       submitted.complete(_SubmittedEvent(kind: kind, tags: tags));
     }
@@ -1611,19 +1596,26 @@ NostrEvent _readStateEvent({
   // Extra raw wire entries, such as values that are not valid timestamps.
   Map<String, Object?> rawContexts = const {},
   int version = 1,
+  // The version-2 unread record instead of read positions.
+  bool unread = false,
 }) {
   final blob = ReadStateBlob(clientId: clientId, contexts: contexts).toJson();
-  blob['v'] = version;
+  blob['v'] = unread ? 2 : version;
   blob['contexts'] = <String, Object?>{...contexts, ...rawContexts};
   return NostrEvent(
     id: 'event-$clientId-$createdAt',
     pubkey: pubkey,
     createdAt: createdAt,
     kind: EventKind.readState,
-    tags: [
-      ['d', '$readStateDTagPrefix$slotId'],
-      ['t', 'read-state'],
-    ],
+    tags: unread
+        ? [
+            ['d', '$readStateUnreadDTagPrefix$slotId'],
+            ['t', readStateUnreadTag],
+          ]
+        : [
+            ['d', '$readStateDTagPrefix$slotId'],
+            ['t', 'read-state'],
+          ],
     content: crypto.encrypt(jsonEncode(blob)),
     sig: 'sig',
   );

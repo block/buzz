@@ -13,10 +13,17 @@ extension ReadStateJournal on ReadStateManager {
       _clientId = journal['clientId'] as String;
       _effectiveState.addAll(contexts(journal['observed']));
       _localContexts.addAll(contexts(journal['local']));
-      _mergeOverrides({
-        ...contexts(journal['observed']),
-        ...contexts(journal['overrides']),
-      });
+      _expiryWatermark = (journal['expiryWatermark'] as int?) ?? 0;
+      // Overrides from before the unread record are not v2 intent (no
+      // import): only a journal that has the record loads them.
+      if (journal['unreadSlot'] case final String slot) {
+        _unreadSlot = slot;
+        _unreadPublished = contexts(journal['unreadPublished']);
+        _mergeOverrides({
+          ...contexts(journal['observed']),
+          ...contexts(journal['overrides']),
+        });
+      }
       _followSlots.addAll(
         ((journal['followSlots'] as List?) ?? const []).cast<String>(),
       );
@@ -93,12 +100,6 @@ extension ReadStateJournal on ReadStateManager {
               !entry.key.startsWith(msgContextPrefix),
         ),
       );
-      _mergeOverrides({
-        for (final entry in stored.contexts.entries)
-          if (!isOverrideContext(entry.key) ||
-              stored.publishableContextIds.contains(entry.key))
-            entry.key: entry.value,
-      });
     }
     _persistLocalState();
   }
@@ -118,6 +119,7 @@ extension ReadStateJournal on ReadStateManager {
       if (!_ownsJournal) {
         throw StateError('Read-state journal writer retired');
       }
+      _discardOverrides();
       final observed = pruneStaleContexts(
         _effectiveState,
         nowUnixSeconds: _now(),
@@ -131,7 +133,14 @@ extension ReadStateJournal on ReadStateManager {
         'clientId': _clientId,
         'observed': observed,
         'local': _localContexts,
-        'overrides': canonicalOverrideEntries(_overrides, _frontierOf),
+        'overrides': canonicalOverrideEntries(
+          _overrides,
+          _frontierOf,
+          now: _expiryNow,
+        ),
+        'unreadSlot': _unreadSlot,
+        'unreadPublished': _unreadPublished,
+        'expiryWatermark': _expiryWatermark,
         'followSlots': _followSlots,
         'followPlacement': [
           for (final keys in _followPlacement) keys.toList()..sort(),

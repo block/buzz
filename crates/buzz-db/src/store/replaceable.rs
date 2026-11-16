@@ -141,24 +141,34 @@ async fn replace_parameterized_event_in_transaction_impl(
         let parts = tag.as_slice();
         parts.len() >= 2 && parts[0] == "d" && parts[1] == d_tag
     });
-    let read_state_t_tag_count = event
-        .tags
-        .iter()
-        .filter(|tag| {
-            let parts = tag.as_slice();
-            parts.len() == 2 && parts[0] == "t" && parts[1] == "read-state"
-        })
-        .count();
-    let is_nip_rs = kind_i32 == buzz_core::kind::KIND_READ_STATE as i32
-        && d_tag_count == 1
-        && has_exact_d_tag
-        && d_tag.strip_prefix("read-state:").is_some_and(|slot| {
-            slot.len() == 32
-                && slot
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        })
-        && read_state_t_tag_count == 1;
+    // NIP-RS read positions and the version-2 unread record: each namespace
+    // pairs its d-tag prefix with exactly one matching t tag.
+    let nip_rs_namespace = [
+        ("read-state:", "read-state"),
+        ("read-state-unread-v2:", "read-state-unread-v2"),
+    ]
+    .into_iter()
+    .find(|(prefix, _)| d_tag.starts_with(prefix));
+    let is_nip_rs = nip_rs_namespace.is_some_and(|(prefix, namespace_tag)| {
+        kind_i32 == buzz_core::kind::KIND_READ_STATE as i32
+            && d_tag_count == 1
+            && has_exact_d_tag
+            && d_tag.strip_prefix(prefix).is_some_and(|slot| {
+                slot.len() == 32
+                    && slot
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            })
+            && event
+                .tags
+                .iter()
+                .filter(|tag| {
+                    let parts = tag.as_slice();
+                    parts.len() == 2 && parts[0] == "t" && parts[1] == namespace_tag
+                })
+                .count()
+                == 1
+    });
     let is_buzz_mesh_status = kind_i32 == buzz_core::kind::KIND_BOOKMARK_SET as i32
         && d_tag.starts_with("buzz-mesh-member-status:")
         && event.tags.iter().any(|tag| {
@@ -1238,6 +1248,24 @@ mod postgres_tests {
                 vec![["t", "read-state"]],
                 people_p(),
                 true,
+            ),
+            (
+                "NIP-RS unread record",
+                Path::Parameterized,
+                buzz_core::kind::KIND_READ_STATE as u16,
+                Some(format!("read-state-unread-v2:{}", "a".repeat(32))),
+                vec![["t", "read-state-unread-v2"]],
+                people_p(),
+                true,
+            ),
+            (
+                "NIP-RS unread prefix with read-state tag",
+                Path::Parameterized,
+                buzz_core::kind::KIND_READ_STATE as u16,
+                Some(format!("read-state-unread-v2:{}", "a".repeat(32))),
+                vec![["t", "read-state"]],
+                people_p(),
+                false,
             ),
             (
                 "mesh status",
@@ -2496,6 +2524,7 @@ mod postgres_tests {
         let nip_rs = buzz_core::kind::KIND_READ_STATE as u16;
         let mesh = buzz_core::kind::KIND_BOOKMARK_SET as u16;
         let read_state_d = format!("read-state:{}", "b".repeat(32));
+        let unread_d = format!("read-state-unread-v2:{}", "b".repeat(32));
         let mesh_d = "buzz-mesh-member-status:purge-test".to_string();
         let tag = |parts: &[&str]| parts.iter().map(|p| p.to_string()).collect::<Vec<_>>();
         let t_read_state = tag(&["t", "read-state"]);
@@ -2509,6 +2538,30 @@ mod postgres_tests {
                 read_state_d.clone(),
                 vec![tag(&["d", &read_state_d]), t_read_state.clone()],
                 true,
+            ),
+            (
+                "nip-rs unread record",
+                nip_rs,
+                unread_d.clone(),
+                vec![tag(&["d", &unread_d]), tag(&["t", "read-state-unread-v2"])],
+                true,
+            ),
+            (
+                "nip-rs unread record with read-state tag",
+                nip_rs,
+                unread_d.clone(),
+                vec![tag(&["d", &unread_d]), t_read_state.clone()],
+                false,
+            ),
+            (
+                "nip-rs read-state slot with unread tag",
+                nip_rs,
+                read_state_d.clone(),
+                vec![
+                    tag(&["d", &read_state_d]),
+                    tag(&["t", "read-state-unread-v2"]),
+                ],
+                false,
             ),
             (
                 "nip-rs without t tag",

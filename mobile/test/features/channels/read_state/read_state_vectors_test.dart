@@ -21,6 +21,46 @@ void main() {
           )
           as Map<String, dynamic>;
   Map<String, int> map(dynamic value) => Map<String, int>.from(value as Map);
+  final unread = corpus['unreadV2'] as Map<String, dynamic>;
+  OverrideRegister register(dynamic value) =>
+      (s: value['s'] as int, c: value['c'] as int, b: value['b'] as int);
+  for (final vector in unread['liveness'] as List) {
+    test('shared unread liveness: ${vector['id']}', () {
+      final now = corpus['now'] as int;
+      final r = register(vector['register']);
+      final frontier = vector['frontier'] as int;
+      expect(isOverrideActive(r, frontier, now: now), vector['expectedActive']);
+      expect(isOverrideExpired(r, now: now), vector['expectedExpired']);
+      expect(isOverrideDiscardable(r, now: now), vector['expectedDiscardable']);
+      expect(
+        canonicalOverrideEntries({'room': r}, (_) => frontier, now: now),
+        map(vector['expectedCanonical']),
+      );
+    });
+  }
+  for (final vector in unread['allocation'] as List) {
+    test('shared unread allocation: ${vector['id']}', () {
+      expect(
+        allocateOverrideStamp(
+          register(vector['register']),
+          now: vector['now'] as int,
+        ),
+        vector['expectedStamp'],
+      );
+    });
+  }
+  for (final vector in unread['receive'] as List) {
+    test('shared unread receive: ${vector['id']}', () {
+      final r = register(vector['register']);
+      final now = vector['now'] as int;
+      final verdict = isOverrideExpired(r, now: now)
+          ? 'drop'
+          : isOverrideDeferred(r, now: now)
+          ? 'defer'
+          : 'merge';
+      expect(verdict, vector['expected']);
+    });
+  }
   for (final vector in corpus['packing'] as List) {
     test('shared packing: ${vector['id']}', () {
       final generated = vector['generate'] as Map?;
