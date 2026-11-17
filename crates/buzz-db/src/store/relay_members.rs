@@ -1099,8 +1099,9 @@ pub(crate) async fn write_nip43_membership_snapshot(
     .bind(community_id.as_uuid())
     .fetch_all(tx.conn())
     .await?;
-    // Retired lists count too: a list newer than every prior one can't
-    // repeat an earlier list's id.
+    // Soft-deleted lists count too: a list newer than every prior one can't
+    // repeat an earlier list's id. A superseded list is deleted below, but the
+    // live head it gives way to is always newer.
     let newest_created_at: Option<DateTime<Utc>> = sqlx::query_scalar(
         "SELECT max(created_at) FROM events \
          WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND channel_id IS NULL",
@@ -1140,17 +1141,16 @@ pub(crate) async fn write_nip43_membership_snapshot(
     let received_at = Utc::now();
     let d_tag = crate::event::extract_d_tag(&event);
 
-    // The relay is authoritative: retire every prior list unconditionally.
-    sqlx::query(
-        "UPDATE events SET deleted_at = NOW() \
-         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
-         AND channel_id IS NULL AND deleted_at IS NULL",
-    )
-    .bind(community_id.as_uuid())
-    .bind(kind_i32)
-    .bind(pubkey_bytes.as_slice())
-    .execute(tx.conn())
-    .await?;
+    // The relay is authoritative: retire every prior live list
+    // unconditionally. A superseded list is deleted, not soft-deleted.
+    let (_, supersede_sql) =
+        replaceable::replacement_sql(false, replaceable::hard_deletes_superseded(kind_i32));
+    sqlx::query(supersede_sql)
+        .bind(community_id.as_uuid())
+        .bind(kind_i32)
+        .bind(pubkey_bytes.as_slice())
+        .execute(tx.conn())
+        .await?;
     sqlx::query(
         "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10)",
@@ -2588,6 +2588,16 @@ mod postgres_tests {
             .expect("transfer ownership");
         assert!(matches!(write.outcome, TransferResult::Transferred { .. }));
         assert_membership_list_matches(&pool, community, &keys, write.snapshot.as_ref()).await;
+        // Each write above deleted the list it superseded, so only the live
+        // list is stored.
+        let stored: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id = $1 AND kind = $2")
+                .bind(community.as_uuid())
+                .bind(buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32)
+                .fetch_one(&pool)
+                .await
+                .expect("count stored lists");
+        assert_eq!(stored, 1, "superseded lists are deleted");
 
         let provisioned = make_test_community(&pool).await;
         let write = db
