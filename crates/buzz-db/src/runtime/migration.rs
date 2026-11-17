@@ -944,11 +944,12 @@ mod postgres_tests {
             artifact_type.trim(),
             "ALTER TYPE channel_type ADD VALUE IF NOT EXISTS 'artifact';"
         );
-        // Artifact creator (0096): a nullable column, so no rewrite and no
+        // Artifact creator and assignees (0096): nullable columns, so no rewrite and no
         // backfill, under bounded locks.
         let creator = strip_sql_comments(migrations[95].sql.as_str());
         assert!(creator.contains("SET LOCAL lock_timeout = '1s';"));
         assert!(creator.contains("ADD COLUMN IF NOT EXISTS creator TEXT;"));
+        assert!(creator.contains("ADD COLUMN IF NOT EXISTS assignees TEXT[];"));
         assert!(!creator.to_ascii_uppercase().contains("UPDATE "));
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);

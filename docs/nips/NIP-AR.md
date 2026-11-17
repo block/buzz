@@ -66,10 +66,37 @@ On creation or when changed from the previous accepted revision, `root` MUST ide
 
 Two optional tags name people, and the relay holds them to rules so a reader can trust the current revision without its history.
 
-- **Assignee.** `["assignee", <hex pubkey>]`, once per person, distinct, at most 16 per revision. Every assignee on a `create`, `update`, `move` or `restore` MUST be able to read the home that revision puts the artifact in, judged when the revision is accepted. Otherwise the relay rejects it with `invalid: an assignee can't see this artifact`. A move that would leave an assignee unable to read the destination is rejected the same way, so the client saves it without them. A `delete` carries no assignees.
-- **Creator.** `["creator", <hex pubkey>]`, at most once. On `create` it MUST equal the revision's signer. Every later `update`, `move` and `restore` MUST carry the creator named on `create`: present and equal, or absent when the artifact was created without one. A `delete` carries none. The relay keeps the creator with the artifact's current state, so expiring or redacting earlier revisions does not change the rule. Otherwise the relay rejects the revision with `invalid: creator must be the signer on create` or `invalid: creator cannot change`.
+- **Assignee.** `["assignee", <hex pubkey>]`, once per person, distinct, at most 4 per revision. Assignees are people. Assignees are checked when someone is assigned and when the artifact moves:
+  - On a `create`, `move` or `restore`, every assignee MUST be able to read the home that revision puts the artifact in, judged when the revision is accepted.
+  - On an `update`, only the assignees it adds, compared with the artifact's current state, are checked. Someone who lost access since being assigned doesn't block an unrelated edit, and can't read the artifact anyway.
+  - A move that would leave an assignee unable to read the destination is rejected, so the client saves it without them.
+  - A `delete` carries no assignees.
+- **Creator.** `["creator", <hex pubkey>]`, at most once. On `create` it MUST equal the revision's signer. Every later `update`, `move` and `restore` MUST carry the creator named on `create`: present and equal, or absent when the artifact was created without one. A `delete` carries none.
+- **Signer.** An artifact revision is signed by a person. An agent acts through its owner's key and names itself in client-defined tags. Comments in the artifact's conversation are ordinary messages and may be signed by agents.
 
-Values are 64 lowercase hex characters. A malformed, repeated or extra tag rejects the envelope. Relays that enforce these rules and support the `unassigned`, `within` and `until` query keys advertise `buzz-artifact-assignees` in NIP-11 `supported_extensions`.
+The relay keeps the creator and the current assignees with the artifact's current state, so expiring or redacting earlier revisions does not change the rules. For an artifact saved before a relay kept them, the relay fills them on its next accepted revision:
+- The creator is the signer of its first revision while that revision is still stored, else the current revision's `creator` tag, else unknown.
+- An unknown creator stays unknown, and later revisions carry none.
+- The assignees are the current revision's.
+
+The relay knows a key is an agent only when the key has presented an owner attestation (NIP-OA, or an agent assertion under NIP-FI). An agent that never did looks like a person to the relay, so clients keep their own rule as the first line.
+
+Values are 64 lowercase hex characters. A malformed, repeated or extra tag rejects the envelope.
+
+### Reason codes
+
+A rejected revision's `OK` message reads `invalid: <code>:<keys> — <text>`. `<keys>` is a comma-separated list of lowercase hex pubkeys, `none`, or empty. Clients match on `<code>`; `<text>` is for people and may change.
+
+| Code | Keys | Meaning |
+| --- | --- | --- |
+| `assignee-unreadable` | The assignees that failed | They can't read the home, on a create, move or restore, or when an update adds them. |
+| `assignee-agent` | The assignees that failed | They are known agents. |
+| `too-many-assignees` | empty | More than 4 assignees. |
+| `signer-agent` | The signer | A known agent signed the revision. |
+| `creator-not-signer` | The claimed creator | A `create` names someone else as creator. |
+| `creator-changed` | The stored creator, or `none` | A later revision's creator differs. Resend with the named creator, or with none. |
+
+Relays that enforce these rules and support the `unassigned`, `within` and `until` query keys advertise `buzz-artifact-assignees` in NIP-11 `supported_extensions`.
 
 ## Access
 

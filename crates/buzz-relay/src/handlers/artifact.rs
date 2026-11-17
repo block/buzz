@@ -3,7 +3,7 @@ use super::ingest::{IngestAuth, IngestError, IngestResult};
 use crate::state::AppState;
 use buzz_core::artifact::ArtifactOp;
 use buzz_core::{StoredEvent, TenantContext};
-use buzz_db::artifact::{ArtifactOutcome, ConversationOutcome};
+use buzz_db::artifact::{ArtifactOutcome, AssigneeFindings, ConversationOutcome};
 use nostr::Event;
 use std::sync::Arc;
 
@@ -36,22 +36,21 @@ pub(crate) async fn accept(
     } else {
         None
     };
-    // Every assignee must be able to read the home the revision puts the
-    // artifact in (NIP-AR, Assignees). Validation keeps a delete from naming
-    // anyone.
-    for assignee in &env.assignees {
-        let pubkey = hex::decode(assignee)
-            .map_err(|_| IngestError::Rejected("invalid: bad assignee".into()))?;
-        let readable =
-            super::channel_access::can_read(state, tenant.community(), &pubkey, env.home)
-                .await
-                .map_err(|e| IngestError::Internal(format!("artifact assignee: {e}")))?;
-        if !readable {
-            return Err(IngestError::Rejected(
-                "invalid: an assignee can't see this artifact".into(),
-            ));
-        }
+    // Task saves are signed by people; an agent acts through its owner's
+    // key with a "via" label. Only agents with an owner on record are known.
+    let signer = event.pubkey.to_bytes().to_vec();
+    if !state
+        .db
+        .agents_among(tenant.community(), std::slice::from_ref(&signer))
+        .await
+        .map_err(|e| IngestError::Internal(format!("artifact signer: {e}")))?
+        .is_empty()
+    {
+        return Err(refused("signer-agent", &[event.pubkey.to_hex()]));
     }
+    let findings = assignee_findings(state, tenant, &env)
+        .await
+        .map_err(|e| IngestError::Internal(format!("artifact assignee: {e}")))?;
     let outcome = state
         .db
         .accept_artifact(
@@ -59,6 +58,7 @@ pub(crate) async fn accept(
             event,
             &env,
             source,
+            &findings,
             &state.relay_keypair,
         )
         .await
@@ -87,12 +87,60 @@ pub(crate) async fn accept(
         ArtifactOutcome::Rejected(message) => {
             return Err(IngestError::Rejected(format!("invalid: {message}")))
         }
+        ArtifactOutcome::Refused { code, keys } => return Err(refused(code, &keys)),
     }
     Ok(IngestResult {
         event_id: event.id.to_hex(),
         accepted: true,
         message: String::new(),
     })
+}
+
+/// Which of `env`'s assignees are recorded agents and which can't read its
+/// home. The acceptance transaction decides which of them the revision is
+/// held to (NIP-AR, Assignees). A delete names nobody.
+async fn assignee_findings(
+    state: &AppState,
+    tenant: &TenantContext,
+    env: &buzz_core::artifact::ArtifactEnvelope,
+) -> Result<AssigneeFindings, buzz_db::DbError> {
+    let mut findings = AssigneeFindings::default();
+    if env.assignees.is_empty() {
+        return Ok(findings);
+    }
+    // Validation admits only lowercase hex pubkeys.
+    let keys: Vec<Vec<u8>> = env
+        .assignees
+        .iter()
+        .filter_map(|a| hex::decode(a).ok())
+        .collect();
+    findings.agents = state
+        .db
+        .agents_among(tenant.community(), &keys)
+        .await?
+        .into_iter()
+        .map(hex::encode)
+        .collect();
+    for (assignee, key) in env.assignees.iter().zip(&keys) {
+        if !super::channel_access::can_read(state, tenant.community(), key, env.home).await? {
+            findings.unreadable.push(assignee.clone());
+        }
+    }
+    Ok(findings)
+}
+
+/// A refusal under a NIP-AR reason code: `invalid: <code>:<keys> — <text>`,
+/// keys comma-separated.
+fn refused(code: &str, keys: &[String]) -> IngestError {
+    let text = match code {
+        "signer-agent" => "an agent can't sign an artifact; its owner signs",
+        "assignee-agent" => "an agent can't be an assignee",
+        "assignee-unreadable" => "an assignee can't see this artifact",
+        "creator-not-signer" => "creator must be the signer on create",
+        "creator-changed" => "creator cannot change; resend with the named creator",
+        _ => "refused",
+    };
+    IngestError::Rejected(format!("invalid: {code}:{} — {text}", keys.join(",")))
 }
 
 /// The tag on a kind:9007 that opens an artifact's conversation and names

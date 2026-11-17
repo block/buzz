@@ -65,7 +65,7 @@ pub struct ArtifactEnvelope {
 }
 
 /// The most `assignee` tags one revision may carry.
-pub const MAX_ASSIGNEES: usize = 16;
+pub const MAX_ASSIGNEES: usize = 4;
 
 /// Whether `value` is a lowercase hex public key.
 fn hex_pubkey(value: &str) -> bool {
@@ -194,7 +194,7 @@ pub fn validate(event: &Event) -> Result<ArtifactEnvelope, &'static str> {
         }
     }
     if assignees.len() > MAX_ASSIGNEES {
-        return Err("too many assignees");
+        return Err("too-many-assignees: — a revision names at most 4 assignees");
     }
     Ok(ArtifactEnvelope {
         id,

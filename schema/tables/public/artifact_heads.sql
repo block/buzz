@@ -8,6 +8,7 @@ CREATE TABLE artifact_heads (
     root BYTEA,
     deleted BOOLEAN NOT NULL DEFAULT false,
     creator TEXT,
+    assignees TEXT[],
     modified_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (community_id, artifact_id)
 );

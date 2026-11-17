@@ -7321,7 +7321,14 @@ mod postgres_tests {
             let env = buzz_core::artifact::validate(&create).expect("valid create");
             healthy
                 .db
-                .accept_artifact(community, &create, &env, None, &healthy.relay_keypair)
+                .accept_artifact(
+                    community,
+                    &create,
+                    &env,
+                    None,
+                    &Default::default(),
+                    &healthy.relay_keypair,
+                )
                 .await
                 .map_err(db_err)?;
 

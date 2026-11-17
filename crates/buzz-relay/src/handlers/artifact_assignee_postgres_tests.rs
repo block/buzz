@@ -125,21 +125,105 @@ impl Fixture {
     }
 }
 
-/// Every assignee must be able to read the home a save puts the task in:
-/// on create, on edit and on move, judged now, not when they were added.
-/// A delete names nobody.
-/// Mutation: skip the assignee check, or check the move's source instead of
-/// its destination → RED.
+/// `r` is refused under reason `code`, naming exactly `keys`.
+fn refused(r: Result<(), String>, code: &str, keys: &[&str]) {
+    let e = r.expect_err("refused");
+    assert!(
+        e.contains(&format!("invalid: {code}:{} — ", keys.join(","))),
+        "{code}: {e}"
+    );
+}
+
+impl Fixture {
+    /// A fresh key recorded as an agent of `owner`, made a member of the
+    /// project so only its being an agent can refuse it.
+    async fn agent(&self) -> Keys {
+        let agent = Keys::generate();
+        let community = self.tenant.community();
+        for key in [&agent, &self.owner] {
+            self.state
+                .db
+                .ensure_user(community, key.public_key().as_bytes())
+                .await
+                .expect("ensure user");
+        }
+        self.state
+            .db
+            .set_agent_owner(
+                community,
+                agent.public_key().as_bytes(),
+                self.owner.public_key().as_bytes(),
+            )
+            .await
+            .expect("record the owner");
+        add(
+            &self.state,
+            &self.tenant,
+            &self.owner,
+            self.project,
+            &agent,
+            "member",
+        )
+        .await;
+        agent
+    }
+
+    /// Forget the head's creator and assignees, as a head saved before the
+    /// relay kept them.
+    async fn as_before_0096(&self, id: Uuid) {
+        sqlx::query("UPDATE artifact_heads SET creator=NULL, assignees=NULL WHERE community_id=$1 AND artifact_id=$2")
+            .bind(self.tenant.community().as_uuid())
+            .bind(id)
+            .execute(self.state.db.pool())
+            .await
+            .expect("forget the head's creator and assignees");
+    }
+
+    /// Expire a stored payload, as retention may.
+    async fn expire(&self, event: &Event) {
+        sqlx::query("DELETE FROM events WHERE community_id=$1 AND id=$2")
+            .bind(self.tenant.community().as_uuid())
+            .bind(event.id.as_bytes().as_slice())
+            .execute(self.state.db.pool())
+            .await
+            .expect("expire a payload");
+    }
+
+    async fn head(&self, id: Uuid) -> (Option<String>, Option<Vec<String>>) {
+        sqlx::query_as("SELECT creator, assignees FROM artifact_heads WHERE community_id=$1 AND artifact_id=$2")
+            .bind(self.tenant.community().as_uuid())
+            .bind(id)
+            .fetch_one(self.state.db.pool())
+            .await
+            .expect("head")
+    }
+
+    async fn remove_from_project(&self, person: &Keys) {
+        let removal = EventBuilder::new(Kind::Custom(9001), "")
+            .tags([
+                Tag::parse(["h", &self.project.to_string()]).unwrap(),
+                Tag::parse(["p", &person.public_key().to_hex()]).unwrap(),
+            ])
+            .sign_with_keys(&self.owner)
+            .unwrap();
+        self.save(&removal).await.expect("remove from the project");
+    }
+}
+
+/// Every assignee must be able to read the home a save puts the task in.
+/// A create, move or restore checks everyone; an update checks only the
+/// people it adds, so someone who lost access since doesn't block an
+/// unrelated edit. The refusal names who failed. At most four, people only,
+/// and an agent can't sign the save.
+/// Mutation: skip the assignee check, check everyone on an update, check
+/// nobody on a move or restore, raise the cap, or skip either agent check
+/// → RED.
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
 async fn every_assignee_must_see_the_task() {
     let f = Fixture::new("assignees").await;
     let member = f.member.public_key().to_hex();
     let outsider = Keys::generate().public_key().to_hex();
-    let refused = |r: Result<(), String>| {
-        let e = r.expect_err("refused");
-        assert!(e.contains("an assignee can't see this artifact"), "{e}");
-    };
     let id = Uuid::new_v4();
 
     refused(
@@ -153,6 +237,8 @@ async fn every_assignee_must_see_the_task() {
             now(),
         ))
         .await,
+        "assignee-unreadable",
+        &[&outsider],
     );
     let create = revision(
         &f.owner,
@@ -177,6 +263,8 @@ async fn every_assignee_must_see_the_task() {
             now(),
         ))
         .await,
+        "assignee-unreadable",
+        &[&outsider],
     );
     refused(
         f.save(&revision(
@@ -189,6 +277,8 @@ async fn every_assignee_must_see_the_task() {
             now(),
         ))
         .await,
+        "assignee-unreadable",
+        &[&member],
     );
     let moved = revision(&f.owner, f.elsewhere, id, "move", Some(&create), &[], now());
     f.save(&moved).await.expect("a move without the member");
@@ -203,10 +293,12 @@ async fn every_assignee_must_see_the_task() {
             now(),
         ))
         .await,
+        "assignee-unreadable",
+        &[&member],
     );
 
-    // Judged now: once the member leaves the project, a save naming them
-    // is refused.
+    // Access lost after assignment: an edit that keeps them is accepted, a
+    // move or restore that keeps them is refused, a delete names nobody.
     let other = Uuid::new_v4();
     let created = revision(
         &f.owner,
@@ -218,43 +310,115 @@ async fn every_assignee_must_see_the_task() {
         now(),
     );
     f.save(&created).await.expect("assigned in the grandchild");
-    let removal = EventBuilder::new(Kind::Custom(9001), "")
-        .tags([
-            Tag::parse(["h", &f.project.to_string()]).unwrap(),
-            Tag::parse(["p", &member]).unwrap(),
-        ])
-        .sign_with_keys(&f.owner)
-        .unwrap();
-    f.save(&removal).await.expect("remove the member");
+    f.remove_from_project(&f.member).await;
+    // Measured against the stored current state, even once retention has
+    // expired the revision that assigned them.
+    f.expire(&created).await;
+    let edit = revision(
+        &f.owner,
+        f.grandchild,
+        other,
+        "update",
+        Some(&created),
+        &[["assignee", &member]],
+        now(),
+    );
+    f.save(&edit)
+        .await
+        .expect("an edit that adds nobody isn't held to a lost access");
+    refused(
+        f.save(&revision(
+            &f.owner,
+            f.child,
+            other,
+            "move",
+            Some(&edit),
+            &[["assignee", &member]],
+            now(),
+        ))
+        .await,
+        "assignee-unreadable",
+        &[&member],
+    );
+    let deleted = revision(
+        &f.owner,
+        f.grandchild,
+        other,
+        "delete",
+        Some(&edit),
+        &[],
+        now(),
+    );
+    f.save(&deleted).await.expect("a delete names nobody");
     refused(
         f.save(&revision(
             &f.owner,
             f.grandchild,
             other,
-            "update",
-            Some(&created),
+            "restore",
+            Some(&deleted),
             &[["assignee", &member]],
             now(),
         ))
         .await,
+        "assignee-unreadable",
+        &[&member],
     );
-    f.save(&revision(
-        &f.owner,
-        f.grandchild,
-        other,
-        "delete",
-        Some(&created),
+
+    // At most four, people only, signed by a person.
+    let five: Vec<String> = (0..5)
+        .map(|_| Keys::generate().public_key().to_hex())
+        .collect();
+    let tags: Vec<[&str; 2]> = five.iter().map(|k| ["assignee", k.as_str()]).collect();
+    refused(
+        f.save(&revision(
+            &f.owner,
+            f.child,
+            Uuid::new_v4(),
+            "create",
+            None,
+            &tags,
+            now(),
+        ))
+        .await,
+        "too-many-assignees",
         &[],
-        now(),
-    ))
-    .await
-    .expect("a delete names nobody");
+    );
+    let agent = f.agent().await;
+    let agent_hex = agent.public_key().to_hex();
+    refused(
+        f.save(&revision(
+            &f.owner,
+            f.child,
+            Uuid::new_v4(),
+            "create",
+            None,
+            &[["assignee", &agent_hex]],
+            now(),
+        ))
+        .await,
+        "assignee-agent",
+        &[&agent_hex],
+    );
+    refused(
+        f.save(&revision(
+            &agent,
+            f.child,
+            Uuid::new_v4(),
+            "create",
+            None,
+            &[],
+            now(),
+        ))
+        .await,
+        "signer-agent",
+        &[&agent_hex],
+    );
 }
 
-/// A creator tag names the creating signer, and every later revision keeps
-/// it, through moves and a delete and restore, even after retention expires
-/// the earlier payloads, so the current revision's creator can be trusted
-/// without its history.
+/// The creator is the creating signer and never changes, through moves and
+/// a delete and restore, even after retention expires the earlier payloads.
+/// A refusal names the creator to resend with.
 /// Mutation: skip the create check, skip the keep check, or let a later
 /// revision rewrite the head's creator → RED.
 #[tokio::test]
@@ -264,10 +428,6 @@ async fn the_creator_is_the_signer_and_never_changes() {
     let owner = f.owner.public_key().to_hex();
     let member = f.member.public_key().to_hex();
     let id = Uuid::new_v4();
-    let refused = |r: Result<(), String>, reason: &str| {
-        let e = r.expect_err("refused");
-        assert!(e.contains(reason), "{e}");
-    };
 
     refused(
         f.save(&revision(
@@ -280,7 +440,8 @@ async fn the_creator_is_the_signer_and_never_changes() {
             now(),
         ))
         .await,
-        "creator must be the signer on create",
+        "creator-not-signer",
+        &[&member],
     );
     let create = revision(
         &f.owner,
@@ -305,7 +466,8 @@ async fn the_creator_is_the_signer_and_never_changes() {
                 now(),
             ))
             .await,
-            "creator cannot change",
+            "creator-changed",
+            &[&owner],
         );
     }
     let edit = revision(
@@ -332,14 +494,8 @@ async fn the_creator_is_the_signer_and_never_changes() {
     f.save(&moved).await.expect("a move keeps the creator");
     let deleted = revision(&f.owner, f.project, id, "delete", Some(&moved), &[], now());
     f.save(&deleted).await.expect("a delete carries no creator");
-    // Retention may expire every earlier payload; the rule still holds.
     for expired in [&create, &edit, &moved] {
-        sqlx::query("DELETE FROM events WHERE community_id=$1 AND id=$2")
-            .bind(f.tenant.community().as_uuid())
-            .bind(expired.id.as_bytes().as_slice())
-            .execute(f.state.db.pool())
-            .await
-            .expect("expire a payload");
+        f.expire(expired).await;
     }
     refused(
         f.save(&revision(
@@ -352,7 +508,8 @@ async fn the_creator_is_the_signer_and_never_changes() {
             now(),
         ))
         .await,
-        "creator cannot change",
+        "creator-changed",
+        &[&owner],
     );
     f.save(&revision(
         &f.owner,
@@ -381,8 +538,182 @@ async fn the_creator_is_the_signer_and_never_changes() {
             now(),
         ))
         .await,
-        "creator cannot change",
+        "creator-changed",
+        &["none"],
     );
+}
+
+/// A task saved before the relay kept its creator and assignees gets them
+/// on its next save: the creator from its first save's signer, else the
+/// current revision's tag, else none, which nobody can claim later; the
+/// assignees from its current revision, so an edit isn't held to someone
+/// who lost access since. It never becomes uneditable.
+/// Mutation: treat unknown assignees as nobody assigned, take the current
+/// tag over the first signer, or let an edit set an unknown creator → RED.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn a_task_saved_before_0096_stays_editable() {
+    let f = Fixture::new("before-0096").await;
+    let owner = f.owner.public_key().to_hex();
+    let member = f.member.public_key().to_hex();
+
+    // Its assignee lost access; a title edit is still accepted.
+    let id = Uuid::new_v4();
+    let create = revision(
+        &f.owner,
+        f.grandchild,
+        id,
+        "create",
+        None,
+        &[["creator", &owner], ["assignee", &member]],
+        now(),
+    );
+    f.save(&create).await.expect("create");
+    f.as_before_0096(id).await;
+    f.remove_from_project(&f.member).await;
+    f.save(&revision(
+        &f.owner,
+        f.grandchild,
+        id,
+        "update",
+        Some(&create),
+        &[["creator", &owner], ["assignee", &member]],
+        now(),
+    ))
+    .await
+    .expect("a title edit keeps the assignee who lost access");
+    assert_eq!(
+        f.head(id).await,
+        (Some(owner.clone()), Some(vec![member.clone()]))
+    );
+
+    // The first save's signer outranks a current tag; the refusal names it.
+    let id = Uuid::new_v4();
+    let editor = Keys::generate();
+    add(&f.state, &f.tenant, &f.owner, f.child, &editor, "member").await;
+    let create = revision(&f.owner, f.child, id, "create", None, &[], now());
+    f.save(&create).await.expect("create without a tag");
+    let edit = revision(&editor, f.child, id, "update", Some(&create), &[], now());
+    f.save(&edit).await.expect("an edit by someone else");
+    f.as_before_0096(id).await;
+    // Before the relay checked it, a stored tag could name anyone.
+    sqlx::query("UPDATE events SET tags = tags || jsonb_build_array(jsonb_build_array('creator', $3::text)) WHERE community_id=$1 AND id=$2")
+        .bind(f.tenant.community().as_uuid())
+        .bind(edit.id.as_bytes().as_slice())
+        .bind(&member)
+        .execute(f.state.db.pool())
+        .await
+        .expect("an unverified tag");
+    for tags in [vec![], vec![["creator", member.as_str()]]] {
+        refused(
+            f.save(&revision(
+                &f.owner,
+                f.child,
+                id,
+                "update",
+                Some(&edit),
+                &tags,
+                now(),
+            ))
+            .await,
+            "creator-changed",
+            &[&owner],
+        );
+    }
+    f.save(&revision(
+        &f.owner,
+        f.child,
+        id,
+        "update",
+        Some(&edit),
+        &[["creator", &owner]],
+        now(),
+    ))
+    .await
+    .expect("resent with the named creator");
+
+    // First save gone: the current revision's tag.
+    let id = Uuid::new_v4();
+    let create = revision(
+        &f.owner,
+        f.project,
+        id,
+        "create",
+        None,
+        &[["creator", &owner]],
+        now(),
+    );
+    f.save(&create).await.expect("create");
+    let edit = revision(
+        &f.owner,
+        f.project,
+        id,
+        "update",
+        Some(&create),
+        &[["creator", &owner]],
+        now(),
+    );
+    f.save(&edit).await.expect("edit");
+    f.as_before_0096(id).await;
+    f.expire(&create).await;
+    refused(
+        f.save(&revision(
+            &f.owner,
+            f.project,
+            id,
+            "update",
+            Some(&edit),
+            &[["creator", &member]],
+            now(),
+        ))
+        .await,
+        "creator-changed",
+        &[&owner],
+    );
+    f.save(&revision(
+        &f.owner,
+        f.project,
+        id,
+        "update",
+        Some(&edit),
+        &[["creator", &owner]],
+        now(),
+    ))
+    .await
+    .expect("the current revision's creator");
+
+    // Neither on hand: no creator, and nobody can claim one.
+    let id = Uuid::new_v4();
+    let create = revision(&f.owner, f.child, id, "create", None, &[], now());
+    f.save(&create).await.expect("create");
+    f.as_before_0096(id).await;
+    f.expire(&create).await;
+    refused(
+        f.save(&revision(
+            &f.owner,
+            f.child,
+            id,
+            "update",
+            Some(&create),
+            &[["creator", &owner]],
+            now(),
+        ))
+        .await,
+        "creator-changed",
+        &["none"],
+    );
+    f.save(&revision(
+        &f.owner,
+        f.child,
+        id,
+        "update",
+        Some(&create),
+        &[],
+        now(),
+    ))
+    .await
+    .expect("an edit without a creator");
+    assert_eq!(f.head(id).await, (None, Some(vec![])));
 }
 
 /// Find reads current tasks by assignee and status, finds the ones nobody

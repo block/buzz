@@ -30,6 +30,24 @@ pub enum ArtifactOutcome {
     Conflict(&'static str),
     /// Protocol violation with a public-safe reason.
     Rejected(&'static str),
+    /// Refused under a stable reason code (NIP-AR), naming the keys involved.
+    Refused {
+        /// The reason code.
+        code: &'static str,
+        /// The keys the refusal is about, lowercase hex, or `none`.
+        keys: Vec<String>,
+    },
+}
+
+/// Which of a revision's assignees the relay found it may not name, judged
+/// before the transaction. The transaction decides which of them count:
+/// everyone on a create, move or restore; only those an update adds.
+#[derive(Debug, Default)]
+pub struct AssigneeFindings {
+    /// Assignees recorded as agents.
+    pub agents: Vec<String>,
+    /// Assignees who can't read the revision's home.
+    pub unreadable: Vec<String>,
 }
 
 /// Outcome of a request to open an artifact's conversation.
@@ -52,6 +70,62 @@ pub const CONVERSATION_CANNOT_MOVE: &str = "this artifact's comments can't move 
 /// Conflict for a non-create revision whose artifact is missing or lives
 /// outside every channel the sender was authorized for.
 pub const HEAD_UNAVAILABLE: &str = "artifact head unavailable";
+
+/// The head's creator and assignees. A head saved before the relay kept
+/// them has no assignee list (NULL, distinct from an empty one) and is
+/// filled from what is still on hand: the creator is the signer of the first
+/// save, else the current revision's `creator` tag, else stays unknown
+/// (`None`), and nobody can claim it later. The assignees are the current
+/// revision's; `None` when that revision is gone, so everyone counts as
+/// added.
+async fn known_creator_and_assignees(
+    tx: &mut crate::AdmittedTx,
+    community: CommunityId,
+    artifact: Uuid,
+    head: &sqlx::postgres::PgRow,
+) -> Result<(Option<String>, Option<Vec<String>>)> {
+    let creator: Option<String> = head.get("creator");
+    // Every head saved since keeps a list, empty when nobody is assigned.
+    if let Some(assignees) = head.get::<Option<Vec<String>>, _>("assignees") {
+        return Ok((creator, Some(assignees)));
+    }
+    let current: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT tags FROM events WHERE community_id=$1 AND id=$2 AND deleted_at IS NULL",
+    )
+    .bind(community.as_uuid())
+    .bind(head.get::<Vec<u8>, _>("event_id"))
+    .fetch_optional(tx.conn())
+    .await?;
+    let tag_values = |name: &str| -> Vec<String> {
+        current
+            .as_ref()
+            .and_then(|tags| tags.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|tag| match tag.as_array().map(Vec::as_slice) {
+                Some([key, value]) if key == name => value.as_str().map(str::to_owned),
+                _ => None,
+            })
+            .collect()
+    };
+    let creator = match creator {
+        Some(creator) => Some(creator),
+        None => {
+            let first_signer: Option<Vec<u8>> = sqlx::query_scalar(
+                "SELECT e.pubkey FROM (SELECT event_id FROM artifact_revisions WHERE community_id=$1 AND artifact_id=$2 ORDER BY modified_at,event_id LIMIT 1) r JOIN events e ON e.community_id=$1 AND e.id=r.event_id AND e.deleted_at IS NULL",
+            )
+            .bind(community.as_uuid())
+            .bind(artifact)
+            .fetch_optional(tx.conn())
+            .await?;
+            match first_signer {
+                Some(pubkey) => Some(hex::encode(pubkey)),
+                None => tag_values("creator").into_iter().next(),
+            }
+        }
+    };
+    Ok((creator, current.is_some().then(|| tag_values("assignee"))))
+}
 
 fn invalid(message: &str) -> DbError {
     DbError::InvalidData(message.into())
@@ -124,6 +198,7 @@ impl Db {
         event: &Event,
         env: &ArtifactEnvelope,
         authorized_source: Option<Uuid>,
+        findings: &AssigneeFindings,
         relay_keys: &Keys,
     ) -> Result<ArtifactOutcome> {
         let mut tx = self.begin_event_write_transaction(community).await?;
@@ -146,7 +221,7 @@ impl Db {
             return Ok(ArtifactOutcome::Duplicate);
         }
         let head = sqlx::query(
-            "SELECT event_id,channel_id,artifact_type,root,deleted,creator FROM artifact_heads WHERE community_id=$1 AND artifact_id=$2 FOR UPDATE",
+            "SELECT event_id,channel_id,artifact_type,root,deleted,creator,assignees FROM artifact_heads WHERE community_id=$1 AND artifact_id=$2 FOR UPDATE",
         )
         .bind(community.as_uuid())
         .bind(env.id)
@@ -197,28 +272,57 @@ impl Db {
                 }
             }
         }
-        // The creator is the creating signer, and every later revision keeps
-        // it, so the current revision's creator can be trusted without its
-        // history. The head holds it, so it outlives retention and
-        // redaction. A delete carries no creator; a restore keeps the one
-        // from before the delete.
-        match (&head, env.op) {
-            (None, _) => {
-                if env
-                    .creator
-                    .as_ref()
-                    .is_some_and(|c| *c != event.pubkey.to_hex())
-                {
-                    return Ok(ArtifactOutcome::Rejected(
-                        "creator must be the signer on create",
-                    ));
+        // The creator, named on create, is the creating signer and never
+        // changes; the assignees are the current revision's. The head holds
+        // both, so they outlive retention and redaction. A head saved before
+        // the relay kept them fills them here, under the lock.
+        let signer = event.pubkey.to_hex();
+        let (creator, stored_assignees) = match &head {
+            None => (env.creator.clone(), None),
+            Some(head) => known_creator_and_assignees(&mut tx, community, env.id, head).await?,
+        };
+        match env.op {
+            ArtifactOp::Create => {
+                if let Some(claimed) = env.creator.as_ref().filter(|c| **c != signer) {
+                    return Ok(ArtifactOutcome::Refused {
+                        code: "creator-not-signer",
+                        keys: vec![claimed.clone()],
+                    });
                 }
             }
-            (Some(_), ArtifactOp::Delete) => {}
-            (Some(head), _) => {
-                if env.creator != head.get::<Option<String>, _>("creator") {
-                    return Ok(ArtifactOutcome::Rejected("creator cannot change"));
+            // A delete carries no creator; a restore names it again.
+            ArtifactOp::Delete => {}
+            _ => {
+                if env.creator != creator {
+                    return Ok(ArtifactOutcome::Refused {
+                        code: "creator-changed",
+                        keys: vec![creator.unwrap_or_else(|| "none".into())],
+                    });
                 }
+            }
+        }
+        // Every assignee is checked when the artifact lands somewhere (a
+        // create, move or restore); an update is checked only for the people
+        // it adds, so someone who lost access since doesn't block it.
+        let checked: Vec<&String> = env
+            .assignees
+            .iter()
+            .filter(|a| match (env.op, &stored_assignees) {
+                (ArtifactOp::Update, Some(stored)) => !stored.contains(a),
+                _ => true,
+            })
+            .collect();
+        for (code, found) in [
+            ("assignee-agent", &findings.agents),
+            ("assignee-unreadable", &findings.unreadable),
+        ] {
+            let keys: Vec<String> = checked
+                .iter()
+                .filter(|a| found.contains(a))
+                .map(|a| (*a).clone())
+                .collect();
+            if !keys.is_empty() {
+                return Ok(ArtifactOutcome::Refused { code, keys });
             }
         }
         if source != Some(env.home) {
@@ -256,8 +360,8 @@ impl Db {
         .bind(if env.op == ArtifactOp::Move { source } else { None })
         .execute(tx.conn())
         .await?;
-        sqlx::query("INSERT INTO artifact_heads (community_id,artifact_id,event_id,channel_id,artifact_type,root,deleted,creator,modified_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,clock_timestamp()) ON CONFLICT (community_id,artifact_id) DO UPDATE SET event_id=EXCLUDED.event_id,channel_id=EXCLUDED.channel_id,root=EXCLUDED.root,deleted=EXCLUDED.deleted,modified_at=clock_timestamp()")
-            .bind(community.as_uuid()).bind(env.id).bind(event.id.as_bytes().as_slice()).bind(env.home).bind(&env.artifact_type).bind(&env.root).bind(env.op == ArtifactOp::Delete).bind(&env.creator).execute(tx.conn()).await?;
+        sqlx::query("INSERT INTO artifact_heads (community_id,artifact_id,event_id,channel_id,artifact_type,root,deleted,creator,assignees,modified_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,clock_timestamp()) ON CONFLICT (community_id,artifact_id) DO UPDATE SET event_id=EXCLUDED.event_id,channel_id=EXCLUDED.channel_id,root=EXCLUDED.root,deleted=EXCLUDED.deleted,creator=EXCLUDED.creator,assignees=EXCLUDED.assignees,modified_at=clock_timestamp()")
+            .bind(community.as_uuid()).bind(env.id).bind(event.id.as_bytes().as_slice()).bind(env.home).bind(&env.artifact_type).bind(&env.root).bind(env.op == ArtifactOp::Delete).bind(&creator).bind(&env.assignees).execute(tx.conn()).await?;
         let conversation = match env.op {
             ArtifactOp::Move | ArtifactOp::Delete | ArtifactOp::Restore => {
                 match follow_artifact(&mut tx, env).await? {
