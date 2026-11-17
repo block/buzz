@@ -5,6 +5,7 @@ import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
 import 'package:buzz/features/channels/me/me_page.dart';
 import 'package:buzz/shared/me/default_agent.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
@@ -367,6 +368,22 @@ void main() {
       expect(find.text('Archive #Project chat?'), findsOneWidget);
       expect(find.text('The channel will become read-only.'), findsOneWidget);
       expect(relay.submitted, isEmpty);
+      final confirming = tester.widget<Semantics>(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is Semantics && widget.properties.label == 'Project chat',
+        ),
+      );
+      expect(confirming.properties.liveRegion, isFalse);
+      expect(confirming.properties.customSemanticsActions, isEmpty);
+      expect(find.text('Archiving…'), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('archive-solo-grouped')),
+          matching: find.byType(BuzzLoadingIndicator),
+        ),
+        findsNothing,
+      );
       await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
       expect(relay.submitted, isEmpty);

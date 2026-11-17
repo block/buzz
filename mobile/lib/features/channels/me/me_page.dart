@@ -185,7 +185,7 @@ class MePage extends HookConsumerWidget {
       if (archives.value.containsKey(channelId)) return;
       archives.value = {
         ...archives.value,
-        channelId: _MeArchiveOperation(_MeArchivePhase.pending),
+        channelId: _MeArchiveOperation(_MeArchivePhase.confirming),
       };
       // Capture the reviewed account/community before the confirmation awaits.
       final actions = archiveActions;
@@ -214,6 +214,10 @@ class MePage extends HookConsumerWidget {
           confirmLabel: 'Archive',
         );
         if (!confirmed || !isCurrentArchiveScope()) return;
+        archives.value = {
+          ...archives.value,
+          channelId: _MeArchiveOperation(_MeArchivePhase.pending),
+        };
         await actions.archiveChannel(
           channelId,
           onAccepted: () {

@@ -15,7 +15,7 @@ class _MeRetry extends StatelessWidget {
   );
 }
 
-enum _MeArchivePhase { pending, accepted }
+enum _MeArchivePhase { confirming, pending, accepted }
 
 // Each attempt has its own identity: an older recovery read cannot retire a
 // later accepted archive of the same chat.
@@ -66,7 +66,7 @@ class _MeChatRow extends ConsumerWidget {
         : ', ${working.join(', ')} working';
     final row = Semantics(
       label: '${isUnread ? '$name, unread' : name}$status',
-      liveRegion: archivePhase != null,
+      liveRegion: archiving || accepted,
       onTap: onTap,
       onLongPress: onLongPress,
       customSemanticsActions: {
