@@ -11,7 +11,6 @@ import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/community/community_storage.dart';
 import 'package:buzz/shared/hosted/known_communities_sync.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
 
 import '../community/community_storage_test.dart';

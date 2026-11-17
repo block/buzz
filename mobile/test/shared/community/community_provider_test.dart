@@ -22,7 +22,6 @@ import 'package:buzz/shared/hosted/sign_out.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import 'community_storage_test.dart';
@@ -508,51 +507,48 @@ void main() {
       expect((await knownOutbox.read()).outbox, isEmpty);
     });
 
-    testWidgets(
-      'sign-out keeps the identity, removes the community and '
-      'reports no leave to the account',
-      (tester) async {
-        FlutterSecureStorage.setMockInitialValues({});
-        container = createContainer();
-        final keys = nostr.Keys.generate();
-        final community = Community.create(
-          name: 'Organization',
-          relayUrl: 'wss://buzz.example.org',
-          pubkey: keys.public,
-          nsec: keys.nsec,
-        );
-        await communityStorage.save(community);
-        await communityStorage.saveActiveId(community.id);
-        await tester.pumpWidget(
-          UncontrolledProviderScope(
-            container: container,
-            child: MaterialApp(
-              theme: AppTheme.light(),
-              home: Consumer(
-                builder: (context, ref, _) => Scaffold(
-                  body: TextButton(
-                    onPressed: () => confirmSignOut(context, ref),
-                    child: const Text('Sign out of Buzz'),
-                  ),
+    testWidgets('sign-out keeps the identity, removes the community and '
+        'reports no leave to the account', (tester) async {
+      FlutterSecureStorage.setMockInitialValues({});
+      container = createContainer();
+      final keys = nostr.Keys.generate();
+      final community = Community.create(
+        name: 'Organization',
+        relayUrl: 'wss://buzz.example.org',
+        pubkey: keys.public,
+        nsec: keys.nsec,
+      );
+      await communityStorage.save(community);
+      await communityStorage.saveActiveId(community.id);
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: Consumer(
+              builder: (context, ref, _) => Scaffold(
+                body: TextButton(
+                  onPressed: () => confirmSignOut(context, ref),
+                  child: const Text('Sign out of Buzz'),
                 ),
               ),
             ),
           ),
-        );
-        await tester.tap(find.text('Sign out of Buzz'));
-        await tester.pumpAndSettle();
-        expect(find.text('Sign out?'), findsOneWidget);
-        await tester.tap(find.widgetWithText(FilledButton, 'Sign out'));
-        await tester.pumpAndSettle();
-        expect(await communityStorage.loadAll(), isEmpty);
-        expect(find.textContaining('Failed to sign out'), findsNothing);
-        expect(
-          await AccountIdentityStore().forPairing(keys.public).read(),
-          isNotNull,
-        );
-        expect((await knownOutbox.read()).outbox, isEmpty);
-      },
-    );
+        ),
+      );
+      await tester.tap(find.text('Sign out of Buzz'));
+      await tester.pumpAndSettle();
+      expect(find.text('Sign out?'), findsOneWidget);
+      await tester.tap(find.widgetWithText(FilledButton, 'Sign out'));
+      await tester.pumpAndSettle();
+      expect(await communityStorage.loadAll(), isEmpty);
+      expect(find.textContaining('Failed to sign out'), findsNothing);
+      expect(
+        await AccountIdentityStore().forPairing(keys.public).read(),
+        isNotNull,
+      );
+      expect((await knownOutbox.read()).outbox, isEmpty);
+    });
 
     test(
       'removal deletes the channel list snapshot and retires writers',
