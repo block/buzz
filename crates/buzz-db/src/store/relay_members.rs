@@ -2138,6 +2138,67 @@ mod postgres_tests {
         );
     }
 
+    /// The race in `member_removal_waits_for_and_removes_concurrent_acceptance`
+    /// for an owned agent removed with its owner: the cascade's lock on the
+    /// agent's row waits for the in-flight acceptance and then deletes it.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn cascade_waits_for_and_removes_owned_agent_concurrent_acceptance() {
+        let pool = setup_pool().await;
+        crate::test_support::retire_foreign_key_delete_actions(&pool).await;
+        crate::test_support::drop_foreign_keys_between(
+            &pool,
+            &[("join_policy_acceptances", "relay_members")],
+        )
+        .await;
+        let (community, _owner) = owned_community(&pool).await;
+        let (human, agent) = (test_pubkey(), test_pubkey());
+        add_with_acceptance(&pool, community, &human, "member").await;
+        add_with_acceptance(&pool, community, &agent, "member").await;
+        record_owner(&pool, community, &agent, &human).await;
+
+        let mut inserter = pool.begin().await.expect("begin acceptance insert");
+        crate::store::reference_check::require_relay_member(&mut inserter, community, &agent)
+            .await
+            .expect("lock agent as the acceptance writer does");
+        sqlx::query(
+            "INSERT INTO join_policy_acceptances (community_id, pubkey, policy_version) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(community.as_uuid())
+        .bind(&agent)
+        .bind("b".repeat(64))
+        .execute(&mut *inserter)
+        .await
+        .expect("insert concurrent acceptance");
+
+        let name = format!("cascade-remove-{}", Uuid::new_v4().simple());
+        let remover = crate::test_support::named_pool(&name).await;
+        let removal = tokio::spawn({
+            let human = human.clone();
+            async move {
+                remove_relay_member(&remover, community, &human, &nostr::Keys::generate())
+                    .await
+                    .map(|write| write.outcome)
+            }
+        });
+        crate::test_support::wait_for_lock_wait(&pool, &name).await;
+        inserter
+            .commit()
+            .await
+            .expect("commit concurrent acceptance");
+
+        assert_eq!(
+            removal
+                .await
+                .expect("join removal")
+                .expect("removal after concurrent acceptance"),
+            RemoveResult::Removed
+        );
+        assert_eq!(role_of(&pool, community, &agent).await, None);
+        assert_eq!(acceptances(&pool, community, &agent).await, 0);
+    }
+
     async fn owned_community(pool: &PgPool) -> (CommunityId, String) {
         let community = make_test_community(pool).await;
         let owner = test_pubkey();
