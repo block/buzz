@@ -15,7 +15,7 @@ class _MeRetry extends StatelessWidget {
   );
 }
 
-class _MeChatRow extends HookConsumerWidget {
+class _MeChatRow extends ConsumerWidget {
   const _MeChatRow({
     required this.channelId,
     required this.name,
@@ -23,48 +23,39 @@ class _MeChatRow extends HookConsumerWidget {
     required this.onLongPress,
     required this.isUnread,
     required this.canArchive,
+    required this.archiving,
+    required this.onArchive,
   });
   final String channelId;
   final String name;
   final bool isUnread;
   final bool canArchive;
+  final bool archiving;
+  final Future<void> Function() onArchive;
   final VoidCallback onTap;
   final VoidCallback onLongPress;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final archiving = useState(false);
     Future<void> archive() async {
-      if (!canArchive || archiving.value) return;
-      archiving.value = true;
-      try {
-        await ref.read(channelActionsProvider).archiveChannel(channelId);
-      } catch (error) {
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showFeedbackSnackBar(
-            SnackBar(content: Text('Couldn’t archive chat: $error')),
-            kind: ToastKind.error,
-          );
-        }
-      } finally {
-        if (context.mounted) archiving.value = false;
-      }
+      if (!canArchive || archiving) return;
+      await onArchive();
     }
 
     final color = channelNavigationForeground(context, unread: isUnread);
     final working = ref.watch(meWorkingAgentsProvider(channelId));
-    final status = archiving.value
+    final status = archiving
         ? ', archiving'
         : working.isEmpty
         ? ''
         : ', ${working.join(', ')} working';
     final row = Semantics(
       label: '${isUnread ? '$name, unread' : name}$status',
-      liveRegion: archiving.value,
+      liveRegion: archiving,
       onTap: onTap,
       onLongPress: onLongPress,
       customSemanticsActions: {
-        if (canArchive && !archiving.value)
+        if (canArchive && !archiving)
           const CustomSemanticsAction(label: 'Archive chat'): archive,
       },
       excludeSemantics: true,
@@ -99,7 +90,7 @@ class _MeChatRow extends HookConsumerWidget {
                   ),
                 ),
               ),
-              if (archiving.value) ...[
+              if (archiving) ...[
                 const SizedBox(width: Grid.xs),
                 const BuzzLoadingIndicator(size: 20),
               ] else if (working.isNotEmpty) ...[
@@ -137,7 +128,7 @@ class _MeChatRow extends HookConsumerWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (archiving.value)
+              if (archiving)
                 BuzzLoadingIndicator(
                   size: 20,
                   color: context.colors.onPrimaryContainer,
@@ -149,7 +140,7 @@ class _MeChatRow extends HookConsumerWidget {
                 ),
               const SizedBox(width: Grid.xs),
               Text(
-                archiving.value ? 'Archiving…' : 'Archive',
+                archiving ? 'Archiving…' : 'Archive',
                 style: TextStyle(color: context.colors.onPrimaryContainer),
               ),
             ],

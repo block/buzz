@@ -102,6 +102,28 @@ class MePage extends HookConsumerWidget {
         ref.watch(meOfflineSaveWarningProvider).value ?? false;
     final channels = ref.watch(channelsProvider);
     final unreadIds = ref.watch(meUnreadChannelIdsProvider);
+    // Workspace collapse disposes its rows. Keep writes and feedback with
+    // the page so re-expanding cannot submit a second archive.
+    final archiving = useState(<String>{});
+    Future<void> archive(String channelId) async {
+      if (archiving.value.contains(channelId)) return;
+      archiving.value = {...archiving.value, channelId};
+      try {
+        await ref.read(channelActionsProvider).archiveChannel(channelId);
+      } catch (error) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showFeedbackSnackBar(
+            SnackBar(content: Text('Couldn’t archive chat: $error')),
+            kind: ToastKind.error,
+          );
+        }
+      } finally {
+        if (context.mounted) {
+          archiving.value = {...archiving.value}..remove(channelId);
+        }
+      }
+    }
+
     final busy = useState(false);
     Future<void> perform(Future<void> Function() action) async {
       if (busy.value) return;
@@ -203,6 +225,8 @@ class MePage extends HookConsumerWidget {
                 name: channel.name,
                 isUnread: unreadIds.contains(channel.id),
                 canArchive: channel.isPersonalChat(viewer, legacyChannels),
+                archiving: archiving.value.contains(channel.id),
+                onArchive: () => archive(channel.id),
                 onLongPress: () => showChannelDetailsSheet(
                   context: context,
                   channel: channel,

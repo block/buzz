@@ -244,15 +244,34 @@ void main() {
         ),
         isNot(contains('Archive chat')),
       );
+      // Collapse fully disposes the row, then expand before acknowledgement.
+      await tester.tap(find.text('App work'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('archive-solo-grouped')), findsNothing);
+      await tester.tap(find.text('App work'));
+      await tester.pumpAndSettle();
+      expect(find.bySemanticsLabel('Project chat, archiving'), findsOneWidget);
+      expect(
+        tester
+            .getSemantics(find.bySemanticsLabel('Project chat, archiving'))
+            .getSemanticsData()
+            .customSemanticsActionIds,
+        isEmpty,
+      );
       await tester.drag(
         find.byKey(const ValueKey('archive-solo-grouped')),
         const Offset(-700, 0),
       );
       await tester.pumpAndSettle();
       expect(relay.submitted, hasLength(1));
+      await tester.tap(find.text('App work'));
+      await tester.pumpAndSettle();
+      expect(find.text('Project chat'), findsNothing);
       relay.acknowledgement!.completeError(StateError('Relay unavailable'));
       await tester.pumpAndSettle();
       expect(find.textContaining('Couldn’t archive chat:'), findsOneWidget);
+      await tester.tap(find.text('App work'));
+      await tester.pumpAndSettle();
       expect(find.text('Project chat').hitTestable(), findsOneWidget);
       expect(
         container
