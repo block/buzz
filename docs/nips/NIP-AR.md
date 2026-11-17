@@ -31,7 +31,7 @@ Each event contains a complete snapshot. For example, a task created directly in
 }
 ```
 
-The `assignee` and `project` tags and the payload are illustrative, not required fields; this NIP does not define a task schema.
+The `project` tag and the payload are illustrative, not required fields; this NIP does not define a task schema. `assignee` and `creator` tags are optional, and when present the relay enforces them (see Assignees and creator).
 
 | Tag | Meaning |
 | --- | --- |
@@ -61,6 +61,42 @@ Resubmitting an already accepted event succeeds without applying it again, even 
 A `create` whose `d` is already in use fails. When the sender cannot read the existing artifact, the error reveals only that the identity is taken, never its home, type, title, or current revision. Clients MAY derive `d` deterministically, for example from the message an artifact tracks, and accept that disclosure.
 
 On creation or when changed from the previous accepted revision, `root` MUST identify an existing, undeleted conversation anchor in `h`. Later loss of that anchor does not prevent edits. Replies belong to that conversation, not to an artifact revision.
+
+## Assignees and creator
+
+Two optional tags name people, and the relay holds them to rules so a reader can trust the current revision without its history.
+
+- **Assignee.** `["assignee", <hex pubkey>]`, once per person, distinct, at most 4 per revision. Assignees are people. Assignees are checked when someone is assigned and when the artifact moves:
+  - On a `create`, `move` or `restore`, every assignee MUST be able to read the home that revision puts the artifact in, judged when the revision is accepted.
+  - On an `update`, only the assignees it adds, compared with the artifact's current state, are checked. Someone who lost access since being assigned doesn't block an unrelated edit, and can't read the artifact anyway.
+  - A move that would leave an assignee unable to read the destination is rejected, so the client saves it without them.
+  - A `delete` carries no assignees.
+- **Creator.** `["creator", <hex pubkey>]`, at most once. On `create` it MUST equal the revision's signer. Every later `update`, `move` and `restore` MUST carry the creator named on `create`: present and equal, or absent when the artifact was created without one. A `delete` carries none.
+- **Signer.** An artifact revision is signed by a person. An agent acts through its owner's key and names itself in client-defined tags. Comments in the artifact's conversation are ordinary messages and may be signed by agents.
+
+The relay keeps the creator and the current assignees with the artifact's current state, so expiring or redacting earlier revisions does not change the rules. For an artifact saved before a relay kept them, the relay fills them on its next accepted revision:
+- The creator is the signer of its first revision while that revision is still stored, else the current revision's `creator` tag, else unknown.
+- An unknown creator stays unknown, and later revisions carry none.
+- The assignees are the current revision's.
+
+The relay knows a key is an agent only when the key has presented an owner attestation (NIP-OA, or an agent assertion under NIP-FI). An agent that never did looks like a person to the relay, so clients keep their own rule as the first line.
+
+Values are 64 lowercase hex characters. A malformed, repeated or extra tag rejects the envelope.
+
+### Reason codes
+
+A rejected revision's `OK` message reads `invalid: <code>:<keys> — <text>`. `<keys>` is a comma-separated list of lowercase hex pubkeys, `none`, or empty. Clients match on `<code>`; `<text>` is for people and may change.
+
+| Code | Keys | Meaning |
+| --- | --- | --- |
+| `assignee-unreadable` | The assignees that failed | They can't read the home, on a create, move or restore, or when an update adds them. |
+| `assignee-agent` | The assignees that failed | They are known agents. |
+| `too-many-assignees` | empty | More than 4 assignees. |
+| `signer-agent` | The signer | A known agent signed the revision. |
+| `creator-not-signer` | The claimed creator | A `create` names someone else as creator. |
+| `creator-changed` | The stored creator, or `none` | A later revision's creator differs. Resend with the named creator, or with none. |
+
+Relays that enforce these rules and support the `unassigned`, `within` and `until` query keys advertise `buzz-artifact-assignees` in NIP-11 `supported_extensions`.
 
 ## Access
 
@@ -96,6 +132,14 @@ Relays MUST reject kind-5 deletion requests targeting artifact revisions with an
 An artifact's current state is its latest accepted revision, as determined by the `prev` rules above. Current-state queries MUST return only that revision and omit deleted artifacts. For example, a task whose current revision belongs to Project B no longer appears in Project A's list, even if an earlier revision belonged there. Revision history is queried separately. This NIP does not define a public acceptance order or history pagination. Relays record the order in which they accept revisions; clients observe the resulting current state through sync (see Sync), not through timestamps or `prev` chains.
 
 Relays MUST support querying current artifacts across channels the reader can access using exact tag-name/value matches, including multi-character tag names. Conditions on different tag names are combined with AND; requested values for one name are combined with OR. A match compares the tag name and its first value in the same tag. Access checks and tag matching apply before pagination and any counts. Older revisions do not contribute matches.
+
+Current-state queries also accept these keys, combined with the tag conditions by AND:
+
+- `"unassigned": true` matches only artifacts with no `assignee` tag. It cannot be combined with `#assignee`.
+- `"within": <channel id>` matches artifacts whose home is that channel or a channel filed under it, down to its grandchildren, as far as the reader may read each one. A project search covers the project's whole tree this way.
+- `"until": <unix seconds>` matches revisions with `created_at` at or before it, and orders the page by `created_at`, newest first. The next page asks `until` the oldest `created_at` it received and skips artifacts it already has.
+
+`history` and `head` reads refuse `unassigned` and `within`, and incremental reads refuse all three.
 
 Relays MUST advertise and enforce limits on tag-name/value sizes, total tag bytes, query predicates and values, and page size. Queries MUST run within an enforced execution budget. Unsupported or over-limit requests fail explicitly; predicates MUST NOT be silently ignored or incomplete results presented as complete.
 

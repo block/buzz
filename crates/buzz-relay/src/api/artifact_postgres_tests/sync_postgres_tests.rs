@@ -45,6 +45,7 @@ async fn accept(f: &Fixture, event: &Event) {
                 event,
                 &envelope,
                 source,
+                &Default::default(),
                 &f.state.relay_keypair
             )
             .await

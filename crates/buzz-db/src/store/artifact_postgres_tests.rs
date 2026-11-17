@@ -97,7 +97,14 @@ impl Fixture {
     async fn accept(&self, e: &Event, source: Option<Uuid>) -> ArtifactOutcome {
         let env = artifact::validate(e).unwrap();
         self.db
-            .accept_artifact(self.community, e, &env, source, &self.relay)
+            .accept_artifact(
+                self.community,
+                e,
+                &env,
+                source,
+                &Default::default(),
+                &self.relay,
+            )
             .await
             .unwrap()
     }
@@ -564,7 +571,14 @@ async fn quiescing_community_rejects_artifact_at_admission_before_coordinate_loc
         .unwrap();
     let error = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        f.db.accept_artifact(f.community, &create, &env, None, &f.relay),
+        f.db.accept_artifact(
+            f.community,
+            &create,
+            &env,
+            None,
+            &Default::default(),
+            &f.relay,
+        ),
     )
     .await
     .expect("admission must reject before waiting on the coordinate lock")

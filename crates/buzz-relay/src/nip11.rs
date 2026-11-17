@@ -283,6 +283,7 @@ impl RelayInfo {
             // kind:20005 one timed-out pubkey, to ask again (NOSTR.md,
             // Channel access).
             "buzz-channel-access".to_string(),
+            "buzz-artifact-assignees".to_string(),
         ];
         let gif = gif_provider.map(|provider| {
             supported_extensions.push("buzz-gif".to_string());
@@ -856,6 +857,7 @@ mod tests {
         assert!(extensions.contains(&"buzz-channel-parent-access".to_string()));
         assert!(extensions.contains(&"buzz-artifact-conversations".to_string()));
         assert!(extensions.contains(&"buzz-channel-access".to_string()));
+        assert!(extensions.contains(&"buzz-artifact-assignees".to_string()));
     }
 
     /// NIP-WP → NIP-11 mirror: a set workspace icon is served in the standard

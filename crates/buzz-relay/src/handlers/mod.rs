@@ -2,6 +2,8 @@
 pub mod admin_action_worker;
 pub mod admin_outbox_worker;
 #[cfg(test)]
+mod artifact_assignee_postgres_tests;
+#[cfg(test)]
 pub(crate) mod artifact_conversation_postgres_tests;
 /// NIP-AR Sync subscriptions.
 pub mod artifact_sync;

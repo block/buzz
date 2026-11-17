@@ -38,7 +38,7 @@ async fn ask_with(
 
 /// `POST /query` with `body`, signed by `viewer`, with a payload tag unless
 /// `payload` is false.
-async fn query(
+pub(crate) async fn query(
     state: &Arc<AppState>,
     tenant: &TenantContext,
     viewer: &Keys,

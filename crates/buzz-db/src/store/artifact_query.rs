@@ -47,6 +47,27 @@ pub(super) fn predicates(
                 .push(")");
         }
     }
+    if query.unassigned {
+        qb.push(" AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(e.tags) tag WHERE tag->>0='assignee')");
+    }
+    if let Some(within) = query.within {
+        // The channel and what is filed under it, two levels deep like every
+        // channel tree (`crate::channel_tree`); the scope above still decides
+        // what the reader may read.
+        qb.push(" AND (e.channel_id=")
+            .push_bind(within)
+            .push(" OR EXISTS (SELECT 1 FROM channels d WHERE d.community_id=e.community_id AND d.id=e.channel_id AND d.deleted_at IS NULL AND (d.parent_id=")
+            .push_bind(within)
+            .push(" OR EXISTS (SELECT 1 FROM channels m WHERE m.community_id=d.community_id AND m.id=d.parent_id AND m.deleted_at IS NULL AND m.parent_id=")
+            .push_bind(within)
+            .push("))))");
+    }
+    if let Some(until) = query.until {
+        qb.push(" AND e.created_at<=").push_bind(
+            chrono::DateTime::from_timestamp(until, 0)
+                .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC),
+        );
+    }
 }
 
 /// Append the reader's permission scope and the exact tag predicates. A
@@ -230,10 +251,16 @@ impl Db {
             tx.commit().await?;
             return Ok((vec![], n));
         }
-        qb.push(" ORDER BY e.received_at DESC,e.id ASC LIMIT ")
-            .push_bind(query.limit)
-            .push(" OFFSET ")
-            .push_bind(query.offset);
+        // With `until`, the page follows `created_at`, so the next page asks
+        // `until` the oldest it got; without it, newest received first.
+        qb.push(if query.until.is_some() {
+            " ORDER BY e.created_at DESC,e.id ASC LIMIT "
+        } else {
+            " ORDER BY e.received_at DESC,e.id ASC LIMIT "
+        })
+        .push_bind(query.limit)
+        .push(" OFFSET ")
+        .push_bind(query.offset);
         let events = rows_to_events(qb.build().fetch_all(&mut *tx).await?)?;
         tx.commit().await?;
         Ok((events, 0))

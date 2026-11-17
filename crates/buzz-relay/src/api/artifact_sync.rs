@@ -141,9 +141,12 @@ async fn execute(
     filter: &Value,
 ) -> Response {
     let request: Request = serde_json::from_value(filter.clone()).map_err(|_| invalid())?;
+    // Paging and the current-read-only filters have no incremental form; a
+    // filter this path would not apply is refused, never ignored.
     if request.artifact != "incremental"
-        || request.query.get("limit").is_some()
-        || request.query.get("offset").is_some()
+        || ["limit", "offset", "until", "unassigned", "within"]
+            .iter()
+            .any(|key| request.query.get(*key).is_some())
     {
         return Err(invalid());
     }
