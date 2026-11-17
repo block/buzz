@@ -176,6 +176,11 @@ pub struct ActionRecord {
 /// Insert a new report row. Idempotent on `(community, report_event_id)`:
 /// re-ingesting the same signed report is a no-op returning the existing id.
 ///
+/// A `channel_id` must exist in `community`; otherwise this returns
+/// [`DbError::NotFound`](crate::error::DbError::NotFound) and writes nothing.
+/// The check runs before the upsert, so a missing channel wins over an
+/// existing report with the same `report_event_id`, whose row stays unchanged.
+///
 /// `illegal` reports auto-escalate: they land `status='escalated'` so the
 /// platform operator backstop sees them without waiting for a community admin
 /// to forward them (the severe class was never the community's to hold). Every
@@ -206,6 +211,12 @@ pub async fn insert_report(
         "open"
     };
 
+    crate::store::reference_check::require_optional_channel(
+        tx.conn(),
+        community,
+        report.channel_id,
+    )
+    .await?;
     let row = sqlx::query(
         r#"
         INSERT INTO moderation_reports (
@@ -773,6 +784,9 @@ pub async fn list_restricted_page(
 }
 
 /// Insert a moderation audit row, returning its id.
+///
+/// A `channel_id` must exist in `community`; otherwise this returns
+/// [`DbError::NotFound`](crate::error::DbError::NotFound) and writes nothing.
 pub async fn insert_action(
     pool: &PgPool,
     community: CommunityId,
@@ -782,6 +796,12 @@ pub async fn insert_action(
         pool,
         community,
         crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    crate::store::reference_check::require_optional_channel(
+        tx.conn(),
+        community,
+        action.channel_id,
     )
     .await?;
     let row = sqlx::query(
