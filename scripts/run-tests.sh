@@ -183,6 +183,10 @@ run_unit_tests() {
   run_test_step "buzz-admin user-deletion intake command tests" \
     cargo test -p buzz-admin user_deletions::tests -- --nocapture
 
+  # Deletion command safety defaults; mirrors the nextest unit lane.
+  run_test_step "buzz-deletion unit tests" \
+    cargo test -p buzz-deletion --lib -- --nocapture
+
   # Multi-tenant conformance gate: independent replay checker + golden
   # fixtures (buzz-conformance). Pure in-process trace replay, no infra.
   run_test_step "buzz-conformance tests" \

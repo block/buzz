@@ -36,8 +36,10 @@ author. Supply `--relay-pubkey <hex-or-npub>` for each independently verified
 relay signer. A missing or untrusted signer stops the operation. The same trust
 rule applies to archive deltas and snapshots. Human-signed requests about another
 identity and archive actor/replacement references on surviving identities need
-an explicit shared-history disposition; the command reports them as blockers. Historical `replaced-by` references in
-archive requests and deltas remain blockers even after unarchive removes the
+an explicit shared-history disposition. Selected archive events with these
+references stop planning with an error before `profile_batches_start` is printed;
+they are not included in its blocker list. Historical `replaced-by` references in
+archive requests and deltas still stop planning after unarchive removes the
 canonical archive row.
 
 Shared archive snapshots are rebuilt from the retained canonical archive rows.
@@ -58,8 +60,10 @@ a successful partial preview. SQL statements have a 30-second timeout and locks
 a three-second timeout; large accounts can require a separately reviewed plan.
 
 Before mutations, the command rejects remaining credentials, memberships,
-workflows, subscriptions, non-profile authored content and unresolved archive
-references. It retains replay watermarks, deletion fences, requests, approvals,
+workflows, subscriptions, non-profile authored content other than repository
+announcements/state (30617/30618), and unresolved archive references. Repository
+events and name mappings remain intact and do not block identity removal.
+It retains replay watermarks, deletion fences, requests, approvals,
 history, repositories and media objects. Media cleanup must preserve its source
 evidence before this command removes avatar/configuration references.
 

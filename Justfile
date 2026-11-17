@@ -472,6 +472,9 @@ test-unit:
         # audit outcome contract, NIP-FI policy/backfill, and user-deletion intake.
         cargo nextest run -p buzz-admin \
             -E 'test(storage_snapshot) + test(/^communities::tests::/) + test(/^tests::communities_/) + test(=tests::partition_audit_outcomes_keep_their_json_names_and_exit_codes) + test(/^nip_fi::tests::/) + test(/^nip_fi_policy::tests::/) + test(/^user_deletions::tests::/)'
+        # Deletion command safety defaults and planning logic are infra-free;
+        # ignored PostgreSQL tests run separately. Keep the fallback in step.
+        cargo nextest run -p buzz-deletion --lib
         # Multi-tenant conformance gate (buzz-conformance): the independent
         # replay checker + golden fixtures. No infra — pure in-process trace
         # replay — so it belongs in the unit job. Run all targets (lib + the

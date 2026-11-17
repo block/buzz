@@ -312,6 +312,127 @@ async fn limits_dependencies_and_signer_fail_before_any_mutation() {
     assert_eq!(before, export(&f.pool).await);
 }
 
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn content_then_profile_cleanup_retains_human_and_agent_repositories() {
+    use crate::user_deletion::{content_batches::ContentBatchOptions, ExecutionMode};
+
+    let f = Fixture::new().await;
+    f.profiles().await;
+    let mut repository_ids = Vec::new();
+    for community in [f.community, f.elsewhere] {
+        for owner in [&f.human, &f.agent, &f.other] {
+            let repo = format!("repo-{}", owner.public_key());
+            for kind in [30617, 30618] {
+                let event = f
+                    .event(
+                        community,
+                        owner,
+                        kind,
+                        vec![vec!["d".into(), repo.clone()]],
+                        "retained repository metadata",
+                    )
+                    .await;
+                repository_ids.push(json!(format!("\\x{}", event.id)));
+                sqlx::query("INSERT INTO event_mentions(community_id,pubkey_hex,event_id,event_created_at,event_kind) VALUES($1,$2,$3,now(),$4)")
+                    .bind(community).bind(f.other.public_key().to_hex())
+                    .bind(event.id.to_bytes().as_slice()).bind(i32::from(kind))
+                    .execute(&f.pool).await.unwrap();
+            }
+            sqlx::query(
+                "INSERT INTO git_repo_names(community_id,repo_id,owner_pubkey) VALUES($1,$2,$3)",
+            )
+            .bind(community)
+            .bind(repo)
+            .bind(owner.public_key().to_hex())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        }
+    }
+    // Retaining repositories must not exempt ordinary human or agent content.
+    for owner in [&f.human, &f.agent] {
+        f.event(f.community, owner, 1, vec![], "remove content first")
+            .await;
+    }
+    let before = export(&f.pool).await;
+    let opts = f.options(2);
+    let secret = f.relay.secret_key().to_secret_hex();
+    let mut blocked = Vec::new();
+    assert!(f
+        .store
+        .run_profile_batches(&opts, true, Some(&secret), &mut blocked)
+        .await
+        .is_err());
+    assert!(String::from_utf8(blocked)
+        .unwrap()
+        .contains("events: content/account cleanup"));
+    assert_eq!(before, export(&f.pool).await);
+    f.store
+        .run_message_batches(
+            &ContentBatchOptions {
+                community: f.community,
+                pubkey: f.human.public_key().to_hex(),
+                relay_pubkey: Some(f.relay.public_key().to_hex()),
+                batch_size: 2,
+                max_items: 1000,
+            },
+            ExecutionMode::Delete,
+            None,
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap();
+    let after_content = export(&f.pool).await;
+    let mut preview = Vec::new();
+    let proposed = f
+        .store
+        .run_profile_batches(&opts, false, None, &mut preview)
+        .await
+        .unwrap();
+    let start: Value =
+        serde_json::from_slice(preview.split(|b| *b == b'\n').next().unwrap()).unwrap();
+    assert_eq!(start["blockers"], json!([]));
+    assert_eq!(after_content, export(&f.pool).await);
+    let deleted = f
+        .store
+        .run_profile_batches(&opts, true, Some(&secret), &mut Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(proposed.items, deleted.items);
+    let after = export(&f.pool).await;
+    assert_eq!(before["git_repo_names"], after["git_repo_names"]);
+    for (table, rows) in &before {
+        for row in rows.as_array().unwrap() {
+            if row["community_id"] == json!(f.elsewhere)
+                || (table == "events" && repository_ids.contains(&row["id"]))
+                || (table == "event_mentions" && repository_ids.contains(&row["event_id"]))
+            {
+                assert!(
+                    after[table].as_array().unwrap().contains(row),
+                    "retained row changed in {table}"
+                );
+            }
+        }
+    }
+    let remaining: Vec<Vec<u8>> =
+        sqlx::query_scalar("SELECT pubkey FROM users WHERE community_id=$1")
+            .bind(f.community)
+            .fetch_all(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(remaining, vec![f.other.public_key().to_bytes().to_vec()]);
+    assert_eq!(
+        f.store
+            .run_profile_batches(&opts, true, None, &mut Vec::new())
+            .await
+            .unwrap()
+            .items,
+        0
+    );
+    assert_eq!(after, export(&f.pool).await);
+}
+
 struct FailAfterCommit;
 impl Write for FailAfterCommit {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
