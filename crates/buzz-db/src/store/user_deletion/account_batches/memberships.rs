@@ -156,29 +156,20 @@ pub(super) async fn rebuild(
                 .map(Tag::parse)
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(|e| invalid(e.to_string()))?
+        } else if kind == 39001 {
+            crate::channel::group_admins_tags(
+                &channel_id.to_string(),
+                &channel.identity(),
+                &members,
+            )
+            .map_err(|e| invalid(e.to_string()))?
         } else {
-            let mut tags = vec![Tag::identifier(channel_id.to_string())];
-            tags.extend(
-                buzz_core::channel::group_state_identity_tags(
-                    &channel.channel_type,
-                    &channel.labels,
-                    &channel.created_by,
-                )
-                .map_err(|e| invalid(e.to_string()))?,
-            );
-            for member in &members {
-                if kind == 39001 && !matches!(member.role.as_str(), "owner" | "admin") {
-                    continue;
-                }
-                let key = hex::encode(&member.pubkey);
-                let parts = if kind == 39001 {
-                    vec!["p", &key, &member.role]
-                } else {
-                    vec!["p", &key, "", &member.role]
-                };
-                tags.push(Tag::parse(parts).map_err(|e| invalid(e.to_string()))?);
-            }
-            tags
+            crate::channel::group_members_tags(
+                &channel_id.to_string(),
+                Some(&channel.identity()),
+                &members,
+            )
+            .map_err(|e| invalid(e.to_string()))?
         };
         let latest: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar("SELECT max(created_at) FROM events WHERE community_id=$1 AND channel_id=$2 AND kind=$3 AND pubkey=$4 AND deleted_at IS NULL")
             .bind(community.as_uuid()).bind(channel_id).bind(kind).bind(signer.public_key().to_bytes().as_slice()).fetch_one(tx.conn()).await?;
