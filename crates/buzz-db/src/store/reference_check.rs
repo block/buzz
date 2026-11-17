@@ -1,5 +1,5 @@
-//! In-transaction parent checks for the channel, user and relay-member
-//! references that used to be foreign keys.
+//! In-transaction parent checks for the community, channel, user,
+//! relay-member and workflow references that used to be foreign keys.
 //!
 //! Each helper locks the parent row `FOR KEY SHARE`: the lock a foreign key's
 //! check takes, so a concurrent delete of the parent (which locks it
@@ -8,14 +8,31 @@
 //! are idempotent; once they are dropped these checks are the only guard.
 //!
 //! A missing parent is `DbError::NotFound`, never a silent success. Every
-//! lookup is scoped by `community_id`, so a parent that exists only in another
-//! community is missing.
+//! lookup below the community is scoped by `community_id`, so a parent that
+//! exists only in another community is missing.
 
 use sqlx::PgConnection;
 use uuid::Uuid;
 
 use crate::error::{DbError, Result};
 use crate::CommunityId;
+
+/// Lock `communities (id)` `FOR KEY SHARE`, or fail with `NotFound`.
+///
+/// Any lifecycle state satisfies the reference, as it did under the foreign
+/// key: a tombstoned community keeps its row. Writers that must refuse a
+/// community being deleted use write admission instead.
+pub(crate) async fn require_community(
+    conn: &mut PgConnection,
+    community_id: CommunityId,
+) -> Result<()> {
+    sqlx::query_scalar::<_, i32>("SELECT 1 FROM communities WHERE id = $1 FOR KEY SHARE")
+        .bind(community_id.as_uuid())
+        .fetch_optional(conn)
+        .await?
+        .map(|_| ())
+        .ok_or_else(|| DbError::NotFound(format!("community {community_id}")))
+}
 
 /// Lock `channels (community_id, id)` `FOR KEY SHARE`, or fail with `NotFound`.
 ///
@@ -88,4 +105,38 @@ pub(crate) async fn require_relay_member(
     .await?
     .map(|_| ())
     .ok_or_else(|| DbError::NotFound(format!("relay member {pubkey}")))
+}
+
+/// Lock `workflows (community_id, id)` `FOR KEY SHARE`, or fail with `NotFound`.
+pub(crate) async fn require_workflow(
+    conn: &mut PgConnection,
+    community_id: CommunityId,
+    workflow_id: Uuid,
+) -> Result<()> {
+    sqlx::query_scalar::<_, i32>(
+        "SELECT 1 FROM workflows WHERE community_id = $1 AND id = $2 FOR KEY SHARE",
+    )
+    .bind(community_id.as_uuid())
+    .bind(workflow_id)
+    .fetch_optional(conn)
+    .await?
+    .map(|_| ())
+    .ok_or_else(|| DbError::NotFound(format!("workflow {workflow_id}")))
+}
+
+/// Lock `workflow_runs (community_id, id)` `FOR KEY SHARE`, or fail with `NotFound`.
+pub(crate) async fn require_workflow_run(
+    conn: &mut PgConnection,
+    community_id: CommunityId,
+    run_id: Uuid,
+) -> Result<()> {
+    sqlx::query_scalar::<_, i32>(
+        "SELECT 1 FROM workflow_runs WHERE community_id = $1 AND id = $2 FOR KEY SHARE",
+    )
+    .bind(community_id.as_uuid())
+    .bind(run_id)
+    .fetch_optional(conn)
+    .await?
+    .map(|_| ())
+    .ok_or_else(|| DbError::NotFound(format!("workflow_run {run_id}")))
 }

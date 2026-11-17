@@ -69,8 +69,9 @@ pub const CONTROL_PLANE_TABLES: &[&str] = &[
 ///
 /// Each entry is `(table, row source)`; the row source binds the community as
 /// `$1` and is prefixed with `DELETE`, `SELECT count(*)`, or `SELECT EXISTS`.
-/// The order is FK-safe for deletion: outbox rows before their actions, and
-/// both before `moderation_reports`.
+/// Rows go child before parent: outbox rows before their actions, and both
+/// before `moderation_reports`. That order also satisfies the foreign keys
+/// while they exist; it is not needed once they are dropped.
 pub const RELAY_ADMIN_TABLES: &[(&str, &str)] = &[
     (
         "relay_admin_outbox",
@@ -170,7 +171,10 @@ const EXCLUDED_SCOPED_TABLES: &[&str] = &[
     "operator_listener_outbox",
 ];
 
-/// Foreign-key-safe child-before-parent order for the PostgreSQL purge.
+/// Tables the PostgreSQL purge deletes from, child before parent. The order
+/// satisfies the foreign keys while they exist; once they are dropped it does
+/// not matter, but the list must stay complete ([`EXPECTED_SCOPED_TABLES`]
+/// gates it).
 pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "nip_fi_profile_heads",
     "personal_read_frontiers",
@@ -2340,7 +2344,7 @@ impl DeletionStore {
 
         let mut deleted = BTreeMap::new();
         // Staff enforcement rows are operator-global, so the scoped loop never
-        // sees them. They must go before moderation_reports (FK order).
+        // sees them. They go before moderation_reports (child before parent).
         for (table, rows) in RELAY_ADMIN_TABLES {
             let sql = format!("DELETE {rows}");
             let affected = sqlx::query(AssertSqlSafe(sql))
@@ -2358,8 +2362,8 @@ impl DeletionStore {
             )
             .await?;
         }
-        // The order is child-before-parent/FK-safe, not alphabetical. Cascades
-        // can make later units observe zero rows; each scoped WHERE stays idempotent.
+        // Child before parent, not alphabetical (see PURGE_SCOPED_TABLES). A
+        // later unit can observe zero rows; each scoped WHERE stays idempotent.
         let pending = live_pending_tables_on(&mut tx).await?;
         for table in pending.iter().chain(PURGE_SCOPED_TABLES) {
             let sql = format!("DELETE FROM {table} WHERE community_id = $1");
@@ -5784,7 +5788,7 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
     async fn contender_db(application_name: &str) -> Db {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1 -- local test-only credentials
         let options = PgConnectOptions::from_str(&database_url)
             .expect("parse test database URL")
             .application_name(application_name);
@@ -9257,10 +9261,70 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
             .mark_bindings_removed(&token, serde_json::json!({"keys": 0}))
             .await
             .expect("bindings removed");
-        let deleted = store
-            .purge_postgres(&token)
+        // Overlap the real purge with a real feedback replay. Park the purge
+        // at its next provenance row, after it has already cleared (and
+        // locked) the feedback row, so the replay must wait on that row lock
+        // without holding anything the purge's community lock needs.
+        let violation: i64 = sqlx::query_scalar(
+            "INSERT INTO rate_limit_violations (community_id) VALUES ($1) RETURNING id",
+        )
+        .bind(community.as_uuid())
+        .fetch_one(&db.pool)
+        .await
+        .expect("seed next provenance row");
+        let replay_created_at: DateTime<Utc> =
+            sqlx::query_scalar("SELECT event_created_at FROM product_feedback WHERE id = $1")
+                .bind(feedback_id)
+                .fetch_one(&db.pool)
+                .await
+                .expect("original feedback timestamp");
+        let mut blocker = db.pool.begin().await.expect("begin purge pause");
+        sqlx::query("SELECT id FROM rate_limit_violations WHERE id = $1 FOR UPDATE")
+            .bind(violation)
+            .execute(&mut *blocker)
             .await
-            .expect("purge without FK actions");
+            .expect("pause purge at the next provenance row");
+
+        let purge_name = format!("feedback-purge-{}", Uuid::new_v4().simple());
+        let purge_pool = crate::test_support::named_pool(&purge_name).await;
+        let purge_store = Db::from_pool(purge_pool).deletion_store();
+        let purge_token = token.clone();
+        let purge = tokio::spawn(async move { purge_store.purge_postgres(&purge_token).await });
+        crate::test_support::wait_for_lock_wait(&db.pool, &purge_name).await;
+
+        let replay_name = format!("feedback-replay-{}", Uuid::new_v4().simple());
+        let replay_pool = crate::test_support::named_pool(&replay_name).await;
+        let replay = tokio::spawn(async move {
+            let tags = serde_json::json!([]);
+            crate::product_feedback::insert(
+                &replay_pool,
+                community,
+                crate::product_feedback::NewProductFeedback {
+                    event_id: &[9_u8; 32],
+                    submitter_pubkey: &[7_u8; 32],
+                    category: None,
+                    body: "feedback survives",
+                    tags: &tags,
+                    event_created_at: replay_created_at,
+                },
+            )
+            .await
+        });
+        crate::test_support::wait_for_lock_wait(&db.pool, &replay_name).await;
+        blocker.commit().await.expect("resume purge");
+        let (purged, replayed) = tokio::time::timeout(Duration::from_secs(15), async {
+            tokio::join!(purge, replay)
+        })
+        .await
+        .expect("purge and replay finish");
+        let purged = purged.expect("join purge");
+        let replayed = replayed.expect("join replay");
+        assert!(
+            purged.is_ok() && replayed.is_ok(),
+            "purge and permitted replay must both succeed: purge={purged:?}, replay={replayed:?}"
+        );
+        assert_eq!(replayed.expect("replay accepted"), feedback_id);
+        let deleted = purged.expect("purge without FK actions");
         for table in [
             "channel_members",
             "personal_read_frontiers",

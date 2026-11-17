@@ -322,18 +322,17 @@ pub async fn search_users(
         .collect())
 }
 
-/// Set the owner pubkey for an agent user.
-/// The owner pubkey must already exist in the same community's users table;
-/// it is checked (and locked `FOR KEY SHARE`) in the writing transaction.
-/// Atomically set agent owner — only if no owner is currently assigned.
+/// Atomically set an agent user's owner, only if no owner is assigned yet.
+///
+/// The owner must already exist in the same community's users table; it is
+/// checked (and locked `FOR KEY SHARE`) in the writing transaction.
 ///
 /// Returns Ok(true) if ownership was set, Ok(false) if an owner already exists
 /// (caller should check whether the existing owner matches). Returns
 /// `DbError::NotFound` if the agent pubkey doesn't exist in the users table, or
 /// if the agent has no owner yet and `owner_pubkey` doesn't exist there. An
 /// agent that already has an owner returns `Ok(false)` without looking at
-/// `owner_pubkey`. The owner is checked before anything is written, so the
-/// error is the same whether or not the owner foreign key is installed.
+/// `owner_pubkey`.
 pub async fn set_agent_owner(
     pool: &PgPool,
     community_id: CommunityId,
