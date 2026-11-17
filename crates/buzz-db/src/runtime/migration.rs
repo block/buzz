@@ -4013,8 +4013,9 @@ mod postgres_tests {
         )
         .fetch_one(&pool)
         .await
-        .expect("read retained guard");
-        assert!(tombstone);
+        .expect("read retired guard");
+        // 0096 retired the tombstone trigger.
+        assert!(!tombstone);
         store
             .validate_serving_catalog()
             .await
