@@ -769,7 +769,7 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       .replacingOccurrences(
         of: #"!?\[([^\]]*)\]\([^)]*\)"#, with: "$1", options: .regularExpression)
       .replacingOccurrences(
-        of: #"(\*\*|~~)(\S(?:.*?\S)?)\1"#, with: "$2", options: .regularExpression)
+        of: #"(\*\*|~~)(\S(?:.*?\S)??)\1"#, with: "$2", options: .regularExpression)
       .replacingOccurrences(of: #"[ \t]+"#, with: " ", options: .regularExpression)
   }
 
