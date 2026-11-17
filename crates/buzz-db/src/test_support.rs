@@ -16,6 +16,47 @@ pub(crate) async fn prebuild_media_edit_index(pool: &sqlx::PgPool) {
         .execute(pool).await.expect("operator media index prebuild on isolated fixture");
 }
 
+/// Desired-state DDL for the tenant tables migration 0107 adds.
+const IDENTITY_RETIREMENT_TABLES: [(&str, &str); 3] = [
+    (
+        "identity_retirement_actions",
+        include_str!("../../../schema/tables/public/identity_retirement_actions.sql"),
+    ),
+    (
+        "identity_retirement_holds",
+        include_str!("../../../schema/tables/public/identity_retirement_holds.sql"),
+    ),
+    (
+        "identity_retirement_workflows",
+        include_str!("../../../schema/tables/public/identity_retirement_workflows.sql"),
+    ),
+];
+
+/// Create 0107's tenant tables on a schema pinned below 0107.
+///
+/// This release's deletion catalog requires them, so a test that checks an
+/// older catalog for some other object (fences, guards, functions) adds them
+/// out of order to isolate that object. Call
+/// [`drop_identity_retirement_tables`] before migrating past 0106.
+pub(crate) async fn add_identity_retirement_tables(pool: &sqlx::PgPool) {
+    for (table, ddl) in IDENTITY_RETIREMENT_TABLES {
+        sqlx::raw_sql(ddl)
+            .execute(pool)
+            .await
+            .unwrap_or_else(|error| panic!("create {table} out of order: {error}"));
+    }
+}
+
+/// Undo [`add_identity_retirement_tables`] so 0107 can create them.
+pub(crate) async fn drop_identity_retirement_tables(pool: &sqlx::PgPool) {
+    for (table, _) in IDENTITY_RETIREMENT_TABLES {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP TABLE {table}")))
+            .execute(pool)
+            .await
+            .unwrap_or_else(|error| panic!("drop out-of-order {table}: {error}"));
+    }
+}
+
 /// A uniquely named database on the test server that is dropped when the
 /// guard goes out of scope, including when the test panics.
 ///
