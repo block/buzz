@@ -2566,6 +2566,7 @@ mod postgres_tests {
                 "assert_community_write_allowed",
                 "enforce_community_write_fence",
                 "attach_community_write_fence",
+                "community_deletion_lock_key",
             ]
             .contains(&function.as_str())
             {
