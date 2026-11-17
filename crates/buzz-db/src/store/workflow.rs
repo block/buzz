@@ -25,6 +25,7 @@ use uuid::Uuid;
 use buzz_core::CommunityId;
 
 use crate::error::{DbError, Result};
+use crate::store::reference_check;
 use crate::Db;
 use buzz_datastore_tracing::datastore_span;
 
@@ -324,82 +325,10 @@ pub struct ApprovalRecord {
 
 // -- Reference checks ---------------------------------------------------------
 //
-// Every workflow-table reference is checked in the writing transaction, and the
-// parent row is locked `FOR KEY SHARE`: the lock a foreign key's check takes, so
-// a concurrent delete of the parent (which locks it `FOR UPDATE` first, see
-// `workflow/deletion.rs`) either waits for this transaction or runs first and
-// makes the check fail. While the foreign keys still exist the two checks are
-// idempotent; once they are dropped these checks are the only guard.
-//
-// A missing parent is `DbError::NotFound`, never a silent success.
-
-/// Lock `workflows (community_id, id)` `FOR KEY SHARE`, or fail with `NotFound`.
-async fn require_workflow(
-    conn: &mut sqlx::PgConnection,
-    community_id: CommunityId,
-    workflow_id: Uuid,
-) -> Result<()> {
-    sqlx::query_scalar::<_, i32>(
-        "SELECT 1 FROM workflows WHERE community_id = $1 AND id = $2 FOR KEY SHARE",
-    )
-    .bind(community_id.as_uuid())
-    .bind(workflow_id)
-    .fetch_optional(conn)
-    .await?
-    .map(|_| ())
-    .ok_or_else(|| DbError::NotFound(format!("workflow {workflow_id}")))
-}
-
-/// Lock `workflow_runs (community_id, id)` `FOR KEY SHARE`, or fail with `NotFound`.
-async fn require_workflow_run(
-    conn: &mut sqlx::PgConnection,
-    community_id: CommunityId,
-    run_id: Uuid,
-) -> Result<()> {
-    sqlx::query_scalar::<_, i32>(
-        "SELECT 1 FROM workflow_runs WHERE community_id = $1 AND id = $2 FOR KEY SHARE",
-    )
-    .bind(community_id.as_uuid())
-    .bind(run_id)
-    .fetch_optional(conn)
-    .await?
-    .map(|_| ())
-    .ok_or_else(|| DbError::NotFound(format!("workflow_run {run_id}")))
-}
-
-/// Lock `users (community_id, pubkey)` `FOR KEY SHARE`, or fail with `NotFound`.
-async fn require_workflow_owner(
-    conn: &mut sqlx::PgConnection,
-    community_id: CommunityId,
-    owner_pubkey: &[u8],
-) -> Result<()> {
-    sqlx::query_scalar::<_, i32>(
-        "SELECT 1 FROM users WHERE community_id = $1 AND pubkey = $2 FOR KEY SHARE",
-    )
-    .bind(community_id.as_uuid())
-    .bind(owner_pubkey)
-    .fetch_optional(conn)
-    .await?
-    .map(|_| ())
-    .ok_or_else(|| DbError::NotFound("workflow owner user".to_owned()))
-}
-
-/// Lock `channels (community_id, id)` `FOR KEY SHARE`, or fail with `NotFound`.
-async fn require_workflow_channel(
-    conn: &mut sqlx::PgConnection,
-    community_id: CommunityId,
-    channel_id: Uuid,
-) -> Result<()> {
-    sqlx::query_scalar::<_, i32>(
-        "SELECT 1 FROM channels WHERE community_id = $1 AND id = $2 FOR KEY SHARE",
-    )
-    .bind(community_id.as_uuid())
-    .bind(channel_id)
-    .fetch_optional(conn)
-    .await?
-    .map(|_| ())
-    .ok_or_else(|| DbError::NotFound(format!("channel {channel_id}")))
-}
+// Every workflow-table reference is checked in the writing transaction with the
+// shared helpers in `store/reference_check.rs`. A concurrent delete of the
+// parent (which locks it `FOR UPDATE` first, see `workflow/deletion.rs`) either
+// waits for this transaction or runs first and makes the check fail.
 
 /// Check the parents a `workflows` row references: its owner, then its channel.
 async fn require_workflow_parents(
@@ -408,11 +337,8 @@ async fn require_workflow_parents(
     owner_pubkey: &[u8],
     channel_id: Option<Uuid>,
 ) -> Result<()> {
-    require_workflow_owner(conn, community_id, owner_pubkey).await?;
-    if let Some(channel_id) = channel_id {
-        require_workflow_channel(conn, community_id, channel_id).await?;
-    }
-    Ok(())
+    reference_check::require_user(conn, community_id, owner_pubkey, "workflow owner user").await?;
+    reference_check::require_optional_channel(conn, community_id, channel_id).await
 }
 
 // -- Workflow CRUD ------------------------------------------------------------
@@ -749,9 +675,10 @@ pub async fn latest_scheduled_workflow_fire(
 /// intentional: the schedule instant was claimed and must not duplicate later.
 ///
 /// Returns `false` when no unlinked claim matches, or the run is missing or
-/// belongs to another workflow. Workflow delete removes only its own fires
-/// before its runs, and the fire→run FK is NO ACTION, so a cross-workflow link
-/// would block that delete.
+/// belongs to another workflow. A link stays inside one workflow, so workflow
+/// delete, which removes that workflow's fires and runs together, never leaves
+/// a fire naming a deleted run (and, while the fire→run foreign key exists,
+/// never trips it).
 pub async fn attach_scheduled_workflow_run(
     pool: &PgPool,
     community_id: CommunityId,
@@ -1042,7 +969,7 @@ pub async fn create_workflow_run(
     .await?;
     let id = Uuid::new_v4();
 
-    require_workflow(tx.conn(), community_id, workflow_id).await?;
+    reference_check::require_workflow(tx.conn(), community_id, workflow_id).await?;
     sqlx::query(
         r#"
         INSERT INTO workflow_runs
@@ -1258,8 +1185,8 @@ pub async fn create_approval(pool: &PgPool, params: CreateApprovalParams<'_>) ->
     )
     .await?;
 
-    require_workflow(tx.conn(), community_id, workflow_id).await?;
-    require_workflow_run(tx.conn(), community_id, run_id).await?;
+    reference_check::require_workflow(tx.conn(), community_id, workflow_id).await?;
+    reference_check::require_workflow_run(tx.conn(), community_id, run_id).await?;
     sqlx::query(
         r#"
         INSERT INTO workflow_approvals

@@ -70,8 +70,9 @@ pub const CONTROL_PLANE_TABLES: &[&str] = &[
 ///
 /// Each entry is `(table, row source)`; the row source binds the community as
 /// `$1` and is prefixed with `DELETE`, `SELECT count(*)`, or `SELECT EXISTS`.
-/// The order is FK-safe for deletion: outbox rows before their actions, and
-/// both before `moderation_reports`.
+/// Rows go child before parent: outbox rows before their actions, and both
+/// before `moderation_reports`. That order also satisfies the foreign keys
+/// while they exist; it is not needed once they are dropped.
 pub const RELAY_ADMIN_TABLES: &[(&str, &str)] = &[
     (
         "relay_admin_outbox",
@@ -171,7 +172,10 @@ const EXCLUDED_SCOPED_TABLES: &[&str] = &[
     "operator_listener_outbox",
 ];
 
-/// Foreign-key-safe child-before-parent order for the PostgreSQL purge.
+/// Tables the PostgreSQL purge deletes from, child before parent. The order
+/// satisfies the foreign keys while they exist; once they are dropped it does
+/// not matter, but the list must stay complete ([`EXPECTED_SCOPED_TABLES`]
+/// gates it).
 pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "nip_fi_profile_heads",
     "personal_read_frontiers",
@@ -2341,7 +2345,7 @@ impl DeletionStore {
 
         let mut deleted = BTreeMap::new();
         // Staff enforcement rows are operator-global, so the scoped loop never
-        // sees them. They must go before moderation_reports (FK order).
+        // sees them. They go before moderation_reports (child before parent).
         for (table, rows) in RELAY_ADMIN_TABLES {
             let sql = format!("DELETE {rows}");
             let affected = sqlx::query(AssertSqlSafe(sql))
@@ -2359,8 +2363,8 @@ impl DeletionStore {
             )
             .await?;
         }
-        // The order is child-before-parent/FK-safe, not alphabetical. Cascades
-        // can make later units observe zero rows; each scoped WHERE stays idempotent.
+        // Child before parent, not alphabetical (see PURGE_SCOPED_TABLES). A
+        // later unit can observe zero rows; each scoped WHERE stays idempotent.
         let pending = live_pending_tables_on(&mut tx).await?;
         for table in pending.iter().chain(PURGE_SCOPED_TABLES) {
             let sql = format!("DELETE FROM {table} WHERE community_id = $1");
