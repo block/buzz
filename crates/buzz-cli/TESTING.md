@@ -138,6 +138,8 @@ buzz channels list | jq .
 buzz channels list --visibility open | jq .
 buzz channels list --member | jq .
 buzz channels list --include-archived | jq .   # archived channels are hidden without this
+# `visibility` is "open" or "private" from the relay's ["public"]/["private"] tag. It is null only
+# when an event carries neither (older or non-Buzz relays); NIP-29 would read that as public.
 
 # channels get
 buzz channels get --channel "$CHANNEL_ID" | jq .
