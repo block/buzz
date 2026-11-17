@@ -36,6 +36,7 @@ import '../../../shared/widgets/frosted_scaffold.dart';
 import '../../../shared/widgets/buzz_loading_indicator.dart';
 import '../../../shared/widgets/modal_presentation.dart';
 import '../channel.dart';
+import '../channel_action_confirmation.dart';
 import '../compose_bar.dart';
 import 'me_assistant_picker_sheet.dart';
 import 'new_me_project.dart';
@@ -105,11 +106,21 @@ class MePage extends HookConsumerWidget {
     // Workspace collapse disposes its rows. Keep writes and feedback with
     // the page so re-expanding cannot submit a second archive.
     final archiving = useState(<String>{});
-    Future<void> archive(String channelId) async {
+    Future<void> archive(Channel channel) async {
+      final channelId = channel.id;
       if (archiving.value.contains(channelId)) return;
       archiving.value = {...archiving.value, channelId};
+      // Capture the reviewed account/community before the confirmation awaits.
+      final actions = ref.read(channelActionsProvider);
       try {
-        await ref.read(channelActionsProvider).archiveChannel(channelId);
+        final confirmed = await showChannelActionConfirmation(
+          context: Navigator.of(context, rootNavigator: true).context,
+          title: 'Archive #${channel.name}?',
+          body: 'The channel will become read-only.',
+          confirmLabel: 'Archive',
+        );
+        if (!confirmed || !context.mounted) return;
+        await actions.archiveChannel(channelId);
       } catch (error) {
         if (context.mounted) {
           ScaffoldMessenger.of(context).showFeedbackSnackBar(
@@ -226,7 +237,7 @@ class MePage extends HookConsumerWidget {
                 isUnread: unreadIds.contains(channel.id),
                 canArchive: channel.isPersonalChat(viewer, legacyChannels),
                 archiving: archiving.value.contains(channel.id),
-                onArchive: () => archive(channel.id),
+                onArchive: () => archive(channel),
                 onLongPress: () => showChannelDetailsSheet(
                   context: context,
                   channel: channel,

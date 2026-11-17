@@ -25,6 +25,7 @@ import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/tabler_star_icon.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import 'channel.dart';
+import 'channel_action_confirmation.dart';
 import 'add_members_sheet.dart';
 import 'channel_identity_names_provider.dart';
 import 'channel_management_provider.dart';
@@ -489,22 +490,11 @@ Future<void> _confirmAndRun(
   final ownerNavigator = Navigator.of(sheetContext);
   final ownerRoute = ModalRoute.of(sheetContext);
   final pageContext = Navigator.of(sheetContext, rootNavigator: true).context;
-  final confirmed = await showBuzzDialog<bool>(
+  final confirmed = await showChannelActionConfirmation(
     context: pageContext,
-    builder: (dialogContext) => AlertDialog(
-      title: Text(title),
-      content: Text(body),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(dialogContext).pop(false),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.of(dialogContext).pop(true),
-          child: Text(confirmLabel),
-        ),
-      ],
-    ),
+    title: title,
+    body: body,
+    confirmLabel: confirmLabel,
   );
   if (confirmed != true) return;
   try {

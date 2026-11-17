@@ -219,10 +219,25 @@ void main() {
         expect(find.byType(Dismissible), findsNWidgets(3));
       }
 
+      // A full swipe only offers the existing lifecycle confirmation.
+      await tester.drag(find.text('Project chat'), const Offset(-700, 0));
+      await tester.pumpAndSettle();
+      expect(find.text('Archive #Project chat?'), findsOneWidget);
+      expect(find.text('The channel will become read-only.'), findsOneWidget);
+      expect(relay.submitted, isEmpty);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(relay.submitted, isEmpty);
+      expect(find.text('Project chat').hitTestable(), findsOneWidget);
+
       // Keep a write in flight, reject it (including permission/offline
       // failures), then retry the same gesture through the real action.
       relay.acknowledgement = Completer<void>();
       await tester.drag(find.text('Project chat'), const Offset(-700, 0));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(relay.submitted, isEmpty);
+      await tester.tap(find.widgetWithText(FilledButton, 'Archive'));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));
       expect(relay.submitted, hasLength(1));
@@ -285,6 +300,8 @@ void main() {
       relay.acknowledgement = null;
       await tester.drag(find.text('Project chat'), const Offset(-700, 0));
       await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Archive'));
+      await tester.pumpAndSettle();
       expect(find.text('Project chat'), findsNothing);
       expect(find.text('Loose chat'), findsOneWidget);
       expect(
@@ -308,6 +325,21 @@ void main() {
         ui.SemanticsAction.customAction,
         archive,
       );
+      await tester.pumpAndSettle();
+      expect(find.text('Archive #Legacy chat?'), findsOneWidget);
+      expect(relay.submitted, hasLength(2));
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(relay.submitted, hasLength(2));
+      expect(find.text('Legacy chat'), findsOneWidget);
+      node.owner!.performAction(
+        node.id,
+        ui.SemanticsAction.customAction,
+        archive,
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Archive #Legacy chat?'), findsOneWidget);
+      await tester.tap(find.widgetWithText(FilledButton, 'Archive'));
       await tester.pumpAndSettle();
       expect(find.text('Legacy chat'), findsNothing);
       expect(relay.archived, containsAll(['grouped', 'legacy']));
