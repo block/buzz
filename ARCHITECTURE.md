@@ -498,8 +498,8 @@ Relay-owned write APIs provide the supported mutation path for tenant data:
   checks active, undeleted state. Deletion lifecycle transitions take the
   matching exclusive lock. A serving transaction never spans communities.
   The universal per-table write-fence triggers and their functions have been
-  retired after writer coverage and fleet gates; the community tombstone guard
-  remains. New tenant-owned tables rely on this admission alone.
+  retired after writer coverage and fleet gates. New tenant-owned tables rely
+  on this admission alone.
 - **Replica floor:** supported channel-event insertions check `created_at`
   against `clock_timestamp()` on their admitted transaction using the shared
   960-second floor. The ordered heartbeat handshake and activity scan retain
@@ -511,6 +511,11 @@ Relay-owned write APIs provide the supported mutation path for tenant data:
   Drain old connections/in-flight transactions, stop out-of-band writers, and
   hold the replica breaker closed through the drop until replay catches up.
   Already-running old pods do not reverify the trigger on each heartbeat.
+- **Single-table guards:** channel tenant binding, community lifecycle,
+  request/approval evidence and manifest chunks are owned by application writers.
+  Serving/deletion catalog validation tolerates the five legacy guards being
+  absent. Their contract migration is gated on the writer and catalog-expand
+  release (#8320) being deployed fleet-wide.
 - **Role separation:** relay/runtime code owns admission and lock protocols;
   operator maintenance/backfill workflows must either use those protocols or run
   under explicit reviewed procedures that keep routing fences closed.

@@ -436,6 +436,9 @@ test-unit:
         # buzz-workflow parser, cron, condition and denial-logging unit tests
         # (infra-free). Its ignored Postgres cases run in the PostgreSQL lane.
         cargo nextest run -p buzz-workflow --lib
+        # Deletion workflow/unit tests; Postgres cases remain ignored here.
+        # Keep the Cargo fallback in scripts/run-tests.sh in step.
+        cargo nextest run -p buzz-deletion --lib
         # buzz-acp owns the relay-to-agent trust boundary. Run its tests here so
         # forged relay events cannot regain a path into agent routing unnoticed.
         cargo nextest run -p buzz-acp
