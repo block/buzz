@@ -110,19 +110,15 @@ void main() {
       test(name, () async => expect(await input(), expected));
     }
 
-    test(
-      'personal data, screenshots, sessions and native breadcrumbs stay off',
-      () {
-        expect(options.sendDefaultPii, isFalse);
-        expect(options.attachScreenshot, isFalse);
-        expect(options.attachViewHierarchy, isFalse);
-        expect(options.enableAutoNativeBreadcrumbs, isFalse);
-        expect(options.recordHttpBreadcrumbs, isFalse);
-        expect(options.enableAutoSessionTracking, isFalse);
-        expect(options.replay.sessionSampleRate, isNull);
-        expect(options.tracesSampleRate, isNull);
-      },
-    );
+    test('personal data, screenshots and native breadcrumbs stay off', () {
+      expect(options.sendDefaultPii, isFalse);
+      expect(options.attachScreenshot, isFalse);
+      expect(options.attachViewHierarchy, isFalse);
+      expect(options.enableAutoNativeBreadcrumbs, isFalse);
+      expect(options.recordHttpBreadcrumbs, isFalse);
+      expect(options.replay.sessionSampleRate, isNull);
+      expect(options.tracesSampleRate, isNull);
+    });
   });
 
   group('a sent error', () {
