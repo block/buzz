@@ -63,10 +63,11 @@ class OrganizationSignIn extends ChangeNotifier {
   /// What the user can do about [failure], ending the sign-in page's failure
   /// message. The banner keeps "Try again." so its capsule stays compact.
   String get failureAdvice => switch (_unavailableCause) {
-    null => 'Try again.',
-    final cause when cause.startsWith('http5') =>
+    final cause? when cause.startsWith('http5') =>
       'The sign-in service is unavailable. Try again later.',
-    _ => 'Check your network or VPN connection, then try again.',
+    final cause? when cause.startsWith('http3') || !cause.startsWith('http') =>
+      'Check your network or VPN connection, then try again.',
+    _ => 'Try again.',
   };
 
   // What [BuilderlabAccountClient.lastUnavailableCause] held when the

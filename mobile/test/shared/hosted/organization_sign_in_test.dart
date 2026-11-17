@@ -182,13 +182,18 @@ void main() {
 
   test('an unreachable account server names the cause in the code', () async {
     late Uri login;
-    http.Response? Function()? failExchange;
+    http.StreamedResponse Function()? failExchange;
+    http.StreamedResponse respond(http.Response response) =>
+        http.StreamedResponse(
+          Stream.value(response.bodyBytes),
+          response.statusCode,
+        );
     final signIn = OrganizationSignIn(
       account: BuilderlabAccountClient(
         accountOrigin: organization,
-        httpClient: MockClient((request) async {
-          if (!request.url.path.endsWith('/exchange')) return me();
-          return failExchange?.call() ?? exchanged();
+        httpClient: MockClient.streaming((request, _) async {
+          if (!request.url.path.endsWith('/exchange')) return respond(me());
+          return failExchange?.call() ?? respond(exchanged());
         }),
       ),
       browser: BrowserAuth(
@@ -201,28 +206,51 @@ void main() {
       reconnect: () async {},
     );
     await signIn.initialize();
-    for (final (fail, code) in <(http.Response? Function(), String)>[
-      (() => http.Response('', 302), 'account-unavailable-http302'),
-      (() => http.Response('', 503), 'account-unavailable-http503'),
-      (() => http.Response('x' * 65537, 503), 'account-unavailable-http503'),
-      (
-        () => throw http.ClientException('offline'),
-        'account-unavailable-network',
-      ),
-    ]) {
+    const network = 'Check your network or VPN connection, then try again.';
+    const outage = 'The sign-in service is unavailable. Try again later.';
+    // An error body the server holds open, which must not keep the
+    // connection after its status decides the failure.
+    var heldCancelled = false;
+    final held = StreamController<List<int>>(
+      onCancel: () => heldCancelled = true,
+    );
+    for (final (fail, code, advice)
+        in <(http.StreamedResponse Function(), String, String)>[
+          (
+            () => respond(http.Response('', 302)),
+            'account-unavailable-http302',
+            network,
+          ),
+          (
+            () => respond(http.Response('', 503)),
+            'account-unavailable-http503',
+            outage,
+          ),
+          (
+            () => http.StreamedResponse(held.stream, 503),
+            'account-unavailable-http503',
+            outage,
+          ),
+          (
+            () => respond(http.Response('', 429)),
+            'account-unavailable-http429',
+            'Try again.',
+          ),
+          (
+            () => throw http.ClientException('offline'),
+            'account-unavailable-network',
+            network,
+          ),
+        ]) {
       failExchange = fail;
       await signIn.signIn();
       await signIn.browser.receive(callback(login, 'org-code'));
       await pumpEventQueue();
       expect(signIn.status, OrganizationSessionStatus.signedOut);
       expect(signIn.failureCode, code);
-      expect(
-        signIn.failureAdvice,
-        code.endsWith('http503')
-            ? 'The sign-in service is unavailable. Try again later.'
-            : 'Check your network or VPN connection, then try again.',
-      );
+      expect(signIn.failureAdvice, advice);
     }
+    expect(heldCancelled, isTrue);
     failExchange = null;
     await signIn.signIn();
     expect(signIn.failureCode, isNull);
