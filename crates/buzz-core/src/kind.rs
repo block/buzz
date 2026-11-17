@@ -191,6 +191,7 @@ pub const RESULT_GATED_KINDS: &[u32] = &[
     KIND_AGENT_TURN_METRIC,
     KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_VIEWER_ACCESS_CHANGED,
 ];
 
 /// Kinds whose stored events have `#p`-bound read access — readable only by
@@ -218,6 +219,7 @@ pub const P_GATED_KINDS: &[u32] = &[
     // readable by any unauthenticated or non-owner party, including via `ids`
     // filters — see NIP-AM §Relay Behavior.
     KIND_AGENT_TURN_METRIC,
+    KIND_VIEWER_ACCESS_CHANGED,
 ];
 
 /// NIP-AP: Agent Persona (parameterized replaceable, owner-authored).
@@ -528,6 +530,14 @@ pub const KIND_TYPING_INDICATOR: u32 = 20002;
 /// Ephemeral: an owner's presence for its agents. Content is the status, each
 /// `p` tag names one agent the signer owns. Never the signer's own presence.
 pub const KIND_AGENT_PRESENCE: u32 = 20003;
+/// Ephemeral, relay-signed: "ask again what you may do in this channel"
+/// (NOSTR.md, Channel access). Empty content; only `["h", <channel id>]`.
+pub const KIND_CHANNEL_ACCESS_CHANGED: u32 = 20004;
+/// Ephemeral, relay-signed: "ask again what you may do in every channel",
+/// sent when the named person's community restriction changes
+/// (NOSTR.md, Channel access). Empty content; only `["p", <pubkey>]`, and
+/// delivered only to that pubkey.
+pub const KIND_VIEWER_ACCESS_CHANGED: u32 = 20005;
 /// Ephemeral: owner-scoped encrypted agent observer telemetry and control frame.
 pub const KIND_AGENT_OBSERVER_FRAME: u32 = 24200;
 /// Ephemeral: huddle emoji reaction burst. Channel-scoped to the ephemeral
@@ -768,6 +778,8 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_PRESENCE_UPDATE,
     KIND_TYPING_INDICATOR,
     KIND_AGENT_PRESENCE,
+    KIND_CHANNEL_ACCESS_CHANGED,
+    KIND_VIEWER_ACCESS_CHANGED,
     KIND_HUDDLE_REACTION,
     KIND_BLOSSOM_AUTH,
     KIND_OPERATOR_LISTENER_REGISTRATION,
@@ -934,6 +946,8 @@ pub const fn is_relay_only_kind(kind: u32) -> bool {
             | KIND_THREAD_WINDOW_BOUNDS
             | KIND_MEMBERSHIP_SNAPSHOT
             | KIND_MEMBERSHIP_PUBLIC
+            | KIND_CHANNEL_ACCESS_CHANGED
+            | KIND_VIEWER_ACCESS_CHANGED
     )
 }
 
@@ -1022,6 +1036,18 @@ mod tests {
     fn nip43_membership_snapshot_is_relay_only() {
         assert!(is_relay_only_kind(KIND_NIP43_MEMBERSHIP_LIST));
         assert!(!is_relay_only_kind(KIND_NIP43_LEAVE_REQUEST));
+    }
+
+    #[test]
+    fn channel_access_changed_is_relay_only_and_ephemeral() {
+        assert_eq!(KIND_CHANNEL_ACCESS_CHANGED, 20004);
+        assert!(is_relay_only_kind(KIND_CHANNEL_ACCESS_CHANGED));
+        assert!(is_ephemeral(KIND_CHANNEL_ACCESS_CHANGED));
+        assert_eq!(KIND_VIEWER_ACCESS_CHANGED, 20005);
+        assert!(is_relay_only_kind(KIND_VIEWER_ACCESS_CHANGED));
+        assert!(is_ephemeral(KIND_VIEWER_ACCESS_CHANGED));
+        assert!(RESULT_GATED_KINDS.contains(&KIND_VIEWER_ACCESS_CHANGED));
+        assert!(P_GATED_KINDS.contains(&KIND_VIEWER_ACCESS_CHANGED));
     }
 
     #[test]

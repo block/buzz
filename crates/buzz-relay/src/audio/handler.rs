@@ -2517,7 +2517,13 @@ impl crate::audio::room::RoomEndHandler for CommittedRoomEnd {
             })
             .await
         {
-            Ok(true) => {}
+            Ok(true) => {
+                crate::handlers::channel_access::announce_changed(
+                    &self.tenant,
+                    &state,
+                    room.channel_id,
+                );
+            }
             Ok(false) => return true,
             Err(error) => {
                 warn!(channel_id = %room.channel_id, %error, "auto-archive failed, huddle stays alive");
@@ -3989,6 +3995,7 @@ async fn commit_participant_join(
         MembershipAdmission::AutoAddRequired { .. }
     ) {
         state.invalidate_membership(tenant, channel_id, pubkey_bytes);
+        crate::handlers::channel_access::announce_changed(tenant, state, channel_id);
     }
 
     Ok(outcome)

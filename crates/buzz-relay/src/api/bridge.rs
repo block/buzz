@@ -3,6 +3,7 @@
 //! These endpoints provide HTTP access to the relay's Nostr protocol,
 //! authenticated via NIP-98 signed events.
 
+mod channel_access;
 mod effective_edit;
 mod membership_snapshot;
 mod read_state_snapshot;
@@ -1640,8 +1641,9 @@ pub async fn query_events(
 
     // This authority surface always needs payload-bound NIP-98, including dev.
     // Detect before admission, and before Filter can drop the extension key.
-    let compact_membership = serde_json::from_slice::<Vec<Value>>(&body)
-        .is_ok_and(|filters| membership_snapshot::requested(&filters));
+    let payload_bound = serde_json::from_slice::<Vec<Value>>(&body).is_ok_and(|filters| {
+        membership_snapshot::requested(&filters) || channel_access::requested(&filters)
+    });
 
     // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
     let proof = crate::nip_fi_shadow::EnforcedProof::new(&state, &headers, "bridge");
@@ -1657,8 +1659,8 @@ pub async fn query_events(
                 "POST",
                 &url,
                 Some(&body),
-                state.config.require_auth_token || nip_fi_active || compact_membership,
-                nip_fi_enforce || compact_membership,
+                state.config.require_auth_token || nip_fi_active || payload_bound,
+                nip_fi_enforce || payload_bound,
             ))
             .map(|auth| auth.proof((auth.event_id_bytes, auth.signed_created_at)))
             .map_err(|e| e.into_response())
@@ -1747,6 +1749,9 @@ async fn query_member_events(
             &raw_filters,
         )
         .await;
+    }
+    if channel_access::requested(&raw_filters) {
+        return channel_access::query(state, tenant, &pubkey, &raw_filters).await;
     }
     let routed = || caller.read_artifact(&raw_filters);
     if let Some(result) =

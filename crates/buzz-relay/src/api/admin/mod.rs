@@ -1305,7 +1305,7 @@ async fn unban_member(
     if !lifted {
         return Err(ApiError::conflict("no active ban for this member"));
     }
-    state.invalidate_restrictions(&tenant);
+    state.restrictions_changed(&tenant, Some(&target_bytes));
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -1348,7 +1348,7 @@ async fn untimeout_member(
     if !lifted {
         return Err(ApiError::conflict("no active timeout for this member"));
     }
-    state.invalidate_restrictions(&tenant);
+    state.restrictions_changed(&tenant, Some(&target_bytes));
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -2284,9 +2284,18 @@ mod postgres_tests {
     pub(super) async fn nip98_state_with_real_pool(
         pool: sqlx::PgPool,
     ) -> Arc<crate::state::AppState> {
+        nip98_state_with_real_pool_and_redis(pool, "redis://127.0.0.1:1").await
+    }
+
+    /// [`nip98_state_with_real_pool`] on the Redis at `redis_url`, for
+    /// tests that watch what a route publishes.
+    async fn nip98_state_with_real_pool_and_redis(
+        pool: sqlx::PgPool,
+        redis_url: &str,
+    ) -> Arc<crate::state::AppState> {
         let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         config.require_relay_membership = false;
-        config.redis_url = "redis://127.0.0.1:1".to_string();
+        config.redis_url = redis_url.to_string();
         config.relay_operator_pubkeys = vec![test_operator_keys().public_key().to_hex()];
         config.relay_operator_api_origin = Some("https://admin.example".to_string());
         config.admin = Some(crate::config::AdminConfig {
@@ -12676,6 +12685,84 @@ mod postgres_tests {
         assert!(
             !timed_out_socket.is_cancelled(),
             "ban is scoped to its target"
+        );
+    }
+
+    /// A timeout or ban set from the dashboard is pushed to the person and
+    /// their agent, so their clients ask again whether they may post, and to
+    /// no one else. The route reaches the push only through the one step
+    /// every restriction change takes.
+    /// Mutation: drop the push from `AppState::restrictions_changed` → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn direct_timeout_and_ban_are_pushed_to_that_person_only() {
+        use crate::handlers::channel_access_postgres_tests::{subscribe_viewer, viewer_pushes};
+        let (pool, community, host, _) = direct_fixture().await;
+        let redis_url = std::env::var("REDIS_URL").expect("REDIS_URL names a live Redis");
+        let state = nip98_state_with_real_pool_and_redis(pool, &redis_url).await;
+        tokio::spawn(state.pubsub.clone().run_subscriber());
+        crate::handlers::multinode_fanout::spawn(state.clone(), state.pubsub.subscribe_local());
+        let tenant = buzz_core::TenantContext::resolved(community, &host);
+        let (member, agent, bystander) = (
+            nostr::Keys::generate(),
+            nostr::Keys::generate(),
+            nostr::Keys::generate(),
+        );
+        for keys in [&member, &agent] {
+            state
+                .db
+                .ensure_user(community, keys.public_key().as_bytes())
+                .await
+                .expect("user");
+        }
+        state
+            .db
+            .set_agent_owner(
+                community,
+                agent.public_key().as_bytes(),
+                member.public_key().as_bytes(),
+            )
+            .await
+            .expect("agent owner");
+        let mut member_rx = subscribe_viewer(&state, &tenant, &member, true);
+        let mut agent_rx = subscribe_viewer(&state, &tenant, &agent, true);
+        let mut bystander_rx = subscribe_viewer(&state, &tenant, &bystander, false);
+        state
+            .pubsub
+            .retain_topic(&tenant, buzz_pubsub::EventTopic::Global)
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let target = member.public_key().to_hex();
+        let wait = std::time::Duration::from_secs(2);
+
+        for (path, body) in [
+            (
+                format!("/members/{target}/timeout?communityHost={host}"),
+                serde_json::json!({ "requestId": Uuid::new_v4(), "expirationSecs": 600 }),
+            ),
+            (
+                format!("/members/{target}/ban?communityHost={host}"),
+                serde_json::json!({ "requestId": Uuid::new_v4() }),
+            ),
+        ] {
+            let (status, answer) = direct_post(&state, &path, body).await;
+            assert_eq!(status, StatusCode::OK, "{path}: {answer}");
+            assert_eq!(
+                viewer_pushes(&state, &mut member_rx, wait).await,
+                vec![target.clone()],
+                "{path}"
+            );
+            assert_eq!(
+                viewer_pushes(&state, &mut agent_rx, wait).await,
+                vec![agent.public_key().to_hex()],
+                "{path}"
+            );
+        }
+        assert!(
+            viewer_pushes(&state, &mut bystander_rx, wait)
+                .await
+                .is_empty(),
+            "a bystander is told nothing"
         );
     }
 

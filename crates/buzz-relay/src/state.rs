@@ -2106,17 +2106,25 @@ impl AppState {
             .await
     }
 
-    /// Drop the community's cached restriction rows on this pod and, best
-    /// effort, on every other pod. Call after every ban, unban, timeout or
-    /// untimeout write commits, and after an agent's owner is recorded.
+    /// The one step after a restriction of `target` changes: every ban,
+    /// unban, timeout or untimeout write, by any route, once it commits, and
+    /// an agent's owner being recorded. Drops the community's cached
+    /// restriction rows on this pod and, best effort, on every other pod,
+    /// then tells `target` and the agents it owns to ask again what they may
+    /// do ([`crate::handlers::channel_access::announce_restriction_changed`]).
+    /// `target` is `None` only for a recovered legacy report action that
+    /// recorded no target.
     ///
     /// The drop is community-wide because an agent's row also carries its
     /// owner's restriction, and the cache does not know which agents a
     /// target owns. Restriction writes are rare next to the reads this cache
     /// absorbs, so the refill is cheap.
-    pub fn invalidate_restrictions(&self, tenant: &TenantContext) {
+    pub fn restrictions_changed(&self, tenant: &TenantContext, target: Option<&[u8]>) {
         self.invalidate_restrictions_local(tenant.community());
         self.spawn_cache_invalidation(tenant, CacheInvalidation::Restrictions);
+        if let Some(target) = target {
+            crate::handlers::channel_access::announce_restriction_changed(tenant, self, target);
+        }
     }
 
     /// Local-only restriction drop. See [`Self::invalidate_membership_local`].
@@ -2391,13 +2399,13 @@ impl AppState {
     ///
     /// The agent's cached restriction row predates the link and lacks the
     /// owner's restriction, so the community's rows are dropped too (see
-    /// [`Self::invalidate_restrictions`]).
+    /// [`Self::restrictions_changed`]).
     pub fn disconnect_unowned_agent_clusterwide(
         &self,
         tenant: &TenantContext,
         agent: &[u8],
     ) -> usize {
-        self.invalidate_restrictions(tenant);
+        self.restrictions_changed(tenant, Some(agent));
         self.disconnect_clusterwide(
             tenant,
             agent,
@@ -3616,6 +3624,21 @@ pub(crate) mod tests {
         let pool = options
             .connect_lazy(&config.database_url)
             .expect("lazy pg pool");
+        build_test_state(config, pool).await
+    }
+
+    /// [`test_state_with_database_url_and_pool_options`] with a live Redis
+    /// at `redis_url`, for tests that publish and fan out through it.
+    pub(crate) async fn test_state_with_database_and_redis_url(
+        database_url: &str,
+        redis_url: &str,
+    ) -> Arc<AppState> {
+        let mut config = crate::config::Config::for_test();
+        config.require_relay_membership = false;
+        config.redis_url = redis_url.to_owned();
+        config.database_url = database_url.to_owned();
+        config.read_database_url = None;
+        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         build_test_state(config, pool).await
     }
 
@@ -5430,7 +5453,7 @@ pub(crate) mod tests {
         let cached = |key| state.restriction_cache.entry(&key).is_some();
 
         for invalidate in [
-            &(|| state.invalidate_restrictions(&tenant)) as &dyn Fn(),
+            &(|| state.restrictions_changed(&tenant, Some(&owner))) as &dyn Fn(),
             &|| state.apply_cache_invalidation(community, CacheInvalidation::Restrictions),
         ] {
             seed();

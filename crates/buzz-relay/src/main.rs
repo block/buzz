@@ -1085,6 +1085,13 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                     // archived channel immediately (CLOSED is in the client's
                     // drop-set → no reconnect storm). Offline clients are caught
                     // by the archived=true skip in discover_channels on reconnect.
+                    // Its subscribers, and those of conversations under it,
+                    // which close to posts with it, ask again.
+                    buzz_relay::handlers::channel_access::announce_changed(
+                        &tenant,
+                        &reaper_state,
+                        channel_id,
+                    );
                     buzz_relay::handlers::side_effects::evict_all_channel_subscriptions(
                         &tenant,
                         &reaper_state,
