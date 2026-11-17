@@ -79,6 +79,32 @@ class RunnerTests: XCTestCase {
   }
 
   @MainActor
+  func testLabelledButtonKeepsContentStylingAcrossAppearanceUpdates() throws {
+    guard #available(iOS 26.0, *) else { throw XCTSkip("Requires iOS 26") }
+    let messenger = NavigationTestMessenger()
+    let appearance: [String: Any] = ["brightness": "light",
+      "foregroundColor": 0xFF000000, "backgroundColor": 0, "enabled": true]
+    let content: [String: Any] = ["icon": "more", "label": "Unread", "iconSize": 24]
+    let platform = NavigationGlassButtonPlatformView(
+      frame: CGRect(x: 0, y: 0, width: 100, height: 48), viewIdentifier: 999994,
+      arguments: appearance.merging(content) { _, next in next }
+        .merging(["controlSize": 40, "controlWidth": 100]) { _, next in next },
+      messenger: messenger)
+    let button = try XCTUnwrap(
+      descendants(of: platform.view()).compactMap { $0 as? UIButton }.first)
+    messenger.invoke("setAppearance", arguments: appearance) { _ in }
+    messenger.invoke("setContent", arguments: content) { _ in }
+    let insets = try XCTUnwrap(button.configuration?.contentInsets)
+    XCTAssertNotNil(button.configuration?.titleTextAttributesTransformer)
+    // Selecting a filter chip is an appearance-only update.
+    messenger.invoke("setAppearance",
+      arguments: appearance.merging(["selected": true]) { _, next in next }) { _ in }
+    XCTAssertNotNil(button.configuration?.titleTextAttributesTransformer)
+    XCTAssertEqual(button.configuration?.contentInsets, insets)
+    XCTAssertEqual(button.configuration?.title, "Unread")
+  }
+
+  @MainActor
   func testMenuActionsSurviveEveryDismissalOrdering() async {
     for ordering in 0..<3 {
       let button = NavigationGlassButton(frame: .zero)
