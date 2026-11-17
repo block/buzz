@@ -71,9 +71,9 @@ not know (`VersionMissing`) and does not start. With it off, the stop build
 serves, but its startup check finds the floor trigger gone and keeps the
 replica fence closed, so cursor reads go to the writer.
 
-## Plain SQL functions (`0093`)
+## Plain SQL functions (`0094`)
 
-`0093_drop_plain_sql_functions.sql` drops two functions whose work the relay
+`0094_drop_plain_sql_functions.sql` drops two functions whose work the relay
 now does in application code:
 
 | Function | Application replacement |
@@ -83,12 +83,12 @@ now does in application code:
 
 **A relay build at or after commit `279a31da` (the merge of
 [#9397](https://github.com/block/buzz/pull/9397), which follows #9396) and
-before `0093` is a required stop.** No tagged relay release contains it:
+before `0094` is a required stop.** No tagged relay release contains it:
 `relay-v0.3.0` does not, so a deployment on a tagged release must move to a
 stop build first. Follow the same procedure as above. An older relay that
-still serves after `0093` fails every write and deletion that takes the community deletion lock, with
+still serves after `0094` fails every write and deletion that takes the community deletion lock, with
 `42883 community_deletion_lock_key(uuid) does not exist`, and its profile name
 search fails with `42883 profile_name_fields(text) does not exist`.
 
-`0093` takes no table locks. It needs no cleanup, and a rollback to a stop
+`0094` takes no table locks. It needs no cleanup, and a rollback to a stop
 build needs auto-migration off, as above.
