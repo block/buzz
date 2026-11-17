@@ -68,3 +68,6 @@ identity.key
 
 # Helm dependency tarballs — regenerable from Chart.lock via `helm dependency build`
 deploy/charts/*/charts/*.tgz
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+graft/
