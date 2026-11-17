@@ -102,3 +102,41 @@ search fails with `42883 profile_name_fields(text) does not exist`.
 
 `0094` takes no table locks. It needs no cleanup, and a rollback to a stop
 build needs auto-migration off, as above.
+
+## Single-table guards (`0096`)
+
+`0096_drop_single_table_guards.sql` drops five single-table guard triggers and
+their functions. The application writers and the catalog expand from
+[#8320](https://github.com/block/buzz/pull/8320) now own each rule:
+
+| Table | Trigger / function | Application rule |
+| --- | --- | --- |
+| `channels` | `trg_channels_community_id_immutable` / `channels_community_id_immutable()` | `community_id` is bound at insert and never updated |
+| `communities` | `communities_deletion_tombstone` / `enforce_community_tombstone()` | lifecycle changes go through one transition function |
+| `community_deletion_requests` | `community_deletion_request_retargeting_guard` / `prevent_community_deletion_request_retargeting()` | inventory freezes are one-way |
+| `community_deletion_approvals` | `community_deletion_approval_removal_guard` / `prevent_community_deletion_approval_removal()` | approvals are insert-only |
+| `community_deletion_manifest_keys` | `community_deletion_manifest_keys_guard` / `protect_community_deletion_manifest_keys()` | chunk writes stop at freeze and `deleted_at` is one-way |
+
+**A relay build at or after commit `ec778bff` (the merge of
+[#8320](https://github.com/block/buzz/pull/8320)) and before `0096` is a
+required stop.** No tagged relay release contains it, so a deployment on a
+tagged release must move to a stop build first. For a deployment that has not
+yet passed `0094`, this supersedes the `0094` stop: `ec778bff` is an ancestor
+of the `0094` merge, so one build at or after `ec778bff` that is also a valid
+`0094` stop satisfies both, while a build between `279a31da` and `ec778bff`
+satisfies only `0094`'s. Follow the same procedure as above.
+
+An older relay requires the tombstone trigger both at startup and on every
+readiness check. Once `0096` has run, it fails both with
+`community tombstone trigger is missing`: serving pods go not ready and a
+restarted pod does not start, with auto-migration on or off. Its writers also
+do not enforce the five rules above.
+
+`0096` takes `ACCESS EXCLUSIVE` on those five tables in one transaction, under
+a 5s `lock_timeout` that bounds each lock acquisition. Reads and writes on
+`channels` can queue while it acquires the remaining locks. A lock timeout
+rolls the whole migration back, and a retry is clean.
+
+Roll back only to a build at or after `ec778bff`, with auto-migration off, as
+in [Rollback](#rollback). A build below `ec778bff` does not start after
+`0096`.
