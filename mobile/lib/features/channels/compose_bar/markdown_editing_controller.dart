@@ -15,7 +15,12 @@ class _MarkdownRule {
 }
 
 class _MarkdownEditingController extends TextEditingController {
-  final Set<String> _agentMentionNames = <String>{};
+  /// Selected mention labels drawn as chips, each flagged as an agent.
+  Map<String, bool> _mentionChipLabels = const {};
+
+  /// Set while Undo or Redo restores an earlier value, which must stay exact
+  /// rather than be widened to a chip or given a space after a link.
+  bool _applyingHistory = false;
   TextSpan? _cachedTextSpan;
   String? _cachedText;
   TextRange? _cachedComposingRange;
@@ -63,23 +68,8 @@ class _MarkdownEditingController extends TextEditingController {
   /// then shows as raw text.
   @override
   set value(TextEditingValue newValue) {
-    final previousText = super.value.text;
     super.value = _snapSelectionToChips(newValue);
-    // Like Flutter's undo history, keep only values that changed the text.
-    if (super.value.text == previousText && _recentValues.isNotEmpty) return;
-    _recentValues.add(_historyKey(super.value));
   }
-
-  /// Text edits this controller has made. Undo and redo restore one of these
-  /// exactly, which tells them apart from a key press or a paste of a link.
-  /// Like Flutter's undo stack this is unbounded, so it keeps a small key per
-  /// edit rather than each edit's full text.
-  final _recentValues = <(int, int, int)>{};
-
-  /// Android's undo history drops the composing range, so the key leaves it
-  /// out.
-  static (int, int, int) _historyKey(TextEditingValue value) =>
-      (value.text.length, value.text.hashCode, value.selection.hashCode);
 
   TextEditingValue _snapSelectionToChips(TextEditingValue next) {
     _refreshChipRanges(next.text);
@@ -231,18 +221,18 @@ class _MarkdownEditingController extends TextEditingController {
     _MarkdownRule(r'_([^_\n]*?)_', _MarkdownStyle.italic),
   ];
 
-  /// Updates the known agent labels which should render as agent mention
-  /// chips. The editor still stores the literal `@Name` text, matching the
-  /// markdown sent to the relay.
-  void setAgentMentionNames(Iterable<String> names) {
+  /// Updates the selected mention labels drawn as chips (label to whether it
+  /// is an agent). The editor still stores the literal `@Label` text,
+  /// matching the markdown sent to the relay; a chip is drawn wherever
+  /// [mentionOccurrences] finds the label, which is also where the send
+  /// resolves its recipient.
+  void setMentionChipLabels(Map<String, bool> labels) {
     final next = {
-      for (final name in names)
-        if (name.trim().isNotEmpty) name.trim().toLowerCase(),
+      for (final entry in labels.entries)
+        if (entry.key.trim().isNotEmpty) entry.key.trim(): entry.value,
     };
-    if (setEquals(_agentMentionNames, next)) return;
-    _agentMentionNames
-      ..clear()
-      ..addAll(next);
+    if (mapEquals(_mentionChipLabels, next)) return;
+    _mentionChipLabels = Map.unmodifiable(next);
     _cachedTextSpan = null;
     notifyListeners();
   }
@@ -310,7 +300,7 @@ class _MarkdownEditingController extends TextEditingController {
     TextEditingValue newValue,
   ) {
     // Undo and Redo restore an earlier value exactly, and must stay exact.
-    if (_recentValues.contains(_historyKey(newValue))) return newValue;
+    if (_applyingHistory) return newValue;
     return _spaceAfterPastedLink(
       oldValue,
       expandChipDeletion(oldValue, newValue),
@@ -596,7 +586,7 @@ class _MarkdownEditingController extends TextEditingController {
             contentStyle,
             matchOffset + contentStart,
             composingRange,
-            renderAgentMentions: false,
+            renderMentions: false,
           ),
         );
       }
@@ -619,14 +609,14 @@ class _MarkdownEditingController extends TextEditingController {
     TextStyle style,
     int sourceOffset,
     TextRange composingRange, {
-    bool renderAgentMentions = true,
+    bool renderMentions = true,
   }) {
     List<InlineSpan> buildTextSegment(
       String text,
       TextStyle segmentStyle,
       int segmentOffset,
-    ) => renderAgentMentions
-        ? _buildAgentMentionSpans(
+    ) => renderMentions
+        ? _buildMentionSpans(
             context,
             text,
             segmentStyle,
@@ -675,7 +665,11 @@ class _MarkdownEditingController extends TextEditingController {
     ];
   }
 
-  List<InlineSpan> _buildAgentMentionSpans(
+  /// Draws each selected mention in [source] as one chip over its hidden
+  /// `@Label` source, so the span keeps one character per source character
+  /// for native caret movement and deletion. Qualified labels (a name
+  /// followed by its pubkey in parentheses) stay coloured text.
+  List<InlineSpan> _buildMentionSpans(
     BuildContext context,
     String source,
     TextStyle style, {
@@ -686,31 +680,19 @@ class _MarkdownEditingController extends TextEditingController {
         ? _buildComposerTokenSpans(context, source, style, sourceOffset)
         : null;
     if (tokenSpans != null) return tokenSpans;
-    if (_agentMentionNames.isEmpty) {
+    if (_mentionChipLabels.isEmpty) {
       return [TextSpan(text: source, style: style)];
     }
 
-    final escapedNames = _agentMentionNames.toList()
-      ..sort((a, b) => b.length.compareTo(a.length));
-    final expression = RegExp(
-      r'(^|\s)@(' +
-          escapedNames.map(RegExp.escape).join('|') +
-          r')(?=\s|[,.!?:;)\]}*_]|$)',
-      caseSensitive: false,
-      multiLine: true,
-    );
     final spans = <InlineSpan>[];
     var offset = 0;
-    for (final match in expression.allMatches(source)) {
-      final prefix = match.group(1)!;
-      if (match.start > offset) {
+    for (final mention in mentionOccurrences(source, _mentionChipLabels.keys)) {
+      if (mention.start > offset) {
         spans.add(
-          TextSpan(text: source.substring(offset, match.start), style: style),
+          TextSpan(text: source.substring(offset, mention.start), style: style),
         );
       }
-      if (prefix.isNotEmpty) spans.add(TextSpan(text: prefix, style: style));
-
-      final label = match.group(2)!;
+      final label = source.substring(mention.start + 1, mention.end);
       if (RegExp(r'\([0-9a-f]{64}\)').hasMatch(label)) {
         spans.add(
           TextSpan(
@@ -718,20 +700,24 @@ class _MarkdownEditingController extends TextEditingController {
             style: style.copyWith(color: context.colors.primary),
           ),
         );
-        offset = match.end;
+        offset = mention.end;
         continue;
       }
       spans.add(
         WidgetSpan(
           alignment: PlaceholderAlignment.baseline,
           baseline: TextBaseline.alphabetic,
-          child: _ComposerAgentMentionChip(label: label, textStyle: style),
+          child: _ComposerMentionChip(
+            label: label,
+            isAgent: _mentionChipLabels[mention.label] ?? false,
+            textStyle: style,
+          ),
         ),
       );
       _pendingChipRanges.add(
         TextRange(
-          start: sourceOffset + match.start + prefix.length,
-          end: sourceOffset + match.end,
+          start: sourceOffset + mention.start,
+          end: sourceOffset + mention.end,
         ),
       );
       // The visual chip replaces the `@` placeholder. Keep the label as
@@ -744,7 +730,7 @@ class _MarkdownEditingController extends TextEditingController {
           style: _hiddenMentionTextStyle(style),
         ),
       );
-      offset = match.end;
+      offset = mention.end;
     }
     if (offset < source.length) {
       spans.add(TextSpan(text: source.substring(offset), style: style));
@@ -766,7 +752,7 @@ class _MarkdownEditingController extends TextEditingController {
     for (final match in matches) {
       if (match.start > offset) {
         spans.addAll(
-          _buildAgentMentionSpans(
+          _buildMentionSpans(
             context,
             source.substring(offset, match.start),
             style,
@@ -829,7 +815,7 @@ class _MarkdownEditingController extends TextEditingController {
     }
     if (offset < source.length) {
       spans.addAll(
-        _buildAgentMentionSpans(
+        _buildMentionSpans(
           context,
           source.substring(offset),
           style,
@@ -950,122 +936,4 @@ class _MarkdownEditingController extends TextEditingController {
       decoration: TextDecoration.none,
     );
   }
-}
-
-class _ComposerBuzzLinkChip extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final String semanticLabel;
-  final TextStyle textStyle;
-
-  const _ComposerBuzzLinkChip({
-    required this.icon,
-    required this.label,
-    required this.semanticLabel,
-    required this.textStyle,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final style = textStyle.copyWith(
-      color: context.colors.primary,
-      fontWeight: FontWeight.w600,
-      height: 1,
-    );
-    final fontSize = style.fontSize ?? 16;
-    return Semantics(
-      label: semanticLabel,
-      excludeSemantics: true,
-      child: Container(
-        key: ValueKey('composer-buzz-link-chip:$label'),
-        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-        decoration: BoxDecoration(
-          color: context.colors.primary.withValues(alpha: 0.16),
-          borderRadius: BorderRadius.circular(Radii.sm),
-          border: Border.all(
-            color: context.colors.primary.withValues(alpha: 0.12),
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: fontSize * 0.95, color: context.colors.primary),
-            const SizedBox(width: Grid.quarter + 1),
-            Text(label, style: style),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _ComposerAgentMentionChip extends StatelessWidget {
-  final String label;
-  final TextStyle textStyle;
-
-  const _ComposerAgentMentionChip({
-    required this.label,
-    required this.textStyle,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final style = textStyle.copyWith(
-      color: context.colors.primary,
-      fontWeight: FontWeight.w500,
-      height: 1,
-    );
-    final fontSize = style.fontSize ?? 16;
-
-    return Semantics(
-      label: 'Agent mention: $label',
-      excludeSemantics: true,
-      child: Container(
-        key: const ValueKey('composer-agent-mention-chip'),
-        padding: const EdgeInsets.fromLTRB(
-          Grid.half,
-          Grid.quarter + 1,
-          Grid.half,
-          Grid.quarter,
-        ),
-        decoration: BoxDecoration(
-          // The composer surface is already tinted, so the body chip's
-          // low-opacity fill disappears here. Keep the same chip geometry
-          // while giving this editable token enough contrast to read as one.
-          color: context.colors.primary.withValues(alpha: 0.16),
-          borderRadius: BorderRadius.circular(Radii.sm),
-          border: Border.all(
-            color: context.colors.primary.withValues(alpha: 0.12),
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            Icon(
-              BuzzIcons.bot,
-              size: fontSize * 0.95,
-              color: context.colors.primary,
-            ),
-            const SizedBox(width: Grid.quarter),
-            Text(label, style: style),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// Routes user edits through [_MarkdownEditingController.formatUserEdit] so
-/// composer chips follow their editing rules.
-class _ComposerChipEditingFormatter extends TextInputFormatter {
-  final _MarkdownEditingController controller;
-
-  _ComposerChipEditingFormatter(this.controller);
-
-  @override
-  TextEditingValue formatEditUpdate(
-    TextEditingValue oldValue,
-    TextEditingValue newValue,
-  ) => controller.formatUserEdit(oldValue, newValue);
 }

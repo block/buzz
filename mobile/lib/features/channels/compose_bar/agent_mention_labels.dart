@@ -1,11 +1,20 @@
 part of '../compose_bar.dart';
 
-Set<String> _agentMentionLabels({
+/// Selected labels the editor draws as chips, each flagged as an agent. A
+/// binding restored from a saved draft carries no agent bit, so it draws as
+/// a person chip until the send revalidates it. Chips and recipients share
+/// [mentionOccurrences], so a chip on screen is a recipient at send and text
+/// that is no longer a chip notifies nobody.
+Map<String, bool> _mentionChipLabels({
   required Map<String, MentionCandidate> bindings,
 }) => {
   for (final entry in bindings.entries)
-    if (entry.value.isAgent) entry.key,
+    if (entry.key.isNotEmpty) entry.key: entry.value.isAgent,
 };
+
+String _mentionChipLabelsKey(Map<String, bool> labels) =>
+    (labels.entries.map((e) => '${e.key}\u0001${e.value}').toList()..sort())
+        .join('\u0000');
 
 List<MentionCandidate> _resolveComposerMentions(
   String text,

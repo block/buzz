@@ -57,6 +57,15 @@ void main() {
     );
     expect(mentionOccurrences('@A @B', ['A @B', 'B']).single.label, 'A @B');
     expect(mentionOccurrences('mail@Scout', ['Scout']), isEmpty);
+    // A mention opens where a query does, so a pick after a bracket binds.
+    for (final bracket in ['(', '[', '{']) {
+      expect(
+        mentionOccurrences('see $bracket@Scout', ['Scout']).single.start,
+        5,
+        reason: 'after $bracket',
+      );
+    }
+    expect(mentionOccurrences('see {@Scout}', ['Scout']).single.end, 11);
     expect(mentionOccurrences('@Scout ($second)', ['Scout']), isEmpty);
     expect(
       mentionOccurrences('@Scout ($second) 2', ['Scout ($second)']),

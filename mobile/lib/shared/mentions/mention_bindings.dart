@@ -85,6 +85,9 @@ String selectedMentionLabel(
 
 /// Longest literal ranges win, including labels containing another @ sign.
 /// Recognition precedes eligibility: ambiguous labels still block shorter ones.
+/// A label opens where a query does (portable mention rules, section 2): at
+/// the start, after whitespace, `(`, `[` or `{`, or after a Markdown
+/// delimiter, so a mention picked after a bracket keeps its recipient.
 List<({int start, int end, String label})> mentionOccurrences(
   String text,
   Iterable<String> labels,
@@ -99,7 +102,7 @@ List<({int start, int end, String label})> mentionOccurrences(
         ? r'(?! (?:[2-9]|[1-9][0-9]+)(?=[\s,;.!?:)\]}*_]|$))'
         : '';
     final pattern = RegExp(
-      '(?:^|\\s|[*_]{1,3}|\\|\\|)(@${RegExp.escape(label)})(?! \\([0-9a-f]{64}\\))$suffix(?=\\|\\||[\\s,;.!?:)\\]}*_]|\$)',
+      '(?:^|[\\s(\\[{]|[*_]{1,3}|\\|\\|)(@${RegExp.escape(label)})(?! \\([0-9a-f]{64}\\))$suffix(?=\\|\\||[\\s,;.!?:)\\]}*_]|\$)',
       caseSensitive: false,
     );
     for (final match in pattern.allMatches(text)) {
