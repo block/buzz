@@ -9,6 +9,7 @@ use sqlx::PgConnection;
 use std::io::Write;
 use uuid::Uuid;
 
+mod community_memberships;
 mod memberships;
 mod operations;
 mod ownership;
@@ -128,6 +129,14 @@ impl UserDeletionStore {
             for op in operations {
                 if op.table == "channel_members" && op.action == "delete" {
                     self.delete_memberships(options, op, writer, stage, &mut summary)
+                        .await?;
+                    if !summary.supported_scope_exhausted {
+                        break;
+                    }
+                    continue;
+                }
+                if op.table == "relay_members" && op.action == "delete" {
+                    self.delete_community_membership(options, op, writer, stage, &mut summary)
                         .await?;
                     if !summary.supported_scope_exhausted {
                         break;
@@ -341,7 +350,7 @@ async fn mutate(
             .await?;
     }
     let verb = match op.update {
-        Some(update) => format!("UPDATE {} SET {update}", op.table),
+        Some(update) => update.to_owned(),
         None => format!("DELETE FROM {}", op.table),
     };
     let sql = format!(

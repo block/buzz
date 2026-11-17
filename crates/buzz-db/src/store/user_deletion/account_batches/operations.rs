@@ -6,6 +6,7 @@ pub(super) struct Operation {
     pub selector: &'static str,
     pub key: &'static str,
     pub identity: &'static str,
+    // Complete literal UPDATE prefixes keep the table and SET list auditable.
     pub update: Option<&'static str>,
 }
 
@@ -109,15 +110,15 @@ pub(super) const OPERATIONS: &[Operation] = &[
         "actor=decode($3->>'actor','hex') AND channel_id=($3->>'channel_id')::uuid AND root_id=decode($3->>'root_id','hex')"),
     delete("personal_read_accounts", "actor=decode($2,'hex')",
         "jsonb_build_object('actor',encode(actor,'hex'))", "actor=decode($3->>'actor','hex')"),
-    clear("api_tokens", "clear_revoked_by", "revoked_by=decode($2,'hex') AND owner_pubkey<>decode($2,'hex')", ID_KEY, ID_MATCH, "revoked_by=NULL"),
+    clear("api_tokens", "clear_revoked_by", "revoked_by=decode($2,'hex') AND owner_pubkey<>decode($2,'hex')", ID_KEY, ID_MATCH, "UPDATE api_tokens SET revoked_by=NULL"),
     clear("channel_members", "clear_invited_by", "invited_by=decode($2,'hex') AND pubkey<>decode($2,'hex')", MEMBER_KEY, MEMBER_MATCH,
-        "invited_by=NULL,sync_modified_at=clock_timestamp()"),
+        "UPDATE channel_members SET invited_by=NULL,sync_modified_at=clock_timestamp()"),
     clear("channel_members", "clear_removed_by", "removed_by=decode($2,'hex') AND pubkey<>decode($2,'hex')", MEMBER_KEY, MEMBER_MATCH,
-        "removed_by=NULL,sync_modified_at=clock_timestamp()"),
+        "UPDATE channel_members SET removed_by=NULL,sync_modified_at=clock_timestamp()"),
     clear("relay_members", "clear_added_by", "added_by=$2 AND pubkey<>$2", TEXT_KEY, TEXT_MATCH,
-        "added_by=NULL,updated_at=clock_timestamp()"),
-    clear("pubkey_allowlist", "clear_added_by", "added_by=decode($2,'hex') AND pubkey<>decode($2,'hex')", BYTE_KEY, BYTE_MATCH, "added_by=NULL"),
-    clear("archived_identities", "clear_replaced_by", "replaced_by=$2", TEXT_KEY, TEXT_MATCH, "replaced_by=NULL"),
+        "UPDATE relay_members SET added_by=NULL,updated_at=clock_timestamp()"),
+    clear("pubkey_allowlist", "clear_added_by", "added_by=decode($2,'hex') AND pubkey<>decode($2,'hex')", BYTE_KEY, BYTE_MATCH, "UPDATE pubkey_allowlist SET added_by=NULL"),
+    clear("archived_identities", "clear_replaced_by", "replaced_by=$2", TEXT_KEY, TEXT_MATCH, "UPDATE archived_identities SET replaced_by=NULL"),
     // Copies before their source, so interruption never loses attribution.
     delete("event_mentions", personal_event_copy!(),
         "jsonb_build_object('pubkey_hex',pubkey_hex,'event_id',encode(event_id,'hex'))",

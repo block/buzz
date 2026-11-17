@@ -230,15 +230,16 @@ async fn personal_events_revisions_copies_and_community_feedback_are_removed() {
             })
             .cloned()
             .collect();
-        // Account membership cleanup adds three signed discovery heads and
-        // their mention entries; the journey below tests those independently.
+        // Membership cleanup adds signed channel and community rosters and
+        // their mention entries; dedicated journeys test those independently.
         let generated: BTreeSet<_> = after["events"]
             .as_array()
             .unwrap()
             .iter()
             .filter(|r| {
-                !r["channel_id"].is_null()
-                    && [39000, 39001, 39002].contains(&r["kind"].as_i64().unwrap())
+                (!r["channel_id"].is_null()
+                    && [39000, 39001, 39002].contains(&r["kind"].as_i64().unwrap()))
+                    || r["kind"] == 13534
             })
             .map(|r| r["id"].clone().to_string())
             .collect();

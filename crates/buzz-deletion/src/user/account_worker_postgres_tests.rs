@@ -91,6 +91,14 @@ impl Fixture {
         assert_eq!(row.status, "pending");
         assert_eq!(row.target_community_id, Some(community));
         store.release(&lease).await.unwrap();
+        // This worker journey covers a former member's credentials. The real
+        // CLI journey supplies a process-local signing key for roster cleanup.
+        sqlx::query("DELETE FROM relay_members WHERE community_id=$1 AND pubkey=$2")
+            .bind(community)
+            .bind(TARGET)
+            .execute(&pool)
+            .await
+            .unwrap();
         Self {
             pool,
             store,
@@ -254,7 +262,7 @@ async fn real_account_cap_saves_failure_then_retry_saves_success() {
         .unwrap(),
         0
     );
-    f.assert_account_saved(4).await;
+    f.assert_account_saved(3).await;
     let resumed = f.inspect_released().await;
     assert_eq!(
         resumed.execution.lease_generation,
@@ -338,7 +346,7 @@ async fn real_account_cancellation_releases_lease_and_resumes_committed_batches(
         .unwrap(),
         0
     );
-    f.assert_account_saved(2).await;
+    f.assert_account_saved(1).await;
     assert_eq!(
         f.inspect_released().await.execution.lease_generation,
         paused.execution.lease_generation + 1

@@ -51,9 +51,17 @@ pub(super) async fn run(
     mode: ExecutionMode,
     stage: Option<(&EntityLease, Uuid)>,
 ) -> Result<AccountBatchSummary> {
-    Ok(store(db, mode)?
-        .run_account_batches(options, mode, &mut std::io::stdout(), stage)
-        .await?)
+    let store = store(db, mode)?;
+    // Workflow stdout is a single inspection document; direct commands emit NDJSON.
+    if stage.is_some() {
+        Ok(store
+            .run_account_batches(options, mode, &mut std::io::stderr(), stage)
+            .await?)
+    } else {
+        Ok(store
+            .run_account_batches(options, mode, &mut std::io::stdout(), stage)
+            .await?)
+    }
 }
 
 /// Run the explicitly selected scope; global work is never inferred from a

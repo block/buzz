@@ -14,6 +14,9 @@ mod expansion_postgres_tests;
 #[path = "memberships_postgres_tests.rs"]
 mod memberships_postgres_tests;
 
+#[path = "community_memberships_postgres_tests.rs"]
+mod community_memberships_postgres_tests;
+
 #[path = "ownership_postgres_tests.rs"]
 mod ownership_postgres_tests;
 

@@ -9,12 +9,14 @@ impl UserDeletionStore {
         community: Uuid,
         targets: &[String],
     ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        timeouts(&mut tx).await?;
+        self.preflight_community_membership(&mut tx, community, targets)
+            .await?;
         let targets: Vec<Vec<u8>> = targets
             .iter()
             .map(|key| hex::decode(key).map_err(|_| invalid("invalid target")))
             .collect::<Result<_>>()?;
-        let mut tx = self.pool.begin().await?;
-        timeouts(&mut tx).await?;
         let has_members: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM channel_members WHERE community_id=$1 AND pubkey=ANY($2))",
         )
