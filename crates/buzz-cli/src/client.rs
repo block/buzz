@@ -645,26 +645,27 @@ impl BuzzClient {
     ) -> Result<reqwest::RequestBuilder, CliError> {
         // Evidence first: a refresh may wait out adapter retries, and the
         // proof must be signed after it, just before sending, to stay fresh.
-        // Signing may wait out throttling in turn, so evidence that is due
-        // for refresh by then is fetched again, and the proof re-signed when
-        // the assertion changed or that fetch aged the proof.
-        let mut assertion = self.evidence().await?;
+        // Signing may wait out throttling in turn, so the evidence is fetched
+        // again after it and sent with the proof; the proof is re-signed only
+        // when signing or that fetch aged it. The proof covers the request,
+        // not the assertion, so a provider may hand out a new one each time.
+        self.evidence().await?;
         let mut round = 1;
-        let authorization = loop {
+        let (authorization, assertion) = loop {
             // The proof is dated before signing, which may be held for long.
             let signed_at = crate::cached_assertion::unix_now();
             let authorization = self.proof(&proof).await?;
             let current = self.evidence().await?;
             let age = crate::cached_assertion::unix_now().saturating_sub(signed_at);
-            if current == assertion && age < PROOF_MAX_AGE_SECS {
-                break authorization;
+            if age < PROOF_MAX_AGE_SECS {
+                break (authorization, current);
             }
             if round == AUTHORIZE_ROUNDS {
                 return Err(CliError::Unavailable(
-                    "the NIP-FI assertion kept expiring while the proof was signed".into(),
+                    "the request proof kept going stale while it was signed".into(),
                 ));
             }
-            (assertion, round) = (current, round + 1);
+            round += 1;
         };
         let mut req = req.header(reqwest::header::AUTHORIZATION, sensitive(authorization)?);
         if let Some(tag) = self.credentials.auth_tag() {
@@ -3772,6 +3773,50 @@ mod desktop_throttle_tests {
             "the stale proof is signed again"
         );
         assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    /// A provider handing out a new assertion on every lookup is served:
+    /// the proof is signed once and goes out with the post-sign assertion.
+    #[tokio::test]
+    async fn a_new_assertion_per_lookup_goes_out_after_the_proof() {
+        let (relay, seen) = logging_relay().await;
+        let issued: super::ws_deadline_tests::Log = Default::default();
+        let log = issued.clone();
+        let jti = AtomicUsize::new(0);
+        let signs = Arc::new(AtomicUsize::new(0));
+        let n = signs.clone();
+        let keys = nostr::Keys::generate();
+        let pubkey = keys.public_key().to_hex();
+        let aud = relay.clone();
+        let (c, _) = desktop(
+            &relay,
+            &keys,
+            move || {
+                let now = crate::cached_assertion::unix_now();
+                let token = crate::federated_identity::test_support::jws(serde_json::json!({
+                    "iss": "https://adapter.example",
+                    "sub": "user-1",
+                    "aud": aud,
+                    "iat": now,
+                    "exp": now + 600,
+                    "jti": format!("jti-{}", jti.fetch_add(1, Ordering::SeqCst)),
+                    "nostr_pubkey": pubkey,
+                }));
+                log.lock().unwrap().push(token.clone());
+                token
+            },
+            move |_| {
+                n.fetch_add(1, Ordering::SeqCst);
+                None
+            },
+        )
+        .await;
+        let before = issued.lock().unwrap().len();
+        c.query(&serde_json::json!({})).await.unwrap();
+        assert_eq!(signs.load(Ordering::SeqCst), 1);
+        let issued = issued.lock().unwrap();
+        assert_eq!(issued.len() - before, 2, "one lookup each side of signing");
+        assert_eq!(*seen.lock().unwrap(), [issued.last().unwrap().clone()]);
     }
 
     /// Evidence that keeps expiring while the proof is signed ends retryable

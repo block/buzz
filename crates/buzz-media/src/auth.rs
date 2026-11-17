@@ -2,6 +2,25 @@
 
 use crate::error::MediaError;
 
+/// How far a client clock may be off, in either direction, for a kind-24242
+/// proof's `created_at` (future bound, and Strict's age bound) and its
+/// `expiration` (a slow client's proof is not already expired).
+const MEDIA_CLOCK_SKEW_SECS: u64 = 120;
+/// Strict mode: `expiration` may be at most this far past `created_at`.
+const STRICT_MAX_LIFETIME_SECS: u64 = 60;
+/// Permissive mode: the pre-NIP-FI one-hour age allowance.
+const PERMISSIVE_MAX_AGE_SECS: u64 = 3600;
+
+/// Unix seconds now, as the verifier sees it. Tests pin it with
+/// `tests::pinned`.
+fn wall_now() -> u64 {
+    #[cfg(test)]
+    if let Some(now) = tests::PINNED_NOW.with(std::cell::Cell::get) {
+        return now;
+    }
+    nostr::Timestamp::now().as_secs()
+}
+
 /// Blossom kind:24242 verbs Buzz currently accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlossomVerb {
@@ -20,13 +39,15 @@ impl BlossomVerb {
 
 /// Verification strictness derived from the NIP-FI mode.
 ///
-/// `Strict` applies the full NIP-FI kind-24242 rules: 60-second proof window,
-/// `expiration <= created_at + 60s`, mandatory `server` tag on all proofs, and
+/// `Strict` applies the full NIP-FI kind-24242 rules: `created_at` within 120
+/// seconds of now either way, `expiration <= created_at + 60s`, mandatory
+/// `server` tag on all proofs, and
 /// exact cardinality (exactly one each of `t`, `expiration`, `server`; at most
 /// one `x`).
 ///
 /// `Permissive` preserves the pre-NIP-FI behavior for Off-mode deployments:
-/// 3600-second proof window, `server` tag optional, and duplicate tags accepted.
+/// `created_at` up to 3600 seconds old and at most 120 seconds in the future,
+/// `server` tag optional, and duplicate tags accepted.
 /// This keeps a deployed desktop that mints old-shape tokens working against an
 /// Off-mode relay [FI-INV-15].
 ///
@@ -34,9 +55,9 @@ impl BlossomVerb {
 /// callers without mode access may pass `Strict` directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlossomStrictness {
-    /// Full NIP-FI compliance: 60s window, mandatory `server`, exact cardinality.
+    /// Full NIP-FI compliance: ±120s window, 60s lifetime cap, mandatory `server`, exact cardinality.
     Strict,
-    /// Pre-NIP-FI compatibility: 3600s window, optional `server`, tolerant cardinality.
+    /// Pre-NIP-FI compatibility: 3600s age, +120s future, optional `server`, tolerant cardinality.
     Permissive,
 }
 
@@ -53,9 +74,10 @@ pub enum BlossomStrictness {
 ///      - `Permissive`: at least one `t` tag equal to `verb`; any other valued
 ///        `t` (including `""`) rejects and valueless tags are ignored
 ///        (origin/main `found_t` semantics).
-///   4. `expiration` tag present, strictly future, and within the freshness window
-///   5. `created_at` bounded: not more than 5s in the future; not older than the
-///      mode-selected window (60s `Strict`, 3600s `Permissive`)
+///   4. `expiration` tag present and later than 120s ago; in `Strict`, at most
+///      60s after `created_at`
+///   5. `created_at` bounded: not more than 120s in the future; not older than
+///      the mode-selected age (120s `Strict`, 3600s `Permissive`)
 ///   6. `server` tag enforcement: in `Strict` mode, exactly one `server` tag is
 ///      required and MUST match the bound tenant host; in `Permissive`, optional
 ///      when-present behavior is preserved
@@ -185,33 +207,39 @@ pub fn verify_blossom_auth_event_for_verb(
     if exp_count == 0 {
         return Err(MediaError::MissingTag("expiration"));
     }
-    let now = nostr::Timestamp::now().as_secs();
+    let now = wall_now();
 
-    // 4b. Expiration must be strictly in the future
-    if exp_value <= now {
+    // 4b. Expiration must not have passed, allowing for a client clock up to
+    //     MEDIA_CLOCK_SKEW_SECS slow.
+    if exp_value <= now.saturating_sub(MEDIA_CLOCK_SKEW_SECS) {
         return Err(MediaError::TokenExpired);
     }
 
     // 5. created_at freshness bounds.
     //
+    //   Both modes:
+    //     created_at <= now + 120s        — bounded future skew
+    //
     //   Strict  (NIP-FI active modes):
-    //     created_at <= now + 5s          — bounded future skew
-    //     now - created_at <= 60s         — 60-second replay window
+    //     now - created_at <= 120s        — replay window
     //     expiration <= created_at + 60s  — token cannot outlive its window
     //
     //   Permissive (Off mode):
-    //     created_at <= now + 5s          — future skew only
     //     now - created_at <= 3600s       — 1-hour replay window (pre-NIP-FI)
     //     expiration window not enforced
     let created = auth_event.created_at.as_secs();
-    if created > now + 5 {
+    if created > now + MEDIA_CLOCK_SKEW_SECS {
         return Err(MediaError::TimestampOutOfWindow);
     }
-    let max_age = if strict { 60u64 } else { 3600u64 };
+    let max_age = if strict {
+        MEDIA_CLOCK_SKEW_SECS
+    } else {
+        PERMISSIVE_MAX_AGE_SECS
+    };
     if now > created + max_age {
         return Err(MediaError::TimestampOutOfWindow);
     }
-    if strict && exp_value > created + 60 {
+    if strict && exp_value > created + STRICT_MAX_LIFETIME_SECS {
         // expiration tag must satisfy expiration <= created_at + 60s
         return Err(MediaError::TimestampOutOfWindow);
     }
@@ -1753,9 +1781,10 @@ mod tests {
         let body = b"hello world";
         let sha256 = hex::encode(sha2::Sha256::digest(body));
         let server = "relay.example";
-        // Token expired in the past — simulates a proof that was valid at admit
-        // time but whose expiry passed during a slow body transfer.
-        let past = Timestamp::now().as_secs().saturating_sub(10);
+        // Token expired in the past, beyond the clock-skew allowance — simulates
+        // a proof that was valid at admit time but whose expiry passed during a
+        // slow body transfer.
+        let past = Timestamp::now().as_secs().saturating_sub(130);
         let exp_str = past.to_string();
         let tags = vec![
             Tag::parse(["t", "upload"]).unwrap(),
@@ -1868,5 +1897,55 @@ mod tests {
             .is_ok(),
             "Permissive must use last-wins expiration: valueless-first must not cause expiry rejection"
         );
+    }
+
+    // ── Clock skew: ±120 s client clocks ─────────────────────────────────────
+
+    thread_local! {
+        pub(super) static PINNED_NOW: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    }
+
+    /// Verifies a Strict upload proof signed `offset` seconds from a server
+    /// clock pinned at `SERVER_NOW`, with a 60 s lifetime.
+    fn verify_proof_at(offset: i64) -> Result<(), MediaError> {
+        const SERVER_NOW: u64 = 1_800_000_000;
+        let sha256 = "a".repeat(64);
+        let created = SERVER_NOW.saturating_add_signed(offset);
+        let event = EventBuilder::new(Kind::from(24242), "Upload buzz-media")
+            .tags([
+                Tag::parse(["t", "upload"]).unwrap(),
+                Tag::parse(["x", &sha256]).unwrap(),
+                Tag::parse(["expiration", &(created + 60).to_string()]).unwrap(),
+                Tag::parse(["server", "relay.example"]).unwrap(),
+            ])
+            .custom_created_at(Timestamp::from(created))
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        PINNED_NOW.with(|c| c.set(Some(SERVER_NOW)));
+        let out = verify_blossom_upload_auth(
+            &event,
+            &sha256,
+            Some("relay.example"),
+            BlossomStrictness::Strict,
+        );
+        PINNED_NOW.with(|c| c.set(None));
+        out
+    }
+
+    #[test]
+    fn test_proof_window_is_120s_either_way() {
+        assert!(verify_proof_at(120).is_ok());
+        assert!(verify_proof_at(-120).is_ok());
+        for offset in [121, -121] {
+            assert!(matches!(
+                verify_proof_at(offset),
+                Err(MediaError::TimestampOutOfWindow)
+            ));
+        }
+        // A slow client's proof expires 120 s after its `expiration`.
+        assert!(matches!(
+            verify_proof_at(-180),
+            Err(MediaError::TokenExpired)
+        ));
     }
 }

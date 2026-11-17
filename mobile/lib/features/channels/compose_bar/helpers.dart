@@ -855,3 +855,22 @@ OverlayPortalController _useComposerSuggestionPortal(BuildContext context) {
   }, [controller]);
   return controller;
 }
+
+/// Insert an emoji without restoring the keyboard underneath a native picker.
+void _insertComposerEmoji(
+  TextEditingController controller,
+  FocusNode focusNode,
+  String emoji, {
+  required bool restoreFocus,
+}) {
+  final text = controller.text;
+  final selection = controller.selection;
+  final cursor = selection.isValid
+      ? selection.baseOffset.clamp(0, text.length)
+      : text.length;
+  controller.value = TextEditingValue(
+    text: text.replaceRange(cursor, cursor, emoji),
+    selection: TextSelection.collapsed(offset: cursor + emoji.length),
+  );
+  if (restoreFocus) focusNode.requestFocus();
+}

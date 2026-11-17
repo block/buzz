@@ -519,6 +519,38 @@ void main() {
 
       final result = formatTimeline(events);
       expect(result[0].content, 'v3');
+
+      // Same second: the greater id wins, as on the relay, even when `ms`
+      // and display order point the other way.
+      final sameSecond = [
+        _edit(
+          id: 'z',
+          targetId: threadIdA,
+          content: 'z wins',
+          createdAt: 2000,
+          extraTags: [
+            ['ms', '100'],
+          ],
+        ),
+        _edit(
+          id: 'a',
+          targetId: threadIdA,
+          content: 'a loses',
+          createdAt: 2000,
+          extraTags: [
+            ['ms', '900'],
+          ],
+        ),
+      ];
+      for (final edits in [sameSecond, sameSecond.reversed.toList()]) {
+        expect(
+          formatTimeline([
+            _textMsg(id: threadIdA, content: 'v1'),
+            ...edits,
+          ]).single.content,
+          'z wins',
+        );
+      }
     });
 
     test('deleted edit is ignored', () {

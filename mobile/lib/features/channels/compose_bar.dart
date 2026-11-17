@@ -87,6 +87,7 @@ part 'compose_bar/input_tray.dart';
 part 'compose_bar/layout.dart';
 part 'compose_bar/ios_controls.dart';
 part 'compose_bar/selection_menu.dart';
+part 'compose_bar/hardware_keyboard.dart';
 part 'compose_bar/dock.dart';
 part 'compose_bar/share_delivery.dart';
 part 'compose_bar/compose_bar_widget.dart';

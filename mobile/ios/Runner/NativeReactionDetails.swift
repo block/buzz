@@ -500,7 +500,9 @@ final class NativeMessageImageLoader: NSObject, URLSessionDataDelegate {
     queue.removeAll { $0 === download }
     if let task = download.task { active.removeValue(forKey: task.taskIdentifier) }
     if let image {
-      let frames = image.images ?? [image]
+      // A frame held for several time units repeats; count its pixels once.
+      var seen = Set<ObjectIdentifier>()
+      let frames = (image.images ?? [image]).filter { seen.insert(ObjectIdentifier($0)).inserted }
       let cost = frames.reduce(0) { $0 + ($1.cgImage.map { $0.bytesPerRow * $0.height } ?? 0) }
       cache.setObject(image, forKey: download.request as NSURLRequest, cost: cost)
     }
@@ -557,29 +559,56 @@ final class NativeMessageImageLoader: NSObject, URLSessionDataDelegate {
     completionHandler(nil) // Never forward supplied auth to another URL.
   }
 
-  static func decode(_ bytes: Data) -> UIImage? {
+  /// Decodes up to 60 frames, each holding the delays of the frames it stands
+  /// for. `isCancelled` is checked before each frame; a cancelled decode
+  /// returns nil.
+  static func decode(
+    _ bytes: Data, maximumPixelSize: Int = 120, isCancelled: () -> Bool = { false }
+  ) -> UIImage? {
     guard let source = CGImageSourceCreateWithData(bytes as CFData, nil) else { return nil }
     let count = CGImageSourceGetCount(source)
     let step = max(1, Int(ceil(Double(count) / 60)))
     var frames: [UIImage] = []
-    var duration: TimeInterval = 0
-    for index in stride(from: 0, to: count, by: step) {
-      guard let image = CGImageSourceCreateThumbnailAtIndex(source, index, [
-        kCGImageSourceCreateThumbnailFromImageAlways: true,
-        kCGImageSourceThumbnailMaxPixelSize: 120,
-        kCGImageSourceCreateThumbnailWithTransform: true,
-      ] as CFDictionary) else { continue }
-      frames.append(UIImage(cgImage: image))
-      let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [String: Any]
-      let animation = (properties?[kCGImagePropertyGIFDictionary as String]
-        ?? properties?[kCGImagePropertyPNGDictionary as String] ?? properties?["{WebP}"]) as? [String: Any]
-      let delay = (animation?["UnclampedDelayTime"] ?? animation?["DelayTime"]) as? Double ?? 0.1
-      // Frames asking for 10 ms or less show for 100 ms, as in browsers and
-      // the Flutter timeline (MediaImageProvider), so the sheet plays an
-      // emoji at the same speed as the chip that opened it.
-      duration += (delay <= 0.01 ? 0.1 : delay) * Double(step)
+    var delays: [TimeInterval] = []
+    for index in 0..<count {
+      if index % step == 0 {
+        if isCancelled() { return nil }
+        if let image = CGImageSourceCreateThumbnailAtIndex(source, index, [
+          kCGImageSourceCreateThumbnailFromImageAlways: true,
+          kCGImageSourceThumbnailMaxPixelSize: maximumPixelSize,
+          kCGImageSourceCreateThumbnailWithTransform: true,
+        ] as CFDictionary) {
+          frames.append(UIImage(cgImage: image))
+          delays.append(0)
+        }
+      }
+      if !delays.isEmpty { delays[delays.count - 1] += delay(source, at: index) }
     }
     guard let first = frames.first else { return nil }
-    return frames.count > 1 ? UIImage.animatedImage(with: frames, duration: duration) : first
+    guard frames.count > 1 else { return first }
+    // UIKit shows every frame of an animated image for the same time, so a
+    // frame repeats once per time unit it holds. The unit divides every delay
+    // to the nearest 10 ms, coarsened to keep the sequence within 600 entries.
+    let centiseconds = delays.map { max(1, Int(($0 * 100).rounded())) }
+    let total = centiseconds.reduce(0, +)
+    let unit = max(centiseconds.reduce(0, gcd), Int(ceil(Double(total) / 600)))
+    var sequence: [UIImage] = []
+    for (frame, held) in zip(frames, centiseconds) {
+      sequence += repeatElement(frame, count: max(1, Int((Double(held) / Double(unit)).rounded())))
+    }
+    return UIImage.animatedImage(with: sequence, duration: Double(total) / 100)
   }
+
+  private static func delay(_ source: CGImageSource, at index: Int) -> TimeInterval {
+    let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [String: Any]
+    let animation = (properties?[kCGImagePropertyGIFDictionary as String]
+      ?? properties?[kCGImagePropertyPNGDictionary as String] ?? properties?["{WebP}"]) as? [String: Any]
+    let delay = (animation?["UnclampedDelayTime"] ?? animation?["DelayTime"]) as? Double ?? 0.1
+    // Frames asking for 10 ms or less show for 100 ms, as in browsers and
+    // the Flutter timeline (MediaImageProvider), so the sheet plays an
+    // emoji at the same speed as the chip that opened it.
+    return delay <= 0.01 ? 0.1 : delay
+  }
+
+  private static func gcd(_ a: Int, _ b: Int) -> Int { b == 0 ? a : gcd(b, a % b) }
 }
