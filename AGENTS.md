@@ -4,6 +4,13 @@ This guide is for AI agents contributing to the Buzz codebase. It covers
 agent-specific context and conventions. For general contributor info (setup,
 code style, PR process, architecture), see [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Agent Charter
+
+Process, lifecycle, validation, design, and routing rules are governed by
+`~/.agent_charter/MANIFESTO.md` and this repository's
+`.agent_charter/CONFIG.md`. This file remains authoritative for Buzz product,
+stack, testing, and release facts.
+
 ---
 
 ## Product Contract
