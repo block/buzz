@@ -204,6 +204,7 @@ void main() {
     for (final (fail, code) in <(http.Response? Function(), String)>[
       (() => http.Response('', 302), 'account-unavailable-http302'),
       (() => http.Response('', 503), 'account-unavailable-http503'),
+      (() => http.Response('x' * 65537, 503), 'account-unavailable-http503'),
       (
         () => throw http.ClientException('offline'),
         'account-unavailable-network',
