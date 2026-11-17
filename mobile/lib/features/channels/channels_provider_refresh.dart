@@ -24,12 +24,11 @@ Future<List<NostrEvent>> _fetchMemberMetadata(
   List<String> ids, {
   required bool strong,
 }) => strong
-    ? session.queryRelay([
-        NostrFilter(
-          kinds: const [39000],
-          tags: {'#d': ids},
-          limit: ids.length,
-          extensions: const {'consistency': 'strong'},
-        ),
-      ])
+    ? _fetchPaginatedChannelEvents(
+        session,
+        kind: 39000,
+        tags: {'#d': ids},
+        operation: 'Writer channel metadata',
+        strong: true,
+      )
     : session.fetchHistory(NostrFilters.channelMetadata(ids));

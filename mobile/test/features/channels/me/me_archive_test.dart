@@ -42,6 +42,7 @@ class _ArchiveRelay extends RelaySessionNotifier {
   int metadataReads = 0;
   List<NostrEvent>? replicaMetadata;
   bool failStrongMetadata = false;
+  bool failStrongMetadataTail = false;
   final discoveryQueries = <Map<String, dynamic>>[];
 
   void unarchive(String id) {
@@ -63,7 +64,12 @@ class _ArchiveRelay extends RelaySessionNotifier {
 
   List<NostrEvent> events(NostrFilter filter, {bool strong = false}) {
     if (filter.kinds.contains(39000)) {
-      if (strong && failStrongMetadata) throw StateError('Writer unavailable');
+      if (strong &&
+          (failStrongMetadata ||
+              (failStrongMetadataTail &&
+                  filter.extensions['before_id'] != null))) {
+        throw StateError('Writer unavailable');
+      }
       if (!strong && replicaMetadata != null) {
         return replicaMetadata!
             .where(
@@ -149,9 +155,33 @@ class _ArchiveRelay extends RelaySessionNotifier {
     for (final filter in filters) {
       final wire = filter.toJson();
       if (filter.kinds.any([39000, 39002].contains)) discoveryQueries.add(wire);
-      results.addAll(
-        await _read(filter, strong: wire['consistency'] == 'strong'),
+      final snapshot = await _read(
+        filter,
+        strong: wire['consistency'] == 'strong',
       );
+      if (filter.kinds.contains(39000)) {
+        // A low server cap forces recovery through the composite cursor.
+        final before = wire['before_id'] as String?;
+        final page =
+            snapshot
+                .where(
+                  (event) =>
+                      filter.until == null ||
+                      event.createdAt < filter.until! ||
+                      (event.createdAt == filter.until &&
+                          before != null &&
+                          event.id.compareTo(before) < 0),
+                )
+                .toList()
+              ..sort(
+                (a, b) => a.createdAt == b.createdAt
+                    ? b.id.compareTo(a.id)
+                    : b.createdAt.compareTo(a.createdAt),
+              );
+        results.addAll(page.take(2));
+      } else {
+        results.addAll(snapshot);
+      }
     }
     return results;
   }
@@ -565,6 +595,27 @@ void main() {
       ScaffoldMessenger.of(context).clearSnackBars();
       await tester.pumpAndSettle();
 
+      // A later metadata page failure cannot install a successful prefix.
+      relay.failStrongMetadataTail = true;
+      _performCustomAction(
+        tester,
+        'Loose chat, archived, awaiting refresh',
+        'Refresh chat status',
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Couldn’t refresh chat status. Try again.'),
+        findsOneWidget,
+      );
+      expect(
+        find.bySemanticsLabel('Loose chat, archived, awaiting refresh'),
+        findsOneWidget,
+      );
+      expect(relay.submitted, hasLength(4));
+      relay.failStrongMetadataTail = false;
+      ScaffoldMessenger.of(context).clearSnackBars();
+      await tester.pumpAndSettle();
+
       if (unarchiveBeforeRecovery) {
         // No archived snapshot was observed for this chat. A successful
         // explicit post-acceptance recovery must honor the later active v13.
@@ -587,6 +638,21 @@ void main() {
         );
         await tester.pumpAndSettle();
         expect(find.bySemanticsLabel('Loose chat'), findsOneWidget);
+        expect(
+          container.read(channelsProvider).requireValue.map((c) => c.id),
+          containsAll(_ArchiveRelay.chats.keys),
+        );
+        expect(
+          relay.discoveryQueries.where(
+            (q) =>
+                (q['kinds'] as List).contains(39000) && q['before_id'] != null,
+          ),
+          isNotEmpty,
+        );
+        expect(
+          relay.discoveryQueries.every((q) => q['consistency'] == 'strong'),
+          isTrue,
+        );
         expect(
           container
               .read(channelsProvider)
