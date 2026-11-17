@@ -17,11 +17,61 @@ class _MeRetry extends StatelessWidget {
 
 enum _MeArchivePhase { confirming, pending, accepted }
 
-// Each attempt has its own identity: an older recovery read cannot retire a
-// later accepted archive of the same chat.
+// Keep attempt identity across metadata observations so an older recovery
+// cannot retire a later archive. Revisions live only for this page/scope.
 class _MeArchiveOperation {
-  _MeArchiveOperation(this.phase);
+  _MeArchiveOperation(
+    this.phase,
+    this.activeRevision, {
+    Object? attempt,
+    this.archivedRevision,
+  }) : attempt = attempt ?? Object();
+
   final _MeArchivePhase phase;
+  final Object attempt;
+  final DateTime activeRevision;
+  final DateTime? archivedRevision;
+
+  bool get needsRecovery =>
+      phase == _MeArchivePhase.accepted && archivedRevision == null;
+
+  _MeArchiveOperation withPhase(_MeArchivePhase next) => _MeArchiveOperation(
+    next,
+    activeRevision,
+    attempt: attempt,
+    archivedRevision: archivedRevision,
+  );
+
+  _MeArchiveOperation? observe(Channel channel) {
+    final revision = channel.createdAt;
+    final archived = archivedRevision;
+    if (channel.isArchived) {
+      // A prior lifecycle's archived metadata cannot reconcile this attempt.
+      if (!revision.isAfter(activeRevision) ||
+          (archived != null && !revision.isAfter(archived))) {
+        return this;
+      }
+      return _MeArchiveOperation(
+        phase,
+        activeRevision,
+        attempt: attempt,
+        archivedRevision: revision,
+      );
+    }
+    if (archived != null && revision.isAfter(archived)) {
+      if (phase == _MeArchivePhase.accepted) return null;
+      return _MeArchiveOperation(phase, revision, attempt: attempt);
+    }
+    if (!revision.isAfter(activeRevision)) return this;
+    // Without an observed archive, even newer active metadata can precede
+    // acceptance. Only explicit writer recovery may retire that guard.
+    return _MeArchiveOperation(
+      phase,
+      revision,
+      attempt: attempt,
+      archivedRevision: archived,
+    );
+  }
 }
 
 class _MeChatRow extends ConsumerWidget {

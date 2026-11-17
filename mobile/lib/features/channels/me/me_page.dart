@@ -114,17 +114,22 @@ class MePage extends HookConsumerWidget {
     ref.listen(channelsProvider, (_, next) {
       final all = next.value;
       if (all == null) return;
-      final reconciled = archives.value.keys
-          .where(
-            (id) =>
-                archives.value[id]?.phase == _MeArchivePhase.accepted &&
-                !all.any((channel) => channel.id == id && !channel.isArchived),
-          )
-          .toSet();
-      if (reconciled.isNotEmpty) {
-        archives.value = {...archives.value}
-          ..removeWhere((key, _) => reconciled.contains(key));
+      final byId = {for (final channel in all) channel.id: channel};
+      final updated = {...archives.value};
+      var changed = false;
+      for (final entry in archives.value.entries) {
+        final channel = byId[entry.key];
+        if (channel == null) continue;
+        final observed = entry.value.observe(channel);
+        if (identical(observed, entry.value)) continue;
+        changed = true;
+        if (observed == null) {
+          updated.remove(entry.key);
+        } else {
+          updated[entry.key] = observed;
+        }
       }
+      if (changed) archives.value = updated;
     });
     bool isCurrentArchiveScope() =>
         context.mounted &&
@@ -135,8 +140,7 @@ class MePage extends HookConsumerWidget {
       archiveRecovery.value = recovery;
       final accepted = {
         for (final entry in archives.value.entries)
-          if (entry.value.phase == _MeArchivePhase.accepted)
-            entry.key: entry.value,
+          if (entry.value.needsRecovery) entry.key: entry.value,
       };
       if (accepted.isEmpty) {
         await ref.read(channelsProvider.notifier).refresh();
@@ -158,7 +162,8 @@ class MePage extends HookConsumerWidget {
           final operation = accepted[channel.id];
           if (!channel.isArchived &&
               operation != null &&
-              identical(updated[channel.id], operation)) {
+              identical(updated[channel.id]?.attempt, operation.attempt) &&
+              updated[channel.id]!.needsRecovery) {
             // Another client can unarchive without this page ever observing
             // the intermediate archived snapshot. Trust this fresh result,
             // not the old accepted marker, without issuing another write.
@@ -185,7 +190,10 @@ class MePage extends HookConsumerWidget {
       if (archives.value.containsKey(channelId)) return;
       archives.value = {
         ...archives.value,
-        channelId: _MeArchiveOperation(_MeArchivePhase.confirming),
+        channelId: _MeArchiveOperation(
+          _MeArchivePhase.confirming,
+          channel.createdAt,
+        ),
       };
       // Capture the reviewed account/community before the confirmation awaits.
       final actions = archiveActions;
@@ -216,7 +224,9 @@ class MePage extends HookConsumerWidget {
         if (!confirmed || !isCurrentArchiveScope()) return;
         archives.value = {
           ...archives.value,
-          channelId: _MeArchiveOperation(_MeArchivePhase.pending),
+          channelId: archives.value[channelId]!.withPhase(
+            _MeArchivePhase.pending,
+          ),
         };
         await actions.archiveChannel(
           channelId,
@@ -225,23 +235,24 @@ class MePage extends HookConsumerWidget {
             if (!isCurrentArchiveScope()) return;
             if (pane?.selectedId == channelId) pane!.clear();
             final all = ref.read(channelsProvider).value;
-            final reflected =
-                all != null &&
-                !all.any(
-                  (channel) => channel.id == channelId && !channel.isArchived,
-                );
+            final operation = archives.value[channelId]!.withPhase(
+              _MeArchivePhase.accepted,
+            );
             final updated = {...archives.value};
-            if (reflected) {
+            final current = all?.where((c) => c.id == channelId).firstOrNull;
+            final observed = current == null
+                ? operation
+                : operation.observe(current);
+            if (observed == null) {
               updated.remove(channelId);
             } else {
-              updated[channelId] = _MeArchiveOperation(
-                _MeArchivePhase.accepted,
-              );
+              updated[channelId] = observed;
             }
             archives.value = updated;
           },
         );
-        if (isCurrentArchiveScope() && archives.value.containsKey(channelId)) {
+        if (isCurrentArchiveScope() &&
+            archives.value[channelId]?.needsRecovery == true) {
           showRefreshFeedback('Chat archived. Refresh to update the list.');
         }
       } catch (_) {
@@ -254,8 +265,8 @@ class MePage extends HookConsumerWidget {
           );
         }
       } finally {
-        // Accepted writes remain guarded until the list reflects the archive.
-        // Refreshing retries the read, never the already accepted write.
+        // Keep confirmed revisions for this page/scope: a routed refresh may
+        // regress to pre-archive metadata after reconciliation succeeds.
         if (isCurrentArchiveScope() && !accepted) {
           archives.value = {...archives.value}..remove(channelId);
         }
@@ -339,6 +350,7 @@ class MePage extends HookConsumerWidget {
                   (c) =>
                       c.isMember &&
                       !c.isArchived &&
+                      archives.value[c.id]?.archivedRevision == null &&
                       c.isSoloChat(legacyChannels),
                 )
                 .toList()

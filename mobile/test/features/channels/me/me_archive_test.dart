@@ -602,6 +602,20 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Archive #Loose chat?'), findsNothing);
       expect(relay.submitted, hasLength(4));
+      // An archived snapshot from an older lifecycle is not reconciliation
+      // for this attempt, whose known active revision is already v11.
+      relay.archived.add('loose');
+      relay.metadataVersions['loose'] = 9;
+      await container.read(channelsProvider.notifier).refresh();
+      await tester.pumpAndSettle();
+      relay.archived.remove('loose');
+      relay.metadataVersions['loose'] = 11;
+      await container.read(channelsProvider.notifier).refresh();
+      await tester.pumpAndSettle();
+      expect(
+        find.bySemanticsLabel('Loose chat, archived, awaiting refresh'),
+        findsOneWidget,
+      );
       // Keep the replica on active v11 even after writer archive v12.
       relay.replicaMetadata = relay.events(
         NostrFilters.channelMetadata(_ArchiveRelay.chats.keys.toList()),
@@ -756,9 +770,74 @@ void main() {
       final archiveSubmissions = unarchiveBeforeRecovery ? 5 : 4;
       expect(relay.submitted, hasLength(archiveSubmissions));
 
-      // Once reconciliation has observed the archive, a genuine later
-      // unarchive is actionable again; completed IDs do not accumulate.
+      // Successful writer recovery must survive the next ordinary routed
+      // refresh: the provider installs stale active v11, but the page keeps
+      // the archived revision and exposes neither archive input.
+      final confirmedRevision = relay.metadataVersions['loose']!;
+      relay.discoveryQueries.clear();
+      if (embedded) {
+        await container.read(channelsProvider.notifier).refresh();
+      } else {
+        await tester.drag(find.byType(CustomScrollView), const Offset(0, 500));
+      }
+      await tester.pumpAndSettle();
+      expect(
+        container
+            .read(channelsProvider)
+            .requireValue
+            .firstWhere((c) => c.id == 'loose')
+            .createdAt
+            .millisecondsSinceEpoch,
+        11000,
+      );
+      expect(find.text('Loose chat'), findsNothing);
+      expect(find.byKey(const ValueKey('archive-solo-loose')), findsNothing);
+      expect(find.bySemanticsLabel('Loose chat'), findsNothing);
+      expect(relay.submitted, hasLength(archiveSubmissions));
+      expect(
+        relay.discoveryQueries.where(
+          (q) => (q['kinds'] as List).contains(39000),
+        ),
+        isEmpty,
+      );
+
       relay.replicaMetadata = null;
+      relay.archived.remove('loose');
+      relay.metadataVersions['loose'] = confirmedRevision;
+      await container.read(channelsProvider.notifier).refresh();
+      await tester.pumpAndSettle();
+      expect(find.text('Loose chat'), findsNothing);
+      relay.archived.add('loose');
+
+      // Keep the highest observed archived revision even when an older
+      // archived result arrives later, then reject equal/older active data.
+      relay.replicaMetadata = null;
+      for (final revision in [confirmedRevision + 2, confirmedRevision + 1]) {
+        relay.metadataVersions['loose'] = revision;
+        await container.read(channelsProvider.notifier).refresh();
+        await tester.pumpAndSettle();
+      }
+      relay.archived.remove('loose');
+      for (final revision in [confirmedRevision + 1, confirmedRevision + 2]) {
+        relay.metadataVersions['loose'] = revision;
+        await container.read(channelsProvider.notifier).refresh();
+        await tester.pumpAndSettle();
+        expect(find.text('Loose chat'), findsNothing);
+        expect(find.byKey(const ValueKey('archive-solo-loose')), findsNothing);
+        expect(relay.submitted, hasLength(archiveSubmissions));
+      }
+      relay.metadataVersions['loose'] = confirmedRevision + 3;
+      await container.read(channelsProvider.notifier).refresh();
+      await tester.pumpAndSettle();
+      expect(find.bySemanticsLabel('Loose chat'), findsOneWidget);
+      _performCustomAction(tester, 'Loose chat', 'Archive chat');
+      await tester.pumpAndSettle();
+      expect(find.text('Archive #Loose chat?'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(relay.submitted, hasLength(archiveSubmissions));
+
+      // A genuinely newer unarchive also releases a fence captured before ACK.
       relay.unarchive('grouped');
       await container.read(channelsProvider.notifier).refresh();
       await tester.pumpAndSettle();
@@ -778,6 +857,10 @@ void main() {
       await tester.tap(find.widgetWithText(FilledButton, 'Archive'));
       await tester.pumpAndSettle();
       expect(relay.submitted, hasLength(archiveSubmissions + 1));
+      // A confirmed fence from the old community must not hide the same ID
+      // in the new community, even with a lower metadata revision.
+      relay.archived.remove('legacy');
+      relay.metadataVersions['legacy'] = 1;
       container
           .read(relayConfigProvider.notifier)
           .update(baseUrl: 'https://other-relay.test', nsec: owner.nsec);
@@ -786,6 +869,7 @@ void main() {
       relay.acknowledgement!.complete();
       await tester.pumpAndSettle();
       expect(pane.selectedId, 'grouped');
+      expect(find.bySemanticsLabel('Legacy chat'), findsOneWidget);
       expect(find.bySemanticsLabel('Project chat'), findsOneWidget);
       expect(
         find.bySemanticsLabel('Project chat, archived, awaiting refresh'),
