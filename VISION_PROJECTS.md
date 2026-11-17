@@ -94,7 +94,7 @@ When you create a branch, Buzz creates a channel. The branch's patches, review c
 └── 📦 Channel archived
 ```
 
-No tab-switching between issue tracker, CI dashboard, chat, and code review. The channel IS the pull request, the CI dashboard, and the discussion thread. One stream. One search index.
+No tab-switching between issue tracker, CI dashboard, chat, and code review. The channel shows the pull request, the CI dashboard, and the discussion thread. One stream. One search index. It displays the proposal and grants nothing: who can read, push and approve always comes from the repo channel and the community's rules. See [VISION_GOVERNANCE.md](VISION_GOVERNANCE.md).
 
 ---
 
@@ -115,8 +115,8 @@ Push          CI              Review          Merge
   │            │ Test ✅        │               │
   │            │ Lint ✅        │               │
   │            │                │               │
-  │            │ kind:1630 ────►│               │
-  │            │ (CI passed)    │               │
+  │            │ check ────────►│               │
+  │            │ (signed result)│               │
   │            │                │ Review in     │
   │            │                │ branch channel│
   │            │                │               │
@@ -129,7 +129,7 @@ Push          CI              Review          Merge
   │            │                │               │ Channel archives
 ```
 
-The approval event is signed by the maintainer's npub. The merge status references the approval. The audit log chains them together. Cryptographic proof of who approved what.
+The approval event is signed by the maintainer's npub. The merge status references the approval. The audit log chains them together. Cryptographic proof of who approved what. In a governed community, landing goes through one gate that checks every applicable rule and leaves a receipt; see [VISION_GOVERNANCE.md](VISION_GOVERNANCE.md).
 
 ---
 
