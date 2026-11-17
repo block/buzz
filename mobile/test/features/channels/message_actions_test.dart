@@ -8,6 +8,7 @@ import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/message_actions.dart';
 import 'package:buzz/features/channels/message_long_press_region.dart';
+import 'package:buzz/shared/emoji/emoji_picker.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/thread_follows/thread_follows_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
@@ -65,7 +66,7 @@ class _RecordingReactionActions implements ChannelActions {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-final _listedChannel = Channel(
+Channel _testChannel({bool guestReactions = false}) => Channel(
   id: _channelId,
   name: 'general',
   channelType: 'stream',
@@ -75,7 +76,14 @@ final _listedChannel = Channel(
   createdAt: DateTime(2026),
   memberCount: 2,
   isMember: true,
+  guestReactions: guestReactions,
 );
+
+final _listedChannel = _testChannel();
+
+List<ChannelMember> _viewerRoster(String role) => [
+  ChannelMember(pubkey: 'self', role: role, joinedAt: DateTime.utc(2026)),
+];
 
 class _ListedChannelsNotifier extends ChannelsNotifier {
   @override
@@ -172,6 +180,11 @@ Future<void> _pumpSheet(
       overrides: [
         savedPrefsProvider.overrideWithValue(prefs),
         myPubkeyProvider.overrideWithValue('self'),
+        if (!listChannel)
+          channelByIdProvider(_channelId).overrideWithValue(_listedChannel),
+        latestChannelMembersProvider(
+          _channelId,
+        ).overrideWithValue(_viewerRoster('member')),
         readStateProvider.overrideWith(
           readStateOverride ??
               () => _FakeReadStateNotifier(
@@ -293,6 +306,8 @@ Future<_MessageActionsPopoverHarness> _pumpMessageActionsPopover(
   bool composerInitiallyFocused = false,
   bool launcherOnNestedRoute = false,
   ChannelActions Function(Ref ref)? createChannelActions,
+  Channel Function()? channelSnapshot,
+  String viewerRole = 'member',
   Rect anchorRect = const Rect.fromLTWH(32, 260, 300, 72),
   String? currentPubkey = 'self',
   bool listChannel = false,
@@ -342,6 +357,13 @@ Future<_MessageActionsPopoverHarness> _pumpMessageActionsPopover(
       overrides: [
         savedPrefsProvider.overrideWithValue(prefs),
         myPubkeyProvider.overrideWithValue('self'),
+        if (!listChannel)
+          channelByIdProvider(
+            _channelId,
+          ).overrideWith((ref) => channelSnapshot?.call() ?? _listedChannel),
+        latestChannelMembersProvider(
+          _channelId,
+        ).overrideWithValue(_viewerRoster(viewerRole)),
         readStateProvider.overrideWith(
           readStateOverride ??
               () => _FakeReadStateNotifier(
@@ -405,13 +427,17 @@ Future<_MessageActionsPopoverHarness> _pumpMessageActionsPopover(
 
 void main() {
   testWidgets(
-    'quick reactions show selection, label controls, and remove our reaction',
+    'open reaction picker respects revocation and still removes our reaction',
     (tester) async {
       final semantics = tester.ensureSemantics();
       final actions = _RecordingReactionActions();
-      await _pumpMessageActionsPopover(
+      var channel = _testChannel(guestReactions: true);
+      final harness = await _pumpMessageActionsPopover(
         tester,
         message: _message(
+          tags: const [
+            ['h', _channelId],
+          ],
           reactions: [
             const TimelineReaction(
               emoji: '👍',
@@ -424,6 +450,8 @@ void main() {
         ),
         prefs: await _mockPrefs(),
         createChannelActions: (_) => actions,
+        channelSnapshot: () => channel,
+        viewerRole: 'guest',
       );
       final emoji = find.byKey(const ValueKey('quick-reaction-👍'));
       final owner = tester.widget<Semantics>(
@@ -434,8 +462,32 @@ void main() {
       expect(owner.properties.label, isNotEmpty);
       expect(owner.properties.onTap, isNotNull);
       expect(find.bySemanticsLabel('Add reaction'), findsOneWidget);
-      await tester.tap(emoji);
+
+      void setReactionGrant(bool allowed) {
+        channel = _testChannel(guestReactions: allowed);
+        harness.container.invalidate(channelByIdProvider(_channelId));
+      }
+
+      Future<void> selectAfterRevocation(String emoji) async {
+        await tester.tap(find.byKey(const ValueKey('quick-reaction-more')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        final picker = find.byType(EmojiPickerSheet);
+        expect(picker, findsOneWidget);
+        setReactionGrant(false);
+        await tester.pump();
+        tester.widget<EmojiPickerSheet>(picker).onSelect(emoji);
+        await tester.pumpAndSettle();
+      }
+
+      await selectAfterRevocation('🎉');
+      expect(actions.added, isEmpty);
+      setReactionGrant(true);
+      await tester.tap(
+        find.byKey(const ValueKey('open-message-actions-popover')),
+      );
       await tester.pumpAndSettle();
+      await selectAfterRevocation('👍');
       expect(actions.removed, ['our-reaction']);
       expect(actions.added, isEmpty);
       semantics.dispose();

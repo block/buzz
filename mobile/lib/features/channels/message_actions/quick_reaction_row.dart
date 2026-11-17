@@ -2,6 +2,7 @@ part of '../message_actions.dart';
 
 class _QuickReactionRow extends ConsumerWidget {
   final TimelineMessage message;
+  final String channelId;
   final List<TimelineReaction> reactions;
   final ValueChanged<String>? onToggleReaction;
 
@@ -18,6 +19,7 @@ class _QuickReactionRow extends ConsumerWidget {
 
   const _QuickReactionRow({
     required this.message,
+    required this.channelId,
     required this.reactions,
     this.onToggleReaction,
     required this.sheetContext,
@@ -40,7 +42,18 @@ class _QuickReactionRow extends ConsumerWidget {
     };
 
     void react(String value) {
-      if (reactions.any((r) => r.emoji == value && r.reactedByCurrentUser)) {
+      final removing = reactions.any(
+        (reaction) => reaction.emoji == value && reaction.reactedByCurrentUser,
+      );
+      if (!pageContext.mounted ||
+          !pageRef
+              .read(channelPermissionsProvider(channelId))
+              .allows(
+                removing ? ChannelAction.removeReaction : ChannelAction.react,
+              )) {
+        return;
+      }
+      if (removing) {
         if (onToggleReaction != null) {
           onToggleReaction!(value);
         } else {

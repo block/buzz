@@ -132,6 +132,7 @@ Future<void> showMessageActions({
                   if (permissions.allows(ChannelAction.react))
                     _QuickReactionRow(
                       message: message,
+                      channelId: channelId,
                       reactions: reactions ?? message.reactions,
                       onToggleReaction: onToggleReaction,
                       sheetContext: sheetContext,
