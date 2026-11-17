@@ -1818,6 +1818,16 @@ pub async fn get_readable_named_only_channels(
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
+    get_readable_named_only_channels_on(&mut connection, community_id, pubkey, named).await
+}
+
+/// [`get_readable_named_only_channels`] on a connection the caller chose.
+async fn get_readable_named_only_channels_on(
+    connection: &mut PgConnection,
+    community_id: CommunityId,
+    pubkey: &[u8],
+    named: &[Uuid],
+) -> Result<Vec<ReadableNamedOnlyChannel>> {
     let sql = format!(
         r#"
         SELECT c.id AS channel_id, c.channel_type::text AS channel_type,
@@ -1847,7 +1857,7 @@ pub async fn get_readable_named_only_channels(
         .bind(community_id.as_uuid())
         .bind(pubkey)
         .bind(named)
-        .fetch_all(&mut *connection)
+        .fetch_all(connection)
         .await?;
 
     rows.into_iter()
@@ -2708,6 +2718,62 @@ impl Db {
         named: &[Uuid],
     ) -> Result<Vec<ReadableNamedOnlyChannel>> {
         get_readable_named_only_channels(&self.pool, community_id, pubkey, named).await
+    }
+
+    /// [`Db::get_readable_named_only_channels`] on the bounded replica arm,
+    /// for the per-request scope of REQ, COUNT and the HTTP bridge. Every
+    /// reconnecting client runs it once per subscription, so on the writer a
+    /// fleet-wide reconnect turned into a writer load spike.
+    ///
+    /// Routed by explicit product decision, like [`Db::is_relay_member`]. A
+    /// stale answer lags a join or a removal by at most the budget `B`. The
+    /// same request already takes its legacy channels from a 10 s cache,
+    /// re-checks every channel it names that it did not get on the writer
+    /// (`confirm_requested_channel_access` in the relay), and fan-out
+    /// re-checks membership for every live event on a private channel. Falls
+    /// back to the writer as [`Db::is_relay_member`] does.
+    #[datastore_span(name = "get_readable_named_only_channels_routed", system = "postgresql")]
+    pub async fn get_readable_named_only_channels_routed(
+        &self,
+        community_id: CommunityId,
+        pubkey: &[u8],
+        named: &[Uuid],
+    ) -> Result<Vec<ReadableNamedOnlyChannel>> {
+        let path = "readable_named_only_channels";
+        match self
+            .route_read(
+                path,
+                crate::RoutePredicate::Bounded,
+                crate::observability::ReaderOperation::Authorization,
+            )
+            .await?
+        {
+            crate::RouteDecision::Replica(mut tx, _entry, reason) => {
+                match get_readable_named_only_channels_on(&mut tx, community_id, pubkey, named)
+                    .await
+                {
+                    Ok(channels) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(channels)
+                    }
+                    // Surface a cancel instead of re-running it on the writer; see
+                    // `DbError::is_statement_cancelled` for the trade-off.
+                    Err(e) if e.is_statement_cancelled() => {
+                        Self::record_route(path, "replica", "statement_cancelled");
+                        Err(e)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        get_readable_named_only_channels(&self.pool, community_id, pubkey, named)
+                            .await
+                    }
+                }
+            }
+            crate::RouteDecision::Writer => {
+                get_readable_named_only_channels(&self.pool, community_id, pubkey, named).await
+            }
+        }
     }
 
     /// The type of channel `channel_id`, deleted or not, or `None` when no

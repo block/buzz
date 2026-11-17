@@ -3710,6 +3710,9 @@ mod writer_pool_postgres_tests;
 #[path = "tests/event_hydration_postgres_tests.rs"]
 mod event_hydration_postgres_tests;
 
+#[path = "tests/readable_named_only_routing_postgres_tests.rs"]
+mod readable_named_only_routing_postgres_tests;
+
 /// `insert_event_with_serving_write_guard` indexes mentions in the event's own
 /// transaction, and an indexing failure stays best-effort: the savepoint rolls
 /// back only the mention rows, never the event.

@@ -1326,7 +1326,8 @@ impl Db {
     /// cache it replaced). Admits and revokes may lag by at most the budget
     /// `B`; everything else fails closed to the writer, including a busy
     /// reader that history reads would be rejected for (see
-    /// [`Db::route_read`]). Not precedent for routing other permission reads.
+    /// [`Db::route_read`]). Not precedent for routing other permission reads;
+    /// [`Db::get_readable_named_only_channels_routed`] is the other one.
     #[datastore_span(name = "is_relay_member", system = "postgresql")]
     pub async fn is_relay_member(&self, community: CommunityId, pubkey: &str) -> Result<bool> {
         let path = "relay_membership";

@@ -304,7 +304,7 @@ pub(crate) async fn readable_named_only_channels_for_filters(
     let mut readable = NamedOnlyChannels::from_readable(
         state
             .db
-            .get_readable_named_only_channels(community, pubkey, &named)
+            .get_readable_named_only_channels_routed(community, pubkey, &named)
             .await?,
     );
     if let Some(allowed) = token_channel_ids {
