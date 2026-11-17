@@ -1610,6 +1610,66 @@ void main() {
     },
   );
 
+  test(
+    'an older sync snapshot finishing late keeps a newer failed publish read\'s retry',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      fakeAsync((async) {
+        final relay = _FakeRelaySession();
+        final signed = _FakeSignedEventRelay();
+        final manager = ReadStateManager(
+          pubkey: keychain.public,
+          relayUrl: _relayUrl,
+          prefs: prefs,
+          crypto: crypto,
+          relaySession: relay,
+          signedEventRelay: signed,
+          remoteEnabled: true,
+          onChanged: () {},
+        );
+        manager.initialize();
+        async.flushMicrotasks();
+        expect(relay.fetchCount, 1);
+
+        // The REQ goes live again and its sync snapshot is slow to download.
+        final slow = Completer<void>();
+        relay.fetchGate = slow.future;
+        relay.statusListeners.last(RelaySubscriptionStatus.ready);
+        async.flushMicrotasks();
+        expect(relay.fetchCount, 2);
+
+        // A mark's publish starts a newer snapshot, which fails.
+        relay.fetchGate = null;
+        relay.failNextFetch = true;
+        manager.markContextRead(
+          'channel-2',
+          DateTime.now().millisecondsSinceEpoch ~/ 1000,
+        );
+        async.elapse(const Duration(seconds: 5));
+        expect(relay.fetchCount, 3);
+        expect(manager.syncError, isNotNull);
+        expect(signed.submitCount, 0);
+
+        // The older snapshot then succeeds. It must not cancel the newer
+        // failure's backoff.
+        slow.complete();
+        async.flushMicrotasks();
+
+        async.elapse(const Duration(minutes: 1));
+        expect(relay.fetchCount, greaterThan(3));
+        expect(signed.submitCount, 1);
+        expect(manager.syncError, isNull);
+        manager.dispose(flushPending: false);
+      });
+    },
+  );
+
   test('remote read-state rollback is ignored', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();

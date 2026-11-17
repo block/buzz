@@ -442,10 +442,12 @@ class ReadStateManager {
       // Snapshot transport validates completeness and fences retired sessions.
       final events = await _relaySession!.fetchReadStateSnapshot();
       if (_disposed || !_servesThisCommunity) return false;
-      _settleSnapshot(read, succeeded: true);
-      _snapshotRetryAttempt = 0;
-      _snapshotRetryTimer?.cancel();
-      _snapshotRetryTimer = null;
+      // An older success must not cancel a newer failure's retry.
+      if (_settleSnapshot(read, succeeded: true)) {
+        _snapshotRetryAttempt = 0;
+        _snapshotRetryTimer?.cancel();
+        _snapshotRetryTimer = null;
+      }
       _mergeEvents(events);
       await _persistLocalState();
       _onChanged();
