@@ -1,8 +1,10 @@
 use buzz_push_gateway::{
+    android_attestation::PendingAttestationVerifier,
     apns::ApnsTransport,
     app_attest::AppAttestVerifier,
     authority::AuthorityStore,
     config::Config,
+    fcm::FcmTransport,
     grant::{GrantKey, GrantKeyring},
     postgres::PostgresAuthorityStore,
     router_with_metrics,
@@ -57,9 +59,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             configured.apns_topic.clone(),
             configured.apns_environment,
         )?);
+        let android = c
+            .android
+            .as_ref()
+            .map(|android| -> Result<_, Box<dyn std::error::Error>> {
+                let fcm = FcmTransport::service_account(
+                    &android.fcm_project_id,
+                    &fs::read(&android.fcm_service_account_path)?,
+                )?;
+                tracing::warn!(
+                    package = %android.package_name,
+                    "Android configured, but Key Attestation verification is not implemented in \
+                     this build: every Android enrollment will be rejected"
+                );
+                Ok(buzz_push_gateway::http::AndroidRuntime {
+                    attestation: Arc::new(PendingAttestationVerifier),
+                    transport: Arc::new(fcm),
+                })
+            })
+            .transpose()?;
         buzz_push_gateway::http::ApplicationRuntime {
             app_attest: Arc::new(apple),
             transport,
+            android,
         }
     };
     let grant_keyring = GrantKeyring::new(

@@ -890,7 +890,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 92);
+        assert_eq!(migrations.len(), 93);
         assert_eq!(migrations[89].version, 90);
         assert!(migrations[89]
             .sql
@@ -921,6 +921,11 @@ mod postgres_tests {
         let retire_floor = strip_sql_comments(migrations[88].sql.as_str());
         assert!(retire_floor.contains("DROP TRIGGER IF EXISTS events_created_at_floor ON events;"));
         assert!(retire_floor.contains("DROP FUNCTION IF EXISTS events_created_at_floor_guard();"));
+        assert_eq!(migrations[92].version, 93);
+        assert!(migrations[92]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN platform TEXT NOT NULL DEFAULT 'ios'"));
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }
@@ -3119,6 +3124,7 @@ mod postgres_tests {
             "entity_deletion_stage_history",
             "user_deletion_fences",
             "workflow_runs",
+            "push_gateway_installations",
         ] {
             assert_eq!(
                 columns(&desired, table).await,
@@ -3183,6 +3189,7 @@ mod postgres_tests {
             "user_deletion_fences",
             "entity_deletion_approvals",
             "workflow_runs",
+            "push_gateway_installations",
         ] {
             assert_eq!(
                 constraints(&desired, table).await,
