@@ -63,7 +63,6 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- functions
 \i functions/channels_community_id_immutable.sql
-\i functions/guard_channel_roster_snapshot.sql
 \i functions/prevent_community_deletion_request_retargeting.sql
 \i functions/prevent_community_deletion_approval_removal.sql
 \i functions/protect_community_deletion_manifest_keys.sql
@@ -139,7 +138,6 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- triggers
 \i triggers/channels.sql
-\i triggers/events.sql
 \i triggers/community_deletion_requests.sql
 \i triggers/community_deletion_approvals.sql
 \i triggers/community_deletion_manifest_keys.sql
