@@ -2799,28 +2799,39 @@ impl Db {
             crate::observability::WriterOperation::EventWrite,
         )
         .await?;
-        Ok(sqlx::query_as(
+        let rows = sqlx::query(
             r#"
-            SELECT names.name, encode(member.pubkey, 'hex')
+            SELECT member.pubkey, u.display_name, v.event
             FROM unnest($2::bytea[]) AS member(pubkey)
-            LEFT JOIN users u
-                ON u.community_id = $1 AND u.pubkey = member.pubkey
+            LEFT JOIN users u ON u.community_id = $1 AND u.pubkey = member.pubkey
             LEFT JOIN nip_fi_profile_heads v
                 ON v.community_id = $1 AND v.pubkey = encode(member.pubkey, 'hex')
-            CROSS JOIN LATERAL (
-                SELECT u.display_name AS name
-                UNION
-                SELECT tag->>1 AS name
-                FROM jsonb_array_elements(v.event->'tags') AS tag
-                WHERE tag->>0 IN ('display_name', 'username', 'full_name')
-            ) names
-            WHERE names.name IS NOT NULL
             "#,
         )
         .bind(community_id.as_uuid())
         .bind(pubkeys)
         .fetch_all(&mut *connection)
-        .await?)
+        .await?;
+
+        let mut names = Vec::new();
+        for row in rows {
+            let pubkey = hex::encode(row.try_get::<Vec<u8>, _>("pubkey")?);
+            if let Some(name) = row.try_get::<Option<String>, _>("display_name")? {
+                names.push((name, pubkey.clone()));
+            }
+            let profile: Option<sqlx::types::Json<nostr::Event>> = row.try_get("event")?;
+            if let Some(profile) = profile {
+                for tag in profile.tags.iter() {
+                    let [field, name, ..] = tag.as_slice() else {
+                        continue;
+                    };
+                    if matches!(field.as_str(), "display_name" | "username" | "full_name") {
+                        names.push((name.clone(), pubkey.clone()));
+                    }
+                }
+            }
+        }
+        Ok(names)
     }
 
     /// Returns the count of active members in a channel.
