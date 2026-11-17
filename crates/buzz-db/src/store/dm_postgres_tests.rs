@@ -3,6 +3,8 @@ use crate::CreateCommunityWithOwnerResult;
 use sqlx::postgres::PgPoolOptions;
 use std::time::Duration;
 
+const ALLOW: AgentAddPolicy<'static> = &|_: &str, _: &[u8]| Ok(());
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn cluster_global_concurrent_dm_creation_reports_only_the_inserter() {
@@ -56,14 +58,21 @@ async fn cluster_global_concurrent_dm_creation_reports_only_the_inserter() {
             .await
             .expect("block inserts, allow lookups");
         let first_pool = first.clone();
-        let first_task =
-            tokio::spawn(
-                async move { open_dm(&first_pool, community, &[&recipient], &author).await },
-            );
+        let first_task = tokio::spawn(async move {
+            open_dm(&first_pool, community, &[&recipient], &author, false, ALLOW).await
+        });
         let second_pool = second.clone();
         let second_task = tokio::spawn(async move {
             if second_is_interactive {
-                open_dm(&second_pool, community, &[&recipient], &author).await
+                open_dm(
+                    &second_pool,
+                    community,
+                    &[&recipient],
+                    &author,
+                    false,
+                    ALLOW,
+                )
+                .await
             } else {
                 create_dm_if_missing(&second_pool, community, &[&author, &recipient], &author).await
             }
@@ -123,7 +132,7 @@ async fn cluster_global_concurrent_dm_creation_reports_only_the_inserter() {
             .expect("hidden DMs")
             .contains(&reused.id));
         let (reopened, created) = db
-            .open_dm(community, &[&recipient], &author)
+            .open_dm(community, &[&recipient], &author, false, ALLOW)
             .await
             .expect("interactive reuse");
         assert_eq!(reopened.id, reused.id);

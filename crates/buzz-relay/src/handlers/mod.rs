@@ -23,6 +23,8 @@ mod create_with_members_postgres_tests;
 #[cfg(test)]
 mod deletion_postgres_tests;
 #[cfg(test)]
+mod dm_growth_postgres_tests;
+#[cfg(test)]
 mod edit_metadata_postgres_tests;
 /// EVENT handler — WS dispatcher → ingest pipeline → fan-out.
 pub mod event;

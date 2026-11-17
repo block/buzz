@@ -629,6 +629,10 @@ async fn actor_owns_any_owner_agent(
     Ok(false)
 }
 
+/// Why kind:9000, and kind:9001 for anyone but yourself or your own agent,
+/// are refused on a DM.
+const DM_MEMBERSHIP_REFUSAL: &str = "DM members change only through kind:41011";
+
 /// Validate an admin kind event BEFORE storage.
 pub async fn validate_admin_event(
     tenant: &TenantContext,
@@ -682,6 +686,21 @@ pub async fn validate_admin_event(
         .map_err(|_| anyhow::anyhow!("channel not found"))?;
     if kind != 9002 && channel.archived_at.is_some() && !is_self_departure(event) {
         return Err(anyhow::anyhow!("channel is archived"));
+    }
+    // A DM is identified by its people, so people join it only through
+    // kind:41011, which keeps that identity in step. Anyone may leave, and
+    // an owner may remove their own agent: every removal releases the DM's
+    // identity when its people change (`release_dm_identity`).
+    if channel.channel_type == "dm" && kind == 9001 {
+        let target = extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
+        if target != actor_bytes
+            && !state
+                .db
+                .is_agent_owner(tenant.community(), &target, &actor_bytes)
+                .await?
+        {
+            return Err(anyhow::anyhow!(DM_MEMBERSHIP_REFUSAL));
+        }
     }
 
     match kind {
@@ -1937,6 +1956,9 @@ pub(crate) async fn validate_put_user(
         .map_err(|_| anyhow::anyhow!("channel not found"))?;
     if channel.archived_at.is_some() {
         anyhow::bail!("channel is archived");
+    }
+    if channel.channel_type == "dm" {
+        anyhow::bail!(DM_MEMBERSHIP_REFUSAL);
     }
     let targets = put_user_targets(event)?;
 
