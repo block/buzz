@@ -1,7 +1,9 @@
+import 'package:buzz/shared/hosted/known_community_sync_provider.dart';
 import 'package:buzz/shared/widgets/ios_message_create_button.dart';
 import 'package:buzz/shared/hosted/browser_auth.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
+import 'package:buzz/shared/hosted/known_communities_provider.dart';
 import 'package:buzz/shared/hosted/organization_sign_in.dart';
 import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/agents/agents_page.dart';
@@ -121,6 +123,8 @@ void main() {
         // different identity (the page reads its pubkey from profileProvider).
         profileProvider.overrideWith(() => profile ?? _FakeProfileNotifier()),
         presenceProvider.overrideWith(() => _FakePresenceNotifier()),
+        knownCommunitiesProvider.overrideWith((ref) async => const []),
+        knownCommunitySyncProvider.overrideWithValue(null),
         communityIconProvider.overrideWith((ref, relayUrl) async {
           onCommunityIconLoad?.call(relayUrl);
           if (loadCommunityIcon != null) return loadCommunityIcon(relayUrl);
@@ -266,6 +270,41 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
+  testWidgets('a DM row stops following presence once it is gone', (
+    tester,
+  ) async {
+    final relay = PresenceTestRelay();
+    final channels = _FakeNotifier(testChannels);
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => channels),
+          relaySessionProvider.overrideWith(() => relay),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    relay.results.removeAt(0).complete([
+      presenceEvent('relay', 'online', subject: 'alice', timestamp: 20),
+    ]);
+    await tester.pumpAndSettle();
+    final container = ProviderScope.containerOf(
+      tester.element(_dmTileFor('Alice')),
+    );
+    expect(container.read(presenceCacheProvider)['alice'], 'online');
+
+    channels.replaceChannels([
+      for (final channel in testChannels)
+        if (channel.channelType != 'dm') channel,
+    ]);
+    await tester.pumpAndSettle();
+    expect(find.text('Alice'), findsNothing);
+    await tester.pump(PresenceCacheNotifier.releaseDelay);
+    expect(relay.unsubscribes, 1);
+    expect(container.read(presenceCacheProvider), isEmpty);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   for (final label in ['Channels options', 'Design options']) {
     testWidgets('$label exposes a labeled button and tap action', (
       tester,
@@ -363,6 +402,19 @@ void main() {
   ) async {
     final channels = [
       testChannels.first,
+      for (final creator in ['aabb', 'other', 'agent'])
+        Channel(
+          id: 'labeled-$creator',
+          name: 'labeled-$creator',
+          channelType: 'stream',
+          visibility: 'private',
+          labels: const ['buzz.solo'],
+          description: '',
+          createdBy: creator,
+          createdAt: DateTime(2025),
+          memberCount: 2,
+          isMember: true,
+        ),
       for (final type in ['stream', 'solo'])
         Channel(
           id: 'private-$type',
@@ -380,6 +432,7 @@ void main() {
       buildTestable(
         overrides: [
           channelsProvider.overrideWith(() => _FakeNotifier(channels)),
+          myPubkeyProvider.overrideWithValue('aabb'),
         ],
       ),
     );
@@ -393,6 +446,9 @@ void main() {
     expect(tester.widget<Icon>(privateIcon).icon, BuzzIcons.lock);
     expect(tester.getTopLeft(publicIcon).dx, tester.getTopLeft(privateIcon).dx);
     expect(find.text('private-solo'), findsNothing);
+    for (final creator in ['aabb', 'other', 'agent']) {
+      expect(find.text('labeled-$creator'), findsNothing);
+    }
   });
 
   testWidgets('shows grouped channel list when data loads', (tester) async {
@@ -4200,13 +4256,15 @@ class _FakeNotifier extends ChannelsNotifier {
   @override
   Future<void> waitForUnreadCatchUp() async => await unreadCatchUp;
 
+  void replaceChannels(List<Channel> channels) => state = AsyncData(channels);
+
   void addUnread(String channelId, ObservedUnreadEvent event) {
     (_observedEventsByChannel[channelId] ??= {})[event.id] = event;
     state = AsyncData([...state.requireValue]);
   }
 
   @override
-  Future<void> ensureDirectoryLoaded({Duration? maxAge}) async {
+  Future<void> ensureDirectoryLoaded() async {
     ref
         .read(channelDirectoryLoadStatusProvider.notifier)
         .markLoaded(_activeDirectoryScope(ref));
@@ -4264,7 +4322,11 @@ class _FakeCommunityListNotifier extends CommunityListNotifier {
   Future<List<Community>> build() async => _communities;
 
   @override
-  Future<void> removeCommunity(String id) async {
+  Future<void> removeCommunity(
+    String id, {
+    String? confirmedSubject,
+    bool accountConfirmed = false,
+  }) async {
     removedIds.add(id);
     _communities = _communities
         .where((community) => community.id != id)
@@ -4309,6 +4371,7 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
     required void Function(RelaySubscriptionStatus) onStatusChanged,
+    bool resumeSince = true,
   }) => subscribe(filter, onEvent, onClosed: onClosed);
 
   @override

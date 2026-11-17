@@ -53,10 +53,10 @@ extension on RelaySessionNotifier {
     final origin = Uri.parse(config.baseUrl);
     final discovery = http.Request('GET', origin.resolve('/'))
       ..headers['Accept'] = 'application/nostr+json';
-    // The query transport leaves gzip bodies compressed (see
-    // RelayHttpQueryClient), and the relay's CDN gzips both responses. The
-    // inflated size is capped too: the transport cap only sees the
-    // compressed bytes.
+    // The relay's CDN gzips both responses. The inflated size is capped too:
+    // where the query transport leaves gzip bodies compressed (see
+    // RelayHttpQueryClient), the transport cap only sees the compressed
+    // bytes.
     final discovered = await send(discovery, 64 * 1024);
     final info = jsonDecode(
       relayResponseText(

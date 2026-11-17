@@ -122,7 +122,12 @@ class Channel {
   /// Solo presentation is carried by NIP-CL metadata, not project filing.
   bool get isSolo => isStream && isPrivate && labels.contains('buzz.solo');
 
-  /// Keep old mobile-created chats visible while older clients migrate.
+  /// Solo inventory placement, including old mobile-created chats. Callers
+  /// still enforce membership and archive visibility.
+  bool isSoloChat(Iterable<String> legacyChannels) =>
+      isSolo || legacyChannels.contains(id);
+
+  /// The owner's Solo composer, with compatibility for old mobile chats.
   bool isPersonalChat(String? viewer, Iterable<String> legacyChannels) => isSolo
       ? viewer != null && createdBy == viewer
       : legacyChannels.contains(id);

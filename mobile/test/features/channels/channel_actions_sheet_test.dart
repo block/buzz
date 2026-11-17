@@ -9,6 +9,8 @@ import 'package:buzz/features/channels/manage_channel_sheet.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/buzz_action_tile.dart';
+import 'package:buzz/shared/widgets/app_list_card.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -63,6 +65,7 @@ Widget _modalApp({
   required Channel channel,
   required Future<List<ChannelMember>> Function() loadMembers,
   required ChannelActions Function(Ref ref) createChannelActions,
+  bool soloDetails = false,
   String? canvasContent,
   Future<ChannelCanvas>? pendingCanvas,
 }) => ProviderScope(
@@ -91,11 +94,19 @@ Widget _modalApp({
     home: Builder(
       builder: (context) => Scaffold(
         body: TextButton(
-          onPressed: () => showChannelActionsSheet(
-            context: context,
-            channel: channel,
-            isUnread: false,
-          ),
+          onPressed: () => soloDetails
+              ? showChannelDetailsSheet(
+                  context: context,
+                  channel: channel,
+                  currentPubkey: _currentPubkey,
+                  onMemberTap: (_, _) {},
+                  personalChat: true,
+                )
+              : showChannelActionsSheet(
+                  context: context,
+                  channel: channel,
+                  isUnread: false,
+                ),
           child: const Text('Open actions'),
         ),
       ),
@@ -104,6 +115,175 @@ Widget _modalApp({
 );
 
 void main() {
+  for (final size in [const Size(800, 390), const Size(669, 951)]) {
+    testWidgets('Duo cover or portrait $size retains the Flutter sheet', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = size;
+      tester.view.padding = const FakeViewPadding(right: 76);
+      tester.view.viewPadding = tester.view.padding;
+      addTearDown(tester.view.reset);
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      await tester.pumpWidget(
+        _modalApp(
+          channel: _channel(),
+          loadMembers: () async => [],
+          createChannelActions: (ref) => _FakeChannelActions(ref),
+        ),
+      );
+      await tester.tap(find.text('Open actions'));
+      await tester.pumpAndSettle();
+      expect(find.byType(BottomSheet), findsOneWidget);
+      expect(find.byType(ChannelActionsSheet), findsOneWidget);
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
+
+  for (final soloDetails in [false, true]) {
+    testWidgets(
+      'Duo ${soloDetails ? 'Solo details' : 'channel actions'} uses native presentation and live permissions',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        tester.view.devicePixelRatio = 1;
+        tester.view.physicalSize = const Size(951, 669);
+        tester.view.padding = const FakeViewPadding(right: 76);
+        tester.view.viewPadding = tester.view.padding;
+        addTearDown(tester.view.reset);
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        const bridge = MethodChannel('buzz/channel_actions_sheet');
+        final clipboard = <String>[];
+        // Copy feedback creates the app's native toast composition layer.
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform_views,
+          (call) async {
+            if (call.method == 'create') {
+              expect((call.arguments as Map)['viewType'], 'buzz/toast_layer');
+            }
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform_views,
+            null,
+          ),
+        );
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async {
+            if (call.method == 'Clipboard.setData') {
+              clipboard.add((call.arguments as Map)['text'] as String);
+            }
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            null,
+          ),
+        );
+        final result = Completer<String?>();
+        final members = Completer<List<ChannelMember>>();
+        final calls = <MethodCall>[];
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(bridge, (
+          call,
+        ) async {
+          calls.add(call);
+          return call.method == 'present' ? result.future : null;
+        });
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            bridge,
+            null,
+          ),
+        );
+        await tester.pumpWidget(
+          _modalApp(
+            channel: _channel(),
+            soloDetails: soloDetails,
+            loadMembers: () => members.future,
+            createChannelActions: (ref) => _FakeChannelActions(ref),
+          ),
+        );
+        await tester.tap(find.text('Open actions'));
+        await tester.pumpAndSettle();
+        if (soloDetails) {
+          expect(calls.last.arguments.toString(), contains('general'));
+          expect(
+            calls.last.arguments.toString(),
+            isNot(contains('Move to section')),
+          );
+        }
+        expect(calls.where((call) => call.method == 'present'), hasLength(1));
+        expect(find.byType(Dialog), findsNothing);
+        expect(find.byType(BottomSheet), findsNothing);
+        expect(
+          calls.last.arguments.toString(),
+          isNot(contains('Delete channel')),
+        );
+        members.complete([
+          ChannelMember(
+            pubkey: _currentPubkey,
+            role: 'owner',
+            joinedAt: DateTime(2025),
+          ),
+        ]);
+        await tester.pumpAndSettle();
+        expect(calls.last.arguments.toString(), contains('Delete channel'));
+        final displayModel = Map<String, dynamic>.from(
+          calls
+                  .lastWhere(
+                    (call) =>
+                        call.method == 'update' || call.method == 'present',
+                  )
+                  .arguments
+              as Map,
+        );
+        result.complete('Copy channel ID');
+        await tester.pumpAndSettle();
+        expect(clipboard, ['channel-id']);
+        expect(find.byType(ChannelActionsSheet), findsNothing);
+        expect(find.byType(ChannelDetailsPage), findsNothing);
+        expect(find.text('Open actions'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        // Render exactly the model handed to the embedded Flutter engine.
+        tester.view.physicalSize = const Size(540, 580);
+        final selected = <String>[];
+        await tester.pumpWidget(
+          ProviderScope(
+            key: const ValueKey('embedded-sheet-engine'),
+            child: MaterialApp(
+              theme: utilitySurfaceThemeData(AppTheme.light()),
+              home: ChannelSheetContent(
+                data: displayModel,
+                onSelect: selected.add,
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(BuzzActionTile), findsNWidgets(soloDetails ? 3 : 2));
+        expect(find.byType(AppListCard), findsWidgets);
+        if (soloDetails) {
+          expect(
+            find.byKey(const ValueKey('channel-details-avatar')),
+            findsOneWidget,
+          );
+          expect(find.text('general'), findsOneWidget);
+        }
+        await tester.tap(find.text('Star'));
+        expect(selected, ['Star']);
+        await tester.pumpWidget(const SizedBox());
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        debugDefaultTargetPlatformOverride = null;
+      },
+    );
+  }
+
   testWidgets('owner sees the complete regular-channel action set', (
     tester,
   ) async {
@@ -915,6 +1095,9 @@ class _FakeChannelActions extends ChannelActions {
 
   @override
   Future<void> leaveChannel(String channelId) async {}
+
+  @override
+  Future<void> archiveChannel(String channelId) async {}
 
   @override
   Future<void> unarchiveChannel(String channelId) async {

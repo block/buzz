@@ -2,7 +2,6 @@ import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_render.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:gpt_markdown/custom_widgets/markdown_config.dart';
 
 const _palette = [
   CustomEmoji(shortcode: 'wave', url: 'https://example.com/wave.png'),
@@ -78,13 +77,13 @@ void main() {
       content: ':WAVE: :unknown:',
       size: 32,
     );
-    final known = matcher.span(context, ':WAVE:', GptMarkdownConfig());
+    final known = matcher.span(context, ':WAVE:', const TextStyle());
     expect(known, isA<WidgetSpan>());
     final image = (known as WidgetSpan).child as CustomEmojiImage;
     expect(image.shortcode, 'wave');
     expect(image.url, 'https://example.com/wave.png');
     expect(image.size, 32);
-    final unknown = matcher.span(context, ':unknown:', GptMarkdownConfig());
+    final unknown = matcher.span(context, ':unknown:', const TextStyle());
     expect(unknown, isA<TextSpan>());
     expect((unknown as TextSpan).text, ':unknown:');
   });
@@ -100,7 +99,7 @@ void main() {
     ], content: ':wave_long:');
     expect(initial.exp.hasMatch(':wave_long:'), isFalse);
     expect(updated.exp.hasMatch(':wave:'), isFalse);
-    final span = updated.span(context, ':wave_long:', GptMarkdownConfig());
+    final span = updated.span(context, ':wave_long:', const TextStyle());
     expect(
       ((span as WidgetSpan).child as CustomEmojiImage).url,
       'https://example.com/new.png',

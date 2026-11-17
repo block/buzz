@@ -30,9 +30,9 @@ steady-state path unless explicitly reviewed.
   replica-floor shared/exclusive lock ordering).
 - If a workflow cannot use those protocols yet, execute it under an explicitly
   reviewed procedure that keeps replica routing fences closed for the run.
-- Existing trigger/function backstops remain the commit-time authority during
-  this transition. Their removal requires separate coverage and fleet gates;
-  this cutover does not authorize it.
+- Community writes use application admission and the deletion-lock protocol.
+  Retained trigger/function guards remain authoritative for their invariants;
+  this cutover does not authorize their removal.
 - Role separation is deliberate: schema reconciliation scripts carry schema
   convergence only; serving admission/fencing semantics remain in runtime/store
   code paths with startup verification and metrics.

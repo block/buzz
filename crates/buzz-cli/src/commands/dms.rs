@@ -73,8 +73,10 @@ async fn list_dms(client: &BuzzClient, limit: u32) -> Result<Vec<serde_json::Val
 
 /// Open a DM with one or more users — sign and submit a kind:41010 event with a d-tag.
 pub async fn cmd_open_dm(client: &BuzzClient, pubkeys: &[String]) -> Result<(), CliError> {
-    if pubkeys.is_empty() || pubkeys.len() > 8 {
-        return Err(CliError::Usage("--pubkey: must provide 1-8 pubkeys".into()));
+    if pubkeys.is_empty() {
+        return Err(CliError::Usage(
+            "--pubkey: must provide at least 1 pubkey".into(),
+        ));
     }
     for pk in pubkeys {
         validate_hex64(pk)?;
@@ -137,11 +139,13 @@ pub async fn cmd_add_dm_member(
     client: &BuzzClient,
     channel_id: &str,
     pubkey: &str,
+    include_history: bool,
 ) -> Result<(), CliError> {
     let channel_uuid = parse_uuid(channel_id)?;
     validate_hex64(pubkey)?;
 
-    let builder = buzz_sdk::build_dm_add_member(channel_uuid, pubkey).map_err(sdk_err)?;
+    let builder =
+        buzz_sdk::build_dm_add_member(channel_uuid, pubkey, include_history).map_err(sdk_err)?;
     let event = client.sign_event(builder).await?;
 
     let resp = client.submit_event(event).await?;
@@ -154,7 +158,11 @@ pub async fn dispatch(cmd: crate::DmsCmd, client: &BuzzClient) -> Result<(), Cli
     match cmd {
         DmsCmd::List { limit } => cmd_list_dms(client, limit).await,
         DmsCmd::Open { pubkeys } => cmd_open_dm(client, &pubkeys).await,
-        DmsCmd::AddMember { channel, pubkey } => cmd_add_dm_member(client, &channel, &pubkey).await,
+        DmsCmd::AddMember {
+            channel,
+            pubkey,
+            include_history,
+        } => cmd_add_dm_member(client, &channel, &pubkey, include_history).await,
         DmsCmd::Hide { channel } => cmd_hide_dm(client, &channel).await,
     }
 }
