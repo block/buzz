@@ -5145,6 +5145,7 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
                     name: Some("wrong-community".to_string()),
                     ..Default::default()
                 },
+                &[1; 32],
             )
             .await,
             Err(DbError::ChannelNotFound(_))
@@ -5156,6 +5157,7 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
                 name: Some("same-community".to_string()),
                 ..Default::default()
             },
+            &[1; 32],
         )
         .await
         .expect("same-community metadata update");
