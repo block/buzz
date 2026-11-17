@@ -31,13 +31,18 @@ struct ChannelClass {
 impl ChannelClass {
     fn from_event(event: &serde_json::Value) -> Self {
         let mut class = Self::default();
+        let mut seen_type = false;
         let tags = event.get("tags").and_then(|t| t.as_array());
         for tag in tags.into_iter().flatten().filter_map(|t| t.as_array()) {
             let key = tag.first().and_then(|v| v.as_str()).unwrap_or("");
             let val = tag.get(1).and_then(|v| v.as_str());
             match key {
-                // The first `t` is the channel type; later `t` tags are labels.
-                "t" if class.channel_type.is_none() => class.channel_type = val.map(str::to_string),
+                // The first `t` is the channel type, as in buzz-core's
+                // `channel_type_from_group_state_tags`; later `t` tags are labels.
+                "t" if !seen_type => {
+                    seen_type = true;
+                    class.channel_type = val.map(str::to_string);
+                }
                 "t" => class.labels.extend(val.map(str::to_string)),
                 // NIP-29 emits both `private` and `public` (Buzz adds the latter).
                 // The presence of either tag is the source of truth; tag value is unused.
@@ -2177,6 +2182,14 @@ mod tests {
         assert_eq!(out["channel_type"], json!("stream"));
         assert_eq!(out["visibility"], json!("private"));
         assert_eq!(out["labels"], json!(["buzz.solo"]));
+    }
+
+    #[test]
+    fn a_valueless_first_t_tag_is_still_the_type_slot() {
+        let out = extract_channel_metadata(&event(json!([["t"], ["t", "buzz.solo"], ["public"]])));
+        assert_eq!(out["channel_type"], serde_json::Value::Null);
+        assert_eq!(out["labels"], json!(["buzz.solo"]));
+        assert_eq!(out["visibility"], json!("public"));
     }
 
     #[test]
