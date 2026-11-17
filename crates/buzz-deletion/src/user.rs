@@ -12,6 +12,8 @@ pub enum Command {
     ContentBatches(content_batches::Args),
     /// Run media cleanup directly, without a workflow request.
     MediaBatches(media::Args),
+    /// Preview or delete profiles in one community; deletion requires stopped writers.
+    ProfileBatches(profile_batches::Args),
     /// Print account-table batches for one community; --delete executes offline.
     AccountBatches(account_batches::Args),
     /// Capture frozen human/agent inputs across stored communities, read-only.
@@ -102,6 +104,7 @@ pub async fn run(command: Command) -> Result<i32> {
     let command = match command {
         Command::ContentBatches(args) => return content_batches::run_command(args).await,
         Command::MediaBatches(args) => return media::run(args).await,
+        Command::ProfileBatches(args) => return profile_batches::run(args).await,
         command => command,
     };
     if let Command::AccountBatches(args) = command {
@@ -150,7 +153,7 @@ pub async fn run(command: Command) -> Result<i32> {
     };
     let store = db.entity_deletion_store();
     match command {
-        Command::ContentBatches(_) | Command::MediaBatches(_) => {
+        Command::ContentBatches(_) | Command::MediaBatches(_) | Command::ProfileBatches(_) => {
             bail!("direct cleanup command dispatched above")
         }
         Command::AccountBatches(_) => anyhow::bail!("account command dispatched above"),
@@ -247,6 +250,7 @@ mod inventory;
 pub mod media;
 /// Standalone delegation of an owned community to community deletion.
 pub mod owned_community;
+mod profile_batches;
 /// Read-only summaries of locally saved request progress and external waits.
 pub mod summary;
 mod transition;
