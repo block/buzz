@@ -104,14 +104,58 @@ class MePage extends HookConsumerWidget {
     final channels = ref.watch(channelsProvider);
     final unreadIds = ref.watch(meUnreadChannelIdsProvider);
     // Workspace collapse disposes its rows. Keep writes and feedback with
-    // the page so re-expanding cannot submit a second archive.
-    final archiving = useState(<String>{});
+    // the page, scoped to the account/community that offered the action.
+    final archiveActions = ref.watch(channelActionsProvider);
+    final archives = useValueNotifier(<String, _MeArchivePhase>{}, [
+      archiveActions,
+    ]);
+    useValueListenable(archives);
+    ref.listen(channelsProvider, (_, next) {
+      final all = next.value;
+      if (all == null) return;
+      final reconciled = archives.value.keys
+          .where(
+            (id) =>
+                archives.value[id] == _MeArchivePhase.accepted &&
+                !all.any((channel) => channel.id == id && !channel.isArchived),
+          )
+          .toSet();
+      if (reconciled.isNotEmpty) {
+        archives.value = {...archives.value}
+          ..removeWhere((key, _) => reconciled.contains(key));
+      }
+    });
+    bool isCurrentArchiveScope() =>
+        context.mounted &&
+        identical(ref.read(channelActionsProvider), archiveActions);
+    Future<void> refreshArchives() async {
+      if (!isCurrentArchiveScope()) return;
+      await ref.read(channelsProvider.notifier).refresh();
+    }
+
     Future<void> archive(Channel channel) async {
       final channelId = channel.id;
-      if (archiving.value.contains(channelId)) return;
-      archiving.value = {...archiving.value, channelId};
+      if (archives.value.containsKey(channelId)) return;
+      archives.value = {...archives.value, channelId: _MeArchivePhase.pending};
       // Capture the reviewed account/community before the confirmation awaits.
-      final actions = ref.read(channelActionsProvider);
+      final actions = archiveActions;
+      final pane = ConversationPaneScope.maybeOf(context);
+      var accepted = false;
+
+      void showRefreshFeedback(String message) {
+        if (!isCurrentArchiveScope()) return;
+        ScaffoldMessenger.of(context).showFeedbackSnackBar(
+          SnackBar(
+            content: Text(message),
+            action: SnackBarAction(
+              label: 'Refresh',
+              onPressed: refreshArchives,
+            ),
+          ),
+          kind: ToastKind.generic,
+        );
+      }
+
       try {
         final confirmed = await showChannelActionConfirmation(
           context: Navigator.of(context, rootNavigator: true).context,
@@ -119,18 +163,45 @@ class MePage extends HookConsumerWidget {
           body: 'The channel will become read-only.',
           confirmLabel: 'Archive',
         );
-        if (!confirmed || !context.mounted) return;
-        await actions.archiveChannel(channelId);
-      } catch (error) {
-        if (context.mounted) {
+        if (!confirmed || !isCurrentArchiveScope()) return;
+        await actions.archiveChannel(
+          channelId,
+          onAccepted: () {
+            accepted = true;
+            if (!isCurrentArchiveScope()) return;
+            if (pane?.selectedId == channelId) pane!.clear();
+            final all = ref.read(channelsProvider).value;
+            final reflected =
+                all != null &&
+                !all.any(
+                  (channel) => channel.id == channelId && !channel.isArchived,
+                );
+            final updated = {...archives.value};
+            if (reflected) {
+              updated.remove(channelId);
+            } else {
+              updated[channelId] = _MeArchivePhase.accepted;
+            }
+            archives.value = updated;
+          },
+        );
+        if (isCurrentArchiveScope() && archives.value.containsKey(channelId)) {
+          showRefreshFeedback('Chat archived. Refresh to update the list.');
+        }
+      } catch (_) {
+        if (accepted) {
+          showRefreshFeedback('Chat archived, but couldn’t refresh the list.');
+        } else if (context.mounted && isCurrentArchiveScope()) {
           ScaffoldMessenger.of(context).showFeedbackSnackBar(
-            SnackBar(content: Text('Couldn’t archive chat: $error')),
+            const SnackBar(content: Text('Couldn’t archive chat. Try again.')),
             kind: ToastKind.error,
           );
         }
       } finally {
-        if (context.mounted) {
-          archiving.value = {...archiving.value}..remove(channelId);
+        // Accepted writes remain guarded until the list reflects the archive.
+        // Refreshing retries the read, never the already accepted write.
+        if (isCurrentArchiveScope() && !accepted) {
+          archives.value = {...archives.value}..remove(channelId);
         }
       }
     }
@@ -236,8 +307,9 @@ class MePage extends HookConsumerWidget {
                 name: channel.name,
                 isUnread: unreadIds.contains(channel.id),
                 canArchive: channel.isPersonalChat(viewer, legacyChannels),
-                archiving: archiving.value.contains(channel.id),
+                archivePhase: archives.value[channel.id],
                 onArchive: () => archive(channel),
+                onRefresh: refreshArchives,
                 onLongPress: () => showChannelDetailsSheet(
                   context: context,
                   channel: channel,

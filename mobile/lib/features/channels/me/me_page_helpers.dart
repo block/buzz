@@ -15,6 +15,8 @@ class _MeRetry extends StatelessWidget {
   );
 }
 
+enum _MeArchivePhase { pending, accepted }
+
 class _MeChatRow extends ConsumerWidget {
   const _MeChatRow({
     required this.channelId,
@@ -23,40 +25,48 @@ class _MeChatRow extends ConsumerWidget {
     required this.onLongPress,
     required this.isUnread,
     required this.canArchive,
-    required this.archiving,
+    required this.archivePhase,
+    required this.onRefresh,
     required this.onArchive,
   });
   final String channelId;
   final String name;
   final bool isUnread;
   final bool canArchive;
-  final bool archiving;
+  final _MeArchivePhase? archivePhase;
+  final Future<void> Function() onRefresh;
   final Future<void> Function() onArchive;
   final VoidCallback onTap;
   final VoidCallback onLongPress;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final archiving = archivePhase == _MeArchivePhase.pending;
+    final accepted = archivePhase == _MeArchivePhase.accepted;
     Future<void> archive() async {
-      if (!canArchive || archiving) return;
+      if (!canArchive || archivePhase != null) return;
       await onArchive();
     }
 
     final color = channelNavigationForeground(context, unread: isUnread);
     final working = ref.watch(meWorkingAgentsProvider(channelId));
-    final status = archiving
+    final status = accepted
+        ? ', archived, awaiting refresh'
+        : archiving
         ? ', archiving'
         : working.isEmpty
         ? ''
         : ', ${working.join(', ')} working';
     final row = Semantics(
       label: '${isUnread ? '$name, unread' : name}$status',
-      liveRegion: archiving,
+      liveRegion: archivePhase != null,
       onTap: onTap,
       onLongPress: onLongPress,
       customSemanticsActions: {
-        if (canArchive && !archiving)
+        if (canArchive && archivePhase == null)
           const CustomSemanticsAction(label: 'Archive chat'): archive,
+        if (accepted)
+          const CustomSemanticsAction(label: 'Refresh chat status'): onRefresh,
       },
       excludeSemantics: true,
       button: true,
@@ -93,6 +103,9 @@ class _MeChatRow extends ConsumerWidget {
               if (archiving) ...[
                 const SizedBox(width: Grid.xs),
                 const BuzzLoadingIndicator(size: 20),
+              ] else if (accepted) ...[
+                const SizedBox(width: Grid.xs),
+                Icon(BuzzIcons.check, size: 20, color: color),
               ] else if (working.isNotEmpty) ...[
                 const SizedBox(width: Grid.xs),
                 SoloWorkingDots(color: color),
@@ -140,7 +153,11 @@ class _MeChatRow extends ConsumerWidget {
                 ),
               const SizedBox(width: Grid.xs),
               Text(
-                archiving ? 'Archiving…' : 'Archive',
+                accepted
+                    ? 'Archived'
+                    : archiving
+                    ? 'Archiving…'
+                    : 'Archive',
                 style: TextStyle(color: context.colors.onPrimaryContainer),
               ),
             ],

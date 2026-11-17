@@ -3,6 +3,8 @@ import 'dart:ui' as ui;
 
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
+import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'package:buzz/features/channels/me/me_page.dart';
 import 'package:buzz/shared/me/default_agent.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
@@ -32,6 +34,9 @@ class _ArchiveRelay extends RelaySessionNotifier {
   final submitted = <NostrEvent>[];
   final archived = <String>{'archived'};
   Completer<void>? acknowledgement;
+  bool failRefresh = false;
+  int failedRefreshes = 0;
+  VoidCallback? afterAcceptance;
 
   static const chats = {
     'grouped': 'Project chat',
@@ -45,43 +50,49 @@ class _ArchiveRelay extends RelaySessionNotifier {
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
 
-  List<NostrEvent> events(NostrFilter filter) => [
-    if (filter.kinds.contains(39002) && filter.until == null)
-      for (final id in chats.keys)
-        NostrEvent(
-          id: 'members-$id',
-          pubkey: 'relay',
-          createdAt: 1,
-          kind: 39002,
-          tags: [
-            ['d', id],
-            ['p', owner, '', id == 'shared' ? 'member' : 'owner'],
-          ],
-          content: '',
-          sig: '',
-        ),
-    if (filter.kinds.contains(39000))
-      for (final entry in chats.entries)
-        if (filter.tags['#d']?.contains(entry.key) == true)
+  List<NostrEvent> events(NostrFilter filter) {
+    if (failRefresh && filter.kinds.contains(39002)) {
+      failedRefreshes++;
+      throw StateError('List unavailable');
+    }
+    return [
+      if (filter.kinds.contains(39002) && filter.until == null)
+        for (final id in chats.keys)
           NostrEvent(
-            id: 'metadata-${entry.key}-${archived.contains(entry.key)}',
+            id: 'members-$id',
             pubkey: 'relay',
-            createdAt: archived.contains(entry.key) ? 2 : 1,
-            kind: 39000,
+            createdAt: 1,
+            kind: 39002,
             tags: [
-              ['d', entry.key],
-              ['name', entry.value],
-              ['t', 'stream'],
-              ['private'],
-              ['P', entry.key == 'shared' ? 'someone-else' : owner],
-              if (entry.key != 'legacy' && entry.key != 'ordinary')
-                ['t', 'buzz.solo'],
-              if (archived.contains(entry.key)) ['archived', 'true'],
+              ['d', id],
+              ['p', owner, '', id == 'shared' ? 'member' : 'owner'],
             ],
             content: '',
             sig: '',
           ),
-  ];
+      if (filter.kinds.contains(39000))
+        for (final entry in chats.entries)
+          if (filter.tags['#d']?.contains(entry.key) == true)
+            NostrEvent(
+              id: 'metadata-${entry.key}-${archived.contains(entry.key)}',
+              pubkey: 'relay',
+              createdAt: archived.contains(entry.key) ? 2 : 1,
+              kind: 39000,
+              tags: [
+                ['d', entry.key],
+                ['name', entry.value],
+                ['t', 'stream'],
+                ['private'],
+                ['P', entry.key == 'shared' ? 'someone-else' : owner],
+                if (entry.key != 'legacy' && entry.key != 'ordinary')
+                  ['t', 'buzz.solo'],
+                if (archived.contains(entry.key)) ['archived', 'true'],
+              ],
+              content: '',
+              sig: '',
+            ),
+    ];
+  }
 
   @override
   Future<List<NostrEvent>> fetchHistory(
@@ -121,6 +132,7 @@ class _ArchiveRelay extends RelaySessionNotifier {
     submitted.add(event);
     await acknowledgement?.future;
     archived.add(event.getTagValue('h')!);
+    afterAcceptance?.call();
     return event;
   }
 }
@@ -133,6 +145,8 @@ void main() {
       final owner = nostr.Keys.generate();
       final relay = _ArchiveRelay(owner.public);
       final embedded = platform == TargetPlatform.android;
+      final pane = ConversationPaneController();
+      addTearDown(pane.dispose);
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
@@ -166,11 +180,14 @@ void main() {
               ),
               child: child!,
             ),
-            home: embedded
-                ? const Scaffold(
-                    body: CustomScrollView(slivers: [MePage(sliver: true)]),
-                  )
-                : const MePage(),
+            home: ConversationPaneScope(
+              controller: pane,
+              child: embedded
+                  ? const Scaffold(
+                      body: CustomScrollView(slivers: [MePage(sliver: true)]),
+                    )
+                  : const MePage(),
+            ),
           ),
         ),
       );
@@ -199,8 +216,9 @@ void main() {
       expect(shared.hitTestable(), findsOneWidget);
       await tester.tap(shared);
       await tester.pumpAndSettle();
-      expect(find.byType(ChannelDetailPage), findsOneWidget);
-      Navigator.of(tester.element(find.byType(ChannelDetailPage))).pop();
+      expect(pane.selectedId, 'shared');
+      expect(pane.detailBuilder!(context), isA<ChannelDetailPage>());
+      pane.clear();
       await tester.pumpAndSettle();
       expect(shared.hitTestable(), findsOneWidget);
       expect(find.byType(Dismissible), findsNWidgets(3));
@@ -284,7 +302,7 @@ void main() {
       expect(find.text('Project chat'), findsNothing);
       relay.acknowledgement!.completeError(StateError('Relay unavailable'));
       await tester.pumpAndSettle();
-      expect(find.textContaining('Couldn’t archive chat:'), findsOneWidget);
+      expect(find.text('Couldn’t archive chat. Try again.'), findsOneWidget);
       await tester.tap(find.text('App work'));
       await tester.pumpAndSettle();
       expect(find.text('Project chat').hitTestable(), findsOneWidget);
@@ -297,12 +315,23 @@ void main() {
         isFalse,
       );
 
-      relay.acknowledgement = null;
+      relay.acknowledgement = Completer<void>();
+      pane.open('grouped', (_) => const SizedBox());
       await tester.drag(find.text('Project chat'), const Offset(-700, 0));
       await tester.pumpAndSettle();
       await tester.tap(find.widgetWithText(FilledButton, 'Archive'));
       await tester.pumpAndSettle();
+      // Metadata can arrive before the write acknowledgement. That is still
+      // reconciled, and must not leave an accepted ID behind after unarchive.
+      relay.archived.add('grouped');
+      await container.read(channelsProvider.notifier).refresh();
+      await tester.pumpAndSettle();
+      expect(pane.selectedId, 'grouped');
+      relay.acknowledgement!.complete();
+      await tester.pumpAndSettle();
+      relay.acknowledgement = null;
       expect(find.text('Project chat'), findsNothing);
+      expect(pane.selectedId, isNull);
       expect(find.text('Loose chat'), findsOneWidget);
       expect(
         container
@@ -344,7 +373,132 @@ void main() {
       expect(find.text('Legacy chat'), findsNothing);
       expect(relay.archived, containsAll(['grouped', 'legacy']));
       expect(find.text('Loose chat').hitTestable(), findsOneWidget);
+      ScaffoldMessenger.of(context).clearSnackBars();
+      await tester.pumpAndSettle();
+      // Relay acceptance plus a real list-read failure retains cached rows.
+      // It must retain accepted knowledge too: no second kind:9002, including
+      // after the section disposes/remounts. Recovery retries only the read.
+      relay.failRefresh = true;
+      pane.open('shared', (_) => const SizedBox());
+      await tester.drag(find.text('Loose chat'), const Offset(-700, 0));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Archive'));
+      await tester.pumpAndSettle();
+      expect(relay.failedRefreshes, greaterThan(0));
+      expect(relay.archived, contains('loose'));
+      expect(relay.submitted, hasLength(4));
+      expect(find.text('Couldn’t archive chat. Try again.'), findsNothing);
+      expect(
+        find.text('Chat archived. Refresh to update the list.'),
+        findsOneWidget,
+      );
+      expect(pane.selectedId, 'shared');
+      await tester.tap(find.text('Chats'));
+      await tester.pumpAndSettle();
+      expect(find.text('Loose chat'), findsNothing);
+      await tester.tap(find.text('Chats'));
+      await tester.pumpAndSettle();
+      final acceptedNode = tester.getSemantics(
+        find.bySemanticsLabel('Loose chat, archived, awaiting refresh'),
+      );
+      final acceptedActions = acceptedNode
+          .getSemanticsData()
+          .customSemanticsActionIds!;
+      expect(
+        acceptedActions.map((id) => CustomSemanticsAction.getAction(id)!.label),
+        ['Refresh chat status'],
+      );
+      await tester.drag(find.text('Loose chat'), const Offset(-700, 0));
+      await tester.pumpAndSettle();
+      expect(find.text('Archive #Loose chat?'), findsNothing);
+      expect(relay.submitted, hasLength(4));
+      relay.failRefresh = false;
+      acceptedNode.owner!.performAction(
+        acceptedNode.id,
+        ui.SemanticsAction.customAction,
+        acceptedActions.single,
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Loose chat'), findsNothing);
+      expect(relay.submitted, hasLength(4));
+
+      // Once reconciliation has observed the archive, a genuine later
+      // unarchive is actionable again; completed IDs do not accumulate.
+      relay.archived.remove('grouped');
+      await container.read(channelsProvider.notifier).refresh();
+      await tester.pumpAndSettle();
+      expect(find.bySemanticsLabel('Project chat'), findsOneWidget);
+      await tester.drag(find.text('Project chat'), const Offset(-700, 0));
+      await tester.pumpAndSettle();
+      expect(find.text('Archive #Project chat?'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(relay.submitted, hasLength(4));
+
+      // An acknowledgement from a retired community cannot mutate the new
+      // scope's row state, feedback, or same-ID tablet selection.
+      relay.acknowledgement = Completer<void>();
+      await tester.drag(find.text('Project chat'), const Offset(-700, 0));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Archive'));
+      await tester.pumpAndSettle();
+      expect(relay.submitted, hasLength(5));
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: 'https://other-relay.test', nsec: owner.nsec);
+      await tester.pumpAndSettle();
+      pane.open('grouped', (_) => const SizedBox());
+      relay.acknowledgement!.complete();
+      await tester.pumpAndSettle();
+      expect(pane.selectedId, 'grouped');
+      expect(find.bySemanticsLabel('Project chat'), findsOneWidget);
+      expect(
+        find.bySemanticsLabel('Project chat, archived, awaiting refresh'),
+        findsNothing,
+      );
+      expect(find.text('Couldn’t archive chat. Try again.'), findsNothing);
       expect(tester.takeException(), isNull);
     }, variant: TargetPlatformVariant.only(platform));
   }
+  test(
+    'archive acceptance is reported before reconciliation errors propagate',
+    () async {
+      final owner = nostr.Keys.generate();
+      final relay = _ArchiveRelay(owner.public);
+      var valid = true;
+      var accepted = 0;
+      relay.afterAcceptance = () => valid = false;
+      final actionsProvider = Provider<ChannelActions>(
+        (ref) => ChannelActions(
+          ref: ref,
+          session: relay,
+          signedEventRelay: SignedEventRelay(session: relay, nsec: owner.nsec),
+          currentPubkey: owner.public,
+          isCommunityValid: () => valid,
+        ),
+      );
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      await expectLater(
+        container
+            .read(actionsProvider)
+            .archiveChannel('grouped', onAccepted: () => accepted++),
+        throwsA(isA<StateError>()),
+      );
+      expect(accepted, 1);
+      expect(relay.submitted, hasLength(1));
+      expect(relay.archived, contains('grouped'));
+
+      valid = true;
+      relay.acknowledgement = Completer<void>();
+      final rejected = container
+          .read(actionsProvider)
+          .archiveChannel('loose', onAccepted: () => accepted++);
+      final rejection = expectLater(rejected, throwsA(isA<StateError>()));
+      relay.acknowledgement!.completeError(StateError('Denied'));
+      await rejection;
+      expect(accepted, 1);
+      expect(relay.archived, isNot(contains('loose')));
+    },
+  );
 }
