@@ -2,7 +2,7 @@ import Flutter
 import SwiftUI
 import UIKit
 
-private struct NativeEmojiMediaHeaderError: Error {}
+private struct NativeEmojiMediaBytesError: Error {}
 
 final class NativeEmojiPickerCoordinator: NSObject,
   UIAdaptivePresentationControllerDelegate
@@ -30,15 +30,34 @@ final class NativeEmojiPickerCoordinator: NSObject,
     }
   }
 
-  static func mediaHeaders(for url: URL) async throws -> [String: String] {
-    guard let channel = activeCoordinator?.channel else { return [:] }
-    return try await withCheckedThrowingContinuation { continuation in
-      channel.invokeMethod("mediaHeaders", arguments: url.absoluteString) { result in
-        if result is FlutterError {
-          continuation.resume(throwing: NativeEmojiMediaHeaderError())
-          return
+  @MainActor private static var nextMediaRequestID = 0
+
+  /// [url]'s encoded bytes from Flutter, which serves them from the shared
+  /// media disk cache or downloads them once. Cancelling the task cancels the
+  /// download when no other surface needs it.
+  @MainActor
+  static func mediaBytes(for url: URL) async throws -> Data {
+    guard let channel = activeCoordinator?.channel else {
+      throw NativeEmojiMediaBytesError()
+    }
+    nextMediaRequestID += 1
+    let id = nextMediaRequestID
+    return try await withTaskCancellationHandler {
+      try await withCheckedThrowingContinuation { continuation in
+        channel.invokeMethod(
+          "mediaBytes",
+          arguments: ["id": id, "url": url.absoluteString]
+        ) { result in
+          guard let bytes = result as? FlutterStandardTypedData else {
+            continuation.resume(throwing: NativeEmojiMediaBytesError())
+            return
+          }
+          continuation.resume(returning: bytes.data)
         }
-        continuation.resume(returning: result as? [String: String] ?? [:])
+      }
+    } onCancel: {
+      Task { @MainActor in
+        channel.invokeMethod("cancelMediaBytes", arguments: id)
       }
     }
   }

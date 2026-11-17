@@ -43,8 +43,18 @@ const RULES: &[Rule] = &[
     Rule {
         name: "purge_content",
         community_scope: true,
-        allowed: &[Decision::Stage("purge_agents"), Decision::CommunityComplete],
+        allowed: &[
+            Decision::Stage("purge_account"),
+            Decision::Stage("purge_agents"),
+            Decision::CommunityComplete,
+        ],
         decide: after_purge_content,
+    },
+    Rule {
+        name: "purge_account",
+        community_scope: true,
+        allowed: &[Decision::Stage("purge_agents")],
+        decide: |_| Ok(Decision::Stage("purge_agents")),
     },
     Rule {
         name: "purge_agents",
@@ -57,7 +67,7 @@ const RULES: &[Rule] = &[
 fn after_purge_content(result: &Value) -> Result<Decision> {
     // Real content cleanup leaves account and agent cleanup to later stages.
     if result["account_erasure_complete"] == false {
-        return Ok(Decision::Stage("purge_agents"));
+        return Ok(Decision::Stage("purge_account"));
     }
     // Demo execution retains its saved, simulated agent-routing result.
     match result["has_agents"].as_bool() {
@@ -242,11 +252,11 @@ mod tests {
         for (result, expected) in [
             (
                 serde_json::json!({"content": {}, "account_erasure_complete": false}),
-                Decision::Stage("purge_agents"),
+                Decision::Stage("purge_account"),
             ),
             (
                 serde_json::json!({"account_erasure_complete": false, "has_agents": false}),
-                Decision::Stage("purge_agents"),
+                Decision::Stage("purge_account"),
             ),
             (
                 serde_json::json!({"dummy": true, "has_agents": true}),

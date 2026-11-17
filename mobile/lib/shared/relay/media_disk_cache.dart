@@ -186,6 +186,18 @@ class MediaDiskCache {
     }
   }
 
+  /// Whether [url] has saved bytes, from the index alone, without reading
+  /// them.
+  Future<bool> contains(String url) async {
+    try {
+      final manager = await _manager;
+      return await manager?.getFileFromCache(url, ignoreMemCache: true) != null;
+    } on Object catch (error) {
+      _logFailure(error);
+      return false;
+    }
+  }
+
   /// [url]'s saved bytes, or null when they are not on disk.
   Future<MediaDiskCacheHit?> read(String url) async {
     final FileInfo? info;

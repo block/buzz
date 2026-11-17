@@ -19,6 +19,7 @@ async fn incremental_resets_for_first_artifact_during_channel_transition() {
         let pool = f.pool.clone();
         let community = f.community;
         let home = f.home;
+        let owner = f.owner.public_key().to_bytes();
         let transition = tokio::spawn(async move {
             if delete_channel {
                 assert!(
@@ -35,6 +36,7 @@ async fn incremental_resets_for_first_artifact_during_channel_transition() {
                         visibility: Some("private".into()),
                         ..Default::default()
                     },
+                    &owner,
                 )
                 .await
                 .unwrap();

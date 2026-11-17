@@ -188,7 +188,7 @@ pub(in crate::store) async fn lock_owned(
 }
 
 pub(in crate::store) async fn validate_approved_inventory(
-    tx: &mut Tx<'_>,
+    tx: &mut sqlx::PgConnection,
     request: &EntityRequest,
 ) -> Result<()> {
     let digest = validated_inventory_digest(request)?;
@@ -198,7 +198,7 @@ pub(in crate::store) async fn validate_approved_inventory(
     )
     .bind(request.id)
     .bind(digest)
-    .fetch_one(&mut **tx)
+    .fetch_one(&mut *tx)
     .await?;
     if !approved {
         return Err(DbError::DeletionSafety(

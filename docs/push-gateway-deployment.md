@@ -1,6 +1,6 @@
 # Buzz Push Gateway deployment
 
-`buzz-push-gateway` is a standalone APNs last hop. Build it with `Dockerfile.push-gateway`; do not run it in the relay image or give relays APNs credentials.
+`buzz-push-gateway` is a standalone APNs and FCM last hop. Build it with `Dockerfile.push-gateway`; do not run it in the relay image or give relays APNs or FCM credentials.
 
 ## Network and health
 
@@ -30,6 +30,32 @@ cannot select or override that identity. Separate applications use separate
 gateway deployments and authority databases.
 
 See [Buzz push notes](buzz-push.md) for the current experimental contract.
+
+## Android (optional)
+
+The same gateway serves the app's Android installations through Firebase Cloud
+Messaging (FCM HTTP v1). Android is off unless all four settings are present;
+a partial set fails startup. The platform of an installation is recorded only in
+gateway state, derived from the attestation type at enrollment. The relay never
+sees it.
+
+| Variable | Purpose |
+|---|---|
+| `BUZZ_PUSH_ANDROID_PACKAGE_NAME` | Exact Android application package, for example `com.example.buzz`. |
+| `BUZZ_PUSH_ANDROID_SIGNING_CERT_DIGESTS` | Comma-separated SHA-256 digests (64 hex characters each) of the app's accepted signing certificates. |
+| `BUZZ_PUSH_FCM_PROJECT_ID` | Firebase project that owns the app's registration tokens, for example `example-project`. |
+| `BUZZ_PUSH_FCM_SERVICE_ACCOUNT_PATH` | Read-only mounted service account key JSON the gateway uses to call FCM. Never commit it. |
+
+The wake is a high-priority, data-only FCM message with a compiled-in payload,
+one constant collapse key and a time to live taken from the delivery's expiry.
+After enrollment, an Android installation signs every call (delegate, revoke a
+delegation, rotate the endpoint, revoke the installation) with its attested
+Keystore key: an ECDSA P-256 signature over the same transcript bytes iOS
+signs, whose single-use challenge is its replay protection.
+
+Android Key Attestation chain verification is not part of this build yet: a
+gateway configured for Android starts, logs a warning, and rejects every Android
+enrollment until it lands. Enable Android in production only after that.
 
 Optional endpoint quota policy variables are `BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS` (default `10`, max `86400`) and `BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES` (default `10`, max `10000`). These are Buzz policy hypotheses, not Apple-published limits; tune under load while retaining a hard ceiling.
 
@@ -102,6 +128,9 @@ The gateway serves Prometheus metrics at `GET /metrics` on the **private health 
 | `push_gateway_apns_send_attempts_total` | counter | none | Entries into the concrete APNs HTTP send seam. Compare with terminal outcomes to detect work that never reached transport. |
 | `push_gateway_apns_deliveries_total` | counter | `outcome` = `accepted` \| `invalid_endpoint` \| `retry` \| `configuration_fault` \| `permanent_request_fault` | Terminal APNs send outcomes. |
 | `push_gateway_apns_delivery_seconds` | histogram | — | APNs send round-trip latency (seconds). |
+| `push_gateway_fcm_send_attempts_total` | counter | none | Entries into the concrete FCM HTTP send seam. |
+| `push_gateway_fcm_deliveries_total` | counter | `outcome` (the same five classes as APNs) | Terminal FCM send outcomes. |
+| `push_gateway_fcm_delivery_seconds` | histogram | none | FCM send round-trip latency (seconds), including any access token refresh. |
 | `push_gateway_admissions_total` | counter | `result` = `admitted` \| `rejected` \| `unavailable` | Outcome at the `authorize_delivery` replay/quota fence. |
 | `push_gateway_delivery_errors_total` | counter | `class` (static) | Selected delivery-handler exit classes only (see note). |
 | `push_gateway_reaper_failures_total` | counter | — | Retention reaper sweep failures. |

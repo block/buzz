@@ -136,6 +136,11 @@ run_unit_tests() {
   run_test_step "buzz-workflow unit tests" \
     cargo test -p buzz-workflow --lib -- --nocapture
 
+  # Deletion workflow/unit tests; Postgres cases remain ignored here.
+  # Mirrors the nextest path in `just test-unit`.
+  run_test_step "buzz-deletion unit tests" \
+    cargo test -p buzz-deletion --lib -- --nocapture
+
   # Keep the relay-to-agent trust-boundary regressions in the fallback path
   # when cargo-nextest is unavailable.
   run_test_step "buzz-acp tests" \
@@ -182,10 +187,6 @@ run_unit_tests() {
 
   run_test_step "buzz-admin user-deletion intake command tests" \
     cargo test -p buzz-admin user_deletions::tests -- --nocapture
-
-  # Deletion command safety defaults; mirrors the nextest unit lane.
-  run_test_step "buzz-deletion unit tests" \
-    cargo test -p buzz-deletion --lib -- --nocapture
 
   # Multi-tenant conformance gate: independent replay checker + golden
   # fixtures (buzz-conformance). Pure in-process trace replay, no infra.

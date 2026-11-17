@@ -71,8 +71,8 @@
 		AB1200002F40400100A17E01 /* NativeMessagePresentationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1200102F40400100A17E01 /* NativeMessagePresentationCoordinator.swift */; };
 		AB1200022F40400100A17E01 /* NativeReactionDetails.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1200122F40400100A17E01 /* NativeReactionDetails.swift */; };
 		AB1200032F40400100A17E01 /* NativeMessageImageLoaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1200132F40400100A17E01 /* NativeMessageImageLoaderTests.swift */; };
-		AB12AA012F40400100A17E01 /* NativeEmojiRedirectPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB12AA022F40400100A17E01 /* NativeEmojiRedirectPolicyTests.swift */; };
 		AB1200032F40400100A17E09 /* IdentityFilePluginTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1200132F40400100A17E09 /* IdentityFilePluginTests.swift */; };
+		78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */ = {isa = PBXBuildFile; productRef = 78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -189,8 +189,8 @@
 		AB1200102F40400100A17E01 /* NativeMessagePresentationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeMessagePresentationCoordinator.swift; sourceTree = "<group>"; };
 		AB1200122F40400100A17E01 /* NativeReactionDetails.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeReactionDetails.swift; sourceTree = "<group>"; };
 		AB1200132F40400100A17E01 /* NativeMessageImageLoaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeMessageImageLoaderTests.swift; sourceTree = "<group>"; };
-		AB12AA022F40400100A17E01 /* NativeEmojiRedirectPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeEmojiRedirectPolicyTests.swift; sourceTree = "<group>"; };
 		AB1200132F40400100A17E09 /* IdentityFilePluginTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentityFilePluginTests.swift; sourceTree = "<group>"; };
+		78E0A7A72DC9AD7400C4905E /* FlutterGeneratedPluginSwiftPackage */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = FlutterGeneratedPluginSwiftPackage; path = Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -214,6 +214,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */,
 				BZZ00000000000000000025 /* BuzzPushKit in Frameworks */,
 				33ADD70AB275E0EC81295559 /* Pods_Runner.framework in Frameworks */,
 			);
@@ -229,7 +230,6 @@
 				BC0010000000000000000004 /* BrowserAuthBridgeTests.swift */,
 				F84380010000000000000002 /* ProfileSetupRecoveryTests.swift */,
 				AB1200132F40400100A17E01 /* NativeMessageImageLoaderTests.swift */,
-				AB12AA022F40400100A17E01 /* NativeEmojiRedirectPolicyTests.swift */,
 				AB1200132F40400100A17E09 /* IdentityFilePluginTests.swift */,
 				BZZ0000000000000000002C /* BuzzCommunicationNotificationTests.swift */,
 				331C80A0294A618700263BE5 /* Fixtures */,
@@ -263,6 +263,7 @@
 		9740EEB11CF90186004384FC /* Flutter */ = {
 			isa = PBXGroup;
 			children = (
+				78E0A7A72DC9AD7400C4905E /* FlutterGeneratedPluginSwiftPackage */,
 				3B3967151E833CAA004F5970 /* AppFrameworkInfo.plist */,
 				9740EEB21CF90195004384FC /* Debug.xcconfig */,
 				7AFA3C8E1D35360C0083082E /* Release.xcconfig */,
@@ -417,6 +418,7 @@
 			);
 			name = Runner;
 			packageProductDependencies = (
+				78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */,
 				BZZ00000000000000000022 /* BuzzPushKit */,
 			);
 			productName = Runner;
@@ -476,6 +478,7 @@
 			);
 			mainGroup = 97C146E51CF9000F007C117D;
 			packageReferences = (
+				781AD8BC2B33823900A9FFBB /* XCLocalSwiftPackageReference "Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage" */,
 				BZZ00000000000000000021 /* XCLocalSwiftPackageReference "BuzzPushKit" */,
 			);
 			productRefGroup = 97C146EF1CF9000F007C117D /* Products */;
@@ -648,7 +651,6 @@
 				BC0010000000000000000003 /* BrowserAuthBridgeTests.swift in Sources */,
 				F84380010000000000000001 /* ProfileSetupRecoveryTests.swift in Sources */,
 				AB1200032F40400100A17E01 /* NativeMessageImageLoaderTests.swift in Sources */,
-				AB12AA012F40400100A17E01 /* NativeEmojiRedirectPolicyTests.swift in Sources */,
 				AB1200032F40400100A17E09 /* IdentityFilePluginTests.swift in Sources */,
 				BZZ0000000000000000002B /* BuzzCommunicationNotificationTests.swift in Sources */,
 			);
@@ -723,6 +725,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = BuzzPushKit;
 		};
+		781AD8BC2B33823900A9FFBB /* XCLocalSwiftPackageReference "Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -730,6 +736,10 @@
 			isa = XCSwiftPackageProductDependency;
 			package = BZZ00000000000000000021 /* XCLocalSwiftPackageReference "BuzzPushKit" */;
 			productName = BuzzPushKit;
+		};
+		78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = FlutterGeneratedPluginSwiftPackage;
 		};
 /* End XCSwiftPackageProductDependency section */
 

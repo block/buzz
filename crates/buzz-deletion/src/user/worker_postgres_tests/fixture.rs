@@ -28,7 +28,7 @@ impl Fixture {
             delete: true,
             relay_pubkey: None,
             batch_size: 100,
-            max_items: 1_000_000,
+            max_items: 100_000,
             next_step: false,
             fail_stage: None,
             stage_delay: Duration::ZERO,
@@ -88,6 +88,33 @@ pub(super) async fn fixture() -> Fixture {
         )
         .await
         .unwrap();
+
+    // The real gate is not implemented. Supply its fixture prerequisite through
+    // the same storage API, then exercise real media dispatch and retry.
+    let lease = store
+        .claim(request.id, "fixture", DEFAULT_LEASE_DURATION)
+        .await
+        .unwrap()
+        .unwrap();
+    let transition = UserDeletionTransition::new(&store);
+    let NextStage::Stage(gate) = transition.get_next_stage(&lease, None).await.unwrap() else {
+        panic!("expected gate")
+    };
+    assert_eq!(gate.stage, "gate_user");
+    store.start_stage(&lease, gate.id).await.unwrap();
+    store
+        .save_stage_success(&lease, gate.id, serde_json::json!({"fixture": true}))
+        .await
+        .unwrap();
+    let NextStage::Stage(media) = transition
+        .get_next_stage(&lease, Some(gate.id))
+        .await
+        .unwrap()
+    else {
+        panic!("expected media")
+    };
+    assert_eq!(media.stage, "purge_media");
+    store.release(&lease).await.unwrap();
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());

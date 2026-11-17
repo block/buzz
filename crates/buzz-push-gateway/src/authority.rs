@@ -24,9 +24,41 @@ pub struct Challenge {
 pub(crate) const CHALLENGE_QUOTA_WINDOW_SECONDS: i64 = 60;
 pub(crate) const CHALLENGE_QUOTA_MAX_REQUESTS: usize = 600;
 
+/// The platform whose push service wakes an installation. It lives only in
+/// gateway state: it is derived from the enrollment attestation type and never
+/// appears in a grant, a lease, or any relay-visible value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    Ios,
+    Android,
+}
+
+impl Platform {
+    /// The value stored in `push_gateway_installations.platform`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Platform::Ios => "ios",
+            Platform::Android => "android",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "ios" => Some(Platform::Ios),
+            "android" => Some(Platform::Android),
+            _ => None,
+        }
+    }
+}
+
+/// `app_attest_key_id` and `app_attest_public_key` hold the attested key's
+/// identifier and SEC1 public key on both platforms (the column names predate
+/// Android). `assertion_counter` only advances for iOS: Keystore keys have no
+/// signature counter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewInstallation {
     pub id: Uuid,
+    pub platform: Platform,
     pub app_attest_key_id: Vec<u8>,
     pub app_attest_public_key: Vec<u8>,
     pub assertion_counter: u32,
@@ -39,6 +71,7 @@ pub struct NewInstallation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Installation {
     pub id: Uuid,
+    pub platform: Platform,
     pub app_attest_key_id: Vec<u8>,
     pub app_attest_public_key: Vec<u8>,
     pub assertion_counter: u32,
@@ -65,6 +98,7 @@ pub struct Delegation {
 pub struct DeliveryAuthority {
     pub delegation_id: Uuid,
     pub installation_id: Uuid,
+    pub platform: Platform,
     pub relay_pubkey: String,
     pub token_ciphertext: Vec<u8>,
     pub endpoint_epoch: i64,
@@ -311,6 +345,7 @@ impl AuthorityStore for MemoryAuthorityStore {
             n.id,
             Installation {
                 id: n.id,
+                platform: n.platform,
                 app_attest_key_id: n.app_attest_key_id,
                 app_attest_public_key: n.app_attest_public_key,
                 assertion_counter: n.assertion_counter,
@@ -550,6 +585,7 @@ impl AuthorityStore for MemoryAuthorityStore {
         let authority = DeliveryAuthority {
             delegation_id,
             installation_id: i.id,
+            platform: i.platform,
             relay_pubkey: relay.to_owned(),
 
             token_ciphertext: i.token_ciphertext.clone(),
@@ -638,6 +674,7 @@ mod tests {
         store
             .create_installation(
                 NewInstallation {
+                    platform: Platform::Ios,
                     id: Uuid::from_u128(1),
                     app_attest_key_id: vec![1],
                     app_attest_public_key: vec![2; 33],
@@ -773,6 +810,7 @@ mod tests {
     async fn expired_installation_can_be_replaced_but_live_installation_cannot() {
         let store = store().await;
         let replacement = |id| NewInstallation {
+            platform: Platform::Ios,
             id,
             app_attest_key_id: vec![1],
             app_attest_public_key: vec![5; 33],
@@ -939,6 +977,7 @@ mod tests {
         store
             .create_installation(
                 NewInstallation {
+                    platform: Platform::Ios,
                     id: Uuid::from_u128(5),
                     app_attest_key_id: vec![1],
                     app_attest_public_key: vec![5; 33],

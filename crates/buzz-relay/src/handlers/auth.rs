@@ -3005,6 +3005,7 @@ mod tests {
                             auto_join: Some(true),
                             ..Default::default()
                         },
+                        &owner.public_key().to_bytes(),
                     )
                     .await
                     .expect("flag channel");

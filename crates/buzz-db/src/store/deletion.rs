@@ -48,10 +48,9 @@ pub const SCHEMA_DESTRUCTION_LOCK_KEY: i64 = 0x62757a7a64656c31;
 /// `hashtextextended($1, 0)`.
 ///
 /// Deletion takes the lock exclusively and community writers take it shared.
-/// The bytes must equal the SQL function
-/// `community_deletion_lock_key(uuid)` (`'buzz-community-deletion:' ||
-/// target::text`) for as long as any relay or database function still uses
-/// it, or deletion and writers stop excluding each other.
+/// The bytes are permanent: operator repair scripts build the same key
+/// (`docs/database.md`), and a replica holding an older key during a rolling
+/// deploy would stop excluding deletion.
 pub fn community_deletion_lock_key(community: CommunityId) -> String {
     format!("buzz-community-deletion:{}", community.as_uuid())
 }
@@ -4099,6 +4098,28 @@ fn bound_text(input: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
+    /// The key bytes are permanent: older replicas and operator repair
+    /// scripts build the same string, so any change splits the lock.
+    #[test]
+    fn community_deletion_lock_key_bytes_are_fixed() {
+        for (id, key) in [
+            (
+                Uuid::nil(),
+                "buzz-community-deletion:00000000-0000-0000-0000-000000000000",
+            ),
+            (
+                Uuid::max(),
+                "buzz-community-deletion:ffffffff-ffff-ffff-ffff-ffffffffffff",
+            ),
+            (
+                Uuid::from_u128(0x0123_4567_89ab_cdef_fedc_ba98_7654_3210),
+                "buzz-community-deletion:01234567-89ab-cdef-fedc-ba9876543210",
+            ),
+        ] {
+            assert_eq!(community_deletion_lock_key(CommunityId::from_uuid(id)), key);
+        }
+    }
+
     /// Every table an approval may gain is one this release purges and
     /// verifies, and every pending table may be gained after approval.
     #[test]
@@ -4771,14 +4792,15 @@ mod postgres_tests {
         .await
         .expect("lookup retired function");
         assert!(!retired_function);
-        let retained: (bool, bool) = sqlx::query_as(
+        let retired: (bool, bool, bool) = sqlx::query_as(
             "SELECT to_regprocedure('community_deletion_lock_key(uuid)') IS NOT NULL, \
+             to_regprocedure('profile_name_fields(text)') IS NOT NULL, \
              EXISTS(SELECT 1 FROM pg_trigger WHERE tgname = 'communities_deletion_tombstone')",
         )
         .fetch_one(&db.pool)
         .await
-        .expect("lookup retained guards");
-        assert_eq!(retained, (true, true));
+        .expect("lookup retired functions and retained guard");
+        assert_eq!(retired, (false, false, true));
     }
 
     #[tokio::test]
@@ -4918,27 +4940,6 @@ DROP FUNCTION community_deletion_lock_key(UUID);
                 Err(DbError::AccessDenied(_))
             ));
             crate::test_support::set_deletion_state(&db.pool, *community.as_uuid(), "active").await;
-        }
-    }
-
-    /// Mixed-version fleets lock through both the Rust key and the SQL
-    /// function until the function is dropped; they must name the same lock.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn community_deletion_lock_key_matches_the_sql_function() {
-        let (db, _) = store().await;
-        let mut communities = vec![Uuid::nil(), Uuid::max()];
-        communities.extend((0..64).map(|_| Uuid::new_v4()));
-        for id in communities {
-            let community = CommunityId::from_uuid(id);
-            let (rust_lock, sql_lock): (i64, i64) =
-                sqlx::query_as("SELECT hashtextextended($1, 0), community_deletion_lock_key($2)")
-                    .bind(community_deletion_lock_key(community))
-                    .bind(id)
-                    .fetch_one(&db.pool)
-                    .await
-                    .expect("hash lock keys");
-            assert_eq!(rust_lock, sql_lock, "lock key drifted for {id}");
         }
     }
 
@@ -5144,6 +5145,7 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
                     name: Some("wrong-community".to_string()),
                     ..Default::default()
                 },
+                &[1; 32],
             )
             .await,
             Err(DbError::ChannelNotFound(_))
@@ -5155,6 +5157,7 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
                 name: Some("same-community".to_string()),
                 ..Default::default()
             },
+            &[1; 32],
         )
         .await
         .expect("same-community metadata update");
