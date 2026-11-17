@@ -5145,6 +5145,7 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
                     name: Some("wrong-community".to_string()),
                     ..Default::default()
                 },
+                &[1; 32],
             )
             .await,
             Err(DbError::ChannelNotFound(_))
@@ -5156,6 +5157,7 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
                 name: Some("same-community".to_string()),
                 ..Default::default()
             },
+            &[1; 32],
         )
         .await
         .expect("same-community metadata update");
@@ -5782,7 +5784,7 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
     async fn contender_db(application_name: &str) -> Db {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1 -- local test-only credentials
         let options = PgConnectOptions::from_str(&database_url)
             .expect("parse test database URL")
             .application_name(application_name);
