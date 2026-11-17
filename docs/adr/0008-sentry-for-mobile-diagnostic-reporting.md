@@ -4,13 +4,13 @@ The mobile app sends its [diagnostic reporting](../../CONTEXT.md#diagnostic-repo
 
 ## Considered options
 
-- **Datadog.** The relay already exports its traces and metrics to Datadog, so client and server data would sit together. Its Flutter SDK has no custom metrics from the client, and its crash reports arrive only through its real-user-monitoring sessions with native crashes off by default.
+- **Datadog.** The relay exports OpenTelemetry traces and Prometheus metrics, which a deployment can collect in Datadog, so client and server data could sit together there. Its Flutter SDK documents no custom metrics from the client, and its native crash reporting is off by default.
 - **Bugsnag.** Comparable crash and error coverage, but no logs, no custom metrics, and three releases of its Flutter SDK in the year before the comparison.
 
 ## Consequences
 
 The current Sentry Flutter SDK installs on iOS only through Swift Package Manager, so the iOS app's plugins move to Swift Package Manager first.
 
-None of the three SDKs instruments WebSockets. Everything reported about relay connections is written by hand in the app, whichever vendor is used.
+None of the three SDKs documents any WebSocket instrumentation. Everything reported about relay connections is written by hand in the app, whichever vendor is used.
 
-Mobile reports are not joined to the relay's traces in Datadog. Correlating a mobile fault with relay behavior is done by time and member until a link between the two is built.
+Mobile reports are not joined to the relay's traces. Correlating a mobile fault with relay behavior is done by time and member until a link between the two is built.

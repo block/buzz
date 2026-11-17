@@ -84,7 +84,7 @@ _Avoid_: App Store build, external build
 
 ### Diagnostic reporting
 
-Sending crash, error and performance data from a mobile installation to a [reporting destination](#reporting-destination). It exists to diagnose faults, so it never covers what people do in the app or what they write. See [ADR 0007](docs/adr/0007-diagnostic-reporting-follows-the-destination.md).
+Sending crash, error and performance data from a mobile installation to a [reporting destination](#reporting-destination). It exists to diagnose faults: it is not a record of how people use the app, and it never includes what they write. See [ADR 0007](docs/adr/0007-diagnostic-reporting-follows-the-destination.md).
 
 _Avoid_: Telemetry, analytics, tracking, observability
 
