@@ -9,7 +9,8 @@ CREATE TABLE push_gateway_installations (
     expires_at TIMESTAMPTZ NOT NULL,
     revoked_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    platform TEXT NOT NULL DEFAULT 'ios' CHECK (platform IN ('ios', 'android'))
 );
 CREATE UNIQUE INDEX push_gateway_installations_active_app_attest_key
     ON push_gateway_installations (app_attest_key_id) WHERE revoked_at IS NULL;

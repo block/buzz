@@ -1,6 +1,6 @@
 # Buzz domain language
 
-Shared terminology for Buzz product behavior. This glossary currently covers mobile [push suppression](#push-suppression), the [notification body](#notification-body), [mobile builds](#mobile-builds), [sharing](#sharing), [quick send](#quick-send) and the [open-channel directory](#open-channel-directory); it is not a complete model of Buzz.
+Shared terminology for Buzz product behavior. This glossary currently covers mobile [push suppression](#push-suppression), the [notification body](#notification-body), [mobile builds](#mobile-builds), [diagnostic reporting](#diagnostic-reporting), [sharing](#sharing), [quick send](#quick-send) and the [open-channel directory](#open-channel-directory); it is not a complete model of Buzz.
 
 ## Notifications
 
@@ -81,6 +81,18 @@ _Avoid_: Dogfood build, enterprise build, org build
 The mobile app distributed through the App Store and TestFlight. It uses only the public Builderlab and cannot reach any organization's community.
 
 _Avoid_: App Store build, external build
+
+### Diagnostic reporting
+
+Sending crash, error and performance data from a mobile installation to a [reporting destination](#reporting-destination). It exists to diagnose faults: it is not a record of how people use the app, and it never includes what they write. See [ADR 0007](docs/adr/0007-diagnostic-reporting-follows-the-destination.md).
+
+_Avoid_: Telemetry, analytics, tracking, observability
+
+### Reporting destination
+
+Where a mobile build's [diagnostic reporting](#diagnostic-reporting) is sent, chosen at build time by whoever distributes the build. A build with no reporting destination reports nothing.
+
+_Avoid_: DSN, Sentry project
 
 ## Sharing
 

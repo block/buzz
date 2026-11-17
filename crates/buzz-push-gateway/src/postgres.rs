@@ -80,6 +80,12 @@ fn ts(v: DateTime<Utc>) -> i64 {
 fn db(_: sqlx::Error) -> AuthorityError {
     AuthorityError::Unavailable
 }
+fn platform_column(r: &sqlx::postgres::PgRow) -> Result<Platform, AuthorityError> {
+    // The CHECK constraint admits only known platforms; an unknown value means
+    // the schema is ahead of this binary, so fail instead of guessing.
+    Platform::parse(&r.try_get::<String, _>("platform").map_err(db)?)
+        .ok_or(AuthorityError::Unavailable)
+}
 fn bytes32(v: Vec<u8>) -> Result<[u8; 32], AuthorityError> {
     v.try_into().map_err(|_| AuthorityError::Unavailable)
 }
@@ -223,8 +229,8 @@ impl AuthorityStore for PostgresAuthorityStore {
                 .await
                 .map_err(db)?;
         }
-        let result = sqlx::query("INSERT INTO push_gateway_installations(id,app_attest_key_id,app_attest_public_key,assertion_counter,token_ciphertext,token_fingerprint,endpoint_epoch,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING")
-            .bind(n.id).bind(n.app_attest_key_id).bind(n.app_attest_public_key).bind(i64::from(n.assertion_counter)).bind(n.token_ciphertext).bind(n.token_fingerprint.to_vec()).bind(n.endpoint_epoch).bind(at(n.expires_at)?).execute(&mut *tx).await.map_err(db)?;
+        let result = sqlx::query("INSERT INTO push_gateway_installations(id,app_attest_key_id,app_attest_public_key,assertion_counter,token_ciphertext,token_fingerprint,endpoint_epoch,expires_at,platform) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING")
+            .bind(n.id).bind(n.app_attest_key_id).bind(n.app_attest_public_key).bind(i64::from(n.assertion_counter)).bind(n.token_ciphertext).bind(n.token_fingerprint.to_vec()).bind(n.endpoint_epoch).bind(at(n.expires_at)?).bind(n.platform.as_str()).execute(&mut *tx).await.map_err(db)?;
         if result.rows_affected() != 1 {
             return Err(AuthorityError::Conflict);
         }
@@ -235,6 +241,7 @@ impl AuthorityStore for PostgresAuthorityStore {
         let r = sqlx::query("SELECT * FROM push_gateway_installations WHERE id=$1 AND revoked_at IS NULL AND expires_at >= $2")
             .bind(id).bind(at(now)?).fetch_optional(&self.pool).await.map_err(db)?.ok_or(AuthorityError::Rejected)?;
         Ok(Installation {
+            platform: platform_column(&r)?,
             id,
             app_attest_key_id: r.try_get("app_attest_key_id").map_err(db)?,
             app_attest_public_key: r.try_get("app_attest_public_key").map_err(db)?,
@@ -263,6 +270,7 @@ impl AuthorityStore for PostgresAuthorityStore {
         .map_err(db)?
         .ok_or(AuthorityError::Rejected)?;
         Ok(Installation {
+            platform: platform_column(&r)?,
             id,
             app_attest_key_id: r.try_get("app_attest_key_id").map_err(db)?,
             app_attest_public_key: r.try_get("app_attest_public_key").map_err(db)?,
@@ -301,6 +309,7 @@ impl AuthorityStore for PostgresAuthorityStore {
             let id = r.try_get("id").map_err(db)?;
             Ok(Installation {
                 id,
+                platform: platform_column(&r)?,
                 app_attest_key_id: r.try_get("app_attest_key_id").map_err(db)?,
                 app_attest_public_key: r.try_get("app_attest_public_key").map_err(db)?,
                 assertion_counter: u32::try_from(
@@ -431,7 +440,7 @@ impl AuthorityStore for PostgresAuthorityStore {
         // Every authority mutation locks installation before delegation. Keep
         // this order here to avoid delivery-vs-refresh deadlocks.
         let i = sqlx::query(
-            "SELECT token_ciphertext,token_fingerprint,endpoint_epoch,expires_at,revoked_at
+            "SELECT platform,token_ciphertext,token_fingerprint,endpoint_epoch,expires_at,revoked_at
              FROM push_gateway_installations
              WHERE id=(SELECT installation_id FROM push_gateway_delegations WHERE id=$1)
              FOR UPDATE",
@@ -468,6 +477,7 @@ impl AuthorityStore for PostgresAuthorityStore {
         let authority = DeliveryAuthority {
             delegation_id: did,
             installation_id,
+            platform: platform_column(&i)?,
             relay_pubkey: relay.to_owned(),
 
             token_ciphertext: i.try_get("token_ciphertext").map_err(db)?,
@@ -941,6 +951,7 @@ mod postgres_tests {
         let store = PostgresAuthorityStore::new(pool.clone());
         let now = Utc::now().timestamp();
         let installation = |id, expires_at| NewInstallation {
+            platform: Platform::Ios,
             id,
             app_attest_key_id: vec![1],
             app_attest_public_key: vec![2; 33],
@@ -1007,6 +1018,7 @@ mod postgres_tests {
         let store = PostgresAuthorityStore::new(pool.clone());
         let now = Utc::now().timestamp();
         let installation = |id| NewInstallation {
+            platform: Platform::Ios,
             id,
             app_attest_key_id: vec![1],
             app_attest_public_key: vec![2; 33],
