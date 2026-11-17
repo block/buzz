@@ -2781,20 +2781,46 @@ impl Db {
         get_users_bulk(&self.pool, community_id, pubkeys).await
     }
 
-    /// Bulk-fetch user names while constructing an event and its mention tags.
-    #[datastore_span(name = "get_users_bulk_for_event_write", system = "postgresql")]
-    pub async fn get_users_bulk_for_event_write(
+    /// Fetch ordinary display names and verified name aliases for mention tags.
+    ///
+    /// Returns `(name, pubkey_hex)` pairs for the supplied community-local members.
+    /// Keep every alias so the caller can reject names shared by distinct keys.
+    #[datastore_span(name = "get_mention_names_for_event_write", system = "postgresql")]
+    pub async fn get_mention_names_for_event_write(
         &self,
         community_id: CommunityId,
         pubkeys: &[Vec<u8>],
-    ) -> Result<Vec<UserRecord>> {
-        get_users_bulk_with_operation(
+    ) -> Result<Vec<(String, String)>> {
+        if pubkeys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut connection = crate::observability::acquire_writer(
             &self.pool,
-            community_id,
-            pubkeys,
             crate::observability::WriterOperation::EventWrite,
         )
-        .await
+        .await?;
+        Ok(sqlx::query_as(
+            r#"
+            SELECT names.name, encode(member.pubkey, 'hex')
+            FROM unnest($2::bytea[]) AS member(pubkey)
+            LEFT JOIN users u
+                ON u.community_id = $1 AND u.pubkey = member.pubkey
+            LEFT JOIN nip_fi_profile_heads v
+                ON v.community_id = $1 AND v.pubkey = encode(member.pubkey, 'hex')
+            CROSS JOIN LATERAL (
+                SELECT u.display_name AS name
+                UNION
+                SELECT tag->>1 AS name
+                FROM jsonb_array_elements(v.event->'tags') AS tag
+                WHERE tag->>0 IN ('display_name', 'username', 'full_name')
+            ) names
+            WHERE names.name IS NOT NULL
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .bind(pubkeys)
+        .fetch_all(&mut *connection)
+        .await?)
     }
 
     /// Returns the count of active members in a channel.
