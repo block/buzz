@@ -730,7 +730,6 @@ async fn reconcile_channels(
     channel_arg: Option<String>,
     relay_key_arg: Option<String>,
 ) -> Result<()> {
-    use buzz_core::channel::group_state_identity_tags;
     use buzz_core::kind::KIND_NIP29_GROUP_ADMINS;
     use buzz_db::event::EventQuery;
 
@@ -829,19 +828,11 @@ async fn reconcile_channels(
 
             // kind:39001 — admins
             {
-                let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
-                tags.extend(group_state_identity_tags(
-                    &channel.channel_type,
-                    &channel.labels,
-                    &channel.created_by,
-                )?);
-                for m in members
-                    .iter()
-                    .filter(|m| m.role == "owner" || m.role == "admin")
-                {
-                    let pk = hex::encode(&m.pubkey);
-                    tags.push(Tag::parse(["p", &pk, &m.role])?);
-                }
+                let tags = buzz_db::channel::group_admins_tags(
+                    &channel_id_str,
+                    &channel.identity(),
+                    &members,
+                )?;
                 let event = EventBuilder::new(Kind::Custom(KIND_NIP29_GROUP_ADMINS as u16), "")
                     .tags(tags)
                     .sign_with_keys(&relay_keys)
@@ -853,16 +844,11 @@ async fn reconcile_channels(
 
         // kind:39002 — members
         {
-            let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
-            tags.extend(group_state_identity_tags(
-                &channel.channel_type,
-                &channel.labels,
-                &channel.created_by,
-            )?);
-            for m in &members {
-                let pk = hex::encode(&m.pubkey);
-                tags.push(Tag::parse(["p", &pk, "", &m.role])?);
-            }
+            let tags = buzz_db::channel::group_members_tags(
+                &channel_id_str,
+                Some(&channel.identity()),
+                &members,
+            )?;
             let event = EventBuilder::new(Kind::Custom(39002), "")
                 .tags(tags)
                 .sign_with_keys(&relay_keys)
