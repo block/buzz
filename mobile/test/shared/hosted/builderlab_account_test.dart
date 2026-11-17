@@ -545,9 +545,10 @@ void main() {
       FlutterSecureStorage.setMockInitialValues({
         storageKey: record('account-1', 'old'),
       });
-      final client = BuilderlabAccountClient(
-        httpClient: MockClient((_) async => http.Response('{}', status)),
+      final transport = UnreadTrackingClient(
+        (_) => http.Response('{}', status),
       );
+      final client = BuilderlabAccountClient(httpClient: transport);
       if (failure == null) {
         expect(await client.restore(), isNull);
         expect(await stored(), isNull);
@@ -555,6 +556,7 @@ void main() {
         await expectLater(client.restore(), throwsA(failure));
         expect(await stored(), record('account-1', 'old'));
       }
+      expect(transport.unread, 0);
     }
   });
 

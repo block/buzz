@@ -36,3 +36,27 @@ class TrickleClient extends http.BaseClient {
     return http.StreamedResponse(stream.stream, 200);
   }
 }
+
+/// Like dart:io, releases a response only once its body is listened to;
+/// aborting an unread response does not.
+class UnreadTrackingClient extends http.BaseClient {
+  UnreadTrackingClient(this.respond);
+  final http.Response Function(http.BaseRequest) respond;
+  int unread = 0;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    await request.finalize().drain<void>();
+    final response = respond(request);
+    unread++;
+    final body = StreamController<List<int>>(onListen: () => unread--);
+    body
+      ..add(response.bodyBytes)
+      ..close();
+    return http.StreamedResponse(
+      body.stream,
+      response.statusCode,
+      headers: response.headers,
+    );
+  }
+}
