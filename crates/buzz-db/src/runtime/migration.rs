@@ -890,7 +890,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 93);
+        assert_eq!(migrations.len(), 94);
         assert_eq!(migrations[89].version, 90);
         assert!(migrations[89]
             .sql
@@ -1034,10 +1034,10 @@ mod postgres_tests {
             "0091 must bound its ACCESS EXCLUSIVE lock on events before the first DROP"
         );
         // The relay builds the deletion lock key in Rust and reads profile
-        // names inline, so 0093 drops both plain SQL functions. 0029 and 0064
+        // names inline, so 0094 drops both plain SQL functions. 0029 and 0064
         // stay frozen.
-        assert_eq!(migrations[92].version, 93);
-        let retire_functions = strip_sql_comments(migrations[92].sql.as_str());
+        assert_eq!(migrations[93].version, 94);
+        let retire_functions = strip_sql_comments(migrations[93].sql.as_str());
         for statement in [
             "SET LOCAL lock_timeout = '5s';",
             "DROP FUNCTION community_deletion_lock_key(UUID);",
@@ -1045,7 +1045,7 @@ mod postgres_tests {
         ] {
             assert!(
                 retire_functions.contains(statement),
-                "0093 must run {statement}"
+                "0094 must run {statement}"
             );
         }
         assert!(!retire_functions.contains("CASCADE"));
@@ -3996,11 +3996,11 @@ mod postgres_tests {
             .expect("deletion catalog must accept post-retirement catalog");
     }
 
-    /// 0093 drops both plain SQL functions, and the relay boots on either
+    /// 0094 drops both plain SQL functions, and the relay boots on either
     /// side of it: rolling deploys run new code before and after the drop.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn migration_0093_drops_plain_sql_functions() {
+    async fn migration_0094_drops_plain_sql_functions() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
         let retirement = MIGRATOR
