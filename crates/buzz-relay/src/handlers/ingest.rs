@@ -678,6 +678,11 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
                 Ok(Scope::ChannelsWrite)
             }
         }
+        // Opening an artifact's conversation is posting in its home, not
+        // creating a channel of one's own.
+        KIND_NIP29_CREATE_GROUP if super::artifact::opens_conversation(event) => {
+            Ok(Scope::MessagesWrite)
+        }
         KIND_NIP29_CREATE_GROUP | KIND_CANVAS => Ok(Scope::ChannelsWrite),
         KIND_NIP29_JOIN_REQUEST | KIND_NIP29_LEAVE_REQUEST | KIND_NIP43_LEAVE_REQUEST => {
             Ok(Scope::ChannelsRead)
@@ -3005,6 +3010,18 @@ async fn ingest_event_inner(
         }
     }
 
+    // An artifact's conversation holds only comments: everything it does
+    // not list is refused, so a new kind stays out until it is added.
+    if channel_row
+        .as_ref()
+        .is_some_and(|ch| ch.channel_type == buzz_db::channel::ChannelType::Artifact.as_str())
+        && !super::artifact::conversation_accepts_kind(kind_u32)
+    {
+        return Err(IngestError::Rejected(
+            "invalid: an artifact's conversation only holds comments".into(),
+        ));
+    }
+
     // Handled directly — these mutate relay_members and do NOT get stored.
     // The handler enforces the durable community ban itself: the write-path
     // gate above exempts relay-admin kinds so timed-out admins keep their
@@ -3173,7 +3190,19 @@ async fn ingest_event_inner(
 
         if !is_edit_metadata && !is_self_departure {
             if let Some(channel) = &channel_row {
-                if channel.archived_at.is_some() {
+                // An artifact's conversation is archived with its home.
+                let home_archived = match channel.parent_id {
+                    Some(home)
+                        if channel.channel_type
+                            == buzz_db::channel::ChannelType::Artifact.as_str() =>
+                    {
+                        load_channel_for_write(tenant, state, home)
+                            .await?
+                            .is_some_and(|home| home.archived_at.is_some())
+                    }
+                    _ => false,
+                };
+                if channel.archived_at.is_some() || home_archived {
                     return Err(match target_denial {
                         Some(reason) => target_denied(reason),
                         None => IngestError::Rejected("invalid: channel is archived".into()),
@@ -3202,6 +3231,12 @@ async fn ingest_event_inner(
             );
         }
         return Ok(result);
+    }
+
+    // Opening an artifact's conversation. Its own handler authorizes the
+    // sender in the artifact's home; nobody becomes the channel's owner.
+    if kind_u32 == KIND_NIP29_CREATE_GROUP && super::artifact::opens_conversation(&event) {
+        return super::artifact::open_conversation(state, tenant, &event, &auth).await;
     }
 
     if kind_u32 == KIND_STREAM_MESSAGE_EDIT {
@@ -3321,6 +3356,16 @@ async fn ingest_event_inner(
             channel_type_str.parse().map_err(|_| {
                 IngestError::Rejected(format!("invalid channel_type: {channel_type_str}"))
             })?;
+        // Artifact conversations live at addresses derived from their
+        // artifact (UUIDv8) and open only through their own route above.
+        if channel_type == buzz_db::channel::ChannelType::Artifact
+            || channel_id.is_some_and(|id| id.get_version_num() == 8)
+        {
+            return Err(IngestError::Rejected(
+                "invalid: artifact conversations open with an artifact tag, at their derived address"
+                    .into(),
+            ));
+        }
         let visibility: buzz_db::channel::ChannelVisibility =
             match event.tags.iter().find_map(|t| {
                 if t.kind().to_string() == "visibility" {

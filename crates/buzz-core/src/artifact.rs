@@ -165,9 +165,36 @@ pub fn validate(event: &Event) -> Result<ArtifactEnvelope, &'static str> {
         root,
     })
 }
+/// Domain separator for [`conversation_id`].
+pub const CONVERSATION_ID_DOMAIN: &[u8] = b"nip-ar-conversation\0";
+
+/// The channel ID of an artifact's conversation, derived from its `d` alone:
+/// the first 16 bytes of `SHA-256("nip-ar-conversation\0" || UTF-8(d))`, with
+/// the RFC 9562 version (8) and variant bits set. Anyone holding the artifact
+/// can compute it, and it does not change when the artifact moves.
+pub fn conversation_id(d: &str) -> Uuid {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(CONVERSATION_ID_DOMAIN);
+    hasher.update(d.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    uuid::Builder::from_custom_bytes(bytes).into_uuid()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conversation_id_matches_the_documented_fixture() {
+        let id = conversation_id("8c1f3d2e-4b5a-4c6d-9e7f-0a1b2c3d4e5f");
+        assert_eq!(id.get_version_num(), 8);
+        assert_eq!(id.get_variant(), uuid::Variant::RFC4122);
+        assert_eq!(id.to_string(), "3f3e3cd7-3b56-81d9-8dd2-8d8b5b1f6d57");
+        assert_ne!(id, conversation_id("8c1f3d2e-4b5a-4c6d-9e7f-0a1b2c3d4e50"));
+    }
     use nostr::{EventBuilder, Keys, Kind, Tag};
     fn event(extra: Vec<Vec<String>>, op: &str, content: &str) -> Event {
         let mut tags = vec![

@@ -257,6 +257,60 @@ the child, without joining it.
   `parent_access` tag beside `parent` and files the channel unnarrowed, so a
   client checks for it before filing a narrowed channel.
 
+### Artifact conversations
+
+A NIP-AR artifact, such as a task, can have a **conversation**: a channel
+for its comments. It belongs to the artifact, not to anyone who posts in it.
+
+- **Address.** The conversation's channel ID is derived from the artifact's
+  `d` alone, so every client computes the same one: take the first 16 bytes
+  of `SHA-256("nip-ar-conversation" || 0x00 || UTF-8(d))`, then set the
+  RFC 9562 version (8) and variant bits (byte 6 = `(b & 0x0f) | 0x80`,
+  byte 8 = `(b & 0x3f) | 0x80`). It does not change when the artifact moves.
+  Fixture: `d` `8c1f3d2e-4b5a-4c6d-9e7f-0a1b2c3d4e5f` gives
+  `3f3e3cd7-3b56-81d9-8dd2-8d8b5b1f6d57`. Version-8 channel IDs are
+  reserved for conversations: an ordinary kind:9007 at one is refused.
+- **Opening.** kind:9007 with `["h", <derived id>]` and
+  `["artifact", <d>]`. Anyone who may post in the artifact's home may send
+  it; it needs the `messages:write` scope. The relay checks that `h` is the
+  derived address and that the artifact exists, is not deleted and lives in
+  that home. It then creates a private channel of type `artifact`, filed
+  under the home (`parent`), with no member rows: nobody owns it. Other
+  tags are ignored. Opening one that already exists is accepted and writes
+  nothing. The home must be a live, unarchived stream or forum with at most
+  one parent, so the conversation is at most the third level; otherwise the
+  relay refuses with `invalid: comments aren't available here`. An
+  artifact cannot itself live in a conversation.
+- **Comments** are kind:9 events with the conversation's `h`. Who reads and
+  posts comes only from the home, through [Channel parents](#channel-parents):
+  the home's readers read, a view-only (`guest`) home's people read but do
+  not post, and a home's `parent_access` applies as it does to any child.
+  Comments close to new posts while the home is archived. Only the home
+  counts: an archived project above it still grants access and does not
+  archive its channels, so it does not close their comments either, just as
+  it does not close posting in those channels.
+- **Only comments.** A conversation accepts only kind:9 messages, kind:40003
+  edits, kind:7 reactions, kind:5 and kind:9005 deletions, and the opening
+  kind:9007. Every other kind with its `h`, including people (9000, 9001,
+  9021, 9022), settings (9002), deletion (9008), a canvas, and any kind added
+  later, is refused with `invalid: an artifact's conversation only holds
+  comments`. The home's direct owners and admins may delete comments with
+  kind:9005; authors may delete their own.
+- **Moves.** When the artifact moves, the conversation moves with it in the
+  same transaction: its parent becomes the new home, the old home's readers
+  lose it at once, and their live subscriptions close. A move to a home that
+  could not hold a conversation is refused with
+  `invalid: this artifact's comments can't move there`.
+- **Delete and restore.** Deleting the artifact closes its conversation to
+  everyone: nothing in it is readable and nothing can be posted, and opening
+  one is refused. Restoring the artifact reopens it.
+- **Hidden.** `artifact` is not a legacy channel type, so conversations are
+  left out of reads that name no channel ([NIP-CL](docs/nips/NIP-CL.md)).
+  Read them by naming the channel.
+- Relays that support conversations advertise `buzz-artifact-conversations`
+  in NIP-11 `supported_extensions`. They also include artifacts in
+  auto-archiving channels in incremental artifact sync.
+
 ### Default channels
 
 A community's owners and admins can mark a channel as a **default channel**:

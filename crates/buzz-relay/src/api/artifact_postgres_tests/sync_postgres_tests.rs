@@ -49,7 +49,7 @@ async fn accept(f: &Fixture, event: &Event) {
             )
             .await
             .unwrap(),
-        buzz_db::artifact::ArtifactOutcome::Accepted(_)
+        buzz_db::artifact::ArtifactOutcome::Accepted { .. }
     ));
 }
 

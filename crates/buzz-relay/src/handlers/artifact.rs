@@ -3,7 +3,7 @@ use super::ingest::{IngestAuth, IngestError, IngestResult};
 use crate::state::AppState;
 use buzz_core::artifact::ArtifactOp;
 use buzz_core::{StoredEvent, TenantContext};
-use buzz_db::artifact::ArtifactOutcome;
+use buzz_db::artifact::{ArtifactOutcome, ConversationOutcome};
 use nostr::Event;
 use std::sync::Arc;
 
@@ -48,7 +48,18 @@ pub(crate) async fn accept(
         .await
         .map_err(|e| IngestError::Internal(format!("artifact storage: {e}")))?;
     match outcome {
-        ArtifactOutcome::Accepted(events) => {
+        ArtifactOutcome::Accepted {
+            events,
+            conversation,
+        } => {
+            if let Some(conversation) = conversation {
+                super::side_effects::artifact_conversation_access_changed(
+                    tenant,
+                    state,
+                    conversation,
+                )
+                .await;
+            }
             for stored in &events {
                 publish(state, tenant, stored).await;
             }
@@ -60,6 +71,93 @@ pub(crate) async fn accept(
         ArtifactOutcome::Rejected(message) => {
             return Err(IngestError::Rejected(format!("invalid: {message}")))
         }
+    }
+    Ok(IngestResult {
+        event_id: event.id.to_hex(),
+        accepted: true,
+        message: String::new(),
+    })
+}
+
+/// The tag on a kind:9007 that opens an artifact's conversation and names
+/// the artifact.
+pub(crate) const CONVERSATION_ARTIFACT_TAG: &str = "artifact";
+
+/// Whether a kind:9007 opens an artifact's conversation.
+pub(crate) fn opens_conversation(event: &Event) -> bool {
+    event
+        .tags
+        .iter()
+        .any(|t| t.kind().to_string() == CONVERSATION_ARTIFACT_TAG)
+}
+
+/// The only kinds an artifact's conversation accepts: what comments need.
+/// It has no members or settings of its own, so every other kind, including
+/// any added later, is refused there.
+pub(crate) fn conversation_accepts_kind(kind: u32) -> bool {
+    use buzz_core::kind::{
+        KIND_DELETION, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_REACTION,
+        KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_EDIT,
+    };
+    matches!(
+        kind,
+        KIND_STREAM_MESSAGE
+            | KIND_STREAM_MESSAGE_EDIT
+            | KIND_REACTION
+            | KIND_DELETION
+            | KIND_NIP29_DELETE_EVENT
+            | KIND_NIP29_CREATE_GROUP
+    )
+}
+
+/// Open the conversation of the artifact named by a kind:9007's `artifact`
+/// tag, at the address derived from it (`h`). Anyone who may post in the
+/// artifact's home may; the channel is filed under the home, with no
+/// members, so nobody owns it. Opening one that exists is accepted and
+/// writes nothing.
+pub(crate) async fn open_conversation(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    event: &Event,
+    auth: &IngestAuth,
+) -> Result<IngestResult, IngestError> {
+    let invalid = |m: &str| IngestError::Rejected(format!("invalid: {m}"));
+    let mut tags = event
+        .tags
+        .iter()
+        .filter(|t| t.kind().to_string() == CONVERSATION_ARTIFACT_TAG);
+    let (Some(tag), None) = (tags.next(), tags.next()) else {
+        return Err(invalid("exactly one artifact tag is required"));
+    };
+    let d = tag.content().unwrap_or_default();
+    let artifact = buzz_core::artifact::canonical_uuid(d).map_err(invalid)?;
+    let conversation = buzz_core::artifact::conversation_id(d);
+    if super::ingest::extract_channel_id(event) != Some(conversation) {
+        return Err(invalid("h must be the artifact's conversation address"));
+    }
+    let home = state
+        .db
+        .artifact_home(tenant.community(), artifact)
+        .await
+        .map_err(|e| IngestError::Internal(format!("artifact storage: {e}")))?
+        .ok_or_else(head_unavailable)?;
+    // A home the sender cannot post in answers like a missing artifact.
+    super::ingest::check_channel_write(tenant, state, auth, home)
+        .await
+        .map_err(|e| match e {
+            IngestError::Internal(_) => e,
+            _ => head_unavailable(),
+        })?;
+    let outcome = state
+        .db
+        .ensure_artifact_conversation(tenant.community(), event, artifact, home)
+        .await
+        .map_err(|e| IngestError::Internal(format!("artifact storage: {e}")))?;
+    match outcome {
+        ConversationOutcome::Created(stored) => publish(state, tenant, &stored).await,
+        ConversationOutcome::Exists => {}
+        ConversationOutcome::Unavailable => return Err(head_unavailable()),
+        ConversationOutcome::Rejected(message) => return Err(invalid(message)),
     }
     Ok(IngestResult {
         event_id: event.id.to_hex(),

@@ -577,6 +577,58 @@ pub(crate) async fn decide_parent_change(
     Ok(())
 }
 
+/// Why a channel cannot hold an artifact's conversation.
+pub const CONVERSATION_HOME_REFUSED: &str =
+    "comments aren't available here: only a stream or forum at most two levels deep can hold them";
+
+/// Lock, on `tx`, the channel that holds or will hold an artifact's
+/// conversation, and its parents nearest first (`FOR NO KEY UPDATE`, as
+/// [`decide_parent_change`] locks a new parent's chain), and say why it
+/// cannot hold one. A conversation is filed under its artifact's home, so the
+/// home must be a live, unarchived stream or forum with at most one parent:
+/// the conversation is then at most the third level. Filing the home or one
+/// of its parents elsewhere counts the conversation in the subtree height,
+/// and waits on these locks, so the depth cannot change before commit.
+pub(crate) async fn refuse_conversation_home(
+    tx: &mut crate::AdmittedTx,
+    home: Uuid,
+) -> Result<Option<&'static str>> {
+    let community_id = tx.community();
+    let mut levels = 0;
+    let mut next = Some(home);
+    while let Some(id) = next {
+        if levels == MAX_ANCESTORS {
+            return Ok(Some(CONVERSATION_HOME_REFUSED));
+        }
+        let row = sqlx::query(
+            "SELECT channel_type::text AS channel_type, archived_at IS NOT NULL AS archived, \
+                    deleted_at IS NOT NULL AS deleted, parent_id \
+             FROM channels WHERE community_id = $1 AND id = $2 FOR NO KEY UPDATE",
+        )
+        .bind(community_id.as_uuid())
+        .bind(id)
+        .fetch_optional(tx.conn())
+        .await?;
+        let Some(row) = row else {
+            return Ok(Some(CONVERSATION_HOME_REFUSED));
+        };
+        if id == home {
+            let channel_type: String = row.try_get("channel_type")?;
+            if !PARENTABLE_CHANNEL_TYPES.contains(&channel_type.as_str())
+                || row.try_get::<bool, _>("deleted")?
+            {
+                return Ok(Some(CONVERSATION_HOME_REFUSED));
+            }
+            if row.try_get::<bool, _>("archived")? {
+                return Ok(Some("channel is archived"));
+            }
+        }
+        levels += 1;
+        next = row.try_get("parent_id")?;
+    }
+    Ok(None)
+}
+
 /// Decide, on `tx`, whether `actor` may change `channel_id`'s
 /// `parent_access`: only a direct owner or admin row may. The caller holds
 /// the channel's row lock. Either direction changes who reads the channel
@@ -655,12 +707,13 @@ fn refuse_auto_archiving_project(has_parent: bool, has_live_children: bool) -> R
     ))
 }
 
-/// Whether `channel_id` has a live child.
+/// Whether `channel_id` has a live child. An artifact's conversation is not
+/// one: holding a task's comments does not make a channel a project.
 async fn has_live_children(tx: &mut crate::AdmittedTx, channel_id: Uuid) -> Result<bool> {
     let community_id = tx.community();
     Ok(sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM channels WHERE community_id = $1 AND parent_id = $2 \
-                        AND deleted_at IS NULL)",
+                        AND deleted_at IS NULL AND channel_type <> 'artifact')",
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)

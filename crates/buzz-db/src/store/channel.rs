@@ -872,9 +872,11 @@ pub fn group_metadata_tags(channel: &ChannelRecord, members: &[MemberRecord]) ->
         tags.push(tag(&["restricted"]));
     }
     // NIP-29 hidden tag: hide metadata from non-members. Set for DMs and
-    // for private system channels. Not a security boundary — access control
-    // is handled by channel-scoped storage.
-    if channel.channel_type == ChannelType::System.as_str() && !open {
+    // for private system channels and artifact conversations. Not a security
+    // boundary — access control is handled by channel-scoped storage.
+    let hidden_type = channel.channel_type == ChannelType::System.as_str()
+        || channel.channel_type == ChannelType::Artifact.as_str();
+    if hidden_type && !open {
         tags.push(tag(&["hidden"]));
     }
     if group_metadata_uses_members(channel) {

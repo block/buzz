@@ -361,10 +361,10 @@ server permits four concurrent operations per process, a two-second SQL
 statement budget, and an eight-second operation budget. There is no
 identity-wide membership count limit on this path.
 
-Incremental reads include only matching readable artifacts in permanent channels.
-TTL channels do not contribute discovery candidates. A known-ID read returns
-`remove` for an artifact in a TTL channel. Moves into a TTL channel return
-removals for the permanent source. An explicit `#h` scope limits candidates
+Incremental reads include matching readable artifacts in every channel,
+including channels with a TTL. (Relays before `buzz-artifact-conversations`
+left TTL channels out: a known-ID read returned `remove` for their
+artifacts.) A TTL change still resets progress. An explicit `#h` scope limits candidates
 to those channels, including retained move sources and membership removals.
 Initial reads omit deleted heads. Later reads retain deletion removals.
 HTTP 400 `incremental_invalid`

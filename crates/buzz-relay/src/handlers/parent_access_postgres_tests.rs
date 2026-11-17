@@ -17,7 +17,7 @@ use crate::state::AppState;
 
 /// Ingest a kind:9000 that `actor` signs, adding `person` to `channel` with
 /// `role`.
-async fn add(
+pub(crate) async fn add(
     state: &Arc<AppState>,
     tenant: &TenantContext,
     actor: &Keys,
@@ -62,7 +62,7 @@ async fn remove(
 
 /// Post a kind:9 that `author` signs in `channel`; the event ID when the
 /// relay accepted it, its message otherwise.
-async fn post(
+pub(crate) async fn post(
     state: &Arc<AppState>,
     tenant: &TenantContext,
     author: &Keys,
@@ -81,7 +81,7 @@ async fn post(
 }
 
 /// Set `child`'s parent to `parent`, or clear it, as `actor`.
-async fn set_parent(
+pub(crate) async fn set_parent(
     state: &Arc<AppState>,
     tenant: &TenantContext,
     actor: &Keys,
@@ -94,7 +94,7 @@ async fn set_parent(
 
 /// The IDs of the events `reader` gets for one historical REQ before EOSE;
 /// none when the relay closes it.
-async fn req_event_ids(
+pub(crate) async fn req_event_ids(
     state: &Arc<AppState>,
     tenant: &TenantContext,
     reader: &Keys,
@@ -124,7 +124,7 @@ async fn req_event_ids(
 }
 
 /// The kind:9 event IDs `reader` gets for a REQ naming `channel`.
-async fn read_named(
+pub(crate) async fn read_named(
     state: &Arc<AppState>,
     tenant: &TenantContext,
     reader: &Keys,
@@ -140,7 +140,7 @@ async fn read_named(
 }
 
 /// The kind:9 event IDs `reader` gets for a REQ that names no channel.
-async fn read_implicit(
+pub(crate) async fn read_implicit(
     state: &Arc<AppState>,
     tenant: &TenantContext,
     reader: &Keys,
@@ -149,7 +149,7 @@ async fn read_implicit(
 }
 
 /// The COUNT `reader` gets for kind:9 in `channel`, or `None` when refused.
-async fn count_named(
+pub(crate) async fn count_named(
     state: &Arc<AppState>,
     tenant: &TenantContext,
     reader: &Keys,
@@ -174,7 +174,7 @@ async fn count_named(
     panic!("no COUNT reply");
 }
 
-async fn role_in(
+pub(crate) async fn role_in(
     state: &AppState,
     tenant: &TenantContext,
     channel: Uuid,
@@ -188,19 +188,19 @@ async fn role_in(
 }
 
 /// A private project, a private child under it, and an outsider.
-struct Tree {
-    state: Arc<AppState>,
-    tenant: TenantContext,
-    owner: Keys,
-    reader: Keys,
-    outsider: Keys,
-    project: Uuid,
-    child: Uuid,
+pub(crate) struct Tree {
+    pub(crate) state: Arc<AppState>,
+    pub(crate) tenant: TenantContext,
+    pub(crate) owner: Keys,
+    pub(crate) reader: Keys,
+    pub(crate) outsider: Keys,
+    pub(crate) project: Uuid,
+    pub(crate) child: Uuid,
 }
 
 impl Tree {
     /// `reader` is a member of the project only.
-    async fn new(label: &str) -> Self {
+    pub(crate) async fn new(label: &str) -> Self {
         Self::with_project(label, &[&["visibility", "private"]]).await
     }
 
@@ -685,7 +685,7 @@ async fn an_archived_project_still_grants_its_children() {
 }
 
 /// Set `channel`'s `parent_access` to `value` as `actor`.
-async fn set_parent_access(
+pub(crate) async fn set_parent_access(
     state: &Arc<AppState>,
     tenant: &TenantContext,
     actor: &Keys,
@@ -945,7 +945,7 @@ async fn only_the_channels_own_admin_changes_parent_access() {
 }
 
 /// Expire `channel`'s TTL now and run the reaper, which must archive it.
-async fn auto_archive(state: &Arc<AppState>, tenant: &TenantContext, channel: Uuid) {
+pub(crate) async fn auto_archive(state: &Arc<AppState>, tenant: &TenantContext, channel: Uuid) {
     sqlx::query(
         "UPDATE channels SET ttl_deadline = clock_timestamp() - interval '1 second' \
          WHERE community_id = $1 AND id = $2",

@@ -343,6 +343,20 @@ pub(crate) async fn evict_conn_channel_subscriptions(
 /// subscriptions promptly so clients stop treating the channel as live. A
 /// reader whose parent access could not be checked keeps the subscription,
 /// and the fan-out gate decides.
+/// After an artifact's move, delete or restore changed who may read its
+/// conversation (committed), clear accessible-channel caches and close live
+/// subscriptions of people who can no longer read it.
+pub(crate) async fn artifact_conversation_access_changed(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    conversation: Uuid,
+) {
+    state.invalidate_all_accessible_channels(tenant);
+    if let Err(e) = evict_non_reader_channel_subscriptions(tenant, state, conversation).await {
+        warn!(channel = %conversation, error = %e, "non-reader subscription eviction failed");
+    }
+}
+
 async fn evict_non_reader_channel_subscriptions(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -570,8 +584,23 @@ async fn may_delete_channel_event(
     {
         return Ok(true);
     }
+    // An artifact's conversation has no rows of its own: its home's direct
+    // owners and admins moderate it.
+    let channel = state
+        .db
+        .get_channel_for_event_write(tenant.community(), channel_id)
+        .await?;
+    let moderated_by = match channel.parent_id {
+        Some(home) if channel.channel_type == buzz_db::channel::ChannelType::Artifact.as_str() => {
+            home
+        }
+        _ => channel_id,
+    };
     Ok(actor_is_channel_owner_or_admin(
-        &state.db.get_members(tenant.community(), channel_id).await?,
+        &state
+            .db
+            .get_members(tenant.community(), moderated_by)
+            .await?,
         actor,
     ) || state
         .db
