@@ -121,9 +121,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
     final hasKnownCommunities = useKnownCommunities(
       accountKey: flow?.account.account?.subject,
       active:
-          showFindCommunities &&
-          idle &&
-          flow?.stage == HostedFlowStage.idle,
+          showFindCommunities && idle && flow?.stage == HostedFlowStage.idle,
       load: () async =>
           (await loadKnownAccountCommunities(flow!.account)).isNotEmpty,
     );
