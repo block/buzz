@@ -66,6 +66,7 @@ A build that is given a [reporting destination](../CONTEXT.md#reporting-destinat
 - Log lines, traces and spans, and joining mobile reports to relay traces.
 - Holding counts on the device while the network is down.
 - Alert rules, dashboards and the destination's own configuration, which belong to whoever owns the destination.
+- Diagnostic reporting in a [public build](../CONTEXT.md#public-build). Nothing prevents it, but what a report carries was chosen for internal builds. Turning it on there first needs the member's public key and the server host names removed, the rest of the list reviewed, and a way to tell people ([ADR 0007](adr/0007-diagnostic-reporting-follows-the-destination.md)). Because identity and every attribute pass through one module, that is a small code change.
 - Usage or behavior data of any kind.
 - Fixing the bugs the reports will reveal, including two found while planning: one subscriber that throws can lose the rest of a batch of events, and a catch-all in account requests presents every error as an outage.
 

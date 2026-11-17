@@ -17,6 +17,8 @@ A report may carry the stack trace and error type, app, operating system and dev
 
 Because the app says nothing about reporting, any notice or consent owed to the people who receive a build is the responsibility of whoever gives that build a reporting destination. Giving a destination to a build that reaches the general public would report on those people without telling them.
 
+What a report may carry was chosen for an internal build. Before a public build is given a reporting destination, that list has to be revisited: at the least the member's public key and the server host names would come out, and the people using the build would need to be told. Nothing in the app enforces this.
+
 A build without a reporting destination must not start the reporting code at all, since a reporting library given an empty destination can still install its hooks.
 
 A relay's host name can identify a community even though the community's name is never sent. We accepted this so that a failing relay can be told apart from a healthy one; an internal build talks only to its own organization's relay.
