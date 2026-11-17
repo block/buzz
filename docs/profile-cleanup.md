@@ -36,7 +36,9 @@ author. Supply `--relay-pubkey <hex-or-npub>` for each independently verified
 relay signer. A missing or untrusted signer stops the operation. The same trust
 rule applies to archive deltas and snapshots. Human-signed requests about another
 identity and archive actor/replacement references on surviving identities need
-an explicit shared-history disposition; the command reports them as blockers.
+an explicit shared-history disposition; the command reports them as blockers. Historical `replaced-by` references in
+archive requests and deltas remain blockers even after unarchive removes the
+canonical archive row.
 
 Shared archive snapshots are rebuilt from the retained canonical archive rows.
 The snapshot replacement is a fresh signed event; no old signature is reused.

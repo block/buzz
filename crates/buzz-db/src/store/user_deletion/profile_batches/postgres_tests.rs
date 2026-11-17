@@ -688,3 +688,93 @@ async fn final_check_keeps_removed_agent_scope_and_locks_ownership() {
         "{error}"
     );
 }
+
+async fn historical_replacement_blocks_cleanup_after_unarchive(kind: u16) {
+    for agent in [false, true] {
+        let f = Fixture::new().await;
+        let replacement = if agent { &f.agent } else { &f.human };
+        let subject = f.other.public_key().to_hex();
+        let replacement = replacement.public_key().to_hex();
+        let signer = if kind == 9035 { &f.other } else { &f.relay };
+        let mut tags = vec![
+            vec!["-".into()],
+            vec!["p".into(), subject.clone()],
+            vec!["replaced-by".into(), replacement.clone()],
+        ];
+        if kind == 8002 {
+            tags.push(vec!["consent".into(), "relay".into()]);
+        }
+        let event = f.event(f.community, signer, kind, tags, "").await;
+        event.verify().unwrap();
+        let community = buzz_core::CommunityId::from_uuid(f.community);
+        assert!(crate::archived_identities::archive(
+            &f.pool,
+            community,
+            &subject,
+            "self",
+            &subject,
+            None,
+            Some(&replacement),
+            &event.id.to_hex(),
+        )
+        .await
+        .unwrap());
+        assert!(
+            crate::archived_identities::unarchive(&f.pool, community, &subject)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !crate::archived_identities::is_archived(&f.pool, community, &subject)
+                .await
+                .unwrap()
+        );
+        let before = export(&f.pool).await;
+        for delete in [false, true] {
+            let mut output = Vec::new();
+            let result = f
+                .store
+                .run_profile_batches(&f.options(1), delete, None, &mut output)
+                .await;
+            assert!(result.is_err(), "kind {kind}, agent {agent}, delete {delete}: unresolved historical replacement was accepted");
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("shared-history disposition required"));
+            assert!(!String::from_utf8(output)
+                .unwrap()
+                .contains("delete_complete"));
+            assert_eq!(
+                before,
+                export(&f.pool).await,
+                "blocked cleanup mutated database"
+            );
+        }
+        // The same historical reference in another community does not block cleanup here.
+        sqlx::query("UPDATE events SET community_id=$2 WHERE community_id=$1 AND id=$3")
+            .bind(f.community)
+            .bind(f.elsewhere)
+            .bind(event.id.to_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let foreign = export(&f.pool).await;
+        f.store
+            .run_profile_batches(&f.options(1), true, None, &mut Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(foreign["events"], export(&f.pool).await["events"]);
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn historical_archive_request_replacement_blocks_after_unarchive() {
+    historical_replacement_blocks_cleanup_after_unarchive(9035).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn historical_archive_delta_replacement_blocks_after_unarchive() {
+    historical_replacement_blocks_cleanup_after_unarchive(8002).await;
+}

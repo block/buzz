@@ -46,13 +46,15 @@ pub(super) async fn select(
     max: u32,
 ) -> Result<Vec<Selected>> {
     // Scope before payload inspection. Case-insensitive subject comparison covers historical hex.
+    // Historical replacement references survive unarchive removing the canonical row.
     // The statement budget bounds the fallback tag scan; no new schema is required.
     let candidate_sql="SELECT id,created_at,kind,encode(pubkey,'hex') AS author,channel_id,
         CASE WHEN pg_column_size(tags)<=65536 THEN tags END AS tags,
         jsonb_build_object('id',id,'created_at',created_at) AS key,encode(sha256(convert_to(to_jsonb(e)::text,'UTF8')),'hex') AS fingerprint
         FROM events e WHERE community_id=$1 AND kind IN (0,10100,30177,30179,30382,9035,9036,8002,8003,13535)
         AND (pubkey=ANY($2::bytea[]) OR EXISTS(SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(tags)='array' THEN tags ELSE '[]'::jsonb END) tag
-          WHERE (tag->>0 IN ('p','d') AND lower(tag->>1)=ANY($3::text[])) OR (tag->>0='consent' AND lower(tag->>2)=ANY($3::text[]))))
+          WHERE (tag->>0 IN ('p','d') AND lower(tag->>1)=ANY($3::text[])) OR (tag->>0='consent' AND lower(tag->>2)=ANY($3::text[]))
+          OR (kind IN (9035,9036,8002,8003) AND tag->>0='replaced-by' AND lower(tag->>1)=ANY($3::text[]))))
         ORDER BY created_at,id LIMIT $4";
     // Bound payload memory before materializing candidate tags. The query remains read-only.
     let budget_sql = format!("SELECT count(*) AS count, COALESCE(sum(pg_column_size(tags)),0)::bigint AS bytes FROM ({candidate_sql}) candidates");
@@ -125,7 +127,7 @@ pub(super) async fn select(
             }
             9035 | 9036 => {
                 let target = subject(&tags, "p")?;
-                if authored && !scope.targets.contains(&target) {
+                if !scope.targets.contains(&target) {
                     return Err(invalid("archive request concerns a surviving identity; shared-history disposition required"));
                 }
                 scope.targets.contains(&target)
@@ -136,7 +138,7 @@ pub(super) async fn select(
                     trusted(scope, &author)?;
                     true
                 } else {
-                    return Err(invalid("archive delta names a target actor on a surviving identity; shared-history disposition required"));
+                    return Err(invalid("archive delta references a target actor or replacement on a surviving identity; shared-history disposition required"));
                 }
             }
             13535 => {
