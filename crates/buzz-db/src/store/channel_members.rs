@@ -914,6 +914,64 @@ pub(crate) async fn put_members_with_event(
     Ok(MemberPutEventWrite::Applied { stored, results })
 }
 
+/// Store a new thread-governance management event only when its signer is a
+/// current channel owner or admin.
+///
+/// The membership advisory lock is deliberately the first statement after
+/// write admission. Kind:9000 and kind:9001 take the same per-channel key, so
+/// a role change and a management publication have one database order. Event
+/// timestamps are not part of that decision.
+///
+/// Duplicate detection runs before the mutable role check while the lock is
+/// held. A record accepted before a later demotion therefore remains an
+/// accepted duplicate, while a different (possibly backdated) event is checked
+/// against the role in force at its actual database serialization point.
+pub(crate) async fn insert_thread_governance_management_event(
+    pool: &PgPool,
+    push_enqueue: Option<crate::runtime::push_enqueue::PushEnqueue>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    event: &nostr::Event,
+    thread_meta: Option<crate::event::ThreadMetadataParams<'_>>,
+) -> Result<(buzz_core::StoredEvent, bool)> {
+    let mut tx = crate::begin_community_event_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    tx.set_push_enqueue(push_enqueue);
+    acquire_channel_membership_lock(tx.conn(), community_id, channel_id).await?;
+
+    let (stored, inserted) = crate::event::insert_event_with_thread_metadata_tx(
+        &mut tx,
+        event,
+        Some(channel_id),
+        thread_meta,
+    )
+    .await?;
+    if !inserted {
+        tx.rollback().await?;
+        return Ok((stored, false));
+    }
+
+    let signer = event.pubkey.to_bytes();
+    let role = get_active_role_tx(tx.conn(), community_id, channel_id, &signer)
+        .await?
+        .and_then(|role| role.parse::<MemberRole>().ok());
+    if !role.is_some_and(|role| role.is_elevated()) {
+        tx.rollback().await?;
+        return Err(DbError::AccessDenied(
+            "only channel owners/admins may publish thread governance management records"
+                .to_string(),
+        ));
+    }
+
+    crate::insert_mentions_in_transaction(&mut tx, event, Some(channel_id)).await?;
+    tx.commit().await?;
+    Ok((stored, true))
+}
+
 /// Take the locks of a [`put_members`] write on `tx`, in the channel lock
 /// order (see `channel::lock_channel_for_settings_write`): the membership
 /// lock, the shared TTL lock, then the channel row `FOR NO KEY UPDATE`.
@@ -2477,6 +2535,30 @@ impl Db {
             channel_id,
             event,
             targets,
+            thread_meta,
+        )
+        .await
+    }
+
+    /// Store a kind:42001 management record after checking current owner/admin
+    /// authority under the same membership lock as kind:9000/9001.
+    #[datastore_span(
+        name = "insert_thread_governance_management_event",
+        system = "postgresql"
+    )]
+    pub async fn insert_thread_governance_management_event(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        event: &nostr::Event,
+        thread_meta: Option<crate::event::ThreadMetadataParams<'_>>,
+    ) -> Result<(buzz_core::StoredEvent, bool)> {
+        insert_thread_governance_management_event(
+            &self.pool,
+            self.push_enqueue.clone(),
+            community_id,
+            channel_id,
+            event,
             thread_meta,
         )
         .await
@@ -5787,6 +5869,114 @@ mod postgres_tests {
             .await
             .expect("restore second owner");
         }
+    }
+
+    /// Thread-governance management publication must authorize behind the same
+    /// advisory key as role changes. If it reads the admin role before taking
+    /// that key, a demotion can commit while the write waits and the stale
+    /// authorization will still store the event.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn thread_governance_rechecks_authority_after_waiting_for_membership_lock() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let (owner, admin) = (Keys::generate(), Keys::generate());
+        let owner_pubkey = owner.public_key().to_bytes().to_vec();
+        let admin_pubkey = admin.public_key().to_bytes().to_vec();
+        for pubkey in [&owner_pubkey, &admin_pubkey] {
+            ensure_user(&pool, community, pubkey)
+                .await
+                .expect("ensure governance actor");
+        }
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "thread-governance-lock",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            None,
+            &owner_pubkey,
+            None,
+        )
+        .await
+        .expect("create governance channel");
+        let channel_id = channel.id;
+        add_member(
+            &pool,
+            community,
+            channel_id,
+            &admin_pubkey,
+            MemberRole::Admin,
+            Some(&owner_pubkey),
+        )
+        .await
+        .expect("grant admin role");
+
+        let event = nostr::EventBuilder::new(
+            nostr::Kind::Custom(buzz_core::kind::KIND_THREAD_GOVERNANCE as u16),
+            serde_json::json!({"version": 2, "reason": "extend"}).to_string(),
+        )
+        .tags([
+            nostr::Tag::parse(["h", &channel_id.to_string()]).expect("h tag"),
+            nostr::Tag::parse(["e", &"ab".repeat(32), "", "root"]).expect("root tag"),
+            nostr::Tag::parse(["type", buzz_core::kind::THREAD_GOVERNANCE_V2_CAPABILITY])
+                .expect("type tag"),
+            nostr::Tag::parse(["action", "extend"]).expect("action tag"),
+        ])
+        .sign_with_keys(&admin)
+        .expect("sign governance event");
+        let event_id = event.id;
+
+        let mut holder = pool.begin().await.expect("begin lock holder");
+        acquire_channel_membership_lock(&mut holder, community, channel_id)
+            .await
+            .expect("hold membership key");
+
+        let writer_pool = pool.clone();
+        let mut writer = tokio::spawn(async move {
+            insert_thread_governance_management_event(
+                &writer_pool,
+                None,
+                community,
+                channel_id,
+                &event,
+                None,
+            )
+            .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(750), &mut writer)
+                .await
+                .is_err(),
+            "governance write must wait on the membership key before authorizing"
+        );
+
+        sqlx::query(
+            "UPDATE channel_members SET role = 'member' \
+             WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+        )
+        .bind(community.as_uuid())
+        .bind(channel_id)
+        .bind(&admin_pubkey)
+        .execute(&mut *holder)
+        .await
+        .expect("demote waiting admin");
+        holder.commit().await.expect("commit demotion");
+
+        let error = tokio::time::timeout(std::time::Duration::from_secs(10), writer)
+            .await
+            .expect("governance writer resumes")
+            .expect("governance writer task")
+            .expect_err("demoted admin must be rejected");
+        assert!(matches!(error, DbError::AccessDenied(_)), "{error:?}");
+        assert!(
+            crate::event::get_event_by_id(&pool, community, event_id.as_bytes())
+                .await
+                .expect("query refused event")
+                .is_none(),
+            "the rejected event must roll back"
+        );
     }
 
     /// Every *mutable* authorization read must sit behind the membership lock.

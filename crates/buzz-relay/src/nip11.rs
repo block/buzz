@@ -265,6 +265,10 @@ impl RelayInfo {
             // without it ignores the tag beside `visibility`, so a client
             // checks this before opening a channel as unlisted.
             "buzz-unlisted-channels".to_string(),
+            // kind:42001 management records are authorized and stored under
+            // the same membership lock as NIP-29 role changes. Clients fail
+            // closed when this exact capability is absent.
+            buzz_core::kind::THREAD_GOVERNANCE_V2_CAPABILITY.to_string(),
         ];
         let gif = gif_provider.map(|provider| {
             supported_extensions.push("buzz-gif".to_string());
@@ -816,11 +820,11 @@ mod tests {
             .contains(&"buzz-gif".to_string()));
     }
 
-    /// Clients refuse NIP-CL labels and system channels, newest-first
-    /// search, and unlisted channels unless the relay says it supports them,
-    /// so every document must advertise all three.
+    /// Clients refuse NIP-CL labels and system channels, newest-first search,
+    /// unlisted channels, and relay-enforced governance unless the relay says
+    /// it supports them, so every document must advertise all four.
     #[test]
-    fn advertises_nip_cl_search_sort_and_unlisted_extensions() {
+    fn advertises_mandatory_buzz_extensions() {
         let info = RelayInfo::build(
             None,
             None,
@@ -834,6 +838,7 @@ mod tests {
         assert!(extensions.contains(&"nip-cl".to_string()));
         assert!(extensions.contains(&"buzz-search-sort".to_string()));
         assert!(extensions.contains(&"buzz-unlisted-channels".to_string()));
+        assert!(extensions.contains(&buzz_core::kind::THREAD_GOVERNANCE_V2_CAPABILITY.to_string()));
     }
 
     /// NIP-WP → NIP-11 mirror: a set workspace icon is served in the standard

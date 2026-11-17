@@ -32,9 +32,10 @@ use buzz_core::kind::{
     KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE,
     KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT,
     KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2,
-    KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS,
-    KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
-    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_THREAD_GOVERNANCE,
+    KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER,
+    RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    THREAD_GOVERNANCE_V2_CAPABILITY,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -643,7 +644,8 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_STREAM_MESSAGE_DIFF
         | KIND_FORUM_POST
         | KIND_FORUM_VOTE
-        | KIND_FORUM_COMMENT => Ok(Scope::MessagesWrite),
+        | KIND_FORUM_COMMENT
+        | KIND_THREAD_GOVERNANCE => Ok(Scope::MessagesWrite),
         KIND_NIP29_PUT_USER | KIND_NIP29_REMOVE_USER | KIND_NIP29_DELETE_GROUP => {
             Ok(Scope::AdminChannels)
         }
@@ -721,6 +723,79 @@ pub(crate) fn extract_channel_id(event: &Event) -> Option<Uuid> {
         }
     }
     None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThreadGovernanceWrite {
+    Completed,
+    Management,
+}
+
+fn exact_two_part_tag<'a>(event: &'a Event, name: &str) -> Result<&'a str, IngestError> {
+    let tags: Vec<_> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some(name))
+        .collect();
+    match tags.as_slice() {
+        [tag] if tag.as_slice().len() == 2 => Ok(tag.as_slice()[1].as_str()),
+        _ => Err(IngestError::Rejected(format!(
+            "invalid: thread governance requires exactly one two-part {name} tag"
+        ))),
+    }
+}
+
+/// Parse the relay-enforced v2 envelope and decide which persistence path it
+/// requires. This must reject ambiguity: treating a malformed management
+/// action as `completed` would bypass the owner/admin transaction below.
+fn validate_thread_governance_event(event: &Event) -> Result<ThreadGovernanceWrite, IngestError> {
+    let channel = exact_two_part_tag(event, "h")?;
+    channel.parse::<Uuid>().map_err(|_| {
+        IngestError::Rejected("invalid: thread governance h tag must be a channel UUID".into())
+    })?;
+
+    let roots: Vec<_> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("e"))
+        .collect();
+    let valid_root = matches!(roots.as_slice(), [tag]
+        if matches!(tag.as_slice(), [name, id, relay, marker]
+            if name == "e"
+                && id.len() == 64
+                && id.chars().all(|ch| ch.is_ascii_hexdigit())
+                && relay.is_empty()
+                && marker == "root"));
+    if !valid_root {
+        return Err(IngestError::Rejected(
+            "invalid: thread governance requires exactly one [e, <64-hex>, \"\", root] tag".into(),
+        ));
+    }
+
+    if exact_two_part_tag(event, "type")? != THREAD_GOVERNANCE_V2_CAPABILITY {
+        return Err(IngestError::Rejected(format!(
+            "invalid: thread governance type must be {THREAD_GOVERNANCE_V2_CAPABILITY}"
+        )));
+    }
+
+    let body: serde_json::Value = serde_json::from_str(&event.content).map_err(|_| {
+        IngestError::Rejected("invalid: thread governance content must be a JSON object".into())
+    })?;
+    if body.as_object().and_then(|body| body.get("version")) != Some(&serde_json::Value::from(2)) {
+        return Err(IngestError::Rejected(
+            "invalid: thread governance content version must be 2".into(),
+        ));
+    }
+
+    match exact_two_part_tag(event, "action")? {
+        "completed" => Ok(ThreadGovernanceWrite::Completed),
+        "extend" | "scope-change" | "blocker-open" | "blocker-resolved" | "closed" | "defer" => {
+            Ok(ThreadGovernanceWrite::Management)
+        }
+        _ => Err(IngestError::Rejected(
+            "invalid: unsupported thread governance action".into(),
+        )),
+    }
 }
 
 /// Result of resolving a reaction's target channel.
@@ -908,6 +983,7 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_HUDDLE_PARTICIPANT_LEFT
             | KIND_HUDDLE_ENDED
             | KIND_HUDDLE_GUIDELINES
+            | KIND_THREAD_GOVERNANCE
     )
 }
 
@@ -2733,6 +2809,12 @@ async fn ingest_event_inner(
 
     super::media_access::validate_media_references(tenant, state, &event).await?;
 
+    let thread_governance_write = if kind_u32 == KIND_THREAD_GOVERNANCE {
+        Some(validate_thread_governance_event(&event)?)
+    } else {
+        None
+    };
+
     // Command kinds are routed AFTER signature verification, timestamp check,
     // pubkey/auth match, and scope validation — never before.
     if buzz_core::kind::is_command_kind(kind_u32) {
@@ -3703,6 +3785,29 @@ async fn ingest_event_inner(
                 }
                 _ => IngestError::Internal(format!("error: channel update failed: {e}")),
             })?
+    } else if thread_governance_write == Some(ThreadGovernanceWrite::Management) {
+        let channel = channel_id.ok_or_else(|| {
+            IngestError::Rejected("invalid: thread governance event missing channel".into())
+        })?;
+        let thread_params = thread_meta.as_ref().map(|meta| meta.as_params());
+        state
+            .db
+            .insert_thread_governance_management_event(
+                tenant.community(),
+                channel,
+                &event,
+                thread_params,
+            )
+            .await
+            .map_err(|error| match error {
+                buzz_db::DbError::AccessDenied(reason) => {
+                    IngestError::Rejected(format!("restricted: {reason}"))
+                }
+                other => IngestError::Internal(format!(
+                    "error: thread governance write failed: {}",
+                    other.kind()
+                )),
+            })?
     } else if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
         // channel_id is None for global kinds (0, 1, 3) due to step 5b above.
@@ -3890,6 +3995,91 @@ mod postgres_tests {
         KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
     use nostr::{EventBuilder, Kind};
+
+    fn thread_governance_event(
+        action: &str,
+        version: u64,
+        extra_tags: impl IntoIterator<Item = nostr::Tag>,
+    ) -> nostr::Event {
+        let channel = Uuid::new_v4();
+        EventBuilder::new(
+            Kind::Custom(KIND_THREAD_GOVERNANCE as u16),
+            serde_json::json!({"version": version}).to_string(),
+        )
+        .tags(
+            [
+                nostr::Tag::parse(["h", &channel.to_string()]).expect("h tag"),
+                nostr::Tag::parse(["e", &"ab".repeat(32), "", "root"]).expect("e tag"),
+                nostr::Tag::parse(["type", THREAD_GOVERNANCE_V2_CAPABILITY]).expect("type tag"),
+                nostr::Tag::parse(["action", action]).expect("action tag"),
+            ]
+            .into_iter()
+            .chain(extra_tags),
+        )
+        .sign_with_keys(&nostr::Keys::generate())
+        .expect("sign thread governance event")
+    }
+
+    #[test]
+    fn thread_governance_v2_classifies_completed_and_management_actions() {
+        let completed = thread_governance_event("completed", 2, []);
+        assert_eq!(
+            validate_thread_governance_event(&completed).expect("valid completed"),
+            ThreadGovernanceWrite::Completed
+        );
+
+        for action in [
+            "extend",
+            "scope-change",
+            "blocker-open",
+            "blocker-resolved",
+            "closed",
+            "defer",
+        ] {
+            let event = thread_governance_event(action, 2, []);
+            assert_eq!(
+                validate_thread_governance_event(&event).expect("valid management action"),
+                ThreadGovernanceWrite::Management,
+                "{action}"
+            );
+        }
+    }
+
+    #[test]
+    fn thread_governance_v2_rejects_downgrades_and_ambiguous_actions() {
+        let v1 = thread_governance_event("extend", 1, []);
+        assert!(matches!(
+            validate_thread_governance_event(&v1),
+            Err(IngestError::Rejected(message)) if message.contains("version must be 2")
+        ));
+
+        let duplicate = thread_governance_event(
+            "completed",
+            2,
+            [nostr::Tag::parse(["action", "extend"]).expect("duplicate action")],
+        );
+        assert!(matches!(
+            validate_thread_governance_event(&duplicate),
+            Err(IngestError::Rejected(message)) if message.contains("exactly one")
+        ));
+
+        let legacy_type = EventBuilder::new(
+            Kind::Custom(KIND_THREAD_GOVERNANCE as u16),
+            serde_json::json!({"version": 2}).to_string(),
+        )
+        .tags([
+            nostr::Tag::parse(["h", &Uuid::new_v4().to_string()]).expect("h tag"),
+            nostr::Tag::parse(["e", &"cd".repeat(32), "", "root"]).expect("e tag"),
+            nostr::Tag::parse(["type", "buzz.thread-governance/v1"]).expect("type tag"),
+            nostr::Tag::parse(["action", "extend"]).expect("action tag"),
+        ])
+        .sign_with_keys(&nostr::Keys::generate())
+        .expect("sign legacy event");
+        assert!(matches!(
+            validate_thread_governance_event(&legacy_type),
+            Err(IngestError::Rejected(message)) if message.contains(THREAD_GOVERNANCE_V2_CAPABILITY)
+        ));
+    }
 
     /// A channel lookup failure must deny the write. Before, the error became
     /// "no row", which skipped the archive check while a cached membership

@@ -382,6 +382,17 @@ pub const KIND_REPORT: u32 = 1984;
 /// deployment feedback table, and never stored or fanned out as an event.
 pub const KIND_PRODUCT_FEEDBACK: u32 = 42000;
 
+/// Buzz thread-governance ledger record.
+///
+/// Version 2 is relay-enforced: management records are stored only when their
+/// signer is a current owner or admin of the channel. Completed-turn records
+/// use ordinary channel-write authorization. Supporting relays advertise
+/// [`THREAD_GOVERNANCE_V2_CAPABILITY`] in NIP-11 `supported_extensions`.
+pub const KIND_THREAD_GOVERNANCE: u32 = 42001;
+
+/// NIP-11 capability for relay-enforced kind:42001 management writes.
+pub const THREAD_GOVERNANCE_V2_CAPABILITY: &str = "buzz.thread-governance/v2";
+
 // NIP-29 group admin events
 /// NIP-29: Add a user to a group.
 pub const KIND_NIP29_PUT_USER: u32 = 9000;
@@ -729,6 +740,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_PRIVATE_MANAGED_AGENT,
     KIND_REPORT,
     KIND_PRODUCT_FEEDBACK,
+    KIND_THREAD_GOVERNANCE,
     KIND_NIP29_PUT_USER,
     KIND_NIP29_REMOVE_USER,
     KIND_NIP29_EDIT_METADATA,
