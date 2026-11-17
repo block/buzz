@@ -1,12 +1,14 @@
-//! User inventory, direct cleanup and persisted deletion workflow commands.
+//! User inventory, content cleanup and resumable deletion workflows.
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use clap::Subcommand;
 use uuid::Uuid;
 
-/// Inspect memberships, run cleanup handlers, or execute approved deletion requests.
+/// Inspect user data, run content cleanup, or advance a deletion request.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Inspect or delete one human's community content.
+    ContentBatches(content_batches::Args),
     /// Run the media handler directly, without a workflow request.
     MediaBatches(media::Args),
     /// Preview or delete profiles in one community; deletion requires stopped writers.
@@ -43,13 +45,22 @@ pub enum Command {
         #[arg(long)]
         inventory_digest: String,
     },
-    /// Run the workflow: placeholder gate, real media cleanup, then community placeholders.
+    /// Run approved workflow stages; real cleanup requires --delete.
     Run {
-        /// Execute real media deletion; required when the media stage is reached.
-        #[arg(long)]
-        delete: bool,
         /// Approved request UUID.
         id: Uuid,
+        /// Execute implemented handlers for a real request.
+        #[arg(long)]
+        delete: bool,
+        /// Trusted relay signer for historical content attribution.
+        #[arg(long, value_parser=content_batches::parse_pubkey)]
+        relay_pubkey: Option<String>,
+        /// Maximum explicit row operations per content batch.
+        #[arg(long, default_value_t=100, value_parser=clap::value_parser!(u16).range(1..=100))]
+        batch_size: u16,
+        /// Maximum content operations per invocation.
+        #[arg(long, default_value_t=1_000_000, value_parser=clap::value_parser!(u32).range(1..=1_000_000))]
+        max_items: u32,
         /// Worker identity; defaults to hostname and process id.
         #[arg(long)]
         executor_id: Option<String>,
@@ -79,12 +90,13 @@ pub enum Command {
     },
 }
 
-/// Run direct cleanup or workflow commands against PostgreSQL.
+/// Run the selected inventory, cleanup or workflow command against PostgreSQL.
 pub async fn run(command: Command) -> Result<i32> {
     let command = match command {
+        Command::ContentBatches(args) => return content_batches::run_command(args).await,
         Command::MediaBatches(args) => return media::run(args).await,
         Command::ProfileBatches(args) => return profile_batches::run(args).await,
-        command => command,
+        other => other,
     };
     let db = if matches!(command, Command::Inventory { .. }) {
         buzz_db::Db::connect_cold_start(
@@ -103,8 +115,9 @@ pub async fn run(command: Command) -> Result<i32> {
     };
     let store = db.entity_deletion_store();
     match command {
-        Command::MediaBatches(_) => bail!("direct media command must run before workflow setup"),
-        Command::ProfileBatches(_) => anyhow::bail!("profile command was not dispatched"),
+        Command::ContentBatches(_) | Command::MediaBatches(_) | Command::ProfileBatches(_) => {
+            anyhow::bail!("direct command was already dispatched")
+        }
         Command::Inventory { pubkey } => {
             crate::print_json(&inventory::generate(&db, &pubkey).await?)?;
         }
@@ -135,23 +148,38 @@ pub async fn run(command: Command) -> Result<i32> {
             crate::print_json(&store.inspect(id).await?)?;
         }
         Command::Run {
-            delete,
             id,
             executor_id,
             next_step,
             fail_stage,
             stage_delay_ms,
             demo_no_agents_in,
+            delete,
+            relay_pubkey,
+            batch_size,
+            max_items,
         } => {
+            let request = store.get(id).await?;
+            let is_real = !request.target.starts_with("demo:");
+            if is_real {
+                anyhow::ensure!(delete, "real workflow execution requires --delete; inspect with content-batches --read-only");
+                anyhow::ensure!(
+                    fail_stage.is_none() && stage_delay_ms == 0 && demo_no_agents_in.is_empty(),
+                    "dummy controls cannot be used for real requests"
+                );
+            }
             let code = worker::run(
                 &store,
                 id,
                 &executor_id.unwrap_or_else(crate::default_executor_id),
                 &worker::RunOptions {
-                    db: Some(db.clone()),
-                    media: None,
-                    delete,
                     next_step,
+                    media: None,
+                    db: is_real.then(|| buzz_db::Db::from_pool(db.pool().clone())),
+                    delete,
+                    relay_pubkey,
+                    batch_size,
+                    max_items,
                     fail_stage,
                     stage_delay: std::time::Duration::from_millis(stage_delay_ms),
                     no_agents_in: demo_no_agents_in,
@@ -168,6 +196,7 @@ pub async fn run(command: Command) -> Result<i32> {
     Ok(0)
 }
 
+mod content_batches;
 mod handlers;
 mod inventory;
 /// Direct upload-only media cleanup and its workflow handler.

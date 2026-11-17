@@ -248,6 +248,11 @@ impl ChannelMembershipLocks<'_> {
     ///
     /// Used by `commit_participant_join` to atomically add membership and the
     /// `48101` event in a single transaction under a session effect permit.
+    ///
+    /// The channel must exist in the transaction's community; it is locked
+    /// `FOR KEY SHARE` before the insert, and a missing channel returns
+    /// [`DbError::NotFound`] without writing. The membership lock this proof
+    /// holds is an advisory lock and does not guard the channel row.
     pub async fn insert_auto_membership(
         &mut self,
         channel_id: Uuid,
@@ -256,6 +261,8 @@ impl ChannelMembershipLocks<'_> {
     ) -> Result<()> {
         self.check_covers(channel_id)?;
         let community_id = self.tx.community();
+        crate::store::reference_check::require_channel(self.tx.conn(), community_id, channel_id)
+            .await?;
         sqlx::query(
             r#"
             INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
@@ -297,32 +304,43 @@ pub async fn lock_channel_memberships_in_transaction<'tx>(
     })
 }
 
-/// Lock the live channel row on a caller-owned transaction and return its
-/// `archived_at` (`None` when the channel is missing, deleted, or not archived).
+/// Lock the channel row on a caller-owned transaction and return its
+/// `archived_at` (`None` when the channel is not archived, or is soft-deleted).
+///
+/// A channel with no row in the transaction's community returns
+/// [`DbError::ChannelNotFound`]: a join into a channel that was purged must not
+/// proceed as if the channel were merely not archived. A soft-deleted channel
+/// keeps its row, so it is not a missing parent and reads as not archived; the
+/// callers' own checks refuse it.
 ///
 /// The `FOR NO KEY UPDATE` row lock makes `archive_channel`'s
 /// `UPDATE channels SET archived_at = NOW()` wait until the caller commits or
 /// rolls back, so a join cannot commit into a channel archived concurrently.
-/// `FOR UPDATE` would invert the lock order against `add_member`, whose
-/// membership INSERT needs `KEY SHARE` on `channels` for its foreign key
-/// after taking the advisory membership lock; `FOR NO KEY UPDATE` still blocks
-/// archive (a non-key update) but is compatible with `KEY SHARE`. Re-reading
-/// under the lock is safe: the caller already holds it.
+/// `FOR UPDATE` would invert the lock order against a membership writer that
+/// key-share locks `channels` after taking the advisory membership lock
+/// ([`ChannelMembershipLocks::insert_auto_membership`]'s channel check, and a
+/// membership INSERT's foreign key while it exists); `FOR NO KEY UPDATE` still
+/// blocks archive (a non-key update) and a delete, but is compatible with
+/// `KEY SHARE`. Re-reading under the lock is safe: the caller already holds it.
 pub async fn lock_channel_archived_at_in_transaction(
     tx: &mut AdmittedTx,
     channel_id: Uuid,
 ) -> Result<Option<DateTime<Utc>>> {
     let community_id = tx.community();
-    let archived_at: Option<Option<DateTime<Utc>>> = sqlx::query_scalar(
-        "SELECT archived_at FROM channels \
-         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL \
+    let row: Option<(Option<DateTime<Utc>>, bool)> = sqlx::query_as(
+        "SELECT archived_at, deleted_at IS NOT NULL FROM channels \
+         WHERE community_id = $1 AND id = $2 \
          FOR NO KEY UPDATE",
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .fetch_optional(tx.conn())
     .await?;
-    Ok(archived_at.flatten())
+    match row {
+        None => Err(DbError::ChannelNotFound(channel_id)),
+        Some((_, true)) => Ok(None),
+        Some((archived_at, false)) => Ok(archived_at),
+    }
 }
 
 /// Take the shared TTL lock of `channel_id` on a caller-owned transaction.
@@ -905,7 +923,10 @@ pub(crate) async fn put_members_with_event(
 /// tag, the TTL reaper's single UPDATE), and none of them takes the
 /// membership lock. So an archive either commits before [`put_members_on`]
 /// reads `archived_at`, or waits until this write commits.
-async fn lock_channel_for_member_put(tx: &mut AdmittedTx, channel_id: Uuid) -> Result<()> {
+pub(crate) async fn lock_channel_for_member_put(
+    tx: &mut AdmittedTx,
+    channel_id: Uuid,
+) -> Result<()> {
     let community_id = tx.community();
     acquire_channel_membership_lock(tx.conn(), community_id, channel_id).await?;
     lock_channel_ttl_shared_in_transaction(tx, channel_id).await?;
@@ -1097,6 +1118,7 @@ fn member_put_denial_message(denial: buzz_core::channel::MemberPutDenial) -> &'s
     match denial {
         D::NotAMember => "private channel requires an invite from an active member",
         D::ElevatedRoleGrant => "only owners/admins may grant elevated roles",
+        D::OwnershipChange => "only owners may grant ownership or change an owner's role",
         D::GuestCannotAdd => "only members can add people in this channel",
         D::SelfJoinAboveJoinRole => {
             "joining this channel gives the guest role; ask a member to make you a member"
@@ -1108,7 +1130,8 @@ fn member_put_denial_message(denial: buzz_core::channel::MemberPutDenial) -> &'s
 /// Remove a member from a channel (soft delete).
 ///
 /// `actor_pubkey` must be an active owner/admin, the agent's owner, or the member
-/// removing themselves.
+/// removing themselves. Only a channel owner may remove another channel owner,
+/// even when the target is their own agent.
 ///
 /// Returns `Err(DbError::MemberNotFound)` if the target is not an active member.
 ///
@@ -1154,6 +1177,29 @@ pub async fn remove_member(
     // as `add_member`).
     acquire_channel_membership_lock(tx.conn(), community_id, channel_id).await?;
 
+    remove_member_on(
+        &mut tx,
+        channel_id,
+        pubkey,
+        actor_pubkey,
+        actor_is_agent_owner,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Apply a removal on an admitted transaction holding the membership lock.
+async fn remove_member_on(
+    tx: &mut AdmittedTx,
+    channel_id: Uuid,
+    pubkey: &[u8],
+    actor_pubkey: &[u8],
+    actor_is_agent_owner: bool,
+) -> Result<()> {
+    let community_id = tx.community();
+    let is_self_remove = pubkey == actor_pubkey;
+    let target_role = get_active_role_tx(tx.conn(), community_id, channel_id, pubkey).await?;
     if !is_self_remove {
         let actor_role_str = get_active_role_tx(tx.conn(), community_id, channel_id, actor_pubkey)
             .await?
@@ -1161,6 +1207,11 @@ pub async fn remove_member(
         let actor_role: MemberRole = actor_role_str.parse().map_err(|_| {
             DbError::InvalidData(format!("invalid role in database: {actor_role_str}"))
         })?;
+        if target_role.as_deref() == Some("owner") && actor_role != MemberRole::Owner {
+            return Err(DbError::AccessDenied(
+                "only owners may remove another owner".to_string(),
+            ));
+        }
         if !actor_role.is_elevated() && !actor_is_agent_owner {
             return Err(DbError::AccessDenied(
                 "only owners/admins or the agent's owner may remove other members".to_string(),
@@ -1171,7 +1222,6 @@ pub async fn remove_member(
     // Defense-in-depth: prevent removing the last owner regardless of caller.
     // Callers (REST handlers, NIP-29 handlers) also check this, but the DB
     // layer enforces it as the final safety net.
-    let target_role = get_active_role_tx(tx.conn(), community_id, channel_id, pubkey).await?;
     if target_role.as_deref() == Some("owner") {
         let row = sqlx::query(
             "SELECT COUNT(*) as cnt FROM channel_members \
@@ -1206,8 +1256,8 @@ pub async fn remove_member(
     if result.rows_affected() == 0 {
         return Err(DbError::MemberNotFound(channel_id));
     }
+    crate::dm::release_dm_identity(tx.conn(), community_id, channel_id, pubkey).await?;
 
-    tx.commit().await?;
     Ok(())
 }
 
@@ -2442,6 +2492,46 @@ impl Db {
         actor_pubkey: &[u8],
     ) -> Result<()> {
         remove_member(&self.pool, community_id, channel_id, pubkey, actor_pubkey).await
+    }
+
+    /// Store a kind:9001 command and its removal together. A locked refusal
+    /// rolls back the event; a duplicate never removes a rejoined member.
+    #[datastore_span(name = "remove_member_with_event", system = "postgresql")]
+    pub async fn remove_member_with_event(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+        event: &nostr::Event,
+        thread_meta: Option<crate::event::ThreadMetadataParams<'_>>,
+    ) -> Result<(buzz_core::StoredEvent, bool)> {
+        let actor = event.pubkey.to_bytes();
+        // Immutable ownership lookup, before taking a pooled transaction.
+        let actor_is_agent_owner = pubkey != actor.as_slice()
+            && crate::user::is_agent_owner(&self.pool, community_id, pubkey, &actor).await?;
+        let mut tx = crate::begin_community_event_write_transaction(
+            &self.pool,
+            community_id,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        tx.set_push_enqueue(self.push_enqueue.clone());
+        acquire_channel_membership_lock(tx.conn(), community_id, channel_id).await?;
+        let (stored, inserted) = crate::event::insert_event_with_thread_metadata_tx(
+            &mut tx,
+            event,
+            Some(channel_id),
+            thread_meta,
+        )
+        .await?;
+        if !inserted {
+            tx.rollback().await?;
+            return Ok((stored, false));
+        }
+        crate::insert_mentions_in_transaction(&mut tx, event, Some(channel_id)).await?;
+        remove_member_on(&mut tx, channel_id, pubkey, &actor, actor_is_agent_owner).await?;
+        tx.commit().await?;
+        Ok((stored, true))
     }
 
     /// Returns `true` if the pubkey is an active member.
@@ -4886,6 +4976,105 @@ mod postgres_tests {
             2,
             "both owners must survive"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn admins_cannot_change_ownership_or_remove_owners() {
+        let pool = setup_pool().await;
+        let (community, channel_id, owner, co_owner) =
+            channel_with_two_owners(&pool, "owner-precedence").await;
+        let admin = random_pubkey();
+        let member = random_pubkey();
+        let newcomer = random_pubkey();
+        for pk in [&admin, &member, &newcomer] {
+            ensure_user(&pool, community, pk)
+                .await
+                .expect("ensure user");
+        }
+        add_member(
+            &pool,
+            community,
+            channel_id,
+            &admin,
+            MemberRole::Admin,
+            Some(&owner),
+        )
+        .await
+        .expect("owner grants admin");
+        add_member(
+            &pool,
+            community,
+            channel_id,
+            &member,
+            MemberRole::Member,
+            Some(&admin),
+        )
+        .await
+        .expect("admin adds member");
+
+        // Granting owner to self, another member, or a new member must fail.
+        // So must demoting/removing a co-owner even while another owner remains.
+        for (target, requested) in [
+            (&admin, MemberRole::Owner),
+            (&member, MemberRole::Owner),
+            (&newcomer, MemberRole::Owner),
+            (&co_owner, MemberRole::Admin),
+        ] {
+            let err = add_member(
+                &pool,
+                community,
+                channel_id,
+                target,
+                requested,
+                Some(&admin),
+            )
+            .await
+            .expect_err("admin must not change ownership");
+            assert!(matches!(err, DbError::AccessDenied(_)), "{err:?}");
+        }
+        // Owning the agent is not a way around its channel-owner role.
+        set_agent_owner(&pool, community, &co_owner, &admin)
+            .await
+            .expect("set immutable agent ownership");
+        let err = remove_member(&pool, community, channel_id, &co_owner, &admin)
+            .await
+            .expect_err("admin must not remove an owner, even its own agent");
+        assert!(matches!(err, DbError::AccessDenied(_)), "{err:?}");
+        let members = get_members(&pool, community, channel_id)
+            .await
+            .expect("members");
+        for (pk, role) in [
+            (&owner, "owner"),
+            (&co_owner, "owner"),
+            (&admin, "admin"),
+            (&member, "member"),
+        ] {
+            assert!(members.iter().any(|m| &m.pubkey == pk && m.role == role));
+        }
+        assert!(!members.iter().any(|m| m.pubkey == newcomer));
+
+        // Admins keep ordinary role management and removal authority.
+        add_member(
+            &pool,
+            community,
+            channel_id,
+            &member,
+            MemberRole::Admin,
+            Some(&admin),
+        )
+        .await
+        .expect("admin promotes another admin");
+        remove_member(&pool, community, channel_id, &member, &admin)
+            .await
+            .expect("admin removes another admin");
+        // Owners can remove co-owners; the last-owner guard still applies.
+        remove_member(&pool, community, channel_id, &co_owner, &owner)
+            .await
+            .expect("owner removes co-owner");
+        remove_member(&pool, community, channel_id, &owner, &owner)
+            .await
+            .expect_err("last-owner guard remains in force");
     }
 
     /// Sets up an open channel with exactly two owners, returning

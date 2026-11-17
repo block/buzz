@@ -1279,8 +1279,9 @@ async fn lock_channel_row(
     }
     lock_channel_ttl(tx, channel_id, ttl).await?;
     // `FOR NO KEY UPDATE`, like a huddle join: it orders this write against
-    // every other settings write and a huddle join, but not against the
-    // `KEY SHARE` lock that a membership INSERT takes for its foreign key.
+    // every other settings write and a huddle join, but not against a
+    // `KEY SHARE` lock on the channel (a membership INSERT's foreign key while
+    // it exists, `insert_auto_membership`'s channel check).
     let (previous_visibility, archived, listed): (String, bool, bool) =
         sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT visibility::text, archived_at IS NOT NULL, {LISTED_CHANNEL_SQL} FROM channels \
@@ -1420,7 +1421,8 @@ async fn update_channel_on(
     }
     if policy_changed {
         sqlx::query(
-            "UPDATE communities SET artifact_policy_modified_at=clock_timestamp() WHERE id=$1",
+            "UPDATE communities SET artifact_policy_modified_at=clock_timestamp() \
+             WHERE id=$1 AND deletion_state = 'active'",
         )
         .bind(community_id.as_uuid())
         .execute(tx.conn())
@@ -1881,10 +1883,13 @@ async fn soft_delete_on(w: &mut ChannelSettingsWriter<'_>) -> Result<()> {
         .bind(channel_id)
         .execute(w.tx.conn())
         .await?;
-    sqlx::query("UPDATE communities SET artifact_policy_modified_at=clock_timestamp() WHERE id=$1")
-        .bind(community_id.as_uuid())
-        .execute(w.tx.conn())
-        .await?;
+    sqlx::query(
+        "UPDATE communities SET artifact_policy_modified_at=clock_timestamp() \
+         WHERE id=$1 AND deletion_state = 'active'",
+    )
+    .bind(community_id.as_uuid())
+    .execute(w.tx.conn())
+    .await?;
     Ok(())
 }
 
