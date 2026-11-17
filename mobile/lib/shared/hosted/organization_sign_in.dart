@@ -60,6 +60,15 @@ class OrganizationSignIn extends ChangeNotifier {
     final f => throw StateError('Unexpected sign-in failure: $f'),
   };
 
+  /// What the user can do about [failure], ending the sign-in page's failure
+  /// message. The banner keeps "Try again." so its capsule stays compact.
+  String get failureAdvice => switch (_unavailableCause) {
+    null => 'Try again.',
+    final cause when cause.startsWith('http5') =>
+      'The sign-in service is unavailable. Try again later.',
+    _ => 'Check your network or VPN connection, then try again.',
+  };
+
   // What [BuilderlabAccountClient.lastUnavailableCause] held when the
   // exchange failed, so later account requests cannot change the code.
   String? _unavailableCause;

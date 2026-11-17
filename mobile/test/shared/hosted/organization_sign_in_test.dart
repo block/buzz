@@ -216,10 +216,17 @@ void main() {
       await pumpEventQueue();
       expect(signIn.status, OrganizationSessionStatus.signedOut);
       expect(signIn.failureCode, code);
+      expect(
+        signIn.failureAdvice,
+        code.endsWith('http503')
+            ? 'The sign-in service is unavailable. Try again later.'
+            : 'Check your network or VPN connection, then try again.',
+      );
     }
     failExchange = null;
     await signIn.signIn();
     expect(signIn.failureCode, isNull);
+    expect(signIn.failureAdvice, 'Try again.');
     await signIn.browser.receive(callback(login, 'org-code'));
     await pumpEventQueue();
     expect(signIn.status, OrganizationSessionStatus.signedIn);
