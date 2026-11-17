@@ -124,13 +124,15 @@ class ComposeBar extends HookConsumerWidget {
       attachments: attachments,
     );
     final voiceNoteRef = useRef(voiceNote)..value = voiceNote;
-    final mentionMap = useRef(<String, MentionCandidate>{});
+    final mentions = useListenableSelector(
+      controller,
+      () => controller.mentions,
+    );
     final prefillText = useRef<String?>(null);
     _useComposeDraftLifecycle(
       context: context,
       voiceNote: voiceNoteRef,
       prefillText: prefillText,
-      mentionMap: mentionMap,
       ref: ref,
       controller: controller,
       draftKey: draftKey,
@@ -285,12 +287,26 @@ class ComposeBar extends HookConsumerWidget {
     final relayAgents = ref.watch(agentDirectoryProvider).asData?.value;
     final agentOwners = ref.watch(agentOwnersProvider).asData?.value;
     final ownedAgents = ref.watch(ownedAgentDirectoryProvider).asData?.value;
-    final chipLabels = _mentionChipLabels(bindings: mentionMap.value);
-    final chipLabelsKey = _mentionChipLabelsKey(chipLabels);
-    useEffect(() {
-      controller.setMentionChipLabels(chipLabels);
-      return null;
-    }, [controller, chipLabelsKey]);
+    List<MentionCandidate> memberMentionCandidates() => _typedMemberCandidates(
+      membersAsync: membersAsync,
+      sessionStatus: sessionStatus,
+      cachedMembers: cachedMembers,
+      userCache: userCache,
+      agentOwners: agentOwners,
+    );
+
+    _useMentionChipQualifiers(
+      ref: ref,
+      controller: controller,
+      mentions: mentions,
+      members: memberMentionCandidates,
+      memberKeys: [
+        membersAsync.asData?.value,
+        cachedMembers,
+        userCache,
+        agentOwners,
+      ],
+    );
     useEffect(
       () {
         final memberList = channelMembersForAutocomplete(
@@ -300,9 +316,8 @@ class ComposeBar extends HookConsumerWidget {
         );
         final pubkeys = [
           ...memberList.map((m) => m.pubkey),
-          ...mentionMap.value.values
-              .where((c) => c.requiresRevalidation && c.pubkey.isNotEmpty)
-              .map((c) => c.pubkey),
+          for (final m in controller.mentions)
+            if (m.candidate.requiresRevalidation) m.candidate.pubkey,
           ...?relayAgents?.map((a) => a.pubkey),
           ...?agentOwners?.values,
         ];
@@ -326,44 +341,29 @@ class ComposeBar extends HookConsumerWidget {
     final isModifyingText = useRef(false);
     final lastObservedEditingValue = useRef(controller.value);
 
-    List<MentionCandidate> memberMentionCandidates() => _typedMemberCandidates(
-      membersAsync: membersAsync,
-      sessionStatus: sessionStatus,
-      cachedMembers: cachedMembers,
-      userCache: userCache,
-      agentOwners: agentOwners,
-    );
-
-    // Insert a selected mention into the text field.
+    // Insert a selected mention into the text field as a chip bound to it.
     void insertMention(MentionCandidate candidate) {
-      final name = selectedMentionLabel(candidate.label, candidate.pubkey, {
-        for (final entry in mentionMap.value.entries)
-          entry.key: entry.value.pubkey,
-      });
       ref
           .read(mentionHistoryProvider.notifier)
           .remember(channelId, candidate.pubkey);
-
-      var start = mentionStartIdx.value.clamp(0, controller.text.length);
+      final text = controller.text;
+      final start = mentionStartIdx.value.clamp(0, text.length);
+      final cursor =
+          (controller.selection.isValid
+                  ? controller.selection.baseOffset
+                  : text.length)
+              .clamp(start, text.length);
       isModifyingText.value = true;
       try {
-        start = _requalifyNamesakes(
-          controller,
-          mentionMap.value,
-          candidate,
-          start,
-          [for (final member in memberMentionCandidates()) member.label],
-        );
-        mentionMap.value[name] = candidate;
-        spliceAndMoveCursor(
-          controller,
-          focusNode,
+        controller.insertMention(
           start: start,
-          replacement: '@$name ',
+          end: cursor,
+          candidate: candidate,
         );
       } finally {
         isModifyingText.value = false;
       }
+      focusNode.requestFocus();
       mentionQuery.value = null;
     }
 
@@ -373,7 +373,6 @@ class ComposeBar extends HookConsumerWidget {
       scopeMessages: prefillScopeMessages,
       draftKey: draftKey,
       controller: controller,
-      mentionMap: mentionMap,
       prefillText: prefillText,
       isModifyingText: isModifyingText,
       hasAttachments: hasAttachments,
@@ -419,12 +418,7 @@ class ComposeBar extends HookConsumerWidget {
 
         var open = findMentionQuery(text, cursor);
         if (open != null &&
-            _insideSelectedMention(
-              text,
-              open.start,
-              cursor,
-              mentionMap.value.keys,
-            )) {
+            _insideSelectedMention(controller.mentions, open.start, cursor)) {
           open = null;
         }
 
@@ -532,9 +526,8 @@ class ComposeBar extends HookConsumerWidget {
 
     void clearComposer() {
       draftRevision.value += 1;
-      controller.clear();
+      controller.replaceDraft(TextEditingValue.empty, mentions: const []);
       attachments.value = [];
-      mentionMap.value.clear();
       mentionQuery.value = null;
       channelQuery.value = null;
       attachmentSurface.value = _AttachmentSurface.closed;
@@ -557,7 +550,8 @@ class ComposeBar extends HookConsumerWidget {
     // Send the message.
     Future<void> send() async {
       if (!canSend()) return;
-      final text = controller.text.trim();
+      final draft = controller.text;
+      final mentions = controller.mentions;
       final submittedOrigin = ComposerSendOrigin.capture(sendSurfaceKey);
       Future<void> sendWithOrigin(
         String content,
@@ -572,14 +566,15 @@ class ComposeBar extends HookConsumerWidget {
       // `_reportSendCancelledByCommunitySwitch`.
       final messenger = ScaffoldMessenger.maybeOf(context);
 
-      // Extract pubkeys for mentions present in the final text.
+      // The recipients: every chip, then typed names the fallback resolves.
       List<MentionCandidate> selectedMentions;
       try {
         selectedMentions = _resolveComposerMentions(
-          text,
-          mentionMap.value,
-          memberMentionCandidates(),
-          buildMentionCandidates(
+          draft,
+          mentions,
+          mentionsInvalid: controller.mentionsInvalid,
+          members: memberMentionCandidates(),
+          restoredCandidates: buildMentionCandidates(
             members: membersAsync.asData?.value ?? const [],
             relayAgents: relayAgents ?? const [],
             sharedChannelIds: {
@@ -596,9 +591,9 @@ class ComposeBar extends HookConsumerWidget {
             // Reuse ordinary search-result classification, not membership as
             // permission. Persisted keys/flags themselves prove no role.
             searchResults: [
-              for (final c in mentionMap.value.values)
-                if (c.requiresRevalidation && userCache[c.pubkey] != null)
-                  userCache[c.pubkey]!,
+              for (final m in mentions)
+                if (m.candidate.requiresRevalidation)
+                  ?userCache[m.candidate.pubkey],
             ],
           ),
         );
@@ -609,6 +604,13 @@ class ComposeBar extends HookConsumerWidget {
         );
         return;
       }
+      // Namesakes of different keys are told apart on the wire; the
+      // composer itself never showed the key.
+      final text = _qualifiedMentionContent(
+        draft,
+        mentions,
+        code: controller._styledCodeRanges(draft),
+      ).trim();
       final outgoing = _OutgoingMentions(selectedMentions);
       // Read before any await. These actions belong to this community and
       // refuse to run after a switch, so an Invite answered after a switch
@@ -684,7 +686,6 @@ class ComposeBar extends HookConsumerWidget {
           await _sendTextOnlyDraft(
             context: context,
             controller: controller,
-            mentionMap: mentionMap,
             draftRevision: draftRevision,
             submittedDraftRevision: submittedDraftRevision,
             focusNode: focusNode,
@@ -704,9 +705,8 @@ class ComposeBar extends HookConsumerWidget {
 
         final draftText = controller.value;
         final draftAttachments = List<_PendingAttachment>.of(attachments.value);
-        final draftMentions = Map<String, MentionCandidate>.of(
-          mentionMap.value,
-        );
+        final draftMentions = controller.mentions;
+        final draftMentionsInvalid = controller.mentionsInvalid;
         clearComposer();
         final clearedDraftRevision = draftRevision.value;
         uploadingCount.value += 1;
@@ -761,10 +761,11 @@ class ComposeBar extends HookConsumerWidget {
                 draftRevision.value == clearedDraftRevision) {
               attachments.value = draftAttachments;
               retainedForRetry = true;
-              mentionMap.value
-                ..clear()
-                ..addAll(draftMentions);
-              controller.value = draftText;
+              controller.replaceDraft(
+                draftText,
+                mentions: draftMentions,
+                mentionsInvalid: draftMentionsInvalid,
+              );
               focusNode.requestFocus();
             }
           } finally {

@@ -80,15 +80,3 @@ MentionCandidate? _spaceMention(
   if (key == null || shown.unavailable.contains(key)) return null;
   return shown.rows.where((row) => row.pubkey == key).firstOrNull;
 }
-
-/// Whether [caret] is inside a mention the user already selected at [start].
-/// Such an `@` does not open a query.
-bool _insideSelectedMention(
-  String text,
-  int start,
-  int caret,
-  Iterable<String> names,
-) => names.any(
-  (name) =>
-      text.startsWith('@$name', start) && caret <= start + 1 + name.length,
-);

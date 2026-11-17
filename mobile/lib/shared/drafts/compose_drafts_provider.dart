@@ -3,11 +3,75 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../mentions/bound_mentions.dart';
+import '../mentions/mention_bindings.dart';
 import '../relay/relay.dart';
 import '../theme/theme_provider.dart';
+import '../utils/string_utils.dart';
 
 const _draftsPrefsKey = 'compose_drafts_v1';
 const _maxDrafts = 50;
+
+/// A picked mention saved with its draft: the exact key bound to the literal
+/// `@Label` at `[start, end)` of the text. Position, not label, identifies
+/// it, so two namesakes that both read `@Sam` keep their own recipients.
+/// Display only in the chooser and chip; it grants no authority.
+@immutable
+class ComposeDraftMention {
+  final int start;
+  final int end;
+  final String pubkey;
+
+  const ComposeDraftMention({
+    required this.start,
+    required this.end,
+    required this.pubkey,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'start': start,
+    'end': end,
+    'pubkey': pubkey,
+  };
+
+  /// The mention [raw] describes inside [text], or null when it is not a
+  /// well-formed, bound `@Label` ending at a name boundary.
+  static ComposeDraftMention? fromJson(Object? raw, String text) {
+    if (raw is! Map<String, dynamic>) return null;
+    final start = raw['start'];
+    final end = raw['end'];
+    final pubkey = raw['pubkey'];
+    if (start is! int ||
+        end is! int ||
+        pubkey is! String ||
+        !isHexPubkey(pubkey) ||
+        start < 0 ||
+        end <= start + 1 ||
+        end > text.length ||
+        text.codeUnitAt(start) != 0x40 /* @ */ ||
+        !mentionEndsAtBoundary(text, end)) {
+      return null;
+    }
+    return ComposeDraftMention(
+      start: start,
+      end: end,
+      pubkey: pubkey.toLowerCase(),
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is ComposeDraftMention &&
+      other.start == start &&
+      other.end == end &&
+      other.pubkey == pubkey;
+
+  @override
+  int get hashCode => Object.hash(start, end, pubkey);
+
+  @override
+  String toString() => 'ComposeDraftMention($start, $end, $pubkey)';
+}
 
 /// A locally persisted, unsent composer draft.
 ///
@@ -23,9 +87,13 @@ class ComposeDraft {
   final String? threadHeadId;
   final String text;
 
-  /// Literal picker labels bound to exact keys, never authorization metadata.
-  /// An empty key/value is a malformed-record tombstone; send must refuse it.
-  final Map<String, String> mentionKeys;
+  /// Picked mentions bound to exact keys at their place in [text], in text
+  /// order and never overlapping. Never authorization metadata.
+  final List<ComposeDraftMention> mentions;
+
+  /// Set when the saved bindings could not be read. Send must refuse while
+  /// the text still holds an `@`, since nothing says who it was for.
+  final bool mentionsInvalid;
   final int updatedAt; // unix seconds
 
   const ComposeDraft({
@@ -34,7 +102,8 @@ class ComposeDraft {
     required this.threadHeadId,
     required this.text,
     required this.updatedAt,
-    this.mentionKeys = const {},
+    this.mentions = const [],
+    this.mentionsInvalid = false,
   });
 
   Map<String, dynamic> toJson() => {
@@ -42,7 +111,10 @@ class ComposeDraft {
     'channel_id': channelId,
     if (threadHeadId != null) 'thread_head_id': threadHeadId,
     'text': text,
-    'mention_keys': mentionKeys,
+    // A null list is the unreadable-record tombstone.
+    'mentions': mentionsInvalid
+        ? null
+        : [for (final mention in mentions) mention.toJson()],
     'updated_at': updatedAt,
   };
 
@@ -54,35 +126,63 @@ class ComposeDraft {
     final updatedAt = raw['updated_at'];
     if (key is! String || channelId is! String || text is! String) return null;
     if (text.trim().isEmpty) return null;
-    final bindings = raw['mention_keys'];
-    final mentionKeys = <String, String>{};
-    if (raw.containsKey('mention_keys')) {
-      if (bindings is! Map<String, dynamic>) {
-        mentionKeys[''] = '';
-      } else {
-        final labels = <String>{};
-        for (final entry in bindings.entries) {
-          if (!labels.add(entry.key.toLowerCase())) mentionKeys[''] = '';
-          final value = entry.value;
-          mentionKeys[entry.key] =
-              entry.key.isNotEmpty &&
-                  value is String &&
-                  RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(value)
-              ? value.toLowerCase()
-              : '';
-        }
-      }
-    }
+    final (mentions, invalid) = _readMentions(raw, text);
     return ComposeDraft(
       key: key,
       channelId: channelId,
       threadHeadId: raw['thread_head_id'] is String
           ? raw['thread_head_id'] as String
           : null,
-      mentionKeys: Map.unmodifiable(mentionKeys),
+      mentions: mentions,
+      mentionsInvalid: invalid,
       text: text,
       updatedAt: updatedAt is int ? updatedAt : 0,
     );
+  }
+
+  /// The saved bindings, or the invalid flag when they cannot be read. A
+  /// record from before positions were saved holds `mention_keys`, labels
+  /// bound to keys; each is bound wherever its literal `@Label` occurs.
+  static (List<ComposeDraftMention>, bool) _readMentions(
+    Map<String, dynamic> raw,
+    String text,
+  ) {
+    final found = <ComposeDraftMention>[];
+    if (raw.containsKey('mentions')) {
+      final list = raw['mentions'];
+      if (list is! List) return (const [], true);
+      for (final item in list) {
+        final mention = ComposeDraftMention.fromJson(item, text);
+        if (mention == null) return (const [], true);
+        found.add(mention);
+      }
+    } else if (raw.containsKey('mention_keys')) {
+      final bindings = raw['mention_keys'];
+      if (bindings is! Map<String, dynamic>) return (const [], true);
+      for (final entry in bindings.entries) {
+        final value = entry.value;
+        if (entry.key.isEmpty || value is! String || !isHexPubkey(value)) {
+          return (const [], true);
+        }
+        for (final range in mentionOccurrences(text, [entry.key])) {
+          found.add(
+            ComposeDraftMention(
+              start: range.start,
+              end: range.end,
+              pubkey: value.toLowerCase(),
+            ),
+          );
+        }
+      }
+    }
+    found.sort((a, b) => a.start.compareTo(b.start));
+    final mentions = <ComposeDraftMention>[];
+    for (final mention in found) {
+      if (mentions.isEmpty || mention.start >= mentions.last.end) {
+        mentions.add(mention);
+      }
+    }
+    return (List.unmodifiable(mentions), false);
   }
 }
 
@@ -156,7 +256,8 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
       channelId: channelId,
       threadHeadId: threadHeadId,
       text: existingText.isEmpty ? text : '$existingText\n\n$text',
-      mentionKeys: existing?.mentionKeys ?? const {},
+      mentions: existing?.mentions ?? const [],
+      mentionsInvalid: existing?.mentionsInvalid ?? false,
       updatedAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
     );
     final next = [draft, ...drafts.where((d) => d.key != key)];
@@ -173,7 +274,8 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
     required String channelId,
     String? threadHeadId,
     required String text,
-    Map<String, String> mentionKeys = const {},
+    List<ComposeDraftMention> mentions = const [],
+    bool mentionsInvalid = false,
   }) {
     if (text.trim().isEmpty) {
       remove(key);
@@ -181,7 +283,8 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
     }
     final existing = state.where((d) => d.key == key).firstOrNull;
     if (existing?.text == text &&
-        mapEquals(existing?.mentionKeys, mentionKeys)) {
+        existing?.mentionsInvalid == mentionsInvalid &&
+        listEquals(existing?.mentions, mentions)) {
       return;
     }
     final draft = ComposeDraft(
@@ -189,7 +292,8 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
       channelId: channelId,
       threadHeadId: threadHeadId,
       text: text,
-      mentionKeys: Map.unmodifiable(mentionKeys),
+      mentions: List.unmodifiable(mentions),
+      mentionsInvalid: mentionsInvalid,
       updatedAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
     );
     final next = [draft, ...state.where((d) => d.key != key)];

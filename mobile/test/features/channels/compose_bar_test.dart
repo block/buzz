@@ -1675,10 +1675,12 @@ void main() {
       final container = ProviderScope.containerOf(
         tester.element(find.byType(ComposeBar)),
       );
-      Map<String, String>? storedKeys() => container
+      List<String>? storedKeys() => container
           .read(composeDraftsProvider.notifier)
           .draftFor('channel-1')
-          ?.mentionKeys;
+          ?.mentions
+          .map((m) => m.pubkey)
+          .toList();
 
       // The first composer mentions one of two people named Scout.
       await _expandComposer(tester);
@@ -1686,7 +1688,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(scouts().first);
       await tester.pumpAndSettle();
-      expect(storedKeys(), {'Scout': first});
+      expect(storedKeys(), [first]);
 
       // A second composer for the same conversation, such as the page a
       // notification opens, replaces it with the other Scout.
@@ -1717,7 +1719,7 @@ void main() {
           'hello';
       await tester.enterText(find.byType(TextField), text);
       await tester.pumpAndSettle();
-      expect(storedKeys(), {'Scout': second});
+      expect(storedKeys(), [second]);
 
       // Back on the first composer, the text it shows goes to that Scout.
       navigator.pop();
@@ -4504,11 +4506,10 @@ void main() {
       );
 
       await _expandComposer(tester);
-      await tester.enterText(find.byType(TextField), '@hel');
+      await tester.enterText(find.byType(TextField), 'hello @hel');
       await tester.pumpAndSettle();
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await _inviteOutside(tester);
       await tester.pumpAndSettle();
@@ -4542,7 +4543,7 @@ void main() {
         (jsonDecode(storedDrafts!) as List)
             .map((d) => (d as Map<String, dynamic>)['text'])
             .toList(),
-        contains('hello @Helper Bot'),
+        contains('hello @Helper Bot '),
       );
     });
 
@@ -4634,11 +4635,10 @@ void main() {
         await _openSystemPhotoPicker(tester);
         await tester.pumpAndSettle();
         await _expandComposer(tester);
-        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.enterText(find.byType(TextField), 'hello @hel');
         await tester.pumpAndSettle();
         await tester.tap(find.text('Helper Bot'));
         await tester.pumpAndSettle();
-        await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
         await tester.tap(find.byIcon(BuzzIcons.arrowUp));
         await _inviteOutside(tester);
         await tester.pump();
@@ -5940,7 +5940,7 @@ void main() {
       session.debugAttachSocketForTest(socket);
 
       await _expandComposer(tester);
-      await tester.enterText(find.byType(TextField), '@hel');
+      await tester.enterText(find.byType(TextField), 'hello @hel');
       await tester.pumpAndSettle();
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
@@ -5949,7 +5949,6 @@ void main() {
         find.byKey(const ValueKey('composer-agent-mention-chip')),
         findsOneWidget,
       );
-      await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await _inviteOutside(tester);
       await tester.pumpAndSettle();
@@ -6014,11 +6013,10 @@ void main() {
       );
 
       await _expandComposer(tester);
-      await tester.enterText(find.byType(TextField), '@hel');
+      await tester.enterText(find.byType(TextField), 'hello @hel');
       await tester.pumpAndSettle();
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await _inviteOutside(tester);
       await tester.pump();
@@ -6093,6 +6091,12 @@ void main() {
           findsNothing,
         );
 
+        // Text typed after a picked chip, even while the IME composes it,
+        // leaves the chip drawn.
+        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Helper Bot'));
+        await tester.pumpAndSettle();
         await tester.enterText(find.byType(TextField), '@Helper Bot typing');
         final textField = tester.widget<TextField>(find.byType(TextField));
         textField.controller!.value = textField.controller!.value.copyWith(
@@ -6260,8 +6264,9 @@ void main() {
         );
         expect(textField.controller!.text, 'xyping');
 
-        // Undo after typing the last letter of a mention restores the
-        // partial mention instead of removing the whole chip.
+        // A typed namesake of a picked chip stays plain text, and Undo after
+        // typing its last letter restores the partial name instead of
+        // removing the picked chip.
         await tester.enterText(find.byType(TextField), '@hel');
         await tester.pumpAndSettle();
         await tester.tap(find.text('Helper Bot'));
@@ -6280,7 +6285,7 @@ void main() {
         await tester.pump(const Duration(seconds: 1));
         expect(
           find.byKey(const ValueKey('composer-agent-mention-chip')),
-          findsNWidgets(2),
+          findsOneWidget,
         );
         // Moving the selection around a lot first changes nothing.
         for (var base = 24; base < 43; base++) {
@@ -6355,13 +6360,12 @@ void main() {
 
       Future<void> mentionMaryAndSend(WidgetTester tester) async {
         await _expandComposer(tester);
-        await tester.enterText(find.byType(TextField), '@Mary J');
+        await tester.enterText(find.byType(TextField), 'hello @Mary J');
         await tester.pump();
         await tester.pump(mentionSearchDebounce * 2);
         await tester.pumpAndSettle();
         await tester.tap(find.text('Mary Jane'));
         await tester.pumpAndSettle();
-        await tester.enterText(find.byType(TextField), 'hello @Mary Jane');
         await tester.tap(find.byIcon(BuzzIcons.arrowUp));
         await tester.pumpAndSettle();
       }
@@ -6527,7 +6531,7 @@ void main() {
         expect(sendCount, 0);
         expect(find.text('Not sent. Couldn’t check members.'), findsOneWidget);
         final field = tester.widget<TextField>(find.byType(TextField));
-        expect(field.controller!.text, 'hello @Mary Jane');
+        expect(field.controller!.text, 'hello @Mary Jane ');
 
         // The membership comes back, as after the relay's own retry.
         membersReady = true;
@@ -6693,11 +6697,10 @@ void main() {
       session.debugAttachSocketForTest(socket);
 
       await _expandComposer(tester);
-      await tester.enterText(find.byType(TextField), '@hel');
+      await tester.enterText(find.byType(TextField), 'hello @hel');
       await tester.pumpAndSettle();
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pump();
 
@@ -6769,11 +6772,10 @@ void main() {
         session.debugAttachSocketForTest(socket);
 
         await _expandComposer(tester);
-        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.enterText(find.byType(TextField), 'hello @hel');
         await tester.pumpAndSettle();
         await tester.tap(find.text('Helper Bot'));
         await tester.pumpAndSettle();
-        await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
         await tester.tap(find.byIcon(BuzzIcons.arrowUp));
         await _inviteOutside(tester);
         await tester.pumpAndSettle();
@@ -7846,11 +7848,10 @@ Future<void> _openSystemPhotoPicker(WidgetTester tester) async {
 
 Future<void> _selectAndSendAgentMention(WidgetTester tester) async {
   await _expandComposer(tester);
-  await tester.enterText(find.byType(TextField), '@hel');
+  await tester.enterText(find.byType(TextField), 'hello @hel');
   await tester.pumpAndSettle();
   await tester.tap(find.text('Helper Bot'));
   await tester.pumpAndSettle();
-  await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
   await tester.tap(find.byIcon(BuzzIcons.arrowUp));
   await tester.pumpAndSettle();
 }

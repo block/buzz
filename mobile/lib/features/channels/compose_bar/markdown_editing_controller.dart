@@ -15,8 +15,19 @@ class _MarkdownRule {
 }
 
 class _MarkdownEditingController extends TextEditingController {
-  /// Selected mention labels drawn as chips, each flagged as an agent.
-  Map<String, bool> _mentionChipLabels = const {};
+  /// Picked mentions bound to their recipients, in text order. The editor
+  /// stores the literal `@Label` the relay receives; each binding is carried
+  /// across edits by position, so two namesakes can both read `@Sam` and
+  /// still notify two people, and no key ever enters the text.
+  List<_ComposerMention> _mentions = const [];
+
+  /// Set when a saved draft's bindings could not be read. The send refuses
+  /// until no `@` is left in the text, since nothing says who it was for.
+  bool _mentionsInvalid = false;
+
+  /// Display labels for chips whose name another candidate shares, by
+  /// lowercase key, such as `Sam · a1b2`. Display only.
+  Map<String, String> _mentionQualifiers = const {};
 
   /// Set while Undo or Redo restores an earlier value, which must stay exact
   /// rather than be widened to a chip or given a space after a link.
@@ -68,7 +79,103 @@ class _MarkdownEditingController extends TextEditingController {
   /// then shows as raw text.
   @override
   set value(TextEditingValue newValue) {
+    if (newValue.text != value.text) _carryMentions(value, newValue);
     super.value = _snapSelectionToChips(newValue);
+  }
+
+  /// The picked mentions bound in [text], in text order.
+  List<_ComposerMention> get mentions => _mentions;
+
+  /// Whether a restored draft's bindings were unreadable; see [replaceDraft].
+  bool get mentionsInvalid => _mentionsInvalid;
+
+  /// Moves every binding across the edit from [old] to [next]: a mention
+  /// the edit reached into is gone, as is one a name character now
+  /// continues (`@Bobby`); punctuation, quotes, hyphens and slashes typed
+  /// against a chip keep it and its recipient (`@Bob's`).
+  void _carryMentions(TextEditingValue old, TextEditingValue next) {
+    if (_mentionsInvalid && !next.text.contains('@')) _mentionsInvalid = false;
+    if (_mentions.isEmpty) return;
+    final replaced = editReplacedRange(
+      old.text,
+      next.text,
+      oldSelection: old.selection,
+      newSelection: next.selection,
+    );
+    final ranges = remapMentionRanges(
+      [for (final mention in _mentions) mention.range],
+      replaced: replaced,
+      oldLength: old.text.length,
+      newText: next.text,
+    );
+    _mentions = List.unmodifiable([
+      for (var i = 0; i < ranges.length; i++)
+        if (ranges[i] case final range?) _mentions[i].at(range),
+    ]);
+  }
+
+  /// Sets [newValue] and the mentions bound in it in one notification, so
+  /// no listener sees the text without its bindings: a restored or
+  /// recovered draft, a prefill, or a cleared composer. [mentionsInvalid]
+  /// marks a draft whose saved bindings could not be read.
+  void replaceDraft(
+    TextEditingValue newValue, {
+    required List<_ComposerMention> mentions,
+    bool mentionsInvalid = false,
+  }) {
+    _mentions = List.unmodifiable(
+      mentions.toList()..sort((a, b) => a.start.compareTo(b.start)),
+    );
+    _mentionsInvalid = mentionsInvalid;
+    _cachedTextSpan = null;
+    final snapped = _snapSelectionToChips(newValue);
+    final unchanged = value == snapped;
+    super.value = snapped;
+    if (unchanged) notifyListeners();
+  }
+
+  /// Replaces the `@query` at `[start, end)` with `@Label ` bound to
+  /// [candidate], caret after the space. Mentions after it move with the
+  /// text in the same notification.
+  void insertMention({
+    required int start,
+    required int end,
+    required MentionCandidate candidate,
+  }) {
+    final label = candidate.label;
+    final replacement = '@$label ';
+    final next = TextEditingValue(
+      text: text.replaceRange(start, end, replacement),
+      selection: TextSelection.collapsed(offset: start + replacement.length),
+    );
+    final carried = remapMentionRanges(
+      [for (final mention in _mentions) mention.range],
+      replaced: TextRange(start: start, end: end),
+      oldLength: text.length,
+      newText: next.text,
+    );
+    replaceDraft(
+      next,
+      mentions: [
+        for (var i = 0; i < carried.length; i++)
+          if (carried[i] case final range?) _mentions[i].at(range),
+        _ComposerMention(
+          start: start,
+          end: start + 1 + label.length,
+          candidate: candidate,
+        ),
+      ],
+      mentionsInvalid: _mentionsInvalid,
+    );
+  }
+
+  /// Updates the display labels of namesake chips (lowercase key to label
+  /// such as `Sam · a1b2`). The text keeps `@Sam`.
+  void setMentionQualifiers(Map<String, String> qualifiers) {
+    if (mapEquals(_mentionQualifiers, qualifiers)) return;
+    _mentionQualifiers = Map.unmodifiable(qualifiers);
+    _cachedTextSpan = null;
+    notifyListeners();
   }
 
   TextEditingValue _snapSelectionToChips(TextEditingValue next) {
@@ -220,22 +327,6 @@ class _MarkdownEditingController extends TextEditingController {
     _MarkdownRule(r'~~([^\n]*?)~~', _MarkdownStyle.strikethrough),
     _MarkdownRule(r'_([^_\n]*?)_', _MarkdownStyle.italic),
   ];
-
-  /// Updates the selected mention labels drawn as chips (label to whether it
-  /// is an agent). The editor still stores the literal `@Label` text,
-  /// matching the markdown sent to the relay; a chip is drawn wherever
-  /// [mentionOccurrences] finds the label, which is also where the send
-  /// resolves its recipient.
-  void setMentionChipLabels(Map<String, bool> labels) {
-    final next = {
-      for (final entry in labels.entries)
-        if (entry.key.trim().isNotEmpty) entry.key.trim(): entry.value,
-    };
-    if (mapEquals(_mentionChipLabels, next)) return;
-    _mentionChipLabels = Map.unmodifiable(next);
-    _cachedTextSpan = null;
-    notifyListeners();
-  }
 
   @override
   TextSpan buildTextSpan({
@@ -665,10 +756,10 @@ class _MarkdownEditingController extends TextEditingController {
     ];
   }
 
-  /// Draws each selected mention in [source] as one chip over its hidden
+  /// Draws each bound mention inside [source] as one chip over its hidden
   /// `@Label` source, so the span keeps one character per source character
-  /// for native caret movement and deletion. Qualified labels (a name
-  /// followed by its pubkey in parentheses) stay coloured text.
+  /// for native caret movement and deletion. A namesake's chip reads its
+  /// qualified display label while the source stays the plain name.
   List<InlineSpan> _buildMentionSpans(
     BuildContext context,
     String source,
@@ -680,57 +771,48 @@ class _MarkdownEditingController extends TextEditingController {
         ? _buildComposerTokenSpans(context, source, style, sourceOffset)
         : null;
     if (tokenSpans != null) return tokenSpans;
-    if (_mentionChipLabels.isEmpty) {
-      return [TextSpan(text: source, style: style)];
-    }
+    final segmentEnd = sourceOffset + source.length;
+    final inSegment = [
+      for (final mention in _mentions)
+        if (mention.start >= sourceOffset && mention.end <= segmentEnd) mention,
+    ];
+    if (inSegment.isEmpty) return [TextSpan(text: source, style: style)];
 
     final spans = <InlineSpan>[];
     var offset = 0;
-    for (final mention in mentionOccurrences(source, _mentionChipLabels.keys)) {
-      if (mention.start > offset) {
+    for (final mention in inSegment) {
+      final start = mention.start - sourceOffset;
+      final end = mention.end - sourceOffset;
+      if (start > offset) {
         spans.add(
-          TextSpan(text: source.substring(offset, mention.start), style: style),
+          TextSpan(text: source.substring(offset, start), style: style),
         );
       }
-      final label = source.substring(mention.start + 1, mention.end);
-      if (RegExp(r'\([0-9a-f]{64}\)').hasMatch(label)) {
-        spans.add(
-          TextSpan(
-            text: '@$label',
-            style: style.copyWith(color: context.colors.primary),
-          ),
-        );
-        offset = mention.end;
-        continue;
-      }
+      final hidden = source.substring(start + 1, end);
       spans.add(
         WidgetSpan(
           alignment: PlaceholderAlignment.baseline,
           baseline: TextBaseline.alphabetic,
           child: _ComposerMentionChip(
-            label: label,
-            isAgent: _mentionChipLabels[mention.label] ?? false,
+            label:
+                _mentionQualifiers[mention.pubkey] ?? mention.candidate.label,
+            isAgent: mention.candidate.isAgent,
             textStyle: style,
           ),
         ),
       );
-      _pendingChipRanges.add(
-        TextRange(
-          start: sourceOffset + mention.start,
-          end: sourceOffset + mention.end,
-        ),
-      );
+      _pendingChipRanges.add(TextRange(start: mention.start, end: mention.end));
       // The visual chip replaces the `@` placeholder. Keep the label as
       // invisible source text so the text span still has one character per
       // source character, preserving native cursor and deletion behavior.
       spans.add(
         TextSpan(
-          text: label,
+          text: hidden,
           semanticsLabel: '',
           style: _hiddenMentionTextStyle(style),
         ),
       );
-      offset = mention.end;
+      offset = end;
     }
     if (offset < source.length) {
       spans.add(TextSpan(text: source.substring(offset), style: style));

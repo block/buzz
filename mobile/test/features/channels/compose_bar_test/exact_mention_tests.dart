@@ -52,7 +52,8 @@ void exactMentionTests() {
   }
 
   // Same-name members get contextual picker labels (`Scout · <npub suffix>`);
-  // namesake mentions are all inserted qualified with their pubkey.
+  // a picked namesake's chip shows the same label while the draft text stays
+  // the plain name, and each chip is bound to its own key by position.
   Finder scoutRows() => find.descendant(
     of: find.byKey(const ValueKey('mention-suggestions-popover')),
     matching: find.textContaining('Scout'),
@@ -78,6 +79,7 @@ void exactMentionTests() {
     'map reselected',
     'removed',
     'legacy',
+    'legacy map',
     'malformed',
     'tainted',
     'non-member human',
@@ -143,17 +145,24 @@ void exactMentionTests() {
           'compose_drafts_v1:https://relay.example:${signer.public}';
       final saved = jsonDecode(_testPrefs.getString(prefsKey)!) as List;
       expect(saved.single['text'], '@Scout ');
-      expect(saved.single['mention_keys'], {'Scout': first});
+      expect(saved.single['mentions'], [
+        {'start': 0, 'end': 6, 'pubkey': first},
+      ]);
       // Dispose the actual provider state, not just the text controller.
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pumpAndSettle();
-      if (scenario.startsWith('map ')) saved.single['mention_keys'] = null;
-      if (scenario == 'legacy') saved.single.remove('mention_keys');
+      if (scenario.startsWith('map ')) saved.single['mentions'] = null;
+      if (scenario.startsWith('legacy')) saved.single.remove('mentions');
+      if (scenario == 'legacy map') {
+        saved.single['mention_keys'] = {'Scout': first};
+      }
       if (scenario == 'malformed') {
-        saved.single['mention_keys'] = {'Scout': 'not-a-key'};
+        saved.single['mentions'] = [
+          {'start': 0, 'end': 6, 'pubkey': 'not-a-key'},
+        ];
       }
       if (scenario == 'tainted') {
-        saved.single['mention_keys'] = {
+        saved.single['mentions'] = {
           'Scout': {'pubkey': second, 'is_agent': true},
         };
       }
@@ -201,13 +210,14 @@ void exactMentionTests() {
       );
       var expectedText = '@Scout ';
       if (scenario.startsWith('map ')) {
+        // An unreadable record stays unreadable while any `@` remains, and
+        // is persisted that way rather than as plain text.
         expectedText = '@Scout hello';
         await tester.enterText(find.byType(TextField), expectedText);
         await tester.pumpAndSettle();
-        expect(
-          jsonDecode(_testPrefs.getString(prefsKey)!).single['mention_keys'],
-          {'': ''},
-        );
+        final persisted = jsonDecode(_testPrefs.getString(prefsKey)!).single;
+        expect(persisted.containsKey('mentions'), isTrue);
+        expect(persisted['mentions'], isNull);
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pumpAndSettle();
         await mount(members());
@@ -243,6 +253,7 @@ void exactMentionTests() {
       if ([
         'rename',
         'legacy',
+        'legacy map',
         'non-member human',
         'non-member listed own agent',
         'non-member own agent, list unknown',
@@ -256,6 +267,8 @@ void exactMentionTests() {
           if (!outsider && scenario != 'map plain')
             [
               'p',
+              // Without any binding, the typed `@Scout` falls back to the
+              // one member still called Scout.
               ['legacy', 'map reselected'].contains(scenario) ? second : first,
             ],
         ]);
@@ -286,15 +299,22 @@ void exactMentionTests() {
       await tester.pump(const Duration(milliseconds: 250));
     });
   }
+
   testWidgets(
-    'same-name picker selections retain exact recipients through removal',
+    'namesake picks show qualified chips over plain draft text and keep '
+    'their own recipients (recommendation 4)',
     (tester) async {
+      final hex64 = RegExp('[0-9a-f]{64}');
       List<String>? sent;
-      await mountComposer(
-        tester,
-        members(),
-        (_, keys, {mediaTags = const []}) async => sent = keys,
-      );
+      String? sentText;
+      await mountComposer(tester, members(), (
+        text,
+        keys, {
+        mediaTags = const [],
+      }) async {
+        sentText = text;
+        sent = keys;
+      });
       await tester.enterText(find.byType(TextField), '@');
       await tester.pumpAndSettle();
       final labels = [
@@ -303,192 +323,67 @@ void exactMentionTests() {
       expect(labels, hasLength(2));
       expect(labels.toSet(), hasLength(2));
       expect(labels, everyElement(startsWith('Scout · ')));
+
+      // One namesake picked: the chip carries the chooser's short label, the
+      // draft text is the plain name, and the right person is notified. The
+      // wire content stays bare: one key under the name needs no qualifier.
       await pick(tester, '@');
       final controller = tester
           .widget<TextField>(find.byType(TextField))
           .controller!;
       expect(controller.text, '@Scout ');
-      await pick(tester, '@Scout @', last: true);
-      expect(controller.text, '@Scout ($first) @Scout ($second) ');
+      expect(find.text('@${labels.first}'), findsOneWidget);
+      expect(find.bySemanticsLabel('Mention: ${labels.first}'), findsOneWidget);
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
-      expect(sent, [first, second]);
+      expect(sentText, '@Scout');
+      expect(sent, [first]);
+
+      // Both picked: no key ever reaches the composer text; each chip keeps
+      // its label; the sent content qualifies both so bubbles tell them apart.
       await pick(tester, '@');
       await pick(tester, '@Scout @', last: true);
-      await tester.enterText(find.byType(TextField), '@Scout ($second) ');
-      await tester.pumpAndSettle();
+      expect(controller.text, '@Scout @Scout ');
+      expect(controller.text, isNot(contains(hex64)));
+      expect(find.text('@${labels.first}'), findsOneWidget);
+      expect(find.text('@${labels.last}'), findsOneWidget);
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
-      expect(sent, [second]);
-    },
-  );
-
-  testWidgets(
-    'qualifying a namesake keeps code and authored spelling as typed',
-    (tester) async {
-      List<String>? sent;
-      await mountComposer(
-        tester,
-        members(),
-        (_, keys, {mediaTags = const []}) async => sent = keys,
-      );
-      final controller = tester
-          .widget<TextField>(find.byType(TextField))
-          .controller!;
-      // Prose is qualified in its own spelling; code stays as typed.
-      await pick(tester, '@');
-      await pick(tester, '`ping @Scout now` @SCOUT @', last: true);
-      expect(
-        controller.text,
-        '`ping @Scout now` @SCOUT ($first) @Scout ($second) ',
-      );
-      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
-      await tester.pumpAndSettle();
+      expect(sentText, '@Scout ($first) @Scout ($second)');
       expect(sent, [first, second]);
-    },
-  );
 
-  // Code the composer styles stays as typed; prose after it is still
-  // qualified, and both recipients send.
-  for (final (form, code, prose) in [
-    ('a fence', '```\nping @Scout now\n```\n', true),
-    ('a list fence', '- run:\n  ```\n  ping @Scout now\n  ```\n\n', true),
-    ('a list-marker fence', '- ```\n  ping @Scout now\n  ```\n\n', true),
-    ('a span in a list item', 'no ` here\n- run `ping @Scout now` x\n\n', true),
-    // Bold and italics consume a backtick inside them before code pairs.
-    ('a span after bold', '**use ` carefully** then `ping @Scout now` ', true),
-    ('a span after italics', '_a ` b_ `ping @Scout now` ', true),
-  ]) {
-    testWidgets('qualifying a namesake leaves $form as typed', (tester) async {
-      List<String>? sent;
-      await mountComposer(
-        tester,
-        members(),
-        (_, keys, {mediaTags = const []}) async => sent = keys,
-      );
-      final controller = tester
-          .widget<TextField>(find.byType(TextField))
-          .controller!;
+      // Deleting the first of two identical chips removes its recipient, not
+      // its namesake's.
       await pick(tester, '@');
-      await pick(tester, '$code${prose ? 'hi @Scout\n' : ''}@', last: true);
-      expect(
-        controller.text,
-        '$code${prose ? 'hi @Scout ($first)\n' : ''}@Scout ($second) ',
+      await pick(tester, '@Scout @', last: true);
+      controller.selection = const TextSelection(
+        baseOffset: 0,
+        extentOffset: 7,
       );
-      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
-      await tester.pumpAndSettle();
-      expect(sent, [first, second]);
-    });
-  }
-
-  // Prose that looks like code to a line-by-line reading is still qualified.
-  for (final (form, before, after) in [
-    ('list continuation', '- item\n\n    ask ', '\n\n'),
-    ('lazy list continuation', '- item\nlazy\n\n    ask ', '\n\n'),
-    ('an unmatched backtick in an earlier item', '- a `x\n- b ask ', ' y`\n\n'),
-    ('quote-tab', '>\t ask ', '\n\n'),
-    ('a backtick consumed by bold', '**a `b** ask ', ' `\n\n'),
-  ]) {
-    testWidgets('$form prose is qualified, not taken for code', (tester) async {
-      List<String>? sent;
-      await mountComposer(
-        tester,
-        members(),
-        (_, keys, {mediaTags = const []}) async => sent = keys,
-      );
-      final controller = tester
-          .widget<TextField>(find.byType(TextField))
-          .controller!;
-      await pick(tester, '@');
-      await pick(tester, '$before@Scout$after@', last: true);
-      expect(controller.text, '$before@Scout ($first)$after@Scout ($second) ');
-      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
-      await tester.pumpAndSettle();
-      expect(sent, [first, second]);
-    });
-  }
-
-  testWidgets(
-    'a namesake selection left only in code keeps its label and recipient',
-    (tester) async {
-      List<String>? sent;
-      await mountComposer(
-        tester,
-        members(),
-        (_, keys, {mediaTags = const []}) async => sent = keys,
-      );
-      final controller = tester
-          .widget<TextField>(find.byType(TextField))
-          .controller!;
-      await pick(tester, '@');
-      await pick(tester, '`ping @Scout now` @', last: true);
-      expect(controller.text, '`ping @Scout now` @Scout ($second) ');
-      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
-      await tester.pumpAndSettle();
-      expect(sent, [first, second]);
-    },
-  );
-
-  testWidgets(
-    'a namesake selection touching code backticks stays bound after unformatting',
-    (tester) async {
-      List<String>? sent;
-      await mountComposer(
-        tester,
-        members(),
-        (_, keys, {mediaTags = const []}) async => sent = keys,
-      );
-      final controller = tester
-          .widget<TextField>(find.byType(TextField))
-          .controller!;
-      await pick(tester, '@');
-      await pick(tester, '`@Scout` and @Scout @', last: true);
-      expect(controller.text, '`@Scout` and @Scout ($first) @Scout ($second) ');
-      // Delete the qualified prose mention and remove the code formatting.
-      await tester.enterText(
-        find.byType(TextField),
-        '@Scout and @Scout ($second) ',
-      );
-      await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
-      await tester.pumpAndSettle();
-      expect(sent, [first, second]);
-    },
-  );
-
-  testWidgets(
-    'qualifying a namesake leaves a longer typed member name intact',
-    (tester) async {
-      final third = 'c' * 64;
-      List<String>? sent;
-      await mountComposer(tester, [
-        ...members(),
-        ChannelMember(
-          pubkey: third,
-          displayName: 'Scout Leader',
-          role: 'member',
-          joinedAt: DateTime(2025),
+      await tester.pump();
+      tester.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: '@Scout ',
+          selection: TextSelection.collapsed(offset: 0),
         ),
-      ], (_, keys, {mediaTags = const []}) async => sent = keys);
-      final controller = tester
-          .widget<TextField>(find.byType(TextField))
-          .controller!;
-      await pick(tester, '@');
-      await tester.enterText(
-        find.byType(TextField),
-        '@Scout and @Scout Leader @',
       );
       await tester.pumpAndSettle();
-      // Rows: the earlier pick, its namesake, then Scout Leader.
-      await tester.tap(scoutRows().at(1));
-      await tester.pumpAndSettle();
-      expect(
-        controller.text,
-        '@Scout ($first) and @Scout Leader @Scout ($second) ',
-      );
+      expect(controller.text, '@Scout ');
+      expect(find.text('@${labels.last}'), findsOneWidget);
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
-      expect(sent, [first, third, second]);
+      expect(sentText, '@Scout');
+      expect(sent, [second]);
+
+      // A chip inside code keeps its recipient but is sent as typed; only the
+      // prose namesake is qualified.
+      await pick(tester, '`ping @');
+      await pick(tester, '`ping @Scout now` @', last: true);
+      expect(controller.text, '`ping @Scout now` @Scout ');
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pumpAndSettle();
+      expect(sentText, '`ping @Scout now` @Scout ($second)');
+      expect(sent, [first, second]);
     },
   );
 

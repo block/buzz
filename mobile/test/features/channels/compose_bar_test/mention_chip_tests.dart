@@ -2,7 +2,7 @@ part of '../compose_bar_test.dart';
 
 /// Picked mentions are atomic chips bound to their recipient (buzz-app
 /// `src/bundled/mentions/README.md`, "Mention rules"; project
-/// recommendations 1 and 2).
+/// recommendations 1 to 3).
 void mentionChipTests() {
   final bob = 'b' * 64;
   final alice = 'a' * 64;
@@ -138,27 +138,55 @@ void mentionChipTests() {
       expect(sentText, 'hi there');
       expect(sent, isEmpty);
 
-      // A name character typed against a chip turns it back into text, so
-      // `@Bobby` is nobody and sends with no recipient.
-      await tester.enterText(find.byType(TextField), '@bo');
-      await tester.pumpAndSettle();
-      await tester.tap(row('Bob'));
-      await tester.pumpAndSettle();
-      expect(personChip, findsOneWidget);
-      backspace(tester, controller);
-      await tester.pump();
-      tester.testTextInput.updateEditingValue(
-        const TextEditingValue(
-          text: '@Bobby',
-          selection: TextSelection.collapsed(offset: 6),
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(personChip, findsNothing);
-      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
-      await tester.pumpAndSettle();
-      expect(sentText, '@Bobby');
-      expect(sent, isEmpty);
+      // Typed directly against a chip (the trailing space removed first), a
+      // letter or digit continues the name: `@Bobby` and `@Bob2` are nobody
+      // and send with no recipient. Punctuation, straight and curly
+      // apostrophes, a hyphen or a slash keep the chip and Bob
+      // (recommendation 3).
+      Future<void> typeAgainstChip(
+        String suffix, {
+        required Matcher chip,
+      }) async {
+        await tester.enterText(find.byType(TextField), '@bo');
+        await tester.pumpAndSettle();
+        await tester.tap(row('Bob'));
+        await tester.pumpAndSettle();
+        expect(personChip, findsOneWidget);
+        backspace(tester, controller);
+        await tester.pump();
+        tester.testTextInput.updateEditingValue(
+          TextEditingValue(
+            text: '@Bob$suffix',
+            selection: TextSelection.collapsed(offset: 4 + suffix.length),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(controller.text, '@Bob$suffix');
+        expect(personChip, chip, reason: suffix);
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+        await tester.pumpAndSettle();
+        expect(sentText, '@Bob$suffix');
+      }
+
+      for (final suffix in ['by', '2']) {
+        await typeAgainstChip(suffix, chip: findsNothing);
+        expect(sent, isEmpty, reason: suffix);
+      }
+      for (final suffix in [
+        "'s idea",
+        '’s idea',
+        '-bot',
+        '/Alice',
+        ', right',
+        '.',
+        '!',
+        '"',
+        ')',
+      ]) {
+        sent = null;
+        await typeAgainstChip(suffix, chip: findsOneWidget);
+        expect(sent, [bob], reason: suffix);
+      }
 
       // A pick after an opening bracket notifies exactly like one after a
       // space (recommendation 1).

@@ -136,7 +136,7 @@ void agentPrefillTests() {
     expect(text(), isEmpty);
   });
 
-  testWidgets('prefills same-name agents with every one qualified', (
+  testWidgets('prefills same-name agents as qualified chips over plain text', (
     tester,
   ) async {
     final viewer = 'f' * 64;
@@ -174,7 +174,9 @@ void agentPrefillTests() {
       ),
     );
     await tester.pumpAndSettle();
-    final prefill = '@Jitter ($first) @Jitter ($second) ';
+    // No key reaches the composer text; each chip shows its qualified
+    // label, and each stays bound to its own agent.
+    const prefill = '@Jitter @Jitter ';
     expect(find.text(prefill.trim()), findsOneWidget);
     await tester.tap(find.text(prefill.trim()));
     await tester.pumpAndSettle();
@@ -182,6 +184,15 @@ void agentPrefillTests() {
       tester.widget<TextField>(find.byType(TextField)).controller!.text,
       prefill,
     );
+    expect(
+      find.byKey(const ValueKey('composer-agent-mention-chip')),
+      findsNWidgets(2),
+    );
+    final chipLabels = tester
+        .widgetList<Text>(find.textContaining(RegExp(r'^Jitter · ')))
+        .map((t) => t.data)
+        .toSet();
+    expect(chipLabels, hasLength(2));
     await tester.enterText(find.byType(TextField), '${prefill}hi');
     await tester.pumpAndSettle();
     await tester.tap(find.byIcon(BuzzIcons.arrowUp));

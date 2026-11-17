@@ -26,7 +26,10 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/agents/owned_agent_directory.dart';
+import '../../shared/identity_names/identity_names.dart';
+import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
+import '../../shared/mentions/bound_mentions.dart';
 import '../../shared/mentions/mention_bindings.dart';
 import '../../shared/mentions/mention_rules.dart';
 import '../../shared/huddle/huddle_session.dart';
@@ -64,7 +67,7 @@ import 'voice_note_recording.dart';
 import 'package:buzz/shared/crypto/event_signing.dart';
 
 part 'compose_bar/helpers.dart';
-part 'compose_bar/agent_mention_labels.dart';
+part 'compose_bar/composer_mentions.dart';
 part 'compose_bar/agent_mention_prefill.dart';
 part 'compose_bar/markdown_editing_controller.dart';
 part 'compose_bar/composer_chips.dart';
