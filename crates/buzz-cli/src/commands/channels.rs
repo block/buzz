@@ -82,6 +82,9 @@ impl ChannelSummary {
     }
 }
 
+/// Most kind:39002 memberships `channels list --member` reads.
+const MAX_LISTED_MEMBERSHIPS: u32 = 10_000;
+
 pub async fn cmd_list_channels(
     client: &BuzzClient,
     visibility: Option<&str>,
@@ -91,41 +94,58 @@ pub async fn cmd_list_channels(
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     let effective_limit = limit.unwrap_or(500);
+    let keep = |c: &ChannelSummary| is_listed(c, visibility, include_archived);
+    // `--limit` counts the channels printed, so both paths keep reading past
+    // the ones the filters drop.
     let events = if member == Some(true) {
-        // Step 1: find channel IDs where we're a member (kind:39002)
+        // Step 1: find channel IDs where we're a member (kind:39002). Read up
+        // to a fixed bound rather than `--limit`, since some may be filtered.
         let my_pk = client.public_key().to_hex();
         let member_filter = serde_json::json!({
             "kinds": [39002],
             "#p": [my_pk],
         });
         let member_events = client
-            .query_paginated(member_filter, effective_limit)
+            .query_paginated(member_filter, MAX_LISTED_MEMBERSHIPS)
             .await?;
         let channel_ids: Vec<String> = member_events
             .iter()
             .map(extract_d_tag)
             .filter(|id| !id.is_empty())
             .collect();
-        if channel_ids.is_empty() {
-            println!("[]");
-            return Ok(());
+        // Step 2: fetch kind:39000 metadata one bounded chunk of IDs at a
+        // time, until `--limit` channels pass the filters.
+        let mut kept = Vec::new();
+        for chunk in channel_ids.chunks(crate::client::QUERY_PAGE_SIZE as usize) {
+            let metadata_filter = serde_json::json!({
+                "kinds": [39000],
+                "#d": chunk,
+            });
+            let page = client
+                .query_paginated(metadata_filter, chunk.len() as u32)
+                .await?;
+            kept.extend(
+                page.into_iter()
+                    .filter(|e| keep(&ChannelSummary::from_event(e))),
+            );
+            if kept.len() >= effective_limit as usize {
+                break;
+            }
         }
-        // Step 2: fetch kind:39000 metadata for those channels.
-        let metadata_filter = serde_json::json!({
-            "kinds": [39000],
-            "#d": channel_ids,
-        });
-        client
-            .query_paginated(metadata_filter, effective_limit)
-            .await?
+        kept.truncate(effective_limit as usize);
+        kept
     } else {
         let filter = serde_json::json!({
             "kinds": [39000],
         });
-        client.query_paginated(filter, effective_limit).await?
+        client
+            .query_paginated_keeping(filter, effective_limit, |e| {
+                keep(&ChannelSummary::from_event(e))
+            })
+            .await?
     };
 
-    let channels = listed_channels(&events, visibility, include_archived);
+    let channels: Vec<ChannelSummary> = events.iter().map(ChannelSummary::from_event).collect();
     let output = match format {
         crate::OutputFormat::Compact => {
             let compact: Vec<serde_json::Value> = channels
@@ -174,19 +194,11 @@ pub async fn cmd_search_channels(
     Ok(())
 }
 
-/// The channels `channels list` prints: every event, minus archived channels
-/// unless `include_archived`, and only `visibility` (`open`/`private`) if given.
-fn listed_channels(
-    events: &[serde_json::Value],
-    visibility: Option<&str>,
-    include_archived: bool,
-) -> Vec<ChannelSummary> {
-    events
-        .iter()
-        .map(ChannelSummary::from_event)
-        .filter(|c| visibility.is_none() || c.visibility.as_deref() == visibility)
-        .filter(|c| include_archived || !c.archived)
-        .collect()
+/// Whether `channels list` prints a channel: archived ones only with
+/// `include_archived`, and only `visibility` (`open`/`private`) if given.
+fn is_listed(channel: &ChannelSummary, visibility: Option<&str>, include_archived: bool) -> bool {
+    (visibility.is_none() || channel.visibility.as_deref() == visibility)
+        && (include_archived || !channel.archived)
 }
 
 /// The channels `channels search` prints, sorted by name then ID. Events
@@ -2076,7 +2088,7 @@ mod tests {
     use super::{
         apply_cardinality_rule, assemble_roster_resolution, build_hint_map, build_template_report,
         cmd_set_add_policy, fetch_candidate_hints, finalize_roster_resolution, format_candidate,
-        hints_from_results, join_bounded_queries, listed_channels, name_matches,
+        hints_from_results, is_listed, join_bounded_queries, name_matches,
         resolve_roster_with_archive_filter, search_matches, validate_ttl_seconds,
         validate_update_channel_fields, ArchivedExclusion, CandidateHint, ChannelSummary,
         ResolvedAgent, RosterResolution, SkippedSlug,
@@ -2246,17 +2258,27 @@ mod tests {
         channels.iter().map(|c| c.channel_id.as_str()).collect()
     }
 
+    fn listed(
+        events: &[serde_json::Value],
+        visibility: Option<&str>,
+        include_archived: bool,
+    ) -> Vec<String> {
+        events
+            .iter()
+            .map(ChannelSummary::from_event)
+            .filter(|c| is_listed(c, visibility, include_archived))
+            .map(|c| c.channel_id)
+            .collect()
+    }
+
     #[test]
     fn list_hides_archived_channels_unless_asked() {
         let events = vec![
             channel("live", "a", json!([["public"]])),
             channel("old", "b", json!([["public"], ["archived", "true"]])),
         ];
-        assert_eq!(ids(&listed_channels(&events, None, false)), vec!["live"]);
-        assert_eq!(
-            ids(&listed_channels(&events, None, true)),
-            vec!["live", "old"]
-        );
+        assert_eq!(listed(&events, None, false), vec!["live"]);
+        assert_eq!(listed(&events, None, true), vec!["live", "old"]);
     }
 
     #[test]
@@ -2265,14 +2287,8 @@ mod tests {
             channel("open", "a", json!([["public"]])),
             channel("secret", "b", json!([["private"]])),
         ];
-        assert_eq!(
-            ids(&listed_channels(&events, Some("open"), false)),
-            vec!["open"]
-        );
-        assert_eq!(
-            ids(&listed_channels(&events, Some("private"), false)),
-            vec!["secret"]
-        );
+        assert_eq!(listed(&events, Some("open"), false), vec!["open"]);
+        assert_eq!(listed(&events, Some("private"), false), vec!["secret"]);
     }
 
     #[test]
