@@ -900,13 +900,38 @@ fn check_distinct_targets(targets: &[MemberPut<'_>]) -> Result<()> {
     }
 }
 
+/// Lock all normalized group defaults before taking the community row.
+///
+/// Membership locks all precede per-channel TTL and row locks. This phase
+/// makes no eligibility decision: an accepted receipt must replay even when
+/// a default has since disappeared or become nonpublic.
+pub(crate) async fn lock_group_default_channels_in_transaction(
+    tx: &mut AdmittedTx,
+    channels: &[Uuid],
+) -> Result<()> {
+    let community = tx.community();
+    for channel in channels {
+        acquire_channel_membership_lock(tx.conn(), community, *channel).await?;
+    }
+    for channel in channels {
+        lock_channel_ttl_shared_in_transaction(tx, *channel).await?;
+        sqlx::query("SELECT id FROM channels WHERE community_id=$1 AND id=$2 FOR NO KEY UPDATE")
+            .bind(community.as_uuid())
+            .bind(channel)
+            .fetch_optional(tx.conn())
+            .await?;
+    }
+    Ok(())
+}
+
 /// Add only new group members to configured public channels on the group's
 /// admitted transaction. Missing/deleted channels remain inert references;
 /// newly configured nonpublic channels are invalid configuration. Saved defaults
 /// that have become nonpublic or closed are retained but skipped. Existing active
 /// memberships never change role.
 ///
-/// All channel membership locks precede TTL and row locks, in canonical order.
+/// The caller holds [`lock_group_default_channels_in_transaction`]'s locks
+/// for the normalized, sorted/deduplicated `channels` from the signed command.
 /// Policy refusals are bounded accounting, while database failures abort the
 /// entire group write. The caller publishes returned channel rosters after commit.
 pub(crate) async fn put_group_default_members_in_transaction(
@@ -923,12 +948,6 @@ pub(crate) async fn put_group_default_members_in_transaction(
 )> {
     use buzz_core::channel::{decide_channel_add_policy, ChannelAddPolicyDenied};
     let community = tx.community();
-    let mut channels = channels.to_vec();
-    channels.sort_unstable();
-    channels.dedup();
-    for channel in &channels {
-        acquire_channel_membership_lock(tx.conn(), community, *channel).await?;
-    }
     let mut summary = crate::mention_group::JoinSummary::default();
     let policy_rows = if targets.is_empty() {
         Vec::new()
@@ -984,11 +1003,10 @@ pub(crate) async fn put_group_default_members_in_transaction(
     };
     let mut changed = Vec::new();
     let mut joined_members = Vec::new();
-    for channel in channels {
-        lock_channel_ttl_shared_in_transaction(tx, channel).await?;
+    for &channel in channels {
         let row = sqlx::query(
             "SELECT visibility::text AS visibility, channel_type::text AS channel_type, unlisted, archived_at \
-             FROM channels WHERE community_id=$1 AND id=$2 AND deleted_at IS NULL FOR NO KEY UPDATE",
+             FROM channels WHERE community_id=$1 AND id=$2 AND deleted_at IS NULL",
         ).bind(community.as_uuid()).bind(channel).fetch_optional(tx.conn()).await?;
         let Some(row) = row else {
             summary.skip("channel_unavailable", targets.len());

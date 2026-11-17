@@ -113,6 +113,14 @@ impl Db {
             ));
         }
         let mut tx = self.begin_event_write_transaction(community).await?;
+        set_statement_budget(&mut tx).await?;
+        // Channel writers lock channels before invalidating the community.
+        // Match that order using the full normalized put set, locks only:
+        // mutable eligibility and authorization stay after the receipt check.
+        if let Operation::Put { channels, .. } = &command.operation {
+            crate::channel_members::lock_group_default_channels_in_transaction(&mut tx, channels)
+                .await?;
+        }
         lock_community(&mut tx).await?;
         if let Some(joins) = receipt_summary(tx.conn(), community, event.id.as_bytes()).await? {
             let mut result = GroupWrite::without_snapshot(GroupOutcome::Duplicate);
@@ -280,6 +288,7 @@ impl Db {
             ));
         }
         let mut tx = self.begin_event_write_transaction(community).await?;
+        set_statement_budget(&mut tx).await?;
         lock_community(&mut tx).await?;
         if let Some(joins) = receipt_summary(tx.conn(), community, event.id.as_bytes()).await? {
             let mut result = GroupWrite::without_snapshot(GroupOutcome::Duplicate);
@@ -333,10 +342,14 @@ impl Db {
     }
 }
 
-async fn lock_community(tx: &mut AdmittedTx) -> Result<()> {
+async fn set_statement_budget(tx: &mut AdmittedTx) -> Result<()> {
     sqlx::query("SET LOCAL statement_timeout='5s'")
         .execute(tx.conn())
         .await?;
+    Ok(())
+}
+
+async fn lock_community(tx: &mut AdmittedTx) -> Result<()> {
     // The same lock owner transitions use: policy changes and group writes see
     // one order, and compatible FK key-share locks cannot create a lock cycle.
     sqlx::query("SELECT id FROM communities WHERE id=$1 FOR NO KEY UPDATE")

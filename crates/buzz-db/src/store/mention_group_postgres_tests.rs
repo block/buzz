@@ -273,6 +273,160 @@ async fn mention_group_concurrent_cas_names_and_identical_retries_commit_once() 
     assert_eq!(f.live_heads(id).await, 1);
 }
 
+// A settings writer already holding a channel lock must be able to finish
+// its community invalidation while a group put waits for that channel.
+async fn assert_channel_writer_precedes_group_put(updates: crate::channel::ChannelUpdate) {
+    use buzz_core::channel::{ChannelType, ChannelVisibility};
+    use std::time::Duration;
+
+    let f = Fixture::new().await;
+    let channel =
+        f.db.create_channel(
+            f.community,
+            "Lock order",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &f.actor.public_key().to_bytes(),
+            None,
+        )
+        .await
+        .unwrap()
+        .id;
+    let id = Uuid::new_v4();
+    let event = f.event(
+        buzz_core::kind::RELAY_ADMIN_PUT_MENTION_GROUP,
+        vec![
+            vec!["d".into(), id.to_string()],
+            vec!["prev".into(), "0".into()],
+            vec!["name".into(), "Ordered".into()],
+            vec!["p".into(), f.actor.public_key().to_hex()],
+            vec!["channel".into(), channel.to_string()],
+        ],
+    );
+    // One connection identifies the real acceptance backend without a
+    // test-only production seam or matching unrelated cluster sessions.
+    let put_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&crate::test_support::database_url())
+        .await
+        .unwrap();
+    let put_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&put_pool)
+        .await
+        .unwrap();
+    let mut holder =
+        f.db.begin_event_write_transaction(f.community)
+            .await
+            .unwrap();
+    sqlx::query("SET LOCAL statement_timeout='2s'")
+        .execute(holder.conn())
+        .await
+        .unwrap();
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(holder.conn())
+        .await
+        .unwrap();
+    let mut writer =
+        crate::channel::lock_channel_for_settings_write(&mut holder, channel, &updates)
+            .await
+            .unwrap();
+    let community = f.community;
+    let relay = f.relay.clone();
+    let put = tokio::spawn(async move {
+        Db::from_pool(put_pool)
+            .accept_mention_group(
+                community,
+                &event,
+                &parse_command(&event).unwrap(),
+                &relay,
+                1_000_000,
+                true,
+            )
+            .await
+    });
+    // Observe PostgreSQL's actual lock dependency, with a bounded deadline.
+    // No scheduling delay can stand in for proof that acceptance is blocked.
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid=$1 \
+                 AND wait_event_type='Lock' AND $2=ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(put_pid)
+            .bind(holder_pid)
+            .fetch_one(f.db.pool())
+            .await
+            .unwrap();
+            if blocked {
+                break;
+            }
+            assert!(
+                !put.is_finished(),
+                "put finished without waiting for channel writer"
+            );
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("put never waited for the production channel lock");
+    let invalidated: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "UPDATE communities SET artifact_policy_modified_at=clock_timestamp() \
+         WHERE id=$1 RETURNING artifact_policy_modified_at",
+    )
+    .bind(community.as_uuid())
+    .fetch_one(writer.tx().conn())
+    .await
+    .expect("channel writer must update community while group put waits");
+    holder.commit().await.unwrap();
+    let accepted = tokio::time::timeout(Duration::from_secs(6), put)
+        .await
+        .unwrap()
+        .unwrap()
+        .expect("group put must also commit; neither writer may abort");
+    assert_eq!(accepted.outcome, GroupOutcome::Applied);
+    assert_eq!(accepted.joins.skipped.get("already_member"), Some(&1));
+    assert_eq!(f.state(id).await.0, 1);
+    assert_eq!(f.live_heads(id).await, 1);
+    let actual: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT artifact_policy_modified_at FROM communities WHERE id=$1")
+            .bind(community.as_uuid())
+            .fetch_one(f.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(actual, invalidated);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn cluster_global_mention_group_put_waits_before_community_for_membership_writer() {
+    assert_channel_writer_precedes_group_put(crate::channel::ChannelUpdate {
+        visibility: Some("private".into()),
+        ..Default::default()
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn cluster_global_mention_group_put_waits_before_community_for_exclusive_ttl_writer() {
+    assert_channel_writer_precedes_group_put(crate::channel::ChannelUpdate {
+        ttl_seconds: Some(Some(3600)),
+        ..Default::default()
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn cluster_global_mention_group_put_waits_before_community_for_row_writer() {
+    assert_channel_writer_precedes_group_put(crate::channel::ChannelUpdate {
+        unlisted: Some(true),
+        ..Default::default()
+    })
+    .await;
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn mention_group_failures_roll_back_rows_receipts_and_retirement() {
@@ -638,6 +792,9 @@ async fn mention_group_default_joins_are_atomic_report_skips_and_never_replay() 
         )
         .await
         .unwrap();
+        let replay = f.apply(&create).await.unwrap();
+        assert_eq!(replay.outcome, GroupOutcome::Duplicate);
+        assert_eq!(replay.joins, accepted.joins);
         let rename = event(version, "Still editable", &without_target, &[public]);
         let renamed = f.apply(&rename).await.unwrap();
         assert_eq!(renamed.outcome, GroupOutcome::Applied);
@@ -656,4 +813,21 @@ async fn mention_group_default_joins_are_atomic_report_skips_and_never_replay() 
             .is_none());
         version += 1;
     }
+    f.db.soft_delete_channel(f.community, public).await.unwrap();
+    let replay = f.apply(&create).await.unwrap();
+    assert_eq!(replay.outcome, GroupOutcome::Duplicate);
+    assert_eq!(replay.joins, accepted.joins);
+    // Even a physically absent default must not turn an accepted receipt
+    // into a new eligibility decision in the prelock phase.
+    sqlx::query("DELETE FROM channels WHERE community_id=$1 AND id=$2")
+        .bind(f.community.as_uuid())
+        .bind(public)
+        .execute(f.db.pool())
+        .await
+        .unwrap();
+    let replay = f.apply(&create).await.unwrap();
+    assert_eq!(replay.outcome, GroupOutcome::Duplicate);
+    assert_eq!(replay.joins, accepted.joins);
+    assert_eq!(f.state(id).await.0, version);
+    assert_eq!(f.live_heads(id).await, 1);
 }
