@@ -1,6 +1,6 @@
 # Trigger retirement deployment
 
-Three migrations drop database triggers and functions whose work the relay
+Four migrations drop database triggers and functions whose work the relay
 now does in application code. They ship together:
 
 | Migration | Drops | Application replacement |
@@ -8,6 +8,7 @@ now does in application code. They ship together:
 | `0089_retire_created_at_floor.sql` | the `events_created_at_floor` constraint trigger and its function (`0021`) | the insert-time floor check, [#8325](https://github.com/block/buzz/pull/8325) |
 | `0090_retire_community_write_fence.sql` | the universal community write-fence triggers and functions | app-side write admission, [#8219](https://github.com/block/buzz/pull/8219), [#8318](https://github.com/block/buzz/pull/8318) and [#8322](https://github.com/block/buzz/pull/8322) |
 | `0091_drop_nip_rs_mesh_migration_triggers.sql` | the migration-only NIP-RS watermark, purge, mention-liveness and mesh-status triggers | [#8128](https://github.com/block/buzz/pull/8128) |
+| `0095_retire_channel_roster_trigger.sql` | the `0032` channel-roster trigger `trg_events_guard_channel_roster_snapshot` and its function | the app-side kind:39002 roster check, [#8316](https://github.com/block/buzz/pull/8316); since [#8611](https://github.com/block/buzz/pull/8611) no relay requires the trigger at startup |
 
 ## Required stop
 
@@ -27,7 +28,12 @@ are still serving:
   events that replica reads can then skip;
 - a relay without #8318 fails its background jobs with
   `42883 community_write_allowed(uuid) does not exist`;
-- a relay without #8128 loses the NIP-RS watermark and superseded-row purge.
+- a relay without #8128 loses the NIP-RS watermark and superseded-row purge;
+- a relay without #8316 does not check kind:39002 roster snapshots against
+  channel membership, so it can save stale rosters;
+- a build with migration `0032` but without #8611 refuses to start once the
+  roster trigger is gone, so such a pod cannot restart during the rollout or
+  serve as a rollback target.
 
 ## Procedure
 
@@ -43,10 +49,10 @@ are still serving:
    - **Auto-migration on:** deploy the new build. Its first pod applies the
      migrations at startup.
    - **Auto-migration off:** run `buzz-admin migrate` with the target
-     `DATABASE_URL`, confirm that it records 0089, 0090 and 0091, then deploy
+     `DATABASE_URL`, confirm that it records 0089 through 0095, then deploy
      the new build. The new build assumes 0091 has run: against a
      database without it, NIP-RS hard deletes fail closed with
-     `check_violation`. The stop build works with all three applied.
+     `check_violation`. The stop build works with all four applied.
 4. Once every relay runs the new build, run the one-off cleanup SQL in
    [#8211](https://github.com/block/buzz/pull/8211) once per database. While
    stop-build pods served after 0091, a replacement could leave a
@@ -57,8 +63,9 @@ are still serving:
 
 A deployment that applies `schema/` with pgschema follows the same order.
 Apply the migrations first, or first drop the triggers on the partitioned
-parents: `events_created_at_floor` and `community_write_fence_events` on
-`events`, and `community_write_fence_delivery_log` on `delivery_log`.
+parents: `events_created_at_floor`, `community_write_fence_events` and
+`trg_events_guard_channel_roster_snapshot` on `events`, and
+`community_write_fence_delivery_log` on `delivery_log`.
 Otherwise pgschema plans the partition copies' drops before the parent's, and
 PostgreSQL refuses with `2BP01`.
 
