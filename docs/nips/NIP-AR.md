@@ -70,6 +70,7 @@ Two optional tags name people, and the relay holds them to rules so a reader can
   - On a `create`, `move` or `restore`, every assignee MUST be able to read the home that revision puts the artifact in, judged when the revision is accepted.
   - On an `update`, only the assignees it adds, compared with the artifact's current state, are checked. Someone who lost access since being assigned doesn't block an unrelated edit, and can't read the artifact anyway.
   - A move that would leave an assignee unable to read the destination is rejected, so the client saves it without them.
+  - Someone banned from the community, or an agent whose owner is, reads nothing, so they can't be assigned. A timeout doesn't change reading, so a timed-out person can still be assigned.
   - A `delete` carries no assignees.
 - **Creator.** `["creator", <hex pubkey>]`, at most once. On `create` it MUST equal the revision's signer. Every later `update`, `move` and `restore` MUST carry the creator named on `create`: present and equal, or absent when the artifact was created without one. A `delete` carries none.
 - **Signer.** An artifact revision is signed by a person. An agent acts through its owner's key and names itself in client-defined tags. Comments in the artifact's conversation are ordinary messages and may be signed by agents.

@@ -194,13 +194,23 @@ fn role_name(role: MemberRole) -> &'static str {
 }
 
 /// Whether `pubkey` can read `channel_id`, by the rule the answer leaves
-/// unreadable channels out with.
+/// unreadable channels out with. Someone banned from the community, or an
+/// agent whose owner is, reads nothing, as every request from them is
+/// refused. A timeout leaves reading alone.
 pub(crate) async fn can_read(
     state: &AppState,
     community_id: CommunityId,
     pubkey: &[u8],
     channel_id: Uuid,
 ) -> Result<bool, buzz_db::DbError> {
+    if state
+        .db
+        .moderation_restriction_state(community_id, pubkey)
+        .await?
+        .banned
+    {
+        return Ok(false);
+    }
     Ok(readable(state, community_id, pubkey, channel_id)
         .await?
         .is_some())

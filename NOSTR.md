@@ -363,9 +363,15 @@ channels the signer has not joined all get the same answer.
   Reading is judged by the check a task's assignees meet
   ([NIP-AR](docs/nips/NIP-AR.md)): a member row, an open channel, or what
   the parents give under `parent_access`; a conversation follows its home.
+  Someone banned from the community, or an agent whose owner is, reads
+  nothing and is answered `false`, as every request from them is refused.
+  A timeout doesn't change reading: a timed-out person is answered `true`
+  where they read, and may ask.
   - **Who may ask.** Only a signer who can read the channel. Otherwise the
     request is refused with 403 and
     `{"error":"not-allowed: the signer cannot read this channel"}`. A
+    banned signer is refused earlier, with the ban's own `blocked:` reason,
+    like every request from them. A
     missing or deleted channel is refused the same way, so the answer
     can't show whether a private channel exists. There are no partial
     answers: a refusal is never a list of `false`s.

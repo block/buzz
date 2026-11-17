@@ -788,7 +788,7 @@ pub(crate) async fn viewer_pushes(
 }
 
 /// Apply a moderation command signed by `actor` against `target`.
-async fn moderate(
+pub(crate) async fn moderate(
     state: &Arc<AppState>,
     tenant: &TenantContext,
     actor: &Keys,
@@ -1224,4 +1224,119 @@ async fn a_reader_learns_who_else_can_read_a_place() {
     let (status, body) = ask_readers(state, tenant, &child_member, f.child, &[&f.owner]).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert_eq!(body, private);
+}
+
+/// Makes `keys` a relay member with `role`, so they may moderate.
+pub(crate) async fn relay_member(
+    state: &AppState,
+    tenant: &TenantContext,
+    keys: &Keys,
+    role: &str,
+) {
+    state
+        .db
+        .add_relay_member(
+            tenant.community(),
+            &keys.public_key().to_hex(),
+            role,
+            None,
+            &Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("relay member");
+}
+
+/// Someone banned from the community, and an agent whose owner is, read
+/// nothing, so the answer says false for them, and a banned asker is
+/// refused with the ban's reason, as every request from them is. A timed-out
+/// person still reads. Lifting the ban restores them.
+/// Mutation: drop the ban from the shared check → RED.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn a_banned_person_reads_nothing() {
+    let f = Fixture::new(live_state().await, "readers-ban").await;
+    let (state, tenant) = (&f.state, &f.tenant);
+    let (banned, agent, timed_out) = (Keys::generate(), Keys::generate(), Keys::generate());
+    relay_member(state, tenant, &f.owner, "owner").await;
+    for keys in [&banned, &agent] {
+        state
+            .db
+            .ensure_user(tenant.community(), keys.public_key().as_bytes())
+            .await
+            .expect("user row");
+    }
+    assert!(state
+        .db
+        .set_agent_owner(
+            tenant.community(),
+            agent.public_key().as_bytes(),
+            banned.public_key().as_bytes(),
+        )
+        .await
+        .expect("own the agent"));
+    for keys in [&banned, &agent, &timed_out] {
+        add(state, tenant, &f.owner, f.project, keys, "member").await;
+    }
+    let open_channel = create_channel(state, tenant, &f.owner, &[]).await;
+    let people = [&banned, &agent, &timed_out];
+    for place in [f.child, open_channel] {
+        assert_eq!(
+            readers(state, tenant, &f.owner, place, &people).await,
+            expect(&[(&banned, true), (&agent, true), (&timed_out, true)])
+        );
+    }
+
+    let until = chrono::Utc::now().timestamp() + 3600;
+    moderate(
+        state,
+        tenant,
+        &f.owner,
+        buzz_core::kind::KIND_MODERATION_TIMEOUT,
+        &timed_out,
+        Some(until),
+    )
+    .await;
+    moderate(
+        state,
+        tenant,
+        &f.owner,
+        buzz_core::kind::KIND_MODERATION_BAN,
+        &banned,
+        None,
+    )
+    .await;
+    for place in [f.child, open_channel] {
+        assert_eq!(
+            readers(state, tenant, &f.owner, place, &people).await,
+            expect(&[(&banned, false), (&agent, false), (&timed_out, true)]),
+            "banned and their agent read nothing, an open channel included; a timeout reads"
+        );
+    }
+    let (status, refused) = ask_readers(state, tenant, &banned, open_channel, &[&f.owner]).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().starts_with("blocked:"),
+        "a banned asker gets the ban's reason: {refused}"
+    );
+    assert_eq!(
+        readers(state, tenant, &timed_out, f.child, &[&f.owner]).await,
+        expect(&[(&f.owner, true)]),
+        "a timed-out person may still ask"
+    );
+
+    moderate(
+        state,
+        tenant,
+        &f.owner,
+        buzz_core::kind::KIND_MODERATION_UNBAN,
+        &banned,
+        None,
+    )
+    .await;
+    assert_eq!(
+        readers(state, tenant, &f.owner, f.child, &people).await,
+        expect(&[(&banned, true), (&agent, true), (&timed_out, true)]),
+        "lifting the ban restores them"
+    );
 }
