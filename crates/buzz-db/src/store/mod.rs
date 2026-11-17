@@ -29,6 +29,10 @@ mod event_deletion;
 /// App-owned push enqueue and channel TTL refresh for inserted events.
 pub(crate) mod event_follow_up;
 mod event_hydration;
+/// Operator identity retirement: archive, execution hold and release.
+pub mod identity_retirement;
+#[cfg(test)]
+mod identity_retirement_postgres_tests;
 /// Per-community NIP-FI issuer bindings.
 pub mod nip_fi_binding;
 /// Recent-first passes for newest-first `events` page reads.

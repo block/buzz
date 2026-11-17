@@ -107,6 +107,9 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "join_policy_acceptances",
     "media_uploaders",
     "media_publications",
+    "identity_retirement_actions",
+    "identity_retirement_holds",
+    "identity_retirement_workflows",
     "moderation_actions",
     "moderation_reports",
     "parameterized_event_watermarks",
@@ -137,11 +140,7 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
 /// this release. The release that ships the table moves it to
 /// [`EXPECTED_SCOPED_TABLES`] and [`PURGE_SCOPED_TABLES`]. These tables have
 /// no foreign keys, so purge order does not matter.
-pub const PENDING_SCOPED_TABLES: &[&str] = &[
-    "identity_retirement_actions",
-    "identity_retirement_holds",
-    "identity_retirement_workflows",
-];
+pub const PENDING_SCOPED_TABLES: &[&str] = &[];
 
 /// Tenant tables an expand migration may add between a deletion's approval
 /// and its execution.
@@ -186,6 +185,9 @@ pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "join_policy_acceptances",
     "media_uploaders",
     "media_publications",
+    "identity_retirement_actions",
+    "identity_retirement_holds",
+    "identity_retirement_workflows",
     "moderation_reports",
     "subscriptions",
     "api_tokens",
@@ -4824,6 +4826,7 @@ pub(crate) mod postgres_tests {
         crate::migration::run_migrations_through(&db.pool, 89)
             .await
             .expect("migrate with fence objects present");
+        crate::test_support::add_identity_retirement_tables(&db.pool).await;
         let store = db.deletion_store();
         let community = db
             .ensure_configured_community("optional-fences.example")
@@ -4964,6 +4967,7 @@ DROP FUNCTION community_deletion_lock_key(UUID);
         crate::migration::run_migrations_through(&db.pool, 86)
             .await
             .expect("phase-one schema");
+        crate::test_support::add_identity_retirement_tables(&db.pool).await;
         let community = db
             .ensure_configured_community("optional-guards.example")
             .await
@@ -8812,6 +8816,23 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         db.record_media_publications(request.community_id, vec![media_hash.clone()])
             .await
             .expect("publication boundary");
+        for insert in [
+            "INSERT INTO identity_retirement_actions \
+             (community_id, id, request_id, operation, target_pubkey, actor_pubkey, request, result) \
+             VALUES ($1, gen_random_uuid(), gen_random_uuid(), 'archive', $2, $2, '{}', '{}')",
+            "INSERT INTO identity_retirement_holds (community_id, pubkey, action_id) \
+             VALUES ($1, $2, gen_random_uuid())",
+            "INSERT INTO identity_retirement_workflows \
+             (community_id, workflow_id, owner_pubkey, action_id, archived_at) \
+             VALUES ($1, gen_random_uuid(), $2, gen_random_uuid(), now())",
+        ] {
+            sqlx::query(insert)
+                .bind(request.community_id.as_uuid())
+                .bind(vec![9_u8; 32])
+                .execute(&db.pool)
+                .await
+                .expect("insert identity retirement row");
+        }
         store
             .approve(request.id, "approver", None)
             .await
@@ -8828,6 +8849,23 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
             .is_err());
         assert!(db
             .record_media_publications(request.community_id, vec!["b".repeat(64)])
+            .await
+            .is_err());
+        let retirement = crate::identity_retirement::RetirementRequest {
+            community: request.community_id,
+            request_id: Uuid::new_v4(),
+            operation: crate::identity_retirement::RetirementOperation::Release,
+            target: [9; 32],
+            actor: [8; 32],
+            payload: crate::identity_retirement::RetirementPayload {
+                reason: None,
+                replaced_by: None,
+                inventory_version: None,
+            },
+        };
+        assert!(db.apply_identity_retirement(&retirement).await.is_err());
+        assert!(db
+            .mark_identity_retirement_published(request.community_id, Uuid::new_v4())
             .await
             .is_err());
         let generation = store.fence(&claim.lease).await.expect("fence");
@@ -8865,6 +8903,13 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         let first = store.purge_postgres(&token).await.expect("purge postgres");
         assert_eq!(first["media_uploaders"], 1);
         assert_eq!(first["media_publications"], 1);
+        for table in [
+            "identity_retirement_actions",
+            "identity_retirement_holds",
+            "identity_retirement_workflows",
+        ] {
+            assert_eq!(first[table], 1, "{table}");
+        }
         let expected_tables: BTreeSet<&str> = EXPECTED_SCOPED_TABLES
             .iter()
             .chain(RELAY_ADMIN_TABLES.iter().map(|(table, _)| table))

@@ -40,13 +40,14 @@ pub(super) async fn claimant_restricted(
     .await?;
     let owner_bytes =
         hex::decode(owner).map_err(|_| DbError::InvalidData("invalid invitation owner".into()))?;
-    if recorded
-        .flatten()
-        .is_some_and(|existing| existing != owner_bytes)
-    {
-        return Err(DbError::InviteOwnerMismatch);
+    match recorded.flatten() {
+        Some(existing) if existing != owner_bytes => Err(DbError::InviteOwnerMismatch),
+        // Already linked to this owner: the claim creates no new link.
+        Some(_) => Ok(false),
+        // The claim would create a link; a held owner refuses it. Retirement
+        // writes holds under the admission lock this check runs under.
+        None => crate::store::identity_retirement::owner_is_held(tx, community, &owner_bytes).await,
     }
-    Ok(false)
 }
 
 #[derive(Default)]

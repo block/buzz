@@ -879,7 +879,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 101);
+        assert_eq!(migrations.len(), 103);
         assert_eq!(migrations[100].version, 101);
         assert!(strip_sql_comments(migrations[100].sql.as_str())
             .contains("DROP CONSTRAINT IF EXISTS push_gateway_delegations_installation_id_fkey"));
@@ -918,6 +918,16 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("ADD COLUMN platform TEXT NOT NULL DEFAULT 'ios'"));
+        assert_eq!(migrations[101].version, 102);
+        assert!(migrations[101]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE identity_retirement_holds"));
+        assert_eq!(migrations[102].version, 103);
+        assert!(migrations[102]
+            .sql
+            .as_str()
+            .contains("VALIDATE CONSTRAINT archived_identities_consent_path_check"));
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }
@@ -1537,6 +1547,9 @@ mod postgres_tests {
             "nip_fi_profile_heads",
             "media_uploaders",
             "media_publications",
+            "identity_retirement_holds",
+            "identity_retirement_actions",
+            "identity_retirement_workflows",
         ];
         for table in crate::deletion::EXPECTED_SCOPED_TABLES
             .iter()
@@ -3121,6 +3134,10 @@ mod postgres_tests {
             "media_uploaders",
             "audit_log",
             "media_publications",
+            "archived_identities",
+            "identity_retirement_actions",
+            "identity_retirement_holds",
+            "identity_retirement_workflows",
             "relay_members",
             "relay_admin_actions",
             "relay_admin_outbox",
@@ -4105,6 +4122,7 @@ mod postgres_tests {
             .run_to(retirement - 1, &pool)
             .await
             .expect("apply pre-retirement migrations");
+        crate::test_support::add_identity_retirement_tables(&pool).await;
         let store = crate::deletion::DeletionStore::new(pool.clone());
         store
             .validate_serving_catalog()
@@ -4114,6 +4132,7 @@ mod postgres_tests {
             .validate_catalog()
             .await
             .expect("deletion must accept pre-retirement catalog");
+        crate::test_support::drop_identity_retirement_tables(&pool).await;
         run_migrations(&pool).await.expect("apply all migrations");
         let fence_triggers: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND tgname LIKE 'community_write_fence_%'",
@@ -4182,6 +4201,7 @@ mod postgres_tests {
             .await
             .expect("apply pre-retirement migrations");
         assert_eq!(present(&pool).await, (true, true));
+        crate::test_support::add_identity_retirement_tables(&pool).await;
         store
             .validate_serving_catalog()
             .await
@@ -4190,6 +4210,7 @@ mod postgres_tests {
             .validate_catalog()
             .await
             .expect("deletion must accept the catalog before the drop");
+        crate::test_support::drop_identity_retirement_tables(&pool).await;
         run_migrations(&pool).await.expect("apply all migrations");
         assert_eq!(present(&pool).await, (false, false));
         store
