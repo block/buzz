@@ -1735,6 +1735,7 @@ pub async fn get_member_channel_ids(
         descendants = crate::channel_tree::descendants_sql(
             "roots",
             &crate::store::channel::legacy_channel_type_sql("d.channel_type"),
+            true,
         ),
     );
     // Built only from the constant type list.
@@ -1788,6 +1789,7 @@ pub async fn get_listed_open_channel_ids_read_at(
         descendants = crate::channel_tree::descendants_sql(
             "roots",
             &crate::store::channel::legacy_channel_type_sql("d.channel_type"),
+            true,
         ),
     );
     // Built only from the constant type list.
@@ -2063,7 +2065,7 @@ async fn get_channel_tx(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, parent_id
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, parent_id, parent_access
         FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
     )
@@ -2161,7 +2163,7 @@ pub async fn get_accessible_channels(
                c.nip29_group_id, c.topic_required, c.max_members,
                c.topic, c.topic_set_by, c.topic_set_at,
                c.purpose, c.purpose_set_by, c.purpose_set_at,
-               c.ttl_seconds, c.ttl_deadline, c.labels, c.join_role, c.unlisted, c.auto_join, c.parent_id,
+               c.ttl_seconds, c.ttl_deadline, c.labels, c.join_role, c.unlisted, c.auto_join, c.parent_id, c.parent_access,
                (cm.channel_id IS NOT NULL) AS is_member
         FROM channels c
         LEFT JOIN channel_members cm

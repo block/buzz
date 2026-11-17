@@ -277,3 +277,115 @@ async fn live_parent_access_probe() {
     .unwrap();
     println!("reader member rows in child (any state): {rows}");
 }
+
+/// Live probe of `parent_access`: a project reader's live subscription to a
+/// child keeps delivering when the child turns view-only, and posting is
+/// refused; it closes when the child turns restricted, and nothing more is
+/// delivered or readable. Needs only a running relay (`RELAY_URL`).
+#[tokio::test]
+#[ignore = "requires a running relay"]
+async fn live_parent_access_narrowing_probe() {
+    let url = relay_url();
+    let (owner, reader) = (Keys::generate(), Keys::generate());
+    let mut o = BuzzTestClient::connect(&url, &owner).await.unwrap();
+    let project = private_channel(&mut o, &owner).await;
+    let child = private_channel(&mut o, &owner).await;
+    send(
+        &mut o,
+        &owner,
+        9002,
+        &[&["h", &child], &["parent", &project]],
+    )
+    .await;
+    let r_hex = reader.public_key().to_hex();
+    send(&mut o, &owner, 9000, &[&["h", &project], &["p", &r_hex]]).await;
+
+    let mut r = BuzzTestClient::connect(&url, &reader).await.unwrap();
+    let named = || {
+        Filter::new().kind(Kind::Custom(9)).custom_tag(
+            nostr::SingleLetterTag::lowercase(nostr::Alphabet::H),
+            child.clone(),
+        )
+    };
+    r.subscribe("child", vec![named().since(nostr::Timestamp::now())])
+        .await
+        .unwrap();
+    let _ = drain(&mut r, "none", Duration::from_millis(500)).await;
+    let owner_post = |text: &str| {
+        EventBuilder::new(Kind::Custom(9), text)
+            .tags([Tag::parse(["h", &child]).unwrap()])
+            .sign_with_keys(&owner)
+            .unwrap()
+    };
+    let reader_post = || {
+        EventBuilder::new(Kind::Custom(9), "reader writes")
+            .tags([Tag::parse(["h", &child]).unwrap()])
+            .sign_with_keys(&reader)
+            .unwrap()
+    };
+
+    let first = owner_post("member access");
+    let first_id = first.id.to_hex();
+    assert!(o.send_event(first).await.unwrap().accepted);
+    let (got, closed) = drain(&mut r, "child", Duration::from_secs(1)).await;
+    println!(
+        "default: delivered={} closed={closed:?}",
+        got.contains(&first_id)
+    );
+    let ok = r.send_event(reader_post()).await.unwrap();
+    println!("default: reader post accepted={}", ok.accepted);
+
+    send(
+        &mut o,
+        &owner,
+        9002,
+        &[&["h", &child], &["parent_access", "guest"]],
+    )
+    .await;
+    let second = owner_post("view only");
+    let second_id = second.id.to_hex();
+    assert!(o.send_event(second).await.unwrap().accepted);
+    let (got, closed) = drain(&mut r, "child", Duration::from_secs(1)).await;
+    println!(
+        "guest: delivered={} closed={closed:?}",
+        got.contains(&second_id)
+    );
+    let ok = r.send_event(reader_post()).await.unwrap();
+    println!(
+        "guest: reader post accepted={} message={:?}",
+        ok.accepted, ok.message
+    );
+
+    send(
+        &mut o,
+        &owner,
+        9002,
+        &[&["h", &child], &["parent_access", "none"]],
+    )
+    .await;
+    let (_, closed) = drain(&mut r, "child", Duration::from_secs(2)).await;
+    println!("none: live sub CLOSED={closed:?}");
+    let third = owner_post("restricted");
+    let third_id = third.id.to_hex();
+    assert!(o.send_event(third).await.unwrap().accepted);
+    let (got, _) = drain(&mut r, "child", Duration::from_secs(1)).await;
+    println!("none: delivered after close={}", got.contains(&third_id));
+    r.subscribe("child2", vec![named()]).await.unwrap();
+    let (got, closed) = drain(&mut r, "child2", Duration::from_secs(1)).await;
+    println!("none: re-REQ events={} closed={closed:?}", got.len());
+    r.subscribe(
+        "meta",
+        vec![Filter::new()
+            .kind(Kind::Custom(39000))
+            .identifier(child.clone())],
+    )
+    .await
+    .unwrap();
+    let (got, closed) = drain(&mut r, "meta", Duration::from_secs(1)).await;
+    println!("none: metadata events={} closed={closed:?}", got.len());
+    let ok = r.send_event(reader_post()).await.unwrap();
+    println!(
+        "none: reader post accepted={} message={:?}",
+        ok.accepted, ok.message
+    );
+}

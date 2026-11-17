@@ -27,12 +27,15 @@ pub(crate) async fn inherited_role(
     if channel.parent_id.is_none() || channel.visibility == "open" {
         return Ok(None);
     }
-    let ancestors = state
+    let lineage = state
         .db
         .get_channel_ancestors(community_id, channel.id)
         .await?;
-    let mut levels = vec![LevelGrant::Nothing];
-    for ancestor in &ancestors {
+    let Some(parent_access) = lineage.parent_access else {
+        return Ok(None);
+    };
+    let mut levels = vec![(LevelGrant::Nothing, parent_access)];
+    for ancestor in lineage.reachable() {
         let role = if state
             .is_member_cached(community_id, ancestor.id, pubkey)
             .await?
@@ -45,7 +48,7 @@ pub(crate) async fn inherited_role(
             None
         };
         let level = LevelGrant::of(role.as_deref(), &ancestor.visibility, &ancestor.join_role);
-        levels.push(level);
+        levels.push((level, ancestor.parent_access));
         if level != LevelGrant::Nothing {
             break;
         }
@@ -56,7 +59,10 @@ pub(crate) async fn inherited_role(
 /// Which of `pubkeys`, none of them members of private channel `channel_id`,
 /// can read it through its parents. For a fan-out's recipients: one bulk
 /// membership read per parent instead of one read each. Reading needs any
-/// grant, so a guest of a parent reads the child too.
+/// grant, so a guest of a parent reads the child too, and a `guest` cap does
+/// not matter; a `none` one stops the walk ([`Lineage::reachable`]).
+///
+/// [`Lineage::reachable`]: buzz_db::channel_tree::Lineage::reachable
 pub(crate) async fn inherited_readers(
     state: &AppState,
     community_id: CommunityId,
@@ -67,12 +73,12 @@ pub(crate) async fn inherited_readers(
     if pubkeys.is_empty() {
         return answer;
     }
-    let ancestors = match state
+    let lineage = match state
         .db
         .get_channel_ancestors(community_id, channel_id)
         .await
     {
-        Ok(ancestors) => ancestors,
+        Ok(lineage) => lineage,
         Err(error) => {
             tracing::warn!(%channel_id, "fan-out parent access: ancestor read failed: {error}");
             answer.unverified.extend(pubkeys);
@@ -80,7 +86,7 @@ pub(crate) async fn inherited_readers(
         }
     };
     let mut remaining: HashSet<Vec<u8>> = pubkeys.into_iter().collect();
-    for ancestor in ancestors {
+    for ancestor in lineage.reachable() {
         if remaining.is_empty() {
             break;
         }

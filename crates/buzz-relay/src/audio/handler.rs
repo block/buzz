@@ -8438,6 +8438,50 @@ mod tests {
                 channel_rows, 0,
                 "joining through a parent makes no row in the channel"
             );
+
+            // The channel narrows what the project grants: view only makes
+            // the project's people guests, who may not join; restricted
+            // gives them nothing. Both hold at commit for a join admitted
+            // before the change, and for any later join: refused at
+            // admission, or, for the huddle the joiner already has a row in,
+            // at commit, which re-checks the lifecycle parent (as on main for
+            // someone removed from it).
+            let set_parent_access = |value: &'static str| {
+                let pool = pool.clone();
+                async move {
+                    sqlx::query(
+                        "UPDATE channels SET parent_access = $3 \
+                         WHERE community_id = $1 AND id = $2",
+                    )
+                    .bind(community_uuid)
+                    .bind(parent_id)
+                    .bind(value)
+                    .execute(&pool)
+                    .await
+                    .expect("set parent_access");
+                }
+            };
+            for (value, lost) in [("guest", "write role"), ("none", "membership")] {
+                set_parent_access("member").await;
+                let admission = admit(parent_id).await.expect("admitted before narrowing");
+                set_parent_access(value).await;
+                let result = commit(parent_id, parent_id, admission).await;
+                let matched = match value {
+                    "guest" => matches!(result, Err(JoinCommitError::WriteRoleLost)),
+                    _ => matches!(result, Err(JoinCommitError::MembershipLost)),
+                };
+                assert!(matched, "{value} loses the {lost} at commit: {result:?}");
+                for channel in [parent_id, child_id] {
+                    if let Ok(admission) = admit(channel).await {
+                        let result = commit(channel, parent_id, admission).await;
+                        assert!(
+                            result.is_err(),
+                            "parent_access {value}: joins {channel}: {result:?}"
+                        );
+                    }
+                }
+            }
+            set_parent_access("member").await;
         }
 
         /// Joining a huddle is a write. For an ephemeral huddle the joiner

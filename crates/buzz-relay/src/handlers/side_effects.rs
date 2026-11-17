@@ -829,34 +829,45 @@ pub async fn validate_admin_event(
                 .any(|t| is_metadata_tag(&t.kind().to_string()));
             if !has_recognized {
                 return Err(anyhow::anyhow!(
-                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, t, join_role, unlisted, auto_join, parent)"
+                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, t, join_role, unlisted, auto_join, parent, parent_access)"
                 ));
             }
 
-            // `parent` is changed on its own: its rule differs from every
-            // other tag's (a parent's owner or admin may clear it), and the
-            // store decides it under the channel's locks
-            // (`buzz_db::channel_tree::decide_parent_change`). Only its
-            // syntax is checked here.
-            let parent_tags: Vec<_> = event
+            // `parent` and `parent_access` are changed apart from every other
+            // tag: their rules differ (a parent's owner or admin may clear a
+            // parent; only the channel's own owner or admin may change
+            // `parent_access`), and the store decides both under the
+            // channel's locks (`buzz_db::channel_tree`). They may travel
+            // together, so a channel can be filed and narrowed in one step.
+            // Only their syntax is checked here.
+            let tree_tags: Vec<_> = event
                 .tags
                 .iter()
-                .filter(|t| t.kind().to_string() == "parent")
+                .filter(|t| TREE_METADATA_TAGS.contains(&t.kind().to_string().as_str()))
                 .collect();
-            if !parent_tags.is_empty() {
-                let only_parent = parent_tags.len() == 1
-                    && event
-                        .tags
-                        .iter()
-                        .map(|t| t.kind().to_string())
-                        .filter(|kind| is_metadata_tag(kind))
-                        .all(|kind| kind == "parent");
-                if !only_parent {
+            if !tree_tags.is_empty() {
+                let kinds: Vec<String> = tree_tags.iter().map(|t| t.kind().to_string()).collect();
+                let only_tree = event
+                    .tags
+                    .iter()
+                    .map(|t| t.kind().to_string())
+                    .filter(|kind| is_metadata_tag(kind))
+                    .all(|kind| TREE_METADATA_TAGS.contains(&kind.as_str()));
+                let once = TREE_METADATA_TAGS
+                    .iter()
+                    .all(|tree| kinds.iter().filter(|kind| kind == tree).count() <= 1);
+                if !only_tree || !once {
                     return Err(anyhow::anyhow!(
-                        "a parent tag must be the only metadata tag in its kind:9002"
+                        "parent and parent_access tags must be the only metadata tags in their kind:9002, at most one of each"
                     ));
                 }
-                parse_parent_tag(parent_tags[0].content(), channel_id)?;
+                for tag in tree_tags {
+                    if tag.kind().to_string() == PARENT_METADATA_TAG {
+                        parse_parent_tag(tag.content(), channel_id)?;
+                    } else {
+                        parse_parent_access_tag(tag.content())?;
+                    }
+                }
                 return Ok(());
             }
 
@@ -1609,12 +1620,29 @@ const RELAY_ROLE_METADATA_TAGS: &[&str] = &["auto_join"];
 /// see `buzz_db::channel_tree::decide_parent_change`.
 const PARENT_METADATA_TAG: &str = "parent";
 
+/// The kind:9002 tags that place a channel in a tree and say what its
+/// parents grant. Their own rules: see `buzz_db::channel_tree`.
+const TREE_METADATA_TAGS: &[&str] = &[PARENT_METADATA_TAG, "parent_access"];
+
 /// True when `kind` is a kind:9002 tag that changes channel metadata.
 fn is_metadata_tag(kind: &str) -> bool {
     PRIVILEGED_METADATA_TAGS.contains(&kind)
         || MEMBER_METADATA_TAGS.contains(&kind)
         || RELAY_ROLE_METADATA_TAGS.contains(&kind)
-        || kind == PARENT_METADATA_TAG
+        || TREE_METADATA_TAGS.contains(&kind)
+}
+
+/// What a kind:9002 `["parent_access", <value>]` tag asks for: `member`,
+/// `guest` or `none`.
+fn parse_parent_access_tag(
+    value: Option<&str>,
+) -> anyhow::Result<buzz_db::channel_tree::ParentAccess> {
+    match value {
+        Some(v) => v.parse().map_err(|e: String| anyhow::anyhow!(e)),
+        None => Err(anyhow::anyhow!(
+            "parent_access tag must have a value (member, guest or none)"
+        )),
+    }
 }
 
 /// The parent change a kind:9002 `["parent", <value>]` tag asks for: a
@@ -2550,6 +2578,11 @@ pub(crate) async fn persist_edit_metadata(
                 // can never reach the column.
                 edit.columns.parent_id = Some(parse_parent_tag(Some(val), channel_id)?);
             }
+            "parent_access" => {
+                // Validated during authorization; parse again so a bad value
+                // can never reach the column.
+                edit.columns.parent_access = Some(parse_parent_access_tag(Some(val))?);
+            }
             "unlisted" => {
                 // Validated during authorization; fail closed so a bad value
                 // can never reach the column.
@@ -2630,7 +2663,7 @@ pub(crate) async fn persist_edit_metadata(
 
     let new_visibility = edit.columns.visibility.clone();
     let unlisted_changed = edit.columns.unlisted.is_some();
-    let parent_changed = edit.columns.parent_id.is_some();
+    let parent_changed = edit.columns.parent_id.is_some() || edit.columns.parent_access.is_some();
     let unarchived = edit.archived == Some(false);
     let write = state
         .db
@@ -2673,9 +2706,10 @@ pub(crate) async fn persist_edit_metadata(
         }
     }
     if parent_changed {
-        // A parent change changes who can read this channel and every
-        // channel under it, so every person's accessible channels are
-        // cleared. Only a private channel's readers depend on its parents.
+        // A parent or `parent_access` change changes who can read this
+        // channel and every channel under it, so every person's accessible
+        // channels are cleared. Only a private channel's readers depend on
+        // its parents.
         state.invalidate_all_accessible_channels(tenant);
         if write.previous_visibility == "private" {
             if let Err(e) = evict_non_reader_channel_subscriptions(tenant, state, channel_id).await

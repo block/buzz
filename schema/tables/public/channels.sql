@@ -45,6 +45,10 @@ CREATE TABLE channels (
     -- The channel whose readers can also read this one (migration 0089).
     -- The relay keeps the tree at most three deep and loop-free on write.
     parent_id       UUID,
+    -- What the parents' people get here: member, guest or none
+    -- (migration 0090).
+    parent_access   TEXT NOT NULL DEFAULT 'member'
+        CHECK (parent_access IN ('member', 'guest', 'none')),
     PRIMARY KEY (community_id, id),
     CONSTRAINT chk_channels_id_not_nil CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid)
 );

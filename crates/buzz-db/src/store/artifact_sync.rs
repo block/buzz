@@ -168,8 +168,10 @@ impl Db {
 // current-state visibility. This query also reads retained move and membership rows.
 // A membership change in a channel also changes access to its private
 // children and grandchildren (`crate::channel_tree`), so it replays those as
-// it does the channel itself. Parent and visibility changes reset every sync
-// through `artifact_policy_modified_at` instead.
+// it does the channel itself, except those its grants do not reach
+// (`parent_access` `none` on the way down). Parent, `parent_access` and
+// visibility changes reset every sync through `artifact_policy_modified_at`
+// instead.
 const CANDIDATES: &str = concat!(
     r#"
 WITH readable AS NOT MATERIALIZED (
@@ -195,12 +197,13 @@ WITH readable AS NOT MATERIALIZED (
     UNION
     SELECT m.sync_modified_at,m.removed,d.id FROM memberships m
     JOIN channels d ON d.community_id=$1 AND d.deleted_at IS NULL
-      AND d.visibility='private' AND d.parent_id=m.id
+      AND d.visibility='private' AND d.parent_id=m.id AND d.parent_access<>'none'
     UNION
     SELECT m.sync_modified_at,m.removed,d.id FROM memberships m
     JOIN channels k ON k.community_id=$1 AND k.deleted_at IS NULL AND k.parent_id=m.id
+      AND k.parent_access<>'none'
     JOIN channels d ON d.community_id=$1 AND d.deleted_at IS NULL
-      AND d.visibility='private' AND d.parent_id=k.id
+      AND d.visibility='private' AND d.parent_id=k.id AND d.parent_access<>'none'
 ), changes AS (
     SELECT a.modified_at AS at,1 AS source,a.artifact_id::text AS id,
            a.artifact_id,NULL::uuid AS removed_channel
