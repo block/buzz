@@ -4098,6 +4098,28 @@ fn bound_text(input: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
+    /// The key bytes are permanent: older replicas and operator repair
+    /// scripts build the same string, so any change splits the lock.
+    #[test]
+    fn community_deletion_lock_key_bytes_are_fixed() {
+        for (id, key) in [
+            (
+                Uuid::nil(),
+                "buzz-community-deletion:00000000-0000-0000-0000-000000000000",
+            ),
+            (
+                Uuid::max(),
+                "buzz-community-deletion:ffffffff-ffff-ffff-ffff-ffffffffffff",
+            ),
+            (
+                Uuid::from_u128(0x0123_4567_89ab_cdef_fedc_ba98_7654_3210),
+                "buzz-community-deletion:01234567-89ab-cdef-fedc-ba9876543210",
+            ),
+        ] {
+            assert_eq!(community_deletion_lock_key(CommunityId::from_uuid(id)), key);
+        }
+    }
+
     /// Every table an approval may gain is one this release purges and
     /// verifies, and every pending table may be gained after approval.
     #[test]
