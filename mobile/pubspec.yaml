@@ -83,8 +83,6 @@ dev_dependencies:
   video_player_platform_interface: ^6.6.0
 
 flutter:
-  config:
-    enable-swift-package-manager: false
   uses-material-design: true
   shaders:
     - shaders/toast_island.frag
