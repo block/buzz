@@ -66,6 +66,8 @@ pub mod push_lease;
 mod put_user_postgres_tests;
 /// NIP-43 relay membership admin command handler (kinds 9030–9032).
 pub mod relay_admin;
+#[cfg(test)]
+mod remove_user_postgres_tests;
 /// NIP-56 report (kind:1984) validation + moderation queue persistence.
 pub mod report;
 /// HTTP report-resolution orchestrations for the deployment admin API (Phase 2).
