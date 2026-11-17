@@ -65,6 +65,8 @@ void configureDiagnostics(SentryFlutterOptions options, String destination) {
     ..enablePrintBreadcrumbs = false
     ..enableUserInteractionBreadcrumbs = false
     ..enableAppLifecycleBreadcrumbs = true
+    // A session record per launch is usage data, which the spec rules out.
+    ..enableAutoSessionTracking = false
     ..beforeSend = ((event, hint) => DiagnosticFilter.filterEvent(event))
     ..beforeBreadcrumb = ((crumb, hint) =>
         DiagnosticFilter.filterBreadcrumb(crumb))
