@@ -345,6 +345,42 @@ void main() {
     });
   });
 
+  test(
+    'a key shown again while a failed narrowing left it covered is read',
+    () {
+      fakeAsync((time) {
+        final relaySession = _RecordingRelaySessionNotifier();
+        final container = _buildContainer(relaySession: relaySession);
+        addTearDown(container.dispose);
+        final notifier = container.read(presenceCacheProvider.notifier);
+
+        container.read(presenceCacheProvider);
+        notifier.track(['alice']);
+        final bob = notifier.track(['bob']);
+        time.elapse(Duration.zero);
+        final wide = relaySession.subscriptions.single;
+
+        // Bob is retired, but the narrower stream fails, so the wide one stays.
+        bob();
+        relaySession.autoReady = false;
+        time.elapse(PresenceCacheNotifier.releaseDelay);
+        relaySession.subscriptions.last.retrying();
+        time.elapse(Duration.zero);
+        expect(relaySession.subscriptions, [wide]);
+        expect(container.read(presenceCacheProvider), isNot(contains('bob')));
+
+        // Shown again before the next poll, Bob is read right away.
+        relaySession.queried.clear();
+        relaySession.snapshot['bob'] = 'online';
+        notifier.track(['bob']);
+        time.elapse(Duration.zero);
+        expect(relaySession.subscriptions, [wide]);
+        expect(relaySession.queried.expand((keys) => keys), ['bob']);
+        expect(container.read(presenceCacheProvider)['bob'], 'online');
+      });
+    },
+  );
+
   test('releasing everyone closes the stream until someone is shown', () {
     fakeAsync((time) {
       final relaySession = _RecordingRelaySessionNotifier();

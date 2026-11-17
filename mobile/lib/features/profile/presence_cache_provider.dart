@@ -233,7 +233,12 @@ class PresenceCacheNotifier extends Notifier<Map<String, String>> {
       _subscribeAttempted = _retrying = false;
       return;
     }
-    if (_presenceUnsub != null && _covered) return;
+    if (_presenceUnsub != null && _covered) {
+      // A key shown again while a stream from before its retirement still
+      // covers it needs only its read.
+      _schedule(generation);
+      return;
+    }
     // One subscription opens at a time. A replacement holds this until it is
     // promoted or abandoned, so tracking bursts widen it in later rounds.
     _opening = true;
