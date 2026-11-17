@@ -59,6 +59,7 @@ part 'compose_bar_test/durable_mention_tests.dart';
 part 'compose_bar_test/agent_prefill_tests.dart';
 part 'compose_bar_test/share_delivery_tests.dart';
 part 'compose_bar_test/mention_chip_tests.dart';
+part 'compose_bar_test/mention_search_tests.dart';
 
 final _pngBytes = Uint8List.fromList([
   0x89,
@@ -760,6 +761,7 @@ void main() {
   agentPrefillTests();
   shareDeliveryTests();
   mentionChipTests();
+  mentionSearchTests();
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() async {

@@ -418,7 +418,7 @@ class ComposeBar extends HookConsumerWidget {
 
         var open = findMentionQuery(text, cursor);
         if (open != null &&
-            _insideSelectedMention(controller.mentions, open.start, cursor)) {
+            _startsSelectedMention(controller.mentions, open.start)) {
           open = null;
         }
 

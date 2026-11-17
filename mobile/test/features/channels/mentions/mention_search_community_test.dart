@@ -284,6 +284,40 @@ void main() {
       },
     );
 
+    test('a search that finds nobody refutes every longer query', () async {
+      await passTypingPause();
+      session.searchFor('al').complete(const []);
+      await container.pump();
+
+      // `alb` cannot find anyone `al` did not: no search, nothing pending.
+      const longer = (channelId: _channelId, query: 'alb', opening: 1);
+      open(longer);
+      expect(container.read(mentionSearchPendingProvider(longer)), isFalse);
+      expect(shownFor(longer), isEmpty);
+      await passTypingPause();
+      expect(session.queries, ['al']);
+
+      // An exact public key is an author lookup, never refuted by a name.
+      const hex = (channelId: _channelId, query: 'ab', opening: 1);
+      open(hex);
+      await passTypingPause();
+      session.searchFor('ab').complete(const []);
+      await container.pump();
+      final key = 'ab${'0' * 62}';
+      open((channelId: _channelId, query: key, opening: 1));
+      await passTypingPause();
+      expect(session.queries, ['al', 'ab', key]);
+
+      // Any later finished search replaces the refutation.
+      session.searchFor(key).complete(const []);
+      await container.pump();
+      const cleared = (channelId: _channelId, query: 'alb', opening: 2);
+      open(cleared);
+      expect(container.read(mentionSearchPendingProvider(cleared)), isTrue);
+      await passTypingPause();
+      expect(session.queries, ['al', 'ab', key, 'alb']);
+    });
+
     test('a longer query starts from the people its prefix found', () async {
       await passTypingPause();
       session.searches.first.complete([

@@ -99,13 +99,12 @@ void _useMentionChipQualifiers({
   }, [controller, chipQualifiers]);
 }
 
-/// Whether [caret] sits inside, or at the end of, a mention bound at
-/// [start]. Such an `@` does not open a query.
-bool _insideSelectedMention(
-  List<_ComposerMention> mentions,
-  int start,
-  int caret,
-) => mentions.any((m) => m.start == start && caret <= m.end);
+/// Whether a mention is bound at [start]. Its `@` opens no query, wherever
+/// the caret is: the prose typed after a chip is never a name search. A
+/// name character typed against the chip unbinds it first, so the `@` of
+/// `@Bobby` is a query again.
+bool _startsSelectedMention(List<_ComposerMention> mentions, int start) =>
+    mentions.any((m) => m.start == start);
 
 /// The recipients a send notifies, in text order: every bound mention, then
 /// typed names outside a chip. A typed name a chip also carries resolves to
