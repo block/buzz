@@ -68,7 +68,9 @@ impl Fixture {
         tags: Vec<Vec<String>>,
         content: &str,
     ) -> Event {
+        // Self-archive requests must retain the author as their explicit p subject.
         let event = EventBuilder::new(Kind::Custom(kind), content)
+            .allow_self_tagging()
             .tags(tags.into_iter().map(|v| Tag::parse(v).unwrap()))
             .custom_created_at(Timestamp::now())
             .sign_with_keys(key)
@@ -737,10 +739,13 @@ async fn historical_replacement_blocks_cleanup_after_unarchive(kind: u16) {
                 .run_profile_batches(&f.options(1), delete, None, &mut output)
                 .await;
             assert!(result.is_err(), "kind {kind}, agent {agent}, delete {delete}: unresolved historical replacement was accepted");
-            assert!(result
-                .unwrap_err()
-                .to_string()
-                .contains("shared-history disposition required"));
+            let error = result.unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("shared-history disposition required"),
+                "{error}"
+            );
             assert!(!String::from_utf8(output)
                 .unwrap()
                 .contains("delete_complete"));
