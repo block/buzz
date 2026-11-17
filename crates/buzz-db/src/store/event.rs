@@ -1324,7 +1324,9 @@ fn push_exact_tag_match(
 }
 
 /// Above this many `#e` values, [`push_e_tag_match`] hides them from the
-/// planner's selectivity estimate.
+/// planner's selectivity estimate. Hiding plans faster from one value up, but
+/// visible values keep a narrow read's per-value plan; at 8 they cost at most
+/// ~0.6 ms of extra planning.
 const E_TAG_ESTIMATED_VALUES_MAX: usize = 8;
 
 /// [`push_exact_tag_match`] for `#e`. Planning a bound array estimates GIN
@@ -3058,9 +3060,15 @@ mod e_tag_filter_shape_tests {
         // estimated elements; a narrow one keeps its bound-value estimate.
         assert!(sql.contains("tags @> ANY((SELECT $"));
         assert!(sql.contains("tag->>1 = ANY((SELECT $"));
-        q.e_tags = Some(vec![format!("{:064x}", 1)]);
-        let narrow = build_query_events_sql(&q, Range::All, page_limit(&q));
-        assert!(!narrow.sql().as_str().contains("(SELECT $"));
+        for (ids, opaque) in [
+            (1, false),
+            (E_TAG_ESTIMATED_VALUES_MAX, false),
+            (E_TAG_ESTIMATED_VALUES_MAX + 1, true),
+        ] {
+            q.e_tags = Some((0..ids).map(|i| format!("{i:064x}")).collect());
+            let qb = build_query_events_sql(&q, Range::All, page_limit(&q));
+            assert_eq!(qb.sql().as_str().contains("(SELECT $"), opaque, "{ids} ids");
+        }
     }
 
     /// Only a one-channel, one-root read of channel-message kinds without a
