@@ -1033,6 +1033,22 @@ mod postgres_tests {
                 < retire_nip_rs.find("DROP TRIGGER").unwrap(),
             "0091 must bound its ACCESS EXCLUSIVE lock on events before the first DROP"
         );
+        // The relay builds the deletion lock key in Rust and reads profile
+        // names inline, so 0093 drops both plain SQL functions. 0029 and 0064
+        // stay frozen.
+        assert_eq!(migrations[92].version, 93);
+        let retire_functions = strip_sql_comments(migrations[92].sql.as_str());
+        for statement in [
+            "SET LOCAL lock_timeout = '5s';",
+            "DROP FUNCTION community_deletion_lock_key(UUID);",
+            "DROP FUNCTION profile_name_fields(TEXT);",
+        ] {
+            assert!(
+                retire_functions.contains(statement),
+                "0093 must run {statement}"
+            );
+        }
+        assert!(!retire_functions.contains("CASCADE"));
         assert_eq!(migrations[55].version, 56);
         assert!(migrations[55]
             .sql
@@ -1517,7 +1533,6 @@ mod postgres_tests {
         ] {
             assert!(retirement.contains(&format!("DROP FUNCTION {signature};")));
         }
-        assert!(!retirement.contains("DROP FUNCTION community_deletion_lock_key"));
         assert!(!retirement.contains("DROP FUNCTION enforce_community_tombstone"));
         assert!(deletion.contains("community tombstones are permanent"));
         assert!(deletion.contains("SET LOCAL lock_timeout = '5s'"));
@@ -2556,6 +2571,7 @@ mod postgres_tests {
                 "assert_community_write_allowed",
                 "enforce_community_write_fence",
                 "attach_community_write_fence",
+                "community_deletion_lock_key",
             ]
             .contains(&function.as_str())
             {
@@ -3963,14 +3979,13 @@ mod postgres_tests {
                 .await
                 .expect("count retired functions");
         assert_eq!(fence_functions, 0);
-        let retained: (bool, bool) = sqlx::query_as(
-            "SELECT to_regprocedure('community_deletion_lock_key(uuid)') IS NOT NULL, \
-             EXISTS(SELECT 1 FROM pg_trigger WHERE tgname = 'communities_deletion_tombstone')",
+        let tombstone: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pg_trigger WHERE tgname = 'communities_deletion_tombstone')",
         )
         .fetch_one(&pool)
         .await
-        .expect("read retained guards");
-        assert_eq!(retained, (true, true));
+        .expect("read retained guard");
+        assert!(tombstone);
         store
             .validate_serving_catalog()
             .await
@@ -3979,6 +3994,53 @@ mod postgres_tests {
             .validate_catalog()
             .await
             .expect("deletion catalog must accept post-retirement catalog");
+    }
+
+    /// 0093 drops both plain SQL functions, and the relay boots on either
+    /// side of it: rolling deploys run new code before and after the drop.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_0093_drops_plain_sql_functions() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        let retirement = MIGRATOR
+            .iter()
+            .find(|m| m.description == "drop plain sql functions")
+            .expect("function retirement migration is embedded")
+            .version;
+        async fn present(pool: &PgPool) -> (bool, bool) {
+            sqlx::query_as(
+                "SELECT to_regprocedure('community_deletion_lock_key(uuid)') IS NOT NULL, \
+                 to_regprocedure('profile_name_fields(text)') IS NOT NULL",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("look up plain SQL functions")
+        }
+        let store = crate::deletion::DeletionStore::new(pool.clone());
+        MIGRATOR
+            .run_to(retirement - 1, &pool)
+            .await
+            .expect("apply pre-retirement migrations");
+        assert_eq!(present(&pool).await, (true, true));
+        store
+            .validate_serving_catalog()
+            .await
+            .expect("new code must boot before the drop");
+        store
+            .validate_catalog()
+            .await
+            .expect("deletion must accept the catalog before the drop");
+        run_migrations(&pool).await.expect("apply all migrations");
+        assert_eq!(present(&pool).await, (false, false));
+        store
+            .validate_serving_catalog()
+            .await
+            .expect("new code must boot after the drop");
+        store
+            .validate_catalog()
+            .await
+            .expect("deletion must accept the catalog after the drop");
     }
 
     /// Verify migration 0044 applies cleanly against a DB that has rows in

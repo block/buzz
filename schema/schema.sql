@@ -67,9 +67,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i functions/prevent_community_deletion_request_retargeting.sql
 \i functions/prevent_community_deletion_approval_removal.sql
 \i functions/protect_community_deletion_manifest_keys.sql
-\i functions/community_deletion_lock_key.sql
 \i functions/enforce_community_tombstone.sql
-\i functions/profile_name_fields.sql
 
 -- tables
 \i tables/public/communities.sql

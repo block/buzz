@@ -8328,9 +8328,7 @@ mod postgres_tests {
              CREATE TABLE {schema}.users (LIKE public.users INCLUDING ALL); \
              CREATE TABLE {schema}.relay_invites (LIKE public.relay_invites INCLUDING ALL); \
              CREATE TABLE {schema}.community_bans (LIKE public.community_bans INCLUDING ALL); \
-             CREATE TABLE {schema}.communities (LIKE public.communities INCLUDING ALL); \
-             CREATE FUNCTION {schema}.community_deletion_lock_key(target UUID) RETURNS BIGINT \
-             LANGUAGE SQL IMMUTABLE STRICT AS 'SELECT public.community_deletion_lock_key(target)';"
+             CREATE TABLE {schema}.communities (LIKE public.communities INCLUDING ALL);"
         )))
         .execute(&admin)
         .await
