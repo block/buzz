@@ -7,6 +7,7 @@ import '../../../shared/identity_names/identity_names.dart';
 import '../../../shared/identity_names/identity_names_provider.dart';
 import '../../../shared/mentions/agent_identity_provider.dart';
 import '../../../shared/relay/relay.dart';
+import '../../../shared/utils/string_utils.dart';
 import '../../../shared/profile/user_cache_provider.dart';
 import '../../../shared/profile/user_profile.dart';
 import '../../../shared/verified_profiles/verified_profile.dart';
@@ -103,13 +104,16 @@ class MentionSearchCache {
   /// The last finished search that found nobody, or null.
   String? _refuted;
 
+  /// Lowercase only, not the section 3 folding: the directory is the relay's
+  /// search, whose prefix rule is what a refutation reasons about, so an
+  /// accented query is a different search, not a continuation of the plain
+  /// one. The device still matches members and found people by folding.
   static String _key(String query) => query.trim().toLowerCase();
 
-  /// Only a query with a letter or digit searches names; a public key is an
-  /// author lookup that no name prefix can refute.
+  /// Only a query with a letter or digit searches names; an exact public key
+  /// is an author lookup that no name prefix can refute.
   static final _wordCharacter = RegExp(r'[\p{L}\p{N}]', unicode: true);
-  static final _npub = RegExp(r'^(?:nostr:)?npub1[02-9ac-hj-np-z]{58}$');
-  static bool _exactKey(String key) => isMentionKey(key) || _npub.hasMatch(key);
+  static bool _exactKey(String key) => typedPublicKey(key) != null;
 
   /// Whether the last finished search found nobody for a shorter query that
   /// [query] continues, so a search for [query] would find nobody either.

@@ -7,8 +7,9 @@ part of '../compose_bar_test.dart';
 void mentionSearchTests() {
   final bob = 'b' * 64;
   final alice = 'a' * 64;
+  final zoe = '9' * 64;
   final members = [
-    for (final (key, name) in [(bob, 'Bob'), (alice, 'Alice')])
+    for (final (key, name) in [(bob, 'Bob'), (alice, 'Alice'), (zoe, 'Zoë')])
       ChannelMember(
         pubkey: key,
         displayName: name,
@@ -107,13 +108,15 @@ void mentionSearchTests() {
 
       // Multi-word names are searched word by word: a second word that
       // continues no local name still goes to the directory, and one that
-      // continues a found name keeps that person listed.
+      // continues a found name keeps that person listed. Names fold accents
+      // (section 3, recommendation 6): `jose maria` lists José María.
       searched.clear();
       await tester.enterText(field, '');
       await tester.pump();
-      await type(tester, '', '@jos mar');
+      await type(tester, '', '@jose maria');
       expect(searched, contains('jos'));
-      expect(searched.last, 'jos mar');
+      expect(searched.last, 'jose maria');
+      expect(row('José María'), findsOneWidget);
       searched.clear();
       await tester.enterText(field, '');
       await tester.pump();
@@ -122,8 +125,16 @@ void mentionSearchTests() {
       expect(row('Alice Smith'), findsOneWidget);
 
       // Once a search finds nobody, longer queries are refuted: no search,
-      // and the chooser closes. The same query searches again when it is
+      // and the chooser closes. A refuted query still matches members on the
+      // device, folding accents: `@zoe` lists the member Zoë after `z` found
+      // nobody in the directory. The same query searches again when it is
       // typed afresh.
+      searched.clear();
+      await tester.enterText(field, '');
+      await tester.pump();
+      await type(tester, '', '@zoe');
+      expect(searched.where((q) => q.isNotEmpty), ['z']);
+      expect(row('Zoë'), findsOneWidget);
       searched.clear();
       await tester.enterText(field, '');
       await tester.pump();
