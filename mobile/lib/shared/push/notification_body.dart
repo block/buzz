@@ -104,7 +104,7 @@ final _codePlaceholder = RegExp('$_codeOpen([0-9]+)$_codeClose');
 
 final _link = RegExp(r'!?\[([^\]]*)\]\([^)]*\)');
 final _emphasis = RegExp(
-  '(\\*\\*|~~)([^$_space](?:$_notLineEnd*?[^$_space])?)\\1',
+  '(\\*\\*|~~)([^$_space](?:$_notLineEnd*?[^$_space])??)\\1',
 );
 final _spaces = RegExp(r'[ \t]+');
 
