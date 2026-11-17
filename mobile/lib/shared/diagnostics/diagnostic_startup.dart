@@ -65,6 +65,11 @@ void configureDiagnostics(SentryFlutterOptions options, String destination) {
     ..enablePrintBreadcrumbs = false
     ..enableUserInteractionBreadcrumbs = false
     ..enableAppLifecycleBreadcrumbs = true
+    // Main-thread hangs, at the SDK's default thresholds. Dart runs on the
+    // main thread, so blocking Dart work is what these catch.
+    ..enableAppHangTracking = true
+    ..anrEnabled = true
+    ..enableWatchdogTerminationTracking = true
     ..beforeSend = ((event, hint) => DiagnosticFilter.filterEvent(event))
     ..beforeBreadcrumb = ((crumb, hint) =>
         DiagnosticFilter.filterBreadcrumb(crumb))

@@ -119,6 +119,15 @@ void main() {
       expect(options.replay.sessionSampleRate, isNull);
       expect(options.tracesSampleRate, isNull);
     });
+
+    test('main-thread hang detection is on at the default thresholds', () {
+      final defaults = SentryFlutterOptions();
+      expect(options.enableAppHangTracking, isTrue);
+      expect(options.anrEnabled, isTrue);
+      expect(options.enableWatchdogTerminationTracking, isTrue);
+      expect(options.appHangTimeoutInterval, defaults.appHangTimeoutInterval);
+      expect(options.anrTimeoutInterval, defaults.anrTimeoutInterval);
+    });
   });
 
   group('a sent error', () {
