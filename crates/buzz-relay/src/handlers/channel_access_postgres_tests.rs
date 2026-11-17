@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use crate::handlers::artifact_conversation_postgres_tests::{create_task, open, send, task};
 use crate::handlers::group_state_postgres_tests::{community, create_channel, edit_channel};
-use crate::handlers::parent_access_postgres_tests::{add, post, set_parent};
+use crate::handlers::parent_access_postgres_tests::{add, post, set_parent, set_parent_access};
 use crate::state::AppState;
 use buzz_core::kind::{KIND_CHANNEL_ACCESS_CHANGED, KIND_VIEWER_ACCESS_CHANGED};
 
@@ -788,7 +788,7 @@ pub(crate) async fn viewer_pushes(
 }
 
 /// Apply a moderation command signed by `actor` against `target`.
-async fn moderate(
+pub(crate) async fn moderate(
     state: &Arc<AppState>,
     tenant: &TenantContext,
     actor: &Keys,
@@ -1013,4 +1013,330 @@ async fn a_timeout_closes_posting_and_is_pushed_to_that_person_only() {
         );
         assert!(post(state, tenant, keys, f.child).await.is_err());
     }
+}
+
+/// `POST /query` asking which of `people` can read `channel`, signed by
+/// `asker`.
+async fn ask_readers(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    asker: &Keys,
+    channel: Uuid,
+    people: &[&Keys],
+) -> (StatusCode, Value) {
+    let pubkeys: Vec<String> = people.iter().map(|p| p.public_key().to_hex()).collect();
+    let body = json!([{"access": "readers", "channel": channel, "pubkeys": pubkeys}]);
+    query(state, tenant, asker, &body, true).await
+}
+
+/// The answer for `people`, asserting the request succeeded.
+async fn readers(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    asker: &Keys,
+    channel: Uuid,
+    people: &[&Keys],
+) -> Vec<(String, bool)> {
+    let (status, body) = ask_readers(state, tenant, asker, channel, people).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body.as_array()
+        .expect("answer array")
+        .iter()
+        .map(|entry| {
+            (
+                entry["pubkey"].as_str().expect("pubkey").to_string(),
+                entry["read"].as_bool().expect("read"),
+            )
+        })
+        .collect()
+}
+
+fn expect(people: &[(&Keys, bool)]) -> Vec<(String, bool)> {
+    people
+        .iter()
+        .map(|(person, read)| (person.public_key().to_hex(), *read))
+        .collect()
+}
+
+/// Removes `person` from `channel`, signed by `actor`.
+async fn remove(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    actor: &Keys,
+    channel: Uuid,
+    person: &Keys,
+) {
+    let removal = EventBuilder::new(Kind::Custom(9001), "")
+        .tags([
+            Tag::parse(["h", &channel.to_string()]).unwrap(),
+            Tag::parse(["p", &person.public_key().to_hex()]).unwrap(),
+        ])
+        .sign_with_keys(actor)
+        .unwrap();
+    send(state, tenant, removal).await.expect("remove");
+}
+
+/// Someone who can read a place learns which of the named people can read
+/// it, by the check a task's assignees meet: through the project and
+/// `parent_access` too, even when the asker isn't in the project. Everyone
+/// named gets an entry, in request order. Asking about a place the asker
+/// can't read is refused the same way whether it is private or missing, and
+/// an asker who loses access between two asks is refused, not told that
+/// nobody reads it.
+/// Mutation: skip the asker check, leave out people who can't read, ignore
+/// the parents, or answer an unreadable place with an empty list → RED.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn a_reader_learns_who_else_can_read_a_place() {
+    let f = Fixture::new(live_state().await, "readers").await;
+    let (state, tenant) = (&f.state, &f.tenant);
+    let project_member = Keys::generate();
+    let project_guest = Keys::generate();
+    let child_member = Keys::generate();
+    let outsider = Keys::generate();
+    add(
+        state,
+        tenant,
+        &f.owner,
+        f.project,
+        &project_member,
+        "member",
+    )
+    .await;
+    add(state, tenant, &f.owner, f.project, &project_guest, "guest").await;
+    add(state, tenant, &f.owner, f.child, &child_member, "member").await;
+
+    let everyone = [
+        &outsider,
+        &project_member,
+        &f.owner,
+        &project_guest,
+        &child_member,
+    ];
+    let answer = expect(&[
+        (&outsider, false),
+        (&project_member, true),
+        (&f.owner, true),
+        (&project_guest, true),
+        (&child_member, true),
+    ]);
+    assert_eq!(
+        readers(state, tenant, &f.owner, f.child, &everyone).await,
+        answer,
+        "everyone named, in request order"
+    );
+    // The disclosure NOSTR.md states: an asker outside the project learns
+    // that a project member reads the child through it.
+    assert_eq!(
+        readers(state, tenant, &child_member, f.child, &everyone).await,
+        answer,
+        "a child member outside the project gets the same answer"
+    );
+    assert_eq!(
+        readers(
+            state,
+            tenant,
+            &project_member,
+            f.conversation,
+            &[&child_member, &outsider]
+        )
+        .await,
+        expect(&[(&child_member, true), (&outsider, false)]),
+        "a task conversation follows its home"
+    );
+
+    set_parent_access(state, tenant, &f.owner, f.child, "none")
+        .await
+        .expect("close the parents' grant");
+    assert_eq!(
+        readers(
+            state,
+            tenant,
+            &child_member,
+            f.child,
+            &[&project_member, &child_member]
+        )
+        .await,
+        expect(&[(&project_member, false), (&child_member, true)]),
+        "parent_access none takes the project's readers away"
+    );
+    set_parent_access(state, tenant, &f.owner, f.child, "member")
+        .await
+        .expect("reopen the parents' grant");
+    remove(state, tenant, &f.owner, f.project, &project_member).await;
+    assert_eq!(
+        readers(state, tenant, &f.owner, f.child, &[&project_member]).await,
+        expect(&[(&project_member, false)]),
+        "a removal is seen at once"
+    );
+
+    // Not allowed to ask: one refusal, the same for private and missing.
+    let (status, private) = ask_readers(state, tenant, &outsider, f.child, &[&f.owner]).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{private}");
+    assert!(
+        private["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("not-allowed:"),
+        "{private}"
+    );
+    let (status, missing) = ask_readers(state, tenant, &f.owner, Uuid::new_v4(), &[&f.owner]).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(missing, private, "a missing place looks like a private one");
+
+    // Losing access between two asks gets the refusal, not a list of falses.
+    assert_eq!(
+        readers(state, tenant, &child_member, f.child, &[&f.owner]).await,
+        expect(&[(&f.owner, true)])
+    );
+    // Removed by a write that skips this node's own removal path.
+    let community = tenant.community();
+    let owner = f.owner.public_key().to_bytes();
+    assert_eq!(
+        readers(state, tenant, &f.owner, f.child, &[&project_guest]).await,
+        expect(&[(&project_guest, true)])
+    );
+    state
+        .db
+        .remove_member(
+            community,
+            f.project,
+            &project_guest.public_key().to_bytes(),
+            &owner,
+        )
+        .await
+        .expect("remove elsewhere");
+    assert_eq!(
+        readers(state, tenant, &f.owner, f.child, &[&project_guest]).await,
+        expect(&[(&project_guest, false)]),
+        "a named person's rows are read fresh"
+    );
+    state
+        .db
+        .remove_member(
+            community,
+            f.child,
+            &child_member.public_key().to_bytes(),
+            &owner,
+        )
+        .await
+        .expect("remove elsewhere");
+    let (status, body) = ask_readers(state, tenant, &child_member, f.child, &[&f.owner]).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body, private);
+}
+
+/// Makes `keys` a relay member with `role`, so they may moderate.
+pub(crate) async fn relay_member(
+    state: &AppState,
+    tenant: &TenantContext,
+    keys: &Keys,
+    role: &str,
+) {
+    state
+        .db
+        .add_relay_member(
+            tenant.community(),
+            &keys.public_key().to_hex(),
+            role,
+            None,
+            &Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("relay member");
+}
+
+/// Someone banned from the community, and an agent whose owner is, read
+/// nothing, so the answer says false for them, and a banned asker is
+/// refused with the ban's reason, as every request from them is. A timed-out
+/// person still reads. Lifting the ban restores them.
+/// Mutation: drop the ban from the shared check → RED.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn a_banned_person_reads_nothing() {
+    let f = Fixture::new(live_state().await, "readers-ban").await;
+    let (state, tenant) = (&f.state, &f.tenant);
+    let (banned, agent, timed_out) = (Keys::generate(), Keys::generate(), Keys::generate());
+    relay_member(state, tenant, &f.owner, "owner").await;
+    for keys in [&banned, &agent] {
+        state
+            .db
+            .ensure_user(tenant.community(), keys.public_key().as_bytes())
+            .await
+            .expect("user row");
+    }
+    assert!(state
+        .db
+        .set_agent_owner(
+            tenant.community(),
+            agent.public_key().as_bytes(),
+            banned.public_key().as_bytes(),
+        )
+        .await
+        .expect("own the agent"));
+    for keys in [&banned, &agent, &timed_out] {
+        add(state, tenant, &f.owner, f.project, keys, "member").await;
+    }
+    let open_channel = create_channel(state, tenant, &f.owner, &[]).await;
+    let people = [&banned, &agent, &timed_out];
+    for place in [f.child, open_channel] {
+        assert_eq!(
+            readers(state, tenant, &f.owner, place, &people).await,
+            expect(&[(&banned, true), (&agent, true), (&timed_out, true)])
+        );
+    }
+
+    let until = chrono::Utc::now().timestamp() + 3600;
+    moderate(
+        state,
+        tenant,
+        &f.owner,
+        buzz_core::kind::KIND_MODERATION_TIMEOUT,
+        &timed_out,
+        Some(until),
+    )
+    .await;
+    moderate(
+        state,
+        tenant,
+        &f.owner,
+        buzz_core::kind::KIND_MODERATION_BAN,
+        &banned,
+        None,
+    )
+    .await;
+    for place in [f.child, open_channel] {
+        assert_eq!(
+            readers(state, tenant, &f.owner, place, &people).await,
+            expect(&[(&banned, false), (&agent, false), (&timed_out, true)]),
+            "banned and their agent read nothing, an open channel included; a timeout reads"
+        );
+    }
+    let (status, refused) = ask_readers(state, tenant, &banned, open_channel, &[&f.owner]).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().starts_with("blocked:"),
+        "a banned asker gets the ban's reason: {refused}"
+    );
+    assert_eq!(
+        readers(state, tenant, &timed_out, f.child, &[&f.owner]).await,
+        expect(&[(&f.owner, true)]),
+        "a timed-out person may still ask"
+    );
+
+    moderate(
+        state,
+        tenant,
+        &f.owner,
+        buzz_core::kind::KIND_MODERATION_UNBAN,
+        &banned,
+        None,
+    )
+    .await;
+    assert_eq!(
+        readers(state, tenant, &f.owner, f.child, &people).await,
+        expect(&[(&banned, true), (&agent, true), (&timed_out, true)]),
+        "lifting the ban restores them"
+    );
 }

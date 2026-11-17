@@ -135,6 +135,53 @@ pub(crate) async fn reachable(
     Ok(ReachablePage { channels, next })
 }
 
+/// Whether one named person can read the place asked about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Reader {
+    /// The person, as lowercase hex.
+    pub pubkey: String,
+    /// Whether they can read the place now.
+    pub read: bool,
+}
+
+/// Which of `pubkeys` can read `channel_id`, in request order, by the check
+/// a task's assignees meet ([`can_read`]). `None` when `asker` cannot read
+/// it themselves, whether it is private to them, deleted or missing, so the
+/// answer never covers a place the asker can't see. Any lookup failure
+/// fails the whole batch.
+pub(crate) async fn readers(
+    state: &AppState,
+    community_id: CommunityId,
+    asker: &[u8],
+    channel_id: Uuid,
+    pubkeys: &[[u8; 32]],
+) -> Result<Option<Vec<Reader>>, buzz_db::DbError> {
+    // Read every row fresh: a push can arrive before another node has
+    // dropped its cached rows for these people.
+    state.invalidate_membership_local(community_id, Uuid::nil(), asker);
+    if !can_read(state, community_id, asker, channel_id).await? {
+        return Ok(None);
+    }
+    for pubkey in pubkeys {
+        state.invalidate_membership_local(community_id, Uuid::nil(), pubkey);
+    }
+    let read: Vec<bool> = stream::iter(pubkeys.iter().copied())
+        .map(|pubkey| async move { can_read(state, community_id, &pubkey, channel_id).await })
+        .buffered(super::req::FILTER_QUERY_CONCURRENCY)
+        .try_collect()
+        .await?;
+    Ok(Some(
+        pubkeys
+            .iter()
+            .zip(read)
+            .map(|(pubkey, read)| Reader {
+                pubkey: hex::encode(pubkey),
+                read,
+            })
+            .collect(),
+    ))
+}
+
 fn role_name(role: MemberRole) -> &'static str {
     match role {
         MemberRole::Owner => "owner",
@@ -147,13 +194,23 @@ fn role_name(role: MemberRole) -> &'static str {
 }
 
 /// Whether `pubkey` can read `channel_id`, by the rule the answer leaves
-/// unreadable channels out with.
+/// unreadable channels out with. Someone banned from the community, or an
+/// agent whose owner is, reads nothing, as every request from them is
+/// refused. A timeout leaves reading alone.
 pub(crate) async fn can_read(
     state: &AppState,
     community_id: CommunityId,
     pubkey: &[u8],
     channel_id: Uuid,
 ) -> Result<bool, buzz_db::DbError> {
+    if state
+        .db
+        .moderation_restriction_state(community_id, pubkey)
+        .await?
+        .banned
+    {
+        return Ok(false);
+    }
     Ok(readable(state, community_id, pubkey, channel_id)
         .await?
         .is_some())

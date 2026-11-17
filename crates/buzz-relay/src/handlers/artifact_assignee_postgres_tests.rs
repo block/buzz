@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::handlers::artifact_conversation_postgres_tests::send;
-use crate::handlers::channel_access_postgres_tests::{live_state, query};
+use crate::handlers::channel_access_postgres_tests::{live_state, moderate, query, relay_member};
 use crate::handlers::group_state_postgres_tests::{community, create_channel};
 use crate::handlers::parent_access_postgres_tests::{add, set_parent};
 use crate::state::AppState;
@@ -837,4 +837,62 @@ async fn find_reads_unassigned_tasks_within_a_project_page_by_page() {
             "{extra}: {response}"
         );
     }
+}
+
+/// Someone banned from the community can't be assigned, because they read
+/// nothing. A timed-out person still reads, so they can.
+/// Mutation: drop the ban from the shared check → RED.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn a_banned_person_cannot_be_assigned() {
+    let f = Fixture::new("assign-ban").await;
+    let (state, tenant) = (&f.state, &f.tenant);
+    let banned = Keys::generate();
+    relay_member(state, tenant, &f.owner, "owner").await;
+    add(state, tenant, &f.owner, f.project, &banned, "member").await;
+    moderate(
+        state,
+        tenant,
+        &f.owner,
+        buzz_core::kind::KIND_MODERATION_BAN,
+        &banned,
+        None,
+    )
+    .await;
+    moderate(
+        state,
+        tenant,
+        &f.owner,
+        buzz_core::kind::KIND_MODERATION_TIMEOUT,
+        &f.member,
+        Some(chrono::Utc::now().timestamp() + 3600),
+    )
+    .await;
+    let banned_hex = banned.public_key().to_hex();
+    let member_hex = f.member.public_key().to_hex();
+    refused(
+        f.save(&revision(
+            &f.owner,
+            f.child,
+            Uuid::new_v4(),
+            "create",
+            None,
+            &[["assignee", &banned_hex]],
+            now(),
+        ))
+        .await,
+        "assignee-unreadable",
+        &[&banned_hex],
+    );
+    f.save(&revision(
+        &f.owner,
+        f.child,
+        Uuid::new_v4(),
+        "create",
+        None,
+        &[["assignee", &member_hex]],
+        now(),
+    ))
+    .await
+    .expect("a timed-out person can be assigned");
 }

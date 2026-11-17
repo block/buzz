@@ -284,6 +284,10 @@ impl RelayInfo {
             // Channel access).
             "buzz-channel-access".to_string(),
             "buzz-artifact-assignees".to_string(),
+            // `POST /query` answers `{"access":"readers"}` with which named
+            // people can read a channel the signer can read (NOSTR.md,
+            // Channel access).
+            "buzz-channel-readers".to_string(),
         ];
         let gif = gif_provider.map(|provider| {
             supported_extensions.push("buzz-gif".to_string());
@@ -857,6 +861,7 @@ mod tests {
         assert!(extensions.contains(&"buzz-channel-parent-access".to_string()));
         assert!(extensions.contains(&"buzz-artifact-conversations".to_string()));
         assert!(extensions.contains(&"buzz-channel-access".to_string()));
+        assert!(extensions.contains(&"buzz-channel-readers".to_string()));
         assert!(extensions.contains(&"buzz-artifact-assignees".to_string()));
     }
 

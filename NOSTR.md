@@ -353,6 +353,41 @@ channels the signer has not joined all get the same answer.
   answered, the whole request fails with 503 and is retried; a channel is
   only ever left out of a complete answer. The answer is a snapshot, and
   every post is still checked when it arrives.
+- **Who else can read.** `POST /query` with exactly
+  `[{"access":"readers","channel":<channel id>,"pubkeys":[<hex pubkey>, ...]}]`:
+  one lowercase channel ID and 1 to 100 distinct lowercase hex pubkeys,
+  with no other keys. The NIP-98 proof must carry a `payload` tag. Any
+  other shape is refused with 400. The answer is a JSON array with one
+  entry per pubkey, in request order: `{"pubkey":<hex pubkey>,"read":<bool>}`.
+  Nobody named is left out, so `false` always means "cannot read".
+  Reading is judged by the check a task's assignees meet
+  ([NIP-AR](docs/nips/NIP-AR.md)): a member row, an open channel, or what
+  the parents give under `parent_access`; a conversation follows its home.
+  Someone banned from the community, or an agent whose owner is, reads
+  nothing and is answered `false`, as every request from them is refused.
+  A timeout doesn't change reading: a timed-out person is answered `true`
+  where they read, and may ask.
+  - **Who may ask.** Only a signer who can read the channel. Otherwise the
+    request is refused with 403 and
+    `{"error":"not-allowed: the signer cannot read this channel"}`. A
+    missing or deleted channel is refused the same way, so the answer
+    can't show whether a private channel exists. A banned signer is
+    refused before the question is answered, with the ban's own
+    `blocked:` reason, like every request from them. There are no partial
+    answers: a refusal is never a list of `false`s.
+  - **What it discloses, by design.** It answers only for a channel the
+    asker can already read, and it says only whether each person reads
+    it, never how or why not. The relay never states the reason for
+    someone else. Two things can still be inferred:
+    - Someone who can read a channel can learn that a named person reads
+      it through a parent the asker isn't in, such as a private project.
+    - An asker who also sees a person in the channel's member list, but
+      is told they can't read it, can infer that the person is banned.
+  - If any person cannot be answered, the whole request fails with 503 and
+    is retried. The answer is a snapshot: after a kind:20004 for the
+    channel, ask again.
+  - Relays that support this advertise `buzz-channel-readers` in NIP-11
+    `supported_extensions`.
 - **Ask again.** After a committed change to who may read or post in a
   channel, the relay sends an ephemeral kind:20004, signed by the relay,
   with empty content and only `["h", <channel id>]`, to that channel and to
