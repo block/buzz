@@ -30,7 +30,8 @@ use crate::state::AppState;
 ///
 /// - **Members only.** Candidates are the destination channel's members; global
 ///   users are never matched.
-/// - **Exact display name.** No substring, prefix, or fuzzy matching. Names may
+/// - **Exact profile name.** Ordinary display names and verified display names,
+///   usernames, and full names are aliases. No substring, prefix, or fuzzy matching. Names may
 ///   contain spaces/punctuation (`"Will Pfleger"`, `"Lep (Subagent)"`), so the
 ///   match is anchored on `@` and terminated by a non-name boundary rather than
 ///   whitespace.
@@ -517,18 +518,11 @@ impl ActionSink for RelayActionSink {
                 .await
                 .map_err(|e| ActionSinkError::Database(e.to_string()))?;
             let member_pubkeys: Vec<Vec<u8>> = members.iter().map(|m| m.pubkey.clone()).collect();
-            let users = state
+            let named_members = state
                 .db
-                .get_users_bulk_for_event_write(tenant.community(), &member_pubkeys)
+                .get_mention_names_for_event_write(tenant.community(), &member_pubkeys)
                 .await
                 .map_err(|e| ActionSinkError::Database(e.to_string()))?;
-            let named_members: Vec<(String, String)> = users
-                .into_iter()
-                .filter_map(|u| {
-                    let name = u.display_name?;
-                    Some((name, nostr::PublicKey::from_slice(&u.pubkey).ok()?.to_hex()))
-                })
-                .collect();
             let agent_mentions_withheld = append_workflow_mention_tags(
                 &mut tags,
                 &text,
@@ -1536,6 +1530,98 @@ mod postgres_tests {
             .await
             .expect("add agent member");
 
+        let verified = nostr::Keys::generate().public_key();
+        let twin = nostr::Keys::generate().public_key();
+        let outsider = nostr::Keys::generate().public_key();
+        for key in [twin, outsider] {
+            state
+                .db
+                .ensure_user(community, &key.to_bytes())
+                .await
+                .expect("ensure user");
+        }
+        for key in [verified, twin] {
+            state
+                .db
+                .add_member(
+                    community,
+                    channel.id,
+                    &key.to_bytes(),
+                    MemberRole::Member,
+                    Some(&author_bytes),
+                )
+                .await
+                .expect("add member");
+        }
+        state
+            .db
+            .update_user_profile(
+                community,
+                &twin.to_bytes(),
+                Some("Alex Example"),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("ambiguous ordinary name");
+        for (key, username) in [(verified, "alex"), (outsider, "outsider")] {
+            state
+                .db
+                .publish_verified_profile(
+                    buzz_db::verified_profiles::ProfileAdmission {
+                        community,
+                        issuer: "https://identity.example.org",
+                        pubkey: &key.to_hex(),
+                        issued_at: Utc::now(),
+                        admitted_at: Utc::now(),
+                        display_name: "Alex Example (@alex)",
+                        username,
+                        full_name: Some("Alex Example"),
+                        label: "Example",
+                        refresh_seconds: 3600,
+                        membership_required: false,
+                    },
+                    &state.relay_keypair,
+                )
+                .await
+                .expect("publish verified profile");
+        }
+        let other_community = match state
+            .db
+            .create_community_with_owner(
+                &format!("other-{}.example.org", Uuid::new_v4().simple()),
+                &author_hex,
+                &nostr::Keys::generate(),
+            )
+            .await
+            .expect("other community")
+            .outcome
+        {
+            CreateCommunityWithOwnerResult::Created(rec) => rec.id,
+            other => panic!("expected fresh community: {other:?}"),
+        };
+        state
+            .db
+            .publish_verified_profile(
+                buzz_db::verified_profiles::ProfileAdmission {
+                    community: other_community,
+                    issuer: "https://identity.example.org",
+                    pubkey: &verified.to_hex(),
+                    issued_at: Utc::now(),
+                    admitted_at: Utc::now(),
+                    display_name: "Foreign Name",
+                    username: "foreign-only",
+                    full_name: None,
+                    label: "Example",
+                    refresh_seconds: 3600,
+                    membership_required: false,
+                },
+                &state.relay_keypair,
+            )
+            .await
+            .expect("foreign profile for the same key");
+
         let sink = Arc::new(RelayActionSink::new(&state));
         state.workflow_engine.set_action_sink(sink);
 
@@ -1602,6 +1688,103 @@ mod postgres_tests {
             ),
             "the first p tag attributes the message to its owner and is marked as attribution"
         );
+        for (name, text, trigger, mentioned, authorized) in [
+            ("verified-username", "@alex", "", true, true),
+            (
+                "verified-display-name",
+                "@Alex Example (@alex)",
+                "",
+                true,
+                true,
+            ),
+            (
+                "verified-dedup",
+                "@alex @Alex Example (@alex) @alex",
+                "",
+                true,
+                true,
+            ),
+            ("ambiguous-full-name", "@Alex Example", "", false, false),
+            ("verified-nonmember", "@outsider", "", false, false),
+            ("foreign-profile", "@foreign-only", "", false, false),
+            (
+                "injected-verified",
+                "echo: {{trigger.text}}",
+                "@alex",
+                true,
+                false,
+            ),
+        ] {
+            let id = execute_send_message_workflow(
+                &state,
+                community,
+                channel.id,
+                &author_bytes,
+                name,
+                text,
+                trigger,
+            )
+            .await;
+            let event = load_event(&id).await;
+            let expected_mentions = if mentioned {
+                vec![verified.to_hex()]
+            } else {
+                vec![]
+            };
+            assert_eq!(
+                tag_values(&event, "p"),
+                [vec![author_hex.clone()], expected_mentions].concat(),
+                "{name}: recipient tags"
+            );
+            assert_eq!(
+                tag_values(&event, "buzz:workflow-mention"),
+                if authorized {
+                    vec![verified.to_hex()]
+                } else {
+                    vec![]
+                },
+                "{name}: delegated authority"
+            );
+        }
+        state
+            .db
+            .ensure_user(community, &verified.to_bytes())
+            .await
+            .expect("ensure ordinary profile user");
+        state
+            .db
+            .update_user_profile(
+                community,
+                &verified.to_bytes(),
+                Some("Ally Example"),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("add ordinary profile alongside verified profile");
+        for (name, text) in [
+            ("mixed-ordinary", "@Ally Example"),
+            ("mixed-verified", "@alex"),
+        ] {
+            let id = execute_send_message_workflow(
+                &state,
+                community,
+                channel.id,
+                &author_bytes,
+                name,
+                text,
+                "",
+            )
+            .await;
+            let event = load_event(&id).await;
+            assert_eq!(
+                tag_values(&event, "p"),
+                vec![author_hex.clone(), verified.to_hex()],
+                "{name}: both profile sources remain mentionable"
+            );
+        }
+
         let p_tag_targets = tag_values(&explicit, "p");
         assert!(
             p_tag_targets.contains(&author_hex),

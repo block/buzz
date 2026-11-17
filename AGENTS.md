@@ -360,6 +360,11 @@ system channels out of these reads unless the filter asks for them (see
 [evalexpr](https://docs.rs/evalexpr) for condition evaluation. Keep expressions
 simple and testable.
 
+Workflow mention candidates include ordinary display names and verified
+`display_name`, `username`, and `full_name` aliases for destination-channel
+members in the same community. Alias collisions across distinct keys remain
+ambiguous. Verified-only profiles do not require a separate kind:0 profile.
+
 **Thread counters**: `reply_count` and `descendant_count` are materialized on
 thread root events. Any code that inserts replies must update these counters —
 check existing reply handlers for the pattern.
