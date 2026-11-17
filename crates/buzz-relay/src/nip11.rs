@@ -265,6 +265,8 @@ impl RelayInfo {
             // without it ignores the tag beside `visibility`, so a client
             // checks this before opening a channel as unlisted.
             "buzz-unlisted-channels".to_string(),
+            // NIP-CW `direction: "newer"` windows, read oldest first.
+            "buzz-window-newer".to_string(),
         ];
         let gif = gif_provider.map(|provider| {
             supported_extensions.push("buzz-gif".to_string());
@@ -817,8 +819,8 @@ mod tests {
     }
 
     /// Clients refuse NIP-CL labels and system channels, newest-first
-    /// search, and unlisted channels unless the relay says it supports them,
-    /// so every document must advertise all three.
+    /// search, unlisted channels and oldest-first windows unless the relay
+    /// says it supports them, so every document must advertise all four.
     #[test]
     fn advertises_nip_cl_search_sort_and_unlisted_extensions() {
         let info = RelayInfo::build(
@@ -834,6 +836,7 @@ mod tests {
         assert!(extensions.contains(&"nip-cl".to_string()));
         assert!(extensions.contains(&"buzz-search-sort".to_string()));
         assert!(extensions.contains(&"buzz-unlisted-channels".to_string()));
+        assert!(extensions.contains(&"buzz-window-newer".to_string()));
     }
 
     /// NIP-WP → NIP-11 mirror: a set workspace icon is served in the standard

@@ -19,7 +19,7 @@ use base64::Engine;
 use serde_json::Value;
 
 use buzz_auth::{LimitType, Nip98ReplayGuard, DEFAULT_REPLAY_TTL_SECS};
-use buzz_core::TenantContext;
+use buzz_core::{thread_window::Direction, TenantContext};
 
 use crate::access::{AccessSlot, AuthResult};
 use crate::handlers::ingest::{IngestAuth, IngestError};
@@ -715,17 +715,18 @@ fn extract_channel_from_filter(filter: &nostr::Filter) -> Option<uuid::Uuid> {
 const BRIDGE_FEED_MAX_LIMIT: u32 = 100;
 const BRIDGE_THREAD_MAX_LIMIT: u32 = 500;
 
-/// The `before_id` extension field, with "present but malformed" kept distinct
-/// from "absent": NIP-CW's cursor grammar says a malformed value MUST reject
-/// the request, never silently demote it to a half cursor or a head request.
+/// A cursor id extension field (`before_id`, `after_id`), with "present but
+/// malformed" kept distinct from "absent": NIP-CW's cursor grammar says a
+/// malformed value MUST reject the request, never silently demote it to a
+/// half cursor or a head request.
 enum BeforeId {
     Absent,
     Valid(Vec<u8>),
     Malformed,
 }
 
-fn extract_before_id(raw: &Value) -> BeforeId {
-    let Some(value) = raw.get("before_id") else {
+fn extract_event_id(raw: &Value, key: &str) -> BeforeId {
+    let Some(value) = raw.get(key) else {
         return BeforeId::Absent;
     };
     match value
@@ -1034,33 +1035,46 @@ async fn handle_channel_window_filter(
         return Ok(());
     }
 
-    // Composite request cursor: `until` + `before_id`, both or neither. The
-    // window path has no timestamp-only fallback — that ambiguity is the
-    // dense-second dup/loss bug this surface exists to kill. A malformed
-    // `before_id` is likewise rejected outright (NIP-CW cursor grammar),
-    // never demoted to a half cursor or a head request.
-    let before_id = match extract_before_id(raw) {
+    // Composite request cursor: `until` + `before_id` (`after` + `after_id`
+    // for a newer page), both or neither. The window path has no
+    // timestamp-only fallback — that ambiguity is the dense-second dup/loss
+    // bug this surface exists to kill. A malformed id is likewise rejected
+    // outright (NIP-CW cursor grammar), never demoted to a half cursor or a
+    // head request.
+    let direction = Direction::parse(raw)
+        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("top_level: {e}")))?;
+    let (ts_key, id_key) = direction.cursor_fields();
+    let id = match extract_event_id(raw, id_key) {
         BeforeId::Malformed => {
             return Err(api_error(
                 StatusCode::BAD_REQUEST,
-                "top_level: before_id must be a 64-hex event id",
+                &format!("top_level: {id_key} must be a 64-hex event id"),
             ));
         }
         BeforeId::Valid(id) => Some(id),
         BeforeId::Absent => None,
     };
-    let cursor = match (filter.until, before_id) {
-        (Some(ts), Some(id)) => {
-            let ts = chrono::DateTime::from_timestamp(ts.as_secs() as i64, 0).ok_or_else(|| {
-                api_error(StatusCode::BAD_REQUEST, "top_level: until is out of range")
-            })?;
-            Some((ts, id))
-        }
+    let ts = raw
+        .get(ts_key)
+        .map(|ts| {
+            ts.as_i64()
+                .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+                .filter(|ts| ts.timestamp() >= 0)
+                .ok_or_else(|| {
+                    api_error(
+                        StatusCode::BAD_REQUEST,
+                        &format!("top_level: {ts_key} is out of range"),
+                    )
+                })
+        })
+        .transpose()?;
+    let cursor = match (ts, id) {
+        (Some(ts), Some(id)) => Some((ts, id)),
         (None, None) => None,
         _ => {
             return Err(api_error(
                 StatusCode::BAD_REQUEST,
-                "top_level cursor requires both until and before_id, or neither",
+                &format!("top_level cursor requires both {ts_key} and {id_key}, or neither"),
             ));
         }
     };
@@ -1082,6 +1096,7 @@ async fn handle_channel_window_filter(
             tenant.community(),
             ch_id,
             limit,
+            direction,
             cursor.clone(),
             kind_filter.as_deref(),
         )
@@ -1183,18 +1198,26 @@ async fn handle_channel_window_filter(
     // 4. Window bounds: exactly one 39006 per window response — the only
     //    authority on exhaustion. `rows < limit` proves nothing on an
     //    exact-multiple final page.
+    //    A newer page binds its direction into both, so it can never be
+    //    mistaken for an older page (or one from a relay that ignores it).
     let cursor_suffix = match &cursor {
         Some((ts, id)) => format!("{}:{}", ts.timestamp(), hex::encode(id)),
         None => "head".to_owned(),
     };
-    let d_val = format!("{ch_hex}:{cursor_suffix}");
-    let content = serde_json::json!({
+    let mut content = serde_json::json!({
         "has_more": window.has_more,
         "next_cursor": window.next_cursor.as_ref().map(|(ts, id)| serde_json::json!({
             "created_at": ts.timestamp(),
             "id": hex::encode(id),
         })),
     });
+    let d_val = match direction {
+        Direction::Older => format!("{ch_hex}:{cursor_suffix}"),
+        Direction::Newer => {
+            content["direction"] = "newer".into();
+            format!("{ch_hex}:newer:{cursor_suffix}")
+        }
+    };
     let tags = vec![parse_tag(["d", &d_val])?, parse_tag(["h", &ch_hex])?];
     let overlay = sign_overlay(KIND_WINDOW_BOUNDS, tags, content.to_string())?;
     let v = serde_json::to_value(&overlay)
@@ -2174,7 +2197,7 @@ async fn query_member_events(
             query.shared_gated_reader = Some(pubkey_bytes.clone());
         }
 
-        match extract_before_id(raw) {
+        match extract_event_id(raw, "before_id") {
             BeforeId::Malformed => {
                 return Err(api_error(
                     StatusCode::BAD_REQUEST,
@@ -4536,7 +4559,7 @@ pub(crate) mod postgres_tests {
     fn extract_before_id_valid_hex() {
         let hex = "a".repeat(64);
         let raw = serde_json::json!({ "before_id": hex });
-        match extract_before_id(&raw) {
+        match extract_event_id(&raw, "before_id") {
             BeforeId::Valid(id) => assert_eq!(id.len(), 32),
             _ => panic!("64-char hex must parse as Valid"),
         }
@@ -4545,31 +4568,46 @@ pub(crate) mod postgres_tests {
     #[test]
     fn extract_before_id_short_hex() {
         let raw = serde_json::json!({ "before_id": "a".repeat(63) });
-        assert!(matches!(extract_before_id(&raw), BeforeId::Malformed));
+        assert!(matches!(
+            extract_event_id(&raw, "before_id"),
+            BeforeId::Malformed
+        ));
     }
 
     #[test]
     fn extract_before_id_long_hex() {
         let raw = serde_json::json!({ "before_id": "a".repeat(65) });
-        assert!(matches!(extract_before_id(&raw), BeforeId::Malformed));
+        assert!(matches!(
+            extract_event_id(&raw, "before_id"),
+            BeforeId::Malformed
+        ));
     }
 
     #[test]
     fn extract_before_id_invalid_hex_chars() {
         let raw = serde_json::json!({ "before_id": "z".repeat(64) });
-        assert!(matches!(extract_before_id(&raw), BeforeId::Malformed));
+        assert!(matches!(
+            extract_event_id(&raw, "before_id"),
+            BeforeId::Malformed
+        ));
     }
 
     #[test]
     fn extract_before_id_absent() {
         let raw = serde_json::json!({});
-        assert!(matches!(extract_before_id(&raw), BeforeId::Absent));
+        assert!(matches!(
+            extract_event_id(&raw, "before_id"),
+            BeforeId::Absent
+        ));
     }
 
     #[test]
     fn extract_before_id_non_string() {
         let raw = serde_json::json!({ "before_id": 12345 });
-        assert!(matches!(extract_before_id(&raw), BeforeId::Malformed));
+        assert!(matches!(
+            extract_event_id(&raw, "before_id"),
+            BeforeId::Malformed
+        ));
     }
 
     #[test]
