@@ -10,6 +10,7 @@ import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/features/activity/activity_page.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
@@ -38,6 +39,7 @@ part 'channels_provider_request_path_cases.dart';
 part 'channels_provider_activity_cases.dart';
 part 'channels_provider_join_cases.dart';
 part 'channels_provider_saved_directory_cases.dart';
+part 'channels_provider_thread_interest_cases.dart';
 
 /// Tests for [ChannelsNotifier] in the pure-Nostr world.
 ///
@@ -58,6 +60,7 @@ void main() {
   _threadActivityCases();
   _confirmedJoinCases();
   _savedDirectoryCases();
+  _threadInterestCases();
   const myPk = 'me';
 
   test(

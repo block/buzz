@@ -861,8 +861,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       final updated = List<Channel>.of(channels);
       final channel = updated[idx];
 
-      if (myPk != null && event.pubkey.toLowerCase() == myPk.toLowerCase()) {
-        _recordSelfThreadInterest(event, myPk);
+      if (myPk != null &&
+          event.pubkey.toLowerCase() == myPk.toLowerCase() &&
+          _addSelfThreadInterest(event)) {
+        _writeThreadInterestStores(myPk);
       }
 
       if (myPk != null &&
@@ -916,12 +918,13 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     }
   }
 
-  void _recordSelfThreadInterest(NostrEvent event, String pubkey) {
+  /// Adds [event]'s thread to the in-memory interest sets; true when new.
+  /// Callers persist with [_writeThreadInterestStores], once per batch: each
+  /// write re-encodes both whole sets on the main thread.
+  bool _addSelfThreadInterest(NostrEvent event) {
     final ref = event.threadReference;
     final target = ref.rootId != null ? _participatedRootIds : _authoredRootIds;
-    final id = ref.rootId ?? event.id;
-    if (!target.add(id)) return;
-    _writeThreadInterestStores(pubkey);
+    return target.add(ref.rootId ?? event.id);
   }
 
   void _writeThreadInterestStores(String pubkey) {
