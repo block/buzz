@@ -890,7 +890,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 94);
+        assert_eq!(migrations.len(), 95);
         assert_eq!(migrations[89].version, 90);
         assert!(migrations[89]
             .sql
