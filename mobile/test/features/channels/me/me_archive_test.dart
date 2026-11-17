@@ -40,6 +40,9 @@ class _ArchiveRelay extends RelaySessionNotifier {
   final metadataVersions = <String, int>{};
   final metadataReadGates = <Completer<void>>[];
   int metadataReads = 0;
+  List<NostrEvent>? replicaMetadata;
+  bool failStrongMetadata = false;
+  final discoveryQueries = <Map<String, dynamic>>[];
 
   void unarchive(String id) {
     archived.remove(id);
@@ -58,7 +61,17 @@ class _ArchiveRelay extends RelaySessionNotifier {
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
 
-  List<NostrEvent> events(NostrFilter filter) {
+  List<NostrEvent> events(NostrFilter filter, {bool strong = false}) {
+    if (filter.kinds.contains(39000)) {
+      if (strong && failStrongMetadata) throw StateError('Writer unavailable');
+      if (!strong && replicaMetadata != null) {
+        return replicaMetadata!
+            .where(
+              (e) => filter.tags['#d']?.contains(e.getTagValue('d')) == true,
+            )
+            .toList();
+      }
+    }
     if (failRefresh && filter.kinds.contains(39002)) {
       failedRefreshes++;
       throw StateError('List unavailable');
@@ -109,7 +122,15 @@ class _ArchiveRelay extends RelaySessionNotifier {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
-    final snapshot = events(filter);
+    // WebSocket ignores consistency extensions and remains replica-routed.
+    return _read(filter);
+  }
+
+  Future<List<NostrEvent>> _read(
+    NostrFilter filter, {
+    bool strong = false,
+  }) async {
+    final snapshot = events(filter, strong: strong);
     if (filter.kinds.contains(39000)) {
       metadataReads++;
       if (metadataReadGates.isNotEmpty) {
@@ -123,7 +144,17 @@ class _ArchiveRelay extends RelaySessionNotifier {
   Future<List<NostrEvent>> queryRelay(
     List<NostrFilter> filters, {
     Duration timeout = const Duration(seconds: 8),
-  }) async => [for (final filter in filters) ...events(filter)];
+  }) async {
+    final results = <NostrEvent>[];
+    for (final filter in filters) {
+      final wire = filter.toJson();
+      if (filter.kinds.any([39000, 39002].contains)) discoveryQueries.add(wire);
+      results.addAll(
+        await _read(filter, strong: wire['consistency'] == 'strong'),
+      );
+    }
+    return results;
+  }
 
   @override
   Future<void Function()> subscribe(
@@ -489,8 +520,50 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Archive #Loose chat?'), findsNothing);
       expect(relay.submitted, hasLength(4));
+      // Keep the replica on active v11 even after writer archive v12.
+      relay.replicaMetadata = relay.events(
+        NostrFilters.channelMetadata(_ArchiveRelay.chats.keys.toList()),
+      );
       relay.archived.add('loose');
       relay.metadataVersions['loose'] = 12;
+
+      // A working replica is no fallback for a failed writer confirmation.
+      relay.failStrongMetadata = true;
+      relay.discoveryQueries.clear();
+      _performCustomAction(
+        tester,
+        'Loose chat, archived, awaiting refresh',
+        'Refresh chat status',
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Couldn’t refresh chat status. Try again.'),
+        findsOneWidget,
+      );
+      expect(
+        find.bySemanticsLabel('Loose chat, archived, awaiting refresh'),
+        findsOneWidget,
+      );
+      expect(relay.submitted, hasLength(4));
+      expect(
+        relay.discoveryQueries.where(
+          (q) => (q['kinds'] as List).contains(39002),
+        ),
+        hasLength(2),
+      );
+      expect(
+        relay.discoveryQueries.where(
+          (q) => (q['kinds'] as List).contains(39000),
+        ),
+        isNotEmpty,
+      );
+      expect(
+        relay.discoveryQueries.every((q) => q['consistency'] == 'strong'),
+        isTrue,
+      );
+      relay.failStrongMetadata = false;
+      ScaffoldMessenger.of(context).clearSnackBars();
+      await tester.pumpAndSettle();
 
       if (unarchiveBeforeRecovery) {
         // No archived snapshot was observed for this chat. A successful
@@ -514,6 +587,15 @@ void main() {
         );
         await tester.pumpAndSettle();
         expect(find.bySemanticsLabel('Loose chat'), findsOneWidget);
+        expect(
+          container
+              .read(channelsProvider)
+              .requireValue
+              .firstWhere((c) => c.id == 'loose')
+              .createdAt
+              .millisecondsSinceEpoch,
+          13000,
+        );
         expect(relay.submitted, hasLength(4));
         _performCustomAction(tester, 'Loose chat', 'Archive chat');
         await tester.pumpAndSettle();
@@ -558,6 +640,7 @@ void main() {
 
       // Once reconciliation has observed the archive, a genuine later
       // unarchive is actionable again; completed IDs do not accumulate.
+      relay.replicaMetadata = null;
       relay.unarchive('grouped');
       await container.read(channelsProvider.notifier).refresh();
       await tester.pumpAndSettle();

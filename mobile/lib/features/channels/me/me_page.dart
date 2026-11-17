@@ -142,7 +142,9 @@ class MePage extends HookConsumerWidget {
         // This request starts after the captured archives were accepted. A
         // generic list notification (even a newer active metadata revision)
         // may instead belong to a read started before acceptance.
-        final fresh = await ref.read(channelsProvider.notifier).fetchFresh();
+        final fresh = await ref
+            .read(channelsProvider.notifier)
+            .fetchFresh(strong: accepted.isNotEmpty);
         if (!isCurrentArchiveScope() ||
             !identical(archiveRecovery.value, recovery)) {
           return;
