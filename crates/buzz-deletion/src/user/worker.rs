@@ -10,13 +10,16 @@ use uuid::Uuid;
 use super::{handlers, transition::UserDeletionTransition};
 use crate::{StageOutcome, DEFAULT_LEASE_DURATION, HEARTBEAT_INTERVAL};
 
-/// Real execution context plus synthetic-only delay and failure controls.
+/// Shared handler controls. Demo delays and failures never invoke real deletion.
 pub(super) struct RunOptions {
+    pub next_step: bool,
     pub db: Option<buzz_db::Db>,
     // Optional preconfigured storage client; otherwise load BUZZ_S3_* at media execution.
     pub media: Option<std::sync::Arc<buzz_media::MediaStorage>>,
     pub delete: bool,
-    pub next_step: bool,
+    pub relay_pubkey: Option<String>,
+    pub batch_size: u16,
+    pub max_items: u32,
     pub fail_stage: Option<String>,
     pub stage_delay: Duration,
     pub no_agents_in: Vec<Uuid>,
