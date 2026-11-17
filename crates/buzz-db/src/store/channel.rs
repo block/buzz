@@ -528,7 +528,7 @@ async fn get_channel_with_operation(
 }
 
 /// Read a live channel on `conn`.
-async fn select_channel(
+pub(crate) async fn select_channel(
     conn: &mut sqlx::PgConnection,
     community_id: CommunityId,
     channel_id: Uuid,
@@ -811,6 +811,66 @@ pub fn group_metadata_uses_members(channel: &ChannelRecord) -> bool {
 /// The roles a channel's relay-signed NIP-29 kind:39001 admins event lists.
 /// The locked snapshot that feeds it reads only these members.
 pub const GROUP_ADMIN_ROLES: [MemberRole; 2] = [MemberRole::Owner, MemberRole::Admin];
+
+/// The tags of a channel's relay-signed NIP-29 kind:39001 admins event.
+/// Shared by the relay, account cleanup and admin reconciliation. Only owners
+/// and admins are listed, even when the supplied roster contains other roles.
+pub fn group_admins_tags(
+    group_id: &str,
+    identity: &ChannelIdentity,
+    members: &[MemberRecord],
+) -> std::result::Result<Vec<nostr::Tag>, nostr::event::tag::Error> {
+    let mut tags = group_list_identity_tags(group_id, Some(identity))?;
+    for member in members.iter().filter(|member| {
+        GROUP_ADMIN_ROLES
+            .iter()
+            .any(|role| role.as_str() == member.role)
+    }) {
+        tags.push(nostr::Tag::parse([
+            "p",
+            &hex::encode(&member.pubkey),
+            &member.role,
+        ])?);
+    }
+    Ok(tags)
+}
+
+/// The tags of a channel's relay-signed NIP-29 kind:39002 members event.
+/// Shared by the relay, account cleanup and admin reconciliation. A missing
+/// channel identity still permits publishing the captured member roster.
+pub fn group_members_tags(
+    group_id: &str,
+    identity: Option<&ChannelIdentity>,
+    members: &[MemberRecord],
+) -> std::result::Result<Vec<nostr::Tag>, nostr::event::tag::Error> {
+    let mut tags = group_list_identity_tags(group_id, identity)?;
+    for member in members {
+        // NIP-29: ["p", pubkey, relay_url, role]. The canonical relay is
+        // implicit because it signs the event, so relay_url stays empty.
+        tags.push(nostr::Tag::parse([
+            "p",
+            &hex::encode(&member.pubkey),
+            "",
+            &member.role,
+        ])?);
+    }
+    Ok(tags)
+}
+
+fn group_list_identity_tags(
+    group_id: &str,
+    identity: Option<&ChannelIdentity>,
+) -> std::result::Result<Vec<nostr::Tag>, nostr::event::tag::Error> {
+    let mut tags = vec![nostr::Tag::identifier(group_id)];
+    if let Some(identity) = identity {
+        tags.extend(buzz_core::channel::group_state_identity_tags(
+            &identity.channel_type,
+            &identity.labels,
+            &identity.created_by,
+        )?);
+    }
+    Ok(tags)
+}
 
 /// The tags of a channel's relay-signed NIP-29 kind:39000 metadata event.
 ///
@@ -2338,6 +2398,92 @@ impl Db {
 /// cannot drift.
 pub(crate) fn channel_ttl_lock_key(community: CommunityId, channel: Uuid) -> String {
     format!("buzz_channel_ttl:{}:{channel}", community.as_uuid())
+}
+
+#[cfg(test)]
+mod group_list_tag_tests {
+    use super::*;
+
+    #[test]
+    fn group_lists_preserve_identity_role_positions_and_roster_order() {
+        let identity = ChannelIdentity {
+            channel_type: "forum".into(),
+            labels: vec!["news".into(), "team".into()],
+            created_by: vec![0xab; 32],
+        };
+        let roles = ["member", "owner", "guest", "admin", "bot", "unknown"];
+        let members: Vec<_> = roles
+            .iter()
+            .enumerate()
+            .map(|(index, role)| MemberRecord {
+                channel_id: Uuid::nil(),
+                pubkey: vec![index as u8; 32],
+                role: (*role).into(),
+                joined_at: Utc::now(),
+                invited_by: None,
+                removed_at: None,
+            })
+            .collect();
+        let tag = |parts: &[&str]| {
+            parts
+                .iter()
+                .map(|part| (*part).to_string())
+                .collect::<Vec<_>>()
+        };
+        let prefix = vec![
+            tag(&["d", "group"]),
+            tag(&["t", "forum"]),
+            tag(&["t", "news"]),
+            tag(&["t", "team"]),
+            tag(&["P", &"ab".repeat(32)]),
+        ];
+        let raw = |tags: Vec<nostr::Tag>| {
+            tags.into_iter()
+                .map(|tag| tag.as_slice().to_vec())
+                .collect::<Vec<_>>()
+        };
+        let mut admins = prefix.clone();
+        admins.extend([
+            tag(&["p", &"01".repeat(32), "owner"]),
+            tag(&["p", &"03".repeat(32), "admin"]),
+        ]);
+        assert_eq!(
+            raw(group_admins_tags("group", &identity, &members).unwrap()),
+            admins
+        );
+        let mut roster = prefix.clone();
+        roster.extend([
+            tag(&["p", &"00".repeat(32), "", "member"]),
+            tag(&["p", &"01".repeat(32), "", "owner"]),
+            tag(&["p", &"02".repeat(32), "", "guest"]),
+            tag(&["p", &"03".repeat(32), "", "admin"]),
+            tag(&["p", &"04".repeat(32), "", "bot"]),
+            tag(&["p", &"05".repeat(32), "", "unknown"]),
+        ]);
+        assert_eq!(
+            raw(group_members_tags("group", Some(&identity), &members).unwrap()),
+            roster
+        );
+        assert_eq!(
+            raw(group_admins_tags("group", &identity, &[]).unwrap()),
+            prefix
+        );
+        assert_eq!(
+            raw(group_members_tags("group", Some(&identity), &[]).unwrap()),
+            prefix
+        );
+        let without_identity = std::iter::once(tag(&["d", "group"]))
+            .chain(roster.into_iter().skip(prefix.len()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            raw(group_members_tags("group", None, &members).unwrap()),
+            without_identity
+        );
+        assert_eq!(
+            raw(group_members_tags("group", None, &[]).unwrap()),
+            vec![tag(&["d", "group"])]
+        );
+    }
 }
 
 #[cfg(test)]

@@ -17,6 +17,7 @@ buzz-pubsub = { workspace = true }
 chrono = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 hex = { workspace = true }
+nostr = { workspace = true }
 redis = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -27,4 +28,3 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 url = { workspace = true }
-nostr = { workspace = true }

@@ -10,16 +10,15 @@ use uuid::Uuid;
 use super::{handlers, transition::UserDeletionTransition};
 use crate::{StageOutcome, DEFAULT_LEASE_DURATION, HEARTBEAT_INTERVAL};
 
-/// Shared handler controls. Demo delays and failures never invoke real deletion.
+/// Real execution controls and demo-only failure/delay options.
 pub(super) struct RunOptions {
-    pub next_step: bool,
     pub db: Option<buzz_db::Db>,
-    // Optional preconfigured storage client; otherwise load BUZZ_S3_* at media execution.
     pub media: Option<std::sync::Arc<buzz_media::MediaStorage>>,
     pub delete: bool,
     pub relay_pubkey: Option<String>,
     pub batch_size: u16,
     pub max_items: u32,
+    pub next_step: bool,
     pub fail_stage: Option<String>,
     pub stage_delay: Duration,
     pub no_agents_in: Vec<Uuid>,
@@ -39,6 +38,9 @@ pub(super) async fn run(
             "user-deletions run does not support entity type {}",
             request.entity_type
         );
+    }
+    if !request.target.starts_with("demo:") && (!options.delete || options.db.is_none()) {
+        bail!("real workflow execution requires --delete and a database");
     }
     let Some(lease) = store.claim(id, owner, DEFAULT_LEASE_DURATION).await? else {
         if store.get(id).await?.status == "completed" {
@@ -152,6 +154,10 @@ async fn run_stage_with_heartbeat(
 #[cfg(test)]
 #[path = "worker_postgres_tests.rs"]
 mod postgres_tests;
+
+#[cfg(test)]
+#[path = "account_worker_postgres_tests.rs"]
+mod account_postgres_tests;
 
 #[cfg(test)]
 mod tests {
