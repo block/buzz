@@ -14,6 +14,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:sentry_flutter/sentry_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 // The SDK's own processors and integrations, so tests see what it really
 // sends rather than hand-built events.
 // ignore: implementation_imports
@@ -91,9 +92,15 @@ void main() {
       (
         'a tag not on the list is dropped',
         () async => (await event(
-          SentryEvent(tags: {'operation': 'relayFrame', 'channel': 'x'}),
+          SentryEvent(
+            tags: {
+              'operation': 'relayFrame',
+              'install.id': 'i',
+              'channel': 'x',
+            },
+          ),
         )).tags,
-        {'operation': 'relayFrame'},
+        {'operation': 'relayFrame', 'install.id': 'i'},
       ),
       (
         'a count keeps its attributes and the member, nothing else',
@@ -224,6 +231,16 @@ void main() {
       expect(Sentry.isEnabled, isFalse);
     });
   }
+
+  test('an installation keeps one install ID across launches', () async {
+    SharedPreferences.setMockInitialValues({});
+    final first = await diagnosticInstallId();
+    expect(first, isNotNull);
+    expect(await diagnosticInstallId(), first);
+
+    SharedPreferences.setMockInitialValues({});
+    expect(await diagnosticInstallId(), isNot(first));
+  });
 
   test('a reporting call that fails does not reach the caller', () async {
     for (final reporter in [

@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:uuid/uuid.dart';
 
 import 'diagnostic_filter.dart';
 import 'diagnostic_reporter.dart';
@@ -24,10 +26,40 @@ Future<void> runWithDiagnostics({
   required FutureOr<void> Function(DiagnosticReporter reporter) app,
 }) async {
   if (!_isUsable(destination)) return app(const NoopDiagnosticReporter());
+  final installId = await diagnosticInstallId();
   await SentryFlutter.init(
     (options) => configureDiagnostics(options, destination),
-    appRunner: () => app(SentryDiagnosticReporter()),
+    appRunner: () {
+      // A scope tag also reaches the native SDKs, so native crashes and
+      // hangs carry it too.
+      if (installId != null) {
+        Sentry.configureScope(
+          (scope) => scope.setTag(DiagnosticFilter.installIdTag, installId),
+        );
+      }
+      return app(SentryDiagnosticReporter());
+    },
   );
+}
+
+const _installIdKey = 'diagnostics.install_id';
+
+/// A random identifier for this installation, kept in app storage, so
+/// reports from one device can be matched up across sign-ins and sign-outs.
+/// Created on first use; null if storage fails, since reporting must never
+/// stop the app from starting.
+Future<String?> diagnosticInstallId() async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString(_installIdKey);
+    if (saved != null) return saved;
+    final created = const Uuid().v4();
+    await prefs.setString(_installIdKey, created);
+    return created;
+  } on Object catch (error) {
+    debugPrint('[Diagnostics] no install ID: ${error.runtimeType}');
+    return null;
+  }
 }
 
 bool _isUsable(String destination) {

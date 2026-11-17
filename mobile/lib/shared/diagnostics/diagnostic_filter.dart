@@ -15,6 +15,9 @@ abstract final class DiagnosticFilter {
   /// Breadcrumb category of the SDK's foreground/background entries.
   static const lifecycleCategory = 'app.lifecycle';
 
+  /// Tag carrying the random per-installation identifier on every report.
+  static const installIdTag = 'install.id';
+
   /// Attributes the app itself sets on counts and breadcrumbs.
   static const appAttributes = {'backend', 'endpoint', 'outcome', 'failure'};
 
@@ -40,10 +43,13 @@ abstract final class DiagnosticFilter {
   static bool allowsAttribute(String key) =>
       appAttributes.contains(key) || _sdkAttributePrefixes.any(key.startsWith);
 
-  /// The app tags a report with where it came from; the SDK tags it with
-  /// its origin and environment.
+  /// The app tags a report with where it came from and which installation
+  /// sent it; the SDK tags it with its origin and environment.
   static bool _allowsTag(String key) =>
-      key == 'operation' || key.startsWith('event.') || allowsAttribute(key);
+      key == 'operation' ||
+      key == installIdTag ||
+      key.startsWith('event.') ||
+      allowsAttribute(key);
 
   /// Filters an error report.
   static SentryEvent filterEvent(SentryEvent event) {
