@@ -82,7 +82,7 @@ When the change lands, its work channel can archive. The conversation stays as t
 
 ## Agents: A Grant, Not a Key
 
-An agent reaches a repo only through its own membership or a grant, never through its owner's. You give an agent a grant: these repos, these actions, until Friday. It can never exceed your own authority or the community's cap. The grant lives in the community, not in a tag the agent carries, so revoking it bites on the next request. Lose the authority behind it, and the agent loses it on the same schedule you do.
+An agent reaches a repo only through its own membership in the repo channel, never through its owner's. Where the community requires it, the agent also needs a grant from you: these repos, these actions, until Friday. A grant only narrows. It never lets an agent see a channel it isn't in, and it can never exceed your own authority or the community's cap. The grant lives in the community, not in a tag the agent carries, so revoking it bites on the next request. Lose the authority behind it, and the agent loses it on the same schedule you do.
 
 The agent's key is still its own key, and **handing over the key doesn't hand over the agent**. Anyone holding it can sign as the agent, and anyone can write a new owner attestation. But a community records an agent's first owner and keeps it. A different owner is refused, and whoever holds the key acts on the original owner's account. To give someone an agent, give them a new key.
 
