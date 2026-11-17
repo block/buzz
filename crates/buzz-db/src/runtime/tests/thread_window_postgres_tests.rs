@@ -66,6 +66,21 @@ async fn thread_window_upper_fence_terminal_snapshot_and_fallback() {
     assert!(!session.is_replica());
     assert_eq!(head.rows[0].event.id, middle.id);
     drop(session);
+    // So does a newer page: it reads up to the newest reply, which no cursor proves.
+    let newer = Request::parse(&serde_json::json!({"thread_window":true,"#h":[channel],
+        "#e":[root.id.to_hex()],"kinds":[9],"direction":"newer",
+        "after":base,"after_id":"ff".repeat(32)}))
+    .unwrap();
+    let (page, session) = db
+        .get_thread_window_with_session(community, &newer, &mut ScanBudget::default())
+        .await
+        .unwrap();
+    assert!(!session.is_replica());
+    assert_eq!(
+        page.rows.iter().map(|e| e.event.id).collect::<Vec<_>>(),
+        [old.id, middle.id]
+    );
+    drop(session);
 
     // Complete the reply fixture, then lag *recent* edits and channel-less
     // deletions. Coverage of old replies is not a freshness proof for aux.

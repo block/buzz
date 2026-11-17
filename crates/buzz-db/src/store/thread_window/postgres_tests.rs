@@ -170,18 +170,21 @@ async fn cardinalities() {
             root.created_at.as_secs(),
         );
         db.insert_event(cid, &root, Some(ch)).await.unwrap();
-        let expected = replies(&db, cid, ch, &keys, &root, count).await;
-        assert_pages(&db, cid, request(ch, &root, 50), &expected).await;
-        let (head, _) = db
-            .get_thread_window_with_session(
-                cid,
-                &request(ch, &root, 50),
-                &mut ScanBudget::default(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(head.has_more, count > 50);
-        assert_eq!(head.rows.len(), count.min(50));
+        let mut expected = replies(&db, cid, ch, &keys, &root, count).await;
+        for direction in [Direction::Older, Direction::Newer] {
+            let mut req = request(ch, &root, 50);
+            req.direction = direction;
+            if direction == Direction::Newer {
+                expected.reverse();
+            }
+            assert_pages(&db, cid, req.clone(), &expected).await;
+            let (head, _) = db
+                .get_thread_window_with_session(cid, &req, &mut ScanBudget::default())
+                .await
+                .unwrap();
+            assert_eq!(head.has_more, count > 50);
+            assert_eq!(head.rows.len(), count.min(50));
+        }
     }
     let index: (bool,bool,String) = sqlx::query_as("SELECT indisvalid,indisready,pg_get_indexdef(indexrelid) FROM pg_index WHERE indexrelid='idx_thread_metadata_window'::regclass")
         .fetch_one(&db.pool).await.unwrap();
@@ -283,6 +286,12 @@ async fn thread_window_predicates_corruption_and_legacy() {
     assert!(page.has_more);
     assert_eq!(page.next_cursor.unwrap().id, expected[49].id.to_hex());
     assert_pages(&db, cid, req.clone(), expected).await;
+    // Oldest first, the eligible rows come first and the second page reads
+    // past all 600 ineligible ones to its last row and the end.
+    let mut newer = req.clone();
+    newer.direction = Direction::Newer;
+    let oldest_first: Vec<_> = expected.iter().rev().cloned().collect();
+    assert_pages(&db, cid, newer, &oldest_first).await;
     sqlx::query("UPDATE events SET deleted_at=now() WHERE community_id=$1 AND id=$2")
         .bind(cid.as_uuid())
         .bind(expected[50].id.to_bytes().to_vec())

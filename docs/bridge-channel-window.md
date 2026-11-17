@@ -50,6 +50,14 @@ A standard bridge filter plus extension fields:
   of the last retained row from the previous page. **Both or neither.**
   `top_level` with `until` but no `before_id` is rejected (`400`): the
   window path has no timestamp-only fallback, ever. Neither = head request.
+- `direction` — `"older"` (default) pages newest first; `"newer"` pages
+  oldest first, from the channel's first row. A relay that supports
+  `"newer"` advertises `buzz-window-newer` in NIP-11
+  `supported_extensions`; clients send it only then.
+- `after` + `after_id` — the `"newer"` cursor, with the same rules as
+  `until` + `before_id`: both or neither, no timestamp-only fallback. A
+  `"newer"` request with `until`/`before_id`, or an `"older"` one with
+  `after`/`after_id`, is rejected (`400`).
 - `include_summaries` / `include_aux` — opt-in overlay/closure appends.
 
 `page`/OFFSET is not honored on the window path.
@@ -70,6 +78,12 @@ other read path uses. The next-page cursor is the `(created_at, id)` of the
 as `next_cursor`. Keyset comparison is
 `created_at < $ts OR (created_at = $ts AND id > $id)`; dense seconds
 paginate without loss or duplication by construction.
+
+A `"newer"` window is the exact mirror: rows are ordered `(created_at ASC,
+id DESC)`, and the keyset is
+`created_at > $after OR (created_at = $after AND id < $after_id)`. Its
+`next_cursor` is the last retained row, sent back as `after` + `after_id`.
+Reading the same channel from both ends meets without a gap or overlap.
 
 `has_more` is a **server fact**: the relay probes `limit + 1` rows after
 all predicates (access, deletion, top-level, kinds), returns at most
@@ -114,6 +128,11 @@ Clients **partition by kind before any cursor math**:
   else `<created_at>:<event_id>` — decimal unix seconds, then the full
   64-char lowercase hex id, colon-delimited. Clients must verify the
   suffix equals the cursor they sent and reject the overlay on mismatch.
+- A `"newer"` page puts `newer:` before the suffix
+  (`<channel_id>:newer:head`, `<channel_id>:newer:<created_at>:<event_id>`)
+  and adds `"direction":"newer"` to the content. An `"older"` page carries
+  neither, so its overlay is byte-identical to one from a relay without
+  `"newer"`.
 - Reserved field: `oldest_retained` (retention gap), added without a wire
   break if needed.
 - Same overlay rules as 39005: relay-signed, query-time, never stored,
