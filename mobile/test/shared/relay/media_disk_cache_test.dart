@@ -356,6 +356,121 @@ void main() {
       await refresh.dispose();
     },
   );
+
+  test('encoded bytes for a native surface download once, across a '
+      'relaunch, and bytes that never decode are not saved', () async {
+    final fetched = <String>[];
+    final client = http_testing.MockClient((request) async {
+      fetched.add(request.url.toString());
+      if (request.url.toString() == _corruptUrl) {
+        return http.Response('not an image', 200);
+      }
+      return http.Response.bytes(_pngBytes, 200);
+    });
+    final directory = MediaDiskCache.directoryFor(
+      root,
+      'community-1',
+      'signer-1',
+    );
+    Future<Uint8List> load(MediaDiskCache cache, String url) =>
+        MediaImageProvider(
+          url: url,
+          auth: auth,
+          client: client,
+          diskCache: cache,
+        ).loadEncodedBytes(cancel: Completer<void>().future);
+
+    for (var launch = 0; launch < 2; launch++) {
+      final cache = MediaDiskCache.open(directory);
+      try {
+        expect(await load(cache, _relayUrl), _pngBytes);
+        await expectLater(load(cache, _corruptUrl), throwsA(anything));
+        await _settle();
+      } finally {
+        await cache.dispose();
+      }
+      // A failed body goes on cooldown; let the next launch retry it.
+      MediaImageProvider.debugResetCooldowns();
+    }
+
+    expect(fetched, [_relayUrl, _corruptUrl, _corruptUrl]);
+  });
+
+  test('encoded bytes remove a damaged saved copy so the next request '
+      'downloads it again', () async {
+    final fetched = <String>[];
+    final client = http_testing.MockClient((request) async {
+      fetched.add(request.url.toString());
+      return http.Response.bytes(_pngBytes, 200);
+    });
+    final cache = MediaDiskCache.open(
+      MediaDiskCache.directoryFor(root, 'community-1', 'signer-1'),
+    );
+    try {
+      await cache.write(
+        _truncatedUrl,
+        Uint8List.fromList(_pngBytes.sublist(0, 20)),
+        immutable: true,
+      );
+      Future<Uint8List> load() => MediaImageProvider(
+        url: _truncatedUrl,
+        auth: auth,
+        client: client,
+        diskCache: cache,
+      ).loadEncodedBytes(cancel: Completer<void>().future);
+
+      expect(await cache.contains(_truncatedUrl), isTrue);
+      await expectLater(load(), throwsA(anything));
+      expect(fetched, isEmpty);
+      await _settle();
+      expect(await cache.contains(_truncatedUrl), isFalse);
+      MediaImageProvider.debugResetCooldowns();
+      expect(await load(), _pngBytes);
+      expect(fetched, [_truncatedUrl]);
+    } finally {
+      await cache.dispose();
+    }
+  });
+
+  test(
+    'encoded bytes share one download with simultaneous image loads',
+    () async {
+      final fetched = <String>[];
+      final respond = Completer<void>();
+      final client = http_testing.MockClient((request) async {
+        fetched.add(request.url.toString());
+        await respond.future;
+        return http.Response.bytes(_pngBytes, 200);
+      });
+      final cache = MediaDiskCache.open(
+        MediaDiskCache.directoryFor(root, 'community-1', 'signer-1'),
+      );
+      try {
+        MediaImageProvider provider() => MediaImageProvider(
+          url: _relayUrl,
+          auth: auth,
+          client: client,
+          diskCache: cache,
+        );
+        final first = provider().loadEncodedBytes(
+          cancel: Completer<void>().future,
+        );
+        final second = provider().loadEncodedBytes(
+          cancel: Completer<void>().future,
+        );
+        final stream = provider().resolve(ImageConfiguration.empty);
+        final shown = _waitError(stream);
+        await _until(() async => fetched.isNotEmpty);
+        respond.complete();
+        expect(await first, _pngBytes);
+        expect(await second, _pngBytes);
+        expect(await shown, isNull);
+        expect(fetched, [_relayUrl]);
+      } finally {
+        await cache.dispose();
+      }
+    },
+  );
 }
 
 /// Waits for background work that a fixed delay cannot bound on a slow
