@@ -26,6 +26,8 @@ struct ChannelClass {
     visibility: Option<String>,
     /// Values of the `t` tags after the first, in event order.
     labels: Vec<String>,
+    /// Whether the relay marked the channel `["archived", "true"]`.
+    archived: bool,
 }
 
 impl ChannelClass {
@@ -48,6 +50,7 @@ impl ChannelClass {
                 // The presence of either tag is the source of truth; tag value is unused.
                 "private" => class.visibility = Some("private".to_string()),
                 "public" => class.visibility = Some("public".to_string()),
+                "archived" => class.archived = val == Some("true"),
                 _ => {}
             }
         }
@@ -65,6 +68,7 @@ fn extract_channel_metadata(e: &serde_json::Value) -> serde_json::Value {
         "channel_type": class.channel_type,
         "visibility": class.visibility,
         "labels": class.labels,
+        "archived": class.archived,
     })
 }
 
@@ -184,7 +188,13 @@ pub async fn cmd_search_channels(
     let mut matches: Vec<ChannelSummary> = arr
         .iter()
         .filter_map(ChannelSummary::from_event)
-        .filter(|c| if include_archived { true } else { !c.archived })
+        .filter(|c| {
+            if include_archived {
+                true
+            } else {
+                !c.class.archived
+            }
+        })
         .filter(|c| name_matches(&c.name, &needle, exact))
         .collect();
     matches.sort_by(|a, b| {
@@ -205,7 +215,6 @@ struct ChannelSummary {
     name: String,
     #[serde(flatten)]
     class: ChannelClass,
-    archived: bool,
     about: Option<String>,
     topic: Option<String>,
     purpose: Option<String>,
@@ -219,7 +228,6 @@ impl ChannelSummary {
         let tags = event.get("tags")?.as_array()?;
         let mut channel_id: Option<String> = None;
         let mut name: Option<String> = None;
-        let mut archived = false;
         let mut about: Option<String> = None;
         let mut topic: Option<String> = None;
         let mut purpose: Option<String> = None;
@@ -238,7 +246,6 @@ impl ChannelSummary {
                 "topic" => topic = val.map(str::to_string),
                 "purpose" => purpose = val.map(str::to_string),
                 "ttl" => ttl_seconds = val.and_then(|value| value.parse().ok()),
-                "archived" => archived = val == Some("true"),
                 _ => {}
             }
         }
@@ -247,7 +254,6 @@ impl ChannelSummary {
             channel_id: channel_id?,
             name: name?,
             class: ChannelClass::from_event(event),
-            archived,
             about,
             topic,
             purpose,
@@ -2182,6 +2188,17 @@ mod tests {
         assert_eq!(out["channel_type"], json!("stream"));
         assert_eq!(out["visibility"], json!("private"));
         assert_eq!(out["labels"], json!(["buzz.solo"]));
+        assert_eq!(out["archived"], json!(false));
+    }
+
+    #[test]
+    fn channel_metadata_marks_archived() {
+        let out = extract_channel_metadata(&event(json!([
+            ["d", "11111111-1111-1111-1111-111111111111"],
+            ["name", "old-channel"],
+            ["archived", "true"],
+        ])));
+        assert_eq!(out["archived"], json!(true));
     }
 
     #[test]
@@ -2220,7 +2237,7 @@ mod tests {
         assert_eq!(s.name, "buzz-chat-composer");
         assert_eq!(s.class.channel_type.as_deref(), Some("stream"));
         assert_eq!(s.class.visibility.as_deref(), Some("public"));
-        assert!(!s.archived);
+        assert!(!s.class.archived);
         assert_eq!(s.about.as_deref(), Some("About text"));
         assert_eq!(s.topic.as_deref(), Some("Composer work"));
         assert_eq!(s.purpose.as_deref(), Some("Track UI for the composer"));
@@ -2235,7 +2252,7 @@ mod tests {
             ["archived", "true"],
         ]));
         let s = ChannelSummary::from_event(&ev).expect("parse");
-        assert!(s.archived);
+        assert!(s.class.archived);
     }
 
     #[test]
