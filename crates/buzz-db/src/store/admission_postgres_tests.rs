@@ -380,6 +380,11 @@ async fn workflow_writers_require_application_admission() {
             .expect_err("approval update must reject"),
         );
     }
+    // The fixture's session runs with foreign-key triggers off, so the owner
+    // must exist for the workflow writer's own reference check.
+    super::user::ensure_user(&db.pool, communities[0], &[1; 32])
+        .await
+        .expect("active workflow owner");
     super::workflow::create_workflow(
         &db.pool,
         communities[0],
