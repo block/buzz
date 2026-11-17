@@ -480,7 +480,7 @@ async fn workflow_deletion_waits_for_and_removes_concurrent_run() {
     seed(&db, community, &keys, id, &d_tag, now).await;
 
     let mut inserter = db.pool.begin().await.expect("begin run insert");
-    super::super::require_workflow(&mut inserter, community, id)
+    crate::store::reference_check::require_workflow(&mut inserter, community, id)
         .await
         .expect("lock workflow as the run writer does");
     sqlx::query(
@@ -554,10 +554,10 @@ async fn workflow_deletion_waits_for_and_removes_concurrent_cross_workflow_appro
     .expect("run");
 
     let mut inserter = db.pool.begin().await.expect("begin approval insert");
-    super::super::require_workflow(&mut inserter, community, other)
+    crate::store::reference_check::require_workflow(&mut inserter, community, other)
         .await
         .expect("lock workflow as the approval writer does");
-    super::super::require_workflow_run(&mut inserter, community, run_id)
+    crate::store::reference_check::require_workflow_run(&mut inserter, community, run_id)
         .await
         .expect("lock run as the approval writer does");
     sqlx::query(
@@ -601,9 +601,9 @@ async fn workflow_deletion_waits_for_and_removes_concurrent_cross_workflow_appro
     assert!(get_workflow(&db.pool, community, other).await.is_ok());
 }
 
-/// Attaching a run to a scheduled fire locks the fire row, then key-share
-/// locks the run for the fire's run foreign key, which this test keeps (the
-/// attach writer is unchanged). The delete must take those two in the same
+/// Attaching a run to a scheduled fire locks the fire row, then, while the
+/// fire's run foreign key exists (this test keeps it), key-share locks the
+/// run. The delete must take those two in the same
 /// order (fire before run), so an attach in flight when the delete starts
 /// completes and is then removed, rather than deadlocking with it.
 #[tokio::test]

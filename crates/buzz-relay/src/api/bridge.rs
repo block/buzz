@@ -11170,7 +11170,8 @@ pub(crate) mod postgres_tests {
             // A schema whose `users` table can be taken away after the link,
             // so only the owner-to-agent lookup fails at revoke time. It
             // carries `communities` so writes pass community write admission,
-            // and `events` for the member list each membership change writes.
+            // and `events` and `event_mentions` for the member list each
+            // membership change writes and the superseded list it deletes.
             let db_url = crate::test_support::database_url();
             let schema = format!("late_owner_{}", uuid::Uuid::new_v4().simple());
             sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
@@ -11182,7 +11183,8 @@ pub(crate) mod postgres_tests {
                  CREATE TABLE {schema}.join_policy_acceptances \
                      (LIKE public.join_policy_acceptances INCLUDING ALL); \
                  CREATE TABLE {schema}.communities (LIKE public.communities INCLUDING ALL); \
-                 CREATE TABLE {schema}.events (LIKE public.events INCLUDING ALL);"
+                 CREATE TABLE {schema}.events (LIKE public.events INCLUDING ALL); \
+                 CREATE TABLE {schema}.event_mentions (LIKE public.event_mentions INCLUDING ALL);"
             )))
             .execute(state.db.pool())
             .await
