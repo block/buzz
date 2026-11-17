@@ -844,17 +844,6 @@ mod postgres_tests {
             .collect()
     }
 
-    fn has_channels_community_id_immutability_guard(sql: &str) -> bool {
-        let normalized = normalize_sql(sql);
-        normalized.contains("create trigger")
-            && normalized.contains("before update")
-            && normalized.contains(" on channels")
-            && normalized.contains("community_id")
-            && normalized.contains("old.community_id")
-            && normalized.contains("new.community_id")
-            && normalized.contains("raise exception")
-    }
-
     fn forbidden_channels_community_id_mutations(sql: &str) -> Vec<String> {
         split_sql_statements(sql)
             .into_iter()
@@ -929,6 +918,12 @@ mod postgres_tests {
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }
+        // 0095 retires the five single-table guard triggers and functions.
+        assert_eq!(migrations[94].version, 95);
+        assert!(migrations[94]
+            .sql
+            .as_str()
+            .contains("SET LOCAL lock_timeout = '5s'"));
         assert!(migrations[79]
             .sql
             .as_str()
@@ -2213,10 +2208,6 @@ mod postgres_tests {
             "channels.community_id must not be re-tenanted after insert; forbidden migration statements:\n{}",
             forbidden_mutations.join("\n---\n")
         );
-        assert!(
-            has_channels_community_id_immutability_guard(sql),
-            "migrations define channels.community_id but no BEFORE UPDATE trigger/function guard that rejects OLD.community_id <> NEW.community_id was found"
-        );
     }
 
     #[test]
@@ -2485,16 +2476,9 @@ mod postgres_tests {
             .expect("embedded migration 0029")
             .sql
             .as_ref();
-        let migration_0051: &str = MIGRATOR
-            .iter()
-            .find(|migration| migration.version == 51)
-            .expect("embedded migration 0051")
-            .sql
-            .as_ref();
         let schema_sql = crate::test_support::desired_state_schema_sql();
 
         let migration = surface(migration_0029);
-        let owner_admission_migration = surface(migration_0051);
         let schema = surface(&schema_sql);
 
         assert_eq!(
@@ -2562,6 +2546,11 @@ mod postgres_tests {
                 "enforce_community_write_fence",
                 "attach_community_write_fence",
                 "community_deletion_lock_key",
+                // 0095 retires the four deletion guard functions.
+                "enforce_community_tombstone",
+                "prevent_community_deletion_request_retargeting",
+                "prevent_community_deletion_approval_removal",
+                "protect_community_deletion_manifest_keys",
             ]
             .contains(&function.as_str())
             {
@@ -2579,17 +2568,6 @@ mod postgres_tests {
                 );
             }
         }
-        assert_eq!(
-            schema
-                .functions
-                .get("prevent_community_deletion_request_retargeting")
-                .expect("schema.sql deletion retargeting guard"),
-            owner_admission_migration
-                .functions
-                .get("prevent_community_deletion_request_retargeting")
-                .expect("0051 deletion retargeting guard"),
-            "schema.sql must carry the latest immutable owner-provenance guard"
-        );
         let request_table = schema
             .tables
             .get("community_deletion_requests")
@@ -2607,6 +2585,16 @@ mod postgres_tests {
             );
         }
         for (trigger, definition) in &migration.triggers {
+            if matches!(
+                trigger.as_str(),
+                "communities_deletion_tombstone"
+                    | "community_deletion_request_retargeting_guard"
+                    | "community_deletion_approval_removal_guard"
+                    | "community_deletion_manifest_keys_guard"
+            ) {
+                assert!(!schema.triggers.contains_key(trigger));
+                continue;
+            }
             let in_schema = schema
                 .triggers
                 .get(trigger)
@@ -3214,6 +3202,57 @@ mod postgres_tests {
                  schema/ does not declare (or the reverse)"
             );
         }
+        // Compare columns, keys and remaining triggers on the five guarded tables;
+        // foreign keys must survive 0095 unchanged.
+        for table in [
+            "channels",
+            "communities",
+            "community_deletion_requests",
+            "community_deletion_approvals",
+            "community_deletion_manifest_keys",
+        ] {
+            assert_eq!(
+                columns(&desired, table).await,
+                columns(&migrated, table).await,
+                "single-table guard column parity: {table}"
+            );
+            // pgschema rewrites CHECK expressions (e.g. BETWEEN) into an
+            // equivalent tree with different grouping. Compare key/FK shapes
+            // here; existing CHECK assertions above remain unchanged.
+            let desired_keys: Vec<_> = constraints(&desired, table)
+                .await
+                .into_iter()
+                .filter(|(_, definition, _)| !definition.starts_with("CHECK"))
+                .collect();
+            let migrated_keys: Vec<_> = constraints(&migrated, table)
+                .await
+                .into_iter()
+                .filter(|(_, definition, _)| !definition.starts_with("CHECK"))
+                .collect();
+            assert_eq!(
+                desired_keys, migrated_keys,
+                "single-table guard key parity: {table}"
+            );
+            let query = "SELECT pg_get_triggerdef(oid) FROM pg_trigger \
+                WHERE tgrelid = $1::regclass AND NOT tgisinternal ORDER BY tgname";
+            let desired_triggers: Vec<String> = sqlx::query_scalar(query)
+                .bind(table)
+                .fetch_all(&desired)
+                .await
+                .expect("desired table triggers");
+            let migrated_triggers: Vec<String> = sqlx::query_scalar(query)
+                .bind(table)
+                .fetch_all(&migrated)
+                .await
+                .expect("migrated table triggers");
+            assert_eq!(
+                desired_triggers, migrated_triggers,
+                "remaining trigger parity: {table}"
+            );
+        }
+        // Shared with the isolated desired-template and migration regressions.
+        crate::deletion::postgres_tests::assert_single_table_guards_retired(&desired).await;
+        crate::deletion::postgres_tests::assert_single_table_guards_retired(&migrated).await;
     }
 
     /// Re-applying `schema/schema.sql` to a database bootstrapped the way every
