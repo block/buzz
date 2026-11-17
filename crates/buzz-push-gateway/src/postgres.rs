@@ -1191,7 +1191,10 @@ mod postgres_tests {
             }
             writer.commit().await.expect("commit delegation writer");
         };
-        let (reaped, ()) = tokio::join!(store.reap_expired(now.timestamp()), commit_once_reaper_waits);
+        let (reaped, ()) = tokio::join!(
+            store.reap_expired(now.timestamp()),
+            commit_once_reaper_waits
+        );
         reaped.expect("reap expired authority");
 
         let delegations: i64 = sqlx::query_scalar("SELECT count(*) FROM push_gateway_delegations")
