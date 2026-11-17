@@ -1,3 +1,5 @@
+import 'channel_permissions.dart';
+
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/mentions/mention_tags.dart';
@@ -23,6 +25,7 @@ class SendMessage {
   final void Function(String channelId, String eventId) _completeLocalMessage;
   final void Function(String channelId, String eventId) _removeLocalMessage;
   final bool Function()? _isDeliveryValid;
+  final bool Function(String channelId, bool reply)? _canSend;
 
   SendMessage({
     required SignedEventRelay signedEventRelay,
@@ -36,6 +39,7 @@ class SendMessage {
     completeLocalMessage,
     required void Function(String channelId, String eventId) removeLocalMessage,
     bool Function()? isDeliveryValid,
+    bool Function(String channelId, bool reply)? canSend,
   }) : _signedEventRelay = signedEventRelay,
        _fetchMembers = fetchMembers,
        _readUserCache = readUserCache,
@@ -44,7 +48,8 @@ class SendMessage {
            markLocalMessageForAnimation ?? ((_, _) {}),
        _completeLocalMessage = completeLocalMessage,
        _removeLocalMessage = removeLocalMessage,
-       _isDeliveryValid = isDeliveryValid;
+       _isDeliveryValid = isDeliveryValid,
+       _canSend = canSend;
 
   /// Send a text message to a channel.
   ///
@@ -62,7 +67,14 @@ class SendMessage {
     Channel? channel,
     List<List<String>> mediaTags = const [],
   }) async {
-    _ensureDeliveryValid();
+    void ensureAllowed() {
+      _ensureDeliveryValid();
+      if (_canSend?.call(channelId, parentEventId != null) == false) {
+        throw StateError('You do not have permission to send this message.');
+      }
+    }
+
+    ensureAllowed();
     // Use explicitly passed pubkeys, or resolve @mentions against
     // channel members to avoid matching the wrong user.
     final explicitMentions =
@@ -113,7 +125,7 @@ class SendMessage {
         if (!isReference(tag)) tag,
     ];
 
-    _ensureDeliveryValid();
+    ensureAllowed();
     NostrEvent? localMessage;
     try {
       await _signedEventRelay.submit(
@@ -121,6 +133,7 @@ class SendMessage {
         content: content,
         tags: tags,
         onSigned: (event) {
+          ensureAllowed();
           localMessage = event;
           _markLocalMessageForAnimation(channelId, event.id);
           _addLocalMessage(channelId, event);
@@ -272,6 +285,9 @@ SendMessage _sender(Ref ref, {bool personal = false}) {
       session: ref.read(relaySessionProvider.notifier),
       nsec: config.nsec,
     ),
+    canSend: (channelId, reply) => ref
+        .read(channelPermissionsProvider(channelId))
+        .allows(reply ? ChannelAction.reply : ChannelAction.post),
     fetchMembers: (channelId) =>
         ref.read(channelMembersProvider(channelId).future),
     readUserCache: () => ref.read(userCacheProvider),

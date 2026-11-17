@@ -1,3 +1,4 @@
+import '../channels/channel_permissions.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -63,7 +64,9 @@ class ForumPostsView extends HookConsumerWidget {
       return timer.cancel;
     }, [channel.id]);
 
-    final canPost = channel.isMember && !channel.isArchived;
+    final canPost = ref
+        .watch(channelPermissionsProvider(channel.id))
+        .allows(ChannelAction.post);
 
     return Column(
       children: [

@@ -309,6 +309,8 @@ class ChannelData {
   /// the relay's `["join_role", ...]` tag. A missing tag (an older relay)
   /// means member; anything but a single `member` value fails closed to guest.
   final bool joinsAsGuest;
+  final bool guestReplies;
+  final bool guestReactions;
 
   const ChannelData({
     required this.id,
@@ -325,6 +327,8 @@ class ChannelData {
     this.isArchived = false,
     this.isUnlisted = false,
     this.joinsAsGuest = false,
+    this.guestReplies = false,
+    this.guestReactions = false,
   });
 
   factory ChannelData.fromEvent(NostrEvent event) {
@@ -371,6 +375,15 @@ class ChannelData {
         !(joinRoles.length == 1 &&
             joinRoles.single.length == 2 &&
             joinRoles.single[1] == 'member');
+    bool grant(String name) {
+      final tags = event.tags
+          .where((t) => t.isNotEmpty && t[0] == name)
+          .toList();
+      return tags.length == 1 &&
+          tags.single.length == 2 &&
+          tags.single[1] == 'true';
+    }
+
     return ChannelData(
       id: id,
       name: name,
@@ -390,6 +403,8 @@ class ChannelData {
       isArchived: isArchived,
       isUnlisted: event.tags.any((t) => t.isNotEmpty && t[0] == 'unlisted'),
       joinsAsGuest: joinsAsGuest,
+      guestReplies: grant('guest_replies'),
+      guestReactions: grant('guest_reactions'),
     );
   }
 }

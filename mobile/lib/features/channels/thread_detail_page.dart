@@ -1,5 +1,8 @@
+import 'channel_permissions.dart';
 import 'message_author_visibility.dart';
+
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+
 import 'message_swipe_reply.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
 import 'message_footer_layout.dart';
@@ -122,6 +125,9 @@ class ThreadDetailPage extends HookConsumerWidget {
     final canReply =
         isMember &&
         !isArchived &&
+        ref
+            .watch(channelPermissionsProvider(channelId))
+            .allows(ChannelAction.reply) &&
         ref.watch(channelStartsThreadsProvider(channelId));
     final appView = View.of(context);
     final composerDockHeight = useState(0.0);

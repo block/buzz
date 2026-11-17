@@ -1,3 +1,4 @@
+import 'channel_permissions.dart';
 import '../../shared/widgets/duo_toolbar.dart';
 import 'composer_geometry.dart';
 import 'message_author_visibility.dart';
@@ -5,6 +6,7 @@ import 'message_author_visibility.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+
 import 'message_swipe_reply.dart';
 import 'bestie_welcome.dart';
 import 'bestie_welcome_storage.dart';
@@ -318,8 +320,9 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     final memberProfilesPreloadState = useFuture(memberProfilesPreload);
     final showsComposer =
         !resolvedChannel.isForum &&
-        resolvedChannel.isMember &&
-        !resolvedChannel.isArchived;
+        ref
+            .watch(channelPermissionsProvider(resolvedChannel.id))
+            .allows(ChannelAction.post);
     final profileOwnedAgentPubkeys = <String>[];
     for (final participantPubkey in resolvedChannel.participantPubkeys) {
       final normalized = participantPubkey.trim().toLowerCase();
@@ -906,9 +909,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                         ),
                       ),
               ),
-              if (!resolvedChannel.isForum &&
-                  (!resolvedChannel.isMember ||
-                      resolvedChannel.isArchived)) ...[
+              if (!resolvedChannel.isForum && !showsComposer) ...[
                 if (!resolvedChannel.isDm)
                   _ReadOnlyNotice(channel: resolvedChannel),
               ],

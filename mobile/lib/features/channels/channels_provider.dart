@@ -825,6 +825,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       ttlDeadline: data.ttlDeadline,
       isUnlisted: data.isUnlisted,
       joinsAsGuest: data.joinsAsGuest,
+      guestReplies: data.guestReplies,
+      guestReactions: data.guestReactions,
     );
   }
 

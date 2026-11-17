@@ -349,6 +349,8 @@ ChannelDetails channelDetailsFromEvent(NostrEvent event) {
   );
   return ChannelDetails(
     id: data.id,
+    guestReplies: data.guestReplies,
+    guestReactions: data.guestReactions,
     name: data.name,
     channelType: data.channelType,
     labels: data.labels,

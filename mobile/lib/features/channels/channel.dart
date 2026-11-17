@@ -37,6 +37,8 @@ class Channel {
   /// Whether joining gives the read-only `guest` role (see
   /// [ChannelData.joinsAsGuest]).
   final bool joinsAsGuest;
+  final bool guestReplies;
+  final bool guestReactions;
 
   const Channel({
     required this.id,
@@ -59,6 +61,8 @@ class Channel {
     this.ttlDeadline,
     this.isUnlisted = false,
     this.joinsAsGuest = false,
+    this.guestReplies = false,
+    this.guestReactions = false,
   });
 
   factory Channel.fromJson(Map<String, dynamic> json) => Channel(
@@ -91,6 +95,8 @@ class Channel {
         : null,
     isUnlisted: json['unlisted'] as bool? ?? false,
     joinsAsGuest: json['joins_as_guest'] as bool? ?? false,
+    guestReplies: json['guest_replies'] == true,
+    guestReactions: json['guest_reactions'] == true,
   );
 
   /// Inverse of [Channel.fromJson].
@@ -115,6 +121,8 @@ class Channel {
     'ttl_deadline': ttlDeadline?.toIso8601String(),
     'unlisted': isUnlisted,
     'joins_as_guest': joinsAsGuest,
+    'guest_replies': guestReplies,
+    'guest_reactions': guestReactions,
   };
 
   bool get isEphemeral => ttlSeconds != null || ttlDeadline != null;
@@ -202,6 +210,8 @@ class Channel {
     ttlDeadline: details.ttlDeadline,
     isUnlisted: isUnlisted,
     joinsAsGuest: joinsAsGuest,
+    guestReplies: details.guestReplies,
+    guestReactions: details.guestReactions,
   );
 
   Channel copyWith({
@@ -237,12 +247,16 @@ class Channel {
     ttlDeadline: ttlDeadline,
     isUnlisted: isUnlisted,
     joinsAsGuest: joinsAsGuest ?? this.joinsAsGuest,
+    guestReplies: guestReplies,
+    guestReactions: guestReactions,
   );
 }
 
 @immutable
 class ChannelDetails {
   final String id;
+  final bool guestReplies;
+  final bool guestReactions;
   final String name;
 
   /// NIP-CL labels from metadata; presentation hints, never access grants.
@@ -261,6 +275,8 @@ class ChannelDetails {
 
   const ChannelDetails({
     required this.id,
+    this.guestReplies = false,
+    this.guestReactions = false,
     required this.name,
     required this.channelType,
     this.labels = const [],
@@ -278,6 +294,8 @@ class ChannelDetails {
 
   factory ChannelDetails.fromJson(Map<String, dynamic> json) => ChannelDetails(
     id: json['id'] as String,
+    guestReplies: json['guest_replies'] == true,
+    guestReactions: json['guest_reactions'] == true,
     name: json['name'] as String,
     channelType: json['channel_type'] as String,
     labels: (json['labels'] as List<dynamic>? ?? const []).cast<String>(),
@@ -299,6 +317,8 @@ class ChannelDetails {
 
   factory ChannelDetails.fromChannel(Channel channel) => ChannelDetails(
     id: channel.id,
+    guestReplies: channel.guestReplies,
+    guestReactions: channel.guestReactions,
     name: channel.name,
     channelType: channel.channelType,
     labels: channel.labels,

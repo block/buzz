@@ -14,7 +14,8 @@ class _ReadOnlyNotice extends HookConsumerWidget {
     final isOpen = channel.visibility == 'open' && !channel.isArchived;
     // Joining a guest-join channel grants a role that cannot post, so it
     // offers no Join (as on desktop).
-    final canJoin = isOpen && !channel.joinsAsGuest;
+    final canJoin = isOpen && !channel.isMember && !channel.joinsAsGuest;
+    final permissions = ref.watch(channelPermissionsProvider(channel.id));
 
     Future<void> join() async {
       if (isJoining.value) return;
@@ -40,6 +41,12 @@ class _ReadOnlyNotice extends HookConsumerWidget {
 
     final message = channel.isArchived
         ? 'This $place is archived and read-only on mobile.'
+        : channel.isMember
+        ? permissions.allows(ChannelAction.reply)
+              ? 'You can reply in threads, but cannot start conversations.'
+              : permissions.allows(ChannelAction.react)
+              ? 'You can react, but cannot send messages.'
+              : 'You have viewing access to this $place.'
         : isOpen && channel.joinsAsGuest
         ? 'This $place is read-only'
         : canJoin && isUnconfirmed.value

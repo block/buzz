@@ -1105,6 +1105,8 @@ extension _ChannelsNotifierDirectory on ChannelsNotifier {
           prev.isArchived != channel.isArchived ||
           prev.channelType != channel.channelType ||
           prev.visibility != channel.visibility ||
+          prev.guestReplies != channel.guestReplies ||
+          prev.guestReactions != channel.guestReactions ||
           prev.createdBy != channel.createdBy ||
           !listEquals(prev.labels, channel.labels)) {
         _lifecycleRef.invalidate(channelDetailsProvider(channel.id));

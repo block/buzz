@@ -10,6 +10,45 @@ import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
   test(
+    'revoking permission during recipient lookup prevents signing and publication',
+    () async {
+      final session = _PendingPublishRelaySession();
+      final members = Completer<List<ChannelMember>>();
+      final peerKey = nostr.Keys.generate().public;
+      var allowed = true;
+      var localCount = 0;
+      final send = SendMessage(
+        signedEventRelay: SignedEventRelay(
+          session: session,
+          nsec: nostr.Keys.generate().nsec,
+        ),
+        fetchMembers: (_) => members.future,
+        readUserCache: () => const {},
+        canSend: (_, _) => allowed,
+        addLocalMessage: (_, _) => localCount++,
+        completeLocalMessage: (_, _) {},
+        removeLocalMessage: (_, _) {},
+      );
+      final pending = send(
+        channelId: _channelId,
+        content: 'Reply',
+        parentEventId: 'root',
+        mentionPubkeys: [peerKey],
+      );
+      allowed = false;
+      members.complete([
+        ChannelMember(
+          pubkey: peerKey,
+          role: 'member',
+          joinedAt: DateTime.utc(2026),
+        ),
+      ]);
+      await expectLater(pending, throwsStateError);
+      expect(localCount, 0);
+    },
+  );
+
+  test(
     'adds the signed message locally before relay acknowledgement',
     () async {
       final session = _PendingPublishRelaySession();

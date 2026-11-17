@@ -1,4 +1,7 @@
+import 'channel_permissions.dart';
+
 import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -56,6 +59,20 @@ const _pillGlyphSize = 16.0;
 void toggleReaction(WidgetRef ref, TimelineMessage message, String emoji) {
   final reaction = message.reactions.where((r) => r.emoji == emoji).firstOrNull;
   if (reaction == null) return;
+  final channelId = message.tags
+      .where((t) => t.length >= 2 && t[0] == 'h')
+      .firstOrNull
+      ?.elementAt(1);
+  if (channelId == null ||
+      !ref
+          .read(channelPermissionsProvider(channelId))
+          .allows(
+            reaction.reactedByCurrentUser
+                ? ChannelAction.removeReaction
+                : ChannelAction.react,
+          )) {
+    return;
+  }
   final actions = ref.read(channelActionsProvider);
   if (reaction.reactedByCurrentUser && reaction.currentUserReactionId != null) {
     actions.removeReaction(reaction.currentUserReactionId!, emoji);
@@ -91,9 +108,24 @@ void showAddReactionPicker({
   required WidgetRef ref,
   required TimelineMessage message,
 }) {
+  final channelId = message.tags
+      .where((t) => t.length >= 2 && t[0] == 'h')
+      .firstOrNull
+      ?.elementAt(1);
+  if (channelId == null ||
+      !ref
+          .read(channelPermissionsProvider(channelId))
+          .allows(ChannelAction.react)) {
+    return;
+  }
   showEmojiPicker(
     context: context,
     onSelect: (emoji) {
+      if (!ref
+          .read(channelPermissionsProvider(channelId))
+          .allows(ChannelAction.react)) {
+        return;
+      }
       ref.read(recentEmojiProvider.notifier).record(emoji);
       armReactionBurst(ref, message, emoji);
       ref
@@ -103,7 +135,7 @@ void showAddReactionPicker({
   );
 }
 
-class ReactionRow extends HookWidget {
+class ReactionRow extends HookConsumerWidget {
   /// The message these reactions belong to. Used to match a pending burst to
   /// the right pill — the same emoji can be pending on a different message.
   final String messageId;
@@ -137,7 +169,23 @@ class ReactionRow extends HookWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    void onToggle(String emoji) {
+      final own = reactions.any(
+        (reaction) => reaction.emoji == emoji && reaction.reactedByCurrentUser,
+      );
+      if (ref
+          .read(channelPermissionsProvider(channelId))
+          .allows(own ? ChannelAction.removeReaction : ChannelAction.react)) {
+        this.onToggle(emoji);
+      }
+    }
+
+    final showAddButton =
+        this.showAddButton &&
+        ref
+            .watch(channelPermissionsProvider(channelId))
+            .allows(ChannelAction.react);
     final liveReactions = useMemoized(() => ValueNotifier(reactions));
     useEffect(
       () => () {

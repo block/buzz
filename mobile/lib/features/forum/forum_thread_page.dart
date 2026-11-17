@@ -1,3 +1,4 @@
+import '../channels/channel_permissions.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -315,7 +316,11 @@ class _ThreadContent extends HookConsumerWidget {
         ),
 
         // Reply composer
-        if (isMember && !isArchived)
+        if (isMember &&
+            !isArchived &&
+            ref
+                .watch(channelPermissionsProvider(channelId))
+                .allows(ChannelAction.post))
           ComposeBar(
             channelId: channelId,
             hintText: 'Reply to this post\u2026',

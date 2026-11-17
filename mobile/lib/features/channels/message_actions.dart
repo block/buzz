@@ -1,4 +1,7 @@
+import 'channel_permissions.dart';
+
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
+
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
@@ -87,6 +90,14 @@ Future<void> showMessageActions({
 }) async {
   if (!context.mounted) return;
   unawaited(HapticFeedback.mediumImpact());
+  final permissions = ref.read(channelPermissionsProvider(channelId));
+  canManageMessage =
+      canManageMessage &&
+      (message.pubkey.toLowerCase() !=
+              ref.read(myPubkeyProvider)?.toLowerCase() ||
+          permissions.allows(
+            message.parentId == null ? ChannelAction.post : ChannelAction.reply,
+          ));
   final restoreFocusOnCancel = composerFocusNode?.hasFocus ?? false;
   composerFocusNode?.unfocus();
 
@@ -118,14 +129,15 @@ Future<void> showMessageActions({
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  _QuickReactionRow(
-                    message: message,
-                    reactions: reactions ?? message.reactions,
-                    onToggleReaction: onToggleReaction,
-                    sheetContext: sheetContext,
-                    pageContext: context,
-                    pageRef: ref,
-                  ),
+                  if (permissions.allows(ChannelAction.react))
+                    _QuickReactionRow(
+                      message: message,
+                      reactions: reactions ?? message.reactions,
+                      onToggleReaction: onToggleReaction,
+                      sheetContext: sheetContext,
+                      pageContext: context,
+                      pageRef: ref,
+                    ),
                   SizedBox(height: message.isSystem ? Grid.xxs : Grid.xs),
                   if (!message.isSystem) ...[
                     // Fast actions: respond now, hand off context, defer.
@@ -247,6 +259,18 @@ void showImageActions({
   required bool canManageMessage,
   VoidCallback? onDeleted,
 }) {
+  if (message.pubkey.toLowerCase() ==
+      ref.read(myPubkeyProvider)?.toLowerCase()) {
+    canManageMessage =
+        canManageMessage &&
+        ref
+            .read(channelPermissionsProvider(channelId))
+            .allows(
+              message.parentId == null
+                  ? ChannelAction.post
+                  : ChannelAction.reply,
+            );
+  }
   showBuzzModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
