@@ -1,6 +1,8 @@
 //! `POST /query` with `[{"access":"channels","ids":[...]}]`: what the signer
 //! may do in each named channel, or, without `ids`, one page of the channels
-//! it can reach (NOSTR.md, Channel access).
+//! it can reach; or, with `[{"access":"readers","channel":..,"pubkeys":[...]}]`,
+//! which of the named people can read one channel the signer can read
+//! (NOSTR.md, Channel access).
 
 use axum::{http::StatusCode, Json};
 use buzz_core::TenantContext;
@@ -8,7 +10,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::api::api_error;
-use crate::handlers::channel_access::{answer, reachable, MAX_IDS};
+use crate::handlers::channel_access::{answer, reachable, readers, MAX_IDS};
 use crate::state::AppState;
 
 /// How long one answer may take before the request fails and is retried.
@@ -25,12 +27,60 @@ enum Asked {
     Named(Vec<Uuid>),
     /// One page of the channels the signer can reach.
     Reachable { after: Option<Uuid>, limit: usize },
+    /// Which of the named people, in request order, can read the channel.
+    Readers {
+        channel: Uuid,
+        pubkeys: Vec<[u8; 32]>,
+    },
 }
+
+/// The refusal when the signer cannot read the channel it asks about. A
+/// missing or deleted channel gets the same one, so it can't be told apart
+/// from a private one.
+const NOT_ALLOWED: &str = "not-allowed: the signer cannot read this channel";
 
 /// A canonical (lowercase, hyphenated) channel id.
 fn channel_id(value: &Value) -> Option<Uuid> {
     let s = value.as_str()?;
     Uuid::parse_str(s).ok().filter(|id| id.to_string() == s)
+}
+
+/// A lowercase hex pubkey.
+fn pubkey(value: &Value) -> Option<[u8; 32]> {
+    let s = value.as_str()?;
+    if s.len() != 64 || s.bytes().any(|b| b.is_ascii_uppercase()) {
+        return None;
+    }
+    let mut key = [0u8; 32];
+    hex::decode_to_slice(s, &mut key).ok()?;
+    Some(key)
+}
+
+/// Exactly `{"access":"readers","channel":<channel id>,"pubkeys":[...]}`
+/// with 1 to [`MAX_IDS`] distinct lowercase hex pubkeys.
+fn asked_readers(filter: &serde_json::Map<String, Value>) -> Result<Asked, &'static str> {
+    const SHAPE: &str = "reader access requires one filter with exactly \
+                         {\"access\":\"readers\"}, \"channel\":<lowercase channel id> \
+                         and \"pubkeys\":[1 to 100 distinct lowercase hex pubkeys]";
+    if filter.len() != 3 {
+        return Err(SHAPE);
+    }
+    let channel = filter.get("channel").and_then(channel_id).ok_or(SHAPE)?;
+    let Some(Value::Array(raw)) = filter.get("pubkeys") else {
+        return Err(SHAPE);
+    };
+    if raw.is_empty() || raw.len() > MAX_IDS {
+        return Err(SHAPE);
+    }
+    let mut pubkeys = Vec::with_capacity(raw.len());
+    for value in raw {
+        let key = pubkey(value).ok_or(SHAPE)?;
+        if pubkeys.contains(&key) {
+            return Err(SHAPE);
+        }
+        pubkeys.push(key);
+    }
+    Ok(Asked::Readers { channel, pubkeys })
 }
 
 /// Exactly one filter with `access` set to `channels` and either `ids`
@@ -45,8 +95,10 @@ fn asked(filters: &[Value]) -> Result<Asked, &'static str> {
     let [Value::Object(filter)] = filters else {
         return Err(SHAPE);
     };
-    if filter.get("access").and_then(Value::as_str) != Some("channels") {
-        return Err(SHAPE);
+    match filter.get("access").and_then(Value::as_str) {
+        Some("channels") => {}
+        Some("readers") => return asked_readers(filter),
+        _ => return Err(SHAPE),
     }
     let Some(raw) = filter.get("ids") else {
         if filter
@@ -93,26 +145,35 @@ pub(super) async fn query(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let asked = asked(filters).map_err(|e| api_error(StatusCode::BAD_REQUEST, e))?;
     let (community, pubkey) = (tenant.community(), viewer.to_bytes());
+    // `None` only when the signer may not ask: reader access to a channel
+    // they can't read.
     let answered = tokio::time::timeout(DEADLINE, async {
         match asked {
             Asked::Named(ids) => answer(state, community, &pubkey, &ids)
                 .await
-                .map(serde_json::to_value),
+                .map(|answer| Some(serde_json::to_value(answer))),
             Asked::Reachable { after, limit } => reachable(state, community, &pubkey, after, limit)
                 .await
-                .map(serde_json::to_value),
+                .map(|page| Some(serde_json::to_value(page))),
+            Asked::Readers { channel, pubkeys } => {
+                readers(state, community, &pubkey, channel, &pubkeys)
+                    .await
+                    .map(|readers| readers.map(serde_json::to_value))
+            }
         }
     })
     .await
     .map_err(|_| "timed out".to_string())
     .and_then(|answered| answered.map_err(|e| e.to_string()));
-    let encoded = answered.map_err(|e| {
-        tracing::warn!(error = %e, "channel access lookup failed");
-        api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "error: channel access lookup failed; retry",
-        )
-    })?;
+    let encoded = answered
+        .map_err(|e| {
+            tracing::warn!(error = %e, "channel access lookup failed");
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "error: channel access lookup failed; retry",
+            )
+        })?
+        .ok_or_else(|| api_error(StatusCode::FORBIDDEN, NOT_ALLOWED))?;
     Ok(Json(encoded.map_err(|_| {
         api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -177,6 +238,40 @@ mod tests {
             json!([{"access":"channels","after":null}]),
             json!([{"access":"channels","ids":[A],"after":B}]),
             json!([{"access":"channels","ids":[A],"limit":1}]),
+        ] {
+            let filters: Vec<Value> = serde_json::from_value(refused.clone()).unwrap();
+            assert!(asked(&filters).is_err(), "{refused}");
+        }
+    }
+
+    #[test]
+    fn accepts_only_the_exact_readers_shape() {
+        let (p, q) = (
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        );
+        assert_eq!(
+            asked(&[json!({"access":"readers","channel":A,"pubkeys":[p, q]})]).unwrap(),
+            Asked::Readers {
+                channel: Uuid::parse_str(A).unwrap(),
+                pubkeys: vec![[0xaa; 32], [0xbb; 32]],
+            }
+        );
+        let too_many: Vec<String> = (0..=MAX_IDS).map(|i| format!("{i:064x}")).collect();
+        for refused in [
+            json!([{"access":"readers","channel":A}]),
+            json!([{"access":"readers","pubkeys":[p]}]),
+            json!([{"access":"readers","channel":A,"pubkeys":[]}]),
+            json!([{"access":"readers","channel":A,"pubkeys":too_many}]),
+            json!([{"access":"readers","channel":A,"pubkeys":[p, p]}]),
+            json!([{"access":"readers","channel":A,"pubkeys":[p.to_uppercase()]}]),
+            json!([{"access":"readers","channel":A,"pubkeys":[&p[1..]]}]),
+            json!([{"access":"readers","channel":A,"pubkeys":["z".repeat(64)]}]),
+            json!([{"access":"readers","channel":A,"pubkeys":p}]),
+            json!([{"access":"readers","channel":A.to_uppercase(),"pubkeys":[p]}]),
+            json!([{"access":"readers","channel":[A],"pubkeys":[p]}]),
+            json!([{"access":"readers","channel":A,"pubkeys":[p],"ids":[A]}]),
+            json!([{"access":"readers","channel":A,"pubkeys":[p]}, {"access":"readers","channel":B,"pubkeys":[p]}]),
         ] {
             let filters: Vec<Value> = serde_json::from_value(refused.clone()).unwrap();
             assert!(asked(&filters).is_err(), "{refused}");
