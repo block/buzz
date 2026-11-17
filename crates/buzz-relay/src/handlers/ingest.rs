@@ -3744,6 +3744,19 @@ async fn ingest_event_inner(
         })?;
         message = ok_message;
         (stored, inserted)
+    } else if kind_u32 == KIND_NIP29_REMOVE_USER {
+        let thread_params = thread_meta.as_ref().map(|m| m.as_params());
+        crate::handlers::side_effects::persist_remove_user(tenant, &event, state, thread_params)
+            .await
+            .map_err(|e| match e.downcast_ref::<buzz_db::DbError>() {
+                Some(buzz_db::DbError::AccessDenied(reason)) => {
+                    IngestError::Rejected(format!("invalid: {reason}"))
+                }
+                Some(missing @ buzz_db::DbError::MemberNotFound(_)) => {
+                    IngestError::Rejected(format!("invalid: {missing}"))
+                }
+                _ => IngestError::Internal(format!("error: membership removal failed: {e}")),
+            })?
     } else if kind_u32 == KIND_NIP29_EDIT_METADATA {
         // One commit stores the event and applies its channel changes. A
         // failure stores nothing, so the client is told and can resend it.
@@ -3853,11 +3866,12 @@ async fn ingest_event_inner(
         });
     }
 
-    // Workflow deletion, kind 5 / 9005 deletions of `e` targets, kind:9000 and
-    // kind:9002 applied their changes in the insert's own transaction above.
+    // Workflow deletion, kind 5 / 9005 deletions of `e` targets, and kinds
+    // 9000–9002 applied their changes in the insert's own transaction above.
     let persisted_atomically = workflow_deletion
         || atomic_deletion
         || kind_u32 == KIND_NIP29_PUT_USER
+        || kind_u32 == KIND_NIP29_REMOVE_USER
         || kind_u32 == KIND_NIP29_EDIT_METADATA;
     if !persisted_atomically && crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
         if let Err(e) =
