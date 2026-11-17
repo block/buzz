@@ -4799,8 +4799,9 @@ pub(crate) mod postgres_tests {
         )
         .fetch_one(&db.pool)
         .await
-        .expect("lookup retired functions and retained guard");
-        assert_eq!(retired, (false, false, true));
+        .expect("lookup retired functions and guard");
+        // 0094 retired the functions; 0096 retired the tombstone trigger.
+        assert_eq!(retired, (false, false, false));
     }
 
     #[tokio::test]
