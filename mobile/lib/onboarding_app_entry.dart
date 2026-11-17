@@ -244,7 +244,8 @@ class OnboardingAppEntry extends HookConsumerWidget {
                   ? null
                   // The form stays open behind setup, so a taken address can
                   // be edited in place.
-                  : (name) => unawaited(flow.start(HostedCreateCommunity(name))),
+                  : (name) =>
+                        unawaited(flow.start(HostedCreateCommunity(name))),
               onCommunityLink: () => enteringCommunityLink.value = true,
               onCreateCommunity: flow == null || busy
                   ? null
