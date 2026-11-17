@@ -128,7 +128,9 @@ class _ComposerInputTray extends HookWidget {
           ),
         );
       },
-      child: child,
+      // Composer controls belong to the tray, so a tap on them reaches its
+      // target instead of being consumed as a dismissal.
+      child: TapRegion(groupId: portal, child: child),
     );
   }
 }

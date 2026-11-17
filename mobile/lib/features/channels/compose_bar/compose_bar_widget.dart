@@ -1002,16 +1002,19 @@ class ComposeBar extends HookConsumerWidget {
           );
         }),
         onCapture: (image) async {
+          inputTool.value = null;
           attachmentSurface.value = _AttachmentSurface.closed;
           await retainAndQueueImages([image]);
         },
         onPickAllPhotos: () =>
             prepare(ref.read(mediaUploadServiceProvider).pickGalleryImages),
         onChoosePhotos: (photos) async {
+          inputTool.value = null;
           attachmentSurface.value = _AttachmentSurface.closed;
           await retainAndQueueImages(photos);
         },
         onChooseAllPhotos: (photos) async {
+          inputTool.value = null;
           attachmentSurface.value = _AttachmentSurface.closed;
           queueImages(photos);
         },

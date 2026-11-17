@@ -319,6 +319,77 @@ void iosControlsTests() {
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),
   );
 
+  testWidgets(
+    'tapping the draft with the attachment menu open goes back to typing',
+    (tester) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _TrayPickerService(),
+          onSend: (_, _, {mediaTags = const []}) async {},
+        ),
+      );
+      await _tapComposerControl(tester, 'Attachments');
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('attachment-menu')), findsOneWidget);
+      await tester.tap(find.text('Message'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('attachment-menu')), findsNothing);
+      expect(find.byType(TextField), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
+
+  testWidgets('choosing photos without the native popover closes the tray', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(800, 900);
+    addTearDown(tester.view.reset);
+    const photoChannel = MethodChannel('buzz/inline_photo_picker');
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      photoChannel,
+      (call) async => false,
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        photoChannel,
+        null,
+      ),
+    );
+    Future<void> settle() async {
+      for (var i = 0; i < 20; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+    }
+
+    await tester.pumpWidget(
+      _buildComposeBar(
+        uploadService: _testUploadService(nostr.Keys.generate().nsec),
+        photoLibrary: _FakePhotoLibrary([
+          RecentPhoto(id: 'one', thumbnailBytes: _gifBytes),
+        ]),
+        onSend: (content, mentions, {mediaTags = const []}) async {},
+      ),
+    );
+    await _tapComposerControl(tester, 'Attachments');
+    await settle();
+    expect(find.byKey(const ValueKey('attachment-menu')), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('attachment-menu-item-photos')));
+    await settle();
+    await tester.tap(find.byKey(const ValueKey('recent-photo-one')));
+    await settle();
+    await tester.tap(find.text('Add 1 photo'));
+    await settle();
+    expect(
+      find.byWidgetPredicate(
+        (w) => w.runtimeType.toString() == '_ComposerToolStripGlass',
+      ),
+      findsNothing,
+    );
+    await tester.pumpWidget(const SizedBox.shrink());
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
   testWidgets('typed mentions and channels preserve the draft and keyboard', (
     tester,
   ) async {
@@ -390,6 +461,38 @@ void iosControlsTests() {
         action.$1 == 'Mention' ? '@Scout ' : '#shared ',
       );
     }
+    // A real tap on Emoji while autocomplete is open opens the picker
+    // instead of only dismissing the suggestions.
+    const emojiChannel = MethodChannel('buzz/native_emoji_picker');
+    var emojiPresentations = 0;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      emojiChannel,
+      (call) async {
+        if (call.method == 'present') emojiPresentations++;
+        return true;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        emojiChannel,
+        null,
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '@');
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('mention-suggestions-popover')),
+      findsOneWidget,
+    );
+    await tester.tap(find.byTooltip('Emoji'));
+    await tester.pumpAndSettle();
+    expect(emojiPresentations, 1);
+    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+      emojiChannel.name,
+      emojiChannel.codec.encodeMethodCall(const MethodCall('dismissed')),
+      (_) {},
+    );
+    await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField), 'Keep this draft');
     await tester.pumpAndSettle();
     final originalDraftTop = tester.getTopLeft(find.byType(TextField)).dy;
@@ -406,6 +509,40 @@ void iosControlsTests() {
       'Keep this draft',
     );
     expect(find.byKey(const ValueKey('attachment-surface')), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+  testWidgets('a Send tap is not taken as a tap outside the suggestions', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _buildComposeBar(
+        channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
+        members: [
+          ChannelMember(
+            pubkey: 'a' * 64,
+            displayName: 'Scout',
+            role: 'member',
+            joinedAt: DateTime(2025),
+          ),
+        ],
+        uploadService: _testUploadService(nostr.Keys.generate().nsec),
+        onSend: (content, mentions, {mediaTags = const []}) async {},
+      ),
+    );
+    await _expandComposer(tester);
+    await tester.enterText(find.byType(TextField), 'hi @Sc');
+    await tester.pumpAndSettle();
+    final suggestions = find.byKey(
+      const ValueKey('mention-suggestions-popover'),
+    );
+    expect(suggestions, findsOneWidget);
+    // Send is a native view, so a widget test cannot press it. A tap the
+    // tray consumes as "outside" dismisses the suggestions and never reaches
+    // the native button; a tap that reaches it leaves them in place.
+    await tester.tap(find.byTooltip('Send'));
+    await tester.pumpAndSettle();
+    expect(suggestions, findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
   }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 }
