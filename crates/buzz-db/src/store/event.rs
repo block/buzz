@@ -5127,6 +5127,7 @@ mod postgres_tests {
             community,
             channel,
             LIMIT as u32,
+            buzz_core::thread_window::Direction::Older,
             window_cursor,
             Some(&[9]),
             ReadDeadline::PerRead,
@@ -5175,6 +5176,7 @@ mod postgres_tests {
                 community,
                 channel,
                 LIMIT as u32,
+                buzz_core::thread_window::Direction::Older,
                 cursor,
                 Some(&[9]),
             )

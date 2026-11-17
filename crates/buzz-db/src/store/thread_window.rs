@@ -1,8 +1,8 @@
-//! NIP-CW thread-mode newest-first reply windows. This path deliberately does not change
+//! NIP-CW thread-mode reply windows, newest or oldest first. This path deliberately does not change
 //! legacy forward threads or the permissive generic event reconstruction path.
 
 use buzz_core::{
-    thread_window::{Cursor, Request, MAX_LIMIT, ROW_KINDS},
+    thread_window::{Cursor, Direction, Request, MAX_LIMIT, ROW_KINDS},
     CommunityId, StoredEvent,
 };
 use chrono::{DateTime, Utc};
@@ -20,7 +20,7 @@ use buzz_datastore_tracing::datastore_span;
 /// authoritative scan bounds.
 #[derive(Debug)]
 pub struct ThreadWindow {
-    /// Reconstructed replies, newest first (id ascending for ties).
+    /// Reconstructed replies in the request's [`Direction`] order.
     pub rows: Vec<StoredEvent>,
     /// Another eligible raw reply exists after this page.
     pub has_more: bool,
@@ -116,17 +116,35 @@ async fn select_window(
         .push_bind(request.channel)
         .push(" AND tm.depth BETWEEN 1 AND ")
         .push_bind(request.depth as i32);
+    // Newer pages scan idx_thread_metadata_window backward.
+    let (order, start, past, tiebreak) = match request.direction {
+        Direction::Older => (
+            "tm.event_created_at DESC, tm.event_id ASC",
+            " <= ",
+            " < ",
+            " > ",
+        ),
+        Direction::Newer => (
+            "tm.event_created_at ASC, tm.event_id DESC",
+            " >= ",
+            " > ",
+            " < ",
+        ),
+    };
     if let Some(cursor) = &request.cursor {
         let (ts, id) = cursor_key(cursor)?;
-        // The redundant upper timestamp bound gives PostgreSQL an index range
-        // start instead of filtering all newer keys at a deep cursor.
-        q.push(" AND tm.event_created_at <= ")
+        // The redundant inclusive timestamp bound gives PostgreSQL an index
+        // range start instead of filtering every key before a deep cursor.
+        q.push(" AND tm.event_created_at")
+            .push(start)
             .push_bind(ts)
-            .push(" AND (tm.event_created_at < ")
+            .push(" AND (tm.event_created_at")
+            .push(past)
             .push_bind(ts)
             .push(" OR (tm.event_created_at = ")
             .push_bind(ts)
-            .push(" AND tm.event_id > ")
+            .push(" AND tm.event_id")
+            .push(tiebreak)
             .push_bind(id)
             .push("))");
     }
@@ -134,7 +152,9 @@ async fn select_window(
     // cannot turn a selective live/kind index into a root-wide scan per reply.
     // PK uniqueness makes the inner LIMIT 1 exact. All eligibility predicates
     // still precede the *outer* limit+1 that establishes page bounds.
-    q.push(" ORDER BY tm.event_created_at DESC, tm.event_id ASC OFFSET 0) tm \
+    q.push(" ORDER BY ")
+        .push(order)
+        .push(" OFFSET 0) tm \
         JOIN LATERAL (SELECT e.id, e.pubkey, e.created_at, e.kind, e.tags, e.content, e.sig, e.received_at, e.channel_id, e.deleted_at \
         FROM events e WHERE e.community_id = tm.community_id \
         AND e.created_at = tm.event_created_at AND e.id = tm.event_id LIMIT 1) e ON true \
@@ -142,7 +162,9 @@ async fn select_window(
         .push_bind(request.channel)
         .push(" AND e.deleted_at IS NULL AND e.kind = ANY(")
         .push_bind(request.kinds.iter().map(|k| *k as i32).collect::<Vec<_>>())
-        .push(") ORDER BY tm.event_created_at DESC, tm.event_id ASC LIMIT ")
+        .push(") ORDER BY ")
+        .push(order)
+        .push(" LIMIT ")
         .push_bind(i64::from(request.limit) + 1);
     // Selectivity varies drastically with root/depth/cursor. A cached generic
     // plan can sort the entire root (and exceeded the SQL deadline in paging
@@ -198,9 +220,10 @@ async fn writer_window(
 }
 
 impl Db {
-    /// Newest-first thread page and its proved replica transaction. Backward
-    /// cursors supply an upper bound, including terminal pages; no forward
-    /// thread "last delivered row is newest" inference is used. Head routing
+    /// Thread page and its proved replica transaction. Older cursors supply
+    /// an upper bound, including terminal pages; no forward thread "last
+    /// delivered row is newest" inference is used. Head and newer pages read
+    /// up to the newest reply, which no cursor bounds, so their routing
     /// inherits the existing default-off budget. Writer follow-ups are pooled,
     /// not a snapshot spanning the response or subsequent history pages. The
     /// caller must share `budget` with every window and auxiliary scan in the request.
@@ -212,15 +235,15 @@ impl Db {
         budget: &mut ScanBudget,
     ) -> Result<(ThreadWindow, ReadSession)> {
         let cursor = request.cursor.as_ref().map(cursor_key).transpose()?;
-        let path = if cursor.is_some() {
-            "thread_window_cursor"
-        } else {
-            "thread_window_head"
+        let (path, covered) = match (request.direction, cursor) {
+            (Direction::Newer, _) => ("thread_window_newer", None),
+            (Direction::Older, None) => ("thread_window_head", None),
+            (Direction::Older, cursor) => ("thread_window_cursor", cursor),
         };
         if let RouteDecision::Replica(mut tx, _, reason) = self
             .route_read(
                 path,
-                RoutePredicate::from_channel_cursor(request.channel, &cursor),
+                RoutePredicate::from_channel_cursor(request.channel, &covered),
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
             .await?

@@ -267,6 +267,8 @@ impl RelayInfo {
             "buzz-unlisted-channels".to_string(),
             // kind:9050 edits an existing Solo member's access.
             "buzz-solo-member-role".to_string(),
+            // NIP-CW `direction: "newer"` windows, read oldest first.
+            "buzz-window-newer".to_string(),
         ];
         let gif = gif_provider.map(|provider| {
             supported_extensions.push("buzz-gif".to_string());
@@ -819,8 +821,9 @@ mod tests {
     }
 
     /// Clients refuse NIP-CL labels and system channels, newest-first
-    /// search, unlisted channels, and Solo role edits unless the relay says it
-    /// supports them, so every document must advertise these extensions.
+    /// search, unlisted channels, Solo role edits and oldest-first windows
+    /// unless the relay says it supports them, so every document must
+    /// advertise these extensions.
     #[test]
     fn advertises_channel_and_search_extensions() {
         let info = RelayInfo::build(
@@ -837,6 +840,7 @@ mod tests {
         assert!(extensions.contains(&"buzz-search-sort".to_string()));
         assert!(extensions.contains(&"buzz-unlisted-channels".to_string()));
         assert!(extensions.contains(&"buzz-solo-member-role".to_string()));
+        assert!(extensions.contains(&"buzz-window-newer".to_string()));
     }
 
     /// NIP-WP → NIP-11 mirror: a set workspace icon is served in the standard
