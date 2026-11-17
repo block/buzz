@@ -1206,6 +1206,8 @@ fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<ChannelRecord> {
         ttl_deadline: row.try_get("ttl_deadline").unwrap_or(None),
         labels: row.try_get("labels")?,
         join_role: row.try_get("join_role")?,
+        guest_replies: false,
+        guest_reactions: false,
         unlisted: row.try_get("unlisted")?,
         auto_join: row.try_get("auto_join")?,
     })

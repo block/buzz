@@ -103,8 +103,8 @@ relay to specific external Nostr identities without granting full access.
 
 ### Announce channels
 
-Roles have the same permissions in every channel. A channel's settings
-decide only who can join and which role a new person gets:
+A channel's settings decide who can join, which role a new person gets,
+and whether guests may contribute within existing conversations:
 
 - `visibility` (`open` | `private`) decides who can find, join and read.
 - `join_role` (`member` | `guest`) is the role a person gets when nobody
@@ -112,18 +112,39 @@ decide only who can join and which role a new person gets:
   add with no `role` tag. The default, `member`, keeps today's behavior.
 
 An open channel with `join_role = guest` is an **announce channel**: anyone
-can find, read and join it, but people who join are guests and cannot write.
+can find, read and join it, but people who join are guests and cannot start
+conversations. By default they cannot reply or react either.
 
 What each role can do:
 
 | Action | Guest | Member or bot | Admin / owner |
 |--------|-------|---------------|---------------|
 | Read, leave | Yes | Yes | Yes |
-| Post, reply, edit, delete own, react, artifacts, canvas, forum, pins, typing, workflow messages, huddles | No | Yes | Yes |
+| Start conversations, artifacts, canvas, forum posts, pins, typing, workflow messages, huddles | No | Yes | Yes |
+| Reply, edit/delete own reply | When `guest_replies = true` | Yes | Yes |
+| Add reactions | When `guest_reactions = true` | Yes | Yes |
+| Remove own reactions | Yes | Yes | Yes |
 | Topic, purpose (kind:9002) | No | Yes | Yes |
 | Add people (kind:9000) | No | Yes, as member, guest or bot | Yes; only owners can grant owner |
 | Push to the channel's git repositories | No | Yes | Yes |
-| Name, about, visibility, TTL, `join_role`, `unlisted` | No | No | Yes |
+| Name, about, visibility, TTL, `join_role`, `guest_replies`, `guest_reactions`, `unlisted` | No | No | Yes |
+
+Owners and admins may set `["guest_replies", "true" | "false"]` and
+`["guest_reactions", "true" | "false"]` with kind:9002. Both default to false;
+omitted tags preserve the setting, and duplicate or malformed values are refused.
+Kind:39000 always publishes both flags. Older clients omitting them do not reset
+them. These grants apply only to active Guest members of streams and forums;
+non-members receive no additional authority.
+
+The reply grant covers stream message kinds 9 and 40002, including their threads
+in forum channels. Forum-specific comments (45003), votes and new posts retain
+their existing writer-only gate. A Guest reply must resolve to an existing message root and parent in the same
+channel through NIP-10. Unknown, inaccessible, cross-channel and auxiliary-event
+parents are refused. A lone root marker is not a reply. `["broadcast", "1"]`
+and separate root copies remain forbidden. Reply edits/deletions check the
+original target and its author. Removing one's own reaction remains possible
+after additions are disabled; other deletion authority is unchanged. Archive,
+moderation, token scope and visibility checks still apply.
 
 A non-member may write only where joining would give a role that can write:
 an open channel with `join_role = member`. A refused write gets

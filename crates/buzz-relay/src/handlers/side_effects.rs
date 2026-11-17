@@ -768,6 +768,21 @@ pub async fn validate_admin_event(
                 }
             }
 
+            for name in ["guest_replies", "guest_reactions"] {
+                let tags: Vec<_> = event
+                    .tags
+                    .iter()
+                    .filter(|t| t.kind().to_string() == name)
+                    .collect();
+                if tags.len() > 1
+                    || tags.iter().any(|t| {
+                        t.as_slice().len() != 2 || !matches!(t.content(), Some("true" | "false"))
+                    })
+                {
+                    return Err(anyhow::anyhow!("{name} must be one true/false tag"));
+                }
+            }
+
             // Validate channel names before storage. A name made entirely of
             // display-prefix hashes becomes empty after canonicalization, and
             // a name the column cannot hold would fail only after the command
@@ -1484,6 +1499,8 @@ const PRIVILEGED_METADATA_TAGS: &[&str] = &[
     "ttl",
     "t",
     "join_role",
+    "guest_replies",
+    "guest_reactions",
     "unlisted",
 ];
 
@@ -2378,6 +2395,18 @@ pub(crate) async fn persist_edit_metadata(
                 let join_role: buzz_db::channel::ChannelJoinRole =
                     val.parse().map_err(|e: String| anyhow::anyhow!(e))?;
                 edit.columns.join_role = Some(join_role.as_str().to_string());
+            }
+            "guest_replies" | "guest_reactions" => {
+                let value = match val {
+                    "true" => true,
+                    "false" => false,
+                    _ => return Err(anyhow::anyhow!("invalid guest contribution value")),
+                };
+                if tag.kind().to_string() == "guest_replies" {
+                    edit.columns.guest_replies = Some(value);
+                } else {
+                    edit.columns.guest_reactions = Some(value);
+                }
             }
             "auto_join" => {
                 // Validated during authorization; fail closed on a resend

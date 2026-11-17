@@ -84,6 +84,10 @@ pub struct ChannelRecord {
     /// The role a new person gets (`"member"` or `"guest"`). Parse with
     /// [`buzz_core::channel::ChannelJoinRole::parse_fail_closed`].
     pub join_role: String,
+    /// Whether active guests may reply within existing conversation threads.
+    pub guest_replies: bool,
+    /// Whether active guests may add reactions.
+    pub guest_reactions: bool,
     /// Whether the channel is left out of channel listings for non-members.
     /// It matters only while the channel is open: anyone can still read and
     /// join an unlisted open channel by naming it, and private channels are
@@ -188,7 +192,7 @@ pub async fn create_channel(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
+               ttl_seconds, ttl_deadline, labels, join_role, guest_replies, guest_reactions, unlisted, auto_join
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -251,7 +255,7 @@ pub async fn create_channel_with_id(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
+               ttl_seconds, ttl_deadline, labels, join_role, guest_replies, guest_reactions, unlisted, auto_join
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -541,7 +545,7 @@ async fn select_channel(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
+               ttl_seconds, ttl_deadline, labels, join_role, guest_replies, guest_reactions, unlisted, auto_join
         FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
     )
@@ -630,7 +634,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
+                   ttl_seconds, ttl_deadline, labels, join_role, guest_replies, guest_reactions, unlisted, auto_join
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL AND visibility::text = $2
             ORDER BY created_at DESC
@@ -650,7 +654,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
+                   ttl_seconds, ttl_deadline, labels, join_role, guest_replies, guest_reactions, unlisted, auto_join
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL
             ORDER BY created_at DESC
@@ -691,7 +695,7 @@ pub async fn list_auto_join_channels(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
+               ttl_seconds, ttl_deadline, labels, join_role, guest_replies, guest_reactions, unlisted, auto_join
         FROM channels
         WHERE community_id = $1 AND auto_join AND channel_type = 'stream'
           AND visibility = 'open' AND archived_at IS NULL AND deleted_at IS NULL
@@ -795,6 +799,8 @@ pub(crate) fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<Channe
         // Selected by every channel-record query. A missing column is an
         // error, never a silent `member`: the write gate depends on it.
         join_role: row.try_get("join_role")?,
+        guest_replies: row.try_get("guest_replies")?,
+        guest_reactions: row.try_get("guest_reactions")?,
         // Selected by every channel-record query, like `join_role`.
         unlisted: row.try_get("unlisted")?,
         auto_join: row.try_get("auto_join")?,
@@ -893,6 +899,22 @@ pub fn group_metadata_tags(channel: &ChannelRecord, members: &[MemberRecord]) ->
         &channel.created_at.timestamp().to_string(),
     ]));
     tags.push(tag(&["join_role", join_role.as_str()]));
+    tags.push(tag(&[
+        "guest_replies",
+        if channel.guest_replies {
+            "true"
+        } else {
+            "false"
+        },
+    ]));
+    tags.push(tag(&[
+        "guest_reactions",
+        if channel.guest_reactions {
+            "true"
+        } else {
+            "false"
+        },
+    ]));
     if channel.auto_join && open && channel.archived_at.is_none() {
         tags.push(tag(&["auto_join"]));
     }
@@ -1069,6 +1091,10 @@ pub struct ChannelUpdate {
     pub labels: Option<Vec<String>>,
     /// New join role (`"member"`/`"guest"`), or `None` to leave unchanged.
     pub join_role: Option<String>,
+    /// Whether guests may reply; omission preserves the setting.
+    pub guest_replies: Option<bool>,
+    /// Whether guests may react; omission preserves the setting.
+    pub guest_reactions: Option<bool>,
     /// New unlisted flag, or `None` to leave unchanged. It decides listing,
     /// not admission, so it does not take the membership lock.
     pub unlisted: Option<bool>,
@@ -1087,6 +1113,8 @@ impl ChannelUpdate {
             && self.ttl_seconds.is_none()
             && self.labels.is_none()
             && self.join_role.is_none()
+            && self.guest_replies.is_none()
+            && self.guest_reactions.is_none()
             && self.unlisted.is_none()
             && self.auto_join.is_none()
     }
@@ -1355,6 +1383,15 @@ async fn update_channel_on(
         set_parts.push(format!("join_role = ${param_idx}"));
         param_idx += 1;
     }
+    for (name, value) in [
+        ("guest_replies", updates.guest_replies),
+        ("guest_reactions", updates.guest_reactions),
+    ] {
+        if value.is_some() {
+            set_parts.push(format!("{name} = ${param_idx}"));
+            param_idx += 1;
+        }
+    }
     if updates.unlisted.is_some() {
         set_parts.push(format!("unlisted = ${param_idx}"));
         param_idx += 1;
@@ -1397,6 +1434,12 @@ async fn update_channel_on(
     }
     if let Some(ref join_role) = updates.join_role {
         q = q.bind(join_role);
+    }
+    for value in [updates.guest_replies, updates.guest_reactions]
+        .into_iter()
+        .flatten()
+    {
+        q = q.bind(value);
     }
     if let Some(unlisted) = updates.unlisted {
         q = q.bind(unlisted);
@@ -2371,6 +2414,8 @@ mod group_metadata_tag_tests {
             ttl_deadline: None,
             labels: Vec::new(),
             join_role: join_role.into(),
+            guest_replies: false,
+            guest_reactions: false,
             unlisted: false,
             auto_join: false,
         }

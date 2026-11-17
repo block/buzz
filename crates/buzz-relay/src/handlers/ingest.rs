@@ -1033,6 +1033,123 @@ pub(crate) fn non_member_may_post(visibility: &str, join_role: &str) -> bool {
     visibility == "open" && ChannelJoinRole::parse_fail_closed(join_role) == ChannelJoinRole::Member
 }
 
+/// The only exceptions to a Guest's broad write denial. Existing writers and
+/// non-content callers continue to use `check_channel_membership` unchanged.
+/// A resolved reply is returned for reuse by the persistence path.
+async fn guest_contribution(
+    community_id: CommunityId,
+    state: &AppState,
+    channel: &buzz_db::channel::ChannelRecord,
+    event: &Event,
+) -> Result<Option<ThreadMetadataOwned>, String> {
+    let actor = effective_message_author(event, &state.relay_keypair.public_key());
+    if !matches!(channel.channel_type.as_str(), "stream" | "forum")
+        || !state
+            .is_member_cached(community_id, channel.id, &actor)
+            .await
+            .map_err(|e| format!("error: database error: {e}"))?
+        || state
+            .db
+            .get_member_role(community_id, channel.id, &actor)
+            .await
+            .map_err(|e| format!("error: database error: {e}"))?
+            .as_deref()
+            != Some("guest")
+    {
+        return Err(MEMBERS_ONLY_POSTING.into());
+    }
+    match event_kind_u32(event) {
+        KIND_STREAM_MESSAGE | KIND_STREAM_MESSAGE_V2 if channel.guest_replies => {
+            guest_reply_meta(community_id, state, channel.id, event)
+                .await
+                .map(Some)
+        }
+        // Target visibility/channel and reaction validity are checked by ingest.
+        KIND_REACTION if channel.guest_reactions => Ok(None),
+        KIND_DELETION | KIND_STREAM_MESSAGE_EDIT => {
+            let targets = super::side_effects::extract_target_event_ids(event);
+            let [id] = targets.as_slice() else {
+                return Err(MEMBERS_ONLY_POSTING.into());
+            };
+            let target = state
+                .db
+                .get_event_by_id_including_deleted_for_event_write(community_id, id)
+                .await
+                .map_err(|e| format!("error: database error: {e}"))?
+                .filter(|target| {
+                    target_readable_in_channel(target, channel.id, &actor)
+                        && effective_message_author(
+                            &target.event,
+                            &state.relay_keypair.public_key(),
+                        ) == actor
+                })
+                .ok_or_else(|| MEMBERS_ONLY_POSTING.to_string())?;
+            match event_kind_u32(&target.event) {
+                // Removal of one's own reaction remains possible after disabling
+                // additions, without granting deletion of any other event kind.
+                KIND_REACTION if event_kind_u32(event) == KIND_DELETION => Ok(None),
+                KIND_STREAM_MESSAGE | KIND_STREAM_MESSAGE_V2 if channel.guest_replies => {
+                    let metadata = state
+                        .db
+                        .get_thread_metadata_by_event(community_id, id)
+                        .await
+                        .map_err(|e| format!("error: database error: {e}"))?;
+                    // Persisted ancestry remains authoritative after a parent is
+                    // deleted. Legacy events without metadata are resolved below.
+                    if !metadata.is_some_and(|meta| {
+                        meta.channel_id == channel.id
+                            && meta.parent_event_id.is_some()
+                            && !meta.broadcast
+                    }) {
+                        guest_reply_meta(community_id, state, channel.id, &target.event).await?;
+                    }
+                    Ok(None)
+                }
+                _ => Err(MEMBERS_ONLY_POSTING.into()),
+            }
+        }
+        _ => Err(MEMBERS_ONLY_POSTING.into()),
+    }
+}
+
+async fn guest_reply_meta(
+    community_id: CommunityId,
+    state: &AppState,
+    channel_id: Uuid,
+    event: &Event,
+) -> Result<ThreadMetadataOwned, String> {
+    if event.tags.iter().any(|tag| {
+        let parts = tag.as_slice();
+        parts.first().map(String::as_str) == Some("broadcast")
+            && parts.get(1).map(String::as_str) == Some("1")
+    }) {
+        return Err(MEMBERS_ONLY_POSTING.into());
+    }
+    let meta = resolve_nip10_thread_meta(community_id, event, channel_id, state)
+        .await?
+        .ok_or_else(|| MEMBERS_ONLY_POSTING.to_string())?;
+    let actor = effective_message_author(event, &state.relay_keypair.public_key());
+    // An auxiliary event must not become a synthetic conversation root/parent.
+    for id in [&meta.root_event_id, &meta.parent_event_id] {
+        let valid = state
+            .db
+            .get_event_by_id_for_event_write(community_id, id)
+            .await
+            .map_err(|e| format!("error: database error: {e}"))?
+            .is_some_and(|target| {
+                target_readable_in_channel(&target, channel_id, &actor)
+                    && matches!(
+                        event_kind_u32(&target.event),
+                        KIND_STREAM_MESSAGE | KIND_STREAM_MESSAGE_V2
+                    )
+            });
+        if !valid {
+            return Err(MEMBERS_ONLY_POSTING.into());
+        }
+    }
+    Ok(meta)
+}
+
 /// The kind-9 channel write gates (token scope, membership or open channel,
 /// not archived) for a channel other than the event's own `h`.
 pub(crate) async fn check_channel_write(
@@ -1484,15 +1601,35 @@ async fn validate_edit_ownership(
         if let Some(ch_id) = target_event.channel_id {
             // A refused write is denied exactly like a missing target;
             // database errors keep their own message.
-            check_channel_membership(community_id, state, ch_id, &actor, None, ChannelWrite::Post)
-                .await
-                .map_err(|error| {
-                    if error.starts_with("error:") {
-                        error
-                    } else {
-                        EDIT_TARGET_DENIED.to_string()
-                    }
-                })?;
+            let access = check_channel_membership(
+                community_id,
+                state,
+                ch_id,
+                &actor,
+                None,
+                ChannelWrite::Post,
+            )
+            .await;
+            let access = if access.as_ref().err().map(String::as_str) == Some(MEMBERS_ONLY_POSTING)
+            {
+                let channel = state
+                    .db
+                    .get_channel_for_event_write(community_id, ch_id)
+                    .await
+                    .map_err(|e| format!("error: database error: {e}"))?;
+                guest_contribution(community_id, state, &channel, event)
+                    .await
+                    .map(|_| ())
+            } else {
+                access
+            };
+            access.map_err(|error| {
+                if error.starts_with("error:") {
+                    error
+                } else {
+                    EDIT_TARGET_DENIED.to_string()
+                }
+            })?;
         }
     } else {
         // Allow the owning human to edit messages authored by their agent.
@@ -2906,6 +3043,7 @@ async fn ingest_event_inner(
         Some(ch_id) => load_channel_for_write(tenant, state, ch_id).await?,
         None => None,
     };
+    let mut guest_thread_meta = None;
     // E1 phase-2 (§4.8 phase-2 addendum): resolve the fan-out visibility once,
     // here, through the same `channel_visibility_cached` gate fan-out uses
     // (fence 2: cached `private` wins over the prefetched row; a `private`
@@ -2949,7 +3087,7 @@ async fn ingest_event_inner(
             // at `check_channel_membership`'s `is_member_cached(tenant
             // .community(), …)` call (see crates/buzz-relay/src/handlers
             // /ingest.rs:424).
-            let auth_result = check_channel_membership(
+            let mut auth_result = check_channel_membership(
                 tenant.community(),
                 state,
                 ch_id,
@@ -2958,6 +3096,15 @@ async fn ingest_event_inner(
                 ChannelWrite::for_kind(kind_u32),
             )
             .await;
+            if auth_result.as_ref().err().map(String::as_str) == Some(MEMBERS_ONLY_POSTING) {
+                if let Some(channel) = &channel_row {
+                    auth_result = guest_contribution(tenant.community(), state, channel, &event)
+                        .await
+                        .map(|meta| {
+                            guest_thread_meta = meta;
+                        });
+                }
+            }
             let claimed = claimed_community_from_event(&event);
             let verdict = if auth_result.is_ok() {
                 Verdict::Allow
@@ -3424,7 +3571,9 @@ async fn ingest_event_inner(
 
     validate_event_imeta(tenant, state, &event, &tenant_media_base).await?;
 
-    let thread_meta = if requires_h_channel_scope(kind_u32) {
+    let thread_meta = if guest_thread_meta.is_some() {
+        guest_thread_meta
+    } else if requires_h_channel_scope(kind_u32) {
         if let Some(ch_id) = channel_id {
             resolve_nip10_thread_meta(tenant.community(), &event, ch_id, state)
                 .await

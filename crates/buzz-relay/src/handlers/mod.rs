@@ -26,10 +26,13 @@ mod deletion_postgres_tests;
 mod dm_growth_postgres_tests;
 #[cfg(test)]
 mod edit_metadata_postgres_tests;
+
 /// EVENT handler — WS dispatcher → ingest pipeline → fan-out.
 pub mod event;
 #[cfg(test)]
 pub(crate) mod group_state_postgres_tests;
+#[cfg(test)]
+mod guest_contributions_postgres_tests;
 /// NIP-IA identity archive request handler (kinds 9035–9036).
 pub mod identity_archive;
 /// imeta tag validation helpers.
