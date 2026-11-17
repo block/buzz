@@ -48,86 +48,73 @@ void main() {
         ],
       );
       addTearDown(container.dispose);
-      final subscription = container.listen(
-        channelPermissionsProvider('room'),
-        (_, _) {},
-      );
+      final provider = channelPermissionsProvider('room');
+      final subscription = container.listen(provider, (_, _) {});
       addTearDown(subscription.close);
-      expect(
-        container
-            .read(channelPermissionsProvider('room'))
-            .allows(ChannelAction.post),
-        isTrue,
-      );
+      bool allows(ChannelAction action) =>
+          container.read(provider).allows(action);
+
+      expect(allows(ChannelAction.post), isTrue);
       role = 'guest';
       container.invalidate(latestChannelMembersProvider('room'));
-      expect(
-        container
-            .read(channelPermissionsProvider('room'))
-            .allows(ChannelAction.post),
-        isFalse,
-      );
-      expect(
-        container
-            .read(channelPermissionsProvider('room'))
-            .allows(ChannelAction.reply),
-        isTrue,
-      );
+      expect(allows(ChannelAction.post), isFalse);
+      expect(allows(ChannelAction.reply), isTrue);
+      expect(allows(ChannelAction.react), isTrue);
+
       room = channel();
       container.invalidate(channelByIdProvider('room'));
-      expect(
-        container
-            .read(channelPermissionsProvider('room'))
-            .allows(ChannelAction.reply),
-        isFalse,
-      );
-      expect(
-        container
-            .read(channelPermissionsProvider('room'))
-            .allows(ChannelAction.react),
-        isFalse,
-      );
+      expect(allows(ChannelAction.reply), isFalse);
+      expect(allows(ChannelAction.react), isFalse);
     },
   );
 
   test('viewer grants are independent and never grant root publishing', () {
     for (final replies in [false, true]) {
       for (final reactions in [false, true]) {
-        final room = channel(replies: replies, reactions: reactions);
-        final guest = ChannelPermissions(room, 'guest');
+        final guest = ChannelPermissions(
+          channel(replies: replies, reactions: reactions),
+          'guest',
+        );
         expect(guest.allows(ChannelAction.post), isFalse);
         expect(guest.allows(ChannelAction.reply), replies);
         expect(guest.allows(ChannelAction.react), reactions);
         expect(guest.allows(ChannelAction.removeReaction), isTrue);
-        for (final role in ['member', 'admin', 'owner', 'bot']) {
-          for (final action in ChannelAction.values) {
-            expect(ChannelPermissions(room, role).allows(action), isTrue);
-          }
-        }
-        for (final action in ChannelAction.values) {
-          expect(ChannelPermissions(room, null).allows(action), isFalse);
-          expect(
-            ChannelPermissions(
-              channel(replies: true, reactions: true, joined: false),
-              'guest',
-            ).allows(action),
-            isFalse,
-          );
-          expect(
-            ChannelPermissions(
-              channel(replies: true, reactions: true, archived: true),
-              'guest',
-            ).allows(action),
-            isFalse,
-          );
-        }
-        final restored = Channel.fromJson(room.toJson());
-        expect(restored.guestReplies, replies);
-        expect(restored.copyWith(name: 'Updated').guestReactions, reactions);
-        expect(
-          restored.mergeDetails(ChannelDetails.fromChannel(room)).guestReplies,
-          replies,
-        );
+      }
+    }
+
+    final room = channel();
+    for (final role in ['member', 'admin', 'owner', 'bot']) {
+      expect(
+        ChannelAction.values.every(ChannelPermissions(room, role).allows),
+        isTrue,
+      );
+    }
+    for (final permissions in [
+      ChannelPermissions(room, null),
+      ChannelPermissions(
+        channel(replies: true, reactions: true, joined: false),
+        'guest',
+      ),
+      ChannelPermissions(
+        channel(replies: true, reactions: true, archived: true),
+        'guest',
+      ),
+    ]) {
+      expect(ChannelAction.values.any(permissions.allows), isFalse);
+    }
+  });
+
+  test('channel snapshots and updates preserve independent grants', () {
+    for (final replies in [false, true]) {
+      final original = channel(replies: replies, reactions: !replies);
+      final restored = Channel.fromJson(original.toJson());
+      for (final room in [
+        restored,
+        restored.copyWith(name: 'Updated'),
+        channel().mergeDetails(ChannelDetails.fromChannel(original)),
+      ]) {
+        expect(room.guestReplies, replies);
+        expect(room.guestReactions, !replies);
       }
     }
   });
