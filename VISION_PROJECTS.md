@@ -36,7 +36,7 @@ The portable representation is a NIP-34 repo announcement (kind:30617) — stand
 
 Branch protections live in the same event — `buzz-protect` tags. The relay enforces them at the git transport layer. Only npubs listed in `push-allowed` can push to protected branches. Force pushes are blocked. Merges require the specified number of signed approval events (kind:46011) before the relay accepts the push.
 
-Agents inherit access from their owner via [NIP-OA](docs/nips/NIP-OA.md). The relay checks: does the push carry a valid NIP-OA auth tag, and is the owner pubkey in that tag listed in `push-allowed`? If yes, the push is accepted — the agent's own pubkey doesn't need to be in the list. Add a maintainer, and all their authorized agents can push. Remove the maintainer, and all their agents lose access instantly. Agents without NIP-OA attestation are treated as their own identity and must be listed explicitly.
+Agents act under their own authority, never their owner's. An agent reaches a repo through its own membership in the repo channel or a grant its owner gives it. [NIP-OA](docs/nips/NIP-OA.md) says which human stands behind the agent, so every push is attributed to that owner and a ban on the owner reaches the agent too. A grant is scoped and expiring and can never exceed the owner's own authority, so when the owner loses access, the grant does too. See [VISION_GOVERNANCE.md](VISION_GOVERNANCE.md).
 
 Standard NIP-34 clients see a normal repo. gitworkshop.dev renders it. ngit-cli works with it. Buzz clients read the `buzz-` tags and wire up the channel and project UI. One event, two audiences, no custom kind for the repo itself.
 

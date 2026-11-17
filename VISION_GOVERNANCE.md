@@ -107,7 +107,7 @@ Your key is yours. The relay never sees it, and an identity assertion doesn't le
 
 In a community backed by an identity issuer ([NIP-FI](docs/nips/NIP-FI.md)), the issuer vouches for who you are and for how long. The relay checks that voucher when you connect and on every git request, and no session outlives it. Corporate identity says who you are and when that stops. The community says what you may do.
 
-A "no" from inside Buzz (a ban, a removal, a revoked grant) takes effect on the next request. A "no" from the issuer lands when the issuer stops vouching for you: right away if it sends a disconnect, otherwise when your current voucher runs out. The community sets how long a voucher can live.
+A "no" from inside Buzz (a ban, a removal, a revoked grant) takes effect on the next request. A "no" from the issuer lands when the issuer stops vouching for you. Once it stops issuing, you can't get back in after your current voucher runs out, and the community sets how long a voucher can live. A disconnect from the issuer can cut that short wherever it's applied, but it isn't the bound. Whether a write already in flight can still land is a separate promise: only under authority valid at its final acceptance.
 
 A governed community records which person stood behind each change. If you reuse that key on public Nostr, it's linkable to that identity. Use a separate key per governed community if that matters to you.
 
