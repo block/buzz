@@ -17,6 +17,13 @@ class _MeRetry extends StatelessWidget {
 
 enum _MeArchivePhase { pending, accepted }
 
+// Each attempt has its own identity: an older recovery read cannot retire a
+// later accepted archive of the same chat.
+class _MeArchiveOperation {
+  _MeArchiveOperation(this.phase);
+  final _MeArchivePhase phase;
+}
+
 class _MeChatRow extends ConsumerWidget {
   const _MeChatRow({
     required this.channelId,
@@ -105,7 +112,7 @@ class _MeChatRow extends ConsumerWidget {
                 const BuzzLoadingIndicator(size: 20),
               ] else if (accepted) ...[
                 const SizedBox(width: Grid.xs),
-                Icon(BuzzIcons.check, size: 20, color: color),
+                TextButton(onPressed: onRefresh, child: const Text('Refresh')),
               ] else if (working.isNotEmpty) ...[
                 const SizedBox(width: Grid.xs),
                 SoloWorkingDots(color: color),

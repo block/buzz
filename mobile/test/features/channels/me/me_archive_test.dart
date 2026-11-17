@@ -37,6 +37,14 @@ class _ArchiveRelay extends RelaySessionNotifier {
   bool failRefresh = false;
   int failedRefreshes = 0;
   VoidCallback? afterAcceptance;
+  final metadataVersions = <String, int>{};
+  final metadataReadGates = <Completer<void>>[];
+  int metadataReads = 0;
+
+  void unarchive(String id) {
+    archived.remove(id);
+    metadataVersions[id] = (metadataVersions[id] ?? 2) + 1;
+  }
 
   static const chats = {
     'grouped': 'Project chat',
@@ -74,9 +82,11 @@ class _ArchiveRelay extends RelaySessionNotifier {
         for (final entry in chats.entries)
           if (filter.tags['#d']?.contains(entry.key) == true)
             NostrEvent(
-              id: 'metadata-${entry.key}-${archived.contains(entry.key)}',
+              id: 'metadata-${entry.key}-${metadataVersions[entry.key] ?? 0}-${archived.contains(entry.key)}',
               pubkey: 'relay',
-              createdAt: archived.contains(entry.key) ? 2 : 1,
+              createdAt:
+                  metadataVersions[entry.key] ??
+                  (archived.contains(entry.key) ? 2 : 1),
               kind: 39000,
               tags: [
                 ['d', entry.key],
@@ -98,7 +108,16 @@ class _ArchiveRelay extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-  }) async => events(filter);
+  }) async {
+    final snapshot = events(filter);
+    if (filter.kinds.contains(39000)) {
+      metadataReads++;
+      if (metadataReadGates.isNotEmpty) {
+        await metadataReadGates.removeAt(0).future;
+      }
+    }
+    return snapshot;
+  }
 
   @override
   Future<List<NostrEvent>> queryRelay(
@@ -130,21 +149,29 @@ class _ArchiveRelay extends RelaySessionNotifier {
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
+    if (event.kind != 9002) return event;
     submitted.add(event);
     await acknowledgement?.future;
-    archived.add(event.getTagValue('h')!);
+    final channelId = event.getTagValue('h')!;
+    archived.add(channelId);
+    metadataVersions[channelId] = (metadataVersions[channelId] ?? 1) + 1;
     afterAcceptance?.call();
     return event;
   }
 }
 
 void main() {
-  for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
-    testWidgets('Solo archive journey on $platform', (tester) async {
+  for (final (platform, unarchiveBeforeRecovery) in [
+    for (final platform in [TargetPlatform.iOS, TargetPlatform.android])
+      for (final restore in [false, true]) (platform, restore),
+  ]) {
+    final name = 'Solo archive on $platform, restore=$unarchiveBeforeRecovery';
+    testWidgets(name, (tester) async {
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
       final owner = nostr.Keys.generate();
       final relay = _ArchiveRelay(owner.public);
+      relay.metadataVersions['loose'] = 10;
       final embedded = platform == TargetPlatform.android;
       final pane = ConversationPaneController();
       addTearDown(pane.dispose);
@@ -380,6 +407,9 @@ void main() {
       // It must retain accepted knowledge too: no second kind:9002, including
       // after the section disposes/remounts. Recovery retries only the read.
       relay.failRefresh = true;
+      // Another client can edit active metadata before our archive, without
+      // that revision ever reaching this page. Archive then becomes v12.
+      relay.metadataVersions['loose'] = 11;
       pane.open('shared', (_) => const SizedBox());
       await tester.drag(find.text('Loose chat'), const Offset(-700, 0));
       await tester.pumpAndSettle();
@@ -413,19 +443,122 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Archive #Loose chat?'), findsNothing);
       expect(relay.submitted, hasLength(4));
+      // Failed recovery must propagate as feedback and retain the marker.
+      ScaffoldMessenger.of(context).clearSnackBars();
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.descendant(
+          of: find.byKey(const ValueKey('archive-solo-loose')),
+          matching: find.widgetWithText(TextButton, 'Refresh'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Couldn’t refresh chat status. Try again.'),
+        findsOneWidget,
+      );
+      expect(
+        find.bySemanticsLabel('Loose chat, archived, awaiting refresh'),
+        findsOneWidget,
+      );
+      expect(relay.submitted, hasLength(4));
+      ScaffoldMessenger.of(context).clearSnackBars();
+      await tester.pumpAndSettle();
+
+      // A generic notification with newer-but-pre-archive active v11 is not
+      // a recovery receipt. It must not clear accepted tracking for v12.
+      relay.archived.remove('loose');
+      relay.metadataVersions['loose'] = 11;
       relay.failRefresh = false;
-      acceptedNode.owner!.performAction(
-        acceptedNode.id,
-        ui.SemanticsAction.customAction,
-        acceptedActions.single,
+      await container.read(channelsProvider.notifier).refresh();
+      await tester.pumpAndSettle();
+      expect(
+        container
+            .read(channelsProvider)
+            .requireValue
+            .firstWhere((c) => c.id == 'loose')
+            .createdAt
+            .millisecondsSinceEpoch,
+        11000,
+      );
+      expect(
+        find.bySemanticsLabel('Loose chat, archived, awaiting refresh'),
+        findsOneWidget,
+      );
+      await tester.drag(find.text('Loose chat'), const Offset(-700, 0));
+      await tester.pumpAndSettle();
+      expect(find.text('Archive #Loose chat?'), findsNothing);
+      expect(relay.submitted, hasLength(4));
+      relay.archived.add('loose');
+      relay.metadataVersions['loose'] = 12;
+
+      if (unarchiveBeforeRecovery) {
+        // No archived snapshot was observed for this chat. A successful
+        // explicit post-acceptance recovery must honor the later active v13.
+        relay.unarchive('loose');
+        final oldRecovery = Completer<void>();
+        relay.metadataReadGates.add(oldRecovery);
+        final readsBeforeRecovery = relay.metadataReads;
+        _performCustomAction(
+          tester,
+          'Loose chat, archived, awaiting refresh',
+          'Refresh chat status',
+        );
+        await tester.pumpAndSettle();
+        expect(relay.metadataReads, readsBeforeRecovery + 1);
+        // Start a second recovery while the first response is held.
+        _performCustomAction(
+          tester,
+          'Loose chat, archived, awaiting refresh',
+          'Refresh chat status',
+        );
+        await tester.pumpAndSettle();
+        expect(find.bySemanticsLabel('Loose chat'), findsOneWidget);
+        expect(relay.submitted, hasLength(4));
+        _performCustomAction(tester, 'Loose chat', 'Archive chat');
+        await tester.pumpAndSettle();
+        expect(find.text('Archive #Loose chat?'), findsOneWidget);
+        await tester.tap(find.text('Cancel'));
+        await tester.pumpAndSettle();
+        expect(relay.submitted, hasLength(4));
+
+        // A new confirmed archive gets a different operation identity. The
+        // old recovery's late completion cannot retire that new marker.
+        relay.failRefresh = true;
+        await tester.drag(find.text('Loose chat'), const Offset(-700, 0));
+        await tester.pumpAndSettle();
+        await tester.tap(find.widgetWithText(FilledButton, 'Archive'));
+        await tester.pumpAndSettle();
+        expect(relay.submitted, hasLength(5));
+        oldRecovery.complete();
+        await tester.pumpAndSettle();
+        expect(
+          find.bySemanticsLabel('Loose chat, archived, awaiting refresh'),
+          findsOneWidget,
+        );
+        expect(
+          find.text('Couldn’t refresh chat status. Try again.'),
+          findsNothing,
+        );
+        await tester.drag(find.text('Loose chat'), const Offset(-700, 0));
+        await tester.pumpAndSettle();
+        expect(find.text('Archive #Loose chat?'), findsNothing);
+        expect(relay.submitted, hasLength(5));
+      }
+      relay.failRefresh = false;
+      _performCustomAction(
+        tester,
+        'Loose chat, archived, awaiting refresh',
+        'Refresh chat status',
       );
       await tester.pumpAndSettle();
       expect(find.text('Loose chat'), findsNothing);
-      expect(relay.submitted, hasLength(4));
+      final archiveSubmissions = unarchiveBeforeRecovery ? 5 : 4;
+      expect(relay.submitted, hasLength(archiveSubmissions));
 
       // Once reconciliation has observed the archive, a genuine later
       // unarchive is actionable again; completed IDs do not accumulate.
-      relay.archived.remove('grouped');
+      relay.unarchive('grouped');
       await container.read(channelsProvider.notifier).refresh();
       await tester.pumpAndSettle();
       expect(find.bySemanticsLabel('Project chat'), findsOneWidget);
@@ -434,7 +567,7 @@ void main() {
       expect(find.text('Archive #Project chat?'), findsOneWidget);
       await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
-      expect(relay.submitted, hasLength(4));
+      expect(relay.submitted, hasLength(archiveSubmissions));
 
       // An acknowledgement from a retired community cannot mutate the new
       // scope's row state, feedback, or same-ID tablet selection.
@@ -443,7 +576,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.widgetWithText(FilledButton, 'Archive'));
       await tester.pumpAndSettle();
-      expect(relay.submitted, hasLength(5));
+      expect(relay.submitted, hasLength(archiveSubmissions + 1));
       container
           .read(relayConfigProvider.notifier)
           .update(baseUrl: 'https://other-relay.test', nsec: owner.nsec);
@@ -502,4 +635,14 @@ void main() {
       expect(relay.archived, isNot(contains('loose')));
     },
   );
+}
+
+void _performCustomAction(WidgetTester tester, String label, String action) {
+  final finder = find.bySemanticsLabel(label);
+  expect(finder, findsOneWidget);
+  final node = tester.getSemantics(finder);
+  final id = node.getSemanticsData().customSemanticsActionIds!.singleWhere(
+    (id) => CustomSemanticsAction.getAction(id)!.label == action,
+  );
+  node.owner!.performAction(node.id, ui.SemanticsAction.customAction, id);
 }
