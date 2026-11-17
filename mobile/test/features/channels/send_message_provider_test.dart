@@ -24,7 +24,7 @@ void main() {
         ),
         fetchMembers: (_) => members.future,
         readUserCache: () => const {},
-        canSend: (_, _) => allowed,
+        canSend: (_, _, _) => allowed,
         addLocalMessage: (_, _) => localCount++,
         completeLocalMessage: (_, _) {},
         removeLocalMessage: (_, _) {},

@@ -25,7 +25,7 @@ class SendMessage {
   final void Function(String channelId, String eventId) _completeLocalMessage;
   final void Function(String channelId, String eventId) _removeLocalMessage;
   final bool Function()? _isDeliveryValid;
-  final bool Function(String channelId, bool reply)? _canSend;
+  final bool Function(String channelId, bool reply, Channel? channel)? _canSend;
 
   SendMessage({
     required SignedEventRelay signedEventRelay,
@@ -39,7 +39,7 @@ class SendMessage {
     completeLocalMessage,
     required void Function(String channelId, String eventId) removeLocalMessage,
     bool Function()? isDeliveryValid,
-    bool Function(String channelId, bool reply)? canSend,
+    bool Function(String channelId, bool reply, Channel? channel)? canSend,
   }) : _signedEventRelay = signedEventRelay,
        _fetchMembers = fetchMembers,
        _readUserCache = readUserCache,
@@ -69,7 +69,7 @@ class SendMessage {
   }) async {
     void ensureAllowed() {
       _ensureDeliveryValid();
-      if (_canSend?.call(channelId, parentEventId != null) == false) {
+      if (_canSend?.call(channelId, parentEventId != null, channel) == false) {
         throw StateError('You do not have permission to send this message.');
       }
     }
@@ -285,9 +285,17 @@ SendMessage _sender(Ref ref, {bool personal = false}) {
       session: ref.read(relaySessionProvider.notifier),
       nsec: config.nsec,
     ),
-    canSend: (channelId, reply) => ref
-        .read(channelPermissionsProvider(channelId))
-        .allows(reply ? ChannelAction.reply : ChannelAction.post),
+    canSend: (channelId, reply, channel) {
+      final permissions = ref.read(channelPermissionsProvider(channelId));
+      // A newly opened DM can send before the channel list includes it.
+      final openedDm = channel?.id == channelId && channel?.isDm == true
+          ? channel
+          : null;
+      return ChannelPermissions(
+        permissions.channel ?? openedDm,
+        permissions.role,
+      ).allows(reply ? ChannelAction.reply : ChannelAction.post);
+    },
     fetchMembers: (channelId) =>
         ref.read(channelMembersProvider(channelId).future),
     readUserCache: () => ref.read(userCacheProvider),

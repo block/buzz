@@ -1,4 +1,7 @@
+import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_messages_provider.dart';
+import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/channel_typing_provider.dart';
 import 'package:buzz/features/channels/pending_local_messages_provider.dart';
 import 'package:buzz/features/channels/send_message_provider.dart';
@@ -30,7 +33,31 @@ void main() {
 
         // The relay admits the live REQ only after its access checks.
         final admitted = relay.holdReq();
-        final container = ProviderContainer(overrides: relay.overrides);
+        final container = ProviderContainer(
+          overrides: [
+            ...relay.overrides,
+            channelByIdProvider(_channel).overrideWithValue(
+              Channel(
+                id: _channel,
+                name: 'general',
+                channelType: 'stream',
+                visibility: 'open',
+                description: '',
+                createdBy: relay.pubkey,
+                createdAt: DateTime.utc(2026),
+                memberCount: 1,
+                isMember: true,
+              ),
+            ),
+            latestChannelMembersProvider(_channel).overrideWithValue([
+              ChannelMember(
+                pubkey: relay.pubkey,
+                role: 'member',
+                joinedAt: DateTime.utc(2026),
+              ),
+            ]),
+          ],
+        );
         addTearDown(container.dispose);
         var messages = container.listen(
           channelMessagesProvider(_channel),

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_permissions.dart';
 import 'package:buzz/features/forum/forum_models.dart';
 import 'package:buzz/features/forum/forum_post_card.dart';
 import 'package:buzz/features/forum/forum_posts_view.dart';
@@ -104,6 +105,9 @@ Widget _buildPostsView({
     overrides: [
       userCacheProvider.overrideWith(() => _FakeUserCacheNotifier(users)),
       profileProvider.overrideWith(() => _FakeProfileNotifier()),
+      channelPermissionsProvider(
+        ch.id,
+      ).overrideWithValue(ChannelPermissions(ch, 'member')),
       forumPostsProvider(ch.id).overrideWith((ref) async => postsResponse),
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
@@ -145,6 +149,9 @@ Widget _buildThreadPage({
         _channelId,
       ).overrideWith((ref) async => channelBotPubkeys),
       profileProvider.overrideWith(() => _FakeProfileNotifier()),
+      channelPermissionsProvider(
+        _channelId,
+      ).overrideWithValue(ChannelPermissions(_forumChannel, 'member')),
       forumThreadProvider((
         channelId: _channelId,
         eventId: postEventId,
@@ -208,6 +215,9 @@ Widget _buildLiveForum(_CountingForumSession session, Widget child) =>
       retry: (_, _) => null,
       overrides: [
         relaySessionProvider.overrideWith(() => session),
+        channelPermissionsProvider(
+          _channelId,
+        ).overrideWithValue(ChannelPermissions(_forumChannel, 'member')),
         userCacheProvider.overrideWith(() => _FakeUserCacheNotifier(const {})),
         knownAgentPubkeysProvider.overrideWithValue(const {}),
         profileProvider.overrideWith(() => _FakeProfileNotifier()),

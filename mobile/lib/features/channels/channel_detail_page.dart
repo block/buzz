@@ -318,11 +318,15 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       ],
     );
     final memberProfilesPreloadState = useFuture(memberProfilesPreload);
+    final permissions = ref.watch(
+      channelPermissionsProvider(resolvedChannel.id),
+    );
     final showsComposer =
         !resolvedChannel.isForum &&
-        ref
-            .watch(channelPermissionsProvider(resolvedChannel.id))
-            .allows(ChannelAction.post);
+        ChannelPermissions(
+          resolvedChannel,
+          permissions.role,
+        ).allows(ChannelAction.post);
     final profileOwnedAgentPubkeys = <String>[];
     for (final participantPubkey in resolvedChannel.participantPubkeys) {
       final normalized = participantPubkey.trim().toLowerCase();

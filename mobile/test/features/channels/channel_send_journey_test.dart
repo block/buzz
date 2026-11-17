@@ -1,5 +1,7 @@
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
+import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -47,6 +49,14 @@ void main() {
       ProviderScope(
         overrides: [
           ...relay.overrides,
+          channelByIdProvider(_channelId).overrideWithValue(_channel),
+          latestChannelMembersProvider(_channelId).overrideWithValue([
+            ChannelMember(
+              pubkey: relay.pubkey,
+              role: 'member',
+              joinedAt: DateTime.utc(2026),
+            ),
+          ]),
           savedPrefsProvider.overrideWithValue(prefs),
           appLifecycleProvider.overrideWith(_Resumed.new),
         ],

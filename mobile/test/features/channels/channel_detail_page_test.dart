@@ -57,6 +57,7 @@ import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/channel_permissions.dart';
 import 'package:buzz/features/channels/channel_messages_provider.dart';
 import 'package:buzz/features/channels/channel_window.dart';
 import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart';
@@ -409,6 +410,13 @@ Widget _buildTestable({
         presenceCacheProvider.overrideWith(() => presenceCache),
       if (!useRealChannelProviders)
         channelsProvider.overrideWith(() => fakeChannelsNotifier),
+      channelPermissionsProvider.overrideWith(
+        (ref, id) => ChannelPermissions(
+          ref.watch(channelByIdProvider(id)) ??
+              (id == resolvedChannel.id ? resolvedChannel : null),
+          'member',
+        ),
+      ),
       channelStarsProvider.overrideWith(_FakeChannelStarsNotifier.new),
       channelMutesProvider.overrideWith(_FakeChannelMutesNotifier.new),
       if (!useRealChannelProviders)

@@ -1,3 +1,5 @@
+import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_permissions.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
@@ -79,6 +81,32 @@ final _dataset = EmojiDataset(
 
 const _messageId = 'msg-1';
 
+final _channelPermission = channelPermissionsProvider('channel')
+    .overrideWithValue(
+      ChannelPermissions(
+        Channel(
+          id: 'channel',
+          name: 'general',
+          channelType: 'stream',
+          visibility: 'open',
+          description: '',
+          createdBy: _alice,
+          createdAt: DateTime.utc(2026),
+          memberCount: 1,
+          isMember: true,
+        ),
+        'member',
+      ),
+    );
+
+Widget _testableReactionRow({
+  required Widget child,
+  List<Override> overrides = const [],
+}) => WidgetHelpers.testable(
+  child: child,
+  overrides: [_channelPermission, ...overrides],
+);
+
 /// Pumps the row and hands back the enclosing container, so tests can arm a
 /// pending burst or inspect the particle controller.
 ///
@@ -96,7 +124,7 @@ Future<ProviderContainer> _pumpRow(
   VoidCallback? onMessageLongPress,
 }) async {
   await tester.pumpWidget(
-    WidgetHelpers.testable(
+    _testableReactionRow(
       overrides: [
         emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
         userCacheProvider.overrideWith(
@@ -163,7 +191,7 @@ void main() {
     ]);
     addTearDown(reactions.dispose);
     await tester.pumpWidget(
-      WidgetHelpers.testable(
+      _testableReactionRow(
         overrides: [
           userCacheProvider.overrideWith(() => _FakeUserCacheNotifier({})),
         ],
@@ -192,7 +220,7 @@ void main() {
     tester,
   ) async {
     await tester.pumpWidget(
-      WidgetHelpers.testable(
+      _testableReactionRow(
         child: Consumer(
           builder: (context, ref, _) => TextButton(
             onPressed: () => toggleReaction(
@@ -310,7 +338,7 @@ void main() {
         ),
       );
       await tester.pumpWidget(
-        WidgetHelpers.testable(
+        _testableReactionRow(
           overrides: [
             emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
             userCacheProvider.overrideWith(
@@ -497,7 +525,7 @@ void main() {
         ),
       );
       await tester.pumpWidget(
-        WidgetHelpers.testable(
+        _testableReactionRow(
           overrides: [
             emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
             relayConfigProvider.overrideWith(
@@ -639,7 +667,7 @@ void main() {
         },
       );
       await tester.pumpWidget(
-        WidgetHelpers.testable(
+        _testableReactionRow(
           overrides: [
             emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
             userCacheProvider.overrideWith(() => _FakeUserCacheNotifier({})),
@@ -853,7 +881,7 @@ void main() {
         ),
       );
       await tester.pumpWidget(
-        WidgetHelpers.testable(
+        _testableReactionRow(
           overrides: [
             emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
             mediaHttpClientProvider.overrideWithValue(
@@ -1158,6 +1186,7 @@ void main() {
         await tester.pumpWidget(
           ProviderScope(
             overrides: [
+              _channelPermission,
               emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
               userCacheProvider.overrideWith(
                 () => _FakeUserCacheNotifier(const {}),
@@ -1204,6 +1233,7 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
+            _channelPermission,
             emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
             userCacheProvider.overrideWith(
               () => _FakeUserCacheNotifier(const {}),

@@ -45,6 +45,9 @@ void combinedReactionTests() {
         pubkey: _alice,
         createdAt: 1,
         content: '',
+        tags: const [
+          ['h', 'channel'],
+        ],
         reactions: [
           TimelineReaction(
             emoji: _fire,
@@ -56,7 +59,7 @@ void combinedReactionTests() {
         ],
       );
       await tester.pumpWidget(
-        WidgetHelpers.testable(
+        _testableReactionRow(
           overrides: [
             channelActionsProvider.overrideWithValue(actions),
             userCacheProvider.overrideWith(() => _FakeUserCacheNotifier({})),
@@ -114,7 +117,7 @@ void combinedReactionTests() {
           );
           addTearDown(client.close);
           await tester.pumpWidget(
-            WidgetHelpers.testable(
+            _testableReactionRow(
               overrides: [mediaHttpClientProvider.overrideWithValue(client)],
               child: MediaQuery(
                 data: MediaQueryData(textScaler: TextScaler.linear(scale)),

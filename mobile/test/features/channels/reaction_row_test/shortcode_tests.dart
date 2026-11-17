@@ -46,7 +46,7 @@ void shortcodeReactionTests() {
     );
     addTearDown(client.close);
     await tester.pumpWidget(
-      WidgetHelpers.testable(
+      _testableReactionRow(
         overrides: overrides(client),
         child: ReactionRow(
           messageId: _messageId,
@@ -135,7 +135,7 @@ void shortcodeReactionTests() {
     final client = MockClient((_) async => http.Response('missing', 404));
     addTearDown(client.close);
     await tester.pumpWidget(
-      WidgetHelpers.testable(
+      _testableReactionRow(
         overrides: overrides(client),
         child: ReactionRow(
           messageId: _messageId,
