@@ -156,16 +156,19 @@ pub enum ActionDef {
 
 impl WorkflowDef {
     /// True when any step performs an action that can exfiltrate channel data
-    /// to an arbitrary external destination (`call_webhook`).
+    /// outside the workflow channel (`call_webhook` or `send_dm`).
     ///
     /// Definitions with such steps require elevated (owner/admin) channel
     /// authority both to save and to run — plain membership is not enough,
     /// because a workflow forwards channel content with the *owner's* standing
     /// authority long after the save (SEC-006).
     pub fn requires_elevated_authority(&self) -> bool {
-        self.steps
-            .iter()
-            .any(|s| matches!(s.action, ActionDef::CallWebhook { .. }))
+        self.steps.iter().any(|s| {
+            matches!(
+                s.action,
+                ActionDef::CallWebhook { .. } | ActionDef::SendDm { .. }
+            )
+        })
     }
 
     /// Validate the workflow definition. Returns `Err` with a descriptive message
@@ -204,6 +207,9 @@ impl WorkflowDef {
                     "step id '{}' is invalid: must contain only alphanumeric characters and underscores",
                     step.id
                 )));
+            }
+            if let ActionDef::SendDm { to, .. } = &step.action {
+                validate_dm_recipient(to)?;
             }
             if !seen_ids.insert(step.id.as_str()) {
                 return Err(WorkflowError::InvalidDefinition(format!(
@@ -275,6 +281,17 @@ impl WorkflowDef {
         }
 
         Ok(())
+    }
+}
+
+/// Enforce the recipient forms before trigger-controlled template resolution.
+pub(crate) fn validate_dm_recipient(to: &str) -> Result<(), WorkflowError> {
+    if to == "{{trigger.author}}" || nostr::PublicKey::from_hex(to).is_ok() {
+        Ok(())
+    } else {
+        Err(WorkflowError::InvalidDefinition(
+            "send_dm recipient must be a hex pubkey or {{trigger.author}}".into(),
+        ))
     }
 }
 

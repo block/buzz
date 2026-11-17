@@ -1981,11 +1981,35 @@ pub fn build_workflow_approval(
 
 /// Build a DM open event (kind 41010).
 ///
-/// `pubkeys` must be 1–8 hex-encoded pubkeys to include in the DM conversation.
+/// `pubkeys` are the hex-encoded pubkeys of everyone else in the DM, at least
+/// one. The relay finds the DM of exactly these members or, when they are all
+/// people, their DM, which agents may have joined (there is one DM per group
+/// of people). Otherwise it makes a DM of exactly these members. It refuses
+/// a DM of more than nine people, the caller included; agents do not count.
+/// To find the DM of the named people whichever agents are named, and add
+/// the named agents to it, use [`build_dm_open_with_history`].
+///
+/// The relay answers kind 41010 and kind 41011 with
+/// `response:{"channel_id":"<uuid>","created":<bool>}`, where `created` is
+/// true only when a new DM was made.
 pub fn build_dm_open(pubkeys: &[&str]) -> Result<EventBuilder, SdkError> {
-    if pubkeys.is_empty() || pubkeys.len() > 8 {
+    dm_open(pubkeys, false)
+}
+
+/// Build a DM open event (kind 41010) with a `["history", "include"]` tag.
+///
+/// The relay finds the DM of the named people, whatever agents it holds, adds
+/// any named agents it lacks, so they see its history, and makes the DM if
+/// there is none. `pubkeys` is as for [`build_dm_open`]. Only people may send
+/// the tag: the relay refuses it from an agent.
+pub fn build_dm_open_with_history(pubkeys: &[&str]) -> Result<EventBuilder, SdkError> {
+    dm_open(pubkeys, true)
+}
+
+fn dm_open(pubkeys: &[&str], include_history: bool) -> Result<EventBuilder, SdkError> {
+    if pubkeys.is_empty() {
         return Err(SdkError::InvalidInput(
-            "dm open requires 1-8 pubkeys".into(),
+            "dm open requires at least 1 pubkey".into(),
         ));
     }
     let mut tags = Vec::with_capacity(pubkeys.len());
@@ -1993,13 +2017,37 @@ pub fn build_dm_open(pubkeys: &[&str]) -> Result<EventBuilder, SdkError> {
         let validated = check_pubkey_hex(pk, "pubkey")?;
         tags.push(tag(&["p", &validated])?);
     }
+    if include_history {
+        tags.push(tag(&["history", "include"])?);
+    }
     Ok(EventBuilder::new(Kind::Custom(KIND_DM_OPEN as u16), "").tags(tags))
 }
 
 /// Build a DM add-member event (kind 41011).
-pub fn build_dm_add_member(channel_id: Uuid, pubkey: &str) -> Result<EventBuilder, SdkError> {
+///
+/// With `include_history`, the member joins this DM and sees its history,
+/// unless a person is joining a DM of at most one person and their agents.
+/// Otherwise it finds or makes a DM of this DM's people and the member, as
+/// [`build_dm_open`] does; agents already here stay behind. Only people may send the history
+/// tag: the relay refuses it from an agent.
+///
+/// The relay also accepts `["history", "ask"]` on kind 41011, which this
+/// builder does not send: agents, and people added to a DM of at most one
+/// person, are added as with `include`, while people who would join a DM of
+/// two or more people are refused with the exact message
+/// `needs-choice: history` and nothing changes. The client then asks whether
+/// they should see the DM's history and sends the add again, tagged `include`
+/// or untagged.
+pub fn build_dm_add_member(
+    channel_id: Uuid,
+    pubkey: &str,
+    include_history: bool,
+) -> Result<EventBuilder, SdkError> {
     let pk = check_pubkey_hex(pubkey, "pubkey")?;
-    let tags = vec![tag(&["h", &channel_id.to_string()])?, tag(&["p", &pk])?];
+    let mut tags = vec![tag(&["h", &channel_id.to_string()])?, tag(&["p", &pk])?];
+    if include_history {
+        tags.push(tag(&["history", "include"])?);
+    }
     Ok(EventBuilder::new(Kind::Custom(KIND_DM_ADD_MEMBER as u16), "").tags(tags))
 }
 
@@ -5102,6 +5150,25 @@ mod tests {
         let ev = sign(build_dm_open(&[&pk]).unwrap());
         assert_eq!(ev.kind.as_u16(), 41010);
         assert!(has_tag(&ev, "p", &pk));
+        assert!(!ev.tags.iter().any(|t| t.as_slice()[0] == "history"));
+    }
+
+    #[test]
+    fn dm_open_with_history_tags_the_open() {
+        let (a, b) = ("a".repeat(64), "b".repeat(64));
+        let ev = sign(build_dm_open_with_history(&[&a, &b]).unwrap());
+        assert_eq!(ev.kind.as_u16(), 41010);
+        assert!(has_tag(&ev, "p", &a));
+        assert!(has_tag(&ev, "p", &b));
+        assert!(has_tag(&ev, "history", "include"));
+    }
+
+    #[test]
+    fn dm_open_with_history_validates_like_dm_open() {
+        for pubkeys in [&[][..], &["bad-hex"][..]] {
+            let err = build_dm_open_with_history(pubkeys).unwrap_err();
+            assert!(matches!(err, SdkError::InvalidInput(_)));
+        }
     }
 
     #[test]
@@ -5111,11 +5178,16 @@ mod tests {
     }
 
     #[test]
-    fn dm_open_rejects_over_8_pubkeys() {
+    fn dm_open_leaves_the_people_limit_to_the_relay() {
+        // Agents do not count toward the relay's nine-person limit, and an
+        // agent caller is not one of the nine, so the SDK caps nothing.
         let pk = "a".repeat(64);
-        let pks: Vec<&str> = vec![pk.as_str(); 9];
-        let err = build_dm_open(&pks).unwrap_err();
-        assert!(matches!(err, SdkError::InvalidInput(_)));
+        let pks: Vec<&str> = vec![pk.as_str(); 12];
+        let ev = sign(build_dm_open(&pks).unwrap());
+        assert_eq!(
+            ev.tags.iter().filter(|t| t.as_slice()[0] == "p").count(),
+            12
+        );
     }
 
     #[test]
@@ -5128,15 +5200,22 @@ mod tests {
     fn dm_add_member_happy_path() {
         let cid = uuid();
         let pk = "b".repeat(64);
-        let ev = sign(build_dm_add_member(cid, &pk).unwrap());
+        let ev = sign(build_dm_add_member(cid, &pk, false).unwrap());
         assert_eq!(ev.kind.as_u16(), 41011);
         assert!(has_tag(&ev, "h", &cid.to_string()));
         assert!(has_tag(&ev, "p", &pk));
+        assert!(!ev.tags.iter().any(|t| t.as_slice()[0] == "history"));
+    }
+
+    #[test]
+    fn dm_add_member_with_history() {
+        let ev = sign(build_dm_add_member(uuid(), &"b".repeat(64), true).unwrap());
+        assert!(has_tag(&ev, "history", "include"));
     }
 
     #[test]
     fn dm_add_member_rejects_bad_pubkey() {
-        let err = build_dm_add_member(uuid(), "short").unwrap_err();
+        let err = build_dm_add_member(uuid(), "short", false).unwrap_err();
         assert!(matches!(err, SdkError::InvalidInput(_)));
     }
 
