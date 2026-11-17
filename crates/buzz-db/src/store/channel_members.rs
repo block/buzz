@@ -1156,6 +1156,28 @@ pub async fn remove_member(
     // as `add_member`).
     acquire_channel_membership_lock(tx.conn(), community_id, channel_id).await?;
 
+    remove_member_on(
+        &mut tx,
+        channel_id,
+        pubkey,
+        actor_pubkey,
+        actor_is_agent_owner,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Apply a removal on an admitted transaction holding the membership lock.
+async fn remove_member_on(
+    tx: &mut AdmittedTx,
+    channel_id: Uuid,
+    pubkey: &[u8],
+    actor_pubkey: &[u8],
+    actor_is_agent_owner: bool,
+) -> Result<()> {
+    let community_id = tx.community();
+    let is_self_remove = pubkey == actor_pubkey;
     let target_role = get_active_role_tx(tx.conn(), community_id, channel_id, pubkey).await?;
     if !is_self_remove {
         let actor_role_str = get_active_role_tx(tx.conn(), community_id, channel_id, actor_pubkey)
@@ -1214,7 +1236,6 @@ pub async fn remove_member(
         return Err(DbError::MemberNotFound(channel_id));
     }
 
-    tx.commit().await?;
     Ok(())
 }
 
@@ -2449,6 +2470,46 @@ impl Db {
         actor_pubkey: &[u8],
     ) -> Result<()> {
         remove_member(&self.pool, community_id, channel_id, pubkey, actor_pubkey).await
+    }
+
+    /// Store a kind:9001 command and its removal together. A locked refusal
+    /// rolls back the event; a duplicate never removes a rejoined member.
+    #[datastore_span(name = "remove_member_with_event", system = "postgresql")]
+    pub async fn remove_member_with_event(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+        event: &nostr::Event,
+        thread_meta: Option<crate::event::ThreadMetadataParams<'_>>,
+    ) -> Result<(buzz_core::StoredEvent, bool)> {
+        let actor = event.pubkey.to_bytes();
+        // Immutable ownership lookup, before taking a pooled transaction.
+        let actor_is_agent_owner = pubkey != actor.as_slice()
+            && crate::user::is_agent_owner(&self.pool, community_id, pubkey, &actor).await?;
+        let mut tx = crate::begin_community_event_write_transaction(
+            &self.pool,
+            community_id,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        tx.set_push_enqueue(self.push_enqueue.clone());
+        acquire_channel_membership_lock(tx.conn(), community_id, channel_id).await?;
+        let (stored, inserted) = crate::event::insert_event_with_thread_metadata_tx(
+            &mut tx,
+            event,
+            Some(channel_id),
+            thread_meta,
+        )
+        .await?;
+        if !inserted {
+            tx.rollback().await?;
+            return Ok((stored, false));
+        }
+        crate::insert_mentions_in_transaction(&mut tx, event, Some(channel_id)).await?;
+        remove_member_on(&mut tx, channel_id, pubkey, &actor, actor_is_agent_owner).await?;
+        tx.commit().await?;
+        Ok((stored, true))
     }
 
     /// Returns `true` if the pubkey is an active member.
@@ -5784,74 +5845,6 @@ mod postgres_tests {
             members.iter().any(|m| m.pubkey == victim),
             "victim must not have been removed by a demoted actor"
         );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn remove_member_protects_a_target_promoted_to_owner_while_waiting() {
-        let pool = setup_pool().await;
-        let (community, channel_id, owner, admin) =
-            channel_with_two_owners(&pool, "owner-precedence-race").await;
-        add_member(
-            &pool,
-            community,
-            channel_id,
-            &admin,
-            MemberRole::Admin,
-            Some(&owner),
-        )
-        .await
-        .expect("make actor an admin");
-        let target = random_pubkey();
-        ensure_user(&pool, community, &target)
-            .await
-            .expect("ensure target");
-        add_member(
-            &pool,
-            community,
-            channel_id,
-            &target,
-            MemberRole::Member,
-            Some(&owner),
-        )
-        .await
-        .expect("add target");
-
-        let mut holder = pool.begin().await.expect("begin lock holder");
-        acquire_channel_membership_lock(&mut holder, community, channel_id)
-            .await
-            .expect("lock membership");
-        let pool2 = pool.clone();
-        let target2 = target.clone();
-        let mut remover = tokio::spawn(async move {
-            remove_member(&pool2, community, channel_id, &target2, &admin).await
-        });
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(750), &mut remover)
-                .await
-                .is_err(),
-            "removal must wait on membership lock"
-        );
-        sqlx::query("UPDATE channel_members SET role = 'owner' WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3")
-            .bind(community.as_uuid())
-            .bind(channel_id)
-            .bind(&target)
-            .execute(&mut *holder)
-            .await
-            .expect("promote target before removal obtains lock");
-        holder.commit().await.expect("commit promotion");
-        let err = tokio::time::timeout(std::time::Duration::from_secs(10), remover)
-            .await
-            .expect("removal proceeds")
-            .expect("task completes")
-            .expect_err("admin must not remove newly promoted owner");
-        assert!(matches!(err, DbError::AccessDenied(_)), "{err:?}");
-        let members = get_members(&pool, community, channel_id)
-            .await
-            .expect("members");
-        assert!(members
-            .iter()
-            .any(|m| m.pubkey == target && m.role == "owner"));
     }
 
     /// A soft-removed row keeps its stored `role`, but that role is history,

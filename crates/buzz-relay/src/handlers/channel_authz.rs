@@ -84,7 +84,7 @@ impl From<MemberPutDenial> for ChannelAuthzError {
 ///
 /// This is the single definition of last-owner protection. Every call site
 /// that once restated it — kind:9000 demotion, kind:9001 self-removal,
-/// kind:9022 leave, and the `handle_remove_user` / `handle_leave_request`
+/// kind:9022 leave, and the `handle_leave_request`
 /// appliers — asks this one question and supplies its own wording.
 ///
 /// `members` must already be filtered to *active* membership; both
