@@ -25,6 +25,18 @@ Future<void> openChannelLink({
   );
 }
 
+/// An open channel read from its own metadata, for a channel the viewer reads
+/// without joining, such as one an Activity mention came from. Null for a
+/// private channel or a DM. Read once per channel, relay and identity.
+final openChannelProvider = FutureProvider.family<Channel?, String>((
+  ref,
+  channelId,
+) {
+  ref.watch(relayConfigProvider.select((config) => config.baseUrl));
+  ref.watch(myPubkeyProvider);
+  return ref.read(channelsProvider.notifier).fetchOpenChannel(channelId);
+});
+
 /// Taps still resolving, so a repeated tap during a slow lookup doesn't open
 /// the channel twice. Each is keyed by the page and connection it was made
 /// on, so a lookup that will be discarded blocks no new tap: the relay config

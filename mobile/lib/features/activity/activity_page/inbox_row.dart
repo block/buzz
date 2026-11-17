@@ -94,8 +94,24 @@ class _InboxRow extends HookConsumerWidget {
     );
 
     final isDm = channel?.isDm ?? false;
-    final channelName = channel != null && !isDm
-        ? (channel!.name.isNotEmpty ? channel!.name : null)
+    // A channel outside the list (one the viewer reads without joining) is
+    // named from its own metadata once the list has loaded.
+    final unlistedId = channel == null ? item.item.channelId : null;
+    final listLoaded = ref.watch(
+      channelsProvider.select((channels) => channels.hasValue),
+    );
+    final named =
+        channel ??
+        (unlistedId != null &&
+                listLoaded &&
+                !ref
+                    .read(channelsProvider.notifier)
+                    .hiddenDmIds
+                    .contains(unlistedId)
+            ? ref.watch(openChannelProvider(unlistedId)).asData?.value
+            : null);
+    final channelName = named != null && !isDm
+        ? (named.name.isNotEmpty ? named.name : null)
         : null;
     final label = inboxTypeLabel(
       item,

@@ -33,6 +33,7 @@ import '../../shared/widgets/modal_presentation.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
 import '../channels/channel_identity_names_provider.dart';
+import '../channels/channel_link_navigation.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/channels_provider.dart';
 import '../channels/me/me_page.dart';
@@ -364,11 +365,10 @@ class ActivityPage extends HookConsumerWidget {
       }
       if (channel == null) {
         if (!context.mounted) return;
-        ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
-          const SnackBar(content: Text('Channel not found here')),
-          kind: ToastKind.error,
-        );
-        return;
+        // An open channel the viewer reads without joining is not listed; the
+        // resolver reads it, or says why it can't be opened.
+        channel = await resolveChannelToOpen(context, ref, channelId);
+        if (channel == null) return;
       }
       final resolvedChannel = channel;
 
