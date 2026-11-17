@@ -568,12 +568,11 @@ async fn an_unlisted_projects_children_are_named_only() {
 }
 
 /// kind:39000 names the parent, and the child's metadata is readable by the
-/// project's readers. A channel in a tree cannot take a TTL.
-/// Mutation: drop the `parent` tag from `group_metadata_tags`, or the TTL
-/// refusal → RED.
+/// project's readers.
+/// Mutation: drop the `parent` tag from `group_metadata_tags` → RED.
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn metadata_names_the_parent_and_a_tree_has_no_ttl() {
+async fn metadata_names_the_parent() {
     let t = Tree::new("parent-metadata").await;
     let (state, tenant) = (&t.state, &t.tenant);
     let tags = group_state_tags(state, tenant, t.child, 39000).await;
@@ -594,14 +593,6 @@ async fn metadata_names_the_parent_and_a_tree_has_no_ttl() {
         "a project reader reads the child's metadata"
     );
 
-    for channel in [t.child, t.project] {
-        assert!(
-            edit_channel(state, tenant, &t.owner, channel, &[&["ttl", "3600"]])
-                .await
-                .is_err(),
-            "a channel in a tree takes no TTL"
-        );
-    }
     // A parent tag rides alone.
     assert!(edit_channel(
         state,
@@ -951,4 +942,123 @@ async fn only_the_channels_own_admin_changes_parent_access() {
     let note = post(state, tenant, &t.owner, chat).await.unwrap();
     assert_eq!(read_named(state, tenant, &t.reader, chat).await, vec![note]);
     assert!(post(state, tenant, &t.reader, chat).await.is_err());
+}
+
+/// Expire `channel`'s TTL now and run the reaper, which must archive it.
+async fn auto_archive(state: &Arc<AppState>, tenant: &TenantContext, channel: Uuid) {
+    sqlx::query(
+        "UPDATE channels SET ttl_deadline = clock_timestamp() - interval '1 second' \
+         WHERE community_id = $1 AND id = $2",
+    )
+    .bind(tenant.community().as_uuid())
+    .bind(channel)
+    .execute(state.db.pool())
+    .await
+    .expect("expire ttl");
+    let reaped = state
+        .db
+        .reap_expired_ephemeral_channels()
+        .await
+        .expect("reap");
+    assert!(
+        reaped.iter().any(|r| r.channel_id == channel),
+        "the reaper archives the expired channel: {reaped:?}"
+    );
+}
+
+/// A chat filed in a project may auto-archive. The project's readers post
+/// in it before, and find and read it after, by name, implicitly, by COUNT
+/// and through its metadata; an outsider still gets nothing.
+/// Mutation: refuse a TTL on any channel with a parent → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_filed_chat_auto_archives_and_stays_readable_through_its_project() {
+    let t = Tree::new("parent-auto-archive").await;
+    let (state, tenant) = (&t.state, &t.tenant);
+    edit_channel(state, tenant, &t.owner, t.child, &[&["ttl", "3600"]])
+        .await
+        .expect("a filed chat takes a TTL");
+    let first = post(state, tenant, &t.owner, t.child).await.unwrap();
+    let second = post(state, tenant, &t.reader, t.child)
+        .await
+        .expect("a project reader posts in the auto-archiving chat");
+
+    auto_archive(state, tenant, t.child).await;
+
+    let mut read = read_named(state, tenant, &t.reader, t.child).await;
+    read.sort();
+    let mut expected = vec![first.clone(), second.clone()];
+    expected.sort();
+    assert_eq!(read, expected);
+    let implicit = read_implicit(state, tenant, &t.reader).await;
+    assert!(implicit.contains(&first) && implicit.contains(&second));
+    assert_eq!(
+        count_named(state, tenant, &t.reader, t.child).await,
+        Some(2)
+    );
+    assert_eq!(metadata_named(state, tenant, &t.reader, t.child).await, 1);
+    let tags = group_state_tags(state, tenant, t.child, 39000).await;
+    assert!(
+        tags.contains(&vec!["parent".to_string(), t.project.to_string()]),
+        "{tags:?}"
+    );
+    assert!(read_named(state, tenant, &t.outsider, t.child)
+        .await
+        .is_empty());
+    assert!(!read_implicit(state, tenant, &t.outsider)
+        .await
+        .contains(&first));
+    assert_eq!(role_in(state, tenant, t.child, &t.reader).await, None);
+}
+
+/// A project, a channel with children and no parent, never auto-archives:
+/// not by taking a TTL, not by having a channel filed under it while it has
+/// one, and not by losing its own parent while it has one and children. An
+/// auto-archiving chat in a project may still hold task conversations.
+/// Mutation: set `PROJECTS_MAY_AUTO_ARCHIVE` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_project_never_auto_archives() {
+    let t = Tree::new("parent-project-ttl").await;
+    let (state, tenant) = (&t.state, &t.tenant);
+    assert!(
+        edit_channel(state, tenant, &t.owner, t.project, &[&["ttl", "3600"]])
+            .await
+            .is_err(),
+        "a project takes no TTL"
+    );
+
+    edit_channel(state, tenant, &t.owner, t.child, &[&["ttl", "3600"]])
+        .await
+        .expect("a filed chat takes a TTL");
+    let task = create_channel(state, tenant, &t.owner, &[&["visibility", "private"]]).await;
+    set_parent(state, tenant, &t.owner, task, Some(t.child))
+        .await
+        .expect("an auto-archiving filed chat holds a task conversation");
+    assert!(
+        set_parent(state, tenant, &t.owner, t.child, None)
+            .await
+            .is_err(),
+        "clearing its parent would leave an auto-archiving project"
+    );
+
+    let standalone = create_channel(state, tenant, &t.owner, &[]).await;
+    edit_channel(state, tenant, &t.owner, standalone, &[&["ttl", "3600"]])
+        .await
+        .expect("a channel outside any tree takes a TTL");
+    let other = create_channel(state, tenant, &t.owner, &[]).await;
+    assert!(
+        set_parent(state, tenant, &t.owner, other, Some(standalone))
+            .await
+            .is_err(),
+        "filing under it would make it an auto-archiving project"
+    );
+    set_parent(state, tenant, &t.owner, standalone, Some(t.project))
+        .await
+        .expect("an auto-archiving channel is filed in a project");
+
+    // Without children, a filed auto-archiving channel may leave its project.
+    set_parent(state, tenant, &t.owner, standalone, None)
+        .await
+        .expect("a childless auto-archiving channel leaves its project");
 }

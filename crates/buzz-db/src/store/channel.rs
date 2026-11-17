@@ -1818,11 +1818,11 @@ pub(crate) async fn apply_channel_metadata_event(
             ));
         }
     }
-    // A parent change, or a TTL on a channel in a tree, is decided here,
+    // A parent change, or a TTL on a project, is decided here,
     // under the channel's locks, so every check sees the state it commits
     // against (`crate::channel_tree`).
     if matches!(edit.columns.ttl_seconds, Some(Some(_))) {
-        crate::channel_tree::refuse_ttl_in_tree(locked.tx(), channel_id).await?;
+        crate::channel_tree::refuse_ttl_on_project(locked.tx(), channel_id).await?;
     }
     if let Some(change) = edit.columns.parent_id {
         crate::channel_tree::decide_parent_change(
