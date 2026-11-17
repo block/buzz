@@ -480,13 +480,59 @@ enum NativeEmojiRemoteImageLoader {
     // Bytes can arrive after the cell left; don't decode for a dead view
     // while visible cells wait for the decode threads.
     try Task.checkCancellation()
-    let decoded = await Task.detached(priority: .userInitiated) {
-      NativeMessageImageLoader.decode(bytes, maximumPixelSize: maximumPixelSize)
-    }.value
-    // A cell that left during the decode keeps only its first frame.
+    // Cached bytes skip Flutter's download gate, so decodes have their own.
+    try await NativeEmojiDecodeGate.acquire()
+    defer { NativeEmojiDecodeGate.release() }
+    let decode = Task.detached(priority: .userInitiated) {
+      NativeMessageImageLoader.decode(bytes, maximumPixelSize: maximumPixelSize) {
+        Task.isCancelled
+      }
+    }
+    // A cell that leaves stops its decode between frames.
+    let decoded = await withTaskCancellationHandler {
+      await decode.value
+    } onCancel: {
+      decode.cancel()
+    }
     try Task.checkCancellation()
     guard let decoded else { throw NativeEmojiRemoteImageError.invalidImage }
     return decoded
+  }
+}
+
+/// Admits four custom emoji decodes at a time, in request order. A waiter
+/// whose cell leaves gives up its place.
+@MainActor
+enum NativeEmojiDecodeGate {
+  static let limit = 4
+  private static var active = 0
+  private static var waiting: [(id: UUID, continuation: CheckedContinuation<Void, Error>)] = []
+
+  static func acquire() async throws {
+    if active < limit {
+      active += 1
+      return
+    }
+    let id = UUID()
+    try await withTaskCancellationHandler {
+      try await withCheckedThrowingContinuation { continuation in
+        waiting.append((id, continuation))
+      }
+    } onCancel: {
+      Task { @MainActor in
+        guard let index = waiting.firstIndex(where: { $0.id == id }) else { return }
+        waiting.remove(at: index).continuation.resume(throwing: CancellationError())
+      }
+    }
+  }
+
+  /// Hands the slot to the next waiter, if any.
+  static func release() {
+    if waiting.isEmpty {
+      active -= 1
+    } else {
+      waiting.removeFirst().continuation.resume()
+    }
   }
 }
 
