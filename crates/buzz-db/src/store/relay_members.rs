@@ -1060,10 +1060,10 @@ impl<T> MembershipWrite<T> {
 /// changes `relay_members`, so the list commits or rolls back with the change.
 /// The per-community list lock is the last explicit lock: every other lock a
 /// membership transaction takes comes first, so the final writer reads every
-/// committed change. The list insert then takes `FOR KEY SHARE` on the
-/// community row through `events.community_id`'s foreign key; owner mutations
-/// lock that row `FOR NO KEY UPDATE`, which doesn't conflict, so no lock cycle
-/// forms. `created_at` is at least one second
+/// committed change. While `events.community_id`'s foreign key exists, the
+/// list insert also takes `FOR KEY SHARE` on the community row; owner
+/// mutations lock that row `FOR NO KEY UPDATE`, which doesn't conflict, so no
+/// lock cycle forms. `created_at` is at least one second
 /// past every earlier list's, so the id is new and a client replacing by
 /// timestamp never keeps an older list from the same second. A burst of
 /// changes runs the timestamp ahead of the clock by up to one second per

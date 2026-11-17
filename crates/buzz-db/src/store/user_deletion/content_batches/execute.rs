@@ -136,8 +136,10 @@ pub(super) async fn execute_owned_batch(
         .await?;
     // Serving writers already hold the shared form of this lock. Keep the
     // exclusive section short: at most one bounded batch, never the whole run.
-    sqlx::query("SELECT pg_advisory_xact_lock(community_deletion_lock_key($1))")
-        .bind(community)
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(crate::deletion::community_deletion_lock_key(
+            crate::CommunityId::from_uuid(community),
+        ))
         .execute(&mut *tx)
         .await?;
     crate::deletion::guard_community_write(&mut tx, crate::CommunityId::from_uuid(community))

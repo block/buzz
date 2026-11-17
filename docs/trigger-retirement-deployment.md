@@ -83,9 +83,12 @@ now does in application code:
 
 **A relay build at or after commit `279a31da` (the merge of
 [#9397](https://github.com/block/buzz/pull/9397), which follows #9396) and
-before `0094` is a required stop.** No tagged relay release contains it:
-`relay-v0.3.0` does not, so a deployment on a tagged release must move to a
-stop build first. Follow the same procedure as above. An older relay that
+before `0094` is a required stop.** Builds from commit `a8f55e63` (the merge
+of [#9363](https://github.com/block/buzz/pull/9363)) up to the merge of
+[#9615](https://github.com/block/buzz/pull/9615) do not qualify: their user
+content cleanup still calls `community_deletion_lock_key`. No tagged relay
+release is a stop build: `relay-v0.3.0` is not, so a deployment on a tagged
+release must move to a stop build first. Follow the same procedure as above. An older relay that
 still serves after `0094` fails every write and deletion that takes the community deletion lock, with
 `42883 community_deletion_lock_key(uuid) does not exist`, and its profile name
 search fails with `42883 profile_name_fields(text) does not exist`.
