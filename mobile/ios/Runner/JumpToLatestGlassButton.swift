@@ -259,6 +259,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
   private var buttonImage: UIImage?
   private var isBusy = false
   private var controlSize: CGFloat = 40
+  private var isFilledBackground = false
 
   init(
     frame: CGRect,
@@ -477,12 +478,27 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     let backgroundColor = (arguments?["backgroundColor"] as? NSNumber)
       .map { Self.color(from: $0.uint32Value) }
     if #available(iOS 26.0, *), arguments?.keys.contains("backgroundColor") == true {
-      var configuration = backgroundColor?.cgColor.alpha ?? 0 > 0
-        ? UIButton.Configuration.filled() : UIButton.Configuration.glass()
-      configuration.cornerStyle = .capsule
-      configuration.baseBackgroundColor = backgroundColor
-      configuration.image = button.configuration?.image
-      button.configuration = configuration
+      let filled = backgroundColor?.cgColor.alpha ?? 0 > 0
+      // Replace the configuration only when the fill kind flips, and keep the
+      // content styling applyContent installed; appearance-only updates
+      // (selection, enabled, busy) must not reset it.
+      if filled != isFilledBackground, let previous = button.configuration {
+        var configuration = filled
+          ? UIButton.Configuration.filled() : UIButton.Configuration.glass()
+        configuration.cornerStyle = .capsule
+        configuration.image = previous.image
+        configuration.contentInsets = previous.contentInsets
+        configuration.titleTextAttributesTransformer =
+          previous.titleTextAttributesTransformer
+        configuration.titleLineBreakMode = previous.titleLineBreakMode
+        configuration.imagePadding = previous.imagePadding
+        configuration.imagePlacement = previous.imagePlacement
+        button.configuration = configuration
+        isFilledBackground = filled
+      }
+      if filled {
+        button.configuration?.baseBackgroundColor = backgroundColor
+      }
     }
     let enabled = arguments?["enabled"] as? Bool ?? true
     let busy = arguments?["busy"] as? Bool ?? false
