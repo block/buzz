@@ -2,7 +2,6 @@
 //! Run against the feature schema with BUZZ_TEST_DATABASE_URL set.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use buzz_auth::Scope;
 use buzz_core::kind::{
@@ -252,25 +251,38 @@ async fn ban_and_current_group_policy_refusals_leave_no_receipt_and_have_valid_c
 }
 
 #[tokio::test]
-#[ignore = "requires Postgres; exercises one real command-expiry transition"]
+#[ignore = "requires Postgres"]
 async fn expired_exact_receipt_retry_survives_a_later_edit_but_unknown_expired_commands_fail() {
     let state = state().await;
     let tenant = community(&state, "mg-expiry").await;
     let actor = Keys::generate();
     let id = Uuid::new_v4();
-    let timestamp = Timestamp::now().as_secs() - 105;
+    let timestamp = Timestamp::now().as_secs() - 3600;
     let original = put_at(&actor, id, 0, "Original", timestamp);
-    ingest_event(&state, &tenant, original.clone(), auth(&actor))
+    // Seed historical acceptance through the same storage API and parsed
+    // signed command as the handler, without a near-expiry setup or clock wait.
+    let seeded = state
+        .db
+        .accept_mention_group(
+            tenant.community(),
+            &original,
+            &buzz_core::mention_group::parse_command(&original).unwrap(),
+            &state.relay_keypair,
+            state.config.max_frame_bytes,
+            state.config.require_relay_membership,
+        )
         .await
         .unwrap();
+    assert_eq!(
+        seeded.outcome,
+        buzz_db::mention_group::GroupOutcome::Applied
+    );
+    assert!(receipt(&state, &tenant, &original).await);
     let edit = put(&actor, id, 1, "Current");
     ingest_event(&state, &tenant, edit, auth(&actor))
         .await
         .unwrap();
     let current = head(&state, &tenant, id).await.unwrap();
-    let wait = (timestamp + 121).saturating_sub(Timestamp::now().as_secs());
-    assert!(wait <= 16, "expiry wait unexpectedly exceeded its bound");
-    tokio::time::sleep(Duration::from_secs(wait)).await;
     assert!(Timestamp::now().as_secs() > timestamp + 120);
     let replay = ingest_event(&state, &tenant, original.clone(), auth(&actor))
         .await
