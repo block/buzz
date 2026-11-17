@@ -15,6 +15,7 @@ pub(super) struct RunOptions {
     pub db: Option<buzz_db::Db>,
     pub media: Option<std::sync::Arc<buzz_media::MediaStorage>>,
     pub delete: bool,
+    pub relay_pubkey: Option<String>,
     pub batch_size: u16,
     pub max_items: u32,
     pub next_step: bool,

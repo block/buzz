@@ -26,12 +26,12 @@ pub(super) struct Rule {
 }
 
 pub(super) const INITIAL_STAGE: &str = "gate_user";
-const COMMUNITY_INITIAL_STAGE: &str = "purge_db";
+const COMMUNITY_INITIAL_STAGE: &str = "purge_content";
 const RULES: &[Rule] = &[
     Rule {
         name: "gate_user",
         community_scope: false,
-        allowed: &[Decision::Stage("purge_media"), Decision::EnterCommunities],
+        allowed: &[Decision::Stage("purge_media")],
         decide: |_| Ok(Decision::Stage("purge_media")),
     },
     Rule {
@@ -41,16 +41,14 @@ const RULES: &[Rule] = &[
         decide: |_| Ok(Decision::EnterCommunities),
     },
     Rule {
-        name: "purge_db",
-        community_scope: true,
-        allowed: &[Decision::Stage("purge_agents"), Decision::CommunityComplete],
-        decide: after_purge_db,
-    },
-    Rule {
         name: "purge_content",
         community_scope: true,
-        allowed: &[Decision::Stage("purge_account")],
-        decide: |_| Ok(Decision::Stage("purge_account")),
+        allowed: &[
+            Decision::Stage("purge_account"),
+            Decision::Stage("purge_agents"),
+            Decision::CommunityComplete,
+        ],
+        decide: after_purge_content,
     },
     Rule {
         name: "purge_account",
@@ -66,11 +64,16 @@ const RULES: &[Rule] = &[
     },
 ];
 
-fn after_purge_db(result: &Value) -> Result<Decision> {
+fn after_purge_content(result: &Value) -> Result<Decision> {
+    // Real content cleanup leaves account and agent cleanup to later stages.
+    if result["account_erasure_complete"] == false {
+        return Ok(Decision::Stage("purge_account"));
+    }
+    // Demo execution retains its saved, simulated agent-routing result.
     match result["has_agents"].as_bool() {
         Some(true) => Ok(Decision::Stage("purge_agents")),
         Some(false) => Ok(Decision::CommunityComplete),
-        None => Err(invalid("purge_db result must contain has_agents")),
+        None => Err(invalid("purge_content result must contain has_agents")),
     }
 }
 
@@ -94,17 +97,7 @@ pub(super) fn decision(stage: &EntityStage) -> Result<Decision> {
         .metadata_json
         .get("result")
         .ok_or_else(|| invalid("completed stage has no saved result"))?;
-    // The validated saved target also identifies legacy demo histories whose
-    // gate result predates media cleanup; do not infer it from a new result field.
-    let next = if stage.stage == "gate_user"
-        && stage.metadata_json["inputs"]["target"]
-            .as_str()
-            .is_some_and(|target| target.starts_with("demo:"))
-    {
-        Decision::EnterCommunities
-    } else {
-        (rule.decide)(result)?
-    };
+    let next = (rule.decide)(result)?;
     if !rule.allowed.contains(&next) {
         return Err(invalid("stage selected a disallowed transition"));
     }
@@ -231,14 +224,7 @@ impl Progress {
                     .find(|(id, _)| !self.completed_communities.contains(id))
                 {
                     Some((id, _)) => Ok(Some(Step {
-                        name: if row.metadata_json["inputs"]["target"]
-                            .as_str()
-                            .is_some_and(|target| target.starts_with("demo:"))
-                        {
-                            COMMUNITY_INITIAL_STAGE
-                        } else {
-                            "purge_content"
-                        },
+                        name: COMMUNITY_INITIAL_STAGE,
                         community: Some(*id),
                     })),
                     None => self.apply(inventory, row, Decision::RequestComplete),
@@ -257,6 +243,34 @@ impl Progress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_routes_real_cleanup_and_saved_demo_results() {
+        assert_eq!(COMMUNITY_INITIAL_STAGE, "purge_content");
+        let content = rule(COMMUNITY_INITIAL_STAGE).unwrap();
+        assert!(content.community_scope);
+        for (result, expected) in [
+            (
+                serde_json::json!({"content": {}, "account_erasure_complete": false}),
+                Decision::Stage("purge_account"),
+            ),
+            (
+                serde_json::json!({"account_erasure_complete": false, "has_agents": false}),
+                Decision::Stage("purge_account"),
+            ),
+            (
+                serde_json::json!({"dummy": true, "has_agents": true}),
+                Decision::Stage("purge_agents"),
+            ),
+            (
+                serde_json::json!({"dummy": true, "has_agents": false}),
+                Decision::CommunityComplete,
+            ),
+        ] {
+            assert_eq!((content.decide)(&result).unwrap(), expected);
+        }
+        assert!((content.decide)(&serde_json::json!({})).is_err());
+    }
 
     #[test]
     fn gating_always_precedes_global_media() {
@@ -281,32 +295,5 @@ mod tests {
             assert_eq!(parse_stage(rule.name).unwrap(), rule.name);
         }
         assert!(parse_stage("unregistered_stage").is_err());
-    }
-
-    #[test]
-    fn account_cleanup_keeps_real_requests_on_the_unfinished_handler_path() {
-        let now = chrono::Utc::now();
-        let mut stage = EntityStage {
-            id: Uuid::new_v4(),
-            request_id: Uuid::new_v4(),
-            target_community_id: Some(Uuid::new_v4()),
-            stage: "purge_content".into(),
-            status: "completed".into(),
-            is_current: true,
-            started_at: Some(now),
-            finished_at: Some(now),
-            last_error: None,
-            updated_at: now,
-            metadata_json: serde_json::json!({"inputs":{"target":"ab".repeat(32)}, "result":{"has_agents":false, "account_erasure_complete":false}}),
-        };
-        assert_eq!(decision(&stage).unwrap(), Decision::Stage("purge_account"));
-        stage.stage = "purge_account".into();
-        assert_eq!(decision(&stage).unwrap(), Decision::Stage("purge_agents"));
-        // Demo routing still consumes its simulated branch result.
-        stage.stage = "purge_db".into();
-        stage.metadata_json["inputs"]["target"] = "demo:account".into();
-        assert_eq!(decision(&stage).unwrap(), Decision::CommunityComplete);
-        stage.metadata_json["result"]["has_agents"] = true.into();
-        assert_eq!(decision(&stage).unwrap(), Decision::Stage("purge_agents"));
     }
 }

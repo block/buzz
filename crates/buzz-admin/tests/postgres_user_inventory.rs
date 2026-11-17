@@ -276,7 +276,7 @@ async fn inventory_submission_completes_demo_but_refuses_unfinished_real_workflo
             assert_eq!(done["status"], "completed");
             assert_eq!(done["stage_history"][0]["id"], first_id);
             let stages = done["stage_history"].as_array().unwrap();
-            assert_eq!(stages.len(), 5);
+            assert_eq!(stages.len(), 6);
             assert!(stages
                 .iter()
                 .all(|s| s["status"] == "completed" && s["is_current"] == false));

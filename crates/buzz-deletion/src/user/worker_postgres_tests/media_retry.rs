@@ -91,18 +91,20 @@ async fn gate_then_media_requires_delete_and_retries_storage_failure_before_comm
     assert_eq!(fixture.uploader_count().await, 0);
     assert_eq!(serde_json::to_value(&after.stage_history[0]).unwrap(), gate);
     let calls = fixture.requests.load(Ordering::SeqCst);
-    run(
-        store,
-        id,
-        "worker-e",
-        &fixture.options(),
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap_err();
-    let stopped = store.inspect(id).await.unwrap();
-    assert_eq!(stopped.stage_history.len(), 3);
-    assert_eq!(stopped.stage_history[2].status, "pending");
-    assert_ne!(stopped.request.status, "completed");
+    // Restarting transition lookup returns content without replaying media.
+    let lease = store
+        .claim(id, "worker-e", DEFAULT_LEASE_DURATION)
+        .await
+        .unwrap()
+        .unwrap();
+    let NextStage::Stage(resumed) = UserDeletionTransition::new(store)
+        .get_next_stage(&lease, None)
+        .await
+        .unwrap()
+    else {
+        panic!("expected content")
+    };
+    assert_eq!(resumed.id, after.stage_history[2].id);
     assert_eq!(fixture.requests.load(Ordering::SeqCst), calls);
+    store.release(&lease).await.unwrap();
 }

@@ -8,6 +8,8 @@ use uuid::Uuid;
 /// Inspect user data, run account cleanup or execute persisted workflows.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Inspect or delete one human's community content.
+    ContentBatches(content_batches::Args),
     /// Run media cleanup directly, without a workflow request.
     MediaBatches(media::Args),
     /// Print account-table batches for one community; --delete executes offline.
@@ -57,10 +59,13 @@ pub enum Command {
         /// Execute implemented real handlers; stop relay and external writers first.
         #[arg(long)]
         delete: bool,
-        /// Maximum account rows per transaction.
+        /// Trusted relay signer for historical content attribution.
+        #[arg(long, value_parser=content_batches::parse_pubkey)]
+        relay_pubkey: Option<String>,
+        /// Maximum explicit row operations per batch.
         #[arg(long, default_value_t=100, value_parser=clap::value_parser!(u16).range(1..=100))]
         batch_size: u16,
-        /// Maximum account row operations in one handler invocation.
+        /// Maximum row operations in one handler invocation.
         #[arg(long, default_value_t=100_000, value_parser=clap::value_parser!(u32).range(1..=1_000_000))]
         max_items: u32,
         /// Worker identity; defaults to hostname and process id.
@@ -95,6 +100,7 @@ pub enum Command {
 /// Run the selected user-deletion command against PostgreSQL.
 pub async fn run(command: Command) -> Result<i32> {
     let command = match command {
+        Command::ContentBatches(args) => return content_batches::run_command(args).await,
         Command::MediaBatches(args) => return media::run(args).await,
         command => command,
     };
@@ -144,7 +150,9 @@ pub async fn run(command: Command) -> Result<i32> {
     };
     let store = db.entity_deletion_store();
     match command {
-        Command::MediaBatches(_) => bail!("direct media command dispatched above"),
+        Command::ContentBatches(_) | Command::MediaBatches(_) => {
+            bail!("direct cleanup command dispatched above")
+        }
         Command::AccountBatches(_) => anyhow::bail!("account command dispatched above"),
         Command::AccountScope { pubkey } => {
             crate::print_json(
@@ -185,6 +193,7 @@ pub async fn run(command: Command) -> Result<i32> {
         Command::Run {
             id,
             delete,
+            relay_pubkey,
             batch_size,
             max_items,
             executor_id,
@@ -210,6 +219,7 @@ pub async fn run(command: Command) -> Result<i32> {
                     db: real.then(|| buzz_db::Db::from_pool(db.pool().clone())),
                     media: None,
                     delete,
+                    relay_pubkey,
                     batch_size,
                     max_items,
                     next_step,
@@ -230,6 +240,7 @@ pub async fn run(command: Command) -> Result<i32> {
 }
 
 mod account_batches;
+mod content_batches;
 mod handlers;
 mod inventory;
 /// Direct upload-only media cleanup and its workflow handler.

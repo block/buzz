@@ -89,7 +89,7 @@ async fn account_workflow_stdout_is_one_document_and_direct_output_remains_ndjso
         .unwrap();
     let inventory = UserDeletionInventory::read(&request).unwrap();
     let mut previous = None;
-    // Only unfinished predecessor handlers are fixture data. Account execution,
+    // Gate/media are fixture preconditions. Content and account execution,
     // transitions, roster signing, stdout and lease release use production code.
     for (name, scope, decision) in [
         ("gate_user", None, Value::Null),
@@ -102,11 +102,6 @@ async fn account_workflow_stdout_is_one_document_and_direct_output_remains_ndjso
             "purge_content",
             Some(community),
             json!({"kind":"enter_communities"}),
-        ),
-        (
-            "purge_account",
-            Some(community),
-            json!({"kind":"stage","stage":"purge_account"}),
         ),
     ] {
         let next = NewEntityStage {
@@ -130,7 +125,7 @@ async fn account_workflow_stdout_is_one_document_and_direct_output_remains_ndjso
         let NextStage::Stage(stage) = result else {
             panic!("expected stage");
         };
-        if name != "purge_account" {
+        if name != "purge_content" {
             store.start_stage(&lease, stage.id).await.unwrap();
             store
                 .save_stage_success(&lease, stage.id, json!({"fixture":true}))
@@ -160,6 +155,19 @@ async fn account_workflow_stdout_is_one_document_and_direct_output_remains_ndjso
     assert!(records
         .iter()
         .any(|r| r["record"] == "proposed_batch" && r["table"] == "relay_members"));
+    let content = cli(
+        &url,
+        &["run", &request.id.to_string(), "--delete", "--next-step"],
+    )
+    .await;
+    let content_document: Value = serde_json::from_slice(&content.stdout).unwrap();
+    let stages = content_document["stage_history"].as_array().unwrap();
+    assert!(stages
+        .iter()
+        .any(|s| s["stage"] == "purge_content" && s["status"] == "completed"));
+    assert!(stages.iter().any(|s| s["stage"] == "purge_account"
+        && s["status"] == "pending"
+        && s["is_current"] == true));
     let output = cli(
         &url,
         &["run", &request.id.to_string(), "--delete", "--next-step"],

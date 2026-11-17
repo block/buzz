@@ -54,7 +54,7 @@ pub fn is_side_effect_kind(kind: u32) -> bool {
 /// 3. `disable_departed_member_workflows` — durably disables any workflows the
 ///    kicked user owned in this channel (SEC-006).
 ///
-/// These are identical to what `handle_remove_user` (kind 9001 path) fires after
+/// These are identical to what `persist_remove_user` (kind 9001 path) fires after
 /// removing a member. Without them a kicked user's live WebSocket session retains
 /// full channel access: the `channel_members.removed_at` write is invisible to
 /// the running subscription and the membership cache until natural expiry, which
@@ -399,7 +399,7 @@ pub async fn handle_side_effects(
         // kind:9000 belongs to the atomic put-user path in ingest, which
         // reports each person's result.
         9000 => Err(anyhow::anyhow!("kind:9000 requires persist_put_user")),
-        9001 => handle_remove_user(tenant, event, state).await,
+        9001 => Err(anyhow::anyhow!("kind:9001 requires persist_remove_user")),
         // kind:9002 belongs to the atomic persistence path in ingest.
         9002 => Err(anyhow::anyhow!("kind:9002 requires atomic persistence")),
         // kind:9005 belongs to the atomic deletion path in ingest.
@@ -629,6 +629,10 @@ async fn actor_owns_any_owner_agent(
     Ok(false)
 }
 
+/// Why kind:9000, and kind:9001 for anyone but yourself or your own agent,
+/// are refused on a DM.
+const DM_MEMBERSHIP_REFUSAL: &str = "DM members change only through kind:41011";
+
 /// Validate an admin kind event BEFORE storage.
 pub async fn validate_admin_event(
     tenant: &TenantContext,
@@ -683,6 +687,21 @@ pub async fn validate_admin_event(
     if kind != 9002 && channel.archived_at.is_some() && !is_self_departure(event) {
         return Err(anyhow::anyhow!("channel is archived"));
     }
+    // A DM is identified by its people, so people join it only through
+    // kind:41011, which keeps that identity in step. Anyone may leave, and
+    // an owner may remove their own agent: every removal releases the DM's
+    // identity when its people change (`release_dm_identity`).
+    if channel.channel_type == "dm" && kind == 9001 {
+        let target = extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
+        if target != actor_bytes
+            && !state
+                .db
+                .is_agent_owner(tenant.community(), &target, &actor_bytes)
+                .await?
+        {
+            return Err(anyhow::anyhow!(DM_MEMBERSHIP_REFUSAL));
+        }
+    }
 
     match kind {
         // Ingest validates kind:9000 with `validate_put_user`, which keeps
@@ -698,7 +717,7 @@ pub async fn validate_admin_event(
                 channel_authz::decide_self_departure(&members, &actor_bytes)?;
                 Ok(())
             } else {
-                match channel_authz::classify_remove_other(&members, &actor_bytes) {
+                match channel_authz::classify_remove_other(&members, &actor_bytes, &target_pubkey) {
                     RemoveOtherDecision::Allow => Ok(()),
                     RemoveOtherDecision::CheckAgentOwner => {
                         if state
@@ -1938,6 +1957,9 @@ pub(crate) async fn validate_put_user(
     if channel.archived_at.is_some() {
         anyhow::bail!("channel is archived");
     }
+    if channel.channel_type == "dm" {
+        anyhow::bail!(DM_MEMBERSHIP_REFUSAL);
+    }
     let targets = put_user_targets(event)?;
 
     let actor_bytes = event.pubkey.to_bytes().to_vec();
@@ -2249,31 +2271,32 @@ fn put_refusal_reason(error: buzz_db::DbError) -> String {
     }
 }
 
-async fn handle_remove_user(
+/// Commit a kind:9001 and its removal before running live effects. A locked
+/// refusal stores nothing; a duplicate runs no removal or notifications.
+pub(crate) async fn persist_remove_user(
     tenant: &TenantContext,
     event: &Event,
     state: &Arc<AppState>,
-) -> anyhow::Result<()> {
+    thread_meta: Option<buzz_db::event::ThreadMetadataParams<'_>>,
+) -> anyhow::Result<(buzz_core::StoredEvent, bool)> {
     let channel_id =
         extract_h_tag_channel(event).ok_or_else(|| anyhow::anyhow!("missing h tag"))?;
     let target_pubkey = extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
     let actor_bytes = event.pubkey.to_bytes().to_vec();
 
-    // Guard: prevent last-owner orphaning on self-removal (kind 9001).
-    if target_pubkey == actor_bytes {
-        let members = state
-            .db
-            .get_members_for_event_write(tenant.community(), channel_id)
-            .await?;
-        if channel_authz::is_sole_owner(&members, &actor_bytes) {
-            return Err(ChannelAuthzError::LastOwnerRemovalTransferFirst.into());
-        }
-    }
-
-    state
+    let (stored, inserted) = state
         .db
-        .remove_member(tenant.community(), channel_id, &target_pubkey, &actor_bytes)
+        .remove_member_with_event(
+            tenant.community(),
+            channel_id,
+            &target_pubkey,
+            event,
+            thread_meta,
+        )
         .await?;
+    if !inserted {
+        return Ok((stored, false));
+    }
     state.invalidate_membership(tenant, channel_id, &target_pubkey);
     evict_live_channel_subscriptions(tenant, state, channel_id, &target_pubkey).await;
     disable_departed_member_workflows(tenant, state, channel_id, &target_pubkey).await;
@@ -2285,7 +2308,7 @@ async fn handle_remove_user(
     } else {
         "member_removed"
     };
-    emit_system_message(
+    if let Err(e) = emit_system_message(
         tenant,
         state,
         channel_id,
@@ -2296,7 +2319,10 @@ async fn handle_remove_user(
         }),
         chrono::Utc::now(),
     )
-    .await?;
+    .await
+    {
+        warn!(channel = %channel_id, error = %e, "removal system message failed");
+    }
 
     if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
         warn!(channel = %channel_id, error = %e, "NIP-29 group discovery emission failed");
@@ -2315,7 +2341,7 @@ async fn handle_remove_user(
         warn!(channel = %channel_id, error = %e, "membership notification emission failed");
     }
 
-    Ok(())
+    Ok((stored, true))
 }
 
 /// Persist an authorized kind:9002 event and the channel changes it names.

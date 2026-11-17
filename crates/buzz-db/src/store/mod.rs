@@ -33,6 +33,8 @@ mod event_hydration;
 pub mod nip_fi_binding;
 /// Recent-first passes for newest-first `events` page reads.
 pub(crate) mod recent_pass;
+/// In-transaction parent checks for channel, user and relay-member references.
+pub(crate) mod reference_check;
 /// User-specific deletion submission and inventory preparation.
 pub mod user_deletion;
 /// Operator-global user restrictions and identity-lock primitives.
@@ -113,6 +115,9 @@ mod channel_name_postgres_tests;
 
 #[cfg(test)]
 mod admission_postgres_tests;
+
+#[cfg(test)]
+mod reference_check_postgres_tests;
 
 /// Durable NIP-FI verified-profile projection state.
 pub mod verified_profiles;

@@ -1,4 +1,4 @@
-//! Start at an approved account stage; the preceding unfinished handlers are
+//! Start at an approved account stage; the preceding handlers are
 //! fixture preconditions, while account dispatch, persistence and release are real.
 
 use super::*;
@@ -71,7 +71,7 @@ impl Fixture {
             .unwrap();
         let transition = UserDeletionTransition::new(&store);
         // Save explicit prerequisites through the storage APIs. Do not run or
-        // pretend to test the unimplemented gate/content handlers.
+        // pretend to exercise the preceding handlers in this account retry test.
         for name in ["gate_user", "purge_media", "purge_content"] {
             let NextStage::Stage(row) = transition.get_next_stage(&lease, None).await.unwrap()
             else {
@@ -80,7 +80,15 @@ impl Fixture {
             assert_eq!(row.stage, name);
             store.start_stage(&lease, row.id).await.unwrap();
             store
-                .save_stage_success(&lease, row.id, json!({"fixture_prerequisite": true}))
+                .save_stage_success(
+                    &lease,
+                    row.id,
+                    if name == "purge_content" {
+                        json!({"content": {}, "account_erasure_complete": false})
+                    } else {
+                        json!({"fixture_prerequisite": true})
+                    },
+                )
                 .await
                 .unwrap();
         }
@@ -113,6 +121,7 @@ impl Fixture {
             db: Some(Db::from_pool(self.pool.clone())),
             media: None,
             delete: true,
+            relay_pubkey: None,
             batch_size: 2,
             max_items,
             next_step: true,

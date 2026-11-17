@@ -1,4 +1,4 @@
-//! Bounded upload evidence queries for offline user media cleanup.
+//! Bounded upload evidence queries for user media cleanup.
 use crate::{Db, DbError, Result};
 
 const MAX_MEDIA_TARGETS: usize = 10_000;

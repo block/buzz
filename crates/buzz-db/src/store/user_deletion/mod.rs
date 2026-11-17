@@ -3,6 +3,8 @@ use crate::Db;
 use sqlx::PgPool;
 /// Bounded cleanup of one human's community account records.
 pub mod account_batches;
+/// Ordered user and owned-agent content cleanup in read-only and delete modes.
+pub mod content_batches;
 mod discovery;
 mod inventory;
 mod media;
