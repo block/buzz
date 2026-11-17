@@ -4,7 +4,7 @@ A mobile build does [diagnostic reporting](../../CONTEXT.md#diagnostic-reporting
 
 We chose this so that the open-source app carries no organization's destination and no rule about which organizations may collect reports, the same reasoning that keeps organization hosts out of the code in [ADR 0001](0001-internal-and-public-mobile-builds.md). The first use is an organization's internal build, where everyone who has the app is a member of the organization that reads the reports.
 
-A report may carry the stack trace and error type, app, operating system and device details, a trail of recent events written from a fixed list, the signed-in member's public key and, when the person is signed in to a Builderlab account, that Builderlab's origin and the account's identifier. A report never carries message content, channel or community names, keys or secrets, or a URL's query string.
+A report may carry the stack trace and error type, app, operating system and device details, a trail of recent events written from a fixed list, the host names of the servers the app talks to, the signed-in member's public key and, when the person is signed in to a Builderlab account, that Builderlab's origin and the account's identifier. A report never carries message content, channel or community names, keys or secrets, or a URL's query string.
 
 ## Considered options
 
@@ -18,5 +18,7 @@ A report may carry the stack trace and error type, app, operating system and dev
 Because the app says nothing about reporting, any notice or consent owed to the people who receive a build is the responsibility of whoever gives that build a reporting destination. Giving a destination to a build that reaches the general public would report on those people without telling them.
 
 A build without a reporting destination must not start the reporting code at all, since a reporting library given an empty destination can still install its hooks.
+
+A relay's host name can identify a community even though the community's name is never sent. We accepted this so that a failing relay can be told apart from a healthy one; an internal build talks only to its own organization's relay.
 
 The public key ties a report to a member. Anyone with access to the reporting destination can therefore see which member hit which fault and when.
