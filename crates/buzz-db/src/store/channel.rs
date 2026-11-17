@@ -1103,13 +1103,14 @@ impl ChannelUpdate {
 /// At least one field must be provided; returns `InvalidData` otherwise.
 /// Returns the updated `ChannelRecord` on success.
 ///
-/// It has no sender, so it does not apply the private-to-open rule that
-/// kind:9002 enforces (`apply_channel_metadata_event`); user edits go there.
+/// `sender` must be the authenticated pubkey making the change. It decides
+/// the private-to-open rule, as for kind:9002 (see [`update_channel_on`]).
 pub async fn update_channel(
     pool: &PgPool,
     community_id: CommunityId,
     channel_id: Uuid,
     updates: ChannelUpdate,
+    sender: &[u8],
 ) -> Result<ChannelRecord> {
     if updates.is_empty() {
         return Err(DbError::InvalidData(
@@ -1124,7 +1125,7 @@ pub async fn update_channel(
     )
     .await?;
     let mut locked = lock_channel_for_settings_write(&mut tx, channel_id, &updates).await?;
-    update_channel_on(&mut locked, updates).await?;
+    update_channel_on(&mut locked, updates, sender).await?;
     tx.commit().await?;
 
     get_channel_with_operation(
@@ -1305,11 +1306,25 @@ async fn lock_channel_row(
 
 /// Writes the set fields of `updates` to the locked channel row on `tx`.
 /// The caller owns the commit.
+///
+/// Opening a private channel publishes its existing history to new readers.
+/// So a private channel may be opened only when it has never held anyone but
+/// `sender` and `sender`'s own agents (NIP-OA), for example a Solo chat;
+/// removed members count, because their posts stay. A visibility change
+/// holds the membership lock (`lock_channel_for_settings_write`), so the
+/// member set read here stays the same until commit.
 async fn update_channel_on(
     w: &mut ChannelSettingsWriter<'_>,
     mut updates: ChannelUpdate,
+    sender: &[u8],
 ) -> Result<()> {
     w.check_covers(&updates)?;
+    if updates.visibility.as_deref() == Some(ChannelVisibility::Open.as_str())
+        && w.previous_visibility() == ChannelVisibility::Private.as_str()
+        && has_member_besides_sender_and_agents(w, sender).await?
+    {
+        return Err(DbError::AccessDenied(PRIVATE_TO_OPEN_REFUSAL.to_string()));
+    }
     let channel_id = w.channel_id;
     let tx = &mut *w.tx;
     let community_id = tx.community();
@@ -1726,18 +1741,6 @@ pub(crate) async fn apply_channel_metadata_event(
             return Err(DbError::AccessDenied("channel is not archived".to_string()));
         }
     }
-    // Opening a private channel changes the admission rules under everyone
-    // who joined it, so only a channel that holds nobody but the sender and
-    // the sender's own agents (NIP-OA) may be opened, for example a Solo
-    // chat. A visibility change holds the membership lock
-    // (`lock_channel_for_settings_write`), so the member set read here stays
-    // the same until commit.
-    if edit.columns.visibility.as_deref() == Some(ChannelVisibility::Open.as_str())
-        && locked.previous_visibility() == ChannelVisibility::Private.as_str()
-        && has_member_besides_sender_and_agents(&mut locked, &event.pubkey.to_bytes()).await?
-    {
-        return Err(DbError::AccessDenied(PRIVATE_TO_OPEN_REFUSAL.to_string()));
-    }
     // `auto_join` only makes sense where a kind:9021 self-join would work:
     // an open, unarchived channel. Decide it here, under the row lock and
     // after the archive decision, on the state this event leaves behind, so
@@ -1773,7 +1776,7 @@ pub(crate) async fn apply_channel_metadata_event(
     } = edit;
     let actor = event.pubkey.to_bytes();
     if !columns.is_empty() {
-        update_channel_on(&mut locked, columns).await?;
+        update_channel_on(&mut locked, columns, &actor).await?;
     }
     if let Some(topic) = topic {
         set_topic_on(&mut locked, &topic, &actor).await?;
@@ -2215,16 +2218,18 @@ impl Db {
         .await
     }
 
-    /// Updates a channel's name and/or description. It does not apply the
-    /// private-to-open rule; user edits go through kind:9002.
+    /// Applies every field set in `updates`, visibility included. `sender`
+    /// must be the authenticated pubkey making the change; it decides the
+    /// private-to-open rule.
     #[datastore_span(name = "update_channel", system = "postgresql")]
     pub async fn update_channel(
         &self,
         community_id: CommunityId,
         channel_id: Uuid,
         updates: ChannelUpdate,
+        sender: &[u8],
     ) -> Result<ChannelRecord> {
-        update_channel(&self.pool, community_id, channel_id, updates).await
+        update_channel(&self.pool, community_id, channel_id, updates, sender).await
     }
 
     /// Sets the topic for a channel.
@@ -2683,6 +2688,7 @@ mod postgres_tests {
                 join_role: Some("guest".into()),
                 ..Default::default()
             },
+            &owner_pk,
         )
         .await
         .expect("set join_role");
@@ -2704,9 +2710,95 @@ mod postgres_tests {
                 join_role: Some("admin".into()),
                 ..Default::default()
             },
+            &owner_pk,
         )
         .await
         .is_err());
+    }
+
+    /// `update_channel` applies the kind:9002 private-to-open rule to its
+    /// `sender`: opening fails while anyone else is, or was, a member, and the
+    /// channel stays private. A channel holding only the sender opens.
+    ///
+    /// Mutation: drop the check from `update_channel_on` → the shared
+    /// channel opens (RED).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn update_channel_refuses_opening_a_private_channel_with_other_members() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let (owner, other) = (random_pubkey(), random_pubkey());
+        let open = || ChannelUpdate {
+            visibility: Some("open".into()),
+            ..Default::default()
+        };
+        let add = |channel: Uuid, pubkey: Vec<u8>, removed: bool| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query(
+                    "INSERT INTO channel_members (community_id, channel_id, pubkey, removed_at) \
+                     VALUES ($1, $2, $3, CASE WHEN $4 THEN now() END)",
+                )
+                .bind(community_id)
+                .bind(channel)
+                .bind(pubkey)
+                .bind(removed)
+                .execute(&pool)
+                .await
+                .expect("insert member");
+            }
+        };
+
+        for removed in [false, true] {
+            let shared = create_test_channel(
+                &pool,
+                community_id,
+                "shared",
+                ChannelType::Stream,
+                ChannelVisibility::Private,
+                None,
+                &owner,
+                None,
+            )
+            .await
+            .expect("create shared channel");
+            add(shared.id, other.clone(), removed).await;
+            for sender in [&owner, &other] {
+                let err = update_channel(&pool, community, shared.id, open(), sender)
+                    .await
+                    .expect_err("opening a shared private channel must fail");
+                assert!(
+                    matches!(&err, DbError::AccessDenied(m) if m == PRIVATE_TO_OPEN_REFUSAL),
+                    "removed={removed}: {err:?}"
+                );
+            }
+            assert_eq!(
+                get_channel(&pool, community, shared.id)
+                    .await
+                    .expect("reload shared")
+                    .visibility,
+                "private",
+                "removed={removed}"
+            );
+        }
+
+        let solo = create_test_channel(
+            &pool,
+            community_id,
+            "solo",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .expect("create solo channel");
+        let opened = update_channel(&pool, community, solo.id, open(), &owner)
+            .await
+            .expect("the only member may open the channel");
+        assert_eq!(opened.visibility, "open");
     }
 
     #[tokio::test]
