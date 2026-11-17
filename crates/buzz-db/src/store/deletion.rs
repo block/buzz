@@ -4804,7 +4804,7 @@ pub(crate) mod postgres_tests {
         .fetch_one(&db.pool)
         .await
         .expect("lookup retired functions and guard");
-        // 0094 retired the functions; 0095 retired the tombstone trigger.
+        // 0094 retired the functions; 0096 retired the tombstone trigger.
         assert_eq!(retired, (false, false, false));
     }
 

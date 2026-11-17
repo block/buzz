@@ -879,7 +879,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 95);
+        assert_eq!(migrations.len(), 96);
         assert_eq!(migrations[89].version, 90);
         assert!(migrations[89]
             .sql
@@ -918,9 +918,9 @@ mod postgres_tests {
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }
-        // 0095 retires the five single-table guard triggers and functions.
-        assert_eq!(migrations[94].version, 95);
-        assert!(migrations[94]
+        // 0096 retires the five single-table guard triggers and functions.
+        assert_eq!(migrations[95].version, 96);
+        assert!(migrations[95]
             .sql
             .as_str()
             .contains("SET LOCAL lock_timeout = '5s'"));
@@ -2546,7 +2546,7 @@ mod postgres_tests {
                 "enforce_community_write_fence",
                 "attach_community_write_fence",
                 "community_deletion_lock_key",
-                // 0095 retires the four deletion guard functions.
+                // 0096 retires the four deletion guard functions.
                 "enforce_community_tombstone",
                 "prevent_community_deletion_request_retargeting",
                 "prevent_community_deletion_approval_removal",
@@ -3203,7 +3203,7 @@ mod postgres_tests {
             );
         }
         // Compare columns, keys and remaining triggers on the five guarded tables;
-        // foreign keys must survive 0095 unchanged.
+        // foreign keys must survive 0096 unchanged.
         for table in [
             "channels",
             "communities",
@@ -4014,7 +4014,7 @@ mod postgres_tests {
         .fetch_one(&pool)
         .await
         .expect("read retired guard");
-        // 0095 retired the tombstone trigger.
+        // 0096 retired the tombstone trigger.
         assert!(!tombstone);
         store
             .validate_serving_catalog()
