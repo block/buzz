@@ -380,6 +380,11 @@ async fn workflow_writers_require_application_admission() {
             .expect_err("approval update must reject"),
         );
     }
+    // The fixture's session runs with foreign-key triggers off, so the owner
+    // must exist for the workflow writer's own reference check.
+    super::user::ensure_user(&db.pool, communities[0], &[1; 32])
+        .await
+        .expect("active workflow owner");
     super::workflow::create_workflow(
         &db.pool,
         communities[0],
@@ -498,9 +503,16 @@ async fn dm_writers_require_application_admission() {
     let participants: [&[u8]; 2] = [&[1; 32], &[2; 32]];
     for community in &communities[1..] {
         assert_fenced(
-            super::dm::create_dm(&db.pool, *community, &participants, participants[0])
-                .await
-                .expect_err("DM create must reject"),
+            super::dm::create_dm(
+                &db.pool,
+                *community,
+                &participants,
+                participants[0],
+                false,
+                &|_: &str, _: &[u8]| Ok(()),
+            )
+            .await
+            .expect_err("DM create must reject"),
         );
         assert_fenced(
             super::dm::hide_dm(&db.pool, *community, Uuid::new_v4(), participants[0])
@@ -508,9 +520,16 @@ async fn dm_writers_require_application_admission() {
                 .expect_err("DM hide must reject"),
         );
     }
-    super::dm::create_dm(&db.pool, communities[0], &participants, participants[0])
-        .await
-        .expect("active DM create succeeds");
+    super::dm::create_dm(
+        &db.pool,
+        communities[0],
+        &participants,
+        participants[0],
+        false,
+        &|_: &str, _: &[u8]| Ok(()),
+    )
+    .await
+    .expect("active DM create succeeds");
 }
 
 #[tokio::test]

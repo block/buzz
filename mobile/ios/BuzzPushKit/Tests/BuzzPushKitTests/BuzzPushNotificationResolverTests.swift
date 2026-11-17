@@ -1114,7 +1114,8 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     let issuer = BuzzRelayAssertionIssuer(
       session: URLSession(configuration: configuration), loadSession: { sharedSession },
       now: { Date(timeIntervalSince1970: TimeInterval(Self.now)) })
-    let issued = "header.payload.signature"
+    // A compact JWS with an `iat`, as the issuer sends.
+    let issued = "e30.eyJpYXQiOjAsImp0aSI6Im9yZyJ9.c2ln"
     var issuerBodies: [[String: Any]] = []
     var signOutDuringQuery = false
     var signOutDuringProfile = false
@@ -1224,7 +1225,8 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
     let issuer = BuzzRelayAssertionIssuer(
       session: URLSession(configuration: configuration), loadSession: { organization },
       loadHostedSession: { sharedHosted }, now: { clock })
-    let issued = "hosted.payload.signature"
+    // A compact JWS with an `iat`, as the issuer sends.
+    let issued = "e30.eyJpYXQiOjAsImp0aSI6Imhvc3RlZCJ9.c2ln"
     let enforcing: Set<String> = ["team.communities.example", "pending.communities.example"]
     var issuedRelays: [String] = []
     var builderlabCalls = 0
@@ -1344,7 +1346,9 @@ final class BuzzPushNotificationResolverTests: XCTestCase {
       ("refused", 401, [:]),
       ("other key", 200, ["assertion": "a.b.c", "nostr_pubkey": String(repeating: "f", count: 64),
         "expires_at": Self.now + 300]),
-      ("expired", 200, ["assertion": "a.b.c", "nostr_pubkey": Self.ownPubkey, "expires_at": Self.now - 1]),
+      // Readable, with an `iat`, but no lifetime left.
+      ("expired", 200, ["assertion": "e30.\(Data(#"{"iat":\#(Self.now - 301)}"#.utf8).base64EncodedString().replacingOccurrences(of: "=", with: "")).c2ln",
+        "nostr_pubkey": Self.ownPubkey, "expires_at": Self.now - 1]),
       ("header injection", 200, ["assertion": "a.b\r\nX: y", "nostr_pubkey": Self.ownPubkey,
         "expires_at": Self.now + 300]),
     ]

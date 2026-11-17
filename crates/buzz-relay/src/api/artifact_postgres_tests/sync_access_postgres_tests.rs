@@ -142,6 +142,7 @@ async fn sync_ignores_unchanged_visibility_and_resets_on_ttl_changes() {
             name: Some("renamed".into()),
             ..Default::default()
         },
+        &f.owner.public_key().to_bytes(),
     )
     .await
     .unwrap();
@@ -155,6 +156,7 @@ async fn sync_ignores_unchanged_visibility_and_resets_on_ttl_changes() {
             ttl_seconds: Some(Some(3600)),
             ..Default::default()
         },
+        &f.owner.public_key().to_bytes(),
     )
     .await
     .unwrap();
@@ -342,6 +344,7 @@ async fn incremental_resets_when_a_move_source_loses_access() {
                     visibility: Some("private".into()),
                     ..Default::default()
                 },
+                &f.owner.public_key().to_bytes(),
             )
             .await
             .unwrap();
@@ -393,6 +396,7 @@ async fn sync_policy_update_can_pass_a_channel_key_share() {
                 visibility: Some("private".into()),
                 ..Default::default()
             },
+            &f.owner.public_key().to_bytes(),
         ),
     )
     .await
@@ -473,6 +477,7 @@ async fn incremental_unlisted_channels_require_membership_or_named_scope() {
             unlisted: Some(true),
             ..Default::default()
         },
+        &f.owner.public_key().to_bytes(),
     )
     .await
     .unwrap();
@@ -523,6 +528,7 @@ async fn incremental_unlisted_channels_require_membership_or_named_scope() {
             unlisted: Some(false),
             ..Default::default()
         },
+        &f.owner.public_key().to_bytes(),
     )
     .await
     .unwrap();

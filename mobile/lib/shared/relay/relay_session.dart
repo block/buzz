@@ -102,6 +102,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   bool _hasConnectedOnce = false;
   int _connectionGeneration = 0;
   int _contextGeneration = 0;
+  Object _liveSubscriptionOwner = Object();
   final Map<Object, String> _visibleChannelsByOwner = {};
   final Map<Object, Future<void> Function()> _beforePauseCallbacks = {};
   bool _socketConnected = false;
@@ -113,6 +114,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// before reading from or publishing through it.
   String? get relayUrl => _relayUrl;
 
+  /// Changes when a rebuild (e.g. auth completing) drops every live
+  /// subscription without a CLOSED, so a holder can tell its own is gone.
+  Object get liveSubscriptionOwner => _liveSubscriptionOwner;
+
   @visibleForTesting
   set debugRelayUrl(String? value) => _relayUrl = value;
 
@@ -120,7 +125,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   SessionState build() {
     final config = ref.watch(relayConfigProvider);
     _relayUrl = config.baseUrl;
-    final authState = ref.watch(authProvider);
+    final auth = ref.watch(authProvider.select(_sessionAuthKey));
     _ageRestricted = ref.watch(ageSignalProvider) == AgeSignalState.restricted;
 
     // Reset disposed flag — build() may re-run on the same Notifier instance
@@ -130,7 +135,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     ref.onDispose(_dispose);
 
     // Auto-connect when authenticated and we have a signing key (NIP-42 AUTH).
-    final isAuthenticated = authState.value?.status == AuthStatus.authenticated;
+    final isAuthenticated = auth.status == AuthStatus.authenticated;
     if (!_ageRestricted && isAuthenticated && config.nsec != null) {
       // Schedule connection after build completes.
       Future.microtask(() => _connect(config));
@@ -351,16 +356,21 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// when a retryable or rate-limited CLOSED begins backoff. Terminal CLOSED
   /// invokes [onClosed] and removes the subscription instead of retrying it.
   /// Calling the cleanup callback cancels pending retries and sends CLOSE.
+  /// Turn off [resumeSince] for a `limit: 0` stream whose events can carry
+  /// older timestamps: the relay matches live events against a replay's
+  /// `since`, so the resume bound would drop them.
   Future<void Function()> subscribeWithStatus(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
     required void Function(RelaySubscriptionStatus status) onStatusChanged,
+    bool resumeSince = true,
   }) => _subscribe(
     filter,
     onEvent,
     onClosed: onClosed,
     onStatusChanged: onStatusChanged,
+    resumeSince: resumeSince,
   );
 
   Future<void Function()> _subscribe(
@@ -368,6 +378,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
     void Function(RelaySubscriptionStatus status)? onStatusChanged,
+    bool resumeSince = true,
   }) async {
     if (_disposed) throw StateError('Relay session is disposed');
     final subId = _nextSubId('l');
@@ -378,6 +389,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       onEvent: onEvent,
       onClosed: onClosed,
       onStatusChanged: onStatusChanged,
+      resumeSince: resumeSince,
       readyCompleter: readyCompleter,
     );
     _liveSubscriptions[subId] = subscription;
@@ -786,19 +798,6 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   bool _isActiveConnection(int generation) =>
       !_disposed && generation == _connectionGeneration;
 
-  NostrFilter _replayFilter(_LiveSubscription subscription) {
-    final filter = subscription.filter;
-    final since = relayResumeSince(
-      originalSince: filter.since,
-      until: filter.until,
-      lastSeenCreatedAt: subscription.lastSeenCreatedAt,
-      liveUntil: subscription.liveUntil,
-    );
-    return since == null || since == filter.since
-        ? filter
-        : filter.copyWithSince(since);
-  }
-
   void _handleMessage(List<dynamic> data) {
     _lastInboundAt = _now();
     if (data.isEmpty) return;
@@ -1086,7 +1085,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       subscription.ambiguousGeneration = _connectionGeneration;
     }
     subscription.reqGeneration = _connectionGeneration;
-    _sendReq(subId, _replayFilter(subscription));
+    _sendReq(subId, subscription.replayFilter);
   }
 
   void _sendReq(String subId, NostrFilter filter) {
@@ -1182,6 +1181,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _rejectAllPending(null);
     final subscriptions = _liveSubscriptions.values.toList();
     _liveSubscriptions.clear();
+    _liveSubscriptionOwner = Object();
     for (final subscription in subscriptions) {
       subscription.closedRetryTimer?.cancel();
       subscription.closedRetryTimer = null;

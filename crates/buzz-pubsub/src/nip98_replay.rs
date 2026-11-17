@@ -127,6 +127,16 @@ mod tests {
             .try_mark(&ctx, &eid, DEFAULT_REPLAY_TTL_SECS)
             .await
             .expect("replay mark"));
+        // Redis keeps the marker for the full TTL, not just the constant.
+        let ttl: i64 = redis::cmd("TTL")
+            .arg(buzz_auth::nip98_replay_key(&ctx, &eid))
+            .query_async(&mut redis_pool())
+            .await
+            .expect("ttl");
+        assert!(
+            ttl > 240 && ttl <= DEFAULT_REPLAY_TTL_SECS as i64,
+            "ttl {ttl}"
+        );
     }
 
     #[tokio::test]

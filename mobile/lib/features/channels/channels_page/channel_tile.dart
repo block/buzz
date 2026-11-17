@@ -187,7 +187,7 @@ class _ChannelTile extends ConsumerWidget {
   }
 }
 
-class _DmAvatar extends ConsumerWidget {
+class _DmAvatar extends HookConsumerWidget {
   final Channel channel;
   final String? currentPubkey;
 
@@ -203,6 +203,16 @@ class _DmAvatar extends ConsumerWidget {
     final visiblePubkeys = otherPubkeys.isNotEmpty
         ? otherPubkeys
         : channel.participantPubkeys.map((pk) => pk.toLowerCase()).toList();
+    final otherPubkey = visiblePubkeys.length == 1
+        ? visiblePubkeys.first
+        : null;
+
+    // Presence is followed while this row is built; a list releases it when
+    // the row scrolls away.
+    useEffect(() {
+      if (otherPubkey == null) return null;
+      return ref.read(presenceCacheProvider.notifier).track([otherPubkey]);
+    }, [otherPubkey]);
 
     if (visiblePubkeys.length > 1) {
       return Container(
@@ -226,7 +236,6 @@ class _DmAvatar extends ConsumerWidget {
       );
     }
 
-    final otherPubkey = visiblePubkeys.isNotEmpty ? visiblePubkeys.first : null;
     final profile = ref.watch(
       userCacheProvider.select(
         (profiles) => otherPubkey == null ? null : profiles[otherPubkey],
@@ -239,11 +248,8 @@ class _DmAvatar extends ConsumerWidget {
     );
 
     // Trigger fetches if not cached yet.
-    if (otherPubkey != null) {
-      if (profile == null) {
-        ref.read(userCacheProvider.notifier).preload([otherPubkey]);
-      }
-      ref.read(presenceCacheProvider.notifier).track([otherPubkey]);
+    if (otherPubkey != null && profile == null) {
+      ref.read(userCacheProvider.notifier).preload([otherPubkey]);
     }
 
     final avatarUrl = profile?.avatarUrl;
