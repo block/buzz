@@ -54,9 +54,15 @@ class OrganizationSignIn extends ChangeNotifier {
   String? get failureCode => switch (failure) {
     null => null,
     final BrowserAuthFailure f => 'browser-${f.name}',
+    AccountFailure.unavailable when _unavailableCause != null =>
+      'account-unavailable-$_unavailableCause',
     final AccountFailure f => 'account-${f.name}',
     final f => throw StateError('Unexpected sign-in failure: $f'),
   };
+
+  // What [BuilderlabAccountClient.lastUnavailableCause] held when the
+  // exchange failed, so later account requests cannot change the code.
+  String? _unavailableCause;
 
   final _subscriptions = <StreamSubscription<Object>>[];
 
@@ -112,6 +118,7 @@ class OrganizationSignIn extends ChangeNotifier {
     // Busy before any await, so a second tap cannot start another attempt.
     final attempt = ++_attempt;
     failure = null;
+    _unavailableCause = null;
     _set(OrganizationSessionStatus.signingIn);
     if (clear) {
       try {
@@ -140,6 +147,7 @@ class OrganizationSignIn extends ChangeNotifier {
     if (_disposed) return;
     final attempt = ++_attempt;
     failure = null;
+    _unavailableCause = null;
     _set(OrganizationSessionStatus.checking);
     try {
       await account.clearLocalSession();
@@ -166,6 +174,7 @@ class OrganizationSignIn extends ChangeNotifier {
 
   Future<void> _exchange(BrowserAuthCode code) async {
     final attempt = _attempt;
+    account.lastUnavailableCause = null;
     try {
       await account.exchange(
         code: code.code,
@@ -176,6 +185,7 @@ class OrganizationSignIn extends ChangeNotifier {
     } on AccountFailure catch (error) {
       if (attempt != _attempt) return;
       failure = error;
+      _unavailableCause = account.lastUnavailableCause;
       _set(_currentStatus());
       return;
     }

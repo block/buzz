@@ -180,6 +180,52 @@ void main() {
     signIn.dispose();
   });
 
+  test('an unreachable account server names the cause in the code', () async {
+    late Uri login;
+    http.Response? Function()? failExchange;
+    final signIn = OrganizationSignIn(
+      account: BuilderlabAccountClient(
+        accountOrigin: organization,
+        httpClient: MockClient((request) async {
+          if (!request.url.path.endsWith('/exchange')) return me();
+          return failExchange?.call() ?? exchanged();
+        }),
+      ),
+      browser: BrowserAuth(
+        origin: organization,
+        openBrowser: (uri) async {
+          login = uri;
+          return null;
+        },
+      ),
+      reconnect: () async {},
+    );
+    await signIn.initialize();
+    for (final (fail, code) in <(http.Response? Function(), String)>[
+      (() => http.Response('', 302), 'account-unavailable-http302'),
+      (() => http.Response('', 503), 'account-unavailable-http503'),
+      (
+        () => throw http.ClientException('offline'),
+        'account-unavailable-network',
+      ),
+    ]) {
+      failExchange = fail;
+      await signIn.signIn();
+      await signIn.browser.receive(callback(login, 'org-code'));
+      await pumpEventQueue();
+      expect(signIn.status, OrganizationSessionStatus.signedOut);
+      expect(signIn.failureCode, code);
+    }
+    failExchange = null;
+    await signIn.signIn();
+    expect(signIn.failureCode, isNull);
+    await signIn.browser.receive(callback(login, 'org-code'));
+    await pumpEventQueue();
+    expect(signIn.status, OrganizationSessionStatus.signedIn);
+    expect(signIn.failureCode, isNull);
+    signIn.dispose();
+  });
+
   test('a failed cancel cleanup still leaves the busy state', () async {
     final storage = _FailingDeleteStorage('buzz_browser_auth_attempt_v1_');
     final signIn = OrganizationSignIn(

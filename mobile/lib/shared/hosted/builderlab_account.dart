@@ -90,6 +90,11 @@ class BuilderlabAccountClient {
   /// Safe request diagnostics: no headers, credentials, bodies or user data.
   ({String path, int status})? lastRejectedRequest;
 
+  /// Why the last request failed as [AccountFailure.unavailable]: a transport
+  /// failure (`unreachable`, `insecure`, `timedOut`, `network`) or an
+  /// unexpected status such as `http302`. Safe to show; callers clear it.
+  String? lastUnavailableCause;
+
   /// Runs [operation], giving it the clock hint of the last refusal (403) that
   /// its own requests to any account client received: how many minutes the
   /// local clock looked off from the server's `Date` when its headers arrived,
@@ -651,7 +656,7 @@ class BuilderlabAccountClient {
         throw AccountFailure.rejected;
       }
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw AccountFailure.unavailable;
+        _unavailable(path, 'http${response.statusCode}');
       }
       final value = jsonDecode(utf8.decode(response.bodyBytes));
       if (value is! Map<String, dynamic>) throw AccountFailure.invalidResponse;
@@ -660,9 +665,17 @@ class BuilderlabAccountClient {
       rethrow;
     } on FormatException {
       throw AccountFailure.invalidResponse;
-    } catch (_) {
-      throw AccountFailure.unavailable;
+    } on TimeoutException {
+      _unavailable(path, 'timedOut');
+    } catch (error) {
+      _unavailable(path, transportFailure(error)?.name ?? 'network');
     }
+  }
+
+  Never _unavailable(String path, String cause) {
+    lastUnavailableCause = cause;
+    debugPrint('Builderlab ${accountOrigin.host} $path: unavailable ($cause)');
+    throw AccountFailure.unavailable;
   }
 
   void dispose() {
