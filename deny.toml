@@ -27,6 +27,13 @@ ignore = [
     # remove these when upstream catches up.
     { id = "RUSTSEC-2026-0194", reason = "transitive via rust-s3 and mesh-llm→plist; trusted-input XML only; no upstream fix available yet" },
     { id = "RUSTSEC-2026-0195", reason = "transitive via rust-s3 and mesh-llm→plist; trusted-input XML only; no upstream fix available yet" },
+    # chrono and humantime are unmaintained, not vulnerable (chrono maintainers
+    # announced the end of maintenance; humantime wraps chrono). chrono is a
+    # direct workspace dependency of most buzz crates; humantime arrives only via
+    # buzz-mesh-smoke → mesh-llm → hf-xet → xet-runtime. No maintained release
+    # exists; removal needs a migration to `time` or `jiff`.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, not vulnerable; direct workspace dependency; removal needs a time/jiff migration" },
+    { id = "RUSTSEC-2026-0542", reason = "humantime unmaintained, not vulnerable; via buzz-mesh-smoke → mesh-llm → xet-runtime; no maintained release" },
     # unsafe-libyaml 0.2.11 — unmaintained (repository archived 2024-03-25), not a
     # vulnerability report. Transitive dep: serde_yaml → unsafe-libyaml. The serde_yaml_ng
     # fork uses the same crate, so removing it means migrating YAML parsing in
@@ -38,18 +45,28 @@ ignore = [
     # Keep the exact NetEQ pin and the wrapper ban below together. Re-audit or
     # remove this exception when NetEQ removes/updates the unused dependency.
     { id = "RUSTSEC-2026-0293", reason = "unused dependency of audited, exactly pinned neteq 0.8.3; no Rust references to ringbuf; other consumers forbidden by bans.deny" },
-    # zip 8.6.0 < 9: extraction keeps setuid/setgid bits (0367), creates
-    # symlinks that escape the destination (0368), applies permissions through
-    # symlinks (0369), and aborts the process when sizing a symlink target from
-    # an attacker-declared length (0429). Only path: buzz-mesh-smoke → mesh-llm v0.76.2 →
-    # mesh-llm-host-runtime / mesh-llm-plugin-manager / mesh-llm-system → zip 8.
-    # mesh-llm's zip readers copy entries manually and never call
-    # ZipArchive::extract; recheck if that changes. Remove on the mesh-llm bump
-    # that ships Mesh-LLM/mesh-llm#2471.
-    { id = "RUSTSEC-2026-0367", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; manual entry copy, never extracts; fix in unreleased mesh-llm#2471" },
-    { id = "RUSTSEC-2026-0368", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; manual entry copy, never extracts; fix in unreleased mesh-llm#2471" },
-    { id = "RUSTSEC-2026-0369", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; manual entry copy, never extracts; fix in unreleased mesh-llm#2471" },
-    { id = "RUSTSEC-2026-0429", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; manual entry copy, never extracts; fix in unreleased mesh-llm#2471" },
+    # zip 8.6.0 < 9 advisories. Only path: buzz-mesh-smoke → mesh-llm v0.76.2 →
+    # mesh-llm-host-runtime / mesh-llm-plugin-manager / mesh-llm-system → zip 8,
+    # built with only the `deflate` feature. mesh-llm reads archives only through
+    # ZipArchive and copies entries by hand, so none of the affected paths run:
+    # - extract() keeps setuid/setgid bits (0367), creates escaping symlinks
+    #   (0368, 0546), and applies permissions through symlinks (0369);
+    # - symlink target sizing aborts on a crafted length (0429);
+    # - AES entries can be altered without error (0545; `aes-crypto` is off);
+    # - `legacy-zip` preallocation aborts (0547; feature is off);
+    # - ZipStreamReader and ZipArchive can disagree on names (0548; no
+    #   ZipStreamReader use).
+    # mesh-llm v0.79.0 ships zip 9.0.5, but that release drops mesh-llm-sdk's
+    # `client` feature, so the bump needs an SDK migration in buzz-mesh-smoke and
+    # desktop. Remove these on that bump; recheck if mesh-llm starts extracting.
+    { id = "RUSTSEC-2026-0367", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; deflate only, ZipArchive manual entry copy, never extracts; fixed in mesh-llm v0.79.0 (needs SDK migration)" },
+    { id = "RUSTSEC-2026-0368", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; deflate only, ZipArchive manual entry copy, never extracts; fixed in mesh-llm v0.79.0 (needs SDK migration)" },
+    { id = "RUSTSEC-2026-0369", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; deflate only, ZipArchive manual entry copy, never extracts; fixed in mesh-llm v0.79.0 (needs SDK migration)" },
+    { id = "RUSTSEC-2026-0429", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; deflate only, ZipArchive manual entry copy, never extracts; fixed in mesh-llm v0.79.0 (needs SDK migration)" },
+    { id = "RUSTSEC-2026-0545", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; deflate only, ZipArchive manual entry copy, never extracts; fixed in mesh-llm v0.79.0 (needs SDK migration)" },
+    { id = "RUSTSEC-2026-0546", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; deflate only, ZipArchive manual entry copy, never extracts; fixed in mesh-llm v0.79.0 (needs SDK migration)" },
+    { id = "RUSTSEC-2026-0547", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; deflate only, ZipArchive manual entry copy, never extracts; fixed in mesh-llm v0.79.0 (needs SDK migration)" },
+    { id = "RUSTSEC-2026-0548", reason = "zip 8.6.0 via buzz-mesh-smoke → mesh-llm v0.76.2; deflate only, ZipArchive manual entry copy, never extracts; fixed in mesh-llm v0.79.0 (needs SDK migration)" },
     # zbus 5 D-Bus crates (zvariant, zbus_names, zvariant_derive) — unmaintained,
     # not vulnerable. Only path: buzz-mesh-smoke → mesh-llm → keyring 4 →
     # zbus-secret-service-keyring-store / secret-service 5 → zbus 5.

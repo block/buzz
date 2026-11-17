@@ -1,4 +1,4 @@
-//! Offline user media cleanup. Both modes use the same upload-only inventory.
+//! User media cleanup. Both modes use the same upload-only inventory.
 use anyhow::{bail, Context, Result};
 use buzz_db::{Db, DbConfig};
 use buzz_media::{
@@ -25,7 +25,7 @@ pub struct Args {
     /// Print selected files without changing the database or storage (default).
     #[arg(long, visible_alias = "print-only", conflicts_with = "delete")]
     pub read_only: bool,
-    /// Delete selected files. Run only while relay and other writers are stopped.
+    /// Delete selected files.
     #[arg(long)]
     pub delete: bool,
 }
@@ -48,7 +48,7 @@ pub async fn run(args: Args) -> Result<i32> {
 }
 
 /// Collect upload claims, select files, then print or delete the same inventory.
-/// Writers must remain stopped for delete mode. No URL references are inspected.
+/// No URL references are inspected.
 /// Unknown historical ownership cannot be recovered from a bare stored blob.
 pub async fn handle(db: &Db, pubkey: &str, delete: bool) -> Result<Value> {
     let pubkey = buzz_db::user_deletion::normalize_user_deletion_pubkey(pubkey)?;

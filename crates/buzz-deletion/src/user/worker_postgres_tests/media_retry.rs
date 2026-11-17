@@ -1,3 +1,4 @@
+use super::media_fixture::fixture;
 use super::*;
 use std::sync::atomic::Ordering;
 
@@ -15,14 +16,14 @@ async fn gate_then_media_requires_delete_and_retries_storage_failure_before_comm
         .unwrap_err();
     assert!(error
         .to_string()
-        .contains("media deletion requires --delete"));
+        .contains("real workflow execution requires --delete"));
     let paused = store.inspect(id).await.unwrap();
     assert_eq!(paused.stage_history.len(), 2);
     let gate = serde_json::to_value(&paused.stage_history[0]).unwrap();
     assert_eq!(paused.stage_history[0].stage, "gate_user");
     assert_eq!(paused.stage_history[0].status, "completed");
     assert_eq!(
-        paused.stage_history[0].metadata_json["result"]["dummy"],
+        paused.stage_history[0].metadata_json["result"]["fixture"],
         true
     );
     let media_id = paused.stage_history[1].id;
@@ -84,21 +85,26 @@ async fn gate_then_media_requires_delete_and_retries_storage_failure_before_comm
         after.stage_history[1].metadata_json["result"]["deleted_versions"],
         1
     );
-    assert_eq!(after.stage_history[2].stage, "purge_db");
+    assert_eq!(after.stage_history[2].stage, "purge_content");
     assert_eq!(after.stage_history[2].status, "pending");
     assert!(fixture.deleted.load(Ordering::SeqCst));
     assert_eq!(fixture.uploader_count().await, 0);
     assert_eq!(serde_json::to_value(&after.stage_history[0]).unwrap(), gate);
     let calls = fixture.requests.load(Ordering::SeqCst);
-    run(
-        store,
-        id,
-        "worker-e",
-        &fixture.options(),
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap();
-    assert_completed(store, id).await;
+    // Restarting transition lookup returns content without replaying media.
+    let lease = store
+        .claim(id, "worker-e", DEFAULT_LEASE_DURATION)
+        .await
+        .unwrap()
+        .unwrap();
+    let NextStage::Stage(resumed) = UserDeletionTransition::new(store)
+        .get_next_stage(&lease, None)
+        .await
+        .unwrap()
+    else {
+        panic!("expected content")
+    };
+    assert_eq!(resumed.id, after.stage_history[2].id);
     assert_eq!(fixture.requests.load(Ordering::SeqCst), calls);
+    store.release(&lease).await.unwrap();
 }

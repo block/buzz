@@ -1519,6 +1519,11 @@ fn push_artifact_d_tag_predicate(
 pub(crate) fn row_to_stored_event(row: sqlx::postgres::PgRow) -> Result<Option<StoredEvent>> {
     let id_bytes: Vec<u8> = row.try_get("id")?;
     let pubkey_bytes: Vec<u8> = row.try_get("pubkey")?;
+    // Bulk erasure retains an unsigned, hidden structural row. Never reconstruct
+    // or expose it as a signed event, even through including-deleted lookups.
+    if pubkey_bytes.is_empty() {
+        return Ok(None);
+    }
     let created_at: DateTime<Utc> = row.try_get("created_at")?;
     let kind_i32: i32 = row.try_get("kind")?;
     let tags_json: serde_json::Value = row.try_get("tags")?;
@@ -2037,6 +2042,25 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
     crate::channel_members::guard_channel_roster_event(tx, kind_i32, channel_id, &tags_json)
         .await?;
 
+    // The relay resolves ancestry before opening this transaction. A bulk
+    // deletion may commit while that write waits for community admission.
+    // Recheck the resolved parent under the shared deletion lock so a stale
+    // resolution cannot insert a reply after its parent was physically erased.
+    if let Some(meta) = &thread_meta {
+        if let (Some(parent), Some(created)) = (meta.parent_event_id, meta.parent_event_created_at)
+        {
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM events WHERE community_id=$1 AND id=$2 AND created_at=$3)")
+                .bind(community_id.as_uuid()).bind(parent).bind(created)
+                .fetch_one(tx.conn()).await?;
+            if !exists {
+                return Err(DbError::InvalidData(
+                    "reply parent disappeared before persistence".into(),
+                ));
+            }
+        }
+    }
+
     let result = sqlx::query(
         r#"
         INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before)
@@ -2073,6 +2097,15 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
         .await?;
 
         if let Some(ref meta) = thread_meta {
+            // The metadata rows below (the reply's and the parent and root
+            // stubs) all name this channel. The check runs first, so a missing
+            // channel fails the whole transaction, event insert included.
+            crate::store::reference_check::require_channel(
+                tx.conn(),
+                community_id,
+                meta.channel_id,
+            )
+            .await?;
             let broadcast_val: bool = meta.broadcast;
 
             let tm_result = sqlx::query(

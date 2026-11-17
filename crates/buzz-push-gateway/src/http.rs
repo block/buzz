@@ -1,9 +1,11 @@
 //! Stateful installation, delegation, delivery, and health APIs.
 use crate::{
+    android_attestation::{self, AndroidAttestationVerifier},
     apns::{DeliveryAttempt, DeliveryOutcome, PushTransport},
     app_attest::AppAttestVerifier,
     authority::{
-        AuthorityError, AuthorityStore, Challenge, Delegation, DeliveryDisposition, NewInstallation,
+        AuthorityError, AuthorityStore, Challenge, Delegation, DeliveryDisposition, Installation,
+        NewInstallation, Platform,
     },
     config::{
         DELEGATE_AUDIENCE, ENROLL_AUDIENCE, REVOKE_DELEGATION_AUDIENCE,
@@ -41,6 +43,15 @@ use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer};
 pub struct ApplicationRuntime {
     pub app_attest: Arc<AppAttestVerifier>,
     pub transport: Arc<dyn PushTransport>,
+    /// Present only when the gateway is configured for Android.
+    pub android: Option<AndroidRuntime>,
+}
+
+/// Android attestation and FCM delivery for this gateway's configured app.
+#[derive(Clone)]
+pub struct AndroidRuntime {
+    pub attestation: Arc<dyn AndroidAttestationVerifier>,
+    pub transport: Arc<dyn PushTransport>,
 }
 
 #[derive(Clone)]
@@ -61,7 +72,7 @@ pub struct AppState {
 fn error(status: StatusCode, code: &'static str) -> Response {
     (status, Json(ErrorBody { error: code })).into_response()
 }
-fn valid_endpoint(v: &str) -> bool {
+fn valid_apns_endpoint(v: &str) -> bool {
     !v.is_empty()
         && v.len() <= MAX_ENDPOINT_HEX_BYTES * 2
         && v.len().is_multiple_of(2)
@@ -142,15 +153,39 @@ fn authority_error(e: AuthorityError) -> Response {
 fn installation_conflict() -> Response {
     error(StatusCode::CONFLICT, "installation_conflict")
 }
-fn endpoint_bytes(endpoint: &str) -> Option<Vec<u8>> {
-    valid_endpoint(endpoint)
-        .then(|| hex::decode(endpoint).ok())
-        .flatten()
+/// FCM registration tokens are opaque ASCII, not hex.
+fn valid_fcm_token(v: &str) -> bool {
+    !v.is_empty()
+        && v.len() <= MAX_FCM_TOKEN_BYTES
+        && v.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'_' | b'-'))
 }
-fn endpoint_fingerprint(token: &[u8]) -> [u8; 32] {
+/// The token bytes sealed into custody, or `None` when `endpoint` is not a
+/// valid push endpoint for `platform`.
+fn endpoint_bytes(platform: Platform, endpoint: &str) -> Option<Vec<u8>> {
+    match platform {
+        Platform::Ios => valid_apns_endpoint(endpoint)
+            .then(|| hex::decode(endpoint).ok())
+            .flatten(),
+        Platform::Android => valid_fcm_token(endpoint).then(|| endpoint.as_bytes().to_vec()),
+    }
+}
+/// The endpoint string handed to the platform's transport.
+fn transport_endpoint(platform: Platform, token: Vec<u8>) -> Option<String> {
+    match platform {
+        Platform::Ios => Some(hex::encode(token)),
+        Platform::Android => String::from_utf8(token).ok(),
+    }
+}
+fn endpoint_fingerprint(platform: Platform, token: &[u8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    h.update(b"buzz-apns-endpoint-v2\0");
+    // Separate namespaces keep a token from one platform from ever owning
+    // another platform's endpoint.
+    h.update(match platform {
+        Platform::Ios => &b"buzz-apns-endpoint-v2\0"[..],
+        Platform::Android => &b"buzz-fcm-endpoint-v1\0"[..],
+    });
     h.update(token);
     h.finalize().into()
 }
@@ -206,13 +241,36 @@ struct EnrollTranscript<'a> {
     endpoint_epoch: i64,
     expires_at: i64,
 }
+
+/// Domain of the Android enrollment transcript, which the attestation
+/// challenge binds.
+const ANDROID_ENROLL_DOMAIN: &str = "buzz.push.enroll.android.v1";
+
+/// The Android enrollment transcript: the iOS one without `key_id`, since the
+/// key is generated after (and from) this transcript's digest.
+#[derive(serde::Serialize)]
+struct AndroidEnrollTranscript<'a> {
+    v: u8,
+    audience: &'a str,
+    challenge_id: uuid::Uuid,
+    challenge: &'a str,
+    endpoint: &'a str,
+    endpoint_epoch: i64,
+    expires_at: i64,
+}
 async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
     let r: InstallationEnrollRequest = match crate::strict_json::from_slice(&body) {
         Ok(r) => r,
         Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_request"),
     };
     let now = (s.now)();
-    let token = match endpoint_bytes(&r.endpoint) {
+    // The platform is derived from which attestation is present.
+    let platform = match (&r.attestation, &r.android_attestation) {
+        (Some(_), None) => Platform::Ios,
+        (None, Some(_)) if s.application.android.is_some() => Platform::Android,
+        _ => return error(StatusCode::BAD_REQUEST, "invalid_request"),
+    };
+    let token = match endpoint_bytes(platform, &r.endpoint) {
         Some(v) => v,
         None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
     };
@@ -227,30 +285,47 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         Some(v) => v,
         None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
     };
-    let t = EnrollTranscript {
-        v: r.v,
-        audience: ENROLL_AUDIENCE,
-        challenge_id: r.challenge_id,
-        challenge: &r.challenge,
-        key_id: &r.key_id,
+    // An Android key is generated with the attestation challenge as an input,
+    // so its transcript holds only values known before the key exists, and
+    // the gateway derives the key id from the attested key.
+    let signed = match (platform, r.key_id.as_deref()) {
+        (Platform::Ios, Some(key_id)) => transcript(
+            "buzz.push.enroll.v1",
+            &EnrollTranscript {
+                v: r.v,
+                audience: ENROLL_AUDIENCE,
+                challenge_id: r.challenge_id,
+                challenge: &r.challenge,
+                key_id,
 
-        endpoint: &r.endpoint,
-        endpoint_epoch: r.endpoint_epoch,
-        expires_at: r.expires_at,
+                endpoint: &r.endpoint,
+                endpoint_epoch: r.endpoint_epoch,
+                expires_at: r.expires_at,
+            },
+        ),
+        (Platform::Android, None) => transcript(
+            ANDROID_ENROLL_DOMAIN,
+            &AndroidEnrollTranscript {
+                v: r.v,
+                audience: ENROLL_AUDIENCE,
+                challenge_id: r.challenge_id,
+                challenge: &r.challenge,
+                endpoint: &r.endpoint,
+                endpoint_epoch: r.endpoint_epoch,
+                expires_at: r.expires_at,
+            },
+        ),
+        _ => None,
     };
-    let signed = match transcript("buzz.push.enroll.v1", &t) {
+    let signed = match signed {
         Some(v) => v,
         None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
     };
-    let verified = match s.application.app_attest.verify_attestation(
-        &r.attestation,
-        &r.key_id,
-        signed.as_bytes(),
-    ) {
-        Ok(value) => value,
-        Err(_) => return error(StatusCode::UNAUTHORIZED, "invalid_attestation"),
+    let verified = match verify_enrollment_attestation(&s, &r, signed.as_bytes()) {
+        Some(value) => value,
+        None => return error(StatusCode::UNAUTHORIZED, "invalid_attestation"),
     };
-    let fingerprint = endpoint_fingerprint(&token);
+    let fingerprint = endpoint_fingerprint(platform, &token);
     match s
         .authority
         .matching_installation(
@@ -291,6 +366,7 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
     let id = uuid::Uuid::new_v4();
     let n = NewInstallation {
         id,
+        platform,
         app_attest_key_id: verified.key_id,
         app_attest_public_key: verified.public_key,
         assertion_counter: 0,
@@ -314,58 +390,141 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         .into_response()
 }
 
+/// The attested key an enrollment proved, on either platform.
+struct VerifiedKey {
+    key_id: Vec<u8>,
+    public_key: Vec<u8>,
+}
+
+/// Verify the enrollment's one attestation against the exact transcript.
+/// `None` rejects it; the response never says why (rejections are logged).
+fn verify_enrollment_attestation(
+    s: &AppState,
+    r: &InstallationEnrollRequest,
+    transcript: &[u8],
+) -> Option<VerifiedKey> {
+    if let Some(attestation) = &r.attestation {
+        let verified = s
+            .application
+            .app_attest
+            .verify_attestation(attestation, r.key_id.as_deref()?, transcript)
+            .ok()?;
+        return Some(VerifiedKey {
+            key_id: verified.key_id,
+            public_key: verified.public_key,
+        });
+    }
+    let android = s.application.android.as_ref()?;
+    let chain = decode_android_chain(r.android_attestation.as_deref()?)?;
+    let proven = android.attestation.verify(&chain, transcript).ok()?;
+    use sha2::{Digest, Sha256};
+    // The key must be a P-256 point. Its id is its digest; the attestation
+    // challenge binds the key to this transcript.
+    (proven.public_key.len() == 65
+        && p256::ecdsa::VerifyingKey::from_sec1_bytes(&proven.public_key).is_ok())
+    .then(|| VerifiedKey {
+        key_id: Sha256::digest(&proven.public_key).to_vec(),
+        public_key: proven.public_key,
+    })
+}
+
+/// Decode a bounded Key Attestation chain of base64 DER certificates.
+fn decode_android_chain(chain: &[String]) -> Option<Vec<Vec<u8>>> {
+    if chain.is_empty() || chain.len() > MAX_ANDROID_CHAIN_CERTIFICATES {
+        return None;
+    }
+    let mut total = 0usize;
+    chain
+        .iter()
+        .map(|certificate| {
+            // Bound before decoding so an oversized request cannot allocate.
+            if certificate.len() > MAX_ANDROID_ATTESTATION_BYTES.div_ceil(3) * 4 {
+                return None;
+            }
+            let der = STANDARD.decode(certificate).ok()?;
+            total += der.len();
+            (!der.is_empty() && total <= MAX_ANDROID_ATTESTATION_BYTES).then_some(der)
+        })
+        .collect()
+}
+
 struct AssertionChallenge<'a> {
     id: uuid::Uuid,
     text: &'a str,
 }
 
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
-async fn verify_installation_assertion<T: serde::Serialize>(
+async fn load_installation(
     s: &AppState,
     installation_id: uuid::Uuid,
-    challenge: AssertionChallenge<'_>,
-    assertion: &str,
-    domain: &str,
-    signed: &T,
     include_revoked: bool,
-) -> Result<(), Response> {
+) -> Result<Installation, Response> {
     let now = (s.now)();
-    let challenge_bytes = decode_challenge(challenge.text)
-        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "invalid_request"))?;
-    let installation = if include_revoked {
+    if include_revoked {
         s.authority
             .installation_for_revocation(installation_id, now)
             .await
     } else {
         s.authority.installation(installation_id, now).await
     }
-    .map_err(authority_error)?;
+    .map_err(authority_error)
+}
+
+/// Authenticate one installation call against the stored attested key. iOS
+/// verifies an App Attest assertion and advances its counter. Android verifies
+/// a Keystore ECDSA signature over the same transcript bytes; with no counter,
+/// the single-use challenge consumed here is its replay protection.
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
+async fn verify_installation_assertion<T: serde::Serialize>(
+    s: &AppState,
+    installation: &Installation,
+    challenge: AssertionChallenge<'_>,
+    assertion: &str,
+    domain: &str,
+    signed: &T,
+) -> Result<(), Response> {
+    let now = (s.now)();
+    let challenge_bytes = decode_challenge(challenge.text)
+        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "invalid_request"))?;
     let transcript = transcript(domain, signed)
         .ok_or_else(|| error(StatusCode::BAD_REQUEST, "invalid_request"))?;
-    let verified = s
-        .application
-        .app_attest
-        .verify_assertion(
-            assertion,
-            transcript.as_bytes(),
-            &installation.app_attest_public_key,
-            installation.assertion_counter,
-            challenge.text,
-            challenge.text,
-        )
-        .map_err(|_| error(StatusCode::UNAUTHORIZED, "invalid_attestation"))?;
+    let counter = match installation.platform {
+        Platform::Ios => Some(
+            s.application
+                .app_attest
+                .verify_assertion(
+                    assertion,
+                    transcript.as_bytes(),
+                    &installation.app_attest_public_key,
+                    installation.assertion_counter,
+                    challenge.text,
+                    challenge.text,
+                )
+                .map_err(|_| error(StatusCode::UNAUTHORIZED, "invalid_attestation"))?
+                .counter,
+        ),
+        Platform::Android => {
+            android_attestation::verify_signature(
+                &installation.app_attest_public_key,
+                transcript.as_bytes(),
+                assertion,
+            )
+            .map_err(|_| error(StatusCode::UNAUTHORIZED, "invalid_attestation"))?;
+            None
+        }
+    };
     s.authority
         .consume_challenge(challenge.id, challenge_bytes, now)
         .await
         .map_err(authority_error)?;
-    s.authority
-        .advance_assertion_counter(
-            installation_id,
-            installation.assertion_counter,
-            verified.counter,
-        )
-        .await
-        .map_err(authority_error)
+    match counter {
+        Some(next) => s
+            .authority
+            .advance_assertion_counter(installation.id, installation.assertion_counter, next)
+            .await
+            .map_err(authority_error),
+        None => Ok(()),
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -409,9 +568,13 @@ async fn delegate(State(s): State<AppState>, body: Bytes) -> Response {
         not_before: r.not_before,
         expires_at: r.expires_at,
     };
+    let installation = match load_installation(&s, r.installation_handle, false).await {
+        Ok(installation) => installation,
+        Err(e) => return e,
+    };
     if let Err(e) = verify_installation_assertion(
         &s,
-        r.installation_handle,
+        &installation,
         AssertionChallenge {
             id: r.challenge_id,
             text: &r.challenge,
@@ -419,7 +582,6 @@ async fn delegate(State(s): State<AppState>, body: Bytes) -> Response {
         &r.assertion,
         "buzz.push.delegate.v1",
         &t,
-        false,
     )
     .await
     {
@@ -472,10 +634,6 @@ async fn rotate_endpoint(State(s): State<AppState>, body: Bytes) -> Response {
         Ok(r) => r,
         Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_request"),
     };
-    let token = match endpoint_bytes(&r.endpoint) {
-        Some(v) => v,
-        None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
-    };
     if r.v != WIRE_VERSION
         || r.endpoint_epoch < 1
         || r.new_endpoint_epoch != r.endpoint_epoch.saturating_add(1)
@@ -492,9 +650,18 @@ async fn rotate_endpoint(State(s): State<AppState>, body: Bytes) -> Response {
         new_endpoint_epoch: r.new_endpoint_epoch,
         endpoint: &r.endpoint,
     };
+    let installation = match load_installation(&s, r.installation_handle, false).await {
+        Ok(installation) => installation,
+        Err(e) => return e,
+    };
+    // The endpoint's shape depends on the installation's platform.
+    let token = match endpoint_bytes(installation.platform, &r.endpoint) {
+        Some(v) => v,
+        None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
+    };
     if let Err(e) = verify_installation_assertion(
         &s,
-        r.installation_handle,
+        &installation,
         AssertionChallenge {
             id: r.challenge_id,
             text: &r.challenge,
@@ -502,7 +669,6 @@ async fn rotate_endpoint(State(s): State<AppState>, body: Bytes) -> Response {
         &r.assertion,
         "buzz.push.rotate-endpoint.v1",
         &t,
-        false,
     )
     .await
     {
@@ -519,7 +685,7 @@ async fn rotate_endpoint(State(s): State<AppState>, body: Bytes) -> Response {
             r.endpoint_epoch,
             r.new_endpoint_epoch,
             ciphertext,
-            endpoint_fingerprint(&token),
+            endpoint_fingerprint(installation.platform, &token),
         )
         .await
     {
@@ -554,9 +720,13 @@ async fn revoke_delegation(State(s): State<AppState>, body: Bytes) -> Response {
         relay_pubkey: &r.relay_pubkey,
         generation: r.generation,
     };
+    let installation = match load_installation(&s, r.installation_handle, false).await {
+        Ok(installation) => installation,
+        Err(e) => return e,
+    };
     if let Err(e) = verify_installation_assertion(
         &s,
-        r.installation_handle,
+        &installation,
         AssertionChallenge {
             id: r.challenge_id,
             text: &r.challenge,
@@ -564,7 +734,6 @@ async fn revoke_delegation(State(s): State<AppState>, body: Bytes) -> Response {
         &r.assertion,
         "buzz.push.revoke-delegation.v1",
         &t,
-        false,
     )
     .await
     {
@@ -609,9 +778,13 @@ async fn revoke_installation(State(s): State<AppState>, body: Bytes) -> Response
         endpoint_epoch: r.endpoint_epoch,
         new_endpoint_epoch: r.new_endpoint_epoch,
     };
+    let installation = match load_installation(&s, r.installation_handle, true).await {
+        Ok(installation) => installation,
+        Err(e) => return e,
+    };
     if let Err(e) = verify_installation_assertion(
         &s,
-        r.installation_handle,
+        &installation,
         AssertionChallenge {
             id: r.challenge_id,
             text: &r.challenge,
@@ -619,7 +792,6 @@ async fn revoke_installation(State(s): State<AppState>, body: Bytes) -> Response
         &r.assertion,
         "buzz.push.revoke-installation.v1",
         &t,
-        true,
     )
     .await
     {
@@ -724,10 +896,26 @@ async fn deliver(
             return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
         }
     };
-    let transport = Arc::clone(&s.application.transport);
-    let endpoint = match s.token_keyring.open(&permit.authority.token_ciphertext) {
-        Ok(token) => hex::encode(token),
-        Err(_) => {
+    let platform = permit.authority.platform;
+    // An Android installation can exist only on a gateway configured for
+    // Android. If that configuration was removed, retry: do not invalidate.
+    let transport = match platform {
+        Platform::Ios => Some(Arc::clone(&s.application.transport)),
+        Platform::Android => s
+            .application
+            .android
+            .as_ref()
+            .map(|a| Arc::clone(&a.transport)),
+    };
+    let endpoint = match s
+        .token_keyring
+        .open(&permit.authority.token_ciphertext)
+        .ok()
+        .and_then(|token| transport_endpoint(platform, token))
+        .zip(transport)
+    {
+        Some(opened) => opened,
+        None => {
             crate::metrics::record_delivery_error("token_custody");
             let _ = s
                 .authority
@@ -736,6 +924,7 @@ async fn deliver(
             return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
         }
     };
+    let (endpoint, transport) = endpoint;
     let attempt = DeliveryAttempt {
         request_id: r.request_id,
         expires_at: r.expires_at,
@@ -746,7 +935,11 @@ async fn deliver(
     let delivery = tokio::spawn(async move {
         let started = std::time::Instant::now();
         let outcome = transport.send(attempt, &endpoint).await;
-        crate::metrics::record_apns_delivery(outcome, started.elapsed().as_secs_f64());
+        let seconds = started.elapsed().as_secs_f64();
+        match platform {
+            Platform::Ios => crate::metrics::record_apns_delivery(outcome, seconds),
+            Platform::Android => crate::metrics::record_fcm_delivery(outcome, seconds),
+        }
         let disposition = match outcome {
             DeliveryOutcome::Retry { .. } | DeliveryOutcome::ConfigurationFault => {
                 DeliveryDisposition::Retryable
@@ -910,6 +1103,7 @@ mod request_limit_tests {
             application: Arc::new(ApplicationRuntime {
                 app_attest: Arc::new(app_attest),
                 transport: Arc::new(NeverTransport),
+                android: None,
             }),
             max_grant_lifetime_seconds: 86_400,
             max_installation_lifetime_seconds: 86_400,
@@ -925,8 +1119,9 @@ mod request_limit_tests {
             v: WIRE_VERSION,
             challenge_id: uuid::Uuid::nil(),
             challenge: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0; 32]),
-            key_id: STANDARD.encode([0; 32]),
-            attestation: STANDARD.encode(vec![0; MAX_APP_ATTESTATION_BYTES]),
+            key_id: Some(STANDARD.encode([0; 32])),
+            attestation: Some(STANDARD.encode(vec![0; MAX_APP_ATTESTATION_BYTES])),
+            android_attestation: None,
 
             endpoint: "ab".repeat(MAX_ENDPOINT_HEX_BYTES),
             endpoint_epoch: 1,
@@ -938,7 +1133,7 @@ mod request_limit_tests {
     #[tokio::test]
     async fn maximum_valid_enrollment_envelope_reaches_the_handler() {
         let body = maximum_enrollment_body();
-        assert_eq!(MAX_ENROLL_REQUEST_BYTES, 23_896);
+        assert_eq!(MAX_ENROLL_REQUEST_BYTES, 23_960);
         assert!(body.len() > MAX_REQUEST_BYTES);
         assert!(body.len() <= MAX_ENROLL_REQUEST_BYTES);
         let (public, _) = router(state());
@@ -1139,3 +1334,7 @@ mod transcript_vector_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "http_android_tests.rs"]
+mod android_tests;

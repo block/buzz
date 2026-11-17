@@ -1,14 +1,51 @@
 # Run and recover a user-deletion workflow
 
-The workflow runs a placeholder account gate, **real media cleanup**, then
-placeholder community actions. Completion does not mean the whole account has
-been erased. Media cleanup requires `--delete` and writers to remain stopped;
-the placeholder gate does not stop uploads for you. Use a disposable database
-and versioned storage bucket when testing.
+The workflow orders account gating, media cleanup, and per-community content
+cleanup. Real requests stop at the unimplemented account gate; they cannot
+complete through placeholder handlers. Demo requests simulate all stages and
+never delete media or content.
 
-Submit with `--pubkey` to discover current memberships. Legacy demo intake
-remains available for inspecting orchestration rows, but its synthetic target
-cannot execute the real media handler. Owned-community execution is unsupported.
+Direct `media-batches` and `content-batches` commands remain available for
+operator-controlled cleanup. Neither command installs or enforces the account
+gate. Protection against concurrent writes by the target or their agents remains
+unimplemented; neither command proves full account erasure. Use a disposable
+database and versioned storage bucket when testing. Owned-community workflow
+execution is unsupported.
+
+## Content batches
+
+`content-batches` selects the user plus agents owned by that user **in the target
+community**. Ownership in another community does not authorize cleanup here.
+The start record reports excluded agent keys with missing or conflicting local
+ownership. Every batch rechecks ownership; a change aborts the batch. Former
+membership does not prevent cleanup of historical content.
+
+The handler preserves actual reply ancestry and other users' reactions by erasing
+selected messages into structural tombstones. Plain links, quotes and unmarked
+references do not require retaining their destinations. Other authors' signed
+messages remain unchanged. Reply parent/root lookups use existing
+`thread_metadata` indexes; no new permanent index or migration is required.
+
+For replies without thread metadata, the handler probes the existing tags GIN
+index for each selected message ID in lowercase and uppercase. It then uses the
+relay's shared parser to distinguish actual replies from ordinary links. It does
+not search for all messages marked as replies. Mixed-case references without
+thread metadata may be missed; replies with thread metadata use binary IDs and
+remain covered regardless of spelling.
+
+This fallback runs during planning and before each batch that physically deletes
+events. All probes share one SQL statement with a one-second timeout and a
+10,000-match limit. A message matching several probes counts several times.
+A timeout or overflow aborts cleanup; unusually many references to the selected
+IDs may require metadata repair first. These bounds are safety limits, not
+measured production latency guarantees.
+
+Each batch installs transaction-local statement and lock timeouts before taking
+the community lock. Its planned output is written before locking; the commit
+receipt is written after commit. An output failure may leave earlier batches
+committed; retry replans the remaining records. A lost database session also
+loses the private worklist and causes execution to fail rather than continue
+with incomplete checks.
 
 ## Code map: worker, policy, and persistence
 
@@ -20,7 +57,7 @@ there is no additional service or database-side workflow function.
 | --- | --- |
 | `buzz-deletion/src/user.rs` | Parse command arguments, call the user/shared stores or worker, print results |
 | `buzz-deletion/src/user/worker.rs` | Claim, heartbeat, call transition, dispatch handler, repeat, release |
-| `buzz-deletion/src/user/handlers.rs` | Dispatch real media or placeholder actions; save outcomes through the shared store |
+| `buzz-deletion/src/user/handlers.rs` | Dispatch real media/content or synthetic demo actions; save outcomes through the shared store |
 | `buzz-deletion/src/user/transition.rs` | `UserDeletionTransition.get_next_stage`: recover or choose the next saved position |
 | `buzz-deletion/src/user/workflow.rs` | Allowed user stages, result-based branching, community-progress reconstruction |
 | `buzz-db/src/store/entity_deletion/mod.rs` | Shared store definition and exports; no stage policy |
@@ -32,7 +69,7 @@ there is no additional service or database-side workflow function.
 | `buzz-db/src/store/user_deletion/requests.rs` | Submit user requests and validate user inventory during approval |
 | `buzz-db/src/store/user_deletion/inventory.rs` | Validate approved inventory and construct handler inputs |
 
-The common store does not know the names `gate_user`, `purge_media`, `purge_db`, or
+The common store does not know the names `gate_user`, `purge_media`, `purge_content`, or
 `purge_agents`. `UserDeletionTransition` supplies a synchronous decision function
 to `EntityDeletionStore.transition_stage`. The store locks the parent and loads
 history, invokes that function while still holding the lock, checks the returned
@@ -117,9 +154,9 @@ The version-1 workflow rules are:
 
 | Stage | Allowed outcome | Runtime choice |
 | --- | --- | --- |
-| `gate_user` | `purge_media` | Always enter request-wide media cleanup |
+| `gate_user` | `purge_media` | Enter media only after saved gate success; real gate is not implemented |
 | `purge_media` | Enter communities | After saved success, select the first uncovered community |
-| `purge_db` | `purge_agents` or community complete | Read saved boolean `result.has_agents` |
+| `purge_content` | `purge_agents` or community complete | Real cleanup continues to agent cleanup; demos read saved `result.has_agents` |
 | `purge_agents` | Community complete | Mark this community covered |
 
 After a community completes, select the first uncovered community in inventory
@@ -127,6 +164,13 @@ order. After all are covered, finish the request. Missing `has_agents` is an
 error, not an implicit skip. The inventory's version selects the currently
 supported rules; future versions must retain the rules needed by active requests.
 No full execution plan is created upfront.
+
+If the real `purge_db` keeps any of the user's messages in a channel, it must
+also keep the user's `channel_members` row for that channel, marked removed. The
+relay refuses to open a private channel that has or had a member other than the
+sender and the sender's own agents (kind:9002 in `NOSTR.md`), and it finds former
+members only through these rows. Without the row, the channel could be opened and
+its history, those messages included, made public.
 
 `previous_stage_id` is bookkeeping for uninterrupted execution. It must belong
 to this request. After restart pass `None`; the database current row is the
@@ -183,22 +227,24 @@ INVENTORY_DIGEST=$(printf '%s\n' "$REQUEST_JSON" | jq -r '.inventory_digest')
 ./target/debug/buzz-admin user-deletions run "$REQUEST_ID" --delete
 ```
 
-Approval creates no stages. The first run completes the dummy gate and leaves
-`purge_media` pending. The second run performs media cleanup and advances to
-community placeholders (or finishes if there are no communities). Omitting
-`--delete` at media saves a retryable failure without deleting anything. Media
-failure keeps the same stage current; no community action runs before media
-succeeds. Resume after the saved retry deadline using the same request ID.
-A saved completed media stage is transitioned without running media again.
+Approval creates no stages. A real run requires `--delete`, then refuses the
+unimplemented `gate_user` handler and leaves it pending. Repeating the run does
+not fabricate progress. Use `--target demo:example` instead of `--pubkey` at
+submission to exercise the full synthetic workflow without deletion.
+
+The routing requires saved gate success before media, and saved media success
+before community cleanup. A media failure keeps the same stage current; resume
+after the saved retry deadline using the same request ID. A saved completed
+media stage is transitioned without running media again.
 
 `--next-step` executes one handler, transitions, and releases the lease. Without
-it, an invocation executes up to 100 handlers. Workflow stdout is one inspection
+it, an invocation executes up to 100 handlers. The worker prints an inspection
 JSON document; media's file report goes to stderr. The direct command prints the
 file report on stdout. Each file has its hash, filename when present,
 keep/delete decision, versions, and outcome counts; uploader lists are omitted.
 
-`--fail-stage purge_db`, `--stage-delay-ms`, and `--demo-no-agents-in` exercise
-placeholder failures and branching only. They do not simulate media success.
+`--fail-stage purge_content`, `--stage-delay-ms`, and `--demo-no-agents-in` exercise
+placeholder failures and branching only. Demo media success is synthetic; real requests reject these controls.
 An injected community failure preserves the same retry semantics as before.
 Ctrl-C releases the worker lease; after an abrupt kill wait for lease expiry.
 
