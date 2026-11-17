@@ -1829,6 +1829,7 @@ async fn query_member_events(
             &filters,
             &accessible_channels,
             None,
+            crate::handlers::system_channels::NamedOnlyRead::Writer,
         )
         .await
         .map_err(|e| internal_error(&format!("named-only channel access lookup: {e}")))?;
@@ -2480,6 +2481,7 @@ async fn count_member_events(
             &filters,
             &accessible_channels,
             None,
+            crate::handlers::system_channels::NamedOnlyRead::Writer,
         )
         .await
         .map_err(|e| internal_error(&format!("named-only channel access lookup: {e}")))?;

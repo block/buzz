@@ -2721,15 +2721,16 @@ impl Db {
     }
 
     /// [`Db::get_readable_named_only_channels`] on the bounded replica arm,
-    /// for the per-request scope of REQ, COUNT and the HTTP bridge. Every
-    /// reconnecting client runs it once per subscription, so on the writer a
+    /// for the per-request scope of a WebSocket REQ. Every reconnecting
+    /// client sends its subscriptions again at once, so on the writer a
     /// fleet-wide reconnect turned into a writer load spike.
     ///
     /// Routed by explicit product decision, like [`Db::is_relay_member`]. A
     /// stale answer lags a join or a removal by at most the budget `B`. The
     /// same request already takes its legacy channels from a 10 s cache,
-    /// re-checks every channel it names that it did not get on the writer
-    /// (`confirm_requested_channel_access` in the relay), and fan-out
+    /// re-checks every channel it names, by `#h` or group-state `#d`, that it
+    /// did not get on the writer (`confirm_requested_channel_access` in the
+    /// relay), and fan-out
     /// re-checks membership for every live event on a private channel. Falls
     /// back to the writer as [`Db::is_relay_member`] does.
     #[datastore_span(

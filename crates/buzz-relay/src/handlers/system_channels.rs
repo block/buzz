@@ -282,6 +282,21 @@ pub(crate) fn filter_live_scope(
     }
 }
 
+/// Which pool [`readable_named_only_channels_for_filters`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NamedOnlyRead {
+    /// The writer. For callers whose repair covers only `#h` names (WS COUNT,
+    /// the HTTP bridge), and for the bridge's read-your-writes
+    /// `"consistency": "strong"` reads.
+    Writer,
+    /// The bounded replica arm
+    /// ([`buzz_db::Db::get_readable_named_only_channels_routed`]). For WS REQ:
+    /// every reconnecting client sends its subscriptions again at once, and
+    /// REQ re-checks every channel a filter names, `#h` or group-state `#d`,
+    /// on the writer (`req::confirm_requested_channel_access`).
+    Routed,
+}
+
 /// Load the named-only channels the reader can read, narrowed to the token's
 /// channel scope, when at least one filter could use them. Returns an empty
 /// set, without a database read, when no filter opts in or names a channel
@@ -293,6 +308,7 @@ pub(crate) async fn readable_named_only_channels_for_filters(
     filters: &[Filter],
     implicit: &[Uuid],
     token_channel_ids: Option<&[Uuid]>,
+    read: NamedOnlyRead,
 ) -> Result<NamedOnlyChannels, buzz_db::DbError> {
     if !filters
         .iter()
@@ -301,12 +317,21 @@ pub(crate) async fn readable_named_only_channels_for_filters(
         return Ok(NamedOnlyChannels::default());
     }
     let named = named_outside(filters, implicit);
-    let mut readable = NamedOnlyChannels::from_readable(
-        state
-            .db
-            .get_readable_named_only_channels_routed(community, pubkey, &named)
-            .await?,
-    );
+    let channels = match read {
+        NamedOnlyRead::Writer => {
+            state
+                .db
+                .get_readable_named_only_channels(community, pubkey, &named)
+                .await?
+        }
+        NamedOnlyRead::Routed => {
+            state
+                .db
+                .get_readable_named_only_channels_routed(community, pubkey, &named)
+                .await?
+        }
+    };
+    let mut readable = NamedOnlyChannels::from_readable(channels);
     if let Some(allowed) = token_channel_ids {
         readable.retain(allowed);
     }

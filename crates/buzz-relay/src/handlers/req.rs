@@ -184,6 +184,7 @@ pub async fn handle_admitted_req(
         &filters,
         &accessible_channels,
         token_channel_ids.as_deref(),
+        super::system_channels::NamedOnlyRead::Routed,
     )
     .await
     {

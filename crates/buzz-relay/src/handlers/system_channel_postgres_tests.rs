@@ -1815,3 +1815,83 @@ async fn named_channels_missing_from_a_stale_cache_still_route_live() {
     mixed.close(&f).await;
     assert_eq!(refcount(&f, EventTopic::Channel(channel)).await, 0);
 }
+
+/// Only WS REQ reads named-only channels from the bounded replica. WS COUNT
+/// and the HTTP bridge re-check only `#h` names, and the bridge serves
+/// read-your-writes `"consistency": "strong"` reads, so they keep the
+/// writer's answer. The "replica" is a schema whose `channels` and
+/// `channel_members` are empty, as if it had not yet replayed the channel.
+/// Mutation: pass `NamedOnlyRead::Writer` from REQ → RED (REQ sees the
+/// channel). Pass `NamedOnlyRead::Routed` from COUNT or the bridge → RED.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn only_req_reads_named_only_channels_from_the_replica() {
+    let f = fixture().await;
+    let owner = Keys::generate();
+    let outsider = Keys::generate();
+    let channel = create_channel(&f.state, &f.tenant, &owner, &[&["channel_type", "system"]]).await;
+    edit_channel(
+        &f.state,
+        &f.tenant,
+        &owner,
+        channel,
+        &[&["visibility", "open"]],
+    )
+    .await
+    .expect("open the system channel");
+    let message = publish(&f, &owner, 9, "hello", &[&["h", &channel.to_string()]]).await;
+    let named = json!({"kinds": [9], "#h": [channel.to_string()]});
+
+    let schema = format!("stale_channels_{}", Uuid::new_v4().simple());
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE SCHEMA {schema}; \
+         CREATE TABLE {schema}.channels (LIKE public.channels INCLUDING ALL); \
+         CREATE TABLE {schema}.channel_members (LIKE public.channel_members INCLUDING ALL);"
+    )))
+    .execute(f.state.db.pool())
+    .await
+    .expect("create replica schema");
+    let replica = sqlx::PgPool::connect_with(
+        crate::test_support::database_url()
+            .parse::<sqlx::postgres::PgConnectOptions>()
+            .expect("database url")
+            .options([("search_path", format!("{schema},public").as_str())]),
+    )
+    .await
+    .expect("replica pool");
+    let mut db = buzz_db::Db::from_pools(f.state.db.pool().clone(), replica);
+    db.fence().force_open_for_tests(chrono::Utc::now());
+    db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(60)));
+    let mut state = (*f.state).clone();
+    state.db = db;
+    let stale = Fixture {
+        state: Arc::new(state),
+        tenant: f.tenant.clone(),
+        host: f.host.clone(),
+    };
+
+    assert_eq!(
+        req(&f, &outsider, named.clone()).await,
+        vec![message.clone()],
+        "precondition: the writer grants the open system channel by name"
+    );
+    assert!(
+        req(&stale, &outsider, named.clone()).await.is_empty(),
+        "WS REQ must take the replica's answer"
+    );
+    assert_eq!(
+        count(&stale, &outsider, named.clone()).await,
+        1,
+        "WS COUNT"
+    );
+    assert_eq!(
+        bridge_ids(bridge(&stale, &outsider, "/query", json!([named.clone()])).await),
+        vec![message],
+        "bridge /query"
+    );
+    assert_eq!(
+        bridge_count(bridge(&stale, &outsider, "/count", json!([named])).await),
+        1,
+        "bridge /count"
+    );
+}

@@ -118,6 +118,7 @@ pub async fn handle_count(
         &filters,
         &accessible_channels,
         token_channel_ids.as_deref(),
+        super::system_channels::NamedOnlyRead::Writer,
     )
     .await
     {
