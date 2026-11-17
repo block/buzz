@@ -1101,9 +1101,14 @@ class _MessageCodeBlock extends HookWidget {
           : [TextSpan(text: shownCode)],
       [code, name, isDark, ink],
     );
+    // Opaque, so the copy button can share it and hide code scrolled beneath.
+    // An inked block sits on the outgoing fill, so its tint is blended there.
     final surface = ink == null
         ? CodeStyle.background(context.colors)
-        : chatCodeTint(ink, 0.14);
+        : Color.alphaBlend(
+            chatCodeTint(ink, 0.14),
+            ChatColors.of(context).outgoing,
+          );
     return Container(
       // In a bubble, the vertical margin brings the bubble's 8px vertical
       // padding up to its 16px side padding, so the block is inset evenly and
@@ -1171,14 +1176,7 @@ class _MessageCodeBlock extends HookWidget {
                 visualDensity: VisualDensity.compact,
                 style: IconButton.styleFrom(
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  // Opaque, so code scrolled beneath stays out of the icon.
-                  // An inked block is translucent over the outgoing fill.
-                  backgroundColor: ink == null
-                      ? surface
-                      : Color.alphaBlend(
-                          surface,
-                          ChatColors.of(context).outgoing,
-                        ),
+                  backgroundColor: surface,
                 ),
                 icon: Icon(
                   isCopied.value ? BuzzIcons.check : BuzzIcons.copy,
