@@ -309,3 +309,77 @@ async fn guests_contribute_only_through_explicit_reply_and_reaction_grants() {
         "remove own reaction after revocation",
     );
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn view_only_stream_has_viewer_admission_and_grants_from_creation() {
+    let state = state().await;
+    let tenant = community(&state, "view-only-create").await;
+    let owner = Keys::generate();
+    let viewer = Keys::generate();
+    let channel = Uuid::new_v4();
+    let channel_id = channel.to_string();
+    let h = ["h", channel_id.as_str()];
+    let create = event(
+        &owner,
+        9007,
+        "",
+        &[
+            &h,
+            &["name", "Announcements"],
+            &["visibility", "view-only"],
+            &["guest_replies", "true"],
+        ],
+    );
+    let submit = async |event, keys| ingest_event(&state, &tenant, event, http_auth(keys)).await;
+    check(submit(create, &owner).await, None, "create View only");
+    check(
+        submit(event(&viewer, 9021, "", &[&h]), &viewer).await,
+        None,
+        "first self-join",
+    );
+    let roster = group_state_tags(&state, &tenant, channel, 39002).await;
+    let viewer_pubkey = viewer.public_key().to_hex();
+    assert!(roster.iter().any(|tag| matches!(
+        tag.as_slice(), [kind, key, _, role, ..]
+            if kind == "p" && key == &viewer_pubkey && role == "guest"
+    )));
+    let metadata = group_state_tags(&state, &tenant, channel, 39000).await;
+    for tag in [
+        &["public"][..],
+        &["restricted"],
+        &["join_role", "guest"],
+        &["guest_replies", "true"],
+        &["guest_reactions", "false"],
+    ] {
+        assert!(
+            metadata
+                .iter()
+                .any(|actual| actual.iter().map(String::as_str).eq(tag.iter().copied())),
+            "missing {tag:?}"
+        );
+    }
+
+    let root = event(&owner, 9, "Update", &[&h]);
+    let root_id = root.id.to_hex();
+    check(submit(root, &owner).await, None, "owner root");
+    check(
+        submit(
+            event(&viewer, 9, "Reply", &[&h, &["e", &root_id, "", "reply"]]),
+            &viewer,
+        )
+        .await,
+        None,
+        "Viewer reply",
+    );
+    check(
+        submit(event(&viewer, 9, "New post", &[&h]), &viewer).await,
+        Some(POST_DENIED),
+        "Viewer cannot post a channel message",
+    );
+    check(
+        submit(event(&viewer, 7, "👍", &[&["e", &root_id]]), &viewer).await,
+        Some(REACT_DENIED),
+        "Viewer cannot add a reaction with only replies enabled",
+    );
+}

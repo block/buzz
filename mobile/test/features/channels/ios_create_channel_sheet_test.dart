@@ -46,12 +46,16 @@ void main() {
                           required description,
                           required visibility,
                           required ttlSeconds,
+                          required guestReplies,
+                          required guestReactions,
                         }) async {
                           payloads.add({
                             'name': name,
                             'description': description,
                             'visibility': visibility,
                             'ttl': ttlSeconds,
+                            'guestReplies': guestReplies,
+                            'guestReactions': guestReactions,
                           });
                           if (payloads.length == 1) {
                             throw StateError('Try again');
@@ -80,6 +84,7 @@ void main() {
               'description': 'Details',
               'visibility': visibility,
               'ttlSeconds': ttl,
+              if (visibility == 'view-only') 'guestReplies': true,
             }),
           ),
           (bytes) => response.complete(
@@ -95,12 +100,14 @@ void main() {
       );
       expect(result, isNull);
       expect(configuration!['session'], session);
-      expect(await create('private', 3600), {'success': true});
+      expect(await create('view-only', 3600), {'success': true});
       expect(payloads.last, {
         'name': 'Test',
         'description': 'Details',
-        'visibility': 'private',
+        'visibility': 'view-only',
         'ttl': 3600,
+        'guestReplies': true,
+        'guestReactions': false,
       });
       expect(result, isNull); // Navigation waits until UIKit has dismissed.
       dismissed.complete();

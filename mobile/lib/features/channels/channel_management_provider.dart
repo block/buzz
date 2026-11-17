@@ -556,6 +556,9 @@ List<List<String>> buildDeleteMessageTags({
   ];
 }
 
+/// Creation-only visibility accepted atomically or refused by the relay.
+const viewOnlyCreateVisibility = 'view-only';
+
 /// Builds the signed kind:9007 tags used by mobile channel creation.
 List<List<String>> buildCreateChannelTags({
   required String channelId,
@@ -565,6 +568,8 @@ List<List<String>> buildCreateChannelTags({
   List<String> labels = const [],
   String? description,
   int? ttlSeconds,
+  bool guestReplies = false,
+  bool guestReactions = false,
 }) {
   if (ttlSeconds != null && ttlSeconds <= 0) {
     throw ArgumentError.value(ttlSeconds, 'ttlSeconds', 'must be positive');
@@ -575,6 +580,10 @@ List<List<String>> buildCreateChannelTags({
     ['name', name],
     ['visibility', visibility],
     ['channel_type', channelType],
+    if (visibility == viewOnlyCreateVisibility) ...[
+      ['guest_replies', guestReplies.toString()],
+      ['guest_reactions', guestReactions.toString()],
+    ],
     for (final label in labels) ['t', label],
     if (description case final about? when about.trim().isNotEmpty)
       ['about', about.trim()],

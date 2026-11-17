@@ -27,6 +27,8 @@ class _CreateChannelSheet extends HookConsumerWidget {
     final nameController = useTextEditingController();
     final descriptionController = useTextEditingController();
     final visibility = useState('open');
+    final guestReplies = useState(false);
+    final guestReactions = useState(false);
     final temporary = useState(false);
     final ttlSeconds = useState(_defaultCreateChannelTtlSeconds);
     final isSubmitting = useState(false);
@@ -53,6 +55,8 @@ class _CreateChannelSheet extends HookConsumerWidget {
               visibility: visibility.value,
               description: descriptionController.text.trim(),
               ttlSeconds: temporary.value ? ttlSeconds.value : null,
+              guestReplies: guestReplies.value,
+              guestReactions: guestReactions.value,
             );
         if (context.mounted) {
           Navigator.of(context).pop(created);
@@ -200,9 +204,11 @@ class _CreateChannelSheet extends HookConsumerWidget {
                       grouped: true,
                       preserveTextInput: true,
                       trailingIcon: Icons.unfold_more,
-                      valueLabel: visibility.value == 'open'
-                          ? 'Public'
-                          : 'Private',
+                      valueLabel: switch (visibility.value) {
+                        'open' => 'Public',
+                        viewOnlyCreateVisibility => 'View only',
+                        _ => 'Private',
+                      },
                       enabled: !isSubmitting.value,
                       label: 'Visibility',
                       onSelected: (value) => visibility.value = value,
@@ -213,6 +219,11 @@ class _CreateChannelSheet extends HookConsumerWidget {
                           value: 'open',
                         ),
                         _CreateChannelMenuOption(
+                          key: Key('create-channel-visibility-view-only'),
+                          label: 'View only',
+                          value: viewOnlyCreateVisibility,
+                        ),
+                        _CreateChannelMenuOption(
                           key: Key('create-channel-visibility-private'),
                           label: 'Private',
                           value: 'private',
@@ -220,6 +231,22 @@ class _CreateChannelSheet extends HookConsumerWidget {
                       ],
                       value: visibility.value,
                     ),
+                    if (visibility.value == viewOnlyCreateVisibility) ...[
+                      SwitchListTile.adaptive(
+                        title: const Text('Allow viewers to reply in threads'),
+                        value: guestReplies.value,
+                        onChanged: isSubmitting.value
+                            ? null
+                            : (value) => guestReplies.value = value,
+                      ),
+                      SwitchListTile.adaptive(
+                        title: const Text('Allow viewers to react'),
+                        value: guestReactions.value,
+                        onChanged: isSubmitting.value
+                            ? null
+                            : (value) => guestReactions.value = value,
+                      ),
+                    ],
                   ],
                 ),
                 if (errorMessage.value case final error?) ...[

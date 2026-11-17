@@ -242,6 +242,7 @@ pub async fn create_channel_with_id(
             ttl_seconds,
             labels,
             unlisted: false,
+            guest_contributions: None,
             members: &[],
         },
     )
@@ -269,6 +270,15 @@ pub async fn create_channel_with_id(
     Ok((record, was_created))
 }
 
+/// Contributions enabled at creation for a channel that admits viewers.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GuestContributions {
+    /// Viewers may send thread replies.
+    pub replies: bool,
+    /// Viewers may add message reactions.
+    pub reactions: bool,
+}
+
 /// A channel to create: the fields a kind:9007 sets.
 pub struct NewChannel<'a> {
     /// Display name, canonicalized before storage.
@@ -287,6 +297,8 @@ pub struct NewChannel<'a> {
     pub labels: &'a [String],
     /// Leave the channel out of listings for non-members from the start.
     pub unlisted: bool,
+    /// When present, self-joins start as viewers with these grants.
+    pub guest_contributions: Option<GuestContributions>,
     /// 32-byte pubkeys added as ordinary members invited by the creator. The
     /// caller has authorized each addition.
     pub members: &'a [Vec<u8>],
@@ -369,6 +381,7 @@ async fn insert_channel_rows(
         ttl_seconds,
         labels,
         unlisted,
+        guest_contributions,
         members,
     } = channel;
     let community_id = tx.community();
@@ -390,11 +403,17 @@ async fn insert_channel_rows(
         return Err(DbError::InvalidData("channel name is required".into()));
     }
 
+    let join_role = if guest_contributions.is_some() {
+        ChannelJoinRole::Guest
+    } else {
+        ChannelJoinRole::Member
+    };
+    let grants = guest_contributions.unwrap_or_default();
     let rows_affected = sqlx::query(
         r#"
-        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline, labels, unlisted)
+        INSERT INTO channels (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline, labels, unlisted, join_role, guest_replies, guest_reactions)
         VALUES ($1, $2, $3, $4::channel_type, $5::channel_visibility, $6, $7, $8,
-                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END, $9, $10)
+                CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END, $9, $10, $11, $12, $13)
         ON CONFLICT (community_id, id) DO NOTHING
         "#,
     )
@@ -408,6 +427,9 @@ async fn insert_channel_rows(
     .bind(ttl_seconds)
     .bind(labels)
     .bind(unlisted)
+    .bind(join_role.as_str())
+    .bind(grants.replies)
+    .bind(grants.reactions)
     .execute(tx.conn())
     .await
     .map_err(|e| listed_name_taken(e, Some(name)))?
@@ -3215,6 +3237,7 @@ mod postgres_tests {
             ttl_seconds: None,
             labels: &[],
             unlisted: false,
+            guest_contributions: None,
             members,
         }
     }

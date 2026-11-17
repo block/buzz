@@ -60,6 +60,8 @@ class ChannelActions {
     List<String> labels = const [],
     String? description,
     int? ttlSeconds,
+    bool guestReplies = false,
+    bool guestReactions = false,
     bool waitForChannelList = true,
   }) async {
     final resolvedChannelId = channelId ?? _newUuidV4();
@@ -71,9 +73,21 @@ class ChannelActions {
       labels: labels,
       description: description,
       ttlSeconds: ttlSeconds,
+      guestReplies: guestReplies,
+      guestReactions: guestReactions,
     );
     _ensureCommunityValid();
-    await _signedEventRelay.submit(kind: 9007, content: '', tags: tags);
+    try {
+      await _signedEventRelay.submit(kind: 9007, content: '', tags: tags);
+    } catch (error) {
+      if (visibility == viewOnlyCreateVisibility &&
+          error.toString().contains('invalid visibility: view-only')) {
+        throw Exception(
+          'This relay does not support creating View only channels.',
+        );
+      }
+      rethrow;
+    }
     _ensureCommunityValid();
     if (!waitForChannelList) {
       // Solo can open from its own confirmed metadata and roster. Reconcile

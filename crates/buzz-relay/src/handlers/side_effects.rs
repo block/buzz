@@ -768,20 +768,8 @@ pub async fn validate_admin_event(
                 }
             }
 
-            for name in ["guest_replies", "guest_reactions"] {
-                let tags: Vec<_> = event
-                    .tags
-                    .iter()
-                    .filter(|t| t.kind().to_string() == name)
-                    .collect();
-                if tags.len() > 1
-                    || tags.iter().any(|t| {
-                        t.as_slice().len() != 2 || !matches!(t.content(), Some("true" | "false"))
-                    })
-                {
-                    return Err(anyhow::anyhow!("{name} must be one true/false tag"));
-                }
-            }
+            guest_grant_from_tags(event, "guest_replies")?;
+            guest_grant_from_tags(event, "guest_reactions")?;
 
             // Validate channel names before storage. A name made entirely of
             // display-prefix hashes becomes empty after canonicalization, and
@@ -2611,6 +2599,22 @@ pub(crate) fn channel_labels_from_tags(
     }
 }
 
+/// Read one optional, explicit boolean grant on kind:9007 or kind:9002.
+pub(super) fn guest_grant_from_tags(event: &Event, name: &str) -> anyhow::Result<Option<bool>> {
+    let mut tags = event.tags.iter().filter(|t| t.kind().to_string() == name);
+    let Some(tag) = tags.next() else {
+        return Ok(None);
+    };
+    if tags.next().is_some() || tag.as_slice().len() != 2 {
+        anyhow::bail!("{name} must be one true/false tag");
+    }
+    match tag.content() {
+        Some("true") => Ok(Some(true)),
+        Some("false") => Ok(Some(false)),
+        _ => anyhow::bail!("{name} must be one true/false tag"),
+    }
+}
+
 /// The kind:9007 `["unlisted", "true"|"false"]` setting: whether a new
 /// channel starts out of channel listings for non-members. A missing tag means
 /// listed. Any other value is refused, as kind:9002 refuses it; the last tag
@@ -2720,82 +2724,21 @@ async fn handle_create_group(
     event: &Event,
     state: &Arc<AppState>,
 ) -> anyhow::Result<()> {
-    let name =
-        extract_tag_value(event, "name").ok_or_else(|| anyhow::anyhow!("missing name tag"))?;
-    let channel_type_str =
-        extract_tag_value(event, "channel_type").unwrap_or_else(|| "stream".to_string());
-    let channel_type: buzz_db::channel::ChannelType = channel_type_str
-        .parse()
-        .map_err(|_| anyhow::anyhow!("invalid channel_type: {channel_type_str}"))?;
-    let visibility: buzz_db::channel::ChannelVisibility =
-        match extract_tag_value(event, "visibility") {
-            Some(visibility_str) => visibility_str
-                .parse()
-                .map_err(|_| anyhow::anyhow!("invalid visibility: {visibility_str}"))?,
-            None => channel_type.default_visibility(),
-        };
-
+    // Ingest already committed the channel, its creator and its initial members.
+    // A failed lookup must not create a second channel with different permissions.
+    let channel_id =
+        extract_h_tag_channel(event).ok_or_else(|| anyhow::anyhow!("missing or invalid h tag"))?;
+    let channel = state
+        .db
+        .get_channel_for_event_write(tenant.community(), channel_id)
+        .await?;
     let actor_bytes = event.pubkey.to_bytes().to_vec();
-    let description = extract_tag_value(event, "about");
-    let ttl_seconds = super::resolve_ttl(event, state.config.ephemeral_ttl_override);
-    let labels = channel_labels_from_tags(event)
-        .transpose()
-        .map_err(|e| anyhow::anyhow!("{e}"))?
-        .unwrap_or_default();
-    let unlisted = create_unlisted_from_tags(event)?;
-
-    // Ingest already created the channel named by the h tag, in the same
-    // commit as this event. Fetch it rather than creating a duplicate.
-    //
-    // Double-count analysis (C5): the counter increment below does NOT
-    // double-count vs. ingest.rs. Ingest increments on was_created=true and
-    // this handler only reaches create_channel() on a DB lookup Err — an
-    // error recovery path where ingest's channel is inaccessible, so the
-    // counter correctly records a new creation.
-    // `members_added`: ingest's create also added the event's `p` tags.
-    let (channel, members_added) = if let Some(client_uuid) = extract_h_tag_channel(event) {
-        match state
-            .db
-            .get_channel_for_event_write(tenant.community(), client_uuid)
-            .await
-        {
-            Ok(ch) => (ch, true),
-            Err(_) => {
-                // Channel not found — shouldn't happen (ingest_event pre-created it),
-                // but fall back to creation to stay resilient.
-                let ch = state
-                    .db
-                    .create_labeled_channel(
-                        tenant.community(),
-                        &name,
-                        channel_type,
-                        visibility,
-                        description.as_deref(),
-                        &actor_bytes,
-                        ttl_seconds,
-                        &labels,
-                        unlisted,
-                    )
-                    .await?;
-                metrics::counter!(
-                    "buzz_channels_created_total",
-                    "community" => tenant.host().to_owned(),
-                    "type" => channel_type.to_string()
-                )
-                .increment(1);
-                (ch, false)
-            }
-        }
-    } else {
-        // Ingest refuses a kind:9007 without an `h` tag before storing it.
-        anyhow::bail!("missing or invalid h tag");
-    };
 
     // Creator becomes owner — evict any stale negative membership lookup.
     state.invalidate_membership(tenant, channel.id, &actor_bytes);
     // Open channels appear in everyone's accessible set; a private channel only
     // affects its initial members, whose entries the invalidations here drop.
-    if visibility == buzz_db::channel::ChannelVisibility::Open {
+    if channel.visibility == buzz_db::channel::ChannelVisibility::Open.as_str() {
         state.invalidate_all_accessible_channels(tenant);
     }
 
@@ -2831,12 +2774,7 @@ async fn handle_create_group(
     // Ingest added these in the create's transaction; announce them as a
     // kind:9000 would. A failed announcement for one member must not cost the
     // rest theirs: a resend writes nothing, so nothing would retry them.
-    let members = if members_added {
-        initial_members(event)?
-    } else {
-        Vec::new()
-    };
-    for member in members {
+    for member in initial_members(event)? {
         state.invalidate_membership(tenant, channel.id, &member);
         if let Err(e) = emit_system_message(
             tenant,
@@ -2867,7 +2805,7 @@ async fn handle_create_group(
         }
     }
 
-    info!(channel_id = %channel.id, name = %name, "NIP-29 CREATE_GROUP processed");
+    info!(channel_id = %channel.id, name = %channel.name, "NIP-29 CREATE_GROUP processed");
     Ok(())
 }
 

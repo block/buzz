@@ -2682,6 +2682,7 @@ struct ChannelCreateRequest {
     ttl_seconds: Option<i32>,
     labels: Vec<String>,
     unlisted: bool,
+    guest_contributions: Option<buzz_db::channel::GuestContributions>,
     members: Vec<Vec<u8>>,
 }
 
@@ -3443,19 +3444,49 @@ async fn ingest_event_inner(
             channel_type_str.parse().map_err(|_| {
                 IngestError::Rejected(format!("invalid channel_type: {channel_type_str}"))
             })?;
-        let visibility: buzz_db::channel::ChannelVisibility =
-            match event.tags.iter().find_map(|t| {
-                if t.kind().to_string() == "visibility" {
-                    t.content().map(|s| s.to_string())
-                } else {
-                    None
-                }
-            }) {
-                Some(visibility_str) => visibility_str.parse().map_err(|_| {
-                    IngestError::Rejected(format!("invalid visibility: {visibility_str}"))
-                })?,
+        use buzz_db::channel::{ChannelType, ChannelVisibility, GuestContributions};
+        let visibility_tags = || {
+            event
+                .tags
+                .iter()
+                .filter(|tag| tag.kind().to_string() == "visibility")
+        };
+        let view_only = visibility_tags().any(|tag| tag.content() == Some("view-only"));
+        let grant = |name| {
+            super::side_effects::guest_grant_from_tags(&event, name)
+                .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))
+        };
+        let replies = grant("guest_replies")?;
+        let reactions = grant("guest_reactions")?;
+        let (visibility, guest_contributions) = if view_only {
+            if channel_type != ChannelType::Stream
+                || !visibility_tags().map(|tag| tag.as_slice().len()).eq([2])
+            {
+                return Err(IngestError::Rejected(
+                    "invalid: view-only requires a stream and one visibility tag".into(),
+                ));
+            }
+            (
+                ChannelVisibility::Open,
+                Some(GuestContributions {
+                    replies: replies.unwrap_or_default(),
+                    reactions: reactions.unwrap_or_default(),
+                }),
+            )
+        } else {
+            if replies.is_some() || reactions.is_some() {
+                return Err(IngestError::Rejected(
+                    "invalid: viewer grants require view-only creation".into(),
+                ));
+            }
+            let visibility = match visibility_tags().find_map(|tag| tag.content()) {
+                Some(value) => value
+                    .parse()
+                    .map_err(|_| IngestError::Rejected(format!("invalid visibility: {value}")))?,
                 None => channel_type.default_visibility(),
             };
+            (visibility, None)
+        };
         let labels = super::side_effects::channel_labels_from_tags(&event)
             .transpose()
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?
@@ -3481,6 +3512,7 @@ async fn ingest_event_inner(
                 ttl_seconds: super::resolve_ttl(&event, state.config.ephemeral_ttl_override),
                 labels,
                 unlisted,
+                guest_contributions,
                 members,
             });
         } else {
@@ -3744,6 +3776,7 @@ async fn ingest_event_inner(
             ttl_seconds: create.ttl_seconds,
             labels: &create.labels,
             unlisted: create.unlisted,
+            guest_contributions: create.guest_contributions,
             members: &create.members,
         };
         match state

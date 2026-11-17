@@ -380,6 +380,7 @@ async fn channel_create_resend_requires_exact_timestamp_and_live_community_row()
         ttl_seconds: None,
         labels: &[],
         unlisted: false,
+        guest_contributions: None,
         members: &[],
     };
     assert!(matches!(

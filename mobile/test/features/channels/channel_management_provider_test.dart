@@ -492,6 +492,52 @@ void main() {
     },
   );
 
+  test('old relay refusal never retries creation as Public', () async {
+    final keys = nostr.Keys.generate();
+    final session = _RecordingPublishRelaySession(
+      publishError: Exception('invalid visibility: view-only'),
+    );
+    final provider = Provider<ChannelActions>(
+      (ref) => ChannelActions(
+        ref: ref,
+        session: session,
+        signedEventRelay: SignedEventRelay(session: session, nsec: keys.nsec),
+        currentPubkey: keys.public,
+      ),
+    );
+    final container = ProviderContainer(retry: (_, _) => null);
+    addTearDown(container.dispose);
+
+    await expectLater(
+      container
+          .read(provider)
+          .createChannel(
+            channelId: _channelId,
+            name: 'announcements',
+            channelType: 'stream',
+            visibility: viewOnlyCreateVisibility,
+            guestReplies: true,
+          ),
+      throwsA(
+        predicate(
+          (e) => relayErrorMessage(
+            e!,
+          ).contains('This relay does not support creating View only channels'),
+        ),
+      ),
+    );
+    final created = session.publishedEvents.single;
+    expect(created.kind, 9007);
+    expect(created.tags, [
+      ['h', _channelId],
+      ['name', 'announcements'],
+      ['visibility', 'view-only'],
+      ['channel_type', 'stream'],
+      ['guest_replies', 'true'],
+      ['guest_reactions', 'false'],
+    ]);
+  });
+
   test('reactions tag the reacted-to message author', () async {
     final keys = nostr.Keys.generate();
     final session = _RecordingPublishRelaySession();
@@ -946,6 +992,9 @@ const _memberPubkey =
     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 
 class _RecordingPublishRelaySession extends RelaySessionNotifier {
+  _RecordingPublishRelaySession({this.publishError});
+
+  final Object? publishError;
   final publishedEvents = <NostrEvent>[];
   final queryFilters = <NostrFilter>[];
   int historyQueryCount = 0;
@@ -959,6 +1008,7 @@ class _RecordingPublishRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     publishedEvents.add(event);
+    if (publishError case final error?) throw error;
     return event;
   }
 

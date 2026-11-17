@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import 'channel.dart';
 
@@ -16,6 +17,8 @@ class IosCreateChannelSheet {
       required String description,
       required String visibility,
       required int? ttlSeconds,
+      required bool guestReplies,
+      required bool guestReactions,
     })
     onCreate,
   }) async {
@@ -33,10 +36,12 @@ class IosCreateChannelSheet {
           description: data['description'] as String,
           visibility: data['visibility'] as String,
           ttlSeconds: data['ttlSeconds'] as int?,
+          guestReplies: data['guestReplies'] == true,
+          guestReactions: data['guestReactions'] == true,
         );
         return {'success': true};
       } catch (error) {
-        return {'error': error.toString()};
+        return {'error': relayErrorMessage(error)};
       }
     });
     try {

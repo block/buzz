@@ -3377,6 +3377,33 @@ void main() {
         'description': 'Release updates',
         'ttl': 7 * 24 * 60 * 60,
       });
+      await tester.tap(find.byKey(const Key('create-channel-visibility')));
+      await tester.pumpAndSettle();
+      final viewOnly = find.byKey(
+        const Key('create-channel-visibility-view-only'),
+      );
+      await tester.ensureVisible(viewOnly);
+      await tester.tap(viewOnly);
+      await tester.pumpAndSettle();
+      final replies = find.widgetWithText(
+        SwitchListTile,
+        'Allow viewers to reply in threads',
+      );
+      final reactions = find.widgetWithText(
+        SwitchListTile,
+        'Allow viewers to react',
+      );
+      expect(tester.widget<SwitchListTile>(replies).value, isFalse);
+      expect(tester.widget<SwitchListTile>(reactions).value, isFalse);
+      await tester.ensureVisible(replies);
+      await tester.tap(replies);
+      await tester.pumpAndSettle();
+      expect(tester.widget<SwitchListTile>(reactions).value, isFalse);
+      await tester.tap(submit);
+      await tester.pumpAndSettle();
+      expect(actions.creations.last, containsPair('visibility', 'view-only'));
+      expect(actions.creations.last, containsPair('guestReplies', true));
+      expect(actions.creations.last, containsPair('guestReactions', false));
       await tester.tap(find.byTooltip('Close'));
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('create-channel-name')), findsNothing);
@@ -4543,6 +4570,8 @@ class _CreateSheetActions implements ChannelActions {
     List<String> labels = const [],
     String? description,
     int? ttlSeconds,
+    bool guestReplies = false,
+    bool guestReactions = false,
     bool waitForChannelList = true,
   }) async {
     creations.add({
@@ -4551,6 +4580,10 @@ class _CreateSheetActions implements ChannelActions {
       'visibility': visibility,
       'description': description,
       'ttl': ttlSeconds,
+      if (visibility == viewOnlyCreateVisibility) ...{
+        'guestReplies': guestReplies,
+        'guestReactions': guestReactions,
+      },
     });
     throw StateError('Try again');
   }
@@ -4573,6 +4606,8 @@ class _RefusingCreateActions implements ChannelActions {
     List<String> labels = const [],
     String? description,
     int? ttlSeconds,
+    bool guestReplies = false,
+    bool guestReactions = false,
     bool waitForChannelList = true,
   }) async => throw error;
 

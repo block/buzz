@@ -78,6 +78,11 @@ final class NativeCreateChannelViewController: UITableViewController, UITextView
   private let rowColor: UIColor
   private var temporary = false
   private var visibility = "open"
+  private var guestReplies = false
+  private var guestReactions = false
+  private let visibilityOptions = [
+    ("Public", "open"), ("View only", "view-only"), ("Private", "private"),
+  ]
   private var ttl = 604800
   private var busy = false
   private let expiry: [(String, Int)] = [
@@ -167,6 +172,10 @@ final class NativeCreateChannelViewController: UITableViewController, UITextView
     updateControls()
     var values: [String: Any] = ["name": value, "description": details.text.trimmingCharacters(in: .whitespacesAndNewlines), "visibility": visibility]
     if temporary { values["ttlSeconds"] = ttl }
+    if visibility == "view-only" {
+      values["guestReplies"] = guestReplies
+      values["guestReactions"] = guestReactions
+    }
     onCreate?(values)
   }
 
@@ -187,7 +196,11 @@ final class NativeCreateChannelViewController: UITableViewController, UITextView
   }
 
   override func numberOfSections(in tableView: UITableView) -> Int { 3 }
-  override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { section == 2 ? (temporary ? 3 : 2) : 1 }
+  private var pickerRowCount: Int { temporary ? 3 : 2 }
+
+  override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+    section == 2 ? pickerRowCount + (visibility == "view-only" ? 2 : 0) : 1
+  }
   override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? { section == 0 ? "Name" : section == 1 ? "Description · Optional" : nil }
 
   override func tableView(_ tableView: UITableView, willDisplayHeaderView view: UIView, forSection section: Int) {
@@ -218,11 +231,29 @@ final class NativeCreateChannelViewController: UITableViewController, UITextView
         field.bottomAnchor.constraint(equalTo: cell.contentView.bottomAnchor, constant: -12),
         field.heightAnchor.constraint(greaterThanOrEqualToConstant: indexPath.section == 0 ? 28 : 96),
       ])
+    } else if indexPath.row >= pickerRowCount {
+      let isReplies = indexPath.row == pickerRowCount
+      let label = isReplies ? "Allow viewers to reply in threads" : "Allow viewers to react"
+      var content = cell.defaultContentConfiguration()
+      content.text = label
+      cell.contentConfiguration = content
+      let toggle = UISwitch()
+      toggle.isOn = isReplies ? guestReplies : guestReactions
+      toggle.accessibilityLabel = label
+      toggle.addAction(UIAction { [weak self, weak toggle] _ in
+        guard let self, let toggle, !self.busy else { return }
+        if isReplies { self.guestReplies = toggle.isOn }
+        else { self.guestReactions = toggle.isOn }
+      }, for: .valueChanged)
+      cell.accessoryView = toggle
+      cell.isAccessibilityElement = false
+      cell.accessibilityElements = [toggle]
     } else {
       let isType = indexPath.row == 0
       let isVisibility = indexPath.row == 1
       let label = isType ? "Channel type" : isVisibility ? "Visibility" : "Delete after inactivity"
-      let value = isType ? (temporary ? "Temporary" : "Ongoing") : isVisibility ? (visibility == "open" ? "Public" : "Private") : expiry.first(where: { $0.1 == ttl })?.0 ?? "7 days"
+      let visibilityLabel = visibilityOptions.first(where: { $0.1 == visibility })?.0 ?? "Public"
+      let value = isType ? (temporary ? "Temporary" : "Ongoing") : isVisibility ? visibilityLabel : expiry.first(where: { $0.1 == ttl })?.0 ?? "7 days"
       let button = UIButton(type: .system)
       let titleLabel = UILabel()
       titleLabel.text = label
@@ -245,7 +276,7 @@ final class NativeCreateChannelViewController: UITableViewController, UITextView
       button.accessibilityLabel = label
       button.accessibilityValue = value
       button.showsMenuAsPrimaryAction = true
-      let choices: [(String, String)] = isType ? [("Ongoing", "ongoing"), ("Temporary", "temporary")] : isVisibility ? [("Public", "open"), ("Private", "private")] : expiry.map { ($0.0, String($0.1)) }
+      let choices: [(String, String)] = isType ? [("Ongoing", "ongoing"), ("Temporary", "temporary")] : isVisibility ? visibilityOptions : expiry.map { ($0.0, String($0.1)) }
       let selected = isType ? (temporary ? "temporary" : "ongoing") : isVisibility ? visibility : String(ttl)
       button.menu = UIMenu(children: choices.map { title, key in
         UIAction(title: title, state: key == selected ? .on : .off) { [weak self] _ in

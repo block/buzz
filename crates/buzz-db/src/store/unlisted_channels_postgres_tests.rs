@@ -371,6 +371,7 @@ async fn channel_created_unlisted_is_never_listed() {
                 ttl_seconds: None,
                 labels: &[],
                 unlisted: true,
+                guest_contributions: None,
                 members: &[],
             },
             &event,

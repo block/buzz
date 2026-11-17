@@ -573,12 +573,16 @@ class ChannelsPage extends HookConsumerWidget {
                     required description,
                     required visibility,
                     required ttlSeconds,
+                    required guestReplies,
+                    required guestReactions,
                   }) => actions.createChannel(
                     name: name,
                     description: description,
                     visibility: visibility,
                     channelType: 'stream',
                     ttlSeconds: ttlSeconds,
+                    guestReplies: guestReplies,
+                    guestReactions: guestReactions,
                   ),
             );
           } else {
