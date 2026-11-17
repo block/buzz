@@ -170,12 +170,12 @@ class _ArchiveRelay extends RelaySessionNotifier {
                       event.createdAt < filter.until! ||
                       (event.createdAt == filter.until &&
                           before != null &&
-                          event.id.compareTo(before) < 0),
+                          event.id.compareTo(before) > 0),
                 )
                 .toList()
               ..sort(
                 (a, b) => a.createdAt == b.createdAt
-                    ? b.id.compareTo(a.id)
+                    ? a.id.compareTo(b.id)
                     : b.createdAt.compareTo(a.createdAt),
               );
         results.addAll(page.take(2));
