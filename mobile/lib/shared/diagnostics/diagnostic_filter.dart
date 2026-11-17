@@ -1,6 +1,8 @@
 import 'package:sentry_flutter/sentry_flutter.dart';
 
-/// The one filter everything passes through before it leaves the device.
+/// The one filter every Dart report, breadcrumb and count passes through
+/// before it leaves the device. Reports the native SDKs capture themselves
+/// (native crashes, app hangs) do not pass through it.
 ///
 /// It removes URL query strings and fragments, keeps only attributes on the
 /// allowed list, and drops breadcrumbs that are not from the app's fixed list.
@@ -19,6 +21,9 @@ abstract final class DiagnosticFilter {
   /// Attribute prefixes the SDK sets on every count: its own name and
   /// version, the release, the member, and the operating system and device.
   static const _sdkAttributePrefixes = ['sentry.', 'user.', 'os.', 'device.'];
+
+  /// Fixed wording that replaces an error's own text.
+  static const removedText = 'Error text removed before sending.';
 
   static const _breadcrumbCategories = {networkCategory, lifecycleCategory};
 
@@ -43,16 +48,19 @@ abstract final class DiagnosticFilter {
   /// Filters an error report.
   static SentryEvent filterEvent(SentryEvent event) {
     event.request = null;
+    // The SDK adds the widget and error description here, which can quote
+    // what is on screen.
+    event.contexts.remove('flutter_error_details');
     event.tags?.removeWhere((key, _) => !_allowsTag(key));
     event.message = switch (event.message) {
       final message? => SentryMessage(stripUrlTails(message.formatted)),
       null => null,
     };
     for (final exception in event.exceptions ?? const <SentryException>[]) {
-      exception.value = switch (exception.value) {
-        final value? => _exceptionValue(exception.type, value),
-        null => null,
-      };
+      // An error's text can quote its input, a server's response body or a
+      // URL, so only its type, mechanism type and stack trace are kept.
+      if (exception.value != null) exception.value = removedText;
+      exception.mechanism?.data = null;
     }
     event.breadcrumbs = [
       for (final crumb in event.breadcrumbs ?? const <Breadcrumb>[])
@@ -81,11 +89,4 @@ abstract final class DiagnosticFilter {
     metric.attributes.removeWhere((key, _) => !allowsAttribute(key));
     return metric;
   }
-
-  /// A [FormatException]'s text quotes the input it could not parse, which
-  /// can be message content, so only its fixed wording is kept.
-  static String _exceptionValue(String? type, String value) =>
-      type == 'FormatException'
-      ? 'The input could not be parsed.'
-      : stripUrlTails(value);
 }

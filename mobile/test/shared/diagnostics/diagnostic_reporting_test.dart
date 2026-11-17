@@ -1,13 +1,27 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:buzz/shared/community/community_provider.dart';
+import 'package:buzz/shared/diagnostics/diagnostic_filter.dart';
 import 'package:buzz/shared/diagnostics/diagnostic_member_binding.dart';
 import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/diagnostics/diagnostic_startup.dart';
 import 'package:buzz/shared/diagnostics/sentry_diagnostic_reporter.dart';
 import 'package:buzz/shared/relay/relay_provider.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:sentry_flutter/sentry_flutter.dart';
+// The SDK's own processors and integrations, so tests see what it really
+// sends rather than hand-built events.
+// ignore: implementation_imports
+import 'package:sentry_flutter/src/breadcrumbs/debug_print_integration.dart';
+// ignore: implementation_imports
+import 'package:sentry_flutter/src/exception/flutter_error_integration.dart';
+// ignore: implementation_imports
+import 'package:sentry_flutter/src/exception/platform_exception_event_processor.dart';
 
 void main() {
   group('what leaves the device', () {
@@ -64,33 +78,15 @@ void main() {
         {'backend': 'relay.example.org'},
       ),
       (
-        'a URL loses its query string and fragment',
+        'a URL in a message loses its query string and fragment',
         () async => (await event(
           SentryEvent(
-            exceptions: [
-              SentryException(
-                type: 'StateError',
-                value:
-                    'failed https://e.org/p?token=abc#frag and wss://r.org/x?y=1',
-              ),
-            ],
+            message: SentryMessage(
+              'failed https://e.org/p?token=abc#frag and wss://r.org/x?y=1',
+            ),
           ),
-        )).exceptions!.single.value,
+        )).message?.formatted,
         'failed https://e.org/p and wss://r.org/x',
-      ),
-      (
-        'a parse failure loses the input it quotes',
-        () async => (await event(
-          SentryEvent(
-            exceptions: [
-              SentryException(
-                type: 'FormatException',
-                value: 'Unexpected character: {"content":"hello"}',
-              ),
-            ],
-          ),
-        )).exceptions!.single.value,
-        'The input could not be parsed.',
       ),
       (
         'a tag not on the list is dropped',
@@ -119,18 +115,106 @@ void main() {
       expect(options.attachScreenshot, isFalse);
       expect(options.attachViewHierarchy, isFalse);
       expect(options.enableAutoNativeBreadcrumbs, isFalse);
+      expect(options.recordHttpBreadcrumbs, isFalse);
       expect(options.replay.sessionSampleRate, isNull);
       expect(options.tracesSampleRate, isNull);
     });
   });
 
-  test('a build with no reporting destination never starts the SDK', () async {
-    DiagnosticReporter? started;
-    await runWithDiagnostics(destination: '', app: (r) => started = r);
+  group('a sent error', () {
+    late _MemoryTransport transport;
+    late SentryFlutterOptions options;
+    late Hub hub;
 
-    expect(started, isA<NoopDiagnosticReporter>());
-    expect(Sentry.isEnabled, isFalse);
+    setUp(() {
+      transport = _MemoryTransport();
+      options = SentryFlutterOptions();
+      configureDiagnostics(options, 'https://key@example.org/1');
+      options
+        ..transport = transport
+        ..sendClientReports = false
+        ..addEventProcessor(PlatformExceptionEventProcessor());
+      hub = Hub(options);
+    });
+    tearDown(() => hub.close());
+
+    final rows = <(String, Object, String)>[
+      ('a parse failure', const FormatException('private-marker'), 'Format'),
+      ('a bad argument', ArgumentError.value('private-marker'), 'Argument'),
+      ('a server response', StateError('body: private-marker'), 'StateError'),
+      (
+        'a platform failure',
+        PlatformException(
+          code: 'failed',
+          message: 'open https://e.org/f?token=private-marker',
+        ),
+        'PlatformException',
+      ),
+    ];
+    for (final (name, error, type) in rows) {
+      test('keeps only the type and stack of $name', () async {
+        await hub.captureException(error, stackTrace: StackTrace.current);
+        final sent = transport.events.single;
+
+        expect(jsonEncode(sent), isNot(contains('private-marker')));
+        final exception = (sent['exception']['values'] as List).last as Map;
+        expect(exception['type'], contains(type));
+        expect(exception['value'], DiagnosticFilter.removedText);
+        expect(exception['stacktrace'], isNotNull);
+      });
+    }
+
+    testWidgets('leaves out what a framework error says about the screen', (
+      tester,
+    ) async {
+      final integration = FlutterErrorIntegration();
+      integration(hub, options);
+      addTearDown(integration.close);
+
+      // A Text without Directionality is a real framework build error.
+      await tester.pumpWidget(const Text('private-marker'));
+      expect(tester.takeException(), isA<FlutterError>());
+      await tester.runAsync(transport.first);
+
+      expect(
+        jsonEncode(transport.events.single),
+        isNot(contains('private-marker')),
+      );
+    });
   });
+
+  test('device logs keep printing in a build that reports', () async {
+    final options = SentryFlutterOptions(checker: _ReleaseChecker());
+    configureDiagnostics(options, 'https://key@example.org/1');
+    final printed = <String?>[];
+    final original = debugPrint;
+    debugPrint = (message, {wrapWidth}) => printed.add(message);
+    final integration = DebugPrintIntegration();
+    try {
+      integration(Hub(options), options);
+      debugPrint('an existing log line');
+    } finally {
+      integration.close();
+      debugPrint = original;
+    }
+    expect(printed, ['an existing log line']);
+  });
+
+  for (final (name, destination) in [
+    ('no reporting destination', ''),
+    ('a destination the SDK cannot parse', 'https://key@example.org'),
+  ]) {
+    test('a build with $name starts without the SDK', () async {
+      DiagnosticReporter? started;
+      await runWithDiagnostics(
+        destination: destination,
+        app: (r) => started = r,
+      );
+
+      expect(started, isA<NoopDiagnosticReporter>());
+      expect(Sentry.isEnabled, isFalse);
+    });
+  }
 
   test('a reporting call that fails does not reach the caller', () async {
     for (final reporter in [
@@ -231,4 +315,31 @@ class _FailingMetrics extends Fake implements SentryMetrics {
     int value, {
     Map<String, SentryAttribute>? attributes,
   }) => throw StateError('down');
+}
+
+class _ReleaseChecker extends RuntimeChecker {
+  @override
+  bool isDebugMode() => false;
+  @override
+  bool isReleaseMode() => true;
+  @override
+  bool isProfileMode() => false;
+}
+
+class _MemoryTransport implements Transport {
+  final events = <Map<String, dynamic>>[];
+  final _first = Completer<void>();
+
+  Future<void> first() => _first.future;
+
+  @override
+  Future<SentryId?> send(SentryEnvelope envelope) async {
+    for (final item in envelope.items) {
+      if (item.header.type != 'event') continue;
+      final bytes = await item.dataFactory();
+      events.add(jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>);
+      if (!_first.isCompleted) _first.complete();
+    }
+    return envelope.header.eventId;
+  }
 }
