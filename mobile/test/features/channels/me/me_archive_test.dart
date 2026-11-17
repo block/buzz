@@ -62,6 +62,12 @@ class _ArchiveRelay extends RelaySessionNotifier {
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
 
+  void setConnected(bool connected) {
+    state = SessionState(
+      status: connected ? SessionStatus.connected : SessionStatus.disconnected,
+    );
+  }
+
   List<NostrEvent> events(NostrFilter filter, {bool strong = false}) {
     if (filter.kinds.contains(39000)) {
       if (strong &&
@@ -313,6 +319,35 @@ void main() {
       expect(find.byType(Dismissible), findsNWidgets(3));
       expect(find.text('General'), findsNothing);
       expect(find.text('Old chat'), findsNothing);
+
+      if (!embedded) {
+        // Ordinary pull-to-refresh keeps the cached inventory without archive
+        // recovery errors on either failed reads or a disconnected session.
+        for (final connected in [true, false]) {
+          relay.failRefresh = true;
+          relay.setConnected(connected);
+          await tester.pumpAndSettle();
+          final failedBeforePull = relay.failedRefreshes;
+          await tester.drag(
+            find.byType(CustomScrollView),
+            const Offset(0, 500),
+          );
+          await tester.pumpAndSettle();
+          expect(
+            relay.failedRefreshes,
+            connected ? greaterThan(failedBeforePull) : failedBeforePull,
+          );
+          expect(
+            find.text('Couldn’t refresh chat status. Try again.'),
+            findsNothing,
+          );
+          expect(find.text('Project chat').hitTestable(), findsOneWidget);
+          expect(relay.submitted, isEmpty);
+          relay.failRefresh = false;
+          relay.setConnected(true);
+          await tester.pumpAndSettle();
+        }
+      }
 
       // Scrolling, a short left drag, and a right drag never archive.
       for (final offset in [

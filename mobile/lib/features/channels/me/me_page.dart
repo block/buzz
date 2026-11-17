@@ -138,13 +138,17 @@ class MePage extends HookConsumerWidget {
           if (entry.value.phase == _MeArchivePhase.accepted)
             entry.key: entry.value,
       };
+      if (accepted.isEmpty) {
+        await ref.read(channelsProvider.notifier).refresh();
+        return;
+      }
       try {
         // This request starts after the captured archives were accepted. A
         // generic list notification (even a newer active metadata revision)
         // may instead belong to a read started before acceptance.
         final fresh = await ref
             .read(channelsProvider.notifier)
-            .fetchFresh(strong: accepted.isNotEmpty);
+            .fetchFresh(strong: true);
         if (!isCurrentArchiveScope() ||
             !identical(archiveRecovery.value, recovery)) {
           return;
