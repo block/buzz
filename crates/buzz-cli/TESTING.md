@@ -134,13 +134,13 @@ FORUM_ID=$(buzz channels create --name "test-forum" --type forum --visibility op
 
 # channels list
 buzz channels list | jq .
-# Expected: [{"channel_id":"...","name":"...","description":"...","created_at":N}]
+# Expected: [{"channel_id":"...","name":"...","description":"...","created_at":N,"channel_type":"stream","visibility":"public","labels":[]}]
 buzz channels list --visibility open | jq .
 buzz channels list --member | jq .
 
 # channels get
 buzz channels get --channel "$CHANNEL_ID" | jq .
-# Expected: {"channel_id":"...","name":"...","description":"...","created_at":N,"pubkey":"..."} or null
+# Expected: {"channel_id":"...","name":"...","description":"...","created_at":N,"channel_type":"stream","visibility":"public","labels":[],"pubkey":"..."} or null
 
 # channels update
 buzz channels update --channel "$CHANNEL_ID" --name "test-cli-updated" \
