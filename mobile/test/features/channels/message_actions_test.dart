@@ -1224,27 +1224,27 @@ void main() {
         final permissionRequests = <Object?>[];
         // Only the permission request is answered: add-only access cannot read
         // the library, so any other photo_manager call fails as it would there.
-        messenger.setMockMethodCallHandler(
-          const MethodChannel('com.fluttercandies/photo_manager'),
-          (call) async {
-            if (call.method != 'requestPermissionExtend') {
-              throw PlatformException(code: 'add_only_cannot_read');
-            }
-            permissionRequests.add(call.arguments);
-            return PermissionState.authorized.index;
-          },
-        );
+        const photoManager = MethodChannel('com.fluttercandies/photo_manager');
+        const saver = MethodChannel('buzz/photo_library_saver');
+        addTearDown(() {
+          messenger.setMockMethodCallHandler(photoManager, null);
+          messenger.setMockMethodCallHandler(saver, null);
+        });
+        messenger.setMockMethodCallHandler(photoManager, (call) async {
+          if (call.method != 'requestPermissionExtend') {
+            throw PlatformException(code: 'add_only_cannot_read');
+          }
+          permissionRequests.add(call.arguments);
+          return PermissionState.authorized.index;
+        });
         final saves = <Map<Object?, Object?>>[];
         PlatformException? saveFailure;
-        messenger.setMockMethodCallHandler(
-          const MethodChannel('buzz/photo_library_saver'),
-          (call) async {
-            expect(call.method, 'saveImage');
-            saves.add(call.arguments as Map<Object?, Object?>);
-            if (saveFailure case final failure?) throw failure;
-            return null;
-          },
-        );
+        messenger.setMockMethodCallHandler(saver, (call) async {
+          expect(call.method, 'saveImage');
+          saves.add(call.arguments as Map<Object?, Object?>);
+          if (saveFailure case final failure?) throw failure;
+          return null;
+        });
 
         await _pumpImageSheet(
           tester,
