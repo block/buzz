@@ -129,7 +129,9 @@ async fn agents_among<'e>(
 pub type AgentAddPolicy<'a> = &'a (dyn Fn(&str, &[u8]) -> std::result::Result<(), String> + Sync);
 
 /// Refuse unless every agent in `joining`, other than `actor`, may join by
-/// `policy`.
+/// `policy`. The refusal names the first agent refused, in the order of
+/// `joining`, as `(agent <hex pubkey>)` at its end, so clients can say whose
+/// setting blocked it.
 ///
 /// Callers run this in the same transaction, and under the same locks, as the
 /// write it guards, so it sees exactly who joins.
@@ -149,17 +151,22 @@ async fn check_joining_agents(
         return Ok(());
     }
     let rows = sqlx::query(
-        "SELECT channel_add_policy::text AS policy, agent_owner_pubkey AS owner FROM users \
-         WHERE community_id = $1 AND pubkey = ANY($2) AND agent_owner_pubkey IS NOT NULL",
+        "SELECT pubkey, channel_add_policy::text AS policy, agent_owner_pubkey AS owner \
+         FROM users \
+         WHERE community_id = $1 AND pubkey = ANY($2) AND agent_owner_pubkey IS NOT NULL \
+         ORDER BY array_position($2, pubkey)",
     )
     .bind(community_id.as_uuid())
     .bind(&joining)
     .fetch_all(&mut *conn)
     .await?;
     for row in rows {
+        let agent: Vec<u8> = row.try_get("pubkey")?;
         let agent_policy: String = row.try_get("policy")?;
         let owner: Vec<u8> = row.try_get("owner")?;
-        policy(&agent_policy, &owner).map_err(DbError::AccessDenied)?;
+        policy(&agent_policy, &owner).map_err(|refusal| {
+            DbError::AccessDenied(format!("{refusal} (agent {})", hex::encode(&agent)))
+        })?;
     }
     Ok(())
 }
