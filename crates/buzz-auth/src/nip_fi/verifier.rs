@@ -473,6 +473,25 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
         let profile_assertion = if profile_eligible {
             Some(super::public_profile::ProfileAssertion {
                 issued_at: parse_numeric_date(&claims["iat"])?,
+                managed: if owner.is_some() {
+                    None
+                } else {
+                    token
+                        .split('.')
+                        .nth(1)
+                        .and_then(|segment| base64url_decode(segment).ok())
+                        .and_then(|bytes| {
+                            serde_json::from_slice::<
+                                std::collections::HashMap<String, Box<serde_json::value::RawValue>>,
+                            >(&bytes)
+                            .ok()
+                        })
+                        .and_then(|raw| {
+                            raw.get("nostr_managed_profile").and_then(|value| {
+                                buzz_core::managed_profile::ManagedProfile::from_json(value.get())
+                            })
+                        })
+                },
                 profile: if owner.is_some() {
                     None
                 } else {

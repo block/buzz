@@ -81,6 +81,8 @@ pub struct ProfileAssertion {
     pub issued_at: chrono::DateTime<chrono::Utc>,
     /// None for agents and malformed/missing human claims: publish nothing.
     pub profile: Option<PublicProfile>,
+    /// Optional directory snapshot, separate from the closed legacy name claim.
+    pub managed: Option<buzz_core::managed_profile::ManagedProfile>,
 }
 
 impl std::fmt::Debug for ProfileAssertion {

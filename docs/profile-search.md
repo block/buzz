@@ -32,7 +32,9 @@ Request:
 Response: a JSON array of signed events for one page of people, best match
 first. Each person contributes their current kind:0, when they have one, then
 their current relay-signed kind:30382, when verified profiles are advertised
-and they have one, whichever of the two matched. A page with fewer than
+and they have one, whichever name source matched. A relay advertising
+`managed_kind: 30383` also returns the matching person’s managed companion when
+available; directory field values do not participate in name search. A page with fewer than
 `limit` people is the last page. Clients that read only kind:0 keep working;
 they also find people who match only by verified name.
 

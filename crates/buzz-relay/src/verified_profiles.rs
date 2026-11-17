@@ -37,6 +37,7 @@ pub(crate) fn admitted(
         return;
     }
     let issuer = assertion.identity().issuer();
+    let subject = assertion.identity().subject().to_owned();
     let Some(policy) = enabled_policies(state).find(|p| p.issuer == issuer) else {
         return;
     };
@@ -57,12 +58,14 @@ pub(crate) fn admitted(
                 ProfileAdmission {
                     community: tenant.community(),
                     issuer: &policy.issuer,
+                    subject: &subject,
                     pubkey: &pubkey,
                     issued_at: evidence.issued_at,
                     admitted_at,
                     display_name: &profile.display_name,
                     username: &profile.username,
                     full_name: profile.full_name.as_deref(),
+                    managed: evidence.managed.as_ref(),
                     label,
                     refresh_seconds: policy.refresh_seconds,
                     membership_required: state.config.require_relay_membership,
@@ -86,7 +89,8 @@ pub(crate) fn admitted(
                 return;
             }
         };
-        deliver(&state, &tenant, &event).await;
+        deliver(&state, &tenant, &event.0).await;
+        deliver(&state, &tenant, &event.1).await;
     });
 }
 
@@ -141,6 +145,6 @@ pub(crate) async fn discovery(
     }
     // `searchable`: `POST /profiles/search` also matches and returns these.
     (count > 0).then(
-        || serde_json::json!({"kind": 30382, "multiple_issuers": count > 1, "searchable": true}),
+        || serde_json::json!({"kind": 30382, "multiple_issuers": count > 1, "searchable": true, "managed_kind": 30383}),
     )
 }

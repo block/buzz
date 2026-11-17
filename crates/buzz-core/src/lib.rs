@@ -87,5 +87,6 @@ pub mod artifact;
 /// NIP-AR sync filter parsing and limits.
 pub mod artifact_sync;
 
+pub mod managed_profile;
 /// Local media reference extraction.
 pub mod media;

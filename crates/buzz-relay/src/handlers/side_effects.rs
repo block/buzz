@@ -9,9 +9,10 @@ use uuid::Uuid;
 use buzz_core::kind::{
     event_kind_u32, is_parameterized_replaceable, AUTHOR_ONLY_KINDS, KIND_AGENT_PROFILE,
     KIND_DM_VISIBILITY, KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST,
-    KIND_IA_UNARCHIVED, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
-    KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA,
-    KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION, KIND_THREAD_SUMMARY, KIND_VERIFIED_PROFILE,
+    KIND_IA_UNARCHIVED, KIND_MANAGED_PROFILE, KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS,
+    KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION, KIND_THREAD_SUMMARY,
+    KIND_VERIFIED_PROFILE,
 };
 use buzz_core::StoredEvent;
 use buzz_db::channel::{MemberRecord, MemberRole};
@@ -445,7 +446,10 @@ pub(crate) async fn authorized_standard_deletion_target(
         return Ok(None);
     };
     // The profile's p tag names its subject, not an author with deletion rights.
-    if event_kind_u32(&target.event) == KIND_VERIFIED_PROFILE {
+    if matches!(
+        event_kind_u32(&target.event),
+        KIND_VERIFIED_PROFILE | KIND_MANAGED_PROFILE
+    ) {
         return Ok(None);
     }
     let author = effective_message_author(&target.event, &state.relay_keypair.public_key());
@@ -521,7 +525,7 @@ pub async fn validate_standard_deletion_event(
             return Err(anyhow::anyhow!("invalid a-tag format"));
         }
         if let Ok(target_kind) = parts[0].parse() {
-            if target_kind == KIND_VERIFIED_PROFILE {
+            if matches!(target_kind, KIND_VERIFIED_PROFILE | KIND_MANAGED_PROFILE) {
                 anyhow::bail!(DELETION_TARGET_DENIED);
             }
             check_deletion_privacy_k_tag(event, target_kind)?;

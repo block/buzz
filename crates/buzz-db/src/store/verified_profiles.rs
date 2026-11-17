@@ -34,6 +34,8 @@ pub struct ProfileAdmission<'a> {
     pub community: CommunityId,
     /// Issuer authenticated by the assertion verifier.
     pub issuer: &'a str,
+    /// Private issuer subject; retained details never cross identity reassignment.
+    pub subject: &'a str,
     /// NIP-42-proven key, equal to the assertion key.
     pub pubkey: &'a str,
     /// Authenticated iat; retains fractional ordering.
@@ -46,6 +48,8 @@ pub struct ProfileAdmission<'a> {
     pub username: &'a str,
     /// Validated optional public full name.
     pub full_name: Option<&'a str>,
+    /// Validated optional directory snapshot. Missing means retain same-identity details.
+    pub managed: Option<&'a buzz_core::managed_profile::ManagedProfile>,
     /// Public issuer label from the enabled policy.
     pub label: &'a str,
     /// Unchanged-name refresh interval from the enabled policy.
@@ -77,7 +81,7 @@ impl Db {
         &self,
         input: ProfileAdmission<'_>,
         keys: &Keys,
-    ) -> Result<Option<Event>> {
+    ) -> Result<Option<(Event, Event)>> {
         let mut tx = crate::begin_community_write_transaction(
             &self.pool,
             input.community,
@@ -115,7 +119,7 @@ impl Db {
 
         let head = sqlx::query(
             r#"
-            SELECT issuer, issued_at::text AS issued_at, event
+            SELECT issuer, subject, issued_at::text AS issued_at, event, managed_event
             FROM nip_fi_profile_heads
             WHERE community_id = $1 AND pubkey = $2
             FOR UPDATE
@@ -144,8 +148,42 @@ impl Db {
             None => (None, false),
         };
 
+        let same_subject = head
+            .as_ref()
+            .map(|row| row.try_get::<Option<String>, _>("subject"))
+            .transpose()?
+            .flatten()
+            .as_deref()
+            == Some(input.subject);
+        let previous_managed: Option<Event> = head
+            .as_ref()
+            .map(|row| row.try_get::<Option<serde_json::Value>, _>("managed_event"))
+            .transpose()?
+            .flatten()
+            .map(|value| {
+                Event::from_json(value.to_string())
+                    .map_err(|_| DbError::InvalidData("managed profile event".into()))
+            })
+            .transpose()?;
+        let retained = previous_managed
+            .as_ref()
+            .filter(|_| same_issuer && same_subject)
+            .filter(|event| tag(event, "username") == Some(input.username))
+            .and_then(|event| {
+                buzz_core::managed_profile::ManagedProfile::from_json(&event.content)
+            });
+        let managed = input.managed.or(retained.as_ref());
+        let managed_content = managed
+            .map(serde_json::to_string)
+            .transpose()?
+            .unwrap_or_default();
+        let managed_changed = previous_managed
+            .as_ref()
+            .is_none_or(|event| event.content != managed_content);
         let issued_at = nanos(input.issued_at).to_string();
-        let changed = !same_issuer
+        let changed = managed_changed
+            || !same_subject
+            || !same_issuer
             || old.as_ref().is_none_or(|event| {
                 tag(event, "display_name") != Some(input.display_name)
                     || tag(event, "username") != Some(input.username)
@@ -173,6 +211,20 @@ impl Db {
         }
 
         let event = profile_event(keys, &input, old.as_ref())?;
+        let managed_event = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_MANAGED_PROFILE as u16),
+            managed_content,
+        )
+        .tags(event.tags.iter().cloned())
+        .custom_created_at(Timestamp::from(
+            event.created_at.as_secs().max(
+                previous_managed
+                    .as_ref()
+                    .map_or(0, |e| e.created_at.as_secs().saturating_add(1)),
+            ),
+        ))
+        .sign_with_keys(keys)
+        .map_err(|_| DbError::InvalidData("managed profile signing".into()))?;
         let stored = self
             .replace_parameterized_event_in_transaction(
                 &mut tx,
@@ -191,14 +243,34 @@ impl Db {
                 "profile event did not replace current head".into(),
             ));
         }
+        let managed_stored = self
+            .replace_parameterized_event_in_transaction(
+                &mut tx,
+                &managed_event,
+                input.pubkey,
+                None,
+                crate::replaceable::ParameterizedReplacePrecondition::Unconditional,
+            )
+            .await?;
+        if !matches!(
+            managed_stored.status,
+            crate::replaceable::ParameterizedReplaceStatus::Inserted
+                | crate::replaceable::ParameterizedReplaceStatus::Duplicate
+        ) {
+            return Err(DbError::InvalidData(
+                "managed profile did not replace current head".into(),
+            ));
+        }
         sqlx::query(
             r#"
-            INSERT INTO nip_fi_profile_heads (community_id, pubkey, issuer, issued_at, event)
-            VALUES ($1, $2, $3, $4::numeric, $5)
+            INSERT INTO nip_fi_profile_heads (community_id, pubkey, issuer, issued_at, event, managed_event, subject)
+            VALUES ($1, $2, $3, $4::numeric, $5, $6, $7)
             ON CONFLICT (community_id, pubkey) DO UPDATE SET
                 issuer = EXCLUDED.issuer,
                 issued_at = EXCLUDED.issued_at,
-                event = EXCLUDED.event
+                event = EXCLUDED.event,
+                managed_event = EXCLUDED.managed_event,
+                subject = EXCLUDED.subject
             "#,
         )
         .bind(input.community.as_uuid())
@@ -206,10 +278,12 @@ impl Db {
         .bind(input.issuer)
         .bind(&issued_at)
         .bind(serde_json::to_value(&event)?)
+        .bind(serde_json::to_value(&managed_event)?)
+        .bind(input.subject)
         .execute(tx.conn())
         .await?;
         tx.commit().await?;
-        Ok(Some(event))
+        Ok(Some((event, managed_event)))
     }
 }
 

@@ -7576,13 +7576,12 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn subject_cannot_delete_relay_verified_profile() {
-        use buzz_core::kind::KIND_VERIFIED_PROFILE;
         use buzz_db::verified_profiles::ProfileAdmission;
         use nostr::Tag;
         let f = ScopedTargetFixture::new("verified-profile-deletion").await;
         let subject = f.author.public_key().to_hex();
         let now = Utc::now();
-        let profile = f
+        let profiles = f
             .state
             .db
             .publish_verified_profile(
@@ -7595,6 +7594,8 @@ mod postgres_tests {
                     display_name: "Alice",
                     username: "alice",
                     full_name: Some("Alice Example"),
+                    managed: None,
+                    subject: "subject-alice",
                     label: "Example",
                     refresh_seconds: 3600,
                     membership_required: false,
@@ -7615,45 +7616,46 @@ mod postgres_tests {
                 .sign_with_keys(&f.author)
                 .unwrap()
         };
-        let coordinate = |author: String| {
-            Tag::parse([
-                "a".to_owned(),
-                format!("{KIND_VERIFIED_PROFILE}:{author}:{subject}"),
-            ])
-            .unwrap()
-        };
-        for tag in [
-            Tag::parse(["e", &profile.id.to_hex()]).unwrap(),
-            coordinate(profile.pubkey.to_hex()),
-            // Even a subject-authored coordinate cannot request deletion of this kind.
-            coordinate(subject.clone()),
-        ] {
-            let event = deletion(tag);
-            let id = event.id;
-            let result = f.submit(event, auth()).await;
-            assert!(
-                matches!(&result, Err(IngestError::Rejected(message))
+        for profile in [profiles.0, profiles.1] {
+            let coordinate = |author: String| {
+                Tag::parse([
+                    "a".to_owned(),
+                    format!("{}:{author}:{subject}", profile.kind.as_u16()),
+                ])
+                .unwrap()
+            };
+            for tag in [
+                Tag::parse(["e", &profile.id.to_hex()]).unwrap(),
+                coordinate(profile.pubkey.to_hex()),
+                // Even a subject-authored coordinate cannot request deletion of this kind.
+                coordinate(subject.clone()),
+            ] {
+                let event = deletion(tag);
+                let id = event.id;
+                let result = f.submit(event, auth()).await;
+                assert!(
+                    matches!(&result, Err(IngestError::Rejected(message))
                     if message == "invalid: deletion target not found or not deletable by you"),
-                "profile deletion must be denied, got {:?}",
-                result.err()
-            );
-            assert!(f
-                .state
-                .db
-                .get_event_by_id(f.tenant.community(), id.as_bytes())
-                .await
-                .unwrap()
-                .is_none());
-            let stored = f
-                .state
-                .db
-                .get_event_by_id(f.tenant.community(), profile.id.as_bytes())
-                .await
-                .unwrap()
-                .expect("profile remains readable");
-            assert_eq!(stored.event, profile);
+                    "profile deletion must be denied, got {:?}",
+                    result.err()
+                );
+                assert!(f
+                    .state
+                    .db
+                    .get_event_by_id(f.tenant.community(), id.as_bytes())
+                    .await
+                    .unwrap()
+                    .is_none());
+                let stored = f
+                    .state
+                    .db
+                    .get_event_by_id(f.tenant.community(), profile.id.as_bytes())
+                    .await
+                    .unwrap()
+                    .expect("profile remains readable");
+                assert_eq!(stored.event, profile);
+            }
         }
-
         f.submit(
             deletion(Tag::parse(["e", &f.global.id.to_hex()]).unwrap()),
             auth(),

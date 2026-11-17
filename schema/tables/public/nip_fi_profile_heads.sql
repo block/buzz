@@ -4,6 +4,8 @@ CREATE TABLE nip_fi_profile_heads (
     issuer TEXT NOT NULL,
     issued_at NUMERIC(30, 0) NOT NULL,
     event JSONB NOT NULL,
+    managed_event JSONB,
+    subject TEXT,
     PRIMARY KEY (community_id, pubkey)
 );
 

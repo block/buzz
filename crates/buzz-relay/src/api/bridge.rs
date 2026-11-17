@@ -7354,6 +7354,8 @@ pub(crate) mod postgres_tests {
                     display_name: "fname",
                     username: "fname",
                     full_name: Some("Fake Name"),
+                    managed: None,
+                    subject: "subject-alice",
                     label: "Example",
                     refresh_seconds: 3600,
                     membership_required: false,
@@ -7387,7 +7389,7 @@ pub(crate) mod postgres_tests {
         };
 
         let events = search(&advertised);
-        assert_eq!(events, vec![profile, verified]);
+        assert_eq!(events, vec![profile, verified.0, verified.1]);
         assert_eq!(events[1].pubkey, advertised.relay_keypair.public_key());
         assert!(events.iter().all(|event| event.verify().is_ok()));
         assert!(search(&unadvertised).is_empty());

@@ -63,6 +63,8 @@ fn input<'a>(
         display_name: "Alice",
         username: "alice",
         full_name,
+        managed: None,
+        subject: "subject-alice",
         label: "Example",
         refresh_seconds: 3600,
         membership_required: true,
@@ -85,7 +87,15 @@ async fn lifecycle() {
     let (db, community, keys, key) = fixture().await;
     let start = Utc::now() - Duration::hours(3);
     let iat = start - Duration::seconds(10);
-    let publish = |input| db.publish_verified_profile(input, &keys);
+    let publish = |input| {
+        let db = &db;
+        let keys = &keys;
+        async move {
+            db.publish_verified_profile(input, keys)
+                .await
+                .map(|pair| pair.map(|(name, _)| name))
+        }
+    };
 
     let first = publish(input(community, &key, iat, start, Some("Alice Example")))
         .await
@@ -390,4 +400,95 @@ async fn profiles_publish_only_for_eligible_keys() {
 #[ignore = "requires Postgres"]
 async fn migration_schema_profiles_publish_only_for_eligible_keys() {
     eligibility().await;
+}
+
+async fn managed_lifecycle() {
+    let (db, community, keys, key) = fixture().await;
+    let start = Utc::now() - Duration::hours(2);
+    let directory = buzz_core::managed_profile::ManagedProfile::from_json(
+        r#"{"version":1,"source_label":"Directory","source_url":"https://example.org/people/alice","fields":[],"city":"London"}"#,
+    ).unwrap();
+    let mut first = input(community, &key, start, start, None);
+    first.managed = Some(&directory);
+    let (legacy, companion) = db
+        .publish_verified_profile(first, &keys)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(legacy.kind, Kind::Custom(30382));
+    assert!(legacy.content.is_empty());
+    assert_eq!(companion.kind, Kind::Custom(30383));
+    assert_eq!(legacy.tags, companion.tags);
+    assert_eq!(legacy.created_at, companion.created_at);
+    assert!(companion.verify().is_ok());
+    assert_eq!(
+        buzz_core::managed_profile::ManagedProfile::from_json(&companion.content),
+        Some(directory.clone())
+    );
+
+    // A failed/missing lookup does not erase details at the next valid refresh.
+    let later = start + Duration::hours(1);
+    let (_, retained) = db
+        .publish_verified_profile(input(community, &key, later, later, None), &keys)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.content, companion.content);
+    // A delayed assertion cannot overwrite newer data.
+    let mut stale = input(community, &key, start, later, None);
+    let mut changed = directory.clone();
+    changed.city = Some("Paris".into());
+    stale.managed = Some(&changed);
+    assert!(db
+        .publish_verified_profile(stale, &keys)
+        .await
+        .unwrap()
+        .is_none());
+    // Changing the verified identity clears retained data even when enrichment is absent.
+    let mut renamed = input(community, &key, later + Duration::seconds(1), later, None);
+    renamed.username = "different";
+    let (_, cleared) = db
+        .publish_verified_profile(renamed, &keys)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(cleared.content.is_empty());
+    let stored: serde_json::Value = sqlx::query_scalar(
+        "SELECT managed_event FROM nip_fi_profile_heads WHERE community_id=$1 AND pubkey=$2",
+    )
+    .bind(community.as_uuid())
+    .bind(&key)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(stored["id"], cleared.id.to_hex());
+    let mut refreshed = input(community, &key, later + Duration::seconds(2), later, None);
+    refreshed.managed = Some(&directory);
+    db.publish_verified_profile(refreshed, &keys)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut reassigned = input(community, &key, later + Duration::seconds(3), later, None);
+    reassigned.subject = "another-private-subject";
+    let (_, cleared) = db
+        .publish_verified_profile(reassigned, &keys)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        cleared.content.is_empty(),
+        "same username cannot carry data across private subjects"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn managed_profiles_preserve_legacy_names_and_same_identity_on_failure() {
+    managed_lifecycle().await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn migration_schema_managed_profiles_preserve_legacy_names_and_same_identity_on_failure() {
+    managed_lifecycle().await;
 }

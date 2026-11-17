@@ -574,6 +574,11 @@ pub async fn search_profile_names(
         qb.push(" AND h.pubkey = encode(people.person, 'hex') AND e.kind = 30382 AND e.pubkey = ");
         qb.push_bind(author.to_vec());
         qb.push(" AND e.channel_id IS NULL AND e.deleted_at IS NULL)");
+        qb.push(" UNION ALL (SELECT e.id, e.kind, e.pubkey, e.channel_id, e.created_at FROM nip_fi_profile_heads h JOIN events e ON e.community_id = h.community_id AND e.id = decode(h.managed_event ->> 'id', 'hex') AND e.created_at = to_timestamp((h.managed_event ->> 'created_at')::bigint) WHERE h.community_id = ");
+        qb.push_bind(*community.as_uuid());
+        qb.push(" AND h.pubkey = encode(people.person, 'hex') AND e.kind = 30383 AND e.pubkey = ");
+        qb.push_bind(author.to_vec());
+        qb.push(" AND e.channel_id IS NULL AND e.deleted_at IS NULL)");
     }
     qb.push(
         ") AS ev ORDER BY people.tier, people.rank DESC, people.created_at DESC, \
