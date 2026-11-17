@@ -59,8 +59,10 @@ pub struct ProductFeedbackRecord {
 /// changing its source community; callers intentionally receive the same
 /// successful acknowledgment in both cases.
 ///
-/// The community must exist; otherwise this returns [`DbError::NotFound`] and
-/// writes nothing. Any lifecycle state qualifies: the table is provenance-only
+/// The community must exist, and nothing is written when it does not: while
+/// the foreign key to `communities` exists it rejects the insert first, and
+/// once the key is dropped this returns [`DbError::NotFound`]. Any lifecycle
+/// state qualifies: the table is provenance-only
 /// and unfenced (`docs/database.md`), so feedback stays writable while its
 /// community is being deleted, and the purge clears its provenance.
 ///
@@ -71,7 +73,6 @@ pub async fn insert(
     feedback: NewProductFeedback<'_>,
 ) -> Result<Uuid> {
     let mut tx = pool.begin().await?;
-    crate::store::reference_check::require_community(&mut tx, community).await?;
     let row = sqlx::query(
         r#"
         INSERT INTO product_feedback (
@@ -93,6 +94,10 @@ pub async fn insert(
     .fetch_one(&mut *tx)
     .await?;
     let id = row.try_get("id")?;
+    // Check after the write, as the foreign key did: the purge locks feedback
+    // rows before the community, so taking the community first would deadlock
+    // with a replay that overlaps it.
+    crate::store::reference_check::require_community(&mut tx, community).await?;
     tx.commit().await?;
 
     Ok(id)
