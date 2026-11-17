@@ -2732,7 +2732,10 @@ impl Db {
     /// (`confirm_requested_channel_access` in the relay), and fan-out
     /// re-checks membership for every live event on a private channel. Falls
     /// back to the writer as [`Db::is_relay_member`] does.
-    #[datastore_span(name = "get_readable_named_only_channels_routed", system = "postgresql")]
+    #[datastore_span(
+        name = "get_readable_named_only_channels_routed",
+        system = "postgresql"
+    )]
     pub async fn get_readable_named_only_channels_routed(
         &self,
         community_id: CommunityId,
