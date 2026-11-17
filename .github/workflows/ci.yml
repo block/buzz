@@ -52,7 +52,7 @@ jobs:
             rust:
               - 'crates/**'
               # The core mention-group limit is coupled to the mobile push gate.
-              - 'mobile/lib/shared/push/push_subscription.dart'
+              - 'mobile/lib/shared/push/push_contract.dart'
               - 'migrations/**'
               - 'schema/**'
               - 'Cargo.toml'

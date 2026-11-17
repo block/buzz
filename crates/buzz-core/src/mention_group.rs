@@ -22,7 +22,7 @@ pub const SETTINGS_D_TAG: &str = "settings";
 pub const MAX_NAME_CHARS: usize = 120;
 /// Maximum distinct members in a group replacement. Keep in sync with
 /// `buzzPushHellthreadParticipantLimit` in
-/// `mobile/lib/shared/push/push_subscription.dart` so one group fits the mobile
+/// `mobile/lib/shared/push/push_contract.dart` so one group fits the mobile
 /// push recipient gate. Clients discover this value through NIP-11.
 pub const MAX_MEMBERS: usize = 20;
 /// Maximum distinct default channels in a group replacement.
@@ -476,7 +476,7 @@ mod tests {
     fn group_member_limit_matches_mobile_push_gate() {
         let source = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../mobile/lib/shared/push/push_subscription.dart"
+            "/../../mobile/lib/shared/push/push_contract.dart"
         ))
         .expect("read the mobile push contract");
         let initializer = source

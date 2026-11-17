@@ -1,5 +1,9 @@
 import 'dart:convert';
 
+import 'push_contract.dart';
+
+export 'push_contract.dart' show buzzPushHellthreadParticipantLimit;
+
 /// User-visible Buzz message kinds. This mirrors
 /// `EventKind.channelMessageEventKinds` without importing feature code into
 /// the shared push layer.
@@ -10,7 +14,6 @@ const buzzPushChannelKinds = [9];
 const buzzPushChannelChunkSize = 50;
 const buzzPushMaxSubscriptions = 16;
 const buzzPushMaxIgnoreFilters = 8;
-const buzzPushHellthreadParticipantLimit = 20;
 
 const _supportedNotificationClasses = {'default'};
 const _filterKeys = {'kinds', 'authors', '#p', '#h', '#e'};
