@@ -109,8 +109,10 @@ async fn guests_contribute_only_through_explicit_reply_and_reaction_grants() {
             (!replies).then_some(POST_DENIED),
             &format!("reply with grants {replies}/{reactions}"),
         );
+        // The relay deduplicates emoji per author and target, even with fresh event IDs.
+        let emoji = if replies { "🎉" } else { "👍" };
         check(
-            submit(event(&guest, 7, "👍", &[&target_tag]), http_auth(&guest)).await,
+            submit(event(&guest, 7, emoji, &[&target_tag]), http_auth(&guest)).await,
             (!reactions).then_some(REACT_DENIED),
             &format!("reaction with grants {replies}/{reactions}"),
         );
@@ -130,7 +132,7 @@ async fn guests_contribute_only_through_explicit_reply_and_reaction_grants() {
         Some(POST_DENIED),
         "NIP-42 root",
     );
-    let reaction = event(&guest, 7, "+", &[&h, &target_tag]);
+    let reaction = event(&guest, 7, "🔥", &[&h, &target_tag]);
     let reaction_id = reaction.id.to_hex();
     check(
         submit(reaction, websocket()).await,
