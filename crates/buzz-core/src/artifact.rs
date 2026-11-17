@@ -56,6 +56,23 @@ pub struct ArtifactEnvelope {
     pub prev: Option<Vec<u8>>,
     /// Optional conversation anchor.
     pub root: Option<Vec<u8>>,
+    /// Who created the artifact (`["creator", <hex pubkey>]`), when the
+    /// revision names them. The relay holds it to the creating signer.
+    pub creator: Option<String>,
+    /// The people assigned (`["assignee", <hex pubkey>]`), distinct, in tag
+    /// order. The relay holds each to someone who can read the home.
+    pub assignees: Vec<String>,
+}
+
+/// The most `assignee` tags one revision may carry.
+pub const MAX_ASSIGNEES: usize = 16;
+
+/// Whether `value` is a lowercase hex public key.
+fn hex_pubkey(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 /// Parse a canonical, non-nil UUID.
 pub fn canonical_uuid(value: &str) -> Result<Uuid, &'static str> {
@@ -156,6 +173,29 @@ pub fn validate(event: &Event) -> Result<ArtifactEnvelope, &'static str> {
             return Err("title must be nonblank and at most 512 UTF-8 bytes");
         }
     }
+    let mut creator = None;
+    let mut assignees: Vec<String> = Vec::new();
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        match parts[0].as_str() {
+            "creator" => {
+                if parts.len() != 2 || !hex_pubkey(&parts[1]) || creator.is_some() {
+                    return Err("creator must occur at most once as a lowercase hex pubkey");
+                }
+                creator = Some(parts[1].clone());
+            }
+            "assignee" => {
+                if parts.len() != 2 || !hex_pubkey(&parts[1]) || assignees.contains(&parts[1]) {
+                    return Err("each assignee must be a distinct lowercase hex pubkey");
+                }
+                assignees.push(parts[1].clone());
+            }
+            _ => {}
+        }
+    }
+    if assignees.len() > MAX_ASSIGNEES {
+        return Err("too many assignees");
+    }
     Ok(ArtifactEnvelope {
         id,
         home,
@@ -163,6 +203,8 @@ pub fn validate(event: &Event) -> Result<ArtifactEnvelope, &'static str> {
         op,
         prev,
         root,
+        creator,
+        assignees,
     })
 }
 /// Domain separator for [`conversation_id`].
@@ -240,9 +282,48 @@ mod tests {
             (vec![], "delete", "hidden"),
             (vec![vec!["x".into(), "x".repeat(4097)]], "create", ""),
             (vec![vec!["x".repeat(129), "x".into()]], "create", ""),
+            (vec![vec!["creator".into(), "A".repeat(64)]], "create", ""),
+            (
+                vec![
+                    vec!["creator".into(), "a".repeat(64)],
+                    vec!["creator".into(), "b".repeat(64)],
+                ],
+                "create",
+                "",
+            ),
+            (vec![vec!["assignee".into(), "a".repeat(63)]], "create", ""),
+            (
+                vec![
+                    vec!["assignee".into(), "a".repeat(64)],
+                    vec!["assignee".into(), "a".repeat(64)],
+                ],
+                "create",
+                "",
+            ),
+            (
+                (0..=MAX_ASSIGNEES)
+                    .map(|i| vec!["assignee".into(), format!("{i:064x}")])
+                    .collect(),
+                "create",
+                "",
+            ),
+            (vec![vec!["creator".into(), "a".repeat(64)]], "delete", ""),
+            (vec![vec!["assignee".into(), "a".repeat(64)]], "delete", ""),
         ] {
             assert!(validate(&event(tags, op, content)).is_err());
         }
+        let env = validate(&event(
+            vec![
+                vec!["creator".into(), "c".repeat(64)],
+                vec!["assignee".into(), "a".repeat(64)],
+                vec!["assignee".into(), "b".repeat(64)],
+            ],
+            "update",
+            "",
+        ))
+        .unwrap();
+        assert_eq!(env.creator, Some("c".repeat(64)));
+        assert_eq!(env.assignees, vec!["a".repeat(64), "b".repeat(64)]);
     }
     #[test]
     fn filter_routes_and_views() {
@@ -277,6 +358,14 @@ mod tests {
         assert_eq!(query.view, ArtifactView::Current);
         let head = parse_query(&json!({"artifact":"head","#d":["x"]})).unwrap();
         assert_eq!(head.view, ArtifactView::Head);
+        let project = "8c1f3d2e-4b5a-4c6d-9e7f-0a1b2c3d4e5f";
+        let find = parse_query(&json!({
+            "artifact":"current","until":1700000000,"unassigned":true,"within":project
+        }))
+        .unwrap();
+        assert_eq!(find.until, Some(1700000000));
+        assert!(find.unassigned);
+        assert_eq!(find.within, Some(Uuid::parse_str(project).unwrap()));
         for invalid in [
             json!({"artifact":"lookup","#d":["x"]}),
             json!({"artifact":"history"}),
@@ -287,6 +376,14 @@ mod tests {
             json!({"artifact":"history","#d":[]}),
             json!({"artifact":"head"}),
             json!({"artifact":"sync","#h":["c"]}),
+            json!({"artifact":"current","until":-1}),
+            json!({"artifact":"current","until":"1"}),
+            json!({"artifact":"current","unassigned":false}),
+            json!({"artifact":"current","unassigned":true,"#assignee":["a"]}),
+            json!({"artifact":"current","within":"p"}),
+            json!({"artifact":"current","within":project.to_uppercase()}),
+            json!({"artifact":"head","#d":["x"],"unassigned":true}),
+            json!({"artifact":"history","#d":["x"],"within":project}),
         ] {
             assert!(parse_query(&invalid).is_err(), "{invalid}");
         }
@@ -323,6 +420,14 @@ pub struct ArtifactQuery {
     pub limit: i64,
     /// Bounded page offset.
     pub offset: i64,
+    /// Only revisions created at or before this Unix time; the page is then
+    /// ordered by `created_at`, newest first.
+    pub until: Option<i64>,
+    /// Only artifacts with no `assignee` tag.
+    pub unassigned: bool,
+    /// Only artifacts whose home is this channel or a channel filed under
+    /// it, as far as the reader may read.
+    pub within: Option<Uuid>,
 }
 /// Maximum artifact page offset.
 pub const MAX_OFFSET: u64 = 10000;
@@ -368,7 +473,18 @@ pub fn parse_query(value: &serde_json::Value) -> Result<ArtifactQuery, &'static 
         Some("head") => ArtifactView::Head,
         _ => return Err("artifact must be \"current\", \"history\" or \"head\""),
     };
-    let tags = parse_predicates(object, &["artifact", "kinds", "limit", "offset"])?;
+    let tags = parse_predicates(
+        object,
+        &[
+            "artifact",
+            "kinds",
+            "limit",
+            "offset",
+            "until",
+            "unassigned",
+            "within",
+        ],
+    )?;
     let number = |name: &str, default: u64| {
         object
             .get(name)
@@ -384,11 +500,41 @@ pub fn parse_query(value: &serde_json::Value) -> Result<ArtifactQuery, &'static 
     if view != ArtifactView::Current && !tags.iter().any(|(n, _)| n == "d") {
         return Err("history and head require #d");
     }
+    let until = object
+        .get("until")
+        .map(|v| {
+            v.as_u64()
+                .and_then(|v| i64::try_from(v).ok())
+                .ok_or("invalid until")
+        })
+        .transpose()?;
+    let unassigned = match object.get("unassigned") {
+        None => false,
+        Some(serde_json::Value::Bool(true)) => true,
+        Some(_) => return Err("unassigned must be true"),
+    };
+    let within = object
+        .get("within")
+        .map(|v| {
+            v.as_str()
+                .ok_or("invalid within")
+                .and_then(|v| canonical_uuid(v).map_err(|_| "invalid within"))
+        })
+        .transpose()?;
+    if view != ArtifactView::Current && (unassigned || within.is_some()) {
+        return Err("unassigned and within require the current view");
+    }
+    if unassigned && tags.iter().any(|(n, _)| n == "assignee") {
+        return Err("unassigned excludes #assignee");
+    }
     Ok(ArtifactQuery {
         view,
         tags,
         limit: limit as i64,
         offset: offset as i64,
+        until,
+        unassigned,
+        within,
     })
 }
 /// Parse the `kinds` and `#name` predicates shared by every artifact filter.

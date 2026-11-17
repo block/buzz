@@ -146,6 +146,19 @@ fn role_name(role: MemberRole) -> &'static str {
     }
 }
 
+/// Whether `pubkey` can read `channel_id`, by the rule the answer leaves
+/// unreadable channels out with.
+pub(crate) async fn can_read(
+    state: &AppState,
+    community_id: CommunityId,
+    pubkey: &[u8],
+    channel_id: Uuid,
+) -> Result<bool, buzz_db::DbError> {
+    Ok(readable(state, community_id, pubkey, channel_id)
+        .await?
+        .is_some())
+}
+
 /// `pubkey`'s access to `channel_id` under their community `restriction`;
 /// `None` when they cannot read it, whether it is private, deleted or missing.
 async fn access(
@@ -155,16 +168,8 @@ async fn access(
     channel_id: Uuid,
     restriction: Restriction,
 ) -> Result<Option<ChannelAccess>, buzz_db::DbError> {
-    let channel = match state
-        .db
-        .get_channel_for_event_write(community_id, channel_id)
-        .await
-    {
-        Ok(channel) if channel.deleted_at.is_none() => channel,
-        Ok(_) | Err(buzz_db::DbError::ChannelNotFound(_)) => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    let Some((role, joined)) = acting_role(state, community_id, &channel, pubkey).await? else {
+    let Some((channel, role, joined)) = readable(state, community_id, pubkey, channel_id).await?
+    else {
         return Ok(None);
     };
     let post = role.can_post()
@@ -179,6 +184,29 @@ async fn access(
         archived: channel.archived_at.is_some(),
         timed_out_until: restriction.timed_out_until,
     }))
+}
+
+/// A live channel `pubkey` can read, with the role they act with and
+/// whether it is their own row's; `None` when it is private to them,
+/// deleted or missing.
+async fn readable(
+    state: &AppState,
+    community_id: CommunityId,
+    pubkey: &[u8],
+    channel_id: Uuid,
+) -> Result<Option<(ChannelRecord, MemberRole, bool)>, buzz_db::DbError> {
+    let channel = match state
+        .db
+        .get_channel_for_event_write(community_id, channel_id)
+        .await
+    {
+        Ok(channel) if channel.deleted_at.is_none() => channel,
+        Ok(_) | Err(buzz_db::DbError::ChannelNotFound(_)) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    Ok(acting_role(state, community_id, &channel, pubkey)
+        .await?
+        .map(|(role, joined)| (channel, role, joined)))
 }
 
 /// The role `pubkey` acts with in `channel` and whether it is their own

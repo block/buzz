@@ -36,6 +36,22 @@ pub(crate) async fn accept(
     } else {
         None
     };
+    // Every assignee must be able to read the home the revision puts the
+    // artifact in (NIP-AR, Assignees). Validation keeps a delete from naming
+    // anyone.
+    for assignee in &env.assignees {
+        let pubkey = hex::decode(assignee)
+            .map_err(|_| IngestError::Rejected("invalid: bad assignee".into()))?;
+        let readable =
+            super::channel_access::can_read(state, tenant.community(), &pubkey, env.home)
+                .await
+                .map_err(|e| IngestError::Internal(format!("artifact assignee: {e}")))?;
+        if !readable {
+            return Err(IngestError::Rejected(
+                "invalid: an assignee can't see this artifact".into(),
+            ));
+        }
+    }
     let outcome = state
         .db
         .accept_artifact(

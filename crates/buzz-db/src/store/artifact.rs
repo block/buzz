@@ -146,7 +146,7 @@ impl Db {
             return Ok(ArtifactOutcome::Duplicate);
         }
         let head = sqlx::query(
-            "SELECT event_id,channel_id,artifact_type,root,deleted FROM artifact_heads WHERE community_id=$1 AND artifact_id=$2 FOR UPDATE",
+            "SELECT event_id,channel_id,artifact_type,root,deleted,creator FROM artifact_heads WHERE community_id=$1 AND artifact_id=$2 FOR UPDATE",
         )
         .bind(community.as_uuid())
         .bind(env.id)
@@ -197,6 +197,30 @@ impl Db {
                 }
             }
         }
+        // The creator is the creating signer, and every later revision keeps
+        // it, so the current revision's creator can be trusted without its
+        // history. The head holds it, so it outlives retention and
+        // redaction. A delete carries no creator; a restore keeps the one
+        // from before the delete.
+        match (&head, env.op) {
+            (None, _) => {
+                if env
+                    .creator
+                    .as_ref()
+                    .is_some_and(|c| *c != event.pubkey.to_hex())
+                {
+                    return Ok(ArtifactOutcome::Rejected(
+                        "creator must be the signer on create",
+                    ));
+                }
+            }
+            (Some(_), ArtifactOp::Delete) => {}
+            (Some(head), _) => {
+                if env.creator != head.get::<Option<String>, _>("creator") {
+                    return Ok(ArtifactOutcome::Rejected("creator cannot change"));
+                }
+            }
+        }
         if source != Some(env.home) {
             // A conversation holds comments, never artifacts.
             let home_type: Option<String> = sqlx::query_scalar(
@@ -232,8 +256,8 @@ impl Db {
         .bind(if env.op == ArtifactOp::Move { source } else { None })
         .execute(tx.conn())
         .await?;
-        sqlx::query("INSERT INTO artifact_heads (community_id,artifact_id,event_id,channel_id,artifact_type,root,deleted,modified_at) VALUES ($1,$2,$3,$4,$5,$6,$7,clock_timestamp()) ON CONFLICT (community_id,artifact_id) DO UPDATE SET event_id=EXCLUDED.event_id,channel_id=EXCLUDED.channel_id,root=EXCLUDED.root,deleted=EXCLUDED.deleted,modified_at=clock_timestamp()")
-            .bind(community.as_uuid()).bind(env.id).bind(event.id.as_bytes().as_slice()).bind(env.home).bind(&env.artifact_type).bind(&env.root).bind(env.op == ArtifactOp::Delete).execute(tx.conn()).await?;
+        sqlx::query("INSERT INTO artifact_heads (community_id,artifact_id,event_id,channel_id,artifact_type,root,deleted,creator,modified_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,clock_timestamp()) ON CONFLICT (community_id,artifact_id) DO UPDATE SET event_id=EXCLUDED.event_id,channel_id=EXCLUDED.channel_id,root=EXCLUDED.root,deleted=EXCLUDED.deleted,modified_at=clock_timestamp()")
+            .bind(community.as_uuid()).bind(env.id).bind(event.id.as_bytes().as_slice()).bind(env.home).bind(&env.artifact_type).bind(&env.root).bind(env.op == ArtifactOp::Delete).bind(&env.creator).execute(tx.conn()).await?;
         let conversation = match env.op {
             ArtifactOp::Move | ArtifactOp::Delete | ArtifactOp::Restore => {
                 match follow_artifact(&mut tx, env).await? {
