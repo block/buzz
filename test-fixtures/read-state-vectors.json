@@ -5,7 +5,7 @@
   "floor": 1797408000,
   "notes": [
     "Evaluation uses messageAt > max(floor, merged key and named parent frontiers).",
-    "Packing inputs are already retention-filtered, locally-owned frontier maps; override groups never enter read-position slots; they live on the version-2 unread record. Neither client writes msg: keys; legacy msg: keys remain readable.",
+    "Packing inputs are already retention-filtered, locally-owned frontier maps; override groups never enter read-position slots; they live on the version-2 unread record. Clients write msg: frontier keys only for an explicit per-message Mark read; msg: and thread: override groups stay device-local and never sync; legacy msg: keys remain readable.",
     "Initial allocation packs keys in ascending order into empty slots. Subsequent edits preserve persisted key-to-slot placement; keys are sorted only within each slot. Envelope uses compact JSON and raw UTF-8.",
     "Overrides remain outside the age floor; full-state snapshot retrieval must not use since.",
     "Lifecycle traces are obligations for suite-local persistence/relay tests, not a substitute implementation."
