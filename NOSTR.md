@@ -370,16 +370,19 @@ channels the signer has not joined all get the same answer.
   - **Who may ask.** Only a signer who can read the channel. Otherwise the
     request is refused with 403 and
     `{"error":"not-allowed: the signer cannot read this channel"}`. A
-    banned signer is refused earlier, with the ban's own `blocked:` reason,
-    like every request from them. A
     missing or deleted channel is refused the same way, so the answer
-    can't show whether a private channel exists. There are no partial
+    can't show whether a private channel exists. A banned signer is
+    refused before the question is answered, with the ban's own
+    `blocked:` reason, like every request from them. There are no partial
     answers: a refusal is never a list of `false`s.
-  - **What it discloses, by design.** Someone who can read a channel can
-    learn that a named person reads it through a parent the asker isn't
-    in, such as a private project. It answers only for a channel the
-    asker can already read, and it says only whether the person reads
-    it, never how.
+  - **What it discloses, by design.** It answers only for a channel the
+    asker can already read, and it says only whether each person reads
+    it, never how or why not. The relay never states the reason for
+    someone else. Two things can still be inferred:
+    - Someone who can read a channel can learn that a named person reads
+      it through a parent the asker isn't in, such as a private project.
+    - An asker who also sees a person in the channel's member list, but
+      is told they can't read it, can infer that the person is banned.
   - If any person cannot be answered, the whole request fails with 503 and
     is retried. The answer is a snapshot: after a kind:20004 for the
     channel, ask again.
