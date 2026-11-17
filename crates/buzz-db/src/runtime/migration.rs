@@ -890,7 +890,10 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 94);
+        assert_eq!(migrations.len(), 95);
+        assert_eq!(migrations[94].version, 95);
+        assert!(strip_sql_comments(migrations[94].sql.as_str())
+            .contains("DROP CONSTRAINT IF EXISTS push_gateway_delegations_installation_id_fkey"));
         assert_eq!(migrations[89].version, 90);
         assert!(migrations[89]
             .sql
@@ -3206,6 +3209,7 @@ mod postgres_tests {
             "entity_deletion_approvals",
             "workflow_runs",
             "push_gateway_installations",
+            "push_gateway_delegations",
         ] {
             assert_eq!(
                 constraints(&desired, table).await,
