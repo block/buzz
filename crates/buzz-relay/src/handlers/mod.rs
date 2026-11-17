@@ -48,6 +48,10 @@ pub mod moderation_commands;
 pub mod moderation_notices;
 /// Multi-node fan-out: Redis events to local subscribers, with lossless lag handling.
 pub mod multinode_fanout;
+/// Reading and writing a private channel through its parents.
+pub(crate) mod parent_access;
+#[cfg(test)]
+mod parent_access_postgres_tests;
 /// Product-feedback validation + deployment sidecar persistence.
 pub mod product_feedback;
 #[allow(dead_code, missing_docs)]

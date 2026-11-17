@@ -890,7 +890,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 92);
+        assert_eq!(migrations.len(), 93);
         assert_eq!(migrations[89].version, 90);
         assert!(migrations[89]
             .sql
@@ -921,6 +921,15 @@ mod postgres_tests {
         let retire_floor = strip_sql_comments(migrations[88].sql.as_str());
         assert!(retire_floor.contains("DROP TRIGGER IF EXISTS events_created_at_floor ON events;"));
         assert!(retire_floor.contains("DROP FUNCTION IF EXISTS events_created_at_floor_guard();"));
+        // Channel parents (0093): a nullable column and a partial index built
+        // inline under bounded locks, as 0083 does.
+        let parents = strip_sql_comments(migrations[92].sql.as_str());
+        assert!(parents.contains("SET LOCAL lock_timeout = '1s';"));
+        assert!(parents.contains("SET LOCAL statement_timeout = '5s';"));
+        assert!(parents.contains("ADD COLUMN IF NOT EXISTS parent_id UUID;"));
+        assert!(parents.contains("CREATE INDEX idx_channels_parent"));
+        assert!(!parents.contains("CONCURRENTLY"));
+        assert!(!parents.to_ascii_uppercase().contains("UPDATE "));
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }
@@ -3152,21 +3161,27 @@ mod postgres_tests {
             "column parity mismatch for channels: schema.sql desired state has drifted \
              from the migrations; update schema/tables/public/channels.sql to match"
         );
-        // The listed-name index (0083) is compared on its own for that reason.
-        let listed_name = |shapes: Vec<(String, String, String)>| {
-            shapes
-                .into_iter()
-                .filter(|(name, _, _)| name == "idx_channels_listed_name")
-                .collect::<Vec<_>>()
-        };
-        let desired_listed_name = listed_name(index_shapes(&desired, "channels").await);
-        assert_eq!(desired_listed_name.len(), 1, "desired state has the index");
-        assert_eq!(
-            desired_listed_name,
-            listed_name(index_shapes(&migrated, "channels").await),
-            "idx_channels_listed_name parity mismatch: update \
-             schema/tables/public/channels.sql to match migration 0083"
-        );
+        // The listed-name (0083) and parent (0089) indexes are compared on
+        // their own for that reason.
+        for (index, migration) in [
+            ("idx_channels_listed_name", "0083"),
+            ("idx_channels_parent", "0089"),
+        ] {
+            let only = |shapes: Vec<(String, String, String)>| {
+                shapes
+                    .into_iter()
+                    .filter(|(name, _, _)| name == index)
+                    .collect::<Vec<_>>()
+            };
+            let desired_index = only(index_shapes(&desired, "channels").await);
+            assert_eq!(desired_index.len(), 1, "desired state has {index}");
+            assert_eq!(
+                desired_index,
+                only(index_shapes(&migrated, "channels").await),
+                "{index} parity mismatch: update \
+                 schema/tables/public/channels.sql to match migration {migration}"
+            );
+        }
         assert_eq!(
             events_key_defs(&desired).await,
             events_key_defs(&migrated).await,

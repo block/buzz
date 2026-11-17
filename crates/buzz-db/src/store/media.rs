@@ -72,10 +72,10 @@ impl Db {
             .execute(&mut *tx)
             .await?;
         // Mirrors channel_members::{get_accessible_channel_ids,
-        // get_readable_named_only_channels}.
+        // get_readable_named_only_channels}, including reads through a parent.
         // The channel is explicitly named by this read, so open unlisted and
         // named-only channels follow the normal explicit-channel read policy.
-        let original_sql = format!("SELECT e.* FROM events e JOIN channels c ON c.community_id=e.community_id AND c.id=e.channel_id WHERE e.community_id=$1 AND e.channel_id=$2 AND e.id=$3 AND e.kind IN ({}) AND e.deleted_at IS NULL AND c.deleted_at IS NULL AND (c.visibility='open' OR EXISTS (SELECT 1 FROM channel_members cm WHERE cm.community_id=c.community_id AND cm.channel_id=c.id AND cm.pubkey=$4 AND cm.removed_at IS NULL))", edit_governed_kinds_sql());
+        let original_sql = format!("SELECT e.* FROM events e JOIN channels c ON c.community_id=e.community_id AND c.id=e.channel_id WHERE e.community_id=$1 AND e.channel_id=$2 AND e.id=$3 AND e.kind IN ({}) AND e.deleted_at IS NULL AND c.deleted_at IS NULL AND (c.visibility='open' OR EXISTS (SELECT 1 FROM channel_members cm WHERE cm.community_id=c.community_id AND cm.channel_id=c.id AND cm.pubkey=$4 AND cm.removed_at IS NULL) OR (c.visibility='private' AND {}))", edit_governed_kinds_sql(), crate::channel_tree::READABLE_THROUGH_PARENT_SQL.replace("$2", "$4"));
         let original = sqlx::query(sqlx::AssertSqlSafe(original_sql))
             .bind(community.as_uuid())
             .bind(channel)
@@ -314,8 +314,12 @@ pub(super) fn media_reference_query(
                          SELECT 1 FROM channel_members m WHERE m.community_id=c.community_id AND m.channel_id=c.id \
                          AND m.removed_at IS NULL AND m.pubkey="
             );
+    // A private channel is also readable through its parents.
     query
         .push_bind(pubkey)
+        .push(") OR (c.visibility = 'private' AND ");
+    crate::channel_tree::push_readable_through_parent(&mut query, pubkey);
+    query
         .push(format!(
             ")))) AND (e.kind <> 40003 OR EXISTS (SELECT 1 FROM events original \
                 WHERE original.community_id=e.community_id AND original.channel_id=e.channel_id \

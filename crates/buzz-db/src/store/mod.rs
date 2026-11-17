@@ -12,6 +12,8 @@ pub mod archived_identities;
 pub mod channel;
 /// Channel membership and roster persistence.
 pub mod channel_members;
+/// Channel parents: reading a channel through the channel it is filed under.
+pub mod channel_tree;
 /// Community lifecycle and host-map persistence.
 pub mod community;
 /// Monotonic community auth policy and operator acceptance receipts.

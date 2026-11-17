@@ -3277,6 +3277,25 @@ async fn check_membership_for_admission(
         .is_member_cached(tenant.community(), lifecycle_parent_id, pubkey_bytes)
         .await
         .map_err(AdmissionRefusal::Dependency)?;
+    // A non-member of a private scope may still hold a role there through
+    // its parents; joining takes one that may post, as for a member.
+    let scope_inherited = if scope_member || write_scope.visibility == "open" {
+        None
+    } else {
+        crate::handlers::parent_access::inherited_role(
+            state,
+            tenant.community(),
+            write_scope,
+            pubkey_bytes,
+        )
+        .await
+        .map_err(AdmissionRefusal::Dependency)?
+    };
+    if scope_inherited.is_some_and(|role| !role.can_post()) {
+        return Err(AdmissionRefusal::Denied(
+            "only members can join huddles in this channel",
+        ));
+    }
     if (scope_member || write_scope.visibility == "open")
         && !crate::handlers::ingest::may_post(
             state,
@@ -3334,12 +3353,22 @@ async fn check_membership_for_admission(
         });
     }
 
-    // Auto-add path: private ephemeral channel + caller is member of parent.
+    // A private channel read through its parents: no member row is made.
+    if channel_id == lifecycle_parent_id && scope_inherited.is_some() {
+        return Ok(MembershipAdmission::Existing {
+            parent_channel_id: lifecycle_parent_id,
+        });
+    }
+
+    // Auto-add path: private ephemeral channel + caller may write in the
+    // parent, as a member or through the parent's own parents.
     if channel.ttl_seconds.is_some() {
-        let parent_member = state
-            .is_member_cached(tenant.community(), lifecycle_parent_id, pubkey_bytes)
-            .await
-            .map_err(AdmissionRefusal::Dependency)?;
+        let parent_member = scope_member
+            || scope_inherited.is_some()
+            || state
+                .is_member_cached(tenant.community(), lifecycle_parent_id, pubkey_bytes)
+                .await
+                .map_err(AdmissionRefusal::Dependency)?;
 
         if parent_member {
             return Ok(MembershipAdmission::AutoAddRequired {
@@ -3621,12 +3650,21 @@ async fn commit_participant_join(
         // IMPORTANT 4b: Re-read parent membership under the lock. A parent
         // membership revocation in the same window would make the auto-add
         // unjustified; reject rather than grant access from stale authority.
+        // Authority through the parent's own parents counts as well; the
+        // write rule in 4e decides whether it may post.
         let parent_still_member = buzz_db::channel_members::is_member_in_transaction(
             membership.tx(),
             *parent_id,
             pubkey_bytes,
         )
-        .await?;
+        .await?
+            || buzz_db::channel_tree::inherited_role_in_transaction(
+                membership.tx(),
+                *parent_id,
+                pubkey_bytes,
+            )
+            .await?
+            .is_some();
 
         if !parent_still_member {
             retire_shadow();
@@ -3675,7 +3713,8 @@ async fn commit_participant_join(
     //     state these locks hold: in the huddle and in its lifecycle parent,
     //     an active member needs a role that may post, and a non-member needs
     //     an open channel whose `join_role` is `member`. A non-member of a
-    //     private scope has lost the membership the pre-join check saw (the
+    //     private scope needs a role through its parents that may post;
+    //     without one it has lost the access the pre-join check saw (the
     //     auto-add above already made a private huddle's joiner a member).
     for scope in locked_channels.iter().copied() {
         let role = buzz_db::channel_members::active_role_in_transaction(
@@ -3695,7 +3734,17 @@ async fn commit_participant_join(
                 .await?;
                 match settings {
                     Some((visibility, _)) if visibility != "open" => {
-                        Some(JoinCommitError::MembershipLost)
+                        match buzz_db::channel_tree::inherited_role_in_transaction(
+                            membership.tx(),
+                            scope,
+                            pubkey_bytes,
+                        )
+                        .await?
+                        {
+                            Some(role) if role.can_post() => None,
+                            Some(_) => Some(JoinCommitError::WriteRoleLost),
+                            None => Some(JoinCommitError::MembershipLost),
+                        }
                     }
                     Some((visibility, join_role))
                         if crate::handlers::ingest::non_member_may_post(
@@ -8146,6 +8195,250 @@ mod tests {
 
     mod postgres_tests {
         use super::*;
+
+        /// A reader of a private channel through its parent joins its call and
+        /// its ephemeral huddle with no row in the channel, and is refused at
+        /// commit once removed from the parent. Mutation: drop the
+        /// through-parent arm of the commit re-check → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn huddle_join_through_a_parent_commits_and_is_revoked() {
+            use chrono::{Duration, Utc};
+            use std::sync::Arc;
+
+            let state = audio_test_state_real_db()
+                .await
+                .expect("postgres-ci provides a database");
+            let pool = state.db.pool().clone();
+            let (tenant, parent_id, member_key) = seed_audio_fixture(&pool).await;
+            let community_uuid = *tenant.community().as_uuid();
+            let joiner = member_key.public_key().to_bytes().to_vec();
+            let joiner_hex = member_key.public_key().to_hex();
+            let creator: Vec<u8> = sqlx::query_scalar(
+                "SELECT created_by FROM channels WHERE community_id = $1 AND id = $2",
+            )
+            .bind(community_uuid)
+            .bind(parent_id)
+            .fetch_one(&pool)
+            .await
+            .expect("channel creator");
+
+            // The call's channel is private, under a private project the
+            // joiner is a member of; the joiner has no row in the channel.
+            let project_id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by) \
+                 VALUES ($1, $2, 'huddle-project', 'stream', 'private', $3)",
+            )
+            .bind(project_id)
+            .bind(community_uuid)
+            .bind(&creator)
+            .execute(&pool)
+            .await
+            .expect("seed project");
+            sqlx::query(
+                "UPDATE channels SET visibility = 'private', parent_id = $3 \
+                 WHERE community_id = $1 AND id = $2",
+            )
+            .bind(community_uuid)
+            .bind(parent_id)
+            .bind(project_id)
+            .execute(&pool)
+            .await
+            .expect("file the channel under the project");
+            let set_project_role = |role: Option<&'static str>| {
+                let pool = pool.clone();
+                let joiner = joiner.clone();
+                let creator = creator.clone();
+                let state = state.clone();
+                let tenant = tenant.clone();
+                async move {
+                    sqlx::query(
+                        "DELETE FROM channel_members \
+                         WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+                    )
+                    .bind(community_uuid)
+                    .bind(project_id)
+                    .bind(&joiner)
+                    .execute(&pool)
+                    .await
+                    .expect("clear project role");
+                    if let Some(role) = role {
+                        sqlx::query(
+                            "INSERT INTO channel_members \
+                             (community_id, channel_id, pubkey, role, invited_by) \
+                             VALUES ($1, $2, $3, $4::member_role, $5)",
+                        )
+                        .bind(community_uuid)
+                        .bind(project_id)
+                        .bind(&joiner)
+                        .bind(role)
+                        .bind(&creator)
+                        .execute(&pool)
+                        .await
+                        .expect("set project role");
+                    }
+                    state.invalidate_membership(&tenant, project_id, &joiner);
+                }
+            };
+            sqlx::query(
+                "DELETE FROM channel_members \
+                 WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+            )
+            .bind(community_uuid)
+            .bind(parent_id)
+            .bind(&joiner)
+            .execute(&pool)
+            .await
+            .expect("drop the joiner's row in the channel");
+            state.invalidate_membership(&tenant, parent_id, &joiner);
+            set_project_role(Some("member")).await;
+
+            // A private ephemeral huddle linked to the channel by its creator.
+            let child_id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO channels \
+                 (id, community_id, name, channel_type, visibility, created_by, ttl_seconds) \
+                 VALUES ($1, $2, 'huddle-parent-child', 'stream', 'private', $3, 3600)",
+            )
+            .bind(child_id)
+            .bind(community_uuid)
+            .bind(&creator)
+            .execute(&pool)
+            .await
+            .expect("seed huddle channel");
+            sqlx::query(
+                "INSERT INTO events \
+                 (community_id, id, pubkey, created_at, kind, tags, content, sig, channel_id) \
+                 VALUES ($1, $2, $3, NOW(), 48100, '[]', $4, $5, $6)",
+            )
+            .bind(community_uuid)
+            .bind([Uuid::new_v4().into_bytes(), Uuid::new_v4().into_bytes()].concat())
+            .bind(&creator)
+            .bind(serde_json::json!({ "ephemeral_channel_id": child_id.to_string() }).to_string())
+            .bind(vec![0u8; 64])
+            .bind(parent_id)
+            .execute(&pool)
+            .await
+            .expect("seed huddle_started link");
+
+            let admit = |channel: Uuid| {
+                let state = state.clone();
+                let tenant = tenant.clone();
+                let joiner = joiner.clone();
+                async move {
+                    let parent = (channel != parent_id).then_some(parent_id);
+                    check_membership_for_admission(&state, &tenant, channel, &joiner, parent).await
+                }
+            };
+            let commit = |channel: Uuid, parent: Uuid, admission: MembershipAdmission| {
+                let state = state.clone();
+                let tenant = tenant.clone();
+                let joiner = joiner.clone();
+                let joiner_hex = joiner_hex.clone();
+                async move {
+                    let cancel = tokio_util::sync::CancellationToken::new();
+                    let gate = crate::nip_fi_gate::SessionAdmissionGate::new(
+                        Utc::now() + Duration::hours(1),
+                        cancel,
+                    );
+                    commit_participant_join(
+                        &state,
+                        &tenant,
+                        channel,
+                        parent,
+                        &joiner_hex,
+                        &joiner,
+                        Uuid::new_v4(),
+                        0,
+                        0,
+                        1,
+                        "1",
+                        &admission,
+                        &gate,
+                        &Arc::new(crate::audio::room::Room::new(tenant.community(), channel)),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                }
+            };
+
+            let huddle_rows = || {
+                let pool = pool.clone();
+                let joiner = joiner.clone();
+                async move {
+                    sqlx::query_scalar::<_, i64>(
+                        "SELECT COUNT(*) FROM channel_members \
+                         WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3 \
+                           AND removed_at IS NULL",
+                    )
+                    .bind(community_uuid)
+                    .bind(child_id)
+                    .bind(&joiner)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("count huddle rows")
+                }
+            };
+
+            // Removed from the project after the pre-join check: refused at
+            // commit, in the channel's call and in its huddle.
+            for channel in [parent_id, child_id] {
+                set_project_role(Some("member")).await;
+                let Ok(admission) = admit(channel).await else {
+                    panic!("a project member is admitted");
+                };
+                set_project_role(None).await;
+                let result = commit(channel, parent_id, admission).await;
+                assert!(
+                    matches!(result, Err(JoinCommitError::MembershipLost)),
+                    "removed from the project, joining {channel}: {result:?}"
+                );
+            }
+            assert_eq!(huddle_rows().await, 0, "a refused join adds no row");
+
+            // A guest of the project may read but not join.
+            set_project_role(Some("guest")).await;
+            for channel in [parent_id, child_id] {
+                assert!(
+                    matches!(
+                        admit(channel).await,
+                        Err(AdmissionRefusal::Denied(
+                            "only members can join huddles in this channel"
+                        ))
+                    ),
+                    "a project guest joins {channel}"
+                );
+            }
+
+            // A project member joins the channel's call with no row there,
+            // and its huddle by the auto-add.
+            set_project_role(Some("member")).await;
+            let admission = admit(parent_id).await.expect("admitted to the call");
+            assert!(matches!(admission, MembershipAdmission::Existing { .. }));
+            let result = commit(parent_id, parent_id, admission).await;
+            assert!(result.is_ok(), "joins the call: {result:?}");
+            let admission = admit(child_id).await.expect("admitted to the huddle");
+            let result = commit(child_id, parent_id, admission).await;
+            assert!(result.is_ok(), "joins the huddle: {result:?}");
+            assert_eq!(huddle_rows().await, 1, "the huddle auto-add makes its row");
+            let channel_rows: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM channel_members \
+                 WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+            )
+            .bind(community_uuid)
+            .bind(parent_id)
+            .bind(&joiner)
+            .fetch_one(&pool)
+            .await
+            .expect("count channel rows");
+            assert_eq!(
+                channel_rows, 0,
+                "joining through a parent makes no row in the channel"
+            );
+        }
 
         /// Joining a huddle is a write. For an ephemeral huddle the joiner
         /// needs a writing role in the huddle itself and in its lifecycle

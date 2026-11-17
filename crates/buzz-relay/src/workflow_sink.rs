@@ -410,7 +410,20 @@ impl ActionSink for RelayActionSink {
                 .is_member_cached(tenant.community(), channel_uuid, &author_pubkey_bytes)
                 .await
                 .map_err(|e| ActionSinkError::Database(e.to_string()))?;
-            if !is_member && channel.visibility != "open" {
+            // A non-member may still read a private channel through its
+            // parents; `may_post` below then decides with that role.
+            if !is_member
+                && channel.visibility != "open"
+                && crate::handlers::parent_access::inherited_role(
+                    &state,
+                    tenant.community(),
+                    &channel,
+                    &author_pubkey_bytes,
+                )
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .is_none()
+            {
                 return Err(ActionSinkError::InvalidInput(
                     "workflow owner does not have access to destination channel".into(),
                 ));

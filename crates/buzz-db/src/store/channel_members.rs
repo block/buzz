@@ -1704,7 +1704,8 @@ pub async fn get_accessible_channel_ids(
 }
 
 /// The member half of [`get_accessible_channel_ids`]: legacy-type channels
-/// where the pubkey is an active member.
+/// where the pubkey is an active member, and the legacy-type children and
+/// grandchildren of every channel it is a member of ([`crate::channel_tree`]).
 pub async fn get_member_channel_ids(
     pool: &PgPool,
     community_id: CommunityId,
@@ -1715,15 +1716,26 @@ pub async fn get_member_channel_ids(
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
+    // The member's channels and, through them, their children and
+    // grandchildren (`crate::channel_tree`). A parent's own type does not
+    // matter; only what the reader is given is limited to legacy types.
     let sql = format!(
         r#"
-        SELECT cm.channel_id
-        FROM channel_members cm
-        JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
-        WHERE cm.community_id = $1 AND cm.pubkey = $2 AND cm.removed_at IS NULL
-          AND {member_types}
+        WITH roots AS (
+            SELECT cm.channel_id AS id, c.channel_type
+            FROM channel_members cm
+            JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
+            WHERE cm.community_id = $1 AND cm.pubkey = $2 AND cm.removed_at IS NULL
+        )
+        SELECT r.id FROM roots r WHERE {member_types}
+        UNION
+        {descendants}
         "#,
-        member_types = crate::store::channel::legacy_channel_type_sql("c.channel_type"),
+        member_types = crate::store::channel::legacy_channel_type_sql("r.channel_type"),
+        descendants = crate::channel_tree::descendants_sql(
+            "roots",
+            &crate::store::channel::legacy_channel_type_sql("d.channel_type"),
+        ),
     );
     // Built only from the constant type list.
     sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
@@ -1735,7 +1747,8 @@ pub async fn get_member_channel_ids(
 }
 
 /// The open half of [`get_accessible_channel_ids`]: listed open channels of
-/// legacy types. It is the same for every reader in the community.
+/// legacy types, and the legacy-type children and grandchildren of every
+/// listed open channel. It is the same for every reader in the community.
 pub async fn get_listed_open_channel_ids(
     pool: &PgPool,
     community_id: CommunityId,
@@ -1756,14 +1769,26 @@ pub async fn get_listed_open_channel_ids_read_at(
     )
     .await?;
     let read_at = std::time::Instant::now();
+    // Listed open channels and their children and grandchildren
+    // (`crate::channel_tree`). Only a *listed* open channel lends its
+    // children to reads that name no channel: an unlisted one's children are
+    // reachable only by naming them, like the channel itself.
     let sql = format!(
         r#"
-        SELECT id
-        FROM channels
-        WHERE community_id = $1 AND visibility = 'open' AND NOT unlisted AND deleted_at IS NULL
-          AND {open_types}
+        WITH roots AS (
+            SELECT id, channel_type
+            FROM channels
+            WHERE community_id = $1 AND visibility = 'open' AND NOT unlisted AND deleted_at IS NULL
+        )
+        SELECT r.id FROM roots r WHERE {open_types}
+        UNION
+        {descendants}
         "#,
-        open_types = crate::store::channel::legacy_channel_type_sql("channel_type"),
+        open_types = crate::store::channel::legacy_channel_type_sql("r.channel_type"),
+        descendants = crate::channel_tree::descendants_sql(
+            "roots",
+            &crate::store::channel::legacy_channel_type_sql("d.channel_type"),
+        ),
     );
     // Built only from the constant type list.
     let value = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
@@ -1799,7 +1824,11 @@ pub struct ReadableNamedOnlyChannel {
 ///   `named`, the channels the request names;
 /// - each unlisted open channel of a legacy type among `named`. A member of
 ///   one also has it through [`get_accessible_channel_ids`]; listing it here
-///   as well is harmless, since a filter's scope is deduplicated.
+///   as well is harmless, since a filter's scope is deduplicated;
+/// - each private channel among `named` that the pubkey can read through its
+///   parents ([`crate::channel_tree`]). This covers a child of an unlisted
+///   open parent, which reads that name no channel leave out, and repairs a
+///   stale cached accessible set the way a direct membership check does.
 ///
 /// Uncached, so a caller can trust it for a channel the request names. A
 /// read reaches one only by naming it, or, for system channels, by opting in
@@ -1821,7 +1850,7 @@ pub async fn get_readable_named_only_channels(
     let sql = format!(
         r#"
         SELECT c.id AS channel_id, c.channel_type::text AS channel_type,
-               (NOT c.unlisted OR {is_member}) AS opt_in
+               (c.visibility = 'open' OR {is_member}) AND (NOT c.unlisted OR {is_member}) AS opt_in
         FROM channels c
         WHERE c.community_id = $1 AND c.deleted_at IS NULL
           AND (
@@ -1833,9 +1862,11 @@ pub async fn get_readable_named_only_channels(
               )
             )
             OR ({legacy_types} AND c.visibility = 'open' AND c.unlisted AND c.id = ANY($3))
+            OR (c.id = ANY($3) AND c.visibility = 'private' AND {through_parent})
           )
         "#,
         legacy_types = crate::store::channel::legacy_channel_type_sql("c.channel_type"),
+        through_parent = crate::channel_tree::READABLE_THROUGH_PARENT_SQL,
         is_member = "EXISTS (
                   SELECT 1 FROM channel_members cm
                   WHERE cm.community_id = c.community_id AND cm.channel_id = c.id
@@ -2032,7 +2063,7 @@ async fn get_channel_tx(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join
+               ttl_seconds, ttl_deadline, labels, join_role, unlisted, auto_join, parent_id
         FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
     )
@@ -2130,7 +2161,7 @@ pub async fn get_accessible_channels(
                c.nip29_group_id, c.topic_required, c.max_members,
                c.topic, c.topic_set_by, c.topic_set_at,
                c.purpose, c.purpose_set_by, c.purpose_set_at,
-               c.ttl_seconds, c.ttl_deadline, c.labels, c.join_role, c.unlisted, c.auto_join,
+               c.ttl_seconds, c.ttl_deadline, c.labels, c.join_role, c.unlisted, c.auto_join, c.parent_id,
                (cm.channel_id IS NOT NULL) AS is_member
         FROM channels c
         LEFT JOIN channel_members cm

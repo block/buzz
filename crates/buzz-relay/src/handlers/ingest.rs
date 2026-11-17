@@ -941,7 +941,8 @@ impl ChannelWrite {
 const NOT_A_CHANNEL_MEMBER: &str = "restricted: not a channel member";
 const MEMBERS_ONLY_POSTING: &str = "restricted: only members can post in this channel";
 
-/// The channel write gate: member OR open-visibility channel, plus, for
+/// The channel write gate: member OR open-visibility channel OR readable
+/// through its parents ([`super::parent_access`]), plus, for
 /// [`ChannelWrite::Post`], the role-table write rule ([`may_post`]).
 ///
 /// `channel` is the request's already-fetched channel row, when the caller has
@@ -980,15 +981,27 @@ pub(crate) async fn check_channel_membership(
             Err(e) => return Err(format!("error: database error: {e}")),
         },
     };
-    if !is_member && channel.visibility != "open" {
-        return Err(NOT_A_CHANNEL_MEMBER.to_string());
-    }
-    if write == ChannelWrite::Post
-        && !may_post(state, community_id, ch_id, pubkey_bytes, channel, is_member)
+    let inherited = if !is_member && channel.visibility != "open" {
+        match super::parent_access::inherited_role(state, community_id, channel, pubkey_bytes)
             .await
             .map_err(|e| format!("error: database error: {e}"))?
-    {
-        return Err(MEMBERS_ONLY_POSTING.to_string());
+        {
+            Some(role) => Some(role),
+            None => return Err(NOT_A_CHANNEL_MEMBER.to_string()),
+        }
+    } else {
+        None
+    };
+    if write == ChannelWrite::Post {
+        let allowed = match inherited {
+            Some(role) => role.can_post(),
+            None => may_post(state, community_id, ch_id, pubkey_bytes, channel, is_member)
+                .await
+                .map_err(|e| format!("error: database error: {e}"))?,
+        };
+        if !allowed {
+            return Err(MEMBERS_ONLY_POSTING.to_string());
+        }
     }
     Ok(())
 }
@@ -998,9 +1011,11 @@ pub(crate) async fn check_channel_membership(
 ///
 /// Roles mean the same thing in every channel: an active member may write
 /// when its role may post ([`buzz_db::channel::MemberRole::can_post`]), so a
-/// guest never may. A non-member may write only where joining would give a
-/// role that can write: an open channel with `join_role = member`. An unknown
-/// stored `join_role` fails closed to `guest`.
+/// guest never may. A non-member may write in an open channel only where
+/// joining would give a role that can write (`join_role = member`), and in a
+/// private channel only where its parents give such a role
+/// ([`super::parent_access::inherited_role`]). An unknown stored `join_role`
+/// fails closed to `guest`.
 pub(crate) async fn may_post(
     state: &AppState,
     community_id: CommunityId,
@@ -1010,7 +1025,17 @@ pub(crate) async fn may_post(
     is_member: bool,
 ) -> Result<bool, buzz_db::DbError> {
     if !is_member {
-        return Ok(non_member_may_post(&channel.visibility, &channel.join_role));
+        if channel.visibility == "open" {
+            return Ok(non_member_may_post(&channel.visibility, &channel.join_role));
+        }
+        return Ok(super::parent_access::inherited_role(
+            state,
+            community_id,
+            channel,
+            pubkey_bytes,
+        )
+        .await?
+        .is_some_and(|role| role.can_post()));
     }
     let role = state
         .db
