@@ -34,6 +34,11 @@ class _ArchiveRelay extends RelaySessionNotifier {
   final String owner;
   final submitted = <NostrEvent>[];
   final archived = <String>{'archived'};
+  // The archive write can commit while the writer still serves the old event.
+  final withholdArchiveMetadata = <String>{};
+
+  bool metadataIsArchived(String id) =>
+      archived.contains(id) && !withholdArchiveMetadata.contains(id);
   Completer<void>? acknowledgement;
   bool failRefresh = false;
   int failedRefreshes = 0;
@@ -108,11 +113,11 @@ class _ArchiveRelay extends RelaySessionNotifier {
         for (final entry in chats.entries)
           if (filter.tags['#d']?.contains(entry.key) == true)
             NostrEvent(
-              id: 'metadata-${entry.key}-${metadataVersions[entry.key] ?? 0}-${archived.contains(entry.key)}',
+              id: 'metadata-${entry.key}-${metadataVersions[entry.key] ?? 0}-${metadataIsArchived(entry.key)}',
               pubkey: 'relay',
               createdAt:
                   metadataVersions[entry.key] ??
-                  (archived.contains(entry.key) ? 2 : 1),
+                  (metadataIsArchived(entry.key) ? 2 : 1),
               kind: 39000,
               tags: [
                 ['d', entry.key],
@@ -122,7 +127,7 @@ class _ArchiveRelay extends RelaySessionNotifier {
                 ['P', entry.key == 'shared' ? 'someone-else' : owner],
                 if (entry.key != 'legacy' && entry.key != 'ordinary')
                   ['t', 'buzz.solo'],
-                if (archived.contains(entry.key)) ['archived', 'true'],
+                if (metadataIsArchived(entry.key)) ['archived', 'true'],
               ],
               content: '',
               sig: '',
@@ -222,7 +227,9 @@ class _ArchiveRelay extends RelaySessionNotifier {
     await acknowledgement?.future;
     final channelId = event.getTagValue('h')!;
     archived.add(channelId);
-    metadataVersions[channelId] = (metadataVersions[channelId] ?? 1) + 1;
+    if (!withholdArchiveMetadata.contains(channelId)) {
+      metadataVersions[channelId] = (metadataVersions[channelId] ?? 1) + 1;
+    }
     afterAcceptance?.call();
     return event;
   }
@@ -523,6 +530,7 @@ void main() {
       // Another client can edit active metadata before our archive, without
       // that revision ever reaching this page. Archive then becomes v12.
       relay.metadataVersions['loose'] = 11;
+      relay.withholdArchiveMetadata.add('loose');
       pane.open('shared', (_) => const SizedBox());
       await tester.drag(find.text('Loose chat'), const Offset(-700, 0));
       await tester.pumpAndSettle();
@@ -578,50 +586,75 @@ void main() {
       ScaffoldMessenger.of(context).clearSnackBars();
       await tester.pumpAndSettle();
 
-      // A generic notification with newer-but-pre-archive active v11 is not
-      // a recovery receipt. It must not clear accepted tracking for v12.
-      relay.archived.remove('loose');
-      relay.metadataVersions['loose'] = 11;
+      // The archive committed but no new metadata was emitted. Repeated
+      // successful strong reads see the writer's active v11, which is newer
+      // than the active v10 the page had seen before confirming the archive.
       relay.failRefresh = false;
-      await container.read(channelsProvider.notifier).refresh();
-      await tester.pumpAndSettle();
-      expect(
-        container
+      for (var i = 0; i < 2; i++) {
+        relay.discoveryQueries.clear();
+        _performCustomAction(
+          tester,
+          'Loose chat, archived, awaiting refresh',
+          'Refresh chat status',
+        );
+        await tester.pumpAndSettle();
+        final channel = container
             .read(channelsProvider)
             .requireValue
-            .firstWhere((c) => c.id == 'loose')
-            .createdAt
-            .millisecondsSinceEpoch,
-        11000,
-      );
-      expect(
-        find.bySemanticsLabel('Loose chat, archived, awaiting refresh'),
-        findsOneWidget,
-      );
-      await tester.drag(find.text('Loose chat'), const Offset(-700, 0));
-      await tester.pumpAndSettle();
-      expect(find.text('Archive #Loose chat?'), findsNothing);
-      expect(relay.submitted, hasLength(4));
+            .firstWhere((c) => c.id == 'loose');
+        expect(channel.createdAt.millisecondsSinceEpoch, 11000);
+        expect(channel.isArchived, isFalse);
+        expect(relay.archived, contains('loose'));
+        expect(
+          relay.discoveryQueries.any(
+            (q) =>
+                q['consistency'] == 'strong' &&
+                (q['kinds'] as List).contains(39000),
+          ),
+          isTrue,
+        );
+        final stillGuarded = tester.getSemantics(
+          find.bySemanticsLabel('Loose chat, archived, awaiting refresh'),
+        );
+        final actions = stillGuarded
+            .getSemanticsData()
+            .customSemanticsActionIds!;
+        expect(
+          actions.map((id) => CustomSemanticsAction.getAction(id)!.label),
+          ['Refresh chat status'],
+        );
+        expect(
+          find.text('Archive accepted. The chat list hasn’t confirmed it yet.'),
+          findsOneWidget,
+        );
+        await tester.drag(find.text('Loose chat'), const Offset(-700, 0));
+        await tester.pumpAndSettle();
+        expect(find.text('Archive #Loose chat?'), findsNothing);
+        expect(relay.submitted, hasLength(4));
+        ScaffoldMessenger.of(context).clearSnackBars();
+        await tester.pumpAndSettle();
+      }
+
       // An archived snapshot from an older lifecycle is not reconciliation
       // for this attempt, whose known active revision is already v11.
-      relay.archived.add('loose');
+      final metadataFilter = NostrFilters.channelMetadata(
+        _ArchiveRelay.chats.keys.toList(),
+      );
+      final staleActive = relay.events(metadataFilter);
+      relay.withholdArchiveMetadata.remove('loose');
       relay.metadataVersions['loose'] = 9;
+      relay.replicaMetadata = relay.events(metadataFilter);
       await container.read(channelsProvider.notifier).refresh();
       await tester.pumpAndSettle();
-      relay.archived.remove('loose');
-      relay.metadataVersions['loose'] = 11;
+      relay.replicaMetadata = staleActive;
+      relay.metadataVersions['loose'] = 12;
       await container.read(channelsProvider.notifier).refresh();
       await tester.pumpAndSettle();
       expect(
         find.bySemanticsLabel('Loose chat, archived, awaiting refresh'),
         findsOneWidget,
       );
-      // Keep the replica on active v11 even after writer archive v12.
-      relay.replicaMetadata = relay.events(
-        NostrFilters.channelMetadata(_ArchiveRelay.chats.keys.toList()),
-      );
-      relay.archived.add('loose');
-      relay.metadataVersions['loose'] = 12;
+      // Keep the replica on active v11 while writer archive v12 is available.
 
       // A working replica is no fallback for a failed writer confirmation.
       relay.failStrongMetadata = true;
@@ -683,8 +716,8 @@ void main() {
       await tester.pumpAndSettle();
 
       if (unarchiveBeforeRecovery) {
-        // No archived snapshot was observed for this chat. A successful
-        // explicit post-acceptance recovery must honor the later active v13.
+        // An unarchive also looks active if the app never saw archived v12.
+        // Superseding the pending read cannot make that result conclusive.
         relay.unarchive('loose');
         final oldRecovery = Completer<void>();
         relay.metadataReadGates.add(oldRecovery);
@@ -703,7 +736,10 @@ void main() {
           'Refresh chat status',
         );
         await tester.pumpAndSettle();
-        expect(find.bySemanticsLabel('Loose chat'), findsOneWidget);
+        expect(
+          find.bySemanticsLabel('Loose chat, archived, awaiting refresh'),
+          findsOneWidget,
+        );
         expect(
           container.read(channelsProvider).requireValue.map((c) => c.id),
           containsAll(_ArchiveRelay.chats.keys),
@@ -729,21 +765,8 @@ void main() {
           13000,
         );
         expect(relay.submitted, hasLength(4));
-        _performCustomAction(tester, 'Loose chat', 'Archive chat');
+        ScaffoldMessenger.of(context).clearSnackBars();
         await tester.pumpAndSettle();
-        expect(find.text('Archive #Loose chat?'), findsOneWidget);
-        await tester.tap(find.text('Cancel'));
-        await tester.pumpAndSettle();
-        expect(relay.submitted, hasLength(4));
-
-        // A new confirmed archive gets a different operation identity. The
-        // old recovery's late completion cannot retire that new marker.
-        relay.failRefresh = true;
-        await tester.drag(find.text('Loose chat'), const Offset(-700, 0));
-        await tester.pumpAndSettle();
-        await tester.tap(find.widgetWithText(FilledButton, 'Archive'));
-        await tester.pumpAndSettle();
-        expect(relay.submitted, hasLength(5));
         oldRecovery.complete();
         await tester.pumpAndSettle();
         expect(
@@ -754,10 +777,15 @@ void main() {
           find.text('Couldn’t refresh chat status. Try again.'),
           findsNothing,
         );
-        await tester.drag(find.text('Loose chat'), const Offset(-700, 0));
-        await tester.pumpAndSettle();
-        expect(find.text('Archive #Loose chat?'), findsNothing);
-        expect(relay.submitted, hasLength(5));
+        expect(
+          find.text('Archive accepted. The chat list hasn’t confirmed it yet.'),
+          findsNothing,
+        );
+        expect(relay.submitted, hasLength(4));
+
+        // An external archive finally supplies an observed archive revision.
+        relay.archived.add('loose');
+        relay.metadataVersions['loose'] = 14;
       }
       relay.failRefresh = false;
       _performCustomAction(
@@ -767,7 +795,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('Loose chat'), findsNothing);
-      final archiveSubmissions = unarchiveBeforeRecovery ? 5 : 4;
+      const archiveSubmissions = 4;
       expect(relay.submitted, hasLength(archiveSubmissions));
 
       // Successful writer recovery must survive the next ordinary routed

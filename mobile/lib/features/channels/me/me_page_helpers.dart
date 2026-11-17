@@ -18,7 +18,7 @@ class _MeRetry extends StatelessWidget {
 enum _MeArchivePhase { confirming, pending, accepted }
 
 // Keep attempt identity across metadata observations so an older recovery
-// cannot retire a later archive. Revisions live only for this page/scope.
+// cannot report feedback for a later archive. Revisions live only here.
 class _MeArchiveOperation {
   _MeArchiveOperation(
     this.phase,
@@ -64,7 +64,7 @@ class _MeArchiveOperation {
     }
     if (!revision.isAfter(activeRevision)) return this;
     // Without an observed archive, even newer active metadata can precede
-    // acceptance. Only explicit writer recovery may retire that guard.
+    // acceptance, even on the writer. Keep guarding until an archive is observed.
     return _MeArchiveOperation(
       phase,
       revision,

@@ -147,30 +147,34 @@ class MePage extends HookConsumerWidget {
         return;
       }
       try {
-        // This request starts after the captured archives were accepted. A
-        // generic list notification (even a newer active metadata revision)
-        // may instead belong to a read started before acceptance.
-        final fresh = await ref
-            .read(channelsProvider.notifier)
-            .fetchFresh(strong: true);
-        if (!isCurrentArchiveScope() ||
+        // The listener reconciles observed archive revisions. Even a strong
+        // read can return pre-archive metadata if relay publication failed.
+        await ref.read(channelsProvider.notifier).fetchFresh(strong: true);
+        if (!context.mounted ||
+            !isCurrentArchiveScope() ||
             !identical(archiveRecovery.value, recovery)) {
           return;
         }
-        final updated = {...archives.value};
-        for (final channel in fresh) {
-          final operation = accepted[channel.id];
-          if (!channel.isArchived &&
-              operation != null &&
-              identical(updated[channel.id]?.attempt, operation.attempt) &&
-              updated[channel.id]!.needsRecovery) {
-            // Another client can unarchive without this page ever observing
-            // the intermediate archived snapshot. Trust this fresh result,
-            // not the old accepted marker, without issuing another write.
-            updated.remove(channel.id);
-          }
+        final stillAwaitingArchive = accepted.entries.any((entry) {
+          final current = archives.value[entry.key];
+          return current != null &&
+              identical(current.attempt, entry.value.attempt) &&
+              current.needsRecovery;
+        });
+        if (stillAwaitingArchive) {
+          ScaffoldMessenger.of(context).showFeedbackSnackBar(
+            SnackBar(
+              content: const Text(
+                'Archive accepted. The chat list hasn’t confirmed it yet.',
+              ),
+              action: SnackBarAction(
+                label: 'Refresh',
+                onPressed: refreshArchives,
+              ),
+            ),
+            kind: ToastKind.generic,
+          );
         }
-        if (updated.length != archives.value.length) archives.value = updated;
       } catch (_) {
         if (context.mounted &&
             isCurrentArchiveScope() &&
