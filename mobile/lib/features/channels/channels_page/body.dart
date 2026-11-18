@@ -513,8 +513,9 @@ class _SliverChannelsList extends HookConsumerWidget {
   }
 }
 
-/// Says when unread status is not syncing with other devices: retries on tap,
-/// or, once the relay refused read state for the session, says how to recover.
+/// Says when unread status is not syncing with other devices: retries on tap
+/// while connected, says it resumes on reconnect while offline, or, once the
+/// relay refused read state for the session, says how to recover.
 class _ReadStateSyncNotice extends ConsumerWidget {
   const _ReadStateSyncNotice();
 
@@ -526,16 +527,26 @@ class _ReadStateSyncNotice extends ConsumerWidget {
             (failed: state.syncFailed, unsupported: state.syncUnsupported),
       ),
     );
-    if (!failed) return const SizedBox.shrink();
+    final online = ref.watch(
+      relaySessionProvider.select(
+        (session) => session.status == SessionStatus.connected,
+      ),
+    );
+    // Unsupported outlasts unrelated successes: marks stay unsendable until
+    // a new session, so it does not depend on the current error.
+    if (!failed && !unsupported) return const SizedBox.shrink();
     final text = Text(
       unsupported
           ? 'Unread status can’t sync with your other devices right now. Sign in again or restart Buzz to try again.'
-          : 'Unread status isn’t syncing with your other devices. Tap to retry.',
+          : online
+          ? 'Unread status isn’t syncing with your other devices. Tap to retry.'
+          // Reconnecting resyncs read state on its own.
+          : 'Unread status isn’t syncing with your other devices. It will retry when you’re back online.',
       style: context.textTheme.bodySmall?.copyWith(
         color: context.colors.onSurfaceVariant,
       ),
     );
-    if (unsupported) {
+    if (unsupported || !online) {
       return Padding(
         key: const Key('read-state-sync-notice'),
         padding: const EdgeInsets.fromLTRB(
