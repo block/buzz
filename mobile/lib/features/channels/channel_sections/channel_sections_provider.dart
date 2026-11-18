@@ -71,7 +71,7 @@ class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
     });
 
     ref.onDispose(() {
-      manager.dispose();
+      manager.dispose(flushPending: false);
       if (_manager == manager) {
         _manager = null;
       }
