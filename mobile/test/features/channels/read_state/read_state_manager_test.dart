@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/read_state/read_state_manager.dart';
 import 'package:buzz/shared/read_state/read_state_storage.dart';
+import 'package:buzz/shared/relay/read_state_snapshot.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 const _relayUrl = 'https://relay.example';
@@ -1389,6 +1390,77 @@ void main() {
       });
     },
   );
+
+  test('an older publish snapshot finishing late keeps a newer full basis '
+      'for follow admission', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    fakeAsync((async) {
+      final relay = _FakeRelaySession();
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+      manager.initialize();
+      async.flushMicrotasks();
+
+      // A publish cuts its snapshot while the account still has room.
+      final slow = Completer<void>();
+      relay.fetchGate = slow.future;
+      manager.markContextRead(
+        'channel-2',
+        DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      );
+      async.elapse(const Duration(seconds: 5));
+      expect(relay.fetchCount, 2);
+
+      // A newer refresh then finds the snapshot full.
+      relay.fetchGate = null;
+      relay.historyEvents = [
+        for (var i = 0; i < readStateSnapshotMaxEvents; i++)
+          NostrEvent(
+            id: 'other-$i',
+            pubkey: keychain.public,
+            createdAt: 100,
+            kind: EventKind.readState,
+            tags: [
+              ['d', 'other-$i'],
+            ],
+            content: '',
+            sig: 'sig',
+          ),
+      ];
+      relay.statusListeners.last(RelaySubscriptionStatus.ready);
+      async.flushMicrotasks();
+      expect(relay.fetchCount, 3);
+
+      // The older snapshot must not restore room the account no longer has.
+      slow.complete();
+      async.flushMicrotasks();
+      bool? followed;
+      manager.setThreadFollow('channel-1', 'a' * 64, true).then((v) {
+        followed = v;
+      });
+      async.flushMicrotasks();
+      expect(followed, isFalse);
+      expect(
+        (manager.syncError as StateError?)?.message,
+        threadFollowsFullMessage,
+      );
+      manager.dispose(flushPending: false);
+    });
+  });
 
   test('remote read-state rollback is ignored', () async {
     SharedPreferences.setMockInitialValues({});

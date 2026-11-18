@@ -775,9 +775,9 @@ class ReadStateManager {
           return;
         }
         checkConnection?.call();
-        snapshot = _capacitySnapshot = events;
+        snapshot = events;
         _mergeEvents(events);
-        if (newest) _dropAbsentPeerFollows(heads, events);
+        if (newest) _dropAbsentPeerFollows(heads, _capacitySnapshot = events);
         _followsLoaded = recovered = true;
         // Unchanged slots publish nothing, so no echo would announce marks
         // this snapshot brought in.
