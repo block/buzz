@@ -25,7 +25,14 @@ Future<http.Response> boundedHttpResponse(
   StreamIterator<List<int>>? body;
   Future<http.Response> read() async {
     final response = await client.send(request);
-    onHeaders?.call(response);
+    try {
+      onHeaders?.call(response);
+    } catch (_) {
+      // Some clients hold the connection until the body is listened to and
+      // cancelled; an abort alone leaves it open.
+      unawaited(response.stream.listen(null).cancel());
+      rethrow;
+    }
     final iterator = body = StreamIterator(response.stream);
     if (abort.isCompleted) {
       await iterator.cancel();

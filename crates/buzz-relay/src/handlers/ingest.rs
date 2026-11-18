@@ -8053,6 +8053,13 @@ mod postgres_tests {
             )
             .await
             .expect("create private channel");
+        // The direct insert bypasses the membership cache, which still holds
+        // the author's snapshot from before this channel existed.
+        f.state.invalidate_membership_local(
+            f.tenant.community(),
+            private,
+            &a.public_key().to_bytes(),
+        );
         let hidden = EventBuilder::new(Kind::Custom(9), "hidden")
             .tags([nostr::Tag::parse(["h", &private.to_string()]).unwrap()])
             .sign_with_keys(a)
