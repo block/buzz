@@ -6,15 +6,15 @@ use nostr::{Event, EventBuilder, Kind, Tag};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use buzz_core::StoredEvent;
 use buzz_core::kind::{
-    AUTHOR_ONLY_KINDS, KIND_AGENT_PROFILE, KIND_DM_VISIBILITY, KIND_GIT_REPO_ANNOUNCEMENT,
-    KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST, KIND_IA_UNARCHIVED, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS,
-    KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION, KIND_THREAD_SUMMARY,
-    KIND_VERIFIED_PROFILE, event_kind_u32, is_parameterized_replaceable,
+    event_kind_u32, is_parameterized_replaceable, AUTHOR_ONLY_KINDS, KIND_AGENT_PROFILE,
+    KIND_DM_VISIBILITY, KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST,
+    KIND_IA_UNARCHIVED, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA,
+    KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION, KIND_THREAD_SUMMARY, KIND_VERIFIED_PROFILE,
 };
-use buzz_db::channel::{MemberRecord, MemberRole, group_members_tags};
+use buzz_core::StoredEvent;
+use buzz_db::channel::{group_members_tags, MemberRecord, MemberRole};
 
 use super::channel_authz::{self, ChannelAuthzError, PutUserDecision, RemoveOtherDecision};
 use super::event::dispatch_persistent_event;
@@ -580,9 +580,7 @@ fn check_deletion_privacy_k_tag(event: &Event, target_kind: u32) -> anyhow::Resu
         }
     }
     if target_is_author_only && !names_target {
-        anyhow::bail!(
-            "deletion of an author-only kind {target_kind} event requires [\"k\",\"{target_kind}\"]"
-        );
+        anyhow::bail!("deletion of an author-only kind {target_kind} event requires [\"k\",\"{target_kind}\"]");
     }
     Ok(())
 }
@@ -1403,7 +1401,7 @@ async fn emit_typed_membership_notification(
         _ => {
             return Err(anyhow::anyhow!(
                 "invalid notification kind: {notification_kind}"
-            ));
+            ))
         }
     };
 
@@ -2595,7 +2593,7 @@ pub(crate) fn channel_labels_from_tags(
                 None => {
                     return Some(Err(buzz_core::channel::ChannelLabelError::Invalid(
                         String::new(),
-                    )));
+                    )))
                 }
             }
         }
@@ -2647,7 +2645,11 @@ async fn plan_group_deletion_target(
             if tag.kind().to_string() == "e" {
                 tag.content().and_then(|v| {
                     let bytes = hex::decode(v).ok()?;
-                    if bytes.len() == 32 { Some(bytes) } else { None }
+                    if bytes.len() == 32 {
+                        Some(bytes)
+                    } else {
+                        None
+                    }
                 })
             } else {
                 None
@@ -4195,7 +4197,7 @@ async fn seed_manifest_pointer(
     owner_hex: &str,
     repo_id: &str,
 ) -> anyhow::Result<()> {
-    use crate::api::git::manifest::{MANIFEST_VERSION, Manifest, pointer_key};
+    use crate::api::git::manifest::{pointer_key, Manifest, MANIFEST_VERSION};
     use crate::api::git::store::{CasOutcome, Precond};
     use std::collections::BTreeMap;
 
@@ -4315,7 +4317,7 @@ async fn emit_initial_ref_state(
     owner_hex: &str,
     repo_id: &str,
 ) -> anyhow::Result<()> {
-    use crate::api::git::manifest_event::{RefStateInputs, build_ref_state_event};
+    use crate::api::git::manifest_event::{build_ref_state_event, RefStateInputs};
     use std::collections::BTreeMap;
 
     let empty_refs: BTreeMap<String, String> = BTreeMap::new();
@@ -4590,7 +4592,7 @@ pub async fn reconcile_channel_events(
 pub(crate) mod publish_test_hooks {
     use buzz_core::tenant::CommunityId;
     use std::sync::{Arc, Mutex};
-    use tokio::sync::{Notify, oneshot};
+    use tokio::sync::{oneshot, Notify};
 
     struct Gate {
         community: CommunityId,
