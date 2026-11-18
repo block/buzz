@@ -138,7 +138,7 @@ mod tests {
             .arg(&key)
             .arg(1)
             .arg("PX")
-            .arg(400)
+            .arg(1400)
             .query_async(&mut pool.clone())
             .await
             .expect("seed exhausted window");
@@ -148,6 +148,6 @@ mod tests {
             .expect("rate limit");
 
         assert!(!result.allowed);
-        assert_eq!(result.reset_in_secs, 1);
+        assert_eq!(result.reset_in_secs, 2);
     }
 }
