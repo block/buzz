@@ -4,6 +4,8 @@ analyzer:
   plugins:
     - custom_lint
   errors:
+    # riverpod_lint 3.1 uses custom_lint, which still requires legacy plugins.
+    analysis_options_deprecated_plugins: ignore
     invalid_use_of_visible_for_overriding_member: ignore
   exclude:
     - build/**

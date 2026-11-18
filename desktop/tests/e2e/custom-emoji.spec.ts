@@ -285,6 +285,30 @@ async function quickReactionStorageContains(
   }, emoji);
 }
 
+test("message quick reaction stays neutral after selecting a shortcut", async ({
+  page,
+}) => {
+  await openGeneral(page);
+
+  const row = reactionTargetRow(page);
+  await expect(row).toBeVisible();
+  await row.hover();
+
+  const quickReactionButton = row.getByRole("button", {
+    name: "React with :+1:",
+  });
+  await expect(quickReactionButton).toBeVisible();
+  await quickReactionButton.click();
+
+  await expect(row.getByLabel("Toggle 👍 reaction")).toBeVisible();
+  await row.hover();
+  await expect(quickReactionButton).not.toHaveAttribute("aria-pressed", "true");
+  await expect(quickReactionButton).not.toHaveClass(SELECTED_ACTION_CLASS);
+  await expect(messageReactionTrigger(row)).not.toHaveClass(
+    SELECTED_ACTION_CLASS,
+  );
+});
+
 test("message reaction action stays neutral after selecting from the picker", async ({
   page,
 }) => {
@@ -411,9 +435,11 @@ test("reacting with a custom emoji renders via the loopback media proxy", async 
   );
 
   const inlineAddReactionButton = row.getByLabel("Add reaction");
-  // The picker closes with the pointer/focus position depending on animation
-  // timing. Put the row into a deterministic idle state before checking the
-  // pill's pre-existing hidden behavior.
+  // Radix returns focus to "Open reactions" a task after the picker's exit
+  // animation unmounts it, which keeps the row focus-within. Wait for that
+  // before blurring, then put the row into a deterministic idle state before
+  // checking the pill's pre-existing hidden behavior.
+  await expect(messageReactionTrigger(row)).toBeFocused();
   await page.mouse.move(0, 0);
   await page.evaluate(() => {
     if (document.activeElement instanceof HTMLElement) {

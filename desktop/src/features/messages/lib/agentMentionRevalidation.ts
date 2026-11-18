@@ -1,5 +1,4 @@
 import {
-  filterAdmittedMentionPubkeys,
   getAgentMentionAdmission,
   getMentionableAgentPubkeys,
   type AgentEligibilityScope,
@@ -8,6 +7,20 @@ import { revalidateRelayAgents } from "@/shared/api/tauriRelayAgents";
 import type { ManagedAgent, RelayAgent } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import * as React from "react";
+
+export type MentionRevalidationOptions = {
+  phase?: "prepare" | "publish";
+  intendedAgentPubkeys?: readonly string[];
+};
+
+export class AgentMentionAuthorizationError extends Error {
+  constructor() {
+    super(
+      "Could not authorize a mentioned agent. Check its access and channel membership, then retry or remove the mention.",
+    );
+    this.name = "AgentMentionAuthorizationError";
+  }
+}
 
 type DirectoryResult<T> = {
   data: T | undefined;
@@ -22,7 +35,9 @@ export async function revalidateAgentMentionPubkeys({
   sharedChannelIds,
   refetchManagedAgents,
   fetchRelayAgents,
+  phase = "publish",
 }: {
+  phase?: "prepare" | "publish";
   pubkeys: readonly string[];
   agentPubkeys: ReadonlySet<string>;
   currentPubkey: string | null;
@@ -39,20 +54,21 @@ export async function revalidateAgentMentionPubkeys({
   }
 
   const [managedResult, relayAgents] = await Promise.all([
-    refetchManagedAgents(),
+    refetchManagedAgents().catch(() => null),
     fetchRelayAgents([...requestedAgentPubkeys]).catch(() => null),
   ]);
   const relayDirectoryReady = relayAgents !== null;
-  if (managedResult.error !== null || managedResult.data === undefined) {
-    return filterAdmittedMentionPubkeys(pubkeys, agentPubkeys, new Set());
-  }
-
+  // Each directory proves only its own identities. A failed local runtime
+  // query must neither veto fresh relay evidence nor admit stale local data.
   const managedPubkeys = new Set(
-    managedResult.data.map((agent) => normalizePubkey(agent.pubkey)),
+    (managedResult?.error === null ? (managedResult.data ?? []) : []).map(
+      (agent) => normalizePubkey(agent.pubkey),
+    ),
   );
   const mentionablePubkeys = getMentionableAgentPubkeys({
     currentPubkey,
     eligibilityScope,
+    phase,
     managedAgentPubkeys: managedPubkeys,
     relayAgents: relayDirectoryReady ? relayAgents : [],
     sharedChannelIds,
@@ -71,7 +87,12 @@ export async function revalidateAgentMentionPubkeys({
       );
     }),
   );
-  return filterAdmittedMentionPubkeys(pubkeys, agentPubkeys, admittedPubkeys);
+  if (
+    [...requestedAgentPubkeys].some((pubkey) => !admittedPubkeys.has(pubkey))
+  ) {
+    throw new AgentMentionAuthorizationError();
+  }
+  return [...pubkeys];
 }
 
 export function useAgentMentionRevalidation({
@@ -90,22 +111,38 @@ export function useAgentMentionRevalidation({
   refetchManagedAgents: () => Promise<DirectoryResult<ManagedAgent[]>>;
 }) {
   return React.useCallback(
-    (pubkeys: readonly string[]) =>
-      revalidateAgentMentionPubkeys({
+    (
+      pubkeys: readonly string[],
+      destinationChannelId?: string | null,
+      options: MentionRevalidationOptions = {},
+    ) => {
+      // A new DM can acquire its channel during preparation. Validate the
+      // actual destination at publication, not the composer's original null id.
+      const scope: AgentEligibilityScope = destinationChannelId
+        ? {
+            type: eligibilityScope.type === "owned" ? "owned" : "channel",
+            channelId: destinationChannelId,
+          }
+        : eligibilityScope;
+      return revalidateAgentMentionPubkeys({
         pubkeys,
-        agentPubkeys: new Set([...agentPubkeys, ...getSelectedAgentPubkeys()]),
+        agentPubkeys: new Set([
+          ...agentPubkeys,
+          ...getSelectedAgentPubkeys(),
+          ...(options.intendedAgentPubkeys ?? []).map(normalizePubkey),
+        ]),
+        phase: options.phase,
         currentPubkey,
-        eligibilityScope,
+        eligibilityScope: scope,
         sharedChannelIds,
         refetchManagedAgents,
         fetchRelayAgents: (requestedPubkeys) =>
           revalidateRelayAgents(
             requestedPubkeys,
-            eligibilityScope.type === "channel"
-              ? eligibilityScope.channelId
-              : undefined,
+            "channelId" in scope ? (scope.channelId ?? undefined) : undefined,
           ),
-      }),
+      });
+    },
     [
       agentPubkeys,
       currentPubkey,

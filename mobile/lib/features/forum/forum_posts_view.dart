@@ -3,11 +3,13 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
+import '../../shared/relay/relay_closed_policy.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
+import '../../shared/widgets/load_error_view.dart';
 import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../channels/channel.dart';
 import '../channels/compose_bar.dart';
@@ -23,11 +25,13 @@ import 'forum_thread_page.dart';
 class ForumPostsView extends HookConsumerWidget {
   final Channel channel;
   final String? currentPubkey;
+  final double titleContentHeight;
 
   const ForumPostsView({
     super.key,
     required this.channel,
     required this.currentPubkey,
+    this.titleContentHeight = 0,
   });
 
   @override
@@ -39,10 +43,22 @@ class ForumPostsView extends HookConsumerWidget {
     final providerContainer = ProviderScope.containerOf(context, listen: false);
     final forumDelivery = ForumEventDelivery.capture(providerContainer);
 
-    // Periodic refresh (every 15s, matching desktop).
+    // Periodic refresh (every 15s, matching desktop). A settled deadline
+    // pauses polling; reopening the forum is the explicit retry.
     useEffect(() {
+      final provider = forumPostsProvider(channel.id);
+      // Only a deadline already settled when this surface mounts is a
+      // reopen; a first load that fails after mounting is not retried.
+      // Hooks run effects during build, so defer the invalidation past it.
+      if (isSettledRelayDeadline(ref.read(provider))) {
+        Future.microtask(() {
+          if (context.mounted) ref.invalidate(provider);
+        });
+      }
       final timer = Stream.periodic(const Duration(seconds: 15)).listen((_) {
-        ref.invalidate(forumPostsProvider(channel.id));
+        if (!isSettledRelayDeadline(ref.read(provider))) {
+          ref.invalidate(provider);
+        }
       });
       return timer.cancel;
     }, [channel.id]);
@@ -61,12 +77,19 @@ class ForumPostsView extends HookConsumerWidget {
                     onPressed: () => isComposing.value = true,
                     tooltip: 'New post',
                     shape: const CircleBorder(),
-                    child: const Icon(LucideIcons.plus),
+                    child: const Icon(BuzzIcons.plus),
                   )
                 : null,
             body: postsAsync.when(
+              // A retry from an error shows loading, not the stale error and its Retry.
+              skipLoadingOnRefresh: !postsAsync.hasError,
               loading: () => Padding(
-                padding: EdgeInsets.only(top: frostedAppBarHeight(context)),
+                padding: EdgeInsets.only(
+                  top: frostedAppBarHeight(
+                    context,
+                    titleContentHeight: titleContentHeight,
+                  ),
+                ),
                 child: const Center(
                   child: BuzzLoadingIndicator(
                     size: 44,
@@ -75,14 +98,15 @@ class ForumPostsView extends HookConsumerWidget {
                 ),
               ),
               error: (e, _) => Padding(
-                padding: EdgeInsets.only(top: frostedAppBarHeight(context)),
-                child: Center(
-                  child: Text(
-                    'Failed to load posts',
-                    style: context.textTheme.bodyMedium?.copyWith(
-                      color: context.colors.error,
-                    ),
+                padding: EdgeInsets.only(
+                  top: frostedAppBarHeight(
+                    context,
+                    titleContentHeight: titleContentHeight,
                   ),
+                ),
+                child: LoadErrorView(
+                  message: 'Failed to load posts',
+                  onRetry: () => ref.invalidate(forumPostsProvider(channel.id)),
                 ),
               ),
               data: (response) {
@@ -100,7 +124,10 @@ class ForumPostsView extends HookConsumerWidget {
                   },
                   child: ListView.separated(
                     padding: EdgeInsets.only(
-                      top: frostedAppBarHeight(context),
+                      top: frostedAppBarHeight(
+                        context,
+                        titleContentHeight: titleContentHeight,
+                      ),
                       left: Grid.gutter,
                       right: Grid.gutter,
                       bottom: Grid.xs,
@@ -136,7 +163,7 @@ class ForumPostsView extends HookConsumerWidget {
               padding: const EdgeInsets.only(right: Grid.xxs),
               child: IconButton(
                 onPressed: () => isComposing.value = false,
-                icon: const Icon(LucideIcons.x, size: 18),
+                icon: const Icon(BuzzIcons.x, size: 18),
                 tooltip: 'Dismiss',
                 visualDensity: VisualDensity.compact,
               ),
@@ -195,7 +222,7 @@ class _EmptyState extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(
-              LucideIcons.messageSquareText,
+              BuzzIcons.messageSquareText,
               size: Grid.xl,
               color: context.colors.onSurfaceVariant,
             ),

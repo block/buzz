@@ -8,11 +8,11 @@ use super::agent_model_process::run_agent_models_command;
 use super::managed_agent_definition::apply_model_provider_prompt_update;
 // The map-only lookup is reached solely from the base-URL helpers that exist for
 // their unit tests; discovery itself always goes through the process-env variant.
-#[cfg(test)]
-use super::agent_models_env::env_value;
 use super::agent_models_env::{
     effective_discovery_provider, env_or_process_value, redaction_env_with_value, DiscoveryProvider,
 };
+#[cfg(test)]
+use super::agent_models_env::{env_value, env_value_or_process_if_absent};
 use super::agent_update_rollback::{rollback_failed_agent_update, AgentUpdateRollback};
 
 use crate::{
@@ -26,7 +26,6 @@ use crate::{
         UpdateManagedAgentResponse, DEFAULT_ACP_COMMAND,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
-    util::now_iso,
 };
 
 /// Query available models from an agent via `buzz-acp models --json`.
@@ -692,8 +691,8 @@ async fn discover_anthropic_models(
 mod databricks;
 #[cfg(test)]
 use databricks::{
-    databricks_sign_in_required_error, databricks_static_token_error, is_databricks_provider,
-    should_start_interactive_auth,
+    databricks_models_response, databricks_sign_in_required_error, databricks_static_token_error,
+    is_databricks_provider, should_start_interactive_auth,
 };
 use databricks::{discover_databricks_models, DatabricksAuthIntent};
 
@@ -722,6 +721,7 @@ pub(super) fn normalize_agent_models(
         .to_string();
 
     let mut models: Vec<AgentModelInfo> = Vec::new();
+    let mut agent_default_model: Option<String> = None;
     let mut seen_ids: HashSet<String> = HashSet::new();
 
     // 1. Stable configOptions (preferred). Only entries with category "model"
@@ -731,17 +731,23 @@ pub(super) fn normalize_agent_models(
             if opt.get("category").and_then(|c| c.as_str()) != Some("model") {
                 continue;
             }
+            if agent_default_model.is_none() {
+                agent_default_model = opt
+                    .get("currentValue")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+            }
             if let Some(options) = opt.get("options").and_then(|v| v.as_array()) {
                 for o in options {
                     if let Some(value) = o.get("value").and_then(|v| v.as_str()) {
                         if seen_ids.insert(value.to_string()) {
                             models.push(AgentModelInfo {
                                 id: value.to_string(),
-                                name: o
-                                    .get("displayName")
+                                name: o.get("name").and_then(|v| v.as_str()).map(str::to_string),
+                                description: o
+                                    .get("description")
                                     .and_then(|v| v.as_str())
                                     .map(str::to_string),
-                                description: None,
                             });
                         }
                     }
@@ -751,9 +757,10 @@ pub(super) fn normalize_agent_models(
     }
 
     // 2. Unstable availableModels (fallback — skip duplicates from stable).
-    let mut agent_default_model: Option<String> = None;
     if let Some(unstable) = raw.get("unstable") {
-        agent_default_model = unstable["currentModelId"].as_str().map(str::to_string);
+        if agent_default_model.is_none() {
+            agent_default_model = unstable["currentModelId"].as_str().map(str::to_string);
+        }
         if let Some(available) = unstable["availableModels"].as_array() {
             for m in available {
                 if let Some(id) = m.get("modelId").and_then(|v| v.as_str()) {

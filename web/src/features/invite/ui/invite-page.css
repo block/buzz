@@ -1,0 +1,121 @@
+.invite-page {
+  position: relative;
+  isolation: isolate;
+  min-height: 100svh;
+  display: grid;
+  place-items: center;
+  padding: 100px 24px;
+  background:
+    radial-gradient(circle, #c9cac4 1px, transparent 1.1px) 0 0 / 32px 32px
+    #d7d72e;
+  overflow: hidden;
+  color: #0f0f0f;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.invite-mark {
+  position: absolute;
+  top: 40px;
+  left: 40px;
+  width: 44px;
+  height: 29px;
+}
+.invite-stack {
+  width: min(100%, 490px);
+}
+.invite-card {
+  background: #fff;
+  border-radius: 32px;
+  padding: 32px;
+  box-shadow: 0 16px 40px #231e1e0f;
+}
+.invite-card h1 {
+  font-size: 32px;
+  line-height: 1.05;
+  font-weight: 400;
+  letter-spacing: -0.035em;
+  margin: 0 0 12px;
+}
+.invite-intro {
+  color: #5f5f5f;
+  margin: 0 0 24px;
+  font-size: 16px;
+}
+.invite-community {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: #f5f5f6;
+  padding: 16px;
+  border-radius: 16px;
+}
+.invite-community p {
+  min-width: 0;
+  font-size: 16px;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.invite-community-icon {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  object-fit: cover;
+  background: #e5f0b1;
+}
+.invite-actions {
+  margin-top: 56px;
+  width: 100%;
+}
+.invite-actions a,
+.invite-actions button {
+  width: 100%;
+  min-height: 52px;
+  height: auto;
+  border-radius: 999px;
+  padding: 12px 28px;
+  font: inherit;
+  white-space: normal;
+}
+.invite-download {
+  margin: 16px 0 0;
+  padding: 20px 24px;
+  background: #fff;
+  border-radius: 24px;
+  box-shadow: 0 8px 24px #231e1e0a;
+  text-align: center;
+  color: #565656;
+}
+.invite-download a {
+  color: #111;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+@media (max-width: 560px) {
+  .invite-page {
+    display: block;
+    padding: 56px 20px;
+  }
+  .invite-mark {
+    display: none;
+  }
+  .invite-stack {
+    margin: auto;
+  }
+  .invite-card {
+    padding: 28px 24px;
+    border-radius: 28px;
+  }
+  .invite-card h1 {
+    font-size: 30px;
+  }
+  .invite-actions {
+    margin-top: 40px;
+  }
+  .invite-download {
+    font-size: 13px;
+  }
+  .invite-community {
+    padding: 14px;
+    gap: 12px;
+  }
+}

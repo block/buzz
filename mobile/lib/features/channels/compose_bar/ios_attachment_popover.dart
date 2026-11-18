@@ -13,6 +13,7 @@ class _IOSAttachmentPopoverCallbacks {
   final Future<void> Function(List<XFile> photos) onChoosePhotos;
   final VoidCallback onAllPhotos;
   final VoidCallback onVideo;
+  final VoidCallback onVoiceNote;
   final VoidCallback onFiles;
 
   const _IOSAttachmentPopoverCallbacks({
@@ -20,6 +21,7 @@ class _IOSAttachmentPopoverCallbacks {
     required this.onChoosePhotos,
     required this.onAllPhotos,
     required this.onVideo,
+    required this.onVoiceNote,
     required this.onFiles,
   });
 }
@@ -40,10 +42,12 @@ class _IOSAttachmentPopoverCoordinator {
   Future<bool> present({
     required Object owner,
     required BuildContext sourceContext,
+    required BuildContext composerContext,
     required Future<void> Function(XFile image) onCapture,
     required Future<void> Function(List<XFile> photos) onChoosePhotos,
     required VoidCallback onAllPhotos,
     required VoidCallback onVideo,
+    required VoidCallback onVoiceNote,
     required VoidCallback onFiles,
   }) async {
     if (defaultTargetPlatform != TargetPlatform.iOS) return false;
@@ -61,6 +65,7 @@ class _IOSAttachmentPopoverCoordinator {
       onChoosePhotos: onChoosePhotos,
       onAllPhotos: onAllPhotos,
       onVideo: onVideo,
+      onVoiceNote: onVoiceNote,
       onFiles: onFiles,
     );
     _ensureHandler();
@@ -76,7 +81,7 @@ class _IOSAttachmentPopoverCoordinator {
       }
       if (!identical(_activeOwner, owner)) return false;
       final supported = supportResult == true;
-      if (!supported || !sourceContext.mounted) {
+      if (!supported || !sourceContext.mounted || !composerContext.mounted) {
         _clearOwner(owner);
         return false;
       }
@@ -87,6 +92,15 @@ class _IOSAttachmentPopoverCoordinator {
         return false;
       }
       final origin = renderObject.localToGlobal(Offset.zero);
+      final composerBox = composerContext.findRenderObject();
+      final isDuo =
+          (DuoToolbarScope.maybeOf(composerContext)?.strip ??
+              FoldGeometry.of(composerContext).strip) !=
+          null;
+      final cameraCenterX =
+          isDuo && composerBox is RenderBox && composerBox.hasSize
+          ? composerBox.localToGlobal(Offset(composerBox.size.width / 2, 0)).dx
+          : null;
 
       _didPresent = true;
       final didPresent =
@@ -95,6 +109,7 @@ class _IOSAttachmentPopoverCoordinator {
             'y': origin.dy,
             'width': renderObject.size.width,
             'height': renderObject.size.height,
+            'cameraCenterX': ?cameraCenterX,
           }) ??
           false;
       if (!identical(_activeOwner, owner)) return false;
@@ -155,6 +170,8 @@ class _IOSAttachmentPopoverCoordinator {
         callbacks?.onAllPhotos();
       case 'pickVideo':
         callbacks?.onVideo();
+      case 'recordVoiceNote':
+        callbacks?.onVoiceNote();
       case 'pickFiles':
         callbacks?.onFiles();
       case 'dismissed':
@@ -178,20 +195,27 @@ class _IOSAttachmentPopoverCoordinator {
 }
 
 class _IOSAttachmentPopoverController {
+  bool get isActive =>
+      identical(_iosAttachmentPopoverCoordinator._activeOwner, this);
+
   Future<bool> present({
     required BuildContext sourceContext,
+    required BuildContext composerContext,
     required Future<void> Function(XFile image) onCapture,
     required Future<void> Function(List<XFile> photos) onChoosePhotos,
     required VoidCallback onAllPhotos,
     required VoidCallback onVideo,
+    required VoidCallback onVoiceNote,
     required VoidCallback onFiles,
   }) => _iosAttachmentPopoverCoordinator.present(
     owner: this,
     sourceContext: sourceContext,
+    composerContext: composerContext,
     onCapture: onCapture,
     onChoosePhotos: onChoosePhotos,
     onAllPhotos: onAllPhotos,
     onVideo: onVideo,
+    onVoiceNote: onVoiceNote,
     onFiles: onFiles,
   );
 

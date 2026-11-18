@@ -1,4 +1,5 @@
 import manifestJson from "@features-manifest";
+import { protectedFeatureDefinitions } from "@protected-features";
 import { z } from "zod";
 import type { FeatureDefinition, FeaturesManifest } from "./types";
 
@@ -25,7 +26,10 @@ const FeaturesManifestSchema = z.object({
 const EMPTY_MANIFEST: FeaturesManifest = { version: 1, features: [] };
 
 function loadManifest(): FeaturesManifest {
-  const result = FeaturesManifestSchema.safeParse(manifestJson);
+  const result = FeaturesManifestSchema.safeParse({
+    ...manifestJson,
+    features: [...manifestJson.features, ...protectedFeatureDefinitions],
+  });
   if (!result.success) {
     console.warn(
       "[FeatureFlags] preview-features.json failed schema validation; falling back to empty manifest.",

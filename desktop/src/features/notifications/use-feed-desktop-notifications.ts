@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { truncateNpub } from "@/shared/lib/pubkey";
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -204,7 +204,7 @@ export function useFeedDesktopNotifications(
         : undefined;
       // Only use real display names, not truncated pubkey fallbacks.
       const senderName =
-        resolvedLabel && resolvedLabel !== truncatePubkey(item.pubkey)
+        resolvedLabel && resolvedLabel !== truncateNpub(item.pubkey)
           ? resolvedLabel
           : undefined;
       void deliverFeedNotification(item, senderName);

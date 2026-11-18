@@ -16,11 +16,19 @@ class ChannelWindowThreadSummary {
   final int? lastReplyAt;
   final List<String> participantPubkeys;
 
+  /// True while capped evidence awaits a complete recount.
+  final bool isLowerBound;
+
+  /// The last known total is awaiting reconciliation and should not be displayed.
+  final bool isCountPending;
+
   const ChannelWindowThreadSummary({
     required this.replyCount,
     required this.descendantCount,
     required this.lastReplyAt,
     required this.participantPubkeys,
+    this.isLowerBound = false,
+    this.isCountPending = false,
   });
 }
 
@@ -273,6 +281,7 @@ ChannelWindowStore mergeLiveChannelWindowEvent(
   ChannelWindowStore current,
   NostrEvent event, {
   required bool isTimelineRow,
+  bool retainOutsideWindow = false,
 }) {
   // A reply doesn't reach the main timeline itself — the root's "N replies" row
   // comes from this summary event, which the relay re-emits on every reply. It
@@ -331,7 +340,8 @@ ChannelWindowStore mergeLiveChannelWindowEvent(
   final oldest = oldestPage?.rows.isEmpty ?? true
       ? null
       : oldestPage!.rows.last.event;
-  if (oldest != null &&
+  if (!retainOutsideWindow &&
+      oldest != null &&
       (event.createdAt < oldest.createdAt ||
           (oldestPage!.hasMore && _compareRelayOrder(event, oldest) >= 0))) {
     return current;
@@ -350,8 +360,20 @@ ChannelWindowStore mergeLiveChannelWindowEvent(
   );
 }
 
-List<NostrEvent> flattenChannelWindowEvents(ChannelWindowStore store) {
-  final byId = <String, NostrEvent>{};
+/// Flattens a window into timeline order. [notices] are system notices
+/// read apart from the pages (see [channelWindowVisibleNotices]), and
+/// [noticeAux] their reactions and deletions. Like a page's aux, those show
+/// whatever their own position: they apply to their targets.
+List<NostrEvent> flattenChannelWindowEvents(
+  ChannelWindowStore store, {
+  Iterable<NostrEvent> notices = const [],
+  Iterable<NostrEvent> noticeAux = const [],
+}) {
+  final byId = <String, NostrEvent>{
+    for (final event in channelWindowVisibleNotices(store, notices))
+      event.id: event,
+    for (final event in noticeAux) event.id: event,
+  };
   for (final page in store.pages) {
     for (final row in page.rows) {
       byId[row.event.id] = row.event;
@@ -368,6 +390,30 @@ List<NostrEvent> flattenChannelWindowEvents(ChannelWindowStore store) {
   }
   return byId.values.toList()
     ..sort(compareChannelTimelineEventsChronologically);
+}
+
+/// The [notices] a window shows: while older pages remain, those older than
+/// its oldest loaded row stay out, as the rows between them are not loaded yet.
+Iterable<NostrEvent> channelWindowVisibleNotices(
+  ChannelWindowStore store,
+  Iterable<NostrEvent> notices,
+) {
+  final floor = channelWindowFloor(store);
+  return floor == null
+      ? notices
+      : notices.where((event) => !isOlderThanChannelCursor(event, floor));
+}
+
+/// The position of the oldest row a window has loaded while older pages
+/// remain, or null once the window reaches the channel's start.
+ChannelPageCursor? channelWindowFloor(ChannelWindowStore store) {
+  if (!channelWindowHasMore(store)) return null;
+  for (final page in store.pages.reversed) {
+    if (page.rows.isEmpty) continue;
+    final oldest = page.rows.last.event;
+    return ChannelPageCursor(createdAt: oldest.createdAt, eventId: oldest.id);
+  }
+  return null;
 }
 
 bool channelWindowHasMore(ChannelWindowStore store) =>
@@ -433,7 +479,7 @@ void _assertValidPage(ChannelWindowPage page) {
       throw Exception('Duplicate channel row ${event.id}.');
     }
     final startCursor = page.startCursor;
-    if (startCursor != null && !_isStrictlyOlder(event, startCursor)) {
+    if (startCursor != null && !isOlderThanChannelCursor(event, startCursor)) {
       throw Exception(
         'Channel row ${event.id} is outside its cursor interval.',
       );
@@ -445,10 +491,22 @@ void _assertValidPage(ChannelWindowPage page) {
   }
 }
 
-bool _isStrictlyOlder(NostrEvent event, ChannelPageCursor cursor) =>
-    event.createdAt < cursor.createdAt ||
-    (event.createdAt == cursor.createdAt &&
-        event.id.compareTo(cursor.eventId) > 0);
+/// Whether [event] comes after [cursor] in relay order: time descending, then
+/// id ascending at ties.
+bool isOlderThanChannelCursor(NostrEvent event, ChannelPageCursor cursor) =>
+    isChannelCursorOlder(
+      ChannelPageCursor(createdAt: event.createdAt, eventId: event.id),
+      cursor,
+    );
+
+/// Whether [position] comes after [cursor] in relay order.
+bool isChannelCursorOlder(
+  ChannelPageCursor position,
+  ChannelPageCursor cursor,
+) =>
+    position.createdAt < cursor.createdAt ||
+    (position.createdAt == cursor.createdAt &&
+        position.eventId.compareTo(cursor.eventId) > 0);
 
 int _compareRelayOrder(NostrEvent left, NostrEvent right) {
   if (left.createdAt != right.createdAt) {

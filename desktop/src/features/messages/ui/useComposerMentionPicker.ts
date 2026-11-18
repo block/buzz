@@ -5,21 +5,23 @@ import type { UseRichTextEditorResult } from "@/features/messages/lib/useRichTex
 
 export function useComposerMentionPicker({
   mentions,
+  onTurnOffAutoPinConfirmation,
   richText,
   setIsEmojiPickerOpen,
 }: {
   mentions: UseMentionsResult;
+  onTurnOffAutoPinConfirmation: () => void;
   richText: UseRichTextEditorResult;
   setIsEmojiPickerOpen: (open: boolean) => void;
 }) {
   const {
     cancelMentionAutocomplete,
     isMentionOpen,
-    openMentionPicker,
+    openMentionPicker: setMentionPickerOpen,
     updateMentionQuery,
   } = mentions;
   const { editor, focus, getPlainTextAndCursor } = richText;
-  return React.useCallback(
+  const openMentionPicker = React.useCallback(
     (insertTrigger = true) => {
       if (!editor) return;
       const { text, cursor } = getPlainTextAndCursor();
@@ -30,7 +32,7 @@ export function useComposerMentionPicker({
           focus();
           return;
         }
-        openMentionPicker(cursor, "first-agent");
+        setMentionPickerOpen(cursor, "first-agent");
         setIsEmojiPickerOpen(false);
         focus();
         return;
@@ -55,9 +57,36 @@ export function useComposerMentionPicker({
       focus,
       getPlainTextAndCursor,
       isMentionOpen,
-      openMentionPicker,
+      setMentionPickerOpen,
       setIsEmojiPickerOpen,
       updateMentionQuery,
     ],
   );
+  const openMentionSettings = React.useCallback(
+    () => openMentionPicker(false),
+    [openMentionPicker],
+  );
+  const revealMentionSettings = React.useCallback(() => {
+    if (!editor) return;
+    const { cursor } = getPlainTextAndCursor();
+    setMentionPickerOpen(cursor, "first-agent");
+    setIsEmojiPickerOpen(false);
+    focus();
+  }, [
+    editor,
+    focus,
+    getPlainTextAndCursor,
+    setIsEmojiPickerOpen,
+    setMentionPickerOpen,
+  ]);
+  const turnOffAutoPinFromConfirmation = React.useCallback(() => {
+    revealMentionSettings();
+    onTurnOffAutoPinConfirmation();
+  }, [onTurnOffAutoPinConfirmation, revealMentionSettings]);
+
+  return {
+    openMentionPicker,
+    openMentionSettings,
+    turnOff: turnOffAutoPinFromConfirmation,
+  };
 }

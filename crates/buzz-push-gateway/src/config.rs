@@ -1,10 +1,48 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use std::{
-    collections::{HashMap, HashSet},
-    net::SocketAddr,
-    path::PathBuf,
-};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
 use thiserror::Error;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApnsEnvironment {
+    Production,
+    Sandbox,
+}
+
+/// The single server-owned Apple application and APNs connection identity.
+#[derive(Debug, Clone)]
+pub struct ApplicationConfig {
+    pub app_attest_app_id: String,
+    /// Exact Apple attestation environment accepted for enrollment.
+    pub app_attest_environment: AppAttestEnvironment,
+    pub apns_cert_path: PathBuf,
+    pub apns_topic: String,
+    pub apns_environment: ApnsEnvironment,
+}
+
+/// The Android application and its Firebase Cloud Messaging identity. All four
+/// settings are supplied together or not at all; without them the gateway
+/// accepts no Android enrollment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AndroidConfig {
+    /// Exact Android application package the attestation must name.
+    pub package_name: String,
+    /// Accepted SHA-256 digests of the app's signing certificate.
+    pub signing_cert_digests: Vec<[u8; 32]>,
+    /// Firebase project that owns the app's FCM registration tokens.
+    pub fcm_project_id: String,
+    /// Mounted service account key JSON the gateway uses to call FCM HTTP v1.
+    pub fcm_service_account_path: PathBuf,
+}
+
+/// Apple App Attest environment, independent of the APNs transport environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppAttestEnvironment {
+    /// Distributed applications, also the default for personal development builds.
+    Production,
+    /// Development-signed applications in an explicitly opted-in gateway build.
+    #[cfg(feature = "personal-dev-app-attest")]
+    Development,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyConfig {
@@ -16,25 +54,35 @@ pub struct KeyConfig {
 pub struct Config {
     pub bind_addr: SocketAddr,
     pub health_addr: SocketAddr,
-    pub public_delivery_url: url::Url,
     pub max_grant_lifetime_seconds: i64,
     pub max_installation_lifetime_seconds: i64,
     pub endpoint_quota_window_seconds: i64,
     pub endpoint_quota_max_deliveries: i64,
-    pub enabled_profiles: HashSet<crate::model::AppProfile>,
+    /// Server-owned application identity and APNs transport.
+    pub application: ApplicationConfig,
+    /// Android identity and FCM credentials, when this gateway serves Android.
+    pub android: Option<AndroidConfig>,
     pub database_url: String,
-    pub app_attest_app_id: String,
     pub app_attest_root_cert_path: PathBuf,
     /// Ordered current key first, followed by decrypt-only predecessors.
     pub grant_keys: Vec<KeyConfig>,
     /// Independent token-custody keyring. These keys MUST NOT be reused for
     /// externally presented delivery capabilities.
     pub token_keys: Vec<KeyConfig>,
-    pub apns_key_path: PathBuf,
-    pub apns_key_id: String,
-    pub apns_team_id: String,
-    pub apns_topic: String,
 }
+
+// Registered NIP-PL v1 App Attest audiences are protocol constants, not routing URLs.
+/// Fixed NIP-PL v1 App Attest audience for installation enrollment.
+pub const ENROLL_AUDIENCE: &str = "https://push.buzz.xyz/v1/installations";
+/// Fixed NIP-PL v1 App Attest audience for creating a delegation.
+pub const DELEGATE_AUDIENCE: &str = "https://push.buzz.xyz/v1/delegations";
+/// Fixed NIP-PL v1 App Attest audience for rotating an installation endpoint.
+pub const ROTATE_ENDPOINT_AUDIENCE: &str = "https://push.buzz.xyz/v1/installations/endpoint";
+/// Fixed NIP-PL v1 App Attest audience for revoking a delegation.
+pub const REVOKE_DELEGATION_AUDIENCE: &str = "https://push.buzz.xyz/v1/delegations/revoke";
+/// Fixed NIP-PL v1 App Attest audience for revoking an installation.
+pub const REVOKE_INSTALLATION_AUDIENCE: &str = "https://push.buzz.xyz/v1/installations/revoke";
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("missing required environment variable {0}")]
@@ -75,6 +123,99 @@ fn parse_keyring(
     }
     Ok(keys)
 }
+
+fn parse_application(e: &HashMap<String, String>) -> Result<ApplicationConfig, ConfigError> {
+    let app_id_key = "BUZZ_PUSH_APP_ATTEST_APP_ID";
+    let cert_key = "BUZZ_PUSH_APNS_CERT_PATH";
+    let topic_key = "BUZZ_PUSH_APNS_TOPIC";
+    let environment_key = "BUZZ_PUSH_APNS_ENVIRONMENT";
+    let required = |key: &'static str| {
+        e.get(key)
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or(ConfigError::Missing(key))
+    };
+    let app_attest_app_id = required(app_id_key)?.to_owned();
+    let app_attest_environment = match e
+        .get("BUZZ_PUSH_APP_ATTEST_ENVIRONMENT")
+        .map(String::as_str)
+    {
+        None | Some("production") => AppAttestEnvironment::Production,
+        #[cfg(feature = "personal-dev-app-attest")]
+        Some("development") => AppAttestEnvironment::Development,
+        Some(_) => return Err(ConfigError::Invalid("BUZZ_PUSH_APP_ATTEST_ENVIRONMENT")),
+    };
+    let apns_topic = required(topic_key)?.to_owned();
+    let apns_cert_path = PathBuf::from(required(cert_key)?);
+    let apns_environment = match e.get(environment_key).map(String::as_str) {
+        None | Some("production") => ApnsEnvironment::Production,
+        Some("sandbox") => ApnsEnvironment::Sandbox,
+        Some(_) => return Err(ConfigError::Invalid(environment_key)),
+    };
+    Ok(ApplicationConfig {
+        app_attest_app_id,
+        app_attest_environment,
+        apns_cert_path,
+        apns_topic,
+        apns_environment,
+    })
+}
+
+const ANDROID_SETTINGS: [&str; 4] = [
+    "BUZZ_PUSH_ANDROID_PACKAGE_NAME",
+    "BUZZ_PUSH_ANDROID_SIGNING_CERT_DIGESTS",
+    "BUZZ_PUSH_FCM_PROJECT_ID",
+    "BUZZ_PUSH_FCM_SERVICE_ACCOUNT_PATH",
+];
+
+fn valid_android_package_name(name: &str) -> bool {
+    let segments: Vec<&str> = name.split('.').collect();
+    segments.len() >= 2
+        && segments.iter().all(|segment| {
+            segment
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic())
+                && segment
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+}
+
+fn parse_android(e: &HashMap<String, String>) -> Result<Option<AndroidConfig>, ConfigError> {
+    // A partial configuration is a mistake, not a request to disable Android.
+    if ANDROID_SETTINGS.iter().all(|key| !e.contains_key(*key)) {
+        return Ok(None);
+    }
+    let required = |key: &'static str| {
+        e.get(key)
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or(ConfigError::Missing(key))
+    };
+    let package_key = ANDROID_SETTINGS[0];
+    let digests_key = ANDROID_SETTINGS[1];
+    let package_name = required(package_key)?;
+    if !valid_android_package_name(package_name) {
+        return Err(ConfigError::Invalid(package_key));
+    }
+    let signing_cert_digests = required(digests_key)?
+        .split(',')
+        .map(|digest| {
+            hex::decode(digest)
+                .ok()
+                .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+                .ok_or(ConfigError::Invalid(digests_key))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(AndroidConfig {
+        package_name: package_name.to_owned(),
+        signing_cert_digests,
+        fcm_project_id: required(ANDROID_SETTINGS[2])?.to_owned(),
+        fcm_service_account_path: PathBuf::from(required(ANDROID_SETTINGS[3])?),
+    }))
+}
+
 impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
         Self::from_map(&std::env::vars().collect())
@@ -97,20 +238,6 @@ impl Config {
                 .any(|token| grant.id == token.id || grant.key == token.key)
         }) {
             return Err(ConfigError::Invalid("BUZZ_PUSH_TOKEN_KEYS"));
-        }
-        let public_delivery_url = req(e, "BUZZ_PUSH_PUBLIC_DELIVERY_URL")?
-            .parse::<url::Url>()
-            .map_err(|_| ConfigError::Invalid("BUZZ_PUSH_PUBLIC_DELIVERY_URL"))?;
-        if public_delivery_url.scheme() != "https"
-            || public_delivery_url.host_str() != Some("push.buzz.xyz")
-            || public_delivery_url.port().is_some()
-            || public_delivery_url.path() != "/v1/deliveries/apns"
-            || public_delivery_url.query().is_some()
-            || public_delivery_url.fragment().is_some()
-            || !public_delivery_url.username().is_empty()
-            || public_delivery_url.password().is_some()
-        {
-            return Err(ConfigError::Invalid("BUZZ_PUSH_PUBLIC_DELIVERY_URL"));
         }
         let max_grant_lifetime_seconds = req(e, "BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS")?
             .parse::<i64>()
@@ -141,45 +268,33 @@ impl Config {
             bounded_positive("BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS", 10, 86_400)?;
         let endpoint_quota_max_deliveries =
             bounded_positive("BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES", 10, 10_000)?;
-        let enabled_profiles = req(e, "BUZZ_PUSH_ENABLED_PROFILES")?
-            .split(',')
-            .map(|profile| match profile {
-                "buzz-ios-production" => Ok(crate::model::AppProfile::BuzzIosProduction),
-                "buzz-ios-sandbox" => Ok(crate::model::AppProfile::BuzzIosSandbox),
-                _ => Err(ConfigError::Invalid("BUZZ_PUSH_ENABLED_PROFILES")),
-            })
-            .collect::<Result<HashSet<_>, _>>()?;
-        if enabled_profiles.is_empty() {
-            return Err(ConfigError::Invalid("BUZZ_PUSH_ENABLED_PROFILES"));
-        }
+        let application = parse_application(e)?;
+        let android = parse_android(e)?;
+        let bind_addr = e
+            .get("BUZZ_PUSH_BIND_ADDR")
+            .map(String::as_str)
+            .unwrap_or("0.0.0.0:8080")
+            .parse::<SocketAddr>()
+            .map_err(|_| ConfigError::Invalid("BUZZ_PUSH_BIND_ADDR"))?;
+        let health_addr = e
+            .get("BUZZ_PUSH_HEALTH_ADDR")
+            .map(String::as_str)
+            .unwrap_or("0.0.0.0:8081")
+            .parse::<SocketAddr>()
+            .map_err(|_| ConfigError::Invalid("BUZZ_PUSH_HEALTH_ADDR"))?;
         Ok(Self {
-            bind_addr: e
-                .get("BUZZ_PUSH_BIND_ADDR")
-                .map(String::as_str)
-                .unwrap_or("0.0.0.0:8080")
-                .parse()
-                .map_err(|_| ConfigError::Invalid("BUZZ_PUSH_BIND_ADDR"))?,
-            health_addr: e
-                .get("BUZZ_PUSH_HEALTH_ADDR")
-                .map(String::as_str)
-                .unwrap_or("0.0.0.0:8081")
-                .parse()
-                .map_err(|_| ConfigError::Invalid("BUZZ_PUSH_HEALTH_ADDR"))?,
-            public_delivery_url,
+            bind_addr,
+            health_addr,
             max_grant_lifetime_seconds,
             max_installation_lifetime_seconds,
             endpoint_quota_window_seconds,
             endpoint_quota_max_deliveries,
-            enabled_profiles,
+            application,
+            android,
             database_url: req(e, "DATABASE_URL")?.to_owned(),
-            app_attest_app_id: req(e, "BUZZ_PUSH_APP_ATTEST_APP_ID")?.to_owned(),
             app_attest_root_cert_path: req(e, "BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH")?.into(),
             grant_keys,
             token_keys,
-            apns_key_path: req(e, "BUZZ_PUSH_APNS_KEY_PATH")?.into(),
-            apns_key_id: req(e, "BUZZ_PUSH_APNS_KEY_ID")?.to_owned(),
-            apns_team_id: req(e, "BUZZ_PUSH_APNS_TEAM_ID")?.to_owned(),
-            apns_topic: req(e, "BUZZ_PUSH_APNS_TOPIC")?.to_owned(),
         })
     }
 }
@@ -187,6 +302,46 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn attestation_environment_is_explicit_and_build_gated() {
+        let mut env = base();
+        assert_eq!(
+            Config::from_map(&env)
+                .unwrap()
+                .application
+                .app_attest_environment,
+            AppAttestEnvironment::Production
+        );
+        for value in ["", "sandbox", "Production", "unknown"] {
+            env.insert("BUZZ_PUSH_APP_ATTEST_ENVIRONMENT".into(), value.into());
+            assert!(Config::from_map(&env).is_err());
+        }
+        env.insert(
+            "BUZZ_PUSH_APP_ATTEST_ENVIRONMENT".into(),
+            "production".into(),
+        );
+        assert_eq!(
+            Config::from_map(&env)
+                .unwrap()
+                .application
+                .app_attest_environment,
+            AppAttestEnvironment::Production
+        );
+        env.insert(
+            "BUZZ_PUSH_APP_ATTEST_ENVIRONMENT".into(),
+            "development".into(),
+        );
+        #[cfg(feature = "personal-dev-app-attest")]
+        assert_eq!(
+            Config::from_map(&env)
+                .unwrap()
+                .application
+                .app_attest_environment,
+            AppAttestEnvironment::Development
+        );
+        #[cfg(not(feature = "personal-dev-app-attest"))]
+        assert!(Config::from_map(&env).is_err());
+    }
 
     fn base() -> HashMap<String, String> {
         HashMap::from([
@@ -207,31 +362,72 @@ mod tests {
                 ),
             ),
             (
-                "BUZZ_PUSH_PUBLIC_DELIVERY_URL".into(),
-                "https://push.buzz.xyz/v1/deliveries/apns".into(),
-            ),
-            (
                 "BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS".into(),
                 "2592000".into(),
             ),
             (
-                "BUZZ_PUSH_ENABLED_PROFILES".into(),
-                "buzz-ios-production".into(),
+                "DATABASE_URL".into(),
+                "postgres://buzz:test@localhost/buzz".into(), // sadscan:disable np.postgres.1
             ),
             (
-                "DATABASE_URL".into(),
-                "postgres://buzz:test@localhost/buzz".into(),
+                "BUZZ_PUSH_APP_ATTEST_APP_ID".into(),
+                "TEAM.com.example.buzz".into(),
             ),
-            ("BUZZ_PUSH_APP_ATTEST_APP_ID".into(), "TEAM.app".into()),
             (
                 "BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH".into(),
                 "/apple-root.pem".into(),
             ),
-            ("BUZZ_PUSH_APNS_KEY_PATH".into(), "/key.p8".into()),
-            ("BUZZ_PUSH_APNS_KEY_ID".into(), "key".into()),
-            ("BUZZ_PUSH_APNS_TEAM_ID".into(), "team".into()),
-            ("BUZZ_PUSH_APNS_TOPIC".into(), "app".into()),
+            (
+                "BUZZ_PUSH_APNS_CERT_PATH".into(),
+                "/apns-identity.pem".into(),
+            ),
+            ("BUZZ_PUSH_APNS_TOPIC".into(), "com.example.buzz".into()),
+            ("BUZZ_PUSH_APNS_ENVIRONMENT".into(), "production".into()),
+            ("BUZZ_PUSH_BIND_ADDR".into(), "127.0.0.1:8080".into()),
+            ("BUZZ_PUSH_HEALTH_ADDR".into(), "127.0.0.1:8081".into()),
         ])
+    }
+
+    #[test]
+    fn application_requires_server_owned_identity_and_certificate() {
+        let config = Config::from_map(&base()).unwrap();
+        assert_eq!(
+            config.application.apns_cert_path,
+            PathBuf::from("/apns-identity.pem")
+        );
+        assert_eq!(config.application.apns_topic, "com.example.buzz");
+
+        for variable in [
+            "BUZZ_PUSH_APNS_CERT_PATH",
+            "BUZZ_PUSH_APNS_TOPIC",
+            "BUZZ_PUSH_APP_ATTEST_APP_ID",
+        ] {
+            let mut env = base();
+            env.remove(variable);
+            assert!(
+                matches!(Config::from_map(&env), Err(ConfigError::Missing(key)) if key == variable)
+            );
+        }
+    }
+
+    #[test]
+    fn startup_needs_no_origin_and_transcript_audiences_stay_registered() {
+        assert!(!base().contains_key("BUZZ_PUSH_GATEWAY_ORIGIN"));
+        Config::from_map(&base()).unwrap();
+        assert_eq!(ENROLL_AUDIENCE, "https://push.buzz.xyz/v1/installations");
+        assert_eq!(DELEGATE_AUDIENCE, "https://push.buzz.xyz/v1/delegations");
+        assert_eq!(
+            ROTATE_ENDPOINT_AUDIENCE,
+            "https://push.buzz.xyz/v1/installations/endpoint"
+        );
+        assert_eq!(
+            REVOKE_DELEGATION_AUDIENCE,
+            "https://push.buzz.xyz/v1/delegations/revoke"
+        );
+        assert_eq!(
+            REVOKE_INSTALLATION_AUDIENCE,
+            "https://push.buzz.xyz/v1/installations/revoke"
+        );
     }
 
     #[test]
@@ -247,21 +443,91 @@ mod tests {
     #[test]
     fn malformed_security_configuration_fails_startup() {
         for (key, value) in [
-            (
-                "BUZZ_PUSH_PUBLIC_DELIVERY_URL",
-                "http://push.example/v1/deliveries/apns",
-            ),
-            (
-                "BUZZ_PUSH_PUBLIC_DELIVERY_URL",
-                "https://push.example/v1/deliveries/apns",
-            ),
             ("BUZZ_PUSH_APP_ATTEST_APP_ID", ""),
-            ("BUZZ_PUSH_ENABLED_PROFILES", "unknown-profile"),
+            ("BUZZ_PUSH_APNS_ENVIRONMENT", "staging"),
             ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "0"),
             ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "31536001"),
+            ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "2.592e+06"),
+            ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "2592000.5"),
             ("BUZZ_PUSH_MAX_INSTALLATION_LIFETIME_SECONDS", "0"),
         ] {
             let mut env = base();
+            env.insert(key.into(), value.into());
+            assert!(Config::from_map(&env).is_err(), "accepted {key}={value}");
+        }
+    }
+
+    // The chart test supplies actual Helm-rendered environment values. Keep this
+    // separate from ordinary unit tests, which do not require Helm or fixtures.
+    #[test]
+    #[ignore = "run deploy/charts/buzz-push-gateway/tests/grant-lifetime.sh"]
+    fn helm_rendered_grant_lifetimes() {
+        let path = std::env::var("BUZZ_TEST_HELM_ENV_FILE").unwrap();
+        let cases: Vec<(String, i64, HashMap<String, String>)> =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(cases.len(), 9);
+        for (label, expected, rendered) in cases {
+            let mut env = base();
+            env.extend(rendered);
+            let config = Config::from_map(&env).unwrap_or_else(|error| panic!("{label}: {error}"));
+            assert_eq!(config.max_grant_lifetime_seconds, expected, "{label}");
+            assert_eq!(
+                env["BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS"],
+                expected.to_string(),
+                "{label} must render decimal integer text"
+            );
+        }
+    }
+
+    fn android_env() -> HashMap<String, String> {
+        let mut env = base();
+        env.extend([
+            (
+                "BUZZ_PUSH_ANDROID_PACKAGE_NAME".into(),
+                "com.example.buzz".into(),
+            ),
+            (
+                "BUZZ_PUSH_ANDROID_SIGNING_CERT_DIGESTS".into(),
+                format!("{},{}", "ab".repeat(32), "CD".repeat(32)),
+            ),
+            ("BUZZ_PUSH_FCM_PROJECT_ID".into(), "example-project".into()),
+            (
+                "BUZZ_PUSH_FCM_SERVICE_ACCOUNT_PATH".into(),
+                "/fcm/service-account.json".into(),
+            ),
+        ]);
+        env
+    }
+
+    #[test]
+    fn android_is_disabled_unless_fully_configured() {
+        assert_eq!(Config::from_map(&base()).unwrap().android, None);
+        let android = Config::from_map(&android_env()).unwrap().android.unwrap();
+        assert_eq!(android.package_name, "com.example.buzz");
+        assert_eq!(android.signing_cert_digests, vec![[0xab; 32], [0xcd; 32]]);
+        assert_eq!(android.fcm_project_id, "example-project");
+        for variable in ANDROID_SETTINGS {
+            let mut env = android_env();
+            env.remove(variable);
+            assert!(
+                matches!(Config::from_map(&env), Err(ConfigError::Missing(key)) if key == variable),
+                "accepted partial Android configuration without {variable}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_android_configuration_fails_startup() {
+        for (key, value) in [
+            ("BUZZ_PUSH_ANDROID_PACKAGE_NAME", "buzz"),
+            ("BUZZ_PUSH_ANDROID_PACKAGE_NAME", "com..buzz"),
+            ("BUZZ_PUSH_ANDROID_PACKAGE_NAME", "com.1buzz"),
+            ("BUZZ_PUSH_ANDROID_SIGNING_CERT_DIGESTS", ""),
+            ("BUZZ_PUSH_ANDROID_SIGNING_CERT_DIGESTS", "abcd"),
+            ("BUZZ_PUSH_ANDROID_SIGNING_CERT_DIGESTS", "zz"),
+            ("BUZZ_PUSH_FCM_PROJECT_ID", ""),
+        ] {
+            let mut env = android_env();
             env.insert(key.into(), value.into());
             assert!(Config::from_map(&env).is_err(), "accepted {key}={value}");
         }
@@ -277,6 +543,17 @@ mod tests {
             env.insert("BUZZ_PUSH_TOKEN_KEYS".into(), token_keys);
             assert!(Config::from_map(&env).is_err());
         }
+    }
+
+    #[test]
+    fn listener_defaults_remain_public_when_addresses_are_absent() {
+        let mut env = base();
+        env.remove("BUZZ_PUSH_BIND_ADDR");
+        env.remove("BUZZ_PUSH_HEALTH_ADDR");
+
+        let config = Config::from_map(&env).unwrap();
+        assert_eq!(config.bind_addr, "0.0.0.0:8080".parse().unwrap());
+        assert_eq!(config.health_addr, "0.0.0.0:8081".parse().unwrap());
     }
 
     #[test]

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import { ACCENT_COLORS } from "./ThemeProvider.tsx";
 import {
   DEFAULT_COMMUNITY_THEME,
   cacheAndApplyCommunityTheme,
@@ -45,6 +47,41 @@ test("parses only the versioned stable appearance contract", () => {
   assert.equal(
     parseCommunityThemePreference({ ...valid, followSystem: "false" }),
     null,
+  );
+});
+
+test("accents follow the cross-client v1 contract", () => {
+  // Mobile's chat color test reads the same fixture, so both clients agree on
+  // every value either can save.
+  const contract = JSON.parse(
+    readFileSync(
+      new URL(
+        "../../../../test-fixtures/community-theme-accents.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const base = { version: 1, theme: "houston", followSystem: false };
+  for (const { accent, desktop } of [...contract.emitted, ...contract.legacy]) {
+    assert.equal(
+      parseCommunityThemePreference({ ...base, accent })?.accent,
+      accent,
+      accent,
+    );
+    assert.equal(
+      ACCENT_COLORS.find(({ value }) => value === accent)?.name,
+      desktop,
+      accent,
+    );
+  }
+  for (const accent of contract.rejected) {
+    assert.equal(parseCommunityThemePreference({ ...base, accent }), null);
+  }
+  // Older clients reject an unknown accent with the whole preference, so the
+  // default published without a picker action stays in their set.
+  assert.ok(
+    contract.baseReaders.accepted.includes(DEFAULT_COMMUNITY_THEME.accent),
   );
 });
 

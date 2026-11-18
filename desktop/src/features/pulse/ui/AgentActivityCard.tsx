@@ -6,12 +6,12 @@ import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import type { UserProfileSummary } from "@/shared/api/types";
 import { Markdown } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { truncateNpub } from "@/shared/lib/pubkey";
 
 type AgentActivityCardProps = {
   group: AgentNoteGroup;
   profile?: UserProfileSummary | null;
-  agentStatus?: "online" | "away" | "offline";
+  agentStatus?: "online" | "away" | "offline" | "unknown";
 };
 
 function formatRelativeTime(unixSeconds: number): string {
@@ -36,7 +36,13 @@ function StatusDot({ status }: { status: "online" | "away" | "offline" }) {
       : status === "away"
         ? "bg-amber-500"
         : "bg-zinc-400";
-  return <span className={`inline-block h-2 w-2 rounded-full ${color}`} />;
+  return (
+    <span
+      aria-label={`Agent ${status}`}
+      role="img"
+      className={`inline-block h-2 w-2 rounded-full ${color}`}
+    />
+  );
 }
 
 export function AgentActivityCard({
@@ -45,7 +51,7 @@ export function AgentActivityCard({
   agentStatus,
 }: AgentActivityCardProps) {
   const [expanded, setExpanded] = React.useState(false);
-  const displayName = profile?.displayName ?? truncatePubkey(group.pubkey);
+  const displayName = profile?.displayName ?? truncateNpub(group.pubkey);
   const avatarUrl = profile?.avatarUrl ?? null;
   const isSingleNote = group.notes.length === 1;
 
@@ -66,7 +72,11 @@ export function AgentActivityCard({
             className="relative flex shrink-0 rounded-xl pt-1 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
             type="button"
           >
-            <UserAvatar avatarUrl={avatarUrl} displayName={displayName} />
+            <UserAvatar
+              avatarUrl={avatarUrl}
+              displayName={displayName}
+              shape="squircle"
+            />
             <Bot className="absolute -bottom-0.5 -right-0.5 h-4 w-4 rounded-full bg-background p-0.5 text-muted-foreground" />
           </button>
         </UserProfilePopover>
@@ -75,7 +85,9 @@ export function AgentActivityCard({
             <span className="truncate text-sm font-semibold leading-none">
               {displayName}
             </span>
-            {agentStatus ? <StatusDot status={agentStatus} /> : null}
+            {agentStatus && agentStatus !== "unknown" ? (
+              <StatusDot status={agentStatus} />
+            ) : null}
             <span className="shrink-0 text-2xs text-muted-foreground">
               {formatRelativeTime(group.latestAt)}
             </span>

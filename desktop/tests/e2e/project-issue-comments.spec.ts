@@ -21,6 +21,7 @@ async function openBuzzProject(page: import("@playwright/test").Page) {
     .first();
   await expect(projectEntry).toBeVisible({ timeout: 10_000 });
   await projectEntry.click();
+  await page.getByTestId("project-home-context-repo-buzz").click();
 }
 
 test("issue detail can open agent chat or seed a channel question", async ({
@@ -114,11 +115,11 @@ test("issue discussion ignores an author-claimed origin channel", async ({
     "project-context-related-channel",
   );
   await expect(relatedChannel).toHaveCount(1);
-  await expect(relatedChannel).toContainText("#general");
+  await expect(relatedChannel).toContainText("#buzz");
   await expect(channelChoices).not.toContainText("#random");
   await relatedChannel.click();
 
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(page.getByTestId("chat-title")).toHaveText("buzz");
   const issueDraftChip = page
     .getByTestId("message-input")
     .locator('[data-composer-buzz-link=""]', {
@@ -243,6 +244,18 @@ test("issue assignees can be assigned and unassigned", async ({ page }) => {
 
   const unassign = page.getByTestId(`project-issue-unassign-${assignee}`);
   await expect(unassign).toBeVisible({ timeout: 10_000 });
+  const assigneeAvatar = unassign.locator("[data-avatar-shape]");
+  const expectedShape = await assigneeAvatar.getAttribute("data-avatar-shape");
+  await unassign.focus();
+  await expect(unassign).toBeFocused();
+  await expect(unassign).toHaveCSS("clip-path", "none");
+  await expect(unassign).not.toHaveClass(/rounded-squircle/);
+  await expect(assigneeAvatar).toHaveCSS(
+    "clip-path",
+    expectedShape === "squircle"
+      ? /url\(["']?#rounded-squircle-clip["']?\)/
+      : "none",
+  );
   await unassign.click();
   await expect(page.getByText("Task unassigned.")).toBeVisible();
   await expect(unassign).toHaveCount(0, { timeout: 10_000 });

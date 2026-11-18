@@ -37,8 +37,13 @@ class StickyDateHeaderState {
 /// A glass date capsule that remains below the app bar as its day scrolls.
 class StickyDateHeader extends StatelessWidget {
   final ValueListenable<StickyDateHeaderState> state;
+  final ValueListenable<bool> scrollVisible;
 
-  const StickyDateHeader({required this.state, super.key});
+  const StickyDateHeader({
+    required this.state,
+    required this.scrollVisible,
+    super.key,
+  });
 
   static const _iosViewType = 'buzz/sticky_date_glass';
   static const _minimumIosGlassHeight = 28.0;
@@ -130,21 +135,23 @@ class StickyDateHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
 
-    return ValueListenableBuilder<StickyDateHeaderState>(
-      valueListenable: state,
-      builder: (context, value, _) {
+    return ListenableBuilder(
+      listenable: Listenable.merge([state, scrollVisible]),
+      builder: (context, _) {
+        final value = state.value;
+        final visible = value.isVisible && scrollVisible.value;
         final stickyHeight = heightOf(context);
         return SizedBox(
           height: stickyHeight,
           child: IgnorePointer(
             child: ExcludeSemantics(
-              excluding: !value.isVisible,
+              excluding: !visible,
               child: AnimatedOpacity(
-                duration: reducedMotion
+                duration: reducedMotion || visible
                     ? Duration.zero
-                    : const Duration(milliseconds: 120),
-                curve: Curves.easeOutCubic,
-                opacity: value.isVisible ? 1 : 0,
+                    : const Duration(milliseconds: 250),
+                curve: Curves.easeInOut,
+                opacity: visible ? 1 : 0,
                 child: ValueListenableBuilder<bool>(
                   valueListenable: messageActionBackdropActive,
                   builder: (context, backdropActive, _) {

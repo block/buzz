@@ -25,12 +25,14 @@ pub mod peer;
 pub mod registry;
 pub mod runtime;
 pub mod status;
+pub mod telemetry;
 pub mod wire;
 
 // Lane modules — one owner per file (see the mesh thread for lane map):
 //   endpoint.rs, peer.rs        — Mari (transport core)
 //   registry.rs, gossip.rs,
-//   membership.rs, status.rs    — Max (membership + /_mesh)
+//   membership.rs, status.rs,
+//   telemetry.rs                — Max (membership + /_mesh + metrics)
 // Session directory + tunnel routing live relay-side (Perci), consuming the
 // seams below; huddle fan-out lives in buzz-relay's audio module (Dawn).
 
@@ -148,6 +150,12 @@ pub trait RelayMeshMembership: Send + Sync + 'static {
     fn local_runtime_id(&self) -> RuntimeId;
     /// Begin drain: gossip `draining=true`, stop accepting new sessions.
     fn begin_drain(&self);
+    /// Whether the record for exactly `runtime_id` advertises `capability`.
+    /// Runtime ids are boot-unique, so a positive answer describes that very
+    /// process. Unknown peers — and implementations without records — say no.
+    fn peer_has_capability(&self, _runtime_id: RuntimeId, _capability: &str) -> bool {
+        false
+    }
 }
 
 /// Seam 2: transport. Moves fenced bytes to a specific runtime.

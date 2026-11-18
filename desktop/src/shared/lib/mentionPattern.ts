@@ -1,3 +1,4 @@
+import { mentionLabelPattern } from "./mentionBoundaries";
 /**
  * Escape special regex characters in a string.
  */
@@ -38,7 +39,11 @@ export function buildPrefixPattern(
     return NEVER_MATCH;
   }
 
-  const nameAlternatives = sorted.map((name) => escapeRegExp(name)).join("|");
+  const nameAlternatives = sorted
+    .map((name) =>
+      prefix === "@" ? mentionLabelPattern(name) : escapeRegExp(name),
+    )
+    .join("|");
   const boundary = "(?=[\\s,;.!?:)\\]}]|$)";
   return new RegExp(`${escapedPrefix}(?:${nameAlternatives})${boundary}`, "gi");
 }

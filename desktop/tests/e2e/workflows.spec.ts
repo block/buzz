@@ -3,6 +3,7 @@ import { parse as parseYaml } from "yaml";
 
 import { installMockBridge } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
+import { addSendMessageStep } from "../helpers/workflows";
 
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
@@ -15,12 +16,18 @@ async function navigateToWorkflows(page: import("@playwright/test").Page) {
   await expect(page.getByTestId("workflows-view")).toBeVisible();
 }
 
+// A new workflow's channel picker opens itself one animation frame after the
+// dialog mounts. A visibility probe taken before that frame reads "closed",
+// and the click that follows can land after it and toggle the list shut, so
+// create dialogs wait for the list instead. Dialogs that never open it
+// themselves (duplicate) open it with a click.
 async function selectWorkflowChannel(
   page: import("@playwright/test").Page,
   dialog: import("@playwright/test").Locator,
+  { opensItself = true }: { opensItself?: boolean } = {},
 ) {
   const channelList = page.getByTestId("channel-combobox-list");
-  if (!(await channelList.isVisible())) {
+  if (!opensItself) {
     await dialog.getByRole("combobox", { name: "Channel" }).click();
   }
   await expect(channelList).toBeVisible();
@@ -94,9 +101,7 @@ async function createWorkflow(
       .click();
   }
 
-  await dialog.getByRole("button", { name: "Add step", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Send Message" }).click();
-  await dialog.getByLabel("Message text").fill("Workflow notification");
+  await addSendMessageStep(dialog, "Workflow notification");
   if (options?.stepName) {
     await dialog.getByRole("button", { name: "Step details" }).click();
     await dialog.getByLabel("Name (optional)").fill(options.stepName);
@@ -568,7 +573,7 @@ test("duplicates a workflow", async ({ page }) => {
 
   // Submit the duplicate after deliberately choosing its destination channel.
   const dialog = page.getByRole("dialog", { name: "Duplicate workflow" });
-  await selectWorkflowChannel(page, dialog);
+  await selectWorkflowChannel(page, dialog, { opensItself: false });
   await dialog.getByRole("button", { name: "Create copy" }).click();
   const activationConfirmation = page.getByRole("alertdialog", {
     name: "This workflow may run often",
@@ -642,8 +647,13 @@ test("deleting the open workflow closes its editor", async ({ page }) => {
   await expect(detailDialog).toBeVisible();
   await detailDialog.getByRole("button", { name: "Workflow actions" }).click();
   await page.getByRole("menuitem", { name: "Delete" }).click();
-  await expect(page.getByRole("alertdialog")).toContainText(workflowName);
-  await page.getByRole("button", { name: "Delete" }).click();
+  const confirmation = page.getByRole("alertdialog");
+  await expect(confirmation).toContainText(workflowName);
+  await expect(confirmation).toContainText(
+    "Publishing its definition again, even an older version, can recreate it.",
+  );
+  await expect(confirmation).not.toContainText("permanently");
+  await confirmation.getByRole("button", { name: "Delete" }).click();
 
   await expect(detailDialog).toHaveCount(0);
   await expect(page).toHaveURL(/#\/workflows(?:\?|$)/);
@@ -698,9 +708,7 @@ test("captures the built editor at desktop and narrow widths", async ({
   const dialog = page.getByRole("dialog", { name: "Create workflow" });
   await selectWorkflowChannel(page, dialog);
   await editWorkflowName(dialog, "editor_screenshot");
-  await dialog.getByRole("button", { name: "Add step", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Send Message" }).click();
-  await dialog.getByLabel("Message text").fill("Notify the workflow channel");
+  await addSendMessageStep(dialog, "Notify the workflow channel");
   const inspector = dialog.getByTestId("workflow-node-inspector");
 
   for (const viewport of [
@@ -803,9 +811,7 @@ test("pane routes use stable IDs and Form/YAML changes stay synchronized", async
   await selectWorkflowChannel(page, dialog);
   await editWorkflowName(dialog, "pane_sync_test");
 
-  await dialog.getByRole("button", { name: "Add step", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Send Message" }).click();
-  await dialog.getByLabel("Message text").fill("first message");
+  await addSendMessageStep(dialog, "first message");
   await expect(page).toHaveURL(/pane=step%3Astep_1/);
 
   await dialog.getByRole("button", { name: "Add after Step 1" }).click();

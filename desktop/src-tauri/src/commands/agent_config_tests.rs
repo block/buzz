@@ -1,5 +1,5 @@
 //! Unit tests for `commands/agent_config.rs` (split to keep `agent_config.rs`
-//! under the 1000-line file-size ratchet).
+//! under the 1500-line file-size ratchet).
 //!
 //! Included via `#[path = "agent_config_tests.rs"] mod tests;` at the bottom of
 //! `agent_config.rs`, so `use super::*` gives access to all items in that module.
@@ -29,7 +29,7 @@ fn with_no_goose_config<T>(body: impl FnOnce() -> T) -> T {
 }
 
 fn goose_runtime() -> &'static KnownAcpRuntime {
-    &KnownAcpRuntime {
+    static RUNTIME: KnownAcpRuntime = KnownAcpRuntime {
         id: "goose",
         label: "Goose",
         commands: &["goose"],
@@ -55,17 +55,22 @@ fn goose_runtime() -> &'static KnownAcpRuntime {
         config_file_format: Some("yaml"),
         supports_acp_native_config: true,
         thinking_env_var: Some("GOOSE_THINKING_EFFORT"),
+        effort_normalization: Some(&crate::managed_agents::GOOSE_EFFORT_NORMALIZATION),
+        effort_accepted_values: None,
         max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
         context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
         max_rounds_env_var: None,
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
-    }
+    };
+    &RUNTIME
 }
 
 fn agent_record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        session_policy: Default::default(),
+        description: None,
         pubkey: "agent".to_string(),
         name: "Agent".to_string(),
         persona_id: Some("persona-1".to_string()),
@@ -113,6 +118,7 @@ fn agent_record() -> ManagedAgentRecord {
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
@@ -126,10 +132,13 @@ fn agent_record() -> ManagedAgentRecord {
 
 fn persona_with_model(model: &str) -> AgentDefinition {
     AgentDefinition {
+        session_policy: Default::default(),
+        description: None,
         id: "persona-1".to_string(),
         display_name: "Persona".to_string(),
         avatar_url: None,
         system_prompt: "You are a persona.".to_string(),
+        acp_command: None,
         runtime: None,
         model: Some(model.to_string()),
         provider: None,
@@ -140,6 +149,7 @@ fn persona_with_model(model: &str) -> AgentDefinition {
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         env_vars: Default::default(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
@@ -626,6 +636,58 @@ fn baked_env_mixed_keys_correct_masking() {
     assert!(token.masked);
 }
 
+/// F1 picker direct-write invariant: a stale record-native `GOOSE_THINKING_EFFORT`
+/// (launch-projection tier 1, ABOVE the canonical column) must not survive a
+/// picker write. Setting effort `high` through the picker path both writes the
+/// column and sweeps the stale alias, so the reader and the launch projection
+/// both resolve `high` — not the stale `low`. Deleting the sweep in
+/// `apply_picker_effort_level` re-breaks this: the projection would emit `low`.
+#[test]
+fn picker_write_sweeps_stale_record_native_effort_alias() {
+    let mut record = agent_record();
+    record
+        .env_vars
+        .insert("GOOSE_THINKING_EFFORT".to_string(), "low".to_string());
+
+    super::apply_picker_effort_level(&mut record, Some("high".to_string()));
+
+    // The stale record-native alias is gone; only the column carries the value.
+    assert!(
+        !record.env_vars.contains_key("GOOSE_THINKING_EFFORT"),
+        "stale record-native effort alias must be swept by the picker write"
+    );
+    assert_eq!(record.effort_level.as_deref(), Some("high"));
+
+    // Reader: the panel resolves the just-set value, not the stale alias.
+    let surface = with_no_goose_config(|| {
+        resolve_config_surface(
+            record.clone(),
+            &[],
+            Some(goose_runtime()),
+            None,
+            &Default::default(),
+            None,
+        )
+    });
+    let effort = surface
+        .normalized
+        .thinking_effort
+        .expect("picker-set effort must resolve");
+    assert_eq!(effort.value.as_deref(), Some("high"));
+
+    // Launch projection: the spawned child receives the picker value.
+    let launch = crate::managed_agents::config_bridge::effort::effort_launch_projection(
+        &record,
+        Some(goose_runtime()),
+        &[],
+        None,
+        &std::collections::BTreeMap::new(),
+        None,
+        &std::collections::BTreeMap::new(),
+    );
+    assert_eq!(launch.value.as_deref(), Some("high"));
+}
+
 #[test]
 fn baked_env_thinking_effort_is_unmasked() {
     // BUZZ_AGENT_THINKING_EFFORT is a non-secret enum — must not be masked.
@@ -653,6 +715,31 @@ fn baked_env_thinking_summary_is_unmasked() {
 }
 
 #[test]
+fn baked_env_openai_compat_endpoint_is_unmasked_but_key_stays_masked() {
+    // The OpenAI-compatible endpoint, model id, and API flavor are
+    // non-secret defaults; the API key next to them is a credential.
+    let entries = baked_env_from_map(&[
+        ("OPENAI_COMPAT_BASE_URL", "https://llm.example/v1"),
+        ("OPENAI_COMPAT_MODEL", "balanced"),
+        ("OPENAI_COMPAT_API", "chat"),
+        ("OPENAI_COMPAT_API_KEY", "placeholder"),
+    ]);
+    assert_eq!(entries.len(), 4);
+    let find = |k: &str| entries.iter().find(|e| e.key == k).unwrap();
+    assert_eq!(
+        find("OPENAI_COMPAT_BASE_URL").value,
+        "https://llm.example/v1"
+    );
+    assert!(!find("OPENAI_COMPAT_BASE_URL").masked);
+    assert_eq!(find("OPENAI_COMPAT_MODEL").value, "balanced");
+    assert!(!find("OPENAI_COMPAT_MODEL").masked);
+    assert_eq!(find("OPENAI_COMPAT_API").value, "chat");
+    assert!(!find("OPENAI_COMPAT_API").masked);
+    assert!(find("OPENAI_COMPAT_API_KEY").masked);
+    assert_eq!(find("OPENAI_COMPAT_API_KEY").value, "••••••");
+}
+
+#[test]
 fn baked_env_allowlist_is_case_insensitive() {
     // Known-safe keys — case-insensitive match must allow them.
     assert!(super::is_safe_to_reveal("buzz_agent_provider"));
@@ -667,6 +754,11 @@ fn baked_env_allowlist_is_case_insensitive() {
     assert!(super::is_safe_to_reveal("DATABRICKS_HOST"));
     assert!(super::is_safe_to_reveal("databricks_model"));
     assert!(super::is_safe_to_reveal("DATABRICKS_MODEL"));
+    assert!(super::is_safe_to_reveal("openai_compat_base_url"));
+    assert!(super::is_safe_to_reveal("OPENAI_COMPAT_BASE_URL"));
+    assert!(super::is_safe_to_reveal("OPENAI_COMPAT_MODEL"));
+    assert!(super::is_safe_to_reveal("OPENAI_COMPAT_API"));
+    assert!(!super::is_safe_to_reveal("OPENAI_COMPAT_API_KEY"));
     // Keys NOT in the allowlist — masked regardless of naming pattern.
     assert!(!super::is_safe_to_reveal("my_api_key"));
     assert!(!super::is_safe_to_reveal("GITHUB_TOKEN"));
@@ -709,4 +801,31 @@ fn live_switch_null_models_parses_to_no_current_model() {
         "Null models must not surface any current model"
     );
     assert!(available.is_empty());
+}
+
+#[test]
+fn claude_code_effort_option_uses_adapter_names() {
+    // Trimmed from a real `claude-agent-acp` 0.36.1 `session/new` response.
+    let raw = serde_json::json!([{
+        "id": "effort",
+        "name": "Effort",
+        "category": "thought_level",
+        "type": "select",
+        "currentValue": "high",
+        "options": [
+            { "value": "low", "name": "Low" },
+            { "value": "xhigh", "name": "Xhigh" }
+        ]
+    }]);
+
+    let entries = parse_config_options(Some(&raw));
+
+    assert_eq!(entries[0].display_name.as_deref(), Some("Effort"));
+    assert_eq!(entries[0].current_value.as_deref(), Some("high"));
+    let labels: Vec<_> = entries[0]
+        .options
+        .iter()
+        .map(|o| o.display_name.as_deref())
+        .collect();
+    assert_eq!(labels, [Some("Low"), Some("Xhigh")]);
 }

@@ -1,31 +1,35 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
+import 'package:duo_kit/duo_kit.dart';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/profile/user_profile.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/emoji/emoji_data_provider.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/avatar_editor_options_scope.dart';
 import '../../shared/widgets/app_list.dart';
 import '../../shared/widgets/app_list_card.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
+import '../../shared/widgets/duo_toolbar.dart';
 import '../../shared/widgets/ios_glass_navigation_action.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/playing_avatar_image.dart';
 import 'ios_profile_text_editor.dart';
+import 'image_avatar_capture.dart';
 import 'profile_avatar_editor.dart';
 import 'profile_avatar_draft.dart';
 import 'profile_provider.dart';
 import 'profile_text_editor.dart';
-import 'profile_text_edit_sheet.dart';
 
 /// Edits the current user's public profile metadata.
 class ProfileEditPage extends HookConsumerWidget {
@@ -34,6 +38,7 @@ class ProfileEditPage extends HookConsumerWidget {
     super.key,
     this.startInPhotoEditor = false,
     this.animatedAvatarCaptureBuilder,
+    this.imageAvatarCaptureBuilder,
   });
 
   /// Opens directly into the photo editor when launched from Settings.
@@ -42,11 +47,24 @@ class ProfileEditPage extends HookConsumerWidget {
   /// Overrides animated capture for focused integration tests.
   final AnimatedAvatarCaptureBuilder? animatedAvatarCaptureBuilder;
 
+  /// Overrides still-image capture for focused integration tests.
+  final ImageAvatarCaptureBuilder? imageAvatarCaptureBuilder;
+
   static const _avatarRadius = 64.0;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final directWideDuoEditor = useMemoized(
+      () =>
+          startInPhotoEditor &&
+          (DuoToolbarScope.maybeOf(context)?.strip ??
+                  FoldGeometry.of(context).strip) !=
+              null &&
+          (View.of(context).physicalSize / View.of(context).devicePixelRatio)
+                  .shortestSide >=
+              600,
+    );
     final profileAsync = ref.watch(profileProvider);
     final profile = profileAsync.asData?.value;
     final profileHydrated = profileAsync.hasValue;
@@ -62,14 +80,16 @@ class ProfileEditPage extends HookConsumerWidget {
         useRef<Future<ProfileAvatarDraft?> Function()?>(null);
     final avatarSaveError = useState<String?>(null);
     final canPrepareAnimatedAvatar = useState(false);
+    final isImageCameraActive = useState(false);
     final avatarMode = useState(ProfileAvatarMode.image);
     final avatarTransition = useAnimationController(
+      initialValue: directWideDuoEditor ? 1 : 0,
       duration: reduceMotion
           ? Duration.zero
           : const Duration(milliseconds: 200),
     );
     useEffect(() {
-      if (!startInPhotoEditor) return null;
+      if (!startInPhotoEditor || directWideDuoEditor) return null;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (context.mounted) unawaited(avatarTransition.forward(from: 0));
       });
@@ -87,11 +107,10 @@ class ProfileEditPage extends HookConsumerWidget {
       bool multiline = false,
     }) => showBuzzModalBottomSheet<void>(
       context: context,
+      title: title,
       isScrollControlled: true,
       requestFocus: true,
-      showCloseButton: false,
-      builder: (_) => ProfileTextEditSheet(
-        title: title,
+      builder: (_) => _ProfileTextEditSheet(
         initialValue: initialValue,
         hintText: hintText,
         multiline: multiline,
@@ -107,13 +126,17 @@ class ProfileEditPage extends HookConsumerWidget {
       bool multiline = false,
     }) async {
       if (defaultTargetPlatform == TargetPlatform.iOS) {
+        final sheetTheme = utilitySurfaceThemeData(Theme.of(context));
         try {
           await IosProfileTextEditor.presentUntilSaved(
             title: title,
             initialValue: initialValue,
             placeholder: hintText,
             multiline: multiline,
-            brightness: Theme.of(context).brightness,
+            brightness: sheetTheme.brightness,
+            pageBackgroundColor: sheetTheme.colorScheme.surface,
+            containerBackgroundColor:
+                sheetTheme.colorScheme.surfaceContainerHighest,
             onSave: onSave,
             shouldRetryOnError: (error) =>
                 error is! ProfileCommunityChangedException,
@@ -124,10 +147,9 @@ class ProfileEditPage extends HookConsumerWidget {
                   !(ModalRoute.of(context)?.isCurrent ?? true)) {
                 return;
               }
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text("We couldn't save this change. Try again."),
-                ),
+              ScaffoldMessenger.of(context).showFeedbackSnackBar(
+                const SnackBar(content: Text('Couldn’t save changes')),
+                kind: ToastKind.error,
               );
             },
           );
@@ -160,7 +182,7 @@ class ProfileEditPage extends HookConsumerWidget {
         return;
       }
       isClosingAvatar.value = true;
-      await avatarTransition.reverse();
+      if (!directWideDuoEditor) await avatarTransition.reverse();
       if (!context.mounted) return;
       if (startInPhotoEditor) {
         Navigator.of(context).pop();
@@ -172,6 +194,7 @@ class ProfileEditPage extends HookConsumerWidget {
       avatarEditConfig.value = null;
       prepareAnimatedAvatar.value = null;
       canPrepareAnimatedAvatar.value = false;
+      isImageCameraActive.value = false;
       avatarMode.value = ProfileAvatarMode.image;
       isClosingAvatar.value = false;
     }
@@ -224,6 +247,19 @@ class ProfileEditPage extends HookConsumerWidget {
         requireCurrentCommunity();
         await ref.read(profileProvider.notifier).updateAvatarUrl(nextAvatar);
         requireCurrentCommunity();
+        if (nextDraft is ProfileAnimatedAvatarDraft) {
+          ref
+              .read(profileAvatarHandoffProvider.notifier)
+              .show(
+                ProfileAvatarHandoff(
+                  avatarUrl: nextAvatar,
+                  animation: nextDraft.animation,
+                  poster: nextDraft.poster,
+                ),
+              );
+        } else {
+          ref.read(profileAvatarHandoffProvider.notifier).clearAny();
+        }
         if (context.mounted) await closeAvatarEditor(whileSaving: true);
       } on ProfileCommunityChangedException {
         await discardStaleEditor();
@@ -243,6 +279,7 @@ class ProfileEditPage extends HookConsumerWidget {
 
     final canSaveAvatar =
         profileHydrated &&
+        !isImageCameraActive.value &&
         (avatarMode.value == ProfileAvatarMode.animated
             ? canPrepareAnimatedAvatar.value
             : avatarDraftMode.value == avatarMode.value &&
@@ -250,6 +287,8 @@ class ProfileEditPage extends HookConsumerWidget {
     final activeDraft = avatarDraftMode.value == avatarMode.value
         ? avatarDraft.value
         : null;
+    final avatarHandoff = ref.watch(profileAvatarHandoffProvider);
+    final pageTitle = isEditingAvatar.value ? 'Edit Photo' : 'Profile';
 
     return PopScope(
       canPop: !isEditingAvatar.value,
@@ -259,18 +298,16 @@ class ProfileEditPage extends HookConsumerWidget {
         }
       },
       child: FrostedScaffold(
-        backgroundColor: context.colors.surface,
+        useUtilitySurfaceTheme: true,
         resizeToAvoidBottomInset: isEditingAvatar.value ? false : null,
         appBar: FrostedAppBar(
+          nativeTitle: pageTitle,
           centerTitle: true,
           title: AnimatedSwitcher(
             duration: reduceMotion
                 ? const Duration(milliseconds: 120)
                 : const Duration(milliseconds: 220),
-            child: Text(
-              isEditingAvatar.value ? 'Edit Photo' : 'Profile',
-              key: ValueKey(isEditingAvatar.value),
-            ),
+            child: Text(pageTitle, key: ValueKey(isEditingAvatar.value)),
           ),
           leading: isEditingAvatar.value
               ? defaultTargetPlatform == TargetPlatform.iOS
@@ -288,7 +325,7 @@ class ProfileEditPage extends HookConsumerWidget {
                         onPressed: isClosingAvatar.value
                             ? null
                             : () => unawaited(closeAvatarEditor()),
-                        icon: const Icon(LucideIcons.arrowLeft),
+                        icon: const Icon(BuzzIcons.arrowLeft),
                       )
               : null,
           actions: isEditingAvatar.value
@@ -345,32 +382,43 @@ class ProfileEditPage extends HookConsumerWidget {
                           height: constraints.maxHeight < 600
                               ? 700
                               : constraints.maxHeight,
-                          child: ProfileAvatarEditor(
-                            key: const ValueKey('profile-avatar-editor-page'),
-                            currentAvatarUrl: profile?.avatarUrl,
-                            fallbackInitial: profile?.initial ?? '?',
-                            draft: activeDraft,
-                            mode: avatarMode.value,
-                            transition: avatarTransition,
-                            onModeChanged: (nextMode) =>
-                                avatarMode.value = nextMode,
-                            onDraftChanged: (draft) {
-                              avatarDraft.value = draft;
-                              avatarDraftMode.value = draft == null
-                                  ? null
-                                  : avatarMode.value;
-                            },
-                            onAnimatedPrepareChanged: (prepare) {
-                              prepareAnimatedAvatar.value = prepare;
-                              canPrepareAnimatedAvatar.value = prepare != null;
-                              if (avatarMode.value ==
-                                  ProfileAvatarMode.animated) {
-                                avatarDraft.value = null;
-                                avatarDraftMode.value = null;
-                              }
-                            },
-                            animatedCaptureBuilder:
-                                animatedAvatarCaptureBuilder,
+                          child: AvatarEditorOptionsScope(
+                            interactive:
+                                profileHydrated &&
+                                !isSavingAvatar.value &&
+                                !isClosingAvatar.value,
+                            child: ProfileAvatarEditor(
+                              key: const ValueKey('profile-avatar-editor-page'),
+                              currentAvatarUrl: profile?.avatarUrl,
+                              fallbackInitial: profile?.initial ?? '?',
+                              draft: activeDraft,
+                              mode: avatarMode.value,
+                              transition: avatarTransition,
+                              onModeChanged: (nextMode) =>
+                                  avatarMode.value = nextMode,
+                              onDraftChanged: (draft) {
+                                avatarDraft.value = draft;
+                                avatarDraftMode.value = draft == null
+                                    ? null
+                                    : avatarMode.value;
+                              },
+                              onAnimatedPrepareChanged: (prepare) {
+                                prepareAnimatedAvatar.value = prepare;
+                                canPrepareAnimatedAvatar.value =
+                                    prepare != null;
+                                if (avatarMode.value ==
+                                    ProfileAvatarMode.animated) {
+                                  avatarDraft.value = null;
+                                  avatarDraftMode.value = null;
+                                }
+                              },
+                              onImageCameraActiveChanged: (active) {
+                                isImageCameraActive.value = active;
+                              },
+                              animatedCaptureBuilder:
+                                  animatedAvatarCaptureBuilder,
+                              imageCaptureBuilder: imageAvatarCaptureBuilder,
+                            ),
                           ),
                         ),
                       ),
@@ -410,6 +458,7 @@ class ProfileEditPage extends HookConsumerWidget {
                 children: [
                   _ProfilePhotoEditor(
                     profile: profile,
+                    handoff: avatarHandoff,
                     onEditPhoto: profileHydrated ? openAvatarEditor : null,
                   ),
                   AppListCard(
@@ -488,36 +537,57 @@ String _fieldValue(String? value) {
   return trimmed.isEmpty ? 'Not set' : trimmed;
 }
 
-class _ProfilePhotoEditor extends StatelessWidget {
-  const _ProfilePhotoEditor({required this.profile, required this.onEditPhoto});
+class _ProfilePhotoEditor extends ConsumerWidget {
+  const _ProfilePhotoEditor({
+    required this.profile,
+    required this.handoff,
+    required this.onEditPhoto,
+  });
 
   final UserProfile? profile;
+  final ProfileAvatarHandoff? handoff;
   final VoidCallback? onEditPhoto;
 
   @override
-  Widget build(BuildContext context) => Column(
-    children: [
-      PlayingAvatarImage(
-        key: const ValueKey('profile-edit-avatar'),
-        imageUrl: profile?.avatarUrl,
-        radius: ProfileEditPage._avatarRadius,
-        backgroundColor: context.colors.primaryContainer,
-        fallback: Text(
-          profile?.initial ?? '?',
-          style: context.textTheme.displaySmall?.copyWith(
-            color: context.colors.onPrimaryContainer,
+  Widget build(BuildContext context, WidgetRef ref) {
+    final activeHandoff = handoff?.avatarUrl == profile?.avatarUrl
+        ? handoff
+        : null;
+    return Column(
+      children: [
+        PlayingAvatarImage(
+          key: const ValueKey('profile-edit-avatar'),
+          imageUrl: profile?.avatarUrl,
+          radius: ProfileEditPage._avatarRadius,
+          backgroundColor: context.controlSurface,
+          loadingImage: activeHandoff == null
+              ? null
+              : MemoryImage(activeHandoff.animation),
+          loadingPosterImage: activeHandoff == null
+              ? null
+              : MemoryImage(activeHandoff.poster),
+          onAnimationReady: activeHandoff == null
+              ? null
+              : () => ref
+                    .read(profileAvatarHandoffProvider.notifier)
+                    .clear(activeHandoff.avatarUrl),
+          fallback: Text(
+            profile?.initial ?? '?',
+            style: context.textTheme.displaySmall?.copyWith(
+              color: context.colors.onPrimaryContainer,
+            ),
           ),
         ),
-      ),
-      const SizedBox(height: Grid.twelve),
-      _ProfileActionPill(
-        key: const ValueKey('profile-edit-photo-pill'),
-        semanticLabel: 'Edit profile photo',
-        label: 'Edit Photo',
-        onTap: onEditPhoto,
-      ),
-    ],
-  );
+        const SizedBox(height: Grid.twelve),
+        _ProfileActionPill(
+          key: const ValueKey('profile-edit-photo-pill'),
+          semanticLabel: 'Edit profile photo',
+          label: 'Edit Photo',
+          onTap: onEditPhoto,
+        ),
+      ],
+    );
+  }
 }
 
 class _ProfileActionPill extends StatelessWidget {
@@ -577,8 +647,94 @@ class _EditChevron extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Icon(
-    LucideIcons.chevronRight,
+    BuzzIcons.chevronRight,
     size: 18,
     color: context.colors.onSurfaceVariant,
   );
+}
+
+class _ProfileTextEditSheet extends HookWidget {
+  const _ProfileTextEditSheet({
+    required this.initialValue,
+    required this.hintText,
+    required this.multiline,
+    required this.onSave,
+  });
+
+  final String initialValue;
+  final String hintText;
+  final bool multiline;
+  final Future<void> Function(String value) onSave;
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = useTextEditingController(text: initialValue);
+    useListenable(controller);
+    final isSaving = useState(false);
+    final error = useState<String?>(null);
+    final hasChanges = controller.text.trim() != initialValue.trim();
+
+    Future<void> save() async {
+      if (!hasChanges || isSaving.value) return;
+      isSaving.value = true;
+      error.value = null;
+      try {
+        await onSave(controller.text);
+        if (context.mounted) Navigator.of(context).pop();
+      } on ProfileCommunityChangedException {
+        if (context.mounted) Navigator.of(context).pop();
+      } catch (_) {
+        error.value = 'Couldn’t save changes';
+      } finally {
+        if (context.mounted) isSaving.value = false;
+      }
+    }
+
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          Grid.gutter,
+          Grid.xxs,
+          Grid.gutter,
+          MediaQuery.viewInsetsOf(context).bottom + Grid.xs,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            TextField(
+              key: const ValueKey('profile-field-input'),
+              controller: controller,
+              autofocus: true,
+              enabled: !isSaving.value,
+              minLines: multiline ? 4 : 1,
+              maxLines: multiline ? 6 : 1,
+              textCapitalization: TextCapitalization.sentences,
+              textInputAction: multiline
+                  ? TextInputAction.newline
+                  : TextInputAction.done,
+              onSubmitted: multiline ? null : (_) => unawaited(save()),
+              decoration: InputDecoration(hintText: hintText),
+            ),
+            if (error.value != null) ...[
+              const SizedBox(height: Grid.xxs),
+              Text(
+                error.value!,
+                style: context.textTheme.bodySmall?.copyWith(
+                  color: context.colors.error,
+                ),
+              ),
+            ],
+            const SizedBox(height: Grid.xs),
+            FilledButton(
+              key: const ValueKey('profile-field-save'),
+              onPressed: hasChanges && !isSaving.value ? save : null,
+              child: Text(isSaving.value ? 'Saving…' : 'Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }

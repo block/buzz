@@ -118,6 +118,7 @@ export async function submitReport(input: {
     kind: KIND_REPORT,
     content: input.note?.trim() ? input.note.trim() : "",
     tags,
+    allowSelfTagging: true,
   });
   await relayClient.publishEvent(
     event,

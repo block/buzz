@@ -40,6 +40,7 @@ export function ProjectAuthorIdentity({
                 accent={profile?.isAgent === true}
                 avatarUrl={profile?.avatarUrl ?? null}
                 displayName={label}
+                shape={profile?.isAgent ? "squircle" : "circle"}
                 fallbackDelayMs={0}
                 size="xs"
                 testId={testId ? `${testId}-avatar` : undefined}
@@ -61,6 +62,7 @@ export function ProjectAuthorIdentity({
               accent={profile?.isAgent === true}
               avatarUrl={profile?.avatarUrl ?? null}
               displayName={label}
+              shape={profile?.isAgent ? "squircle" : "circle"}
               fallbackDelayMs={0}
               size="sm"
             />

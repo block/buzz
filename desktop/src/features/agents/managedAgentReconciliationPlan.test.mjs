@@ -106,3 +106,17 @@ test("classifyReconcileResult treats a relay with no rows as reconciled", () => 
     { succeeded: ["wss://a.example"], failed: [] },
   );
 });
+
+test("classifyReconcileResult leaves a fenced relay neither reconciled nor failed", () => {
+  // Its community was removed mid-call: marking it reconciled would stop a
+  // same-session re-add from starting its pairs.
+  assert.deepEqual(
+    classifyReconcileResult(
+      ["wss://removed.example", "wss://alive.example"],
+      [],
+      canonicalRelayUrl,
+      new Set(["wss://removed.example"]),
+    ),
+    { succeeded: ["wss://alive.example"], failed: [] },
+  );
+});

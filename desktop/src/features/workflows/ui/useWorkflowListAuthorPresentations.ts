@@ -44,6 +44,7 @@ export function useWorkflowListAuthorPresentations(
         workflowId,
         {
           avatarUrl: profile?.avatarUrl ?? null,
+          isAgent: profile?.isAgent === true,
           label: loading
             ? null
             : resolveUserLabel({

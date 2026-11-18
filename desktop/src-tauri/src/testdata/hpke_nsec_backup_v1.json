@@ -1,0 +1,22 @@
+{
+  "description": "Buzz HPKE nsec backup v1 Kotlin interop fixture; keys are test-only",
+  "recipient_public_key_sec1_hex": "04c5b6519400186a8e10abbdc05d3e450c8612e5dba06927091527110324acfb0371d98d662395d872fae967fe75ef24db20a7c2c1af19c34422d94f629b1b1dad",
+  "recipient_private_key_hex": "7ad00e296b224923f735144f3cc7e49746c8e3ebf20b8002d0a73998467d8f78",
+  "nostr_secret_key_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+  "aad_hex": "62757a7a2f6e7365632d6261636b75702f6161642f76310100100001000200126261636b75702d6b65792d323032362d3039000e6261636b75702f73746167696e6700227375626a6563743a30314a3841344d3751314734583853384d35314653374b324858018f6f4e83d17a4e8c8e4f914f7d31a224653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c",
+  "envelope": {
+    "version": 1,
+    "suite": {
+      "aead_id": 2,
+      "kdf_id": 1,
+      "kem_id": 16
+    },
+    "recipient_key_id": "backup-key-2026-09",
+    "service_namespace": "backup/staging",
+    "owner_id": "subject:01J8A4M7Q1G4X8S8M51FS7K2HX",
+    "backup_id": "018f6f4e-83d1-7a4e-8c8e-4f914f7d31a2",
+    "nostr_pubkey": "24653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c",
+    "enc": "BHCSkhHMDDKXgK5vWuP4Gw3NNaMMdrN-1OPUISh_jczrjoZK7HBmMkZE2iogEKle5syyp3-wgGo69cPeHVNEuWA",
+    "ciphertext": "tkBhVlv3rco5mZOIEbESB2Hx_etTIvWQHJJP7hCOIgEysJjwQqnq7iCC0A516Du8"
+  }
+}

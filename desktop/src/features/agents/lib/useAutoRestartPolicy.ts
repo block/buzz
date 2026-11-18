@@ -5,6 +5,7 @@ import {
   managedAgentsQueryKey,
   useManagedAgentsQuery,
 } from "@/features/agents/hooks";
+import { captureRelayRemovals } from "@/features/agents/managedAgentRelayCleanup";
 import { clearActiveTurnsForAgentOnStop } from "@/features/agents/managedAgentRuntimeHooks";
 import {
   startManagedAgent,
@@ -21,6 +22,42 @@ import {
   type AutoRestartEdgeState,
 } from "./autoRestartPolicy";
 
+const defaultRestartOps = {
+  listManagedAgents,
+  stopManagedAgent,
+  startManagedAgent,
+};
+
+/**
+ * One auto-restart attempt, bound to `relayUrl` — the active community's
+ * relay, which the workspace-pair stop and start target — before its first
+ * await. Only a removal of that relay cancels the start.
+ */
+export async function restartDriftedAgent(
+  pubkey: string,
+  relayUrl: string | undefined,
+  ops = defaultRestartOps,
+): Promise<void> {
+  const assertRelayNotRemoved = relayUrl
+    ? captureRelayRemovals(relayUrl)
+    : () => {};
+  // Pre-fire re-fetch: shrink the stale-decision window to ~0.
+  const fresh = await ops.listManagedAgents();
+  const current = fresh.find((a) => a.pubkey === pubkey);
+  if (
+    !current?.needsRestart ||
+    !current.autoRestartOnConfigChange ||
+    current.status !== "running" ||
+    getAgentWorkingState(pubkey).source !== "none"
+  ) {
+    return;
+  }
+  await ops.stopManagedAgent(pubkey);
+  clearActiveTurnsForAgentOnStop(pubkey);
+  assertRelayNotRemoved();
+  await ops.startManagedAgent(pubkey);
+}
+
 /** How often the policy re-evaluates between summary refetches. Keeps the
  * continuity clock honest without waiting for the next 5s poll. */
 const POLICY_TICK_MS = 15_000;
@@ -33,9 +70,10 @@ const POLICY_TICK_MS = 15_000;
  * tested). This hook only wires inputs, owns per-pubkey edge state, and
  * calls the existing stop/start commands — both idempotent and serialized
  * on the backend store lock, so a cross-window double-fire is benign (and
- * further shrunk by the pre-fire summary re-fetch).
+ * further shrunk by the pre-fire summary re-fetch). `relayUrl` is the active
+ * community's relay, which the restarts target.
  */
-export function useAutoRestartPolicy() {
+export function useAutoRestartPolicy(relayUrl: string | undefined) {
   const queryClient = useQueryClient();
   const agents: ManagedAgent[] | undefined = useManagedAgentsQuery().data;
   const edgesRef = React.useRef(new Map<string, AutoRestartEdgeState>());
@@ -101,32 +139,17 @@ export function useAutoRestartPolicy() {
       // until needsRestart cycles (edge-triggered debounce, no retry loops).
       edges.set(agent.pubkey, { consumed: true, armedAt: null });
 
-      void (async () => {
-        try {
-          // Pre-fire re-fetch: shrink the stale-decision window to ~0.
-          const fresh = await listManagedAgents();
-          const current = fresh.find((a) => a.pubkey === agent.pubkey);
-          if (
-            !current?.needsRestart ||
-            !current.autoRestartOnConfigChange ||
-            current.status !== "running" ||
-            getAgentWorkingState(agent.pubkey).source !== "none"
-          ) {
-            return;
-          }
-          await stopManagedAgent(agent.pubkey);
-          clearActiveTurnsForAgentOnStop(agent.pubkey);
-          await startManagedAgent(agent.pubkey);
-        } catch {
+      void restartDriftedAgent(agent.pubkey, relayUrl)
+        .catch(() => {
           // Failed attempt: edge stays consumed — badge-only until the
           // needsRestart edge cycles. No retry loops by design.
-        } finally {
+        })
+        .finally(() => {
           inFlightRef.current.delete(agent.pubkey);
           void queryClient.invalidateQueries({
             queryKey: managedAgentsQueryKey,
           });
-        }
-      })();
+        });
     }
 
     // Drop edge state for agents that no longer exist.

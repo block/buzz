@@ -9,6 +9,8 @@ fn bare_agent_record(
     use crate::managed_agents::{BackendKind, RespondTo};
     use std::collections::BTreeMap;
     ManagedAgentRecord {
+        session_policy: Default::default(),
+        description: None,
         pubkey: "agent".to_string(),
         name: "Agent".to_string(),
         persona_id: persona_id.map(str::to_string),
@@ -58,6 +60,7 @@ fn bare_agent_record(
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         relay_mesh: None,
         effort_level: None,
         auto_restart_on_config_change: false,
@@ -69,10 +72,13 @@ fn bare_agent_record(
 fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> AgentDefinition {
     use std::collections::BTreeMap;
     AgentDefinition {
+        session_policy: Default::default(),
+        description: None,
         id: id.to_string(),
         display_name: "Test Persona".to_string(),
         avatar_url: None,
         system_prompt: "".to_string(),
+        acp_command: None,
         runtime: None,
         model: model.map(str::to_string),
         provider: provider.map(str::to_string),
@@ -83,6 +89,7 @@ fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> Agen
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: vec![],
@@ -182,6 +189,45 @@ fn deploy_resolver_inherits_global_when_definition_blank() {
         Some("global-prov"),
         "definition blank → global; stale record ignored"
     );
+}
+
+#[test]
+fn production_delete_orchestration_restores_bestie_when_agent_save_fails() {
+    use crate::managed_agents::{
+        bestie_assignment::{assignment_matches, replace_assignment},
+        retention::open_retention_db,
+    };
+
+    let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("temp dir: {error}"));
+    let retention_dir = dir.path().join("retention");
+    std::fs::create_dir_all(&retention_dir)
+        .unwrap_or_else(|error| panic!("create retention dir: {error}"));
+    let db_path = retention_dir.join("owner.db");
+    let pubkey = "a".repeat(64);
+    replace_assignment(
+        &mut open_retention_db(&db_path)
+            .unwrap_or_else(|error| panic!("open assignment DB: {error}")),
+        &pubkey,
+    )
+    .unwrap_or_else(|error| panic!("seed assignment: {error}"));
+    let mut record = bare_agent_record(None, None, None);
+    record.pubkey.clone_from(&pubkey);
+    let mut records = vec![record];
+
+    let result = run_managed_agent_deletion(dir.path(), &pubkey, &mut records, |_records| {
+        Err::<(), _>("injected managed-agent save failure".to_string())
+    });
+
+    assert_eq!(
+        result,
+        Err("injected managed-agent save failure".to_string())
+    );
+    assert!(assignment_matches(
+        &open_retention_db(&db_path)
+            .unwrap_or_else(|error| panic!("reopen assignment DB: {error}")),
+        &pubkey,
+    )
+    .unwrap_or_else(|error| panic!("read restored assignment: {error}")));
 }
 
 /// Deploy resolver falls back to global when both definition and record have none.
@@ -312,15 +358,29 @@ fn created_avatar_uses_command_fallback_without_input_or_persona() {
 }
 
 fn profile(name: Option<&str>, picture: Option<&str>) -> crate::relay::AgentProfileInfo {
+    profile_with_about(name, picture, None)
+}
+
+fn profile_with_about(
+    name: Option<&str>,
+    picture: Option<&str>,
+    about: Option<&str>,
+) -> crate::relay::AgentProfileInfo {
     crate::relay::AgentProfileInfo {
         display_name: name.map(str::to_string),
         picture: picture.map(str::to_string),
+        about: about.map(str::to_string),
     }
 }
 
 #[test]
 fn profile_needs_sync_when_missing() {
-    assert!(profile_needs_sync(None, "Duncan", Some("https://x/a.png")));
+    assert!(profile_needs_sync(
+        None,
+        "Duncan",
+        Some("https://x/a.png"),
+        None
+    ));
 }
 
 // ── resolve_reconcile_relay: deferred-task relay pinning ────────────────────
@@ -350,7 +410,7 @@ fn unpinned_reconcile_relay_resolves_the_execution_time_workspace() {
 
 #[test]
 fn profile_needs_sync_when_missing_even_without_expected_avatar() {
-    assert!(profile_needs_sync(None, "Duncan", None));
+    assert!(profile_needs_sync(None, "Duncan", None, None));
 }
 
 #[test]
@@ -359,7 +419,8 @@ fn profile_needs_sync_when_name_diverges() {
     assert!(profile_needs_sync(
         Some(&existing),
         "Duncan",
-        Some("https://x/a.png")
+        Some("https://x/a.png"),
+        None
     ));
 }
 
@@ -369,7 +430,8 @@ fn profile_needs_sync_when_picture_diverges() {
     assert!(profile_needs_sync(
         Some(&existing),
         "Duncan",
-        Some("https://x/new.png")
+        Some("https://x/new.png"),
+        None
     ));
 }
 
@@ -379,14 +441,15 @@ fn profile_in_sync_when_name_and_picture_match() {
     assert!(!profile_needs_sync(
         Some(&existing),
         "Duncan",
-        Some("https://x/a.png")
+        Some("https://x/a.png"),
+        None
     ));
 }
 
 #[test]
 fn profile_in_sync_when_both_avatars_absent() {
     let existing = profile(Some("Duncan"), None);
-    assert!(!profile_needs_sync(Some(&existing), "Duncan", None));
+    assert!(!profile_needs_sync(Some(&existing), "Duncan", None, None));
 }
 
 #[test]
@@ -396,13 +459,50 @@ fn profile_needs_sync_when_existing_name_is_none() {
         Some(&existing),
         "Duncan",
         Some("https://x/a.png"),
+        None,
     ));
 }
 
 #[test]
 fn profile_needs_sync_when_expected_avatar_absent_but_published() {
     let existing = profile(Some("Duncan"), Some("https://x/a.png"));
-    assert!(profile_needs_sync(Some(&existing), "Duncan", None));
+    assert!(profile_needs_sync(Some(&existing), "Duncan", None, None));
+}
+
+#[test]
+fn profile_needs_sync_when_about_diverges() {
+    let existing = profile_with_about(Some("Duncan"), None, Some("Old description."));
+    assert!(profile_needs_sync(
+        Some(&existing),
+        "Duncan",
+        None,
+        Some("New description.")
+    ));
+}
+
+#[test]
+fn profile_needs_sync_when_expected_about_absent_but_published() {
+    let existing = profile_with_about(Some("Duncan"), None, Some("Stale description."));
+    assert!(profile_needs_sync(Some(&existing), "Duncan", None, None));
+}
+
+#[test]
+fn profile_in_sync_when_about_matches() {
+    let existing = profile_with_about(Some("Duncan"), None, Some("A helpful desktop agent."));
+    assert!(!profile_needs_sync(
+        Some(&existing),
+        "Duncan",
+        None,
+        Some("A helpful desktop agent.")
+    ));
+}
+
+#[test]
+fn profile_in_sync_when_about_none_equals_published_empty_string() {
+    // None vs "" must be treated as equal — otherwise every reconcile of an
+    // about-less agent would republish forever.
+    let existing = profile_with_about(Some("Duncan"), None, Some(""));
+    assert!(!profile_needs_sync(Some(&existing), "Duncan", None, None));
 }
 
 #[test]
@@ -692,4 +792,92 @@ fn owner_only_access_deploy_payload_clamps_stale_access() {
         serde_json::json!([]),
         "owner-only-access deploy payload retained a stale allowlist"
     );
+}
+
+/// Runs the real create in a child process: temp app-data and nest paths,
+/// keychain use turned off so agent keys stay inline in the temp agent file,
+/// and no background work outliving the test.
+#[test]
+fn create_managed_agent_persists_picked_effort_and_drops_env_aliases() {
+    const CHILD: &str = "BUZZ_CREATE_EFFORT_TEST_HOME";
+    if let Some(home) = std::env::var_os(CHILD) {
+        return create_with_effort_in_confined_child(std::path::Path::new(&home));
+    }
+    let home = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "commands::agents::tests::create_managed_agent_persists_picked_effort_and_drops_env_aliases", "--nocapture"])
+        .env(CHILD, home.path()).env("HOME", home.path())
+        .env("XDG_DATA_HOME", home.path()).env("APPDATA", home.path())
+        .env("LOCALAPPDATA", home.path())
+        .env_remove("BUZZ_PRIVATE_KEY").env_remove("BUZZ_AUTH_TAG")
+        .env_remove("BUZZ_RELAY_URL").env_remove("BUZZ_NETWORK_TRACE")
+        .output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "child failed: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn create_with_effort_in_confined_child(home: &std::path::Path) {
+    use tauri::Manager;
+    crate::managed_agents::storage::NO_KEYCHAIN_FOR_TEST
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    crate::managed_agents::pin_nest_dir_for_test(home.join("nest"));
+    // Windows known-folder APIs ignore HOME/APPDATA; an absolute mock
+    // identifier replaces the app-data base on every platform.
+    let app_data = home.join("app-data");
+    let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+    context.config_mut().identifier = app_data.to_str().unwrap().to_owned();
+
+    // Unroutable relay: profile publish fails fast and is reported, not fatal.
+    const RELAY: &str = "ws://127.0.0.1:9";
+    let state = crate::app_state::build_app_state();
+    *state.relay_url_override.lock().unwrap() = Some(RELAY.to_string());
+    let app = tauri::test::mock_builder()
+        .manage(state)
+        .build(context)
+        .expect("mock app builds headless");
+    assert_eq!(app.path().app_data_dir().unwrap(), app_data);
+    let alias = crate::managed_agents::config_bridge::effort::effort_suppress_keys()[0];
+    let create = |name: &str, effort: Option<&str>| {
+        let input: CreateManagedAgentRequest = serde_json::from_value(serde_json::json!({
+            "name": name, "relayUrl": RELAY, "acpCommand": null,
+            "agentCommand": null, "idleTimeoutSeconds": null,
+            "maxTurnDurationSeconds": null, "parallelism": null,
+            "systemPrompt": null, "avatarUrl": null, "model": null,
+            "provider": null, "effortLevel": effort,
+            "envVars": { alias: "low" }, "spawnAfterCreate": false,
+        }))
+        .unwrap();
+        let state = app.state::<AppState>();
+        tauri::async_runtime::block_on(create_managed_agent_in(input, app.handle().clone(), &state))
+            .expect("create succeeds")
+            .agent
+            .pubkey
+    };
+    let picked = create("Picked", Some("high"));
+    let unpicked = create("Unpicked", None);
+    let records = load_managed_agents(app.handle()).unwrap();
+
+    let find = |pubkey: &str| records.iter().find(|r| r.pubkey == pubkey).unwrap();
+    assert_eq!(find(&picked).effort_level.as_deref(), Some("high"));
+    assert!(!find(&picked).env_vars.contains_key(alias));
+    assert_eq!(find(&unpicked).effort_level, None);
+    assert!(
+        find(&unpicked).env_vars.contains_key(alias),
+        "no pick leaves env alone"
+    );
+    // The keychain step was skipped: both keys are still inline on disk.
+    let path = crate::managed_agents::storage::managed_agents_store_path(app.handle()).unwrap();
+    let raw: Vec<serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    for pubkey in [&picked, &unpicked] {
+        let entry = raw.iter().find(|r| r["pubkey"] == pubkey.as_str()).unwrap();
+        assert!(entry["private_key_nsec"]
+            .as_str()
+            .unwrap()
+            .starts_with("nsec1"));
+    }
 }

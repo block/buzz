@@ -33,6 +33,7 @@ class _RecordingReminderService extends ReminderService {
     required ReminderTarget target,
     required int notBefore,
     String? note,
+    String? replacingDTag,
   }) async {
     final error = this.error;
     if (error != null) throw error;

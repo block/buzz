@@ -165,91 +165,17 @@ pub fn compute_auth_tag(
     Ok(tag_json.to_string())
 }
 
-/// Verify a NIP-OA `auth` tag JSON string against the given `agent_pubkey`.
-///
-/// Reconstructs the preimage, hashes it, and verifies the Schnorr signature
-/// against the owner pubkey embedded in the tag.
-///
-/// Returns the owner's [`PublicKey`] on success.
-///
-/// # Errors
-///
-/// Returns [`SdkError::InvalidInput`] for malformed JSON, wrong element count,
-/// bad hex, self-attestation, or signature verification failure.
-pub fn verify_auth_tag(
-    auth_tag_json: &str,
-    agent_pubkey: &PublicKey,
-) -> Result<PublicKey, SdkError> {
-    let arr = parse_json_array(auth_tag_json)?;
-
-    if arr.len() != 4 {
-        return Err(SdkError::InvalidInput(format!(
-            "auth tag must have 4 elements, got {}",
-            arr.len()
-        )));
-    }
-
-    let label = arr[0]
-        .as_str()
-        .ok_or_else(|| SdkError::InvalidInput("element 0 must be a string".into()))?;
-    if label != "auth" {
-        return Err(SdkError::InvalidInput(format!(
-            "first element must be \"auth\", got \"{label}\""
-        )));
-    }
-
-    let owner_pubkey_hex = arr[1].as_str().ok_or_else(|| {
-        SdkError::InvalidInput("element 1 (owner pubkey) must be a string".into())
-    })?;
-    let conditions = arr[2]
-        .as_str()
-        .ok_or_else(|| SdkError::InvalidInput("element 2 (conditions) must be a string".into()))?;
-    let sig_hex = arr[3]
-        .as_str()
-        .ok_or_else(|| SdkError::InvalidInput("element 3 (signature) must be a string".into()))?;
-
-    let owner_pubkey = PublicKey::from_hex(owner_pubkey_hex)
-        .map_err(|e| SdkError::InvalidInput(format!("invalid owner pubkey: {e}")))?;
-
-    validate_conditions(conditions)?;
-
-    if owner_pubkey == *agent_pubkey {
-        return Err(SdkError::InvalidInput(
-            "owner and agent pubkeys must differ (self-attestation rejected)".into(),
-        ));
-    }
-
-    let sig = Signature::from_str(sig_hex)
-        .map_err(|e| SdkError::InvalidInput(format!("invalid signature hex: {e}")))?;
-
-    let preimage = build_preimage(agent_pubkey, conditions);
-    let message = hash_preimage(&preimage);
-
-    let xonly = owner_pubkey.xonly().map_err(|e| {
-        SdkError::InvalidInput(format!("owner pubkey xonly conversion failed: {e}"))
-    })?;
-    SECP256K1
-        .verify_schnorr(&sig, &message, &xonly)
-        .map_err(|e| SdkError::InvalidInput(format!("signature verification failed: {e}")))?;
-
-    Ok(owner_pubkey)
+struct ParsedAuthTag {
+    owner_pubkey_hex: String,
+    conditions: String,
+    sig_hex: String,
 }
 
-/// Parse a NIP-OA `auth` tag JSON string into a [`Tag`] without verifying the
-/// signature.
-///
-/// Validates structure only:
-/// - Exactly 4 elements
-/// - First element is `"auth"`
-/// - Second element is a 64-character hex string (owner pubkey)
-/// - Fourth element is a 128-character hex string (signature)
-///
-/// This is the fast path used at MCP startup — no crypto is performed.
-///
-/// # Errors
-///
-/// Returns [`SdkError::InvalidInput`] for any structural violation.
-pub fn parse_auth_tag(json_str: &str) -> Result<Tag, SdkError> {
+/// Parse and validate the canonical wire representation shared by every
+/// verification path. Keeping this check in one place prevents the crypto
+/// verifier from accepting non-canonical values that the structural parser
+/// rejects.
+fn parse_auth_tag_fields(json_str: &str) -> Result<ParsedAuthTag, SdkError> {
     let arr = parse_json_array(json_str)?;
 
     if arr.len() != 4 {
@@ -273,7 +199,7 @@ pub fn parse_auth_tag(json_str: &str) -> Result<Tag, SdkError> {
     })?;
     if owner_pubkey_hex.len() != 64 || !owner_pubkey_hex.chars().all(is_lowercase_hex) {
         return Err(SdkError::InvalidInput(format!(
-            "owner pubkey must be 64 hex chars, got {:?}",
+            "owner pubkey must be 64 lowercase hex chars, got {:?}",
             owner_pubkey_hex
         )));
     }
@@ -281,7 +207,6 @@ pub fn parse_auth_tag(json_str: &str) -> Result<Tag, SdkError> {
     let conditions = arr[2]
         .as_str()
         .ok_or_else(|| SdkError::InvalidInput("element 2 (conditions) must be a string".into()))?;
-
     validate_conditions(conditions)?;
 
     let sig_hex = arr[3]
@@ -289,13 +214,134 @@ pub fn parse_auth_tag(json_str: &str) -> Result<Tag, SdkError> {
         .ok_or_else(|| SdkError::InvalidInput("element 3 (signature) must be a string".into()))?;
     if sig_hex.len() != 128 || !sig_hex.chars().all(is_lowercase_hex) {
         return Err(SdkError::InvalidInput(format!(
-            "signature must be 128 hex chars, got length {}",
+            "signature must be 128 lowercase hex chars, got length {}",
             sig_hex.len()
         )));
     }
 
-    Tag::parse(["auth", owner_pubkey_hex, conditions, sig_hex])
-        .map_err(|e| SdkError::InvalidInput(format!("failed to construct Tag: {e}")))
+    Ok(ParsedAuthTag {
+        owner_pubkey_hex: owner_pubkey_hex.to_owned(),
+        conditions: conditions.to_owned(),
+        sig_hex: sig_hex.to_owned(),
+    })
+}
+
+fn verify_parsed_auth_tag(
+    parsed: &ParsedAuthTag,
+    agent_pubkey: &PublicKey,
+) -> Result<PublicKey, SdkError> {
+    let owner_pubkey = PublicKey::from_hex(&parsed.owner_pubkey_hex)
+        .map_err(|e| SdkError::InvalidInput(format!("invalid owner pubkey: {e}")))?;
+
+    if owner_pubkey == *agent_pubkey {
+        return Err(SdkError::InvalidInput(
+            "owner and agent pubkeys must differ (self-attestation rejected)".into(),
+        ));
+    }
+
+    let sig = Signature::from_str(&parsed.sig_hex)
+        .map_err(|e| SdkError::InvalidInput(format!("invalid signature hex: {e}")))?;
+    let preimage = build_preimage(agent_pubkey, &parsed.conditions);
+    let message = hash_preimage(&preimage);
+
+    let xonly = owner_pubkey.xonly().map_err(|e| {
+        SdkError::InvalidInput(format!("owner pubkey xonly conversion failed: {e}"))
+    })?;
+    SECP256K1
+        .verify_schnorr(&sig, &message, &xonly)
+        .map_err(|e| SdkError::InvalidInput(format!("signature verification failed: {e}")))?;
+
+    Ok(owner_pubkey)
+}
+
+/// Verify a NIP-OA `auth` tag JSON string against the given `agent_pubkey`.
+///
+/// Reconstructs the preimage, hashes it, and verifies the Schnorr signature
+/// against the owner pubkey embedded in the tag.
+///
+/// Returns the owner's [`PublicKey`] on success.
+///
+/// # Errors
+///
+/// Returns [`SdkError::InvalidInput`] for malformed JSON, wrong element count,
+/// bad hex, self-attestation, or signature verification failure.
+pub fn verify_auth_tag(
+    auth_tag_json: &str,
+    agent_pubkey: &PublicKey,
+) -> Result<PublicKey, SdkError> {
+    let parsed = parse_auth_tag_fields(auth_tag_json)?;
+    verify_parsed_auth_tag(&parsed, agent_pubkey)
+}
+
+/// Verify a NIP-OA credential for relay admission at a signed auth event.
+///
+/// This performs the normal signature and syntax checks, then evaluates every
+/// `created_at<` and `created_at>` clause against the signed NIP-42, NIP-98, or
+/// equivalent authentication event's `created_at`. Both operators are strict:
+/// equality does not satisfy either clause. `kind=` clauses are deliberately
+/// not evaluated at connection admission, matching NIP-AA's connection-wide
+/// credential semantics.
+///
+/// # Errors
+///
+/// Returns [`SdkError::InvalidInput`] when the credential is invalid or the
+/// signed authentication event does not satisfy a time condition.
+pub fn verify_auth_tag_for_auth_event(
+    auth_tag_json: &str,
+    agent_pubkey: &PublicKey,
+    auth_event_created_at: u64,
+) -> Result<PublicKey, SdkError> {
+    let parsed = parse_auth_tag_fields(auth_tag_json)?;
+    let owner_pubkey = verify_parsed_auth_tag(&parsed, agent_pubkey)?;
+
+    for clause in parsed.conditions.split('&') {
+        let satisfied = if let Some(value) = clause.strip_prefix("created_at<") {
+            let bound = value
+                .parse::<u64>()
+                .map_err(|e| SdkError::InvalidInput(format!("invalid created_at< bound: {e}")))?;
+            auth_event_created_at < bound
+        } else if let Some(value) = clause.strip_prefix("created_at>") {
+            let bound = value
+                .parse::<u64>()
+                .map_err(|e| SdkError::InvalidInput(format!("invalid created_at> bound: {e}")))?;
+            auth_event_created_at > bound
+        } else {
+            continue;
+        };
+
+        if !satisfied {
+            return Err(SdkError::InvalidInput(format!(
+                "auth event created_at {auth_event_created_at} does not satisfy {clause}"
+            )));
+        }
+    }
+
+    Ok(owner_pubkey)
+}
+
+/// Parse a NIP-OA `auth` tag JSON string into a [`Tag`] without verifying the
+/// signature.
+///
+/// Validates structure only:
+/// - Exactly 4 elements
+/// - First element is `"auth"`
+/// - Second element is a 64-character hex string (owner pubkey)
+/// - Fourth element is a 128-character hex string (signature)
+///
+/// This is the fast path used at MCP startup — no crypto is performed.
+///
+/// # Errors
+///
+/// Returns [`SdkError::InvalidInput`] for any structural violation.
+pub fn parse_auth_tag(json_str: &str) -> Result<Tag, SdkError> {
+    let parsed = parse_auth_tag_fields(json_str)?;
+    Tag::parse([
+        "auth",
+        &parsed.owner_pubkey_hex,
+        &parsed.conditions,
+        &parsed.sig_hex,
+    ])
+    .map_err(|e| SdkError::InvalidInput(format!("failed to construct Tag: {e}")))
 }
 
 #[cfg(test)]
@@ -410,6 +456,32 @@ mod tests {
         let wrong_sig =
             serde_json::json!(["auth", OWNER_PUBKEY_HEX, CONDITIONS, "0".repeat(128)]).to_string();
         assert!(verify_auth_tag(&wrong_sig, &agent_pubkey).is_err());
+    }
+
+    #[test]
+    fn test_verify_rejects_noncanonical_hex() {
+        let owner_keys = Keys::generate();
+        let agent_pubkey = Keys::generate().public_key();
+        let tag_json = compute_auth_tag(&owner_keys, &agent_pubkey, "")
+            .expect("compute_auth_tag must succeed");
+        let mut tag: Value = serde_json::from_str(&tag_json).expect("auth tag is valid JSON");
+
+        tag[1] = Value::String(owner_keys.public_key().to_hex().to_uppercase());
+        assert!(
+            verify_auth_tag(&tag.to_string(), &agent_pubkey).is_err(),
+            "uppercase owner pubkeys must not reach the permissive hex decoder"
+        );
+
+        let mut tag: Value = serde_json::from_str(&tag_json).expect("auth tag is valid JSON");
+        let uppercase_sig = tag[3]
+            .as_str()
+            .expect("signature is a string")
+            .to_uppercase();
+        tag[3] = Value::String(uppercase_sig);
+        assert!(
+            verify_auth_tag(&tag.to_string(), &agent_pubkey).is_err(),
+            "uppercase signatures must not reach the permissive hex decoder"
+        );
     }
 
     /// parse_auth_tag with a well-formed JSON array returns a Tag.
@@ -584,6 +656,40 @@ mod tests {
         let err = verify_auth_tag(&bad_conditions, &agent_pubkey)
             .expect_err("leading zero must be rejected at verify");
         assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn auth_event_time_conditions_are_enforced_strictly() {
+        let owner_keys = Keys::generate();
+        let agent_pubkey = Keys::generate().public_key();
+
+        let expired = compute_auth_tag(&owner_keys, &agent_pubkey, "created_at<1")
+            .expect("sign expired credential");
+        assert!(verify_auth_tag_for_auth_event(&expired, &agent_pubkey, 200).is_err());
+
+        let not_yet_valid = compute_auth_tag(&owner_keys, &agent_pubkey, "created_at>200")
+            .expect("sign future credential");
+        assert!(verify_auth_tag_for_auth_event(&not_yet_valid, &agent_pubkey, 200).is_err());
+
+        let failed_second_clause =
+            compute_auth_tag(&owner_keys, &agent_pubkey, "created_at<201&created_at<200")
+                .expect("sign credential with two upper bounds");
+        assert!(
+            verify_auth_tag_for_auth_event(&failed_second_clause, &agent_pubkey, 200).is_err(),
+            "every clause must pass, even when an earlier clause succeeds"
+        );
+
+        let in_window = compute_auth_tag(
+            &owner_keys,
+            &agent_pubkey,
+            "kind=9&created_at>199&created_at<201",
+        )
+        .expect("sign in-window credential");
+        assert_eq!(
+            verify_auth_tag_for_auth_event(&in_window, &agent_pubkey, 200)
+                .expect("in-window credential passes"),
+            owner_keys.public_key()
+        );
     }
 
     #[test]

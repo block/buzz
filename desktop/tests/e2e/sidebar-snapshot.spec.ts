@@ -35,6 +35,17 @@ function makeSnapshotChannel(index: number, prefix = "snapshot") {
   };
 }
 
+// Cold-boot tests hold the first channels read (deferFirstChannelsRead) so the
+// loading state is on screen however long boot takes, then release it here.
+async function releaseFirstChannelsRead(page: Page) {
+  await expect
+    .poll(() => page.evaluate(() => window.__BUZZ_E2E_CHANNELS_READ_PENDING__))
+    .toBe(1);
+  expect(
+    await page.evaluate(() => window.__BUZZ_E2E_RELEASE_CHANNELS_READ__?.()),
+  ).toBe(1);
+}
+
 const FULL_SNAPSHOT = Array.from({ length: 14 }, (_, index) =>
   makeSnapshotChannel(index),
 );
@@ -294,24 +305,53 @@ test("matching not-modified preserves display mutations without persisting them"
 }) => {
   const optimisticName = "optimistic-local-channel";
   await seedSnapshot(page, { hash: MATCHING_HASH });
-  await installMockBridge(page, {
-    channelsReadDelayMs: READ_DELAY_MS,
-    honorChannelsKnownHash: true,
-  });
+  await installMockBridge(page, { honorChannelsKnownHash: true });
   await page.goto("/");
 
   await expect(page.locator('[data-channel-id^="snapshot-"]')).toHaveCount(
     FULL_SNAPSHOT.length,
-    { timeout: 500 },
   );
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.__BUZZ_E2E_QUERY_CLIENT__?.getQueryState(["channels"]),
+      ),
+    )
+    .toMatchObject({ fetchStatus: "idle", status: "success" });
+
+  // Exercise the mutation during a real revalidation, not a race between boot
+  // rendering and a fixed response delay. The cold-boot test covers first paint.
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__?.();
+    void window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+      queryKey: ["channels"],
+      exact: true,
+    });
+  });
+  await expect
+    .poll(() => page.evaluate(() => window.__BUZZ_E2E_CHANNELS_READ_PENDING__))
+    .toBe(1);
   await mutateDisplayedChannels(page, optimisticName);
   await expect(
     page.locator('[data-channel-id="optimistic-channel"]'),
   ).toBeVisible();
 
+  expect(
+    await page.evaluate(() => window.__BUZZ_E2E_RELEASE_CHANNELS_READ__?.()),
+  ).toBe(1);
+  // Invocation logging only proves the request started. Wait for the query to
+  // consume its response before checking either display state or persistence.
   await expect
-    .poll(() => getChannelsPayloads(page))
-    .toEqual([{ knownHash: MATCHING_HASH }]);
+    .poll(() =>
+      page.evaluate(() =>
+        window.__BUZZ_E2E_QUERY_CLIENT__?.getQueryState(["channels"]),
+      ),
+    )
+    .toMatchObject({ fetchStatus: "idle", status: "success" });
+  expect(await getChannelsPayloads(page)).toEqual([
+    { knownHash: MATCHING_HASH },
+    { knownHash: MATCHING_HASH },
+  ]);
   await expect
     .poll(() => readPersistedSnapshot(page))
     .toEqual({
@@ -329,13 +369,12 @@ test("matching not-modified preserves display mutations without persisting them"
 test("first-ever boot without a snapshot sends null and shows loading", async ({
   page,
 }) => {
-  await installMockBridge(page, { channelsReadDelayMs: READ_DELAY_MS });
+  await installMockBridge(page, { deferFirstChannelsRead: true });
   await page.goto("/");
 
-  await expect(page.getByTestId("sidebar-loading")).toBeVisible({
-    timeout: 500,
-  });
+  await expect(page.getByTestId("sidebar-loading")).toBeVisible();
   await expect(page.locator('[data-channel-id^="snapshot-"]')).toHaveCount(0);
+  await releaseFirstChannelsRead(page);
   await expect
     .poll(() => getChannelsPayloads(page))
     .toEqual([{ knownHash: null }]);
@@ -362,13 +401,12 @@ test("a different identity's snapshot is ignored", async ({ page }) => {
     keyOwnerPubkey: OWNER_PUBKEY,
     ownerPubkey: STALE_COMMUNITY_PUBKEY,
   });
-  await installMockBridge(page, { channelsReadDelayMs: READ_DELAY_MS });
+  await installMockBridge(page, { deferFirstChannelsRead: true });
   await page.goto("/");
 
-  await expect(page.getByTestId("sidebar-loading")).toBeVisible({
-    timeout: 500,
-  });
+  await expect(page.getByTestId("sidebar-loading")).toBeVisible();
   await expect(page.locator('[data-channel-id^="snapshot-"]')).toHaveCount(0);
+  await releaseFirstChannelsRead(page);
   await expect
     .poll(() => getChannelsPayloads(page))
     .toEqual([{ knownHash: null }]);
@@ -418,15 +456,14 @@ test("partial hash/list write fails toward a full fetch", async ({ page }) => {
     );
   }, snapshotKey(RELAY_URL));
   await installMockBridge(page, {
-    channelsReadDelayMs: READ_DELAY_MS,
+    deferFirstChannelsRead: true,
     honorChannelsKnownHash: true,
   });
   await page.goto("/");
 
-  await expect(page.getByTestId("sidebar-loading")).toBeVisible({
-    timeout: 500,
-  });
+  await expect(page.getByTestId("sidebar-loading")).toBeVisible();
   await expect(page.locator('[data-channel-id^="snapshot-"]')).toHaveCount(0);
+  await releaseFirstChannelsRead(page);
   await expect
     .poll(() => getChannelsPayloads(page))
     .toEqual([{ knownHash: null }]);
@@ -458,6 +495,7 @@ test("mismatched not-modified hash falls back to a full list", async ({
   page,
 }) => {
   await seedSnapshot(page, { hash: "persisted-stale-hash" });
+  await trackSnapshotRows(page);
   await installMockBridge(page, {
     channelsReadDelayMs: READ_DELAY_MS,
     channelsNotModifiedResponses: 1,
@@ -465,9 +503,11 @@ test("mismatched not-modified hash falls back to a full list", async ({
   await page.goto("/");
 
   const snapshotRows = page.locator('[data-channel-id^="snapshot-"]');
-  await expect(snapshotRows).toHaveCount(FULL_SNAPSHOT.length, {
-    timeout: 500,
-  });
+  // Record the transient boot frame independently of test-runner scheduling;
+  // cold-boot coverage separately enforces the snapshot paint deadline.
+  await expect
+    .poll(() => getTrackedSnapshotRows(page))
+    .toEqual(FULL_SNAPSHOT.map((channel) => channel.id));
   await expect
     .poll(() => getChannelsPayloads(page))
     .toEqual([{ knownHash: "persisted-stale-hash" }, { knownHash: null }]);
@@ -503,16 +543,18 @@ test("hash mismatch replaces the snapshot with the full live list", async ({
   page,
 }) => {
   await seedSnapshot(page, { hash: "stale-hash" });
+  await trackSnapshotRows(page);
   await installMockBridge(page, {
     channelsReadDelayMs: READ_DELAY_MS,
     honorChannelsKnownHash: true,
   });
   await page.goto("/");
 
-  await expect(page.locator('[data-channel-id^="snapshot-"]')).toHaveCount(
-    FULL_SNAPSHOT.length,
-    { timeout: 500 },
-  );
+  // Observe the boot frame even if live revalidation finishes before the
+  // test runner gets its next turn; cold-boot coverage separately times paint.
+  await expect
+    .poll(() => getTrackedSnapshotRows(page))
+    .toEqual(FULL_SNAPSHOT.map((channel) => channel.id));
   await expect
     .poll(() => getChannelsPayloads(page))
     .toEqual([{ knownHash: "stale-hash" }]);

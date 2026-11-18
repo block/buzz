@@ -43,6 +43,8 @@ export function ProjectInboxDetailPane({
   const authorLabel = resolveUserLabel({ profiles, pubkey: authorPubkey });
   const authorAvatarUrl =
     profiles?.[normalizePubkey(authorPubkey)]?.avatarUrl ?? null;
+  const authorIsAgent =
+    profiles?.[normalizePubkey(authorPubkey)]?.isAgent === true;
   const inboxTitle = `${authorLabel} sent you ${
     workItem.type === "pull-request" ? "a review" : "a task"
   }`;
@@ -98,6 +100,7 @@ export function ProjectInboxDetailPane({
                 avatarUrl={authorAvatarUrl}
                 className="shrink-0"
                 displayName={authorLabel}
+                shape={authorIsAgent ? "squircle" : "circle"}
                 size="sm"
                 testId="project-inbox-author-avatar"
               />

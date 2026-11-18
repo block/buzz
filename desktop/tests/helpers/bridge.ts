@@ -1,6 +1,7 @@
 import type { Page } from "@playwright/test";
 import type { ChannelTemplate, RelayEvent } from "../../src/shared/api/types";
 import type { MockManagedAgentSeed } from "../../src/testing/e2eBridge";
+import { DEPRECATION_BANNER_STORAGE_KEY } from "../../src/app/deprecationBannerVisibility";
 import { FEATURE_OVERRIDES_STORAGE_KEY, PREVIEW_FEATURE_IDS } from "./features";
 
 export const TEST_IDENTITIES = {
@@ -56,6 +57,7 @@ type MockSearchProfileSeed = {
 
 type MockRelayAgentSeed = {
   pubkey: string;
+  ownerPubkey?: string | null;
   name: string;
   agentType?: string;
   capabilities?: string[];
@@ -63,7 +65,7 @@ type MockRelayAgentSeed = {
   respondToAllowlist?: string[];
   channelNames?: string[];
   channelIds?: string[];
-  status?: "online" | "away" | "offline";
+  status?: "online" | "away" | "offline" | "unknown";
 };
 
 type MockHuddleSeed = {
@@ -179,6 +181,11 @@ type MockBridgeOptions = {
     normalized_host?: string;
     archived_at?: string | null;
   }>;
+  builderlabQuota?: {
+    quota_used?: number;
+    quota_limit?: number;
+    can_create?: boolean;
+  };
   acpRuntimesCatalog?: Record<string, unknown>[];
   /** Catalog returned after a successful mocked install. */
   acpRuntimesCatalogAfterInstall?: Record<string, unknown>[];
@@ -228,6 +235,10 @@ type MockBridgeOptions = {
   };
   /** Delay an invocation-time huddle snapshot to exercise hydration ordering. */
   huddleStateReadDelayMs?: number;
+  /** Delay (ms) for `sync_agents_to_active_huddle` so e2e tests can hold the
+   * send path open across a leg that writes nothing to the relay.
+   * Releasable early via `__BUZZ_E2E_RELEASE_HUDDLE_AGENT_SYNCS__()`. */
+  syncAgentsToActiveHuddleDelayMs?: number;
   /** Delay companion creation to expose the newly-started huddle handoff state. */
   openHuddleWindowDelayMs?: number;
   /** Delay the native start result after membership arrives in the channel list. */
@@ -250,6 +261,10 @@ type MockBridgeOptions = {
   /** Outcomes for successive explicit persona share publications. */
   personaSharePublicationStatuses?: Array<"published" | "queued">;
   teams?: MockTeamSeed[];
+  /** Community team-catalog (kind:30178) heads returned by relay queries. */
+  teamCatalogEvents?: RelayEvent[];
+  /** Outcomes for successive explicit team share publications. */
+  teamSharePublicationStatuses?: Array<"published" | "queued">;
   relayAgents?: MockRelayAgentSeed[];
   /** Reject successive relay-agent directory reads, then resume. */
   relayAgentListErrors?: (string | null)[];
@@ -261,6 +276,11 @@ type MockBridgeOptions = {
   /** Sequenced add-member failures. A string fails that call; null succeeds. */
   addChannelMembersErrors?: (string | null)[];
   channelMembersReadDelayMs?: number;
+  relayEntryPolicy?: {
+    requiredRelay?: string;
+    required: boolean;
+    error?: string;
+  };
   channelsReadError?: string;
   /** Reject successive mock `get_channels` calls, then resume. */
   channelsReadErrors?: (string | null)[];
@@ -271,6 +291,11 @@ type MockBridgeOptions = {
   /** Reject successive mock `join_channel` calls, then resume. */
   joinChannelErrors?: string[];
   channelsReadDelayMs?: number;
+  /**
+   * Hold the first `get_channels` read until
+   * `__BUZZ_E2E_RELEASE_CHANNELS_READ__` is called.
+   */
+  deferFirstChannelsRead?: boolean;
   /** Return not-modified for this many reads before resuming full payloads. */
   channelsNotModifiedResponses?: number;
   /** When true, a matching knownHash returns a not-modified channel payload. */
@@ -279,6 +304,13 @@ type MockBridgeOptions = {
   deepHistoryMessageCount?: number;
   feedReadError?: string;
   canvasReadError?: string;
+  /** Seed canvas revisions (oldest first); see e2eBridge mock config. */
+  canvasRevisions?: Array<{
+    content: string;
+    createdAt?: number;
+    eventId?: string;
+    author?: string;
+  }>;
   /** Delay (ms) for `apply_workspace`; see e2eBridge mock config. */
   applyCommunityDelayMs?: number;
   /** Reject `clear_pending_navigation_deep_links` with this message. */
@@ -296,17 +328,32 @@ type MockBridgeOptions = {
   closeChannelLiveSubscriptionOnce?: boolean;
   /** Reject successive kind-9 sends with these messages, then resume. */
   sendMessageErrors?: string[];
+  /** Test-only observer control results emitted after mock control publishes. */
+  observerControlResults?: Array<{
+    type: "cancel_turn" | "switch_model";
+    status: string;
+    channelId?: string | null;
+    requestId?: string;
+    modelId?: string;
+  }>;
   /** Reject successive managed-agent starts, then resume. */
   startManagedAgentErrors?: string[];
   /** Delay (ms) after snapshotting a thread-replies page so E2E tests can
    * deliver live reply/aux events while an older response is in flight. */
   threadRepliesDelayMs?: number;
+  /** Hold every `get_thread_replies` response until
+   * `__BUZZ_E2E_RELEASE_THREAD_REPLIES__()` is called — a manual gate the test
+   * releases explicitly, so the thread-aux backfill provably cannot land (and
+   * heal a stale head) before assertions run. See e2eBridge mock config. */
+  deferThreadReplies?: boolean;
   usersBatchDelayMs?: number;
   /** Delay (ms) for older-history fetches; see e2eBridge mock config. */
   channelWindowDelayMs?: number;
   /** Delay (ms) for newest-page fetches; see e2eBridge mock config. */
   channelHeadDelayMs?: number;
   profileReadDelayMs?: number;
+  /** Hold `get_profile` responses until `__BUZZ_E2E_RELEASE_PROFILE_READS__()`. */
+  deferProfileReads?: boolean;
   profileReadError?: string;
   /** Override whether get_profile reports a real kind:0 event. */
   profileHasEvent?: boolean;
@@ -353,6 +400,9 @@ type MockBridgeOptions = {
   /** Set to false to simulate a Linux .deb install where auto-update is not
    *  supported. Defaults to true. See e2eBridge mock.autoUpdateSupported. */
   autoUpdateSupported?: boolean;
+  /** Manifest key the deprecation banner resolves its installer link with.
+   *  Defaults to none. See e2eBridge mock.newAppInstallerTarget. */
+  newAppInstallerTarget?: string;
   /** Reject browser opener calls to exercise manual pairing fallback UI. */
   openerError?: string;
   /** Delay binding signatures so specs can exercise request supersession. */
@@ -451,6 +501,8 @@ type MockBridgeOptions = {
    * can exercise the "Thread deleted" label / disabled-send path.
    */
   deletedEventIds?: string[];
+  /** Reject one identity read after the configured number of successful reads. */
+  identityReadErrorAfter?: { message: string; successfulReads: number };
   /**
    * When true, `get_identity` returns `lost: true` until `persist_current_identity`
    * or `import_identity` is invoked. Drives the identity-lost recovery UX in tests.
@@ -578,6 +630,12 @@ type MockBridgeOptions = {
    * returning a catalog. Exercises the discovery-failure UI path.
    */
   discoverAgentModelsError?: string;
+  /** Delay (ms) before `discover_agent_models` settles. */
+  discoverAgentModelsDelayMs?: number;
+  /** Config surface returned for every agent instead of the per-runtime mocks. */
+  agentConfigSurface?: Record<string, unknown>;
+  /** ACP commands returned by `discover_acp_commands`. Defaults to `[]`. */
+  acpCommands?: Array<{ command: string; binaryPath: string }>;
   /**
    * Providers returned by `discover_backend_providers`. Defaults to `[]`
    * (the "Run on" section stays hidden). Setting this renders the remote
@@ -614,6 +672,12 @@ type BridgeOptions = {
    * that exercise the Experiments toggle UI itself.
    */
   seedPreviewFeatures?: boolean;
+  /**
+   * When true (default), seed the deprecation banner as just dismissed so it
+   * stays out of existing layout and visual baselines. Set to false in specs
+   * that exercise the banner itself.
+   */
+  seedDeprecationBannerDismissed?: boolean;
   user?: keyof typeof TEST_IDENTITIES;
 };
 
@@ -819,6 +883,12 @@ async function seedDefaultCommunity(
   );
 }
 
+async function seedDeprecationBannerDismissed(page: Page) {
+  await page.addInitScript((key) => {
+    window.localStorage.setItem(key, String(Date.now()));
+  }, DEPRECATION_BANNER_STORAGE_KEY);
+}
+
 async function seedPreviewFeaturesEnabled(page: Page) {
   await page.addInitScript(
     ({ key, ids }) => {
@@ -853,6 +923,9 @@ export async function installBridge(page: Page, options: BridgeOptions) {
   // Experiments toggle UI itself pass `seedPreviewFeatures: false`.
   if (options.seedPreviewFeatures !== false) {
     await seedPreviewFeaturesEnabled(page);
+  }
+  if (options.seedDeprecationBannerDismissed !== false) {
+    await seedDeprecationBannerDismissed(page);
   }
 
   await page.addInitScript(
@@ -958,6 +1031,7 @@ export async function installMockBridge(
     skipOnboardingSeed?: boolean;
     skipCommunitySeed?: boolean;
     seedPreviewFeatures?: boolean;
+    seedDeprecationBannerDismissed?: boolean;
   },
 ) {
   await installBridge(page, {
@@ -968,6 +1042,7 @@ export async function installMockBridge(
     skipOnboardingSeed: options?.skipOnboardingSeed,
     skipCommunitySeed: options?.skipCommunitySeed,
     seedPreviewFeatures: options?.seedPreviewFeatures,
+    seedDeprecationBannerDismissed: options?.seedDeprecationBannerDismissed,
   });
 }
 

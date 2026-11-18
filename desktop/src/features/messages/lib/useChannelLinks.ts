@@ -122,6 +122,16 @@ export function useChannelLinks() {
 
       if (debounceTimerRef.current !== null) {
         clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+
+      // A cleared draft closes now: an Enter inside the debounce would
+      // otherwise pick a stale suggestion instead of submitting. Any other
+      // update keeps the debounce, so an edit made while selecting a
+      // suggestion cannot close the menu under the keydown handler.
+      if (value.length === 0) {
+        setChannelQuery(null);
+        return;
       }
 
       debounceTimerRef.current = setTimeout(() => {
@@ -177,8 +187,11 @@ export function useChannelLinks() {
         return { handled: true };
       }
 
+      // Forward Tab selects; Shift+Tab deliberately does not. The reverse
+      // move stays the browser's, so this overlay can't swallow a keyboard
+      // user's way back out (see useMentions for the same split).
       if (
-        event.key === "Tab" ||
+        (event.key === "Tab" && !event.shiftKey) ||
         (event.key === "Enter" &&
           !event.ctrlKey &&
           !event.metaKey &&

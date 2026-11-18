@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -313,7 +314,7 @@ class ObserverRelayNotifier extends Notifier<ObserverRelayState> {
 
   static String _derivePubkey(String privHex) {
     try {
-      return nostr.Keys(privHex).public;
+      return derivePublicKeyHex(privHex);
     } catch (_) {
       throw const FormatException('failed to derive pubkey');
     }

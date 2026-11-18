@@ -30,14 +30,11 @@ import { cn } from "@/shared/lib/cn";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { Button } from "@/shared/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/shared/ui/dialog";
-import { Input } from "@/shared/ui/input";
 import { MembershipDenied } from "./MembershipDenied";
-import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
-import {
-  ONBOARDING_PRIMARY_CTA_CLASS,
-  OnboardingChrome,
-} from "./OnboardingChrome";
-import { OnboardingFooter, OnboardingFooterProvider } from "./OnboardingFooter";
+import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
+import { OnboardingCard, useOnboardingCardLayout } from "./OnboardingCard";
+import { OnboardingFooter } from "./OnboardingFooter";
+import { OnboardingInput } from "./OnboardingInput";
 import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
@@ -85,6 +82,7 @@ function AvatarCircle({
   previewName: string;
   triggerRef?: React.Ref<HTMLButtonElement>;
 }) {
+  const cardLayout = useOnboardingCardLayout();
   const emojiAvatar = parseEmojiAvatarDataUrl(avatarUrl);
   const presentation = useAvatarPresentation(avatarUrl);
   const hasAvatar =
@@ -101,7 +99,10 @@ function AvatarCircle({
     >
       {emojiAvatar ? (
         <span
-          className="flex h-36 w-36 items-center justify-center overflow-hidden rounded-full text-5xl shadow-xs"
+          className={cn(
+            "flex items-center justify-center overflow-hidden rounded-full shadow-xs",
+            "size-28 text-4xl min-[44rem]:size-36 min-[44rem]:text-5xl",
+          )}
           style={{ backgroundColor: emojiAvatar.color }}
         >
           {emojiAvatar.emoji}
@@ -109,13 +110,21 @@ function AvatarCircle({
       ) : hasAvatar ? (
         <ProfileAvatar
           avatarUrl={avatarUrl}
-          className="h-36 w-36 rounded-full text-4xl"
+          className={cn(
+            "rounded-full",
+            "size-28 text-3xl min-[44rem]:size-36 min-[44rem]:text-4xl",
+          )}
           label={previewName}
           testId="community-avatar-circle"
         />
       ) : (
         <span
-          className="flex h-36 w-36 items-center justify-center rounded-full bg-white/30 text-[var(--buzz-onboarding-backup-ink)] transition-colors group-hover:bg-white/40"
+          className={cn(
+            "flex items-center justify-center rounded-full text-[var(--buzz-onboarding-backup-ink)] transition-colors",
+            cardLayout
+              ? "size-28 border border-[#e2e2e2] bg-[#f9f9f9] group-hover:bg-[#f3f3f3] min-[44rem]:size-36"
+              : "size-36 bg-white/30 group-hover:bg-white/40",
+          )}
           data-testid="community-avatar-empty"
         >
           <Plus className="h-7 w-7" aria-hidden="true" />
@@ -471,26 +480,17 @@ export function CommunityOnboardingFlow({
   return (
     <div
       className={cn(
-        "buzz-onboarding-neutral-theme buzz-startup-shell flex h-dvh justify-center overflow-y-auto px-4 text-foreground",
-        isProfileStage || isTeamStage
-          ? "items-start pb-36 pt-[106px]"
-          : "items-stretch",
         isCurtainFading &&
           "pointer-events-none opacity-0 transition-opacity ease-out motion-reduce:transition-none",
       )}
-      data-system-color-scheme={systemColorScheme}
-      data-testid="community-onboarding-flow"
       style={
         isCurtainFading
           ? { transitionDuration: `${ENTERING_CURTAIN_FADE_MS}ms` }
           : undefined
       }
     >
-      <StartupWindowDragRegion />
-      {isProfileStage || isTeamStage ? (
-        <OnboardingChrome current={isTeamStage ? 7 : 6} />
-      ) : null}
-      <OnboardingFooterProvider
+      <OnboardingCard
+        allowWideContent={isTeamStage}
         backAction={
           isProfileStage
             ? {
@@ -506,6 +506,9 @@ export function CommunityOnboardingFlow({
                 }
               : undefined
         }
+        current={isTeamStage ? 7 : isProfileStage ? 6 : 5}
+        systemColorScheme={systemColorScheme}
+        testId="community-onboarding-flow"
       >
         <OnboardingSlideTransition
           direction={transitionDirection}
@@ -515,10 +518,10 @@ export function CommunityOnboardingFlow({
             className={cn(
               "relative mx-auto w-full text-center",
               isProfileStage
-                ? "buzz-onboarding-step-frame flex max-w-[500px] flex-col items-center"
+                ? "flex max-w-[500px] flex-col items-center"
                 : isTeamStage
-                  ? "buzz-onboarding-step-frame flex max-w-[760px] flex-col items-center"
-                  : "flex min-h-dvh max-w-[560px] flex-col justify-center py-8",
+                  ? "flex max-w-[760px] flex-col items-center"
+                  : "flex min-h-full max-w-[560px] flex-col justify-center",
             )}
             data-testid="community-onboarding-body"
           >
@@ -569,7 +572,7 @@ export function CommunityOnboardingFlow({
                       reactions, and agent handoffs.
                     </p>
                   </div>
-                  <div className="flex min-h-0 w-full flex-1 flex-col items-center justify-center pt-8">
+                  <div className="flex min-h-0 w-full flex-1 flex-col items-center justify-center pt-6">
                     <AvatarCircle
                       avatarUrl={avatarUrl}
                       onClick={() => setIsAvatarEditorOpen(true)}
@@ -577,18 +580,17 @@ export function CommunityOnboardingFlow({
                       triggerRef={avatarTriggerRef}
                     />
                     <label
-                      className="mt-7 block w-full max-w-[412px] text-left"
+                      className="mt-4 block w-full max-w-[412px] text-left"
                       htmlFor="community-display-name"
                     >
                       <span className="mb-2 block pl-4 text-sm text-foreground">
                         Your username
                       </span>
-                      <Input
+                      <OnboardingInput
                         aria-label="Community username"
                         autoCapitalize="none"
                         autoComplete="username"
                         autoCorrect="off"
-                        className="h-14 rounded-2xl border-[color:rgb(var(--buzz-onboarding-avatar-control-fg)_/_0.28)] bg-[rgb(var(--buzz-onboarding-avatar-dialog-bg)/0.95)] px-5 text-sm shadow-none placeholder:text-muted-foreground/60 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[color:rgb(var(--buzz-onboarding-avatar-control-fg)_/_0.5)] md:text-sm"
                         data-testid="community-profile-name-key"
                         disabled={isPending || isUploadingAvatar}
                         id="community-display-name"
@@ -754,28 +756,28 @@ export function CommunityOnboardingFlow({
                   Buzz lets you bring multiple agents into the same workspace.
                   Your team will help you get started using Buzz.
                 </p>
-                <div className="flex w-full flex-1 items-center justify-center py-10">
+                <div className="flex w-full flex-1 items-center justify-center py-6">
                   {starterPersonas.length > 0 ? (
-                    <div className="flex flex-wrap justify-center gap-8">
+                    <div className="grid w-full grid-cols-3 gap-6">
                       {starterPersonas.map((persona) => {
                         const animationUrl =
                           STARTER_PERSONA_ANIMATIONS[persona.displayName];
                         return (
                           <div
-                            className="flex w-40 flex-col items-center gap-3"
+                            className="flex min-w-0 flex-col items-center gap-2"
                             key={persona.id}
                           >
                             {animationUrl ? (
                               <img
                                 alt={`${persona.displayName} animated character`}
-                                className="h-40 w-40 object-contain"
+                                className="size-24 object-contain"
                                 data-testid={`starter-persona-${persona.displayName.toLowerCase()}`}
                                 src={animationUrl}
                               />
                             ) : (
                               <ProfileAvatar
                                 avatarUrl={persona.avatarUrl}
-                                className="h-28 w-28 text-3xl"
+                                className="size-24 text-3xl"
                                 label={persona.displayName}
                               />
                             )}
@@ -823,7 +825,7 @@ export function CommunityOnboardingFlow({
             )}
           </div>
         </OnboardingSlideTransition>
-      </OnboardingFooterProvider>
+      </OnboardingCard>
     </div>
   );
 }

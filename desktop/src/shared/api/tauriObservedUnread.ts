@@ -9,7 +9,7 @@ export type ObservedUnreadProjection = {
   badgeCount: number;
   appBadgeCount: number;
   topLevelUnread: boolean;
-  highPriorityUnread: boolean;
+  highPriorityCount: number;
 };
 export type ObservedUnreadMembershipSeed = {
   participatedRootIds: string[];

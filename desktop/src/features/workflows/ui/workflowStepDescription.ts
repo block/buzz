@@ -1,4 +1,4 @@
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { truncateNpub } from "@/shared/lib/pubkey";
 import {
   formatDurationSecondsVerbose,
   parseDurationSeconds,
@@ -20,11 +20,17 @@ function quoted(value: string | undefined): string | null {
   return normalized ? `“${normalized}”` : null;
 }
 
+// DM/approver references are pubkeys — 64-char hex in any case, or a
+// canonical lowercase npub — or freeform role/template text; only a key
+// identity renders as a key (an npub-shaped string that fails the shared
+// helper's checksum renders the neutral Unavailable, never raw text).
+const KEY_REFERENCE = /^(?:[0-9a-f]{64}|npub1[0-9a-z]+)$/i;
+
 function destination(value: string | undefined): string | null {
   const normalized = value?.trim();
   if (!normalized) return null;
-  return /^[0-9a-f]{64}$/i.test(normalized)
-    ? truncatePubkey(normalized)
+  return KEY_REFERENCE.test(normalized)
+    ? truncateNpub(normalized)
     : compact(normalized);
 }
 

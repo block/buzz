@@ -1,0 +1,7 @@
+{
+  "description": "Unrelated root: must reject the fresh synthetic enrollment signed by the test CA.",
+  "app_id": "TEAMID.xyz.buzz.mobile",
+  "challenge": "buzz-app-attest-strict-verifier-fixture",
+  "aaguid": "appattest",
+  "root_cert_pem": "-----BEGIN CERTIFICATE-----\nMIIB1DCCAVugAwIBAgIRALE3l3fzQ4wPjIL/IjBs02IwCgYIKoZIzj0EAwMwOzEq\nMCgGA1UEAwwhVW5yZWxhdGVkIEFwcCBBdHRlc3QgRml4dHVyZSBSb290MQ0wCwYD\nVQQKDARCdXp6MB4XDTI2MDgwMjA1MjcwMloXDTQ2MDgwMjA1MjcwMlowOzEqMCgG\nA1UEAwwhVW5yZWxhdGVkIEFwcCBBdHRlc3QgRml4dHVyZSBSb290MQ0wCwYDVQQK\nDARCdXp6MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAEPa8SWuDIcjNVDwTXlTQnWbKj\n5Vt8TCiGGH0CiSJajPOlevvjHBEYuVHf7bFYa5N/7OzXQ3qkZomCyizJ6nc5tBEN\nGL3rkz7vZjb9J3QPfixkBwyUHFHmx1WJ84fgAYcDoyMwITAPBgNVHRMBAf8EBTAD\nAQH/MA4GA1UdDwEB/wQEAwIBBjAKBggqhkjOPQQDAwNnADBkAjAMO0cvuHHJSqWj\n4DxJorq8LH7VH9ILTGjcZmz91rLlO7w4oDqiewFQE+GVFl9boekCMBhaa0a/WiW2\nyf2j5d04SOkXREM1NkbHsd1yH1jqSOCuj6PU3Z6zDSSXy1z3HjQIBg==\n-----END CERTIFICATE-----\n"
+}

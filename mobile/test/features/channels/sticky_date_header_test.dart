@@ -26,7 +26,12 @@ void main() {
         await tester.pumpWidget(
           MaterialApp(
             theme: AppTheme.light(),
-            home: Scaffold(body: StickyDateHeader(state: state)),
+            home: Scaffold(
+              body: StickyDateHeader(
+                state: state,
+                scrollVisible: const AlwaysStoppedAnimation(true),
+              ),
+            ),
           ),
         );
 
@@ -158,7 +163,12 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(
           theme: AppTheme.light(),
-          home: Scaffold(body: StickyDateHeader(state: state)),
+          home: Scaffold(
+            body: StickyDateHeader(
+              state: state,
+              scrollVisible: const AlwaysStoppedAnimation(true),
+            ),
+          ),
         ),
       );
 

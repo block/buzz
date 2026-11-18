@@ -1,5 +1,9 @@
 part of '../compose_bar.dart';
 
+String _composerDraftIdentity(WidgetRef ref) =>
+    '${ref.watch(relayConfigProvider).baseUrl}'
+    ':${ref.watch(myPubkeyProvider) ?? 'anon'}';
+
 void _useComposerFocusRestorer({
   required ValueChanged<VoidCallback>? onChanged,
   required ValueNotifier<bool> isExpanded,
@@ -28,13 +32,19 @@ void _useComposerChannelNames(
   _MarkdownEditingController controller,
   AsyncValue<List<Channel>> channelsAsync,
 ) {
-  final channelNames = {
-    for (final channel in channelsAsync.asData?.value ?? const <Channel>[])
-      channel.name.toLowerCase(): channel.id,
-  };
-  final channelNamesKey = channelNames.entries
-      .map((entry) => '${entry.key}\u0000${entry.value}')
-      .join('\u0001');
+  // The composer rebuilds on every keystroke and keyboard frame, so build the
+  // name map and its key only when the channel list itself changes.
+  final channels = channelsAsync.asData?.value;
+  final (:channelNames, :channelNamesKey) = useMemoized(() {
+    final names = {
+      for (final channel in channels ?? const <Channel>[])
+        channel.name.toLowerCase(): channel.id,
+    };
+    final key = names.entries
+        .map((entry) => '${entry.key}\u0000${entry.value}')
+        .join('\u0001');
+    return (channelNames: names, channelNamesKey: key);
+  }, [channels]);
   useEffect(() {
     controller.setChannelNames(channelNames);
     return null;
@@ -43,11 +53,52 @@ void _useComposerChannelNames(
 
 const _typingThrottleMs = 3000;
 
+/// How long a keyboard that was up before an inactive spell may take to come
+/// back after the app resumes. iOS restores it natively a few hundred
+/// milliseconds after `resumed` (flutter/flutter#189051 logs about 0.4 s).
+const _composerKeyboardRestoreGrace = Duration(seconds: 1);
+
+// Keyboard show/hide drives Android IME lift and collapses on hide.
+void _useComposerKeyboardMetrics({
+  required BuildContext context,
+  required FocusNode focusNode,
+  required _ComposerVoiceNote voiceNote,
+  required ObjectRef<Timer?> androidImeFallbackTimer,
+  required ValueNotifier<bool> androidImeTransitionStarted,
+  required VoidCallback collapseComposer,
+}) {
+  final appView = View.of(context);
+  useEffect(() {
+    final observer = _ComposerKeyboardMetricsObserver(
+      view: appView,
+      onKeyboardShown: () {
+        androidImeFallbackTimer.value?.cancel();
+        androidImeTransitionStarted.value = true;
+      },
+      onKeyboardHidden: () {
+        androidImeFallbackTimer.value?.cancel();
+        if (defaultTargetPlatform == TargetPlatform.android) {
+          androidImeTransitionStarted.value = false;
+        }
+        voiceNote.onKeyboardHidden();
+        collapseComposer();
+        focusNode.unfocus();
+      },
+    );
+    WidgetsBinding.instance.addObserver(observer);
+    return () {
+      WidgetsBinding.instance.removeObserver(observer);
+      observer.dispose();
+    };
+  }, [appView, focusNode, voiceNote.isPreparing]);
+}
+
 class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
   final FlutterView view;
   final VoidCallback onKeyboardShown;
   final VoidCallback onKeyboardHidden;
   bool _wasVisible;
+  Timer? _restoreGrace;
 
   _ComposerKeyboardMetricsObserver({
     required this.view,
@@ -55,8 +106,47 @@ class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
     required this.onKeyboardHidden,
   }) : _wasVisible = view.viewInsets.bottom > 0;
 
+  // iOS drops the keyboard inset while the app is inactive (Control Center,
+  // the app switcher) and restores the keyboard natively after it resumes.
+  // Treating that drop as a dismissal collapsed the composer and left the
+  // restored keyboard attached to no field. So ignore metrics until the app
+  // resumes, and give a keyboard that was up the restore grace to return
+  // before deciding it was dismissed.
   @override
   void didChangeMetrics() {
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    if (lifecycle != null && lifecycle != AppLifecycleState.resumed) return;
+    if (_restoreGrace != null) {
+      if (view.viewInsets.bottom <= 0) return;
+      _cancelRestoreGrace();
+    }
+    _reconcile();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) {
+      _cancelRestoreGrace();
+      return;
+    }
+    if (_wasVisible && view.viewInsets.bottom <= 0) {
+      _restoreGrace ??= Timer(_composerKeyboardRestoreGrace, () {
+        _restoreGrace = null;
+        _reconcile();
+      });
+      return;
+    }
+    _reconcile();
+  }
+
+  void dispose() => _cancelRestoreGrace();
+
+  void _cancelRestoreGrace() {
+    _restoreGrace?.cancel();
+    _restoreGrace = null;
+  }
+
+  void _reconcile() {
     final isVisible = view.viewInsets.bottom > 0;
     if (!_wasVisible && isVisible) onKeyboardShown();
     if (_wasVisible && !isVisible) onKeyboardHidden();
@@ -84,6 +174,25 @@ void _showComposerEmojiPicker(
 void _dismissComposerKeyboard(FocusNode focusNode) {
   focusNode.unfocus();
   unawaited(SystemChannels.textInput.invokeMethod<void>('TextInput.hide'));
+}
+
+void _chooseComposerAttachment(
+  BuildContext context,
+  ValueNotifier<_AttachmentSurface> attachmentSurface,
+  ValueNotifier<String?> uploadError,
+  Future<void> Function() choose, {
+  String? errorMessage,
+}) {
+  attachmentSurface.value = _AttachmentSurface.closed;
+  unawaited(() async {
+    try {
+      await choose();
+    } catch (error) {
+      if (context.mounted) {
+        uploadError.value = errorMessage ?? _formatUploadError(error);
+      }
+    }
+  }());
 }
 
 Duration _composerMotionDuration(
@@ -135,6 +244,11 @@ void _expandComposer({
 Widget _composerSuggestionPanel({
   required List<Channel> channelSuggestions,
   required List<MentionCandidate> mentionSuggestions,
+  required Set<String> unavailableMentions,
+  required bool mentionSearchFailed,
+  required bool reserveMentionHeight,
+  required bool mentionSearching,
+  required VoidCallback onMentionSearchRetry,
   required Map<String, UserProfile> userCache,
   required String? currentPubkey,
   required bool isDmChannel,
@@ -148,11 +262,16 @@ Widget _composerSuggestionPanel({
           onSelect: onChannelSelect,
         ),
       )
-    : mentionSuggestions.isNotEmpty
+    : mentionSuggestions.isNotEmpty || mentionSearchFailed
     ? KeyedSubtree(
         key: const ValueKey('mention-suggestions'),
         child: _MentionSuggestions(
           suggestions: mentionSuggestions,
+          unavailable: unavailableMentions,
+          searchFailed: mentionSearchFailed,
+          reserveHeight: reserveMentionHeight,
+          searching: mentionSearching,
+          onRetry: onMentionSearchRetry,
           userCache: userCache,
           currentPubkey: currentPubkey,
           isDmChannel: isDmChannel,
@@ -168,11 +287,13 @@ Widget _composerAttachmentPanel({
   required VoidCallback onCamera,
   required VoidCallback onPhotos,
   required VoidCallback onVideo,
+  required VoidCallback onVoiceNote,
   required VoidCallback onFiles,
   required Future<void> Function(XFile image) onCapture,
   required Future<List<XFile>> Function() onPickAllPhotos,
   required Future<void> Function(List<XFile> photos) onChoosePhotos,
   required Future<void> Function(List<XFile> photos) onChooseAllPhotos,
+  required Future<void> Function(Future<void> Function()) preparePhotos,
 }) => _AttachmentSurfacePanel(
   key: ValueKey(
     surface == _AttachmentSurface.closed
@@ -185,11 +306,13 @@ Widget _composerAttachmentPanel({
   onCamera: onCamera,
   onPhotos: onPhotos,
   onVideo: onVideo,
+  onVoiceNote: onVoiceNote,
   onFiles: onFiles,
   onCapture: onCapture,
   onPickAllPhotos: onPickAllPhotos,
   onChoosePhotos: onChoosePhotos,
   onChooseAllPhotos: onChooseAllPhotos,
+  preparePhotos: preparePhotos,
 );
 
 const _pastedImageMimeTypes = <String>[
@@ -198,10 +321,6 @@ const _pastedImageMimeTypes = <String>[
   'image/png',
   'image/webp',
 ];
-
-/// Cap on ranked mention suggestions shown — matches desktop's
-/// `MENTION_SUGGESTION_LIMIT`.
-const _mentionSuggestionLimit = 50;
 
 /// Walk backward from [cursor] looking for [trigger] (e.g. `@` or `#`) at a
 /// word boundary. Returns the index of the trigger character, or `null` if none
@@ -257,6 +376,82 @@ void spliceAndMoveCursor(
   focusNode.requestFocus();
 }
 
+/// Channel members as the send resolves typed names: loaded members, or the
+/// cached roster while they load.
+List<MentionCandidate> _typedMemberCandidates({
+  required AsyncValue<List<ChannelMember>> membersAsync,
+  required SessionStatus sessionStatus,
+  required List<ChannelMember> cachedMembers,
+  required Map<String, UserProfile> userCache,
+  required Map<String, String>? agentOwners,
+}) => buildMentionCandidates(
+  members: channelMembersForAutocomplete(
+    membersAsync: membersAsync,
+    sessionStatus: sessionStatus,
+    cachedMembers: cachedMembers,
+  ),
+  relayAgents: const [],
+  sharedChannelIds: const {},
+  userCache: userCache,
+  ownerByAgentPubkey: agentOwners ?? const {},
+);
+
+/// Qualify earlier namesake mentions outside code, keeping the cursor in
+/// place, and rebind [mentions] before the text changes. A key with any
+/// plain occurrence left, by the presence rule draft persistence uses (code
+/// formatting ignored), stays bound beside its qualified label. Returns
+/// [start] shifted by the edits before it. Call it before tracking the new
+/// selection: persistence prunes keys absent from the text. [competitors] are
+/// the typed member labels the send resolves: a longer one keeps its
+/// occurrence instead of losing its prefix to a rename.
+int _requalifyNamesakes(
+  _MarkdownEditingController controller,
+  Map<String, MentionCandidate> mentions,
+  MentionCandidate candidate,
+  int start,
+  Iterable<String> competitors,
+) {
+  final renames = namesakeRequalifications(candidate.label, candidate.pubkey, {
+    for (final entry in mentions.entries) entry.key: entry.value.pubkey,
+  });
+  if (renames.isEmpty) return start;
+  final text = controller.text;
+  final cursor = controller.selection.isValid
+      ? controller.selection.baseOffset
+      : text.length;
+  final code = controller._styledCodeRanges(text);
+  // Selected keys first, so an equal-length duplicate stays the selection's.
+  final selected = {for (final key in mentions.keys) key.toLowerCase()};
+  final labels = [
+    ...mentions.keys,
+    ...competitors.where((label) => !selected.contains(label.toLowerCase())),
+  ];
+  final result = renameMentions(
+    text,
+    labels,
+    renames,
+    start,
+    // Exactly what the editor draws as code stays as typed.
+    excluded: (from, to) => code.any((c) => c.start < from && to < c.end),
+  );
+  // Backtick-adjacent code is no occurrence, but persistence still keeps it.
+  final remaining = mentionOccurrences(
+    result.text.replaceAll('`', ' '),
+    labels,
+  ).map((range) => range.label).toSet().intersection(result.renamed);
+  for (final key in result.renamed) {
+    mentions[renames[key]!] =
+        result.kept.contains(key) || remaining.contains(key)
+        ? mentions[key]!
+        : mentions.remove(key)!;
+  }
+  controller.value = TextEditingValue(
+    text: result.text,
+    selection: TextSelection.collapsed(offset: cursor + result.offset - start),
+  );
+  return result.offset;
+}
+
 /// Insert [trigger] (e.g. `@` or `#`) at the cursor position, prefixed with
 /// a space if needed for word separation. Used by `triggerMention` and
 /// `triggerChannel`.
@@ -279,14 +474,6 @@ void _insertTriggerAtCursor(
     selection: TextSelection.collapsed(offset: cursor + insert.length),
   );
   focusNode.requestFocus();
-}
-
-bool hasMention(String text, String name) {
-  final pattern = RegExp(
-    '(?:^|\\s|[*_]{1,3}|\\|\\|)@${RegExp.escape(name)}(?=\\|\\||[\\s,;.!?:)\\]}*_]|\$)',
-    caseSensitive: false,
-  );
-  return pattern.hasMatch(text);
 }
 
 /// Outcome of the non-member mention prompt. `null` (dialog dismissed)
@@ -369,12 +556,11 @@ void _sendTypingIndicator(
         ['e', threadHeadId, '', 'reply'],
     ];
 
-    final event = nostr.Event.from(
+    final event = signNostrEvent(
       kind: EventKind.typingIndicator,
       content: '',
       tags: tags,
       secretKey: privkeyHex,
-      verify: false,
     );
 
     // Send directly over WebSocket — fire-and-forget, matching desktop.
@@ -392,8 +578,9 @@ void _sendTypingIndicator(
 /// identity change that causes the failure also resets that state on the next
 /// frame, so [messenger] must be resolved before the send's first `await`.
 void _reportSendCancelledByCommunitySwitch(ScaffoldMessengerState? messenger) {
-  messenger?.showSnackBar(
-    const SnackBar(content: Text('Message not sent: the community changed')),
+  messenger?.showFeedbackSnackBar(
+    const SnackBar(content: Text('Not sent. Community changed.')),
+    kind: ToastKind.error,
   );
 }
 
@@ -464,21 +651,26 @@ Future<_NonMemberAddOutcome> _addMentionedNonMembers(
 @immutable
 class _NonMemberMentionScan {
   final String channelId;
-  final List<String> agentPubkeys;
-  final List<MentionCandidate> humans;
+
+  /// Mentioned people and agents outside the channel, in draft order.
+  final List<MentionCandidate> outside;
   final bool canAddMembers;
+
+  /// Whether the destination is a DM. Nobody can be added to a DM, so its
+  /// outside people are sent as references without a prompt.
+  final bool isDm;
 
   const _NonMemberMentionScan({
     required this.channelId,
-    required this.agentPubkeys,
-    required this.humans,
+    required this.outside,
     required this.canAddMembers,
+    required this.isDm,
   });
 }
 
 /// Resolves which mentioned identities are non-members, and whether this
-/// identity may add them (see [Channel.canAddMembers]). DMs are skipped: their
-/// participant set is fixed at creation.
+/// identity may add them (see [Channel.canAddMembers]). A DM's participant set
+/// is fixed at creation, so nobody outside it can be added.
 Future<_NonMemberMentionScan> _scanNonMemberMentions(
   WidgetRef ref, {
   required String channelId,
@@ -487,20 +679,39 @@ Future<_NonMemberMentionScan> _scanNonMemberMentions(
 }) async {
   final none = _NonMemberMentionScan(
     channelId: channelId,
-    agentPubkeys: const [],
-    humans: const [],
+    outside: const [],
     canAddMembers: true,
+    isDm: false,
   );
   if (selectedMentions.isEmpty) return none;
 
-  final channel = (await ref.read(
-    channelsProvider.future,
-  )).firstWhere((candidate) => candidate.id == channelId);
-  if (channel.isDm) return none;
+  // A DM opened ahead of a reloading list is found without waiting for it.
+  final channel =
+      ref.read(channelsProvider.notifier).channelById(channelId) ??
+      (await ref.read(
+        channelsProvider.future,
+      )).firstWhere((candidate) => candidate.id == channelId);
 
-  final members = await ref.read(channelMembersProvider(channelId).future);
+  // A DM decides who is inside it the way its send does: by current
+  // membership, or by the channel metadata when membership is unavailable.
+  // A channel needs its membership; a failure here reaches the send, which
+  // reports it and keeps the draft.
+  List<ChannelMember> members;
+  if (channel.isDm) {
+    try {
+      members = await ref.read(channelMembersProvider(channelId).future);
+    } catch (_) {
+      members = const [];
+    }
+  } else {
+    members = await ref.read(channelMembersProvider(channelId).future);
+  }
   final memberPubkeys = {
-    for (final member in members) member.pubkey.toLowerCase(),
+    if (channel.isDm)
+      for (final pubkey in dmParticipantPubkeys(channel, members))
+        pubkey.toLowerCase()
+    else
+      for (final member in members) member.pubkey.toLowerCase(),
   };
   String? selfRole;
   if (currentPubkey != null) {
@@ -513,24 +724,19 @@ Future<_NonMemberMentionScan> _scanNonMemberMentions(
     }
   }
 
-  final agentPubkeys = <String>[];
-  final humans = <MentionCandidate>[];
+  final outside = <MentionCandidate>[];
   final seen = <String>{};
   for (final candidate in selectedMentions) {
     final pubkey = candidate.pubkey.toLowerCase();
     if (memberPubkeys.contains(pubkey) || !seen.add(pubkey)) continue;
-    if (candidate.isAgent) {
-      agentPubkeys.add(pubkey);
-    } else {
-      humans.add(candidate);
-    }
+    outside.add(candidate);
   }
 
   return _NonMemberMentionScan(
     channelId: channelId,
-    agentPubkeys: agentPubkeys,
-    humans: humans,
+    outside: outside,
     canAddMembers: channel.canAddMembers(selfRole),
+    isDm: channel.isDm,
   );
 }
 
@@ -542,7 +748,7 @@ Future<_NonMemberMentionScan> _scanNonMemberMentions(
 class _OutgoingMentions {
   List<String> pubkeys;
   final List<List<String>> referenceTags = [];
-  List<String> _invitedHumanPubkeys = const [];
+  List<MentionCandidate> _invited = const [];
 
   _OutgoingMentions(List<MentionCandidate> selectedMentions)
     : pubkeys = LinkedHashSet<String>.from(
@@ -561,19 +767,17 @@ class _OutgoingMentions {
     ]);
   }
 
-  /// Applies the mention prompt's outcome: invite them, or send without.
-  void resolveHumanChoice(
+  /// Applies the mention prompt's outcome: invite everyone outside, or send
+  /// with them as references. Agents and people are treated the same.
+  void resolveOutsideChoice(
     _NonMemberMentionChoice choice,
-    List<MentionCandidate> humans,
+    List<MentionCandidate> outside,
   ) {
-    final humanPubkeys = [
-      for (final candidate in humans) candidate.pubkey.toLowerCase(),
-    ];
     switch (choice) {
       case _NonMemberMentionChoice.invite:
-        _invitedHumanPubkeys = humanPubkeys;
+        _invited = outside;
       case _NonMemberMentionChoice.sendWithoutInviting:
-        demote(humanPubkeys);
+        demote([for (final candidate in outside) candidate.pubkey]);
     }
   }
 
@@ -586,15 +790,78 @@ class _OutgoingMentions {
     final outcome = await _addMentionedNonMembers(
       channelActions,
       channelId: scan.channelId,
-      agentPubkeys: scan.agentPubkeys,
-      humanPubkeys: _invitedHumanPubkeys,
+      agentPubkeys: [
+        for (final candidate in _invited)
+          if (candidate.isAgent) candidate.pubkey.toLowerCase(),
+      ],
+      humanPubkeys: [
+        for (final candidate in _invited)
+          if (!candidate.isAgent) candidate.pubkey.toLowerCase(),
+      ],
       canAddMembers: scan.canAddMembers,
     );
     demote(outcome.notAdded);
     if (outcome.errors.isNotEmpty) {
-      messenger?.showSnackBar(
+      messenger?.showFeedbackSnackBar(
         SnackBar(content: Text(outcome.errors.join(' '))),
+        kind: ToastKind.error,
       );
     }
   }
+}
+
+/// Insert an emoji at the cursor without replacing the draft.
+void _insertComposerEmoji(
+  TextEditingController controller,
+  FocusNode focusNode,
+  String emoji,
+) {
+  final text = controller.text;
+  final selection = controller.selection;
+  final cursor = selection.isValid
+      ? selection.baseOffset.clamp(0, text.length)
+      : text.length;
+  controller.value = TextEditingValue(
+    text: text.replaceRange(cursor, cursor, emoji),
+    selection: TextSelection.collapsed(offset: cursor + emoji.length),
+  );
+  focusNode.requestFocus();
+}
+
+// Wrap or insert markdown formatting around the current selection.
+void _applyComposerFormat(
+  TextEditingController controller,
+  FocusNode focusNode,
+  ObjectRef<bool> isModifyingText,
+  String prefix,
+  String? suffix,
+) {
+  suffix ??= prefix;
+  final text = controller.text;
+  final sel = controller.selection;
+  if (!sel.isValid) return;
+
+  isModifyingText.value = true;
+  try {
+    if (sel.isCollapsed) {
+      final offset = sel.baseOffset;
+      final updated =
+          '${text.substring(0, offset)}$prefix$suffix${text.substring(offset)}';
+      controller.text = updated;
+      controller.selection = TextSelection.collapsed(
+        offset: offset + prefix.length,
+      );
+    } else {
+      final selected = text.substring(sel.start, sel.end);
+      final updated =
+          '${text.substring(0, sel.start)}$prefix$selected$suffix${text.substring(sel.end)}';
+      controller.text = updated;
+      controller.selection = TextSelection.collapsed(
+        offset: sel.start + prefix.length + selected.length + suffix.length,
+      );
+    }
+  } finally {
+    isModifyingText.value = false;
+  }
+  focusNode.requestFocus();
 }

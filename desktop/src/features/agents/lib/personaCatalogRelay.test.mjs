@@ -22,6 +22,7 @@ function publication(overrides = {}) {
       namePool: [],
       respondTo: null,
       parallelism: null,
+      sessionPolicy: "channel",
     },
     ...overrides,
   };
@@ -45,6 +46,7 @@ test("a pending local share does not appear before relay confirmation", () => {
     respondTo: null,
     respondToAllowlist: [],
     parallelism: null,
+    sessionPolicy: "channel",
     createdAt: "2026-07-26T00:00:00.000Z",
     updatedAt: "2026-07-26T00:00:00.000Z",
   };
@@ -127,6 +129,18 @@ test("test_foreign_entry_with_no_local_copy_stays_unselected", () => {
 
   assert.equal(personas[0].id, `catalog:${ALICE}:reviewer`);
   assert.equal(personas[0].isActive, false);
+});
+
+test("test_catalog_projection_preserves_session_policy", () => {
+  const publications = [
+    publication({
+      agent: { ...publication().agent, sessionPolicy: "thread" },
+    }),
+  ];
+
+  const personas = catalogPersonasFromPublications(publications, [], BOB);
+
+  assert.equal(personas[0].sessionPolicy, "thread");
 });
 
 // Provenance is per-owner: the same d-tag under a different publisher is a

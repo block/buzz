@@ -1,6 +1,6 @@
 //! Unit and integration tests for `archive/mod.rs`.
 //!
-//! Kept in a sibling file so `mod.rs` stays under the 1000-line gate;
+//! Kept in a sibling file so `mod.rs` stays under the 1500-line gate;
 //! `#[path]`-included from there.
 
 use super::pipeline::BucketWithResult;
@@ -622,7 +622,7 @@ fn test_commit_archive_rolls_back_when_scope_write_would_fail() {
 }
 
 // Kind-44200 agent-turn-metric coverage lives in a sibling file to keep this
-// one under the 1000-line gate; nested here (not in `mod.rs`) so it inherits
+// one under the 1500-line gate; nested here (not in `mod.rs`) so it inherits
 // the shared fixtures above through `use super::*`.
 #[path = "mod_agent_metric_tests.rs"]
 mod agent_metric;

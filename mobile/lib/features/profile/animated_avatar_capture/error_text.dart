@@ -20,3 +20,10 @@ class _ErrorText extends StatelessWidget {
     ),
   );
 }
+
+Color _personOutlineColor(int backdropColor) {
+  final color = Color(backdropColor);
+  return color.computeLuminance() > 0.74
+      ? const Color(0xFF111111)
+      : Colors.white;
+}

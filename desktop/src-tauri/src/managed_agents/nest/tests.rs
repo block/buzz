@@ -1,32 +1,57 @@
 use super::*;
 
 #[test]
-fn nest_dir_is_under_home() {
-    if let Some(dir) = nest_dir() {
-        // Accepts both .buzz (prod) and .buzz-dev (dev) depending on
-        // whether init_nest_dir was called before this test ran.
-        let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+#[should_panic(expected = "nest_dir() is not pinned")]
+fn unpinned_nest_dir_panics_instead_of_using_the_real_nest() {
+    nest_dir();
+}
+
+/// Runs in a child process: without the guard, init_nest_dir() would set the
+/// real nest for every later test in this process.
+#[test]
+fn init_nest_dir_panics_unless_the_nest_is_pinned() {
+    const CHILD: &str = "BUZZ_INIT_NEST_DIR_TEST_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let panic = std::panic::catch_unwind(|| init_nest_dir(false))
+            .expect_err("unpinned init_nest_dir() must panic");
+        let message = panic.downcast_ref::<String>().map(String::as_str);
         assert!(
-            name == NEST_DIR_PROD || name == NEST_DIR_DEV,
-            "nest_dir must end with .buzz or .buzz-dev, got {dir:?}"
+            message.is_some_and(|m| m.contains("init_nest_dir() would point")),
+            "unexpected panic: {message:?}"
         );
+
+        let nest = tempfile::tempdir().unwrap();
+        pin_nest_dir_for_test(nest.path().to_path_buf());
+        init_nest_dir(false);
+        assert_eq!(nest_dir(), Some(nest.path().to_path_buf()));
+        return;
     }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "managed_agents::nest::tests::init_nest_dir_panics_unless_the_nest_is_pinned",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "child failed: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
-fn init_nest_dir_prod_sets_buzz() {
-    // init_nest_dir is idempotent (OnceLock) — once set, subsequent calls
-    // are no-ops. We can only test the fallback path if the OnceLock is
-    // unset, which is only true in a fresh process. Instead, verify that
-    // nest_dir() always returns a path ending with a valid nest suffix.
-    let dir = nest_dir();
-    if let Some(d) = dir {
-        let name = d.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        assert!(
-            name == NEST_DIR_PROD || name == NEST_DIR_DEV,
-            "nest_dir suffix must be .buzz or .buzz-dev, got {d:?}"
-        );
-    }
+fn thread_nest_pin_is_removed_with_its_temp_dir() {
+    let nest = pin_temp_nest_dir_for_thread();
+    let path = nest.path().to_path_buf();
+    assert_eq!(nest_dir(), Some(path.clone()));
+
+    drop(nest);
+    assert!(!path.exists(), "temp nest must be deleted");
+    assert!(THREAD_NEST_DIR.with(|pinned| pinned.borrow().is_none()));
 }
 
 #[test]
@@ -39,6 +64,16 @@ fn nest_skill_contains_safe_mention_workflow() {
     assert!(BUZZ_CLI_SKILL_MD.contains("no follow-up verification command is needed"));
     assert!(BUZZ_CLI_SKILL_MD.contains("Add membership separately only when authorized"));
     assert!(BUZZ_CLI_SKILL_MD.contains("never changes membership automatically"));
+}
+
+#[test]
+fn nest_agents_template_defers_commit_policy_to_repositories() {
+    assert_eq!(AGENTS_MD.matches("## Git Commit Attribution").count(), 1);
+    assert!(AGENTS_MD.contains("the runtime sets a default git identity and signing"));
+    assert!(AGENTS_MD.contains("`BUZZ_GIT_IDENTITY=user`"));
+    assert!(AGENTS_MD.contains("Credit the other party with a `Co-authored-by` trailer"));
+    assert!(AGENTS_MD.contains("Follow each repository's own `AGENTS.md` for sign-off (DCO)"));
+    assert!(!AGENTS_MD.contains("every commit MUST include a `Signed-off-by`"));
 }
 
 #[test]
@@ -342,13 +377,19 @@ fn ensure_skill_symlinks_skip_dangling_symlink() {
 }
 
 #[test]
-fn cli_link_name_prod_is_buzz() {
-    assert_eq!(cli_link_name(false), "buzz");
+fn cli_link_name_prod_follows_build_identity() {
+    let expected = crate::build_identity::demo_slug()
+        .map(|slug| format!("buzz-demo-{slug}"))
+        .unwrap_or_else(|| "buzz".to_string());
+    assert_eq!(cli_link_name(false), expected);
 }
 
 #[test]
-fn cli_link_name_dev_is_buzz_dev() {
-    assert_eq!(cli_link_name(true), "buzz-dev");
+fn cli_link_name_dev_follows_build_identity() {
+    let expected = crate::build_identity::demo_slug()
+        .map(|slug| format!("buzz-demo-{slug}"))
+        .unwrap_or_else(|| "buzz-dev".to_string());
+    assert_eq!(cli_link_name(true), expected);
 }
 
 #[cfg(unix)]
@@ -380,8 +421,8 @@ fn ensure_cli_symlink_creates_symlink_dev() {
     let local_bin = tmp.path().join("local_bin");
     fs::create_dir_all(&local_bin).unwrap();
 
-    // Dev link must be "buzz-dev", never "buzz".
-    assert_eq!(cli_link_name(true), "buzz-dev");
+    // Dev and demo links must never overwrite production's "buzz".
+    assert_ne!(cli_link_name(true), "buzz");
 
     let link = local_bin.join(cli_link_name(true));
     std::os::unix::fs::symlink(exe_parent.join("buzz"), &link).unwrap();
@@ -429,6 +470,34 @@ fn refresh_agents_md_writes_version_file() {
     ensure_nest_at(&root).unwrap();
     let version = fs::read_to_string(root.join(".nest-agents-version")).unwrap();
     assert_eq!(version.trim(), NEST_AGENTS_VERSION.to_string());
+}
+
+#[test]
+fn refresh_agents_md_upgrades_attribution_and_preserves_owned_content() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join(".buzz");
+    ensure_nest_at(&root).unwrap();
+
+    let agents_md = root.join("AGENTS.md");
+    fs::write(
+        &agents_md,
+        "# Buzz Nest\n\n## Git Commit Identity\n\n\
+         - **Human sign-off (required):** every commit MUST include a `Signed-off-by`.\n\n\
+         <!-- BEGIN BUZZ MANAGED — regenerated automatically, do not edit below -->\n\
+         ## Active Agents\n\n| Name | Persona | How to address |\n\
+         |------|---------|----------------|\n| Kit | Builder | @Kit |\n\
+         <!-- END BUZZ MANAGED -->\n\n## Local Notes\n\nKeep me.\n",
+    )
+    .unwrap();
+    fs::write(root.join(".nest-agents-version"), "4\n").unwrap();
+
+    ensure_nest_at(&root).unwrap();
+
+    let content = fs::read_to_string(&agents_md).unwrap();
+    assert_eq!(content.matches("## Git Commit Attribution").count(), 1);
+    assert!(!content.contains("**Human sign-off (required):**"));
+    assert!(content.contains("| Kit | Builder | @Kit |"));
+    assert!(content.contains("## Local Notes\n\nKeep me."));
 }
 
 #[test]

@@ -1,3 +1,6 @@
+/// Artwork scale inside an animated agent's unchanged avatar frame.
+const animatedAvatarArtworkScale = 0.85;
+
 // Animated avatar URL scheme shared with the desktop client.
 //
 // The static poster is the normal selected frame. The animated PNG URL lives
@@ -28,7 +31,7 @@ String buildAnimatedAvatarUrl(String posterUrl, String animationUrl) =>
 /// Returns `null` when the poster or animation URL is missing, malformed, or
 /// does not use HTTP(S).
 AnimatedAvatarDescriptor? parseAnimatedAvatarUrl(String? url) {
-  if (url == null || url.isEmpty) return null;
+  if (url == null || !_startsWithHttp(url)) return null;
 
   final separatorIndex = url.indexOf(_animatedAvatarSeparator);
   if (separatorIndex <= 0) return null;
@@ -55,9 +58,30 @@ AnimatedAvatarDescriptor? parseAnimatedAvatarUrl(String? url) {
   );
 }
 
+/// Whether [url] has an HTTP(S) scheme, checked without reading the rest of
+/// it. Avatars are checked on every build, and a `data:` profile picture of
+/// 100 KB costs about a millisecond to scan and parse. The authority is left to
+/// `Uri`, which also accepts backslashes there.
+bool _startsWithHttp(String url) {
+  final head = url.substring(0, url.length < 6 ? url.length : 6).toLowerCase();
+  return head.startsWith('http:') || head.startsWith('https:');
+}
+
 bool _isHttpUrl(String value) {
   final uri = Uri.tryParse(value);
   return uri != null &&
       (uri.scheme == 'http' || uri.scheme == 'https') &&
       uri.host.isNotEmpty;
+}
+
+/// Character presets can be saved as plain poster URLs without buzz-anim.
+/// Keep photographs and ordinary emoji avatars at their existing size.
+bool usesInsetAgentArtwork(String? url) {
+  if (url == null || !_startsWithHttp(url)) return false;
+  if (parseAnimatedAvatarUrl(url) != null) return true;
+  final uri = Uri.tryParse(url);
+  return uri != null &&
+      uri.scheme == 'https' &&
+      uri.host == 'dwwgwmfqqjotj.cloudfront.net' &&
+      RegExp(r'^/avatars/[^/]+/poster/[^/]+/[^/]+\.png$').hasMatch(uri.path);
 }

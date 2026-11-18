@@ -39,7 +39,7 @@ export function WorkflowDeleteDialog({
           <AlertDialogTitle>Delete workflow?</AlertDialogTitle>
           <AlertDialogDescription>
             {workflow
-              ? `Delete "${workflow.name}". This will stop all future triggers and remove the workflow permanently.`
+              ? `Delete "${workflow.name}". This removes the current workflow and stops new triggers. Publishing its definition again, even an older version, can recreate it.`
               : "Delete this workflow."}
           </AlertDialogDescription>
           {error ? (

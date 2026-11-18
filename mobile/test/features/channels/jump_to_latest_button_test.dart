@@ -6,9 +6,41 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 void main() {
+  test(
+    'keeps channel Latest hidden while followed-tail geometry catches up',
+    () {
+      expect(
+        shouldHideChannelJumpToLatest(
+          isAtLatest: false,
+          followsLatest: true,
+          userHasDetached: false,
+        ),
+        isTrue,
+      );
+      expect(
+        shouldHideChannelJumpToLatest(
+          isAtLatest: false,
+          followsLatest: true,
+          userHasDetached: true,
+        ),
+        isFalse,
+        reason: 'A deliberate scroll away must still expose Latest.',
+      );
+      expect(
+        shouldHideChannelJumpToLatest(
+          isAtLatest: true,
+          followsLatest: false,
+          userHasDetached: true,
+        ),
+        isTrue,
+        reason: 'Settled tail geometry remains authoritative.',
+      );
+    },
+  );
+
   testWidgets('uses native iOS liquid glass outside message-action backdrops', (
     tester,
   ) async {
@@ -58,7 +90,7 @@ void main() {
       await tester.pump();
       expect(find.byType(UiKitView), findsNothing);
       expect(find.byType(BackdropFilter), findsOneWidget);
-      expect(find.byIcon(LucideIcons.arrowDown), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.arrowDown), findsOneWidget);
     } finally {
       messageActionBackdropActive.value = false;
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
@@ -88,7 +120,7 @@ void main() {
 
       expect(find.byType(UiKitView), findsNothing);
       expect(find.byType(BackdropFilter), findsOneWidget);
-      expect(find.byIcon(LucideIcons.arrowDown), findsOneWidget);
+      expect(find.byIcon(BuzzIcons.arrowDown), findsOneWidget);
       expect(
         tester.getSize(find.byType(JumpToLatestButton)),
         const Size.square(Grid.xl),
@@ -102,6 +134,96 @@ void main() {
 
       await tester.tap(find.byType(JumpToLatestButton));
       expect(pressed, isTrue);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets('mounts and removes native iOS Latest without animating it', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    var visible = true;
+    late StateSetter update;
+    try {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: StatefulBuilder(
+              builder: (context, setState) {
+                update = setState;
+                return JumpToLatestSwitcher(
+                  id: 'thread',
+                  visible: visible,
+                  onPressed: () {},
+                );
+              },
+            ),
+          ),
+        ),
+      );
+
+      expect(find.byType(AnimatedSwitcher), findsNothing);
+      expect(find.byType(UiKitView), findsOneWidget);
+
+      update(() => visible = false);
+      await tester.pump();
+
+      expect(find.byType(UiKitView), findsNothing);
+      expect(
+        find.byKey(const ValueKey('thread-jump-to-latest-hidden')),
+        findsOneWidget,
+      );
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets('unmounts native iOS Latest while its route is inactive', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    try {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: Column(
+                children: [
+                  JumpToLatestButton(onPressed: () {}),
+                  TextButton(
+                    onPressed: () => Navigator.of(context).push<void>(
+                      MaterialPageRoute<void>(
+                        builder: (_) => const Scaffold(body: Text('Thread')),
+                      ),
+                    ),
+                    child: const Text('Open thread'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+
+      expect(find.byType(UiKitView, skipOffstage: false), findsOneWidget);
+
+      await tester.tap(find.text('Open thread'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Thread'), findsOneWidget);
+      expect(
+        find.byType(UiKitView, skipOffstage: false),
+        findsNothing,
+        reason: 'An underlying route must not keep a native glass layer alive.',
+      );
+
+      Navigator.of(tester.element(find.text('Thread'))).pop();
+      await tester.pumpAndSettle();
+
+      expect(find.byType(UiKitView, skipOffstage: false), findsOneWidget);
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }

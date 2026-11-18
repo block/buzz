@@ -240,3 +240,14 @@ test("resolveAgentCardModelLabel — unspawned openai persona with Databricks-na
   });
   assert.equal(label, "Default model (databricks-gpt-5-5)");
 });
+
+test("resolveModelLabel — uncurated Databricks ids humanize only under databricks_v2", () => {
+  const id = "data_workflow_tools.goose.goose-gpt-6-astra";
+  assert.equal(resolveModelLabel(id, id, "databricks_v2"), "GPT-6 Astra");
+  assert.equal(formatAgentModelLabel(id), id);
+  assert.equal(formatAgentModelLabel(id, "openai"), id);
+  assert.equal(
+    formatAgentModelLabel("builderbot-pr-reviews", "databricks_v2"),
+    "builderbot-pr-reviews",
+  );
+});

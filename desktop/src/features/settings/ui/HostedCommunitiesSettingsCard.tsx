@@ -15,10 +15,13 @@ import {
 
 import { useIdentityQuery } from "@/shared/api/hooks";
 import {
-  HOSTED_COMMUNITY_LIMIT as MAX_COMMUNITIES,
   HOSTED_COMMUNITY_SUFFIX as HOST_SUFFIX,
   hostedCommunityErrorMessage as errorMessage,
+  hostedCommunityQuotaLimit,
+  hostedCommunityQuotaUsed,
   hostedCommunityRelayUrl as relayUrl,
+  normalizedBoundKeyHex,
+  usableBoundIdentityNpub,
   type BuilderlabAuth,
   type HostedCommunityAvailabilityResponse as AvailabilityResponse,
   type HostedCommunitiesResponse as CommunitiesResponse,
@@ -30,8 +33,9 @@ import {
 } from "@/features/communities/hostedCommunityApi";
 import { CommunityIconSettingsCard } from "@/features/communities/ui/CommunityIconSettingsCard";
 import { useCommunities } from "@/features/communities/useCommunities";
-import { safeNpub } from "@/shared/lib/nostrUtils";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
+import { safeNpub } from "@/shared/lib/nostrUtils";
+import { UNAVAILABLE_KEY_LABEL } from "@/shared/lib/pubkey";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -69,6 +73,9 @@ export function HostedCommunitiesSettingsCard() {
   const localPubkey = useIdentityQuery().data?.pubkey ?? null;
   const [auth, setAuth] = React.useState<BuilderlabAuth | null>(null);
   const [communities, setCommunities] = React.useState<HostedCommunity[]>([]);
+  const [quotaUsed, setQuotaUsed] = React.useState<number | null>(null);
+  const [quotaLimit, setQuotaLimit] = React.useState<number | null>(null);
+  const [canCreate, setCanCreate] = React.useState(true);
   const [identity, setIdentity] = React.useState<NostrIdentity | null>(null);
   const [name, setName] = React.useState("");
   const [availability, setAvailability] = React.useState<boolean | null>(null);
@@ -110,6 +117,9 @@ export function HostedCommunitiesSettingsCard() {
     }
     setIdentity(identityResponse.identity ?? null);
     setCommunities(communitiesResponse.communities ?? []);
+    setQuotaUsed(hostedCommunityQuotaUsed(communitiesResponse.quota_used));
+    setQuotaLimit(hostedCommunityQuotaLimit(communitiesResponse.quota_limit));
+    setCanCreate(communitiesResponse.can_create !== false);
   }, []);
 
   React.useEffect(() => {
@@ -160,6 +170,9 @@ export function HostedCommunitiesSettingsCard() {
       setAuth(null);
       setIdentity(null);
       setCommunities([]);
+      setQuotaUsed(null);
+      setQuotaLimit(null);
+      setCanCreate(true);
       setName("");
       setAvailability(null);
     });
@@ -205,15 +218,33 @@ export function HostedCommunitiesSettingsCard() {
   // to a different test identity). When that happens the community list and
   // Connect buttons operate on the *bound* npub's communities, so "Connect"
   // would drop you into a relay your local key isn't a member of. Detect it and
-  // block Connect + Create until the identities match.
-  const boundPubkey = identity?.pubkey_hex ?? null;
+  // block Connect + Create until the identities match. Both keys are compared
+  // in the one normalized hex form, so a padded or mixed-case spelling of
+  // the same key never reads as a mismatch, and an npub stored in the hex
+  // field is not a key at all.
+  // Identity rows display npubs; an unencodable or non-identity-length key
+  // renders the neutral label instead of leaking raw hex. The account's
+  // `pubkey_hex` is the authoritative binding key — the mismatch gate and
+  // every hosted-community operation act on it — so the displayed account
+  // npub is derived from it, not from the server-provided `npub` spelling.
+  // Nothing on this path proves the two fields encode the same key, and two
+  // individually valid but contradictory values must never make the screen
+  // show one identity while binding decisions act on another.
+  const boundHex = normalizedBoundKeyHex(identity?.pubkey_hex);
+  const localHex = normalizedBoundKeyHex(localPubkey);
+  const localNpub = localHex === null ? null : safeNpub(localHex);
+  const boundNpub = usableBoundIdentityNpub(identity);
+  // The account is only usable here when its authoritative `pubkey_hex`
+  // normalizes to a hex key: without that key this card cannot establish
+  // which identity the connected claim, Connect, and Create actions affect.
+  // An identity payload without a usable authoritative key therefore counts
+  // as a mismatch that requires recovery — never as a connected account.
+  const usableBoundIdentity = boundHex !== null;
   const identityMismatch = Boolean(
     identity &&
-      boundPubkey &&
-      localPubkey &&
-      boundPubkey.toLowerCase() !== localPubkey.toLowerCase(),
+      (!usableBoundIdentity ||
+        (boundHex !== null && localHex !== null && boundHex !== localHex)),
   );
-  const localNpub = localPubkey ? safeNpub(localPubkey) : null;
 
   const switchToDeviceIdentity = () =>
     run("Switching identity…", async () => {
@@ -324,7 +355,12 @@ export function HostedCommunitiesSettingsCard() {
   // Create (no separate "check" click). onChange clears the previous result, so
   // the indicator reflects the current input while typing.
   React.useEffect(() => {
-    if (!identity || identityMismatch || !normalizedName || !validName) {
+    if (
+      !usableBoundIdentity ||
+      identityMismatch ||
+      !normalizedName ||
+      !validName
+    ) {
       setCheckingName(false);
       return;
     }
@@ -352,16 +388,11 @@ export function HostedCommunitiesSettingsCard() {
       cancelled = true;
       window.clearTimeout(handle);
     };
-  }, [normalizedName, validName, identity, identityMismatch]);
+  }, [normalizedName, validName, usableBoundIdentity, identityMismatch]);
 
   const createCommunity = (event: React.FormEvent) => {
     event.preventDefault();
-    if (
-      !validName ||
-      !identity ||
-      identityMismatch ||
-      communities.length >= MAX_COMMUNITIES
-    )
+    if (!validName || !usableBoundIdentity || identityMismatch || !canCreate)
       return;
     void run("Creating community…", async () => {
       const availabilityResponse = await invoke<AvailabilityResponse>(
@@ -412,7 +443,7 @@ export function HostedCommunitiesSettingsCard() {
   };
 
   const busy = action != null;
-  const atCommunityLimit = communities.length >= MAX_COMMUNITIES;
+  const atCommunityLimit = !canCreate;
 
   return (
     <section className="space-y-6" data-testid="hosted-communities-settings">
@@ -522,12 +553,14 @@ export function HostedCommunitiesSettingsCard() {
                     <div className="flex flex-wrap gap-x-2">
                       <dt className="text-muted-foreground">Account uses</dt>
                       <dd className="font-mono">
-                        {identity.npub ?? boundPubkey}
+                        {boundNpub ?? UNAVAILABLE_KEY_LABEL}
                       </dd>
                     </div>
                     <div className="flex flex-wrap gap-x-2">
                       <dt className="text-muted-foreground">This device</dt>
-                      <dd className="font-mono">{localNpub ?? localPubkey}</dd>
+                      <dd className="font-mono">
+                        {localNpub ?? UNAVAILABLE_KEY_LABEL}
+                      </dd>
                     </div>
                   </dl>
                 </div>
@@ -548,8 +581,8 @@ export function HostedCommunitiesSettingsCard() {
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <CheckCircle2 className="h-4 w-4 text-emerald-500" /> Buzz
                 identity connected
-                {identity.npub ? (
-                  <span className="font-mono text-xs">{identity.npub}</span>
+                {boundNpub ? (
+                  <span className="font-mono text-xs">{boundNpub}</span>
                 ) : null}
               </div>
               <UnpairIdentityButton
@@ -564,7 +597,8 @@ export function HostedCommunitiesSettingsCard() {
               <h3 className="font-medium">
                 Your communities
                 <span className="ml-2 text-xs font-normal text-muted-foreground">
-                  {communities.length} of {MAX_COMMUNITIES} used
+                  {quotaUsed ?? communities.length}
+                  {quotaLimit === null ? " used" : ` of ${quotaLimit} used`}
                 </span>
               </h3>
               <Button
@@ -593,12 +627,20 @@ export function HostedCommunitiesSettingsCard() {
                       key={community.id ?? community.normalized_host ?? index}
                       community={community}
                       busy={busy}
-                      canConnect={!identityMismatch}
+                      canConnect={usableBoundIdentity && !identityMismatch}
                       showIconPicker={
                         relayHost(relayUrl(community)) ===
                         relayHost(activeCommunity?.relayUrl)
                       }
                       onConnect={() => {
+                        // Invocation guard: the Connect affordance only
+                        // renders for a usable, matching binding, but this
+                        // callback is the last gate — a click that lands after
+                        // a refresh returned an absent or unusable identity
+                        // must not start onboarding either.
+                        if (!usableBoundIdentity || identityMismatch) {
+                          return;
+                        }
                         const url = relayUrl(community);
                         if (url)
                           onboarding.start({
@@ -631,9 +673,9 @@ export function HostedCommunitiesSettingsCard() {
             </div>
             {atCommunityLimit ? (
               <p className="text-sm text-muted-foreground">
-                You&apos;ve reached the limit of {MAX_COMMUNITIES} hosted
-                communities. Transfer one to free up a slot before creating
-                another.
+                You&apos;ve reached your hosted community creation limit.
+                Transferring a community may free an active slot; deleted
+                community addresses remain reserved.
               </p>
             ) : null}
             <div className="flex max-w-xl items-center gap-2">
@@ -641,7 +683,10 @@ export function HostedCommunitiesSettingsCard() {
                 aria-label="Community address"
                 autoComplete="off"
                 disabled={
-                  !identity || identityMismatch || busy || atCommunityLimit
+                  !usableBoundIdentity ||
+                  identityMismatch ||
+                  busy ||
+                  atCommunityLimit
                 }
                 maxLength={63}
                 onChange={(event) => {
@@ -675,7 +720,7 @@ export function HostedCommunitiesSettingsCard() {
             ) : null}
             <Button
               disabled={
-                !identity ||
+                !usableBoundIdentity ||
                 identityMismatch ||
                 !validName ||
                 availability === false ||

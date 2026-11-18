@@ -69,17 +69,29 @@ directory of this harness, not a subdirectory of it — scores Buzz product
 behavior alongside task correctness. It covers direct thread replies, callback
 user mentions, targeted reads of named paths, exact channel membership,
 multiline delivery, non-waking narrative names, batched reports, cross-thread
-isolation, and ambiguous identities. Run one task with the production base
-prompt from the checked-out source build:
+isolation, ambiguous identities, and explicit cold-memory retrieval. Run one
+task with the production base prompt from the checked-out source build:
 
 ```bash
 just benchmark \
   --path benchmarks/buzz-dataset/reply-to-thread \
-  --attempts 1 \
   --manifest benchmarks/harbor-buzz-orchestra/manifests/buzz-native-solo-luna.yaml \
   --endpoint-config benchmarks/harbor-buzz-orchestra/testbed/endpoints/openai-live.json \
   --n-concurrent 1
 ```
+
+Buzz-native tasks declare one of two evaluation layers in `task.toml`.
+**Regression** tasks are deterministic product/prompt regression checks and
+default to k=1. **Workflow** tasks exercise multi-step collaboration
+capabilities and default to k=3 (not 5). Run a layer by metadata with
+`--path benchmarks/buzz-dataset --layer regression` or `--layer workflow`;
+task identities stay unchanged.
+
+When the Buzz dataset root is passed without `--layer` or `--attempts`, the
+wrapper starts two sequential Harbor jobs so each layer gets its own default.
+A direct task path infers its layer's default. An explicit `--attempts`/`-k`
+overrides the defaults and permits one mixed-layer job. Terminal-Bench and
+other unrelated paths keep their existing k=5 default.
 
 The default condition is `buzz-native-solo-luna.yaml` — one solo agent on
 `gpt-5.6-luna` at `thinking_effort: medium`. What this suite scores comes from
@@ -131,6 +143,8 @@ schema, and defaults to leaderboard-eligible settings (Terminal-Bench 2.1,
 ```bash
 just benchmark                                   # full TB 2.1, k=5
 just benchmark --path <TASK_DIR> -k 1            # one local task, one attempt
+just benchmark --path benchmarks/buzz-dataset --layer regression   # Buzz k=1
+just benchmark --path benchmarks/buzz-dataset --layer workflow     # Buzz k=3
 just benchmark -i "cobol*" --attempts 3          # dataset subset
 just benchmark --gui                             # watch the run live
 ```

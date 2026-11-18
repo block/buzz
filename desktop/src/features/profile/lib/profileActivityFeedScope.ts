@@ -2,7 +2,6 @@ import * as React from "react";
 
 import type { ActiveTurnSummary } from "@/features/agents/activeAgentTurnsStore";
 import { subscribeActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
-import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import {
   getAgentObserverSnapshot,
   getAgentTranscript,
@@ -231,11 +230,8 @@ export function useProfileActivityFeedScope(
   const agentCacheKey = activityAgent
     ? normalizePubkey(activityAgent.pubkey)
     : "none";
-  const hasObserver =
-    activityAgent !== null && isManagedAgentActive(activityAgent);
-
   const getSnapshot = React.useCallback(() => {
-    if (!activityAgent || !hasObserver) {
+    if (!activityAgent) {
       return stableFeedScope(
         agentCacheKey,
         deriveProfileActivityFeedScope({
@@ -246,13 +242,15 @@ export function useProfileActivityFeedScope(
       );
     }
 
-    const { events } = getAgentObserverSnapshot(activityAgent.pubkey, true);
-    const transcript = getAgentTranscript(activityAgent.pubkey, true);
+    // Availability gates live subscriptions, not already-observed history.
+    // Unknown or stopped agents can still have completed activity to show.
+    const { events } = getAgentObserverSnapshot(activityAgent.pubkey);
+    const transcript = getAgentTranscript(activityAgent.pubkey);
     return stableFeedScope(
       agentCacheKey,
       deriveProfileActivityFeedScope({ activeTurns, events, transcript }),
     );
-  }, [activeTurns, activityAgent, agentCacheKey, hasObserver]);
+  }, [activeTurns, activityAgent, agentCacheKey]);
 
   const snapshot = React.useSyncExternalStore((onStoreChange) => {
     const unsubscribeObserver = subscribeAgentObserverStore(onStoreChange);

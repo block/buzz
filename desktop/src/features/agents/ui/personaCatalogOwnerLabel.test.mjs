@@ -3,10 +3,8 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import {
-  AgentInstructionReview,
-  resolveCatalogOwnerLabel,
-} from "./PersonaCatalogDialog.tsx";
+import { AgentInstructionReview } from "./CommunityCatalogDialog.tsx";
+import { resolveCatalogOwnerLabel } from "./catalogOwnerLabel.ts";
 
 // ── null / undefined summary ──────────────────────────────────────────────────
 

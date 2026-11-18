@@ -21,6 +21,7 @@ import {
 } from "@/shared/hooks/useIncrementalMount";
 import { cn } from "@/shared/lib/cn";
 import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
+import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
 import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
 import { CopyShareLinkMenuItem } from "./CopyShareLinkMenuItem";
@@ -30,6 +31,7 @@ import { ProjectEventTypeIcon } from "./ProjectEventTypeIcon";
 import { PROJECT_GRID_CARD_BODY_CLASS } from "./projectGridCardStyles";
 import { ProjectListRowMenu } from "./ProjectListRowMenu";
 import { ProjectSelectableGroup } from "./ProjectSelectableGroup";
+import { ProjectPanelState } from "./ProjectPanelState";
 import { ProjectsWorkItemsLoadNotice } from "./ProjectsWorkItemsLoadNotice";
 import { groupProjectWorkItemsByProject } from "./projectWorkItemGroups";
 
@@ -253,21 +255,37 @@ export function ProjectsIssuesList({
   );
 
   if (error && issues.length === 0) {
-    return loadNotice;
+    return (
+      <ProjectPanelState
+        action={
+          <Button
+            disabled={isRetrying}
+            onClick={onRetry}
+            size="sm"
+            variant="outline"
+          >
+            {isRetrying ? "Retrying..." : "Retry"}
+          </Button>
+        }
+        description={
+          error instanceof Error ? error.message : "The relay request failed."
+        }
+        error
+        panel={false}
+        title="Could not load tasks"
+      />
+    );
   }
 
   if (issues.length === 0) {
     return (
       <div className="space-y-3">
         {loadNotice}
-        <div
-          className={cn(
-            "px-4 py-12 text-center text-sm text-muted-foreground",
-            !embedded && "border border-dashed border-border/60",
-          )}
-        >
-          {emptyMessage}
-        </div>
+        <ProjectPanelState
+          className={cn(!embedded && "border border-dashed border-border/60")}
+          panel={false}
+          title={emptyMessage}
+        />
       </div>
     );
   }

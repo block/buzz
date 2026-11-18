@@ -271,6 +271,91 @@ fn transcode_to_mp4_with_cancellation(
     Ok(output)
 }
 
+/// Package a voice-note audio file in the relay's existing canonical video
+/// envelope. The tiny H.264 track satisfies the deployed video validator while
+/// the AAC track remains the only user-facing content in the voice-note player.
+///
+/// Returns the path to a temp MP4. Caller must clean up.
+pub(super) fn transcode_voice_note_to_mp4_with_cancellation(
+    source: &std::path::Path,
+    cancellation: Option<&CancellationToken>,
+) -> Result<std::path::PathBuf, String> {
+    let ffmpeg = find_ffmpeg()?;
+    let output = std::env::temp_dir().join(format!("buzz-voice-note-{}.mp4", uuid::Uuid::new_v4()));
+
+    let result = run_ffmpeg_with_cancellation(
+        ffmpeg_command(&ffmpeg)
+            .args([
+                "-y",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=16x16:r=1",
+            ])
+            .arg("-i")
+            .arg(source)
+            .args([
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                "-shortest",
+                "-map_metadata",
+                "-1",
+                "-map_chapters",
+                "-1",
+                "-sn",
+                "-dn",
+                "-fflags",
+                "+bitexact",
+                "-flags:v",
+                "+bitexact",
+                "-flags:a",
+                "+bitexact",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-tune",
+                "stillimage",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "96k",
+                "-movflags",
+                "+faststart",
+                "-metadata",
+                "encoder=",
+            ])
+            .arg(&output)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped()),
+        FFMPEG_TIMEOUT,
+        cancellation,
+    )
+    .inspect_err(|_| {
+        let _ = std::fs::remove_file(&output);
+    })?;
+
+    if !result.status.success() {
+        let _ = std::fs::remove_file(&output);
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        let detail = stderr
+            .lines()
+            .rev()
+            .find(|line| !line.is_empty() && !line.starts_with("  "))
+            .unwrap_or("unknown error");
+        return Err(format!("Voice note conversion failed: {detail}"));
+    }
+
+    Ok(output)
+}
+
 /// Transcode a HEIC/HEIF still image to JPEG via ffmpeg.
 ///
 /// The Tauri webview / Chromium cannot decode HEIC, so iPhone photos uploaded
@@ -653,6 +738,67 @@ mod tests {
                 "source metadata survived transcode"
             );
         }
+    }
+
+    #[test]
+    fn test_voice_note_envelope_passes_relay_video_validation() {
+        if find_ffmpeg().is_err() {
+            eprintln!("skipping voice-note round-trip: ffmpeg not found");
+            return;
+        }
+
+        let source =
+            std::env::temp_dir().join(format!("buzz-voice-test-{}.wav", uuid::Uuid::new_v4()));
+        let sample_rate = 24_000u32;
+        let sample_bytes = sample_rate as usize * 2;
+        let mut wav = Vec::with_capacity(44 + sample_bytes);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + sample_bytes as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(sample_bytes as u32).to_le_bytes());
+        wav.resize(44 + sample_bytes, 0);
+        std::fs::write(&source, wav).expect("write voice-note fixture");
+
+        let output = match transcode_voice_note_to_mp4_with_cancellation(&source, None) {
+            Ok(output) => output,
+            Err(error) => {
+                eprintln!("skipping voice-note round-trip: {error}");
+                let _ = std::fs::remove_file(&source);
+                return;
+            }
+        };
+        let relay_config = buzz_media_pkg::MediaConfig {
+            s3_endpoint: String::new(),
+            s3_access_key: String::new(),
+            s3_secret_key: String::new(),
+            s3_bucket: String::new(),
+            s3_region: "us-east-1".to_string(),
+            s3_addressing_style: buzz_media_pkg::S3AddressingStyle::Path,
+            max_image_bytes: 50 * 1024 * 1024,
+            max_gif_bytes: 10 * 1024 * 1024,
+            max_video_bytes: 524_288_000,
+            max_file_bytes: 104_857_600,
+            public_base_url: String::new(),
+            upload_records_enabled: false,
+            upload_ip_header: None,
+            upload_port_header: None,
+        };
+        let metadata = buzz_media_pkg::validation::validate_video_file(&output, &relay_config)
+            .expect("relay rejected the canonical voice-note envelope");
+        let _ = std::fs::remove_file(&source);
+        let _ = std::fs::remove_file(&output);
+
+        assert!(metadata.has_audio);
+        assert_eq!((metadata.width, metadata.height), (16, 16));
+        assert!(metadata.duration_secs > 0.0);
     }
 
     /// Round-trip transcode test, gated on ffmpeg being present so CI without

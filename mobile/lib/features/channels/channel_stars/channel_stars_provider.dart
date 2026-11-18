@@ -1,5 +1,4 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:nostr/nostr.dart' as nostr;
 
 import '../../../shared/relay/relay.dart';
 import '../../../shared/theme/theme_provider.dart';
@@ -23,11 +22,13 @@ class ChannelStarsState {
 
 class ChannelStarsNotifier extends Notifier<ChannelStarsState> {
   ChannelStarsManager? _manager;
+  bool _isInitialized = false;
 
   @override
   ChannelStarsState build() {
     _manager?.dispose(flushPending: false);
     _manager = null;
+    _isInitialized = false;
 
     final relayConfig = ref.watch(relayConfigProvider);
     final sessionState = ref.watch(relaySessionProvider);
@@ -39,15 +40,9 @@ class ChannelStarsNotifier extends Notifier<ChannelStarsState> {
       return const ChannelStarsState();
     }
 
-    final pubkey = _safePubkeyFromNsec(nsec);
-    if (pubkey == null || pubkey.isEmpty) {
-      return const ChannelStarsState();
-    }
-
-    final ChannelStarsCrypto crypto;
-    try {
-      crypto = ChannelStarsCrypto(nsec, pubkey);
-    } catch (_) {
+    final pubkey = ref.watch(myPubkeyProvider);
+    final crypto = ref.watch(channelStarsCryptoProvider);
+    if (pubkey == null || crypto == null) {
       return const ChannelStarsState();
     }
 
@@ -60,6 +55,7 @@ class ChannelStarsNotifier extends Notifier<ChannelStarsState> {
     late final ChannelStarsManager manager;
     manager = ChannelStarsManager(
       pubkey: pubkey,
+      relayUrl: relayConfig.baseUrl,
       prefs: prefs,
       crypto: crypto,
       relaySession: ref.read(relaySessionProvider.notifier),
@@ -68,6 +64,11 @@ class ChannelStarsNotifier extends Notifier<ChannelStarsState> {
       onChanged: () => _emitManagerState(manager),
     );
     _manager = manager;
+
+    // Resume re-read catches an EVENT a healthy socket never delivered.
+    ref.listen(appForegroundProvider, (_, foreground) {
+      if (foreground) manager.refreshFromRelay();
+    });
 
     ref.onDispose(() {
       manager.dispose();
@@ -79,6 +80,7 @@ class ChannelStarsNotifier extends Notifier<ChannelStarsState> {
     Future.microtask(() async {
       await manager.initialize();
       if (_manager != manager) return;
+      _isInitialized = true;
       _emitManagerState(manager);
     });
 
@@ -92,7 +94,7 @@ class ChannelStarsNotifier extends Notifier<ChannelStarsState> {
   void _emitManagerState(ChannelStarsManager manager) {
     if (_manager != manager) return;
     state = ChannelStarsState(
-      isReady: true,
+      isReady: _isInitialized,
       store: manager.store,
       version: state.version + 1,
     );
@@ -104,12 +106,16 @@ final channelStarsProvider =
       ChannelStarsNotifier.new,
     );
 
-String? _safePubkeyFromNsec(String nsec) {
+/// Identity-scoped crypto survives connection status changes. A community or
+/// signing-key change replaces it through [relayConfigProvider].
+final channelStarsCryptoProvider = Provider<ChannelStarsCrypto?>((ref) {
+  final config = ref.watch(relayConfigProvider);
+  final pubkey = ref.watch(myPubkeyProvider);
+  final nsec = config.nsec?.trim();
+  if (nsec == null || nsec.isEmpty || pubkey == null) return null;
   try {
-    final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
-    if (privkeyHex.isEmpty) return null;
-    return nostr.Keys(privkeyHex).public;
+    return ChannelStarsCrypto(nsec, pubkey);
   } catch (_) {
     return null;
   }
-}
+});

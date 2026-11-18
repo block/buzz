@@ -1,3 +1,6 @@
+import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:buzz/shared/widgets/concentric_sheet_surface.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/modal_presentation.dart';
@@ -8,6 +11,255 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets('open sheet follows folding without losing its draft or Close', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    for (final startWide in [true, false]) {
+      void posture(bool wide) {
+        tester.view.physicalSize = wide
+            ? const Size(951, 669)
+            : const Size(390, 844);
+        tester.view.padding = wide
+            ? const FakeViewPadding(right: 76)
+            : const FakeViewPadding(bottom: 34);
+        tester.view.viewPadding = tester.view.padding;
+      }
+
+      posture(startWide);
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: Builder(
+              builder: (context) => Scaffold(
+                body: TextButton(
+                  onPressed: () => showBuzzModalBottomSheet<void>(
+                    context: context,
+                    title: 'Draft',
+                    useSafeArea: true,
+                    isDismissible: false,
+                    enableDrag: false,
+                    builder: (_) => const SizedBox(
+                      height: 200,
+                      child: TextField(key: ValueKey('fold-draft')),
+                    ),
+                  ),
+                  child: const Text('Open'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Open'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('fold-draft')),
+        'Keep this edit',
+      );
+      for (final wide in [!startWide, startWide]) {
+        posture(wide);
+        await tester.pumpAndSettle();
+        expect(find.text('Keep this edit'), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('duo-toolbar-Close Draft')),
+          wide ? findsOneWidget : findsNothing,
+        );
+        expect(
+          find.byKey(const ValueKey('buzz-sheet-ios-glass-close')),
+          wide ? findsNothing : findsOneWidget,
+        );
+        if (wide) {
+          expect(
+            tester.getSize(find.byKey(const ValueKey('fold-draft'))).width,
+            greaterThan(800),
+          );
+        }
+      }
+      FocusManager.instance.primaryFocus?.unfocus();
+      await tester.pumpAndSettle();
+      if (startWide) {
+        tester
+            .widget<IosNavigationBar>(
+              find.descendant(
+                of: find.byKey(const ValueKey('duo-toolbar-Close Draft')),
+                matching: find.byType(IosNavigationBar),
+              ),
+            )
+            .leading!
+            .onPressed!();
+      } else {
+        tester
+            .widget<IosGlassNavigationButton>(
+              find.byKey(const ValueKey('buzz-sheet-ios-glass-close')),
+            )
+            .onPressed!();
+      }
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('fold-draft')),
+        findsNothing,
+        reason: 'startWide=$startWide',
+      );
+      await tester.pumpWidget(const SizedBox());
+    }
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    for (final titled in [false, true]) {
+      for (final ownSafeArea in [false, true]) {
+        testWidgets(
+          'fixed bottom clearance $platform titled=$titled ownSafeArea=$ownSafeArea',
+          (tester) async {
+            debugDefaultTargetPlatformOverride = platform;
+            tester.view.physicalSize = const Size(390, 844);
+            tester.view.devicePixelRatio = 1;
+            final systemInset = platform == TargetPlatform.iOS ? 34.0 : 24.0;
+            tester.view.padding = FakeViewPadding(bottom: systemInset);
+            tester.view.viewPadding = FakeViewPadding(bottom: systemInset);
+            addTearDown(() {
+              tester.view.reset();
+              debugDefaultTargetPlatformOverride = null;
+            });
+            try {
+              double? contentInset;
+              await tester.pumpWidget(
+                MaterialApp(
+                  theme: AppTheme.light(),
+                  home: Builder(
+                    builder: (context) => Scaffold(
+                      body: TextButton(
+                        onPressed: () => showBuzzModalBottomSheet<void>(
+                          context: context,
+                          title: titled ? 'People' : null,
+                          showCloseButton: titled,
+                          isScrollControlled: true,
+                          builder: (context) {
+                            contentInset = MediaQuery.paddingOf(context).bottom;
+                            final list = SizedBox(
+                              height: 300,
+                              child: ListView.builder(
+                                key: const ValueKey('clearance-scroll'),
+                                padding: EdgeInsets.zero,
+                                itemCount: 30,
+                                itemBuilder: (_, index) => SizedBox(
+                                  height: 48,
+                                  child: Text('Person $index'),
+                                ),
+                              ),
+                            );
+                            return ownSafeArea
+                                ? SafeArea(top: false, child: list)
+                                : list;
+                          },
+                        ),
+                        child: const Text('Open'),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+              await tester.tap(find.text('Open'));
+              await tester.pumpAndSettle();
+              final list = find.byKey(const ValueKey('clearance-scroll'));
+              final viewportBottom = tester.getRect(list).bottom;
+              // This is outside the scrolling viewport, not trailing list space.
+              expect(
+                viewportBottom,
+                lessThanOrEqualTo(844 - systemInset - Grid.half),
+              );
+              expect(contentInset, 0);
+              await tester.drag(list, const Offset(0, -2000));
+              await tester.pumpAndSettle();
+              expect(find.text('Person 29'), findsOneWidget);
+              expect(tester.getRect(list).bottom, viewportBottom);
+              expect(
+                tester.getRect(find.text('Person 29')).bottom,
+                lessThanOrEqualTo(viewportBottom),
+              );
+              expect(tester.takeException(), isNull);
+            } finally {
+              debugDefaultTargetPlatformOverride = null;
+            }
+          },
+        );
+      }
+    }
+  }
+
+  for (final left in [false, true]) {
+    for (final width in [480.0, 900.0]) {
+      testWidgets(
+        'bounded sheet localizes rail inset left=$left width=$width',
+        (tester) async {
+          debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+          tester.view.physicalSize = const Size(951, 669);
+          tester.view.devicePixelRatio = 1;
+          final padding = FakeViewPadding(
+            left: left ? 76 : 0,
+            right: left ? 0 : 76,
+            bottom: 21,
+          );
+          tester.view.padding = padding;
+          tester.view.viewPadding = padding;
+          addTearDown(() {
+            tester.view.reset();
+            debugDefaultTargetPlatformOverride = null;
+          });
+          EdgeInsets? local;
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: AppTheme.light(),
+              home: Builder(
+                builder: (context) => Scaffold(
+                  body: TextButton(
+                    onPressed: () => showBuzzModalBottomSheet<void>(
+                      context: context,
+                      useDuoFullWidth: false,
+                      constraints: BoxConstraints(maxWidth: width),
+                      showCloseButton: false,
+                      builder: (context) {
+                        local = MediaQuery.paddingOf(context);
+                        return const SizedBox(
+                          height: 100,
+                          width: double.infinity,
+                        );
+                      },
+                    ),
+                    child: const Text('Open'),
+                  ),
+                ),
+              ),
+            ),
+          );
+          await tester.tap(find.text('Open'));
+          await tester.pumpAndSettle();
+          final overlap = (76 - (951 - width) / 2).clamp(0.0, double.infinity);
+          expect(local!.left, left ? overlap : 0);
+          expect(local!.right, left ? 0 : overlap);
+          expect(tester.takeException(), isNull);
+          debugDefaultTargetPlatformOverride = null;
+        },
+      );
+    }
+  }
+
+  Border sheetHeaderBorder(WidgetTester tester) {
+    final decoration =
+        tester
+                .widget<DecoratedBox>(
+                  find.byKey(const ValueKey('buzz-sheet-scroll-divider')),
+                )
+                .decoration
+            as BoxDecoration;
+    return decoration.border! as Border;
+  }
+
   testWidgets(
     'keeps an opaque Flutter surface when iOS native support is unavailable',
     (tester) async {
@@ -64,6 +316,69 @@ void main() {
         await tester.pump();
 
         expect(find.byType(UiKitView), findsOneWidget);
+        final nativeView = tester.widget<UiKitView>(find.byType(UiKitView));
+        expect(
+          nativeView.creationParams,
+          containsPair('independentCorners', true),
+        );
+        const viewChannel = MethodChannel('buzz/concentric_sheet_surface/73');
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          viewChannel,
+          (call) async => call.method == 'getCornerRadii'
+              ? {
+                  'topLeft': 24.0,
+                  'topRight': 24.0,
+                  'bottomLeft': 62.0,
+                  'bottomRight': 48.0,
+                }
+              : null,
+        );
+        nativeView.onPlatformViewCreated!(73);
+        await tester.pumpAndSettle();
+        BorderRadius clipRadius() =>
+            tester
+                    .widget<ClipRSuperellipse>(
+                      find.byKey(
+                        const ValueKey('concentric-sheet-content-clip'),
+                      ),
+                    )
+                    .borderRadius
+                as BorderRadius;
+        expect(clipRadius().bottomLeft, const Radius.circular(62));
+        expect(clipRadius().bottomRight, const Radius.circular(48));
+        // Rotation/folding can change each corner independently.
+        await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+          viewChannel.name,
+          const StandardMethodCodec().encodeMethodCall(
+            const MethodCall('cornerRadiiChanged', {
+              'topLeft': 48.0,
+              'topRight': 62.0,
+              'bottomLeft': 24.0,
+              'bottomRight': 24.0,
+            }),
+          ),
+          (_) {},
+        );
+        await tester.pump();
+        expect(clipRadius().topRight, const Radius.circular(62));
+        expect(clipRadius().bottomLeft, const Radius.circular(24));
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          viewChannel,
+          null,
+        );
+        expect(
+          tester.widget<UiKitView>(find.byType(UiKitView)).hitTestBehavior,
+          PlatformViewHitTestBehavior.translucent,
+        );
+        expect(
+          find.ancestor(
+            of: find.byType(UiKitView),
+            matching: find.byWidgetPredicate(
+              (widget) => widget is IgnorePointer && widget.ignoring,
+            ),
+          ),
+          findsNothing,
+        );
         expect(
           find.byWidgetPredicate(
             (widget) => widget is Material && widget.color == Colors.red,
@@ -166,20 +481,22 @@ void main() {
     try {
       final darkTheme = AppTheme.dark();
       await tester.pumpWidget(themedSurface(darkTheme));
-      await tester.pump();
+      await tester.pumpAndSettle();
       tester.widget<UiKitView>(find.byType(UiKitView)).onPlatformViewCreated!(
         42,
       );
       await tester.pump();
 
-      expect(colorUpdates, hasLength(1));
-      expect(colorUpdates.single.method, 'updateColors');
+      final initialColorUpdates = colorUpdates
+          .where((call) => call.method == 'updateColors')
+          .toList();
+      expect(initialColorUpdates, hasLength(1));
       expect(
-        colorUpdates.single.arguments,
+        initialColorUpdates.single.arguments,
         containsPair('color', darkTheme.colorScheme.surface.toARGB32()),
       );
       expect(
-        colorUpdates.single.arguments,
+        initialColorUpdates.single.arguments,
         containsPair(
           'backdropColor',
           darkTheme.extension<AppColors>()!.huddleDrawerSurface.toARGB32(),
@@ -190,18 +507,84 @@ void main() {
       await tester.pumpWidget(themedSurface(lightTheme));
       await tester.pumpAndSettle();
 
-      expect(colorUpdates.length, greaterThanOrEqualTo(2));
+      final updatedColorCalls = colorUpdates
+          .where((call) => call.method == 'updateColors')
+          .toList();
+      expect(updatedColorCalls.length, greaterThanOrEqualTo(2));
       expect(
-        colorUpdates.last.arguments,
+        updatedColorCalls.last.arguments,
         containsPair('color', lightTheme.colorScheme.surface.toARGB32()),
       );
       expect(
-        colorUpdates.last.arguments,
+        updatedColorCalls.last.arguments,
         containsPair(
           'backdropColor',
           lightTheme.extension<AppColors>()!.huddleDrawerSurface.toARGB32(),
         ),
       );
+    } finally {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        supportChannel,
+        null,
+      );
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        viewChannel,
+        null,
+      );
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets('native glass surfaces receive concentric composer geometry', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    const supportChannel = MethodChannel('buzz/concentric_sheet_surface');
+    const viewChannel = MethodChannel('buzz/concentric_sheet_surface/84');
+    final updates = <MethodCall>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      supportChannel,
+      (call) async => call.method == 'isSupported' ? true : null,
+    );
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      viewChannel,
+      (call) async {
+        updates.add(call);
+        return null;
+      },
+    );
+    try {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: const ConcentricSheetSurface(
+            enabled: true,
+            usesGlass: true,
+            minimumRadius: 26,
+            contentClipRadius: 18,
+            padding: EdgeInsets.zero,
+            providesSheetSurface: false,
+            child: SizedBox(height: 80, child: Text('Composer')),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final nativeSurface = tester.widget<UiKitView>(find.byType(UiKitView));
+      expect(nativeSurface.creationParams, containsPair('usesGlass', true));
+      expect(nativeSurface.creationParams, containsPair('minimumRadius', 26));
+      final contentClip = tester.widget<ClipRSuperellipse>(
+        find.byKey(const ValueKey('concentric-sheet-content-clip')),
+      );
+      expect(contentClip.borderRadius, BorderRadius.circular(18));
+
+      nativeSurface.onPlatformViewCreated!(84);
+      await tester.pump();
+      final geometryUpdate = updates.singleWhere(
+        (call) => call.method == 'updateGeometry',
+      );
+      expect(geometryUpdate.arguments, containsPair('minimumRadius', 26.0));
+      expect(geometryUpdate.arguments, containsPair('brightness', 'light'));
     } finally {
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
         supportChannel,
@@ -234,7 +617,13 @@ void main() {
                 onPressed: () => showBuzzModalBottomSheet<void>(
                   context: context,
                   title: 'Members',
-                  builder: (_) => const Text('Sheet body'),
+                  builder: (sheetContext) => ColoredBox(
+                    key: const ValueKey('sheet-container-surface'),
+                    color: Theme.of(
+                      sheetContext,
+                    ).colorScheme.surfaceContainerHighest,
+                    child: const Text('Sheet body'),
+                  ),
                 ),
                 child: const Text('Open sheet'),
               ),
@@ -255,7 +644,18 @@ void main() {
       );
       expect(
         nativeSurface.creationParams,
-        containsPair('color', lightColorScheme.surface.toARGB32()),
+        containsPair(
+          'color',
+          lightColorScheme.surfaceContainerHighest.toARGB32(),
+        ),
+      );
+      expect(
+        tester
+            .widget<ColoredBox>(
+              find.byKey(const ValueKey('sheet-container-surface')),
+            )
+            .color,
+        lightColorScheme.surface,
       );
       expect(nativeSurface.creationParams, isNot(contains('headerGradient')));
       expect(
@@ -269,7 +669,14 @@ void main() {
       final contentClip = tester.widget<ClipRSuperellipse>(
         find.byKey(const ValueKey('concentric-sheet-content-clip')),
       );
-      expect(contentClip.borderRadius, BorderRadius.circular(Radii.dialog * 2));
+      expect(
+        contentClip.borderRadius,
+        const BorderRadius.vertical(
+          top: Radius.circular(ConcentricSheetSurface.sheetTopRadius),
+          bottom: Radius.circular(Radii.dialog * 2),
+        ),
+      );
+      expect((nativeSurface.creationParams as Map)['topRadius'], 40.0);
       expect(contentClip.clipBehavior, Clip.antiAlias);
       expect(find.text('Members'), findsOneWidget);
       final nativeClose = tester.widget<UiKitView>(
@@ -335,7 +742,7 @@ void main() {
                 find.byKey(const ValueKey('buzz-sheet-surface')),
               )
               .color,
-          lightColorScheme.surface,
+          lightColorScheme.surfaceContainerHighest,
         );
         expect(
           tester.getTopLeft(find.text('Sheet body')).dy -
@@ -415,6 +822,126 @@ void main() {
       }
     },
   );
+
+  testWidgets('untitled Android sheets paint the utility route surface', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    try {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => FilledButton(
+                onPressed: () => showBuzzModalBottomSheet<void>(
+                  context: context,
+                  builder: (sheetContext) => ColoredBox(
+                    key: const ValueKey('untitled-sheet-container'),
+                    color: Theme.of(
+                      sheetContext,
+                    ).colorScheme.surfaceContainerHighest,
+                    child: const SizedBox(
+                      height: 80,
+                      child: Text('Sheet body'),
+                    ),
+                  ),
+                ),
+                child: const Text('Open sheet'),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Open sheet'));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<BottomSheet>(find.byType(BottomSheet)).backgroundColor,
+        lightColorScheme.surfaceContainerHighest,
+      );
+      expect(
+        tester
+            .widget<ColoredBox>(
+              find.byKey(const ValueKey('untitled-sheet-container')),
+            )
+            .color,
+        lightColorScheme.surface,
+      );
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets('sheet divider appears only when content scrolls under header', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    try {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => FilledButton(
+                onPressed: () => showBuzzModalBottomSheet<void>(
+                  context: context,
+                  title: 'Theme',
+                  isScrollControlled: true,
+                  builder: (_) => SizedBox(
+                    height: 360,
+                    child: ListView.builder(
+                      key: const ValueKey('sheet-scroll-view'),
+                      itemCount: 30,
+                      itemBuilder: (_, index) =>
+                          SizedBox(height: 44, child: Text('Option $index')),
+                    ),
+                  ),
+                ),
+                child: const Text('Open sheet'),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Open sheet'));
+      await tester.pumpAndSettle();
+
+      expect(sheetHeaderBorder(tester).bottom.color.a, 0);
+
+      await tester.drag(
+        find.byKey(const ValueKey('sheet-scroll-view')),
+        const Offset(0, -100),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        tester
+            .state<ScrollableState>(
+              find.descendant(
+                of: find.byKey(const ValueKey('sheet-scroll-view')),
+                matching: find.byType(Scrollable),
+              ),
+            )
+            .position
+            .pixels,
+        greaterThan(0),
+      );
+      expect(sheetHeaderBorder(tester).bottom.color.a, greaterThan(0));
+
+      await tester.drag(
+        find.byKey(const ValueKey('sheet-scroll-view')),
+        const Offset(0, 500),
+      );
+      await tester.pumpAndSettle();
+
+      expect(sheetHeaderBorder(tester).bottom.color.a, 0);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
 
   testWidgets('iOS paints the drag handle inside the concentric surface', (
     tester,

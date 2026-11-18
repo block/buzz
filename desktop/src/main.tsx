@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "@/app/App";
+import { NewAppInstallerDownloadHost } from "@/app/NewAppInstallerDownloadHost";
 import { RootErrorBoundary } from "@/app/RootErrorBoundary";
 import { NostrBindConsentDialog } from "@/features/profile/ui/NostrBindConsentDialog";
 import "@fontsource-variable/inter/opsz.css";
@@ -14,6 +15,7 @@ import { CommunitiesProvider } from "@/features/communities/useCommunities";
 import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
 import { CommunityOnboardingProvider } from "@/features/onboarding/communityOnboarding";
 import { ThemeProvider } from "@/shared/theme/ThemeProvider";
+import { AvatarClipPaths } from "@/shared/ui/AvatarClipPaths";
 import { EmojiBurstProvider } from "@/shared/ui/EmojiBurstProvider";
 import { PoofBurstProvider } from "@/shared/ui/PoofBurstProvider";
 import { Toaster } from "@/shared/ui/sonner";
@@ -84,6 +86,7 @@ function renderApp() {
       {/* block/buzz#5078 — catch any uncaught render error so a WebKit
           SecurityError from localStorage can't blank the whole window. */}
       <RootErrorBoundary>
+        <AvatarClipPaths />
         <CommunitiesProvider>
           <CommunityOnboardingProvider
             enabled={huddleWindowChannelId() === null}
@@ -95,6 +98,11 @@ function renderApp() {
                     <UpdaterProvider>
                       <App />
                       <NostrBindConsentDialog />
+                      {/* The huddle window never shows the banner, and a
+                          second host would cancel the main window's download. */}
+                      {huddleWindowChannelId() === null ? (
+                        <NewAppInstallerDownloadHost />
+                      ) : null}
                     </UpdaterProvider>
                     <Toaster />
                   </PoofBurstProvider>

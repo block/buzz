@@ -8,10 +8,13 @@ fn definition(
     prompt: &str,
 ) -> AgentDefinition {
     AgentDefinition {
+        session_policy: Default::default(),
+        description: None,
         id: id.to_string(),
         display_name: "Test Definition".to_string(),
         avatar_url: None,
         system_prompt: prompt.to_string(),
+        acp_command: None,
         runtime: None,
         model: model.map(str::to_string),
         provider: provider.map(str::to_string),
@@ -22,6 +25,7 @@ fn definition(
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: vec![],
@@ -39,6 +43,8 @@ fn record(
 ) -> ManagedAgentRecord {
     use crate::managed_agents::{BackendKind, RespondTo};
     ManagedAgentRecord {
+        session_policy: Default::default(),
+        description: None,
         pubkey: "agent-pk".to_string(),
         name: "Agent".to_string(),
         persona_id: persona_id.map(str::to_string),
@@ -88,6 +94,7 @@ fn record(
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         relay_mesh: None,
         effort_level: None,
         auto_restart_on_config_change: false,

@@ -15,6 +15,7 @@ export function ProjectSelectableGroup({
   icon,
   items,
   label,
+  labelClassName,
   labelTestId,
   testId,
 }: {
@@ -27,6 +28,7 @@ export function ProjectSelectableGroup({
   icon: React.ReactNode;
   items: ProjectSelectionItem[];
   label: string;
+  labelClassName?: string;
   labelTestId?: string;
   testId: string;
 }) {
@@ -44,6 +46,7 @@ export function ProjectSelectableGroup({
     <section
       className="pt-2 first:pt-0"
       data-project-group={groupKey}
+      data-project-group-size={items.length}
       data-testid={testId}
     >
       <div
@@ -92,7 +95,10 @@ export function ProjectSelectableGroup({
           type="button"
         >
           <span
-            className="min-w-0 truncate font-medium text-foreground/80"
+            className={cn(
+              "min-w-0 truncate font-medium text-muted-foreground",
+              labelClassName,
+            )}
             data-testid={labelTestId}
           >
             {label}

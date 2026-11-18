@@ -1,5 +1,7 @@
 part of '../animated_avatar_capture.dart';
 
+enum _AnimatedReviewSection { person, color, poster }
+
 class _RepositionablePreviewSemantics extends StatelessWidget {
   const _RepositionablePreviewSemantics({
     required this.offset,
@@ -47,45 +49,37 @@ class _AnimatedReviewNav extends StatelessWidget {
   final VoidCallback? onRetake;
 
   @override
-  Widget build(BuildContext context) => Row(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      Expanded(
-        child: AvatarEditorOptionButton(
-          icon: LucideIcons.userRound,
-          label: 'You',
-          selected: selected == _AnimatedReviewSection.person,
-          onTap: () => onSelected(_AnimatedReviewSection.person),
-        ),
+  Widget build(BuildContext context) => AvatarEditorOptions(
+    centered: false,
+    dividerBefore: 3,
+    options: [
+      AvatarEditorOptionButton(
+        icon: BuzzIcons.userRound,
+        iosIcon: IosGlassNavigationIcon.person,
+        label: 'You',
+        selected: selected == _AnimatedReviewSection.person,
+        onTap: () => onSelected(_AnimatedReviewSection.person),
       ),
-      const SizedBox(width: Grid.half),
-      Expanded(
-        child: AvatarEditorOptionButton(
-          icon: LucideIcons.palette,
-          label: 'Background',
-          selected: selected == _AnimatedReviewSection.color,
-          onTap: () => onSelected(_AnimatedReviewSection.color),
-        ),
+      AvatarEditorOptionButton(
+        icon: BuzzIcons.palette,
+        iosIcon: IosGlassNavigationIcon.palette,
+        label: 'Background',
+        selected: selected == _AnimatedReviewSection.color,
+        onTap: () => onSelected(_AnimatedReviewSection.color),
       ),
-      const SizedBox(width: Grid.half),
-      Expanded(
-        child: AvatarEditorOptionButton(
-          icon: LucideIcons.galleryThumbnails,
-          label: 'Frame',
-          selected: selected == _AnimatedReviewSection.poster,
-          onTap: () => onSelected(_AnimatedReviewSection.poster),
-        ),
+      AvatarEditorOptionButton(
+        icon: BuzzIcons.galleryThumbnails,
+        iosIcon: IosGlassNavigationIcon.frame,
+        label: 'Frame',
+        selected: selected == _AnimatedReviewSection.poster,
+        onTap: () => onSelected(_AnimatedReviewSection.poster),
       ),
-      const SizedBox(width: Grid.half),
-      Container(width: 1, height: 64, color: context.colors.outlineVariant),
-      const SizedBox(width: Grid.half),
-      Expanded(
-        child: AvatarEditorOptionButton(
-          icon: LucideIcons.camera,
-          label: 'Retake',
-          selected: false,
-          onTap: onRetake,
-        ),
+      AvatarEditorOptionButton(
+        icon: BuzzIcons.camera,
+        iosIcon: IosGlassNavigationIcon.camera,
+        label: 'Retake',
+        selected: false,
+        onTap: onRetake,
       ),
     ],
   );
@@ -135,7 +129,7 @@ class _AnimatedFramingControl extends HookWidget {
                   onOutlineChanged(!outline);
                 },
                 icon: Icon(
-                  outline ? LucideIcons.circle : LucideIcons.circleDashed,
+                  outline ? BuzzIcons.circle : BuzzIcons.circleDashed,
                   size: 24,
                 ),
                 constraints: const BoxConstraints.tightFor(

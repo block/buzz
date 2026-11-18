@@ -35,12 +35,13 @@ import {
   getManagedAgentLog,
   getRuntimeFileConfig,
   installAcpRuntime,
-  invokeTauri,
   listManagedAgents,
   listRelayAgents,
   saveCustomHarness,
   updateManagedAgent,
 } from "@/shared/api/tauri";
+import { syncAgentsToActiveHuddle } from "@/shared/api/tauriChannels";
+import { discoverAcpCommands } from "@/shared/api/acpCommands";
 import type { HarnessDefinitionInput } from "@/shared/api/tauri";
 import { discoverAcpRuntimes } from "@/shared/api/tauriAcpDiscovery";
 import {
@@ -52,9 +53,15 @@ import {
 import { bootstrapManagedAgentRuntimePairs } from "@/features/agents/managedAgentRuntimeHooks";
 import {
   acpRuntimesQueryKey,
+  applyBootWarmGate,
+  getBootWarmSnapshot,
   refreshAcpRuntimes,
+  subscribeBootWarm,
 } from "@/features/agents/acpRuntimesQuery";
-export { useAcpRuntimesQueryForced } from "@/features/agents/acpRuntimesQuery";
+export {
+  useAcpRuntimesQueryForced,
+  useRetryBootWarm,
+} from "@/features/agents/acpRuntimesQuery";
 import {
   createPersona,
   deletePersona,
@@ -130,6 +137,7 @@ export const managedAgentsQueryKey = ["managed-agents"] as const;
 export const personasQueryKey = ["personas"] as const;
 export const acpAuthMethodsQueryKey = ["acp-auth-methods"] as const;
 export const managedAgentPrereqsQueryKey = ["managed-agent-prereqs"] as const;
+export const acpCommandsQueryKey = ["acp-commands"] as const;
 export const backendProvidersQueryKey = ["backend-providers"] as const;
 export const gitBashPrerequisiteQueryKey = ["git-bash-prerequisite"] as const;
 
@@ -218,12 +226,23 @@ function invalidateManagedAgentQueriesInBackground(
  * probe pipeline.
  */
 export function useAcpRuntimesQuery(options?: { enabled?: boolean }) {
-  return useQuery({
+  const query = useQuery({
     enabled: options?.enabled ?? true,
     queryKey: acpRuntimesQueryKey,
     queryFn: () => discoverAcpRuntimes(),
     staleTime: 30 * 60_000,
   });
+  // Overlay the launch boot-warm gate so cheap consumers never present a cold
+  // catalog as authoritative: until the first forced pass settles, an un-warmed
+  // catalog reads as loading (`pending`) or a retryable error (`failed`) rather
+  // than "every harness not installed". `applyBootWarmGate` preserves an
+  // already-good list and passes through untouched while idle/settled.
+  const bootWarm = React.useSyncExternalStore(
+    subscribeBootWarm,
+    getBootWarmSnapshot,
+    getBootWarmSnapshot,
+  );
+  return applyBootWarmGate(query, bootWarm);
 }
 
 export function useAvailableAcpRuntimes(options?: { enabled?: boolean }) {
@@ -305,6 +324,15 @@ export function useGitBashPrerequisiteQuery() {
     queryKey: gitBashPrerequisiteQueryKey,
     queryFn: discoverGitBashPrerequisite,
     staleTime: 15_000,
+  });
+}
+
+export function useAcpCommandsQuery(options?: { enabled?: boolean }) {
+  return useQuery({
+    enabled: options?.enabled ?? true,
+    queryKey: acpCommandsQueryKey,
+    queryFn: discoverAcpCommands,
+    staleTime: 30_000,
   });
 }
 
@@ -577,6 +605,7 @@ export function useStartManagedAgentMutation() {
             pubkey: string;
             expectedRelayUrl?: string;
             expectedSignerPubkey?: string;
+            replayFloorUnix?: number;
           },
     ) =>
       typeof input === "string"
@@ -584,6 +613,7 @@ export function useStartManagedAgentMutation() {
         : startManagedAgent(input.pubkey, {
             expectedRelayUrl: input.expectedRelayUrl,
             expectedSignerPubkey: input.expectedSignerPubkey,
+            replayFloorUnix: input.replayFloorUnix,
           }),
     onSuccess: (updated) => {
       queryClient.setQueryData<ManagedAgent[]>(
@@ -696,10 +726,9 @@ export function useAttachManagedAgentToChannelMutation(
           pubkey: result.agent.pubkey,
         }),
       );
-      void invokeTauri("sync_agents_to_active_huddle", {
-        channelId: effectiveChannelId,
-        agentPubkeys: [result.agent.pubkey],
-      }).catch((error) => {
+      void syncAgentsToActiveHuddle(effectiveChannelId, [
+        result.agent.pubkey,
+      ]).catch((error) => {
         console.warn("Could not sync attached agent into Huddle:", error);
       });
     },
@@ -804,12 +833,16 @@ export function useProvisionChannelManagedAgentMutation(
         throw new Error("No channel selected.");
       }
 
-      const [managedAgents, members] = await Promise.all([
+      const [managedAgents, members, personas] = await Promise.all([
         listManagedAgents(),
         getChannelMembers(effectiveChannelId),
+        rest.personaId && rest.respondTo === undefined
+          ? listPersonas()
+          : Promise.resolve([]),
       ]);
       return provisionChannelManagedAgent(rest, {
         managedAgents,
+        personas,
         channelMemberPubkeys: new Set(
           members.map((member) => normalizePubkey(member.pubkey)),
         ),

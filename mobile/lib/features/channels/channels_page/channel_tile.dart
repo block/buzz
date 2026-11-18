@@ -3,6 +3,10 @@ part of '../channels_page.dart';
 class _ChannelTile extends ConsumerWidget {
   final Channel channel;
   final bool isUnread;
+
+  /// Whether unread thread replies, mentions or broadcasts need attention.
+  /// They show as a dot without bolding the label.
+  final bool hasAttention;
   final bool isMuted;
   final String? currentPubkey;
   final VoidCallback onTap;
@@ -15,9 +19,11 @@ class _ChannelTile extends ConsumerWidget {
   final String? sectionId;
 
   const _ChannelTile({
+    super.key,
     required this.channel,
     required this.isUnread,
     required this.currentPubkey,
+    this.hasAttention = false,
     required this.onTap,
     this.isMuted = false,
     this.onMarkRead,
@@ -27,92 +33,149 @@ class _ChannelTile extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final contentColor = isMuted
-        ? navigationSecondaryForeground(context)
-        : navigationPrimaryForeground(
-            context,
-          ).withValues(alpha: isUnread ? 1 : 0.8);
+        ? navigationMetadataForeground(context)
+        : channelNavigationForeground(context);
 
-    return InkWell(
-      borderRadius: BorderRadius.circular(Radii.md),
-      onTap: onTap,
-      onLongPress: () => _showChannelActions(context, ref),
-      child: Padding(
-        padding: const EdgeInsets.only(
-          left: _kChannelSectionInset,
-          right: _kChannelSectionInset,
-          top: _kChannelRowVerticalPadding,
-          bottom: _kChannelRowVerticalPadding,
-        ),
-        child: Row(
-          children: [
-            SizedBox(
-              width: _kChannelLeadingWidth,
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: channel.isDm
-                    ? _DmAvatar(channel: channel, currentPubkey: currentPubkey)
-                    : Icon(
-                        channelIcon(channel),
+    final selected =
+        ConversationPaneScope.maybeOf(context)?.selectedId == channel.id;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: selected ? context.colors.primaryContainer : null,
+        borderRadius: BorderRadius.circular(Radii.md),
+      ),
+      child: Semantics(
+        selected: selected,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(Radii.md),
+          onTap: onTap,
+          onLongPress: () => _showChannelActions(context, ref),
+          child: Padding(
+            padding: const EdgeInsets.only(
+              left: _kChannelSectionInset,
+              right: _kChannelSectionInset,
+              top: _kChannelRowVerticalPadding,
+              bottom: _kChannelRowVerticalPadding,
+            ),
+            child: Row(
+              children: [
+                if (channel.isDm) ...[
+                  SizedBox(
+                    width: _kChannelLeadingWidth,
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: _DmAvatar(
+                        channel: channel,
+                        currentPubkey: currentPubkey,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: _kChannelLabelGap),
+                ] else ...[
+                  SizedBox(
+                    width: _kChannelLeadingWidth,
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Icon(
+                        channel.visibility == 'private'
+                            ? BuzzIcons.lock
+                            : BuzzIcons.hash,
                         key: ValueKey('channel-icon-${channel.id}'),
                         size: _kChannelIconSize,
                         color: contentColor,
                       ),
-              ),
-            ),
-            const SizedBox(width: _kChannelLabelGap),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    resolveDmChannelDisplayLabel(
-                      channel,
-                      currentPubkey: currentPubkey,
                     ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: contentListTitleTextStyle.copyWith(
-                      color: contentColor,
-                      fontWeight: isUnread ? FontWeight.w700 : FontWeight.w400,
+                  ),
+                  const SizedBox(width: _kChannelLabelGap),
+                ],
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        ref.watch(
+                          identityNameSourcesProvider.select(
+                            (names) => resolveDmChannelDisplayLabel(
+                              channel,
+                              currentPubkey: currentPubkey,
+                              names: names,
+                            ),
+                          ),
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: navigationChatTitleTextStyle.copyWith(
+                          color: isMuted
+                              ? contentColor
+                              : channelNavigationForeground(
+                                  context,
+                                  unread: isUnread,
+                                ),
+                          fontWeight: isUnread
+                              ? FontWeight.w600
+                              : FontWeight.w400,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                if (hasAttention) ...[
+                  const SizedBox(width: Grid.xxs),
+                  // The dot is the only sign of this state, so name it for
+                  // screen readers; it merges into the row's label.
+                  Semantics(
+                    label: 'Needs your attention',
+                    child: Container(
+                      key: ValueKey('channel-attention-dot-${channel.id}'),
+                      width: 6,
+                      height: 6,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: context.colors.primary,
+                      ),
                     ),
                   ),
                 ],
-              ),
-            ),
-            if (channel.isEphemeral) ...[
-              const SizedBox(width: Grid.xxs),
-              _EphemeralBadge(channel: channel),
-            ],
-            if (isMuted) ...[
-              const SizedBox(width: Grid.xxs),
-              Icon(
-                LucideIcons.bellOff,
-                size: 12,
-                color: context.colors.onSurface.withValues(alpha: 0.4),
-              ),
-            ],
-            if (!channel.isMember && !channel.isDm)
-              Padding(
-                padding: const EdgeInsets.only(right: Grid.xxs),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: Grid.half + 2,
-                    vertical: 3,
-                  ),
-                  decoration: BoxDecoration(
-                    color: context.colors.primary.withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(Radii.sm),
-                  ),
-                  child: Text(
-                    'Open',
-                    style: context.textTheme.labelSmall?.copyWith(
-                      color: context.colors.primary,
-                      fontWeight: FontWeight.w600,
+                if (channel.isEphemeral) ...[
+                  const SizedBox(width: Grid.xxs),
+                  _EphemeralBadge(channel: channel),
+                ],
+                if (isMuted) ...[
+                  const SizedBox(width: Grid.xxs),
+                  SizedBox(
+                    width: _kChannelIconSize,
+                    child: Center(
+                      child: Icon(
+                        BuzzIcons.bellOff,
+                        size: 12,
+                        color: navigationMetadataForeground(context),
+                      ),
                     ),
                   ),
-                ),
-              ),
-          ],
+                ],
+                if (!channel.isMember && !channel.isDm)
+                  Padding(
+                    padding: const EdgeInsets.only(right: Grid.xxs),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: Grid.half + 2,
+                        vertical: 3,
+                      ),
+                      decoration: BoxDecoration(
+                        color: context.colors.primary.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(Radii.sm),
+                      ),
+                      child: Text(
+                        'Open',
+                        style: context.textTheme.labelSmall?.copyWith(
+                          color: context.colors.primary,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -122,14 +185,15 @@ class _ChannelTile extends ConsumerWidget {
     showChannelActionsSheet(
       context: context,
       channel: channel,
-      isUnread: isUnread,
+      // Mark read also clears the dot: the channel mark reads every reply.
+      isUnread: isUnread || hasAttention,
       onMarkRead: onMarkRead,
       sectionId: sectionId,
     );
   }
 }
 
-class _DmAvatar extends ConsumerWidget {
+class _DmAvatar extends HookConsumerWidget {
   final Channel channel;
   final String? currentPubkey;
 
@@ -145,6 +209,16 @@ class _DmAvatar extends ConsumerWidget {
     final visiblePubkeys = otherPubkeys.isNotEmpty
         ? otherPubkeys
         : channel.participantPubkeys.map((pk) => pk.toLowerCase()).toList();
+    final otherPubkey = visiblePubkeys.length == 1
+        ? visiblePubkeys.first
+        : null;
+
+    // Presence is followed while this row is built; a list releases it when
+    // the row scrolls away.
+    useEffect(() {
+      if (otherPubkey == null) return null;
+      return ref.read(presenceCacheProvider.notifier).track([otherPubkey]);
+    }, [otherPubkey]);
 
     if (visiblePubkeys.length > 1) {
       return Container(
@@ -168,34 +242,31 @@ class _DmAvatar extends ConsumerWidget {
       );
     }
 
-    final otherPubkey = visiblePubkeys.isNotEmpty ? visiblePubkeys.first : null;
     final profile = ref.watch(
       userCacheProvider.select(
         (profiles) => otherPubkey == null ? null : profiles[otherPubkey],
       ),
     );
     final presence = ref.watch(
-      presenceCacheProvider.select(
-        (presenceMap) => otherPubkey == null
-            ? 'offline'
-            : (presenceMap[otherPubkey] ?? 'offline'),
+      presentedPresenceProvider.select(
+        (presenceMap) => otherPubkey == null ? null : presenceMap[otherPubkey],
       ),
     );
 
     // Trigger fetches if not cached yet.
-    if (otherPubkey != null) {
-      if (profile == null) {
-        ref.read(userCacheProvider.notifier).preload([otherPubkey]);
-      }
-      ref.read(presenceCacheProvider.notifier).track([otherPubkey]);
+    if (otherPubkey != null && profile == null) {
+      ref.read(userCacheProvider.notifier).preload([otherPubkey]);
     }
 
     final avatarUrl = profile?.avatarUrl;
+    // Keyed to the hex public key when the counterpart is unnamed and the
+    // profile isn't cached — the compact-npub participant label would
+    // otherwise render `N` for every unnamed DM counterpart. Selection skips
+    // the current user like the row label does, so the initial always
+    // identifies the same counterpart the label names.
     final initial =
         profile?.initial ??
-        (channel.participants.isNotEmpty
-            ? channel.participants.first[0].toUpperCase()
-            : '?');
+        dmAvatarInitial(channel, currentPubkey: currentPubkey);
     return SizedBox(
       width: _kDmAvatarSize,
       height: _kDmAvatarSize,
@@ -205,7 +276,7 @@ class _DmAvatar extends ConsumerWidget {
           AvatarImage(
             imageUrl: avatarUrl,
             radius: _kDmAvatarSize / 2,
-            backgroundColor: context.colors.primaryContainer,
+            backgroundColor: context.controlSurface,
             fallback: Text(
               initial,
               style: context.textTheme.labelSmall?.copyWith(
@@ -214,29 +285,31 @@ class _DmAvatar extends ConsumerWidget {
                 fontWeight: FontWeight.w600,
               ),
             ),
+            isAgent: profile?.isAgent == true,
           ),
-          Positioned(
-            right: -1,
-            bottom: -1,
-            child: Container(
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(
-                color: _presenceColor(context, presence),
-                shape: BoxShape.circle,
-                border: Border.all(
-                  color: context.theme.scaffoldBackgroundColor,
-                  width: 1.5,
+          if (presence != null)
+            Positioned(
+              right: -1,
+              bottom: -1,
+              child: Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  color: _presenceColor(context, presence),
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: context.theme.scaffoldBackgroundColor,
+                    width: 1.5,
+                  ),
                 ),
               ),
             ),
-          ),
         ],
       ),
     );
   }
 
-  Color _presenceColor(BuildContext context, String presence) {
+  Color _presenceColor(BuildContext context, String? presence) {
     return switch (presence) {
       'online' => context.appColors.success,
       'away' => context.appColors.warning,

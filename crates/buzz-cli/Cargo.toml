@@ -40,6 +40,7 @@ uuid = { workspace = true }
 
 # RFC3339 observer timestamps for owner-reviewed agent draft requests
 chrono = { workspace = true }
+httpdate = { workspace = true }
 
 # Typed event builders for all write operations
 buzz-sdk = { workspace = true }
@@ -86,8 +87,24 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # Random number generation — full jitter for exponential backoff in with_retry
 rand = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+# getuid for the desktop provider's same-user check
+libc = "0.2"
+
+# OS keychain for paired desktop-provider tokens (never a file)
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "=3.6.3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "=3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust", "vendored"] }
+
 [dev-dependencies]
 # Scratch files for channel-templates.json fixtures in tests
 tempfile = "3"
 # Minimal HTTP test server for retry/policy integration tests
 axum = { workspace = true }
+# A raw WebSocket relay for NIP-FI close-classification tests
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+# `test-util` enables paused-time control for deterministic timeout tests
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

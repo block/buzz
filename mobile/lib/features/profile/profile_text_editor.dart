@@ -1,15 +1,9 @@
-import 'dart:async';
-
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
-import '../../shared/widgets/modal_presentation.dart';
-import 'ios_profile_text_editor.dart';
+import '../../shared/widgets/text_editor.dart';
 import 'profile_provider.dart';
-import 'profile_text_edit_sheet.dart';
 
 /// Opens the current user's display-name editor from a profile action surface.
 Future<void> showProfileDisplayNameEditor(BuildContext context) async {
@@ -92,52 +86,13 @@ Future<void> _showProfileTextEditor({
   required String hintText,
   required Future<void> Function(String value) onSave,
   bool multiline = false,
-}) async {
-  if (defaultTargetPlatform == TargetPlatform.iOS) {
-    try {
-      await IosProfileTextEditor.presentUntilSaved(
-        title: title,
-        initialValue: initialValue,
-        placeholder: hintText,
-        multiline: multiline,
-        brightness: Theme.of(context).brightness,
-        onSave: onSave,
-        shouldRetryOnError: (error) =>
-            error is! ProfileCommunityChangedException,
-        canPresent: () =>
-            context.mounted && (ModalRoute.of(context)?.isCurrent ?? true),
-        onSaveError: () {
-          if (context.mounted && (ModalRoute.of(context)?.isCurrent ?? true)) {
-            _showSaveError(context);
-          }
-        },
-      );
-      return;
-    } on MissingPluginException {
-      // Previews and older builds retain the complete Flutter fallback.
-    } on PlatformException {
-      // A temporary native presentation failure should not block editing.
-    }
-  }
-
-  if (!context.mounted) return;
-  await showBuzzModalBottomSheet<void>(
-    context: context,
-    isScrollControlled: true,
-    requestFocus: true,
-    showCloseButton: false,
-    builder: (_) => ProfileTextEditSheet(
-      title: title,
-      initialValue: initialValue,
-      hintText: hintText,
-      multiline: multiline,
-      onSave: onSave,
-    ),
-  );
-}
-
-void _showSaveError(BuildContext context) {
-  ScaffoldMessenger.of(context).showSnackBar(
-    const SnackBar(content: Text("We couldn't save this change. Try again.")),
-  );
-}
+}) => showTextEditor(
+  context: context,
+  title: title,
+  initialValue: initialValue,
+  hintText: hintText,
+  onSave: onSave,
+  multiline: multiline,
+  keyPrefix: 'profile-field',
+  shouldRetryOnError: (error) => error is! ProfileCommunityChangedException,
+);

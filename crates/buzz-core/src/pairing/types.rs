@@ -28,6 +28,26 @@ pub enum PairingMessage {
         /// Defaults to `1` when absent (backward compat with pre-versioned implementations).
         #[serde(default = "default_version")]
         version: u32,
+        /// Optional confirmation UX negotiated inside the encrypted offer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        confirmation: Option<String>,
+    },
+
+    /// Source advertises a separate, source-only random code. Contains no code.
+    DesktopCode {},
+    /// Target submits the user-entered code over the authenticated encrypted channel.
+    CodeSubmit {
+        /// Six ASCII digits displayed only on the source.
+        code: String,
+        /// Correlates rejection with the submitted attempt.
+        request_id: String,
+    },
+    /// Source rejects an attempt without releasing any identity material.
+    CodeRejected {
+        /// Request being rejected.
+        request_id: String,
+        /// Remaining guesses before this QR session is permanently aborted.
+        remaining_attempts: u8,
     },
 
     /// Either party → other. Confirms the Short Authentication String matches.
@@ -104,6 +124,7 @@ mod tests {
         let msg = PairingMessage::Offer {
             session_id: "deadbeef".repeat(8),
             version: 1,
+            confirmation: None,
         };
         let json = serde_json::to_string(&msg).expect("serialize");
         assert!(
@@ -129,6 +150,7 @@ mod tests {
                 session_id: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
                     .to_string(),
                 version: 1,
+                confirmation: None,
             }
         );
     }

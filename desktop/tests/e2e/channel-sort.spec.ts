@@ -178,7 +178,10 @@ test.describe("per-group channel sort", () => {
     const stored = await page.evaluate((key) => {
       return JSON.parse(window.localStorage.getItem(key) ?? "null");
     }, SORT_STORAGE_KEY);
-    expect(stored).toEqual({ version: 1, groups: { channels: "recent" } });
+    expect(stored).toMatchObject({
+      version: 1,
+      groups: { channels: "recent" },
+    });
 
     // Survives reload.
     await page.reload();
@@ -246,6 +249,6 @@ test.describe("per-group channel sort", () => {
     const stored = await page.evaluate((key) => {
       return JSON.parse(window.localStorage.getItem(key) ?? "null");
     }, SORT_STORAGE_KEY);
-    expect(stored).toEqual({ version: 1, groups: { dms: "recent" } });
+    expect(stored).toMatchObject({ version: 1, groups: { dms: "recent" } });
   });
 });

@@ -22,6 +22,16 @@ import {
 } from "./buzzAgentConfig";
 
 /**
+ * Capitalize the first character of an effort value for human display.
+ * Raw canonical values ("off", "low", "medium", "high", "max") become
+ * title-cased ("Off", "Low", "Medium", "High", "Max") while the raw
+ * string is preserved as the option value for round-trip fidelity.
+ */
+function humanizeEffortLabel(v: string): string {
+  return v.length === 0 ? v : v[0].toUpperCase() + v.slice(1);
+}
+
+/**
  * Shared effort-select dropdown for the `BUZZ_AGENT_THINKING_EFFORT` env var.
  *
  * Used by both `BuzzAgentModelTuningFields` (per-agent/persona dialogs) and
@@ -105,16 +115,30 @@ export function EffortSelectField({
     : effortDefault === null
       ? "Inherit (default)"
       : (inheritFallbackLabel ?? "Inherit");
+  // Build the option set as the union of the runtime's valid values and the
+  // buzz-agent master list. This ensures runtime-native values like Goose's
+  // "off" appear as options even though they are not in the buzz-agent list.
+  // Ordering: effortValid values (in their supplied order) come first; any
+  // remaining master-list values that are not in effortValid follow as
+  // disabled options. This preserves runtime-authored ordering for valid
+  // values while keeping buzz-agent unavailable options visible when the
+  // caller requests them (showUnavailableOptions).
+  const effortValidSet = new Set(effortValid as readonly string[]);
+  const allValues = [
+    ...(effortValid as readonly string[]),
+    ...BUZZ_AGENT_THINKING_EFFORT_VALUES.filter((v) => !effortValidSet.has(v)),
+  ];
   const effortOptions: AgentDropdownOption[] = [
     { label: emptyOptionLabel ?? inheritLabel, value: "" },
-    ...BUZZ_AGENT_THINKING_EFFORT_VALUES.flatMap((v) => {
-      const isValid = (effortValid as readonly string[]).includes(v);
+    ...allValues.flatMap((v) => {
+      const isValid = effortValidSet.has(v);
       if (!showUnavailableOptions && !isValid) return [];
       const isDefault = v === effortDefault;
+      const humanLabel = humanizeEffortLabel(v);
       return [
         {
           disabled: !isValid,
-          label: isDefault ? `${v} (default)` : v,
+          label: isDefault ? `${humanLabel} (default)` : humanLabel,
           value: v,
         },
       ];
@@ -245,12 +269,15 @@ export const NUMERIC_KIND_MIN: Record<NumericDescriptor["kind"], number> = {
  */
 export function NumericTuningFields({
   descriptors,
+  disabled = false,
   envVars,
   inheritedEnvVars,
   onEnvVarChange,
 }: {
   /** Numeric descriptors to render. Empty array → renders nothing. */
   descriptors: NumericDescriptor[];
+  /** When true, all inputs are read-only (e.g. while a Save is in flight). */
+  disabled?: boolean;
   envVars: EnvVarsValue;
   inheritedEnvVars: EnvVarsValue;
   onEnvVarChange: (key: string, value: string) => void;
@@ -273,6 +300,7 @@ export function NumericTuningFields({
               aria-describedby={`help-${testId}`}
               autoComplete="off"
               data-testid={testId}
+              disabled={disabled}
               id={testId}
               inputMode="numeric"
               min={NUMERIC_KIND_MIN[d.kind]}
@@ -293,12 +321,15 @@ export function NumericTuningFields({
 }
 
 export function BuzzAgentModelTuningFields({
+  disabled = false,
   envVars,
   inheritedEnvVars,
   model,
   onEnvVarChange,
   provider,
 }: {
+  /** When true, all controls are read-only (e.g. while a Save is in flight). */
+  disabled?: boolean;
   envVars: EnvVarsValue;
   inheritedEnvVars: EnvVarsValue;
   /** Active LLM model (optional) — used with `provider` for effort filtering. */
@@ -329,6 +360,7 @@ export function BuzzAgentModelTuningFields({
         <div className="space-y-1.5">
           <EffortSelectField
             currentEffort={currentEffort}
+            disabled={disabled}
             effortDefault={effortDefault}
             effortValid={effortValid}
             htmlFor="ba-thinking-effort"
