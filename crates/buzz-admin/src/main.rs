@@ -529,30 +529,83 @@ async fn cmd_remove_member(pubkey_arg: String, role_filter: Option<String>) -> R
         Ok((RemoveResult::Removed, snapshot)) => {
             println!("removed {pubkey_hex}");
             fan_out_membership_list(&pubsub, &tenant, snapshot).await;
+            let published = publish_member_disconnects(&db, &pubsub, &tenant, &pubkey_hex).await;
+            Ok(removed_exit_code(published))
         }
         Ok((RemoveResult::NotFound, _)) => {
+            // Rerunning after a removal whose disconnect was not confirmed
+            // lands here, so the disconnect is retried before reporting.
+            publish_member_disconnects(&db, &pubsub, &tenant, &pubkey_hex).await;
             eprintln!("error: member not found: {pubkey_hex}");
-            return Ok(2);
+            Ok(2)
         }
         Ok((RemoveResult::IsOwner, _)) => {
             eprintln!(
                 "error: cannot remove relay owner: {pubkey_hex}\n\
                  To change the owner, update RELAY_OWNER_PUBKEY and restart."
             );
-            return Ok(3);
+            Ok(3)
         }
         Ok((RemoveResult::RoleMismatch, _)) => {
             let role_str = role_filter.as_deref().unwrap_or("(unknown)");
             eprintln!("error: role mismatch — {pubkey_hex} is not currently '{role_str}'");
-            return Ok(4);
+            Ok(4)
         }
         Err(e) => {
             eprintln!("error: DB write failed: {e}");
-            return Ok(5);
+            Ok(5)
         }
     }
+}
 
-    Ok(0)
+/// Exit code after a committed removal: 0 once every disconnect was
+/// published, 6 when it must be retried by rerunning the same command.
+fn removed_exit_code(disconnect_published: bool) -> i32 {
+    if disconnect_published {
+        0
+    } else {
+        6
+    }
+}
+
+/// Publish, to every relay server, a disconnect for `pubkey_hex` and every
+/// agent recorded as its own. Idempotent, so a rerun retries it. Returns
+/// whether each disconnect reached at least one subscribed relay server; that
+/// is publication, not observed socket closure.
+async fn publish_member_disconnects(
+    db: &Db,
+    pubsub: &PubSubManager,
+    tenant: &TenantContext,
+    pubkey_hex: &str,
+) -> bool {
+    let Ok(pubkey) = hex::decode(pubkey_hex) else {
+        return false;
+    };
+    let agents = match db.list_agents_for_owner(tenant.community(), &pubkey).await {
+        Ok(agents) => agents,
+        Err(e) => {
+            eprintln!(
+                "warning: owned-agent lookup failed: {e}; disconnect not published, rerun to retry"
+            );
+            return false;
+        }
+    };
+    let mut published = true;
+    for key in std::iter::once(pubkey).chain(agents) {
+        let command = buzz_pubsub::conn_control::ConnControl::DisconnectPubkey {
+            pubkey: key,
+            event_id: String::new(),
+            reason: "blocked: access revoked".to_string(),
+            unowned_only: false,
+        };
+        published &= matches!(pubsub.publish_conn_control(tenant, &command).await, Ok(n) if n > 0);
+    }
+    if published {
+        println!("disconnect published");
+    } else {
+        eprintln!("warning: disconnect not confirmed by any relay server; rerun to retry");
+    }
+    published
 }
 
 async fn cmd_republish_members() -> Result<i32> {
@@ -905,6 +958,14 @@ mod storage_snapshot_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A committed removal whose disconnect was not published exits nonzero
+    /// so the operator reruns it; a published one exits 0.
+    #[test]
+    fn unpublished_disconnect_after_removal_asks_for_a_rerun() {
+        assert_eq!(removed_exit_code(false), 6);
+        assert_eq!(removed_exit_code(true), 0);
+    }
 
     #[test]
     fn parses_partition_audit_month_horizon() {
