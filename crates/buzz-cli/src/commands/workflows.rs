@@ -413,7 +413,11 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        BuzzClient::new(format!("http://{addr}"), Keys::generate(), None, None).unwrap()
+        BuzzClient::new(
+            format!("http://{addr}"),
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap()
     }
 
     fn relay() -> Relay {
@@ -500,19 +504,23 @@ mod tests {
             "invalid cursors never reach the relay"
         );
 
-        for (status, body, want_relay) in [
+        type Expect = fn(&CliError) -> bool;
+        let relay_error: Expect = |e| matches!(e, CliError::Relay { .. });
+        let auth_error: Expect = |e| matches!(e, CliError::Auth(_));
+        let other_error: Expect = |e| !matches!(e, CliError::Relay { .. } | CliError::Auth(_));
+        for (status, body, expect) in [
             (
                 StatusCode::NOT_FOUND,
                 json!({"error": "workflow not found"}).to_string(),
-                true,
+                relay_error,
             ),
             (
                 StatusCode::UNAUTHORIZED,
                 json!({"error": "auth"}).to_string(),
-                true,
+                auth_error,
             ),
-            (StatusCode::OK, "not json".to_string(), false),
-            (StatusCode::OK, "[]".to_string(), false),
+            (StatusCode::OK, "not json".to_string(), other_error),
+            (StatusCode::OK, "[]".to_string(), other_error),
         ] {
             let mut r = relay();
             r.runs = (status, body);
@@ -520,7 +528,7 @@ mod tests {
             let err = fetch_workflow_runs(&client, WF, None, None, None)
                 .await
                 .unwrap_err();
-            assert_eq!(matches!(err, CliError::Relay { .. }), want_relay, "{err:?}");
+            assert!(expect(&err), "{err:?}");
         }
     }
 
