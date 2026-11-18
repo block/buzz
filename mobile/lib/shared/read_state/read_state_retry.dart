@@ -99,7 +99,13 @@ extension ReadStateRetry on ReadStateManager {
     );
     if (blob == null) throw StateError('Invalid pending read-state event');
     if (unread) {
-      if (slot == _unreadCoordinate) _unreadPublished = Map.of(blob.contexts);
+      final head = _unreadHead;
+      // A newer own head that lacks this packet is what the relay holds; the
+      // successor is rebuilt above it from the saved intent.
+      if (slot == _unreadCoordinate &&
+          (head == null || !_outranks(head, event))) {
+        _unreadPublished = Map.of(blob.contexts);
+      }
     } else {
       _published[slot] = Map.of(blob.contexts);
     }
