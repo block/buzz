@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use fs2::FileExt;
-use nostr::nips::nip44;
 use nostr::Timestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -107,7 +106,7 @@ fn store_key(client: &BuzzClient) -> Result<String, CliError> {
         .map_err(|e| CliError::Other(format!("invalid relay URL: {e}")))?;
     Ok(format!(
         "{}@{}",
-        client.keys().public_key().to_hex(),
+        client.public_key().to_hex(),
         url.origin().ascii_serialization()
     ))
 }
@@ -351,19 +350,13 @@ pub(crate) async fn mark_read(
     }
 
     let plaintext = encode_blob(&identity.client_id, &contexts, MAX_PLAINTEXT_BYTES)?;
-    let me = client.keys().public_key();
-    let ciphertext = nip44::encrypt(
-        client.keys().secret_key(),
-        &me,
-        plaintext,
-        nip44::Version::V2,
-    )
-    .map_err(|e| CliError::Other(format!("failed to encrypt read state: {e}")))?;
+    let me = client.public_key();
+    let ciphertext = client.credentials().nip44_encrypt(&me, &plaintext).await?;
     let created_at = previous_at.map_or(options.now, |at| options.now.max(at + 1));
     let builder = buzz_sdk::build_read_state(&identity.slot_id, &ciphertext)
         .map_err(|e| CliError::Other(format!("build_read_state failed: {e}")))?
         .custom_created_at(Timestamp::from(created_at));
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
 
     if store.identities.get(&key) != Some(&identity) {
         store.identities.insert(key, identity);
@@ -431,6 +424,8 @@ mod tests {
     use super::*;
     use crate::commands::read_state::tests::slot_event;
     use crate::commands::test_relay::{fake_relay, Shared};
+    use crate::credentials::Credentials;
+    use nostr::nips::nip44;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
     const CH1: &str = "11111111-1111-4111-8111-111111111111";
@@ -448,7 +443,7 @@ mod tests {
         let relay = Shared::default();
         let url = fake_relay(relay.clone()).await;
         let world = World {
-            client: BuzzClient::new(url, Keys::generate(), None, None).unwrap(),
+            client: BuzzClient::new(url, Credentials::from_keys(Keys::generate())).unwrap(),
             relay,
             dir: tempfile::tempdir().unwrap(),
             counter: 0,
@@ -501,7 +496,12 @@ mod tests {
 
         fn other_slot(&self, slot: &str, contexts: Value, at: u64) {
             let blob = json!({"v": 1, "client_id": "desktop", "contexts": contexts});
-            self.push(slot_event(self.client.keys(), slot, &blob.to_string(), at));
+            self.push(slot_event(
+                &self.client.credentials().test_keys(),
+                slot,
+                &blob.to_string(),
+                at,
+            ));
         }
 
         fn own_slot_on_relay(
@@ -513,7 +513,7 @@ mod tests {
         ) {
             let blob = json!({"v": 1, "client_id": client_id, "contexts": contexts});
             self.push(slot_event(
-                self.client.keys(),
+                &self.client.credentials().test_keys(),
                 &identity.slot_id,
                 &blob.to_string(),
                 at,
@@ -535,9 +535,9 @@ mod tests {
         }
 
         fn blob_of(&self, event: &Value) -> Value {
-            let me = self.client.keys().public_key();
+            let me = self.client.credentials().test_keys().public_key();
             let plaintext = nip44::decrypt(
-                self.client.keys().secret_key(),
+                self.client.credentials().test_keys().secret_key(),
                 &me,
                 event["content"].as_str().unwrap(),
             )
@@ -626,18 +626,18 @@ mod tests {
             "earlier entries carry forward"
         );
 
-        let state = read_state::merge(
-            w.client.keys(),
-            w.relay
-                .lock()
-                .unwrap()
-                .events
-                .iter()
-                .filter(|e| e["kind"] == 30078)
-                .cloned()
-                .collect(),
-        )
-        .unwrap();
+        let slots: Vec<Value> = w
+            .relay
+            .lock()
+            .unwrap()
+            .events
+            .iter()
+            .filter(|e| e["kind"] == 30078)
+            .cloned()
+            .collect();
+        let state = read_state::merge(w.client.credentials(), slots)
+            .await
+            .unwrap();
         assert_eq!(state.frontier(CH1), Some(200));
         assert_eq!(state.frontier(CH2), Some(150));
     }
@@ -792,7 +792,7 @@ mod tests {
 
         let newer = json!({"v": 2, "client_id": identity.client_id, "contexts": {}});
         w.push(slot_event(
-            w.client.keys(),
+            &w.client.credentials().test_keys(),
             &identity.slot_id,
             &newer.to_string(),
             5,
@@ -919,7 +919,7 @@ mod tests {
         }
         assert!(!options.store_path.with_extension("json.tmp").exists());
         let key = store_key(&w.client).unwrap();
-        assert!(key.starts_with(&w.client.keys().public_key().to_hex()));
+        assert!(key.starts_with(&w.client.credentials().test_keys().public_key().to_hex()));
         assert!(key.contains("@http://127.0.0.1:"));
 
         let held = lock_store(&options.store_path, Duration::from_millis(10))
