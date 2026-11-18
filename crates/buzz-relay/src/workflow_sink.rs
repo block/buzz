@@ -14,6 +14,7 @@ use buzz_workflow::action_sink::{ActionSink, ActionSinkError, SentMessage};
 use chrono::Utc;
 use nostr::{EventBuilder, Kind, Tag};
 use tracing::info;
+use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 use uuid::Uuid;
 
 use crate::handlers::event::dispatch_persistent_event;
@@ -31,29 +32,42 @@ use crate::state::AppState;
 /// - **Members only.** Candidates are the destination channel's members; global
 ///   users are never matched.
 /// - **Exact profile name.** Ordinary display names and verified display names,
-///   usernames, and full names are aliases. No substring, prefix, or fuzzy matching. Names may
-///   contain spaces/punctuation (`"Will Pfleger"`, `"Lep (Subagent)"`), so the
+///   usernames, and full names are aliases. Matching ignores case and canonical
+///   Unicode encoding differences, with no substring, prefix, or fuzzy matching.
+///   Names may contain spaces/punctuation (`"Alex Example"`, `"Lep (Subagent)"`), so the
 ///   match is anchored on `@` and terminated by a non-name boundary rather than
 ///   whitespace.
 /// - **Greedy-longest, non-overlapping.** Longer names are matched first and
-///   consume their span, so `@Will Pfleger` binds *Pfleger* and a bare `@Will`
-///   does not match the member `"Will Pfleger"`.
+///   consume their span, so `@Alex Example` binds *Example* and a bare `@Alex`
+///   does not match the member `"Alex Example"`.
 /// - **Ambiguous names wake no one.** If two or more members share the matched
 ///   display name, no `p` tag is emitted for it — arbitrary selection would
 ///   silently misroute and tagging all of them is a false-wake firehose.
 ///
 /// Returns deduplicated pubkey hexes, in first-appearance order in `text`.
 fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<String> {
+    let members: Vec<_> = members
+        .iter()
+        .map(|(name, pubkey)| {
+            (
+                name.chars()
+                    .flat_map(char::to_lowercase)
+                    .nfd()
+                    .collect::<String>(),
+                pubkey.clone(),
+            )
+        })
+        .collect();
     // Name → pubkey, folding case (client matches case-insensitively). A name
     // that maps to more than one distinct pubkey is ambiguous → wake no one.
     let mut by_name: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
-    for (name, pubkey) in members {
+    for (name, pubkey) in &members {
         if name.trim().is_empty() {
             continue;
         }
         by_name
-            .entry(name.to_lowercase())
+            .entry(name.clone())
             .and_modify(|slot| {
                 if slot.as_deref() != Some(pubkey.as_str()) {
                     *slot = None; // ambiguous
@@ -70,29 +84,25 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
     let chars: Vec<char> = text.chars().collect();
     let mut consumed = vec![false; chars.len()];
 
-    // Case-insensitivity folds *both* sides through `char::to_lowercase`, which
-    // can change length: `İ` (U+0130) lowercases to two code points (`i` +
-    // U+0307 combining dot). Comparing a pre-lowercased copy of the whole text
-    // against a lowercased name by index silently desyncs once any earlier char
-    // expands. Instead, fold on the fly: walk the original `chars` at the
-    // candidate `@`, folding each char, and match against the folded-name char
-    // stream — tracking how many *original* chars were consumed so
-    // boundary/`consumed` accounting stays in original coordinates. `None` = no
-    // match; `Some(n)` = matched, consuming `n` original chars after the `@`.
+    // Lowercasing and canonical decomposition can expand characters. Count the
+    // matching span in original coordinates, then normalize that whole span so
+    // combining marks can reorder across character boundaries. Never index the
+    // original text with normalized offsets.
     let match_name_len = |start: usize, folded_name: &[char]| -> Option<usize> {
         let mut ci = start;
         let mut ni = 0;
         while ni < folded_name.len() {
             let c = *chars.get(ci)?;
-            for fc in c.to_lowercase() {
-                if folded_name.get(ni) != Some(&fc) {
-                    return None;
-                }
-                ni += 1;
-            }
+            ni += c.to_lowercase().nfd().count();
             ci += 1;
         }
-        Some(ci - start)
+        chars[start..ci]
+            .iter()
+            .copied()
+            .flat_map(char::to_lowercase)
+            .nfd()
+            .eq(folded_name.iter().copied())
+            .then_some(ci - start)
     };
 
     // A mention is anchored on `@` at a left boundary (start / whitespace / `(`)
@@ -101,14 +111,14 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
     // longest member name first, this is the whole rule: no punctuation allowlist
     // to get wrong, and it is unicode-safe (em-dash, emoji all terminate a name).
     let is_left_boundary = |i: usize| i == 0 || chars[i - 1].is_whitespace() || chars[i - 1] == '(';
-    let extends_name = |c: char| c.is_alphanumeric() || c == '_';
+    let extends_name = |c: char| c.is_alphanumeric() || c == '_' || is_combining_mark(c);
 
     let mut out: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut hits: Vec<(usize, String)> = Vec::new();
 
     for (name, _) in &names {
-        let folded_name: Vec<char> = name.to_lowercase().chars().collect();
+        let folded_name: Vec<char> = name.chars().collect();
         if folded_name.is_empty() {
             continue;
         }
@@ -127,7 +137,7 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
                 });
             if let Some(name_len) = name_len {
                 let span = 1 + name_len;
-                if let Some(Some(pubkey)) = by_name.get(&name.to_lowercase()) {
+                if let Some(Some(pubkey)) = by_name.get(name) {
                     hits.push((at, pubkey.clone()));
                 }
                 for slot in consumed.iter_mut().skip(at).take(span) {
@@ -779,13 +789,38 @@ mod tests {
 
     #[test]
     fn combining_mark_in_name_matches() {
-        // A name carrying a combining mark (`é` as `e` + U+0301) matches the same
-        // sequence in text (1:1 folding) and terminates cleanly.
-        let members = vec![m("Jos\u{0065}\u{0301}", &pk('4'))]; // "José" decomposed
-        assert_eq!(
-            resolve_mention_pubkeys("hi @Jos\u{0065}\u{0301}!", &members),
-            vec![pk('4')]
-        );
+        for (name, text, mentioned) in [
+            ("Jose\u{0301}", "@Jose\u{0301}! @Robby", true),
+            ("José", "@Jose\u{0301}! @Robby", true),
+            ("Jose\u{0301}", "@JOSÉ! @Robby", true),
+            ("a\u{0301}\u{0323}", "@a\u{0323}\u{0301}! @Robby", true),
+            ("각", "@\u{1100}\u{1161}\u{11a8}! @Robby", true),
+            ("José", "@Jose\u{0301}x @Robby", false),
+            ("Jose", "@Jose\u{0301} @Robby", false),
+            ("José", "@Jose\u{0301}@Robby @Robby", true),
+        ] {
+            let members = vec![m(name, &pk('4')), m("Robby", &pk('a'))];
+            let expected = if mentioned {
+                vec![pk('4'), pk('a')]
+            } else {
+                vec![pk('a')]
+            };
+            assert_eq!(
+                resolve_mention_pubkeys(text, &members),
+                expected,
+                "{name}: {text}"
+            );
+        }
+        for (other_key, expected) in [('4', vec![pk('4'), pk('a')]), ('5', vec![pk('a')])] {
+            let members = vec![
+                m("José", &pk('4')),
+                m("Jose\u{0301}", &pk(other_key)),
+                m("Robby", &pk('a')),
+            ];
+            for text in ["@José @Robby", "@Jose\u{0301} @Robby"] {
+                assert_eq!(resolve_mention_pubkeys(text, &members), expected, "{text}");
+            }
+        }
     }
 
     #[test]
@@ -1690,6 +1725,7 @@ mod postgres_tests {
         );
         for (name, text, trigger, mentioned, authorized) in [
             ("verified-username", "@alex", "", true, true),
+            ("verified-username-mixed-case", "@ALEX", "", true, true),
             (
                 "verified-display-name",
                 "@Alex Example (@alex)",
@@ -1782,6 +1818,63 @@ mod postgres_tests {
                 tag_values(&event, "p"),
                 vec![author_hex.clone(), verified.to_hex()],
                 "{name}: both profile sources remain mentionable"
+            );
+        }
+
+        state
+            .db
+            .publish_verified_profile(
+                buzz_db::verified_profiles::ProfileAdmission {
+                    community,
+                    issuer: "https://identity.example.org",
+                    pubkey: &twin.to_hex(),
+                    issued_at: Utc::now(),
+                    admitted_at: Utc::now(),
+                    display_name: "Taylór Example (@alex)",
+                    username: "alex",
+                    full_name: Some("Taylór Example"),
+                    label: "Example",
+                    refresh_seconds: 3600,
+                    membership_required: false,
+                },
+                &state.relay_keypair,
+            )
+            .await
+            .expect("publish duplicate verified username");
+        for (name, text, expected_mentions) in [
+            ("duplicate-verified-username", "@alex", vec![]),
+            ("duplicate-verified-username-mixed-case", "@ALEX", vec![]),
+            (
+                "unique-verified-display-after-collision",
+                "@Alex Example (@alex)",
+                vec![verified.to_hex()],
+            ),
+            (
+                "verified-full-name-normalized",
+                "@Taylo\u{0301}r Example",
+                vec![twin.to_hex()],
+            ),
+        ] {
+            let id = execute_send_message_workflow(
+                &state,
+                community,
+                channel.id,
+                &author_bytes,
+                name,
+                text,
+                "",
+            )
+            .await;
+            let event = load_event(&id).await;
+            assert_eq!(
+                tag_values(&event, "p"),
+                [vec![author_hex.clone()], expected_mentions.clone()].concat(),
+                "{name}: recipient tags"
+            );
+            assert_eq!(
+                tag_values(&event, "buzz:workflow-mention"),
+                expected_mentions,
+                "{name}: delegated authority"
             );
         }
 

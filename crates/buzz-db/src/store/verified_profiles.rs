@@ -1,9 +1,11 @@
-//! Durable output-only NIP-FI verified profiles. Authorization never reads
-//! these tables.
+//! Durable relay-verified NIP-FI profiles. Stored profiles do not authorize
+//! admission. Workflow mentions read their name aliases for destination-channel
+//! members, including delegated agent-wake tags when the workflow's authored
+//! template names an unambiguous member and its authority checks allow it.
 //!
 //! A profile is a historical record ("verified as Alice at T"). It is never
 //! retracted: on a relay that enforces NIP-FI, a key cannot post without a
-//! fresh issuer assertion, so a stale name labels only past activity.
+//! fresh issuer assertion, regardless of its stored profile.
 
 use crate::{AdmittedTx, Db, DbError, Result};
 use buzz_core::CommunityId;
