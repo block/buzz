@@ -864,12 +864,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       final updated = List<Channel>.of(channels);
       final channel = updated[idx];
 
-      if (myPk != null &&
-          event.pubkey.toLowerCase() == myPk.toLowerCase() &&
-          _addSelfThreadInterest(event)) {
-        _writeThreadInterestStores(myPk);
-      }
-      _noteThreadChannel(event, channel.id);
+      _noteThreadEvent(event, channel.id, myPk);
 
       if (myPk != null &&
           shouldNotifyForEvent(

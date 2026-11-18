@@ -12,6 +12,16 @@ extension _ChannelThreadFollows on ChannelsNotifier {
       ? const {}
       : ref.read(threadFollowsProvider).unfollowedRootIds;
 
+  /// Records the user's own thread interest and the thread's channel.
+  void _noteThreadEvent(NostrEvent event, String channelId, String? myPk) {
+    if (myPk != null &&
+        event.pubkey.toLowerCase() == myPk.toLowerCase() &&
+        _addSelfThreadInterest(event)) {
+      _writeThreadInterestStores(myPk);
+    }
+    _noteThreadChannel(event, channelId);
+  }
+
   void _noteThreadChannel(NostrEvent event, String channelId) {
     if (event.threadReference.rootId case final rootId?) {
       ref
