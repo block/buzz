@@ -6,11 +6,15 @@ pub(super) async fn targets(
     human: &str,
     lock: bool,
 ) -> Result<Vec<String>> {
-    Ok(
-        super::super::agent_ownership::discover(conn, human, Some(community), lock)
-            .await?
-            .pubkeys(),
+    Ok(super::super::agent_ownership::discover(
+        conn,
+        human,
+        Some(community),
+        lock,
+        super::super::agent_ownership::DiscoveryLimit::TargetKeys,
     )
+    .await?
+    .pubkeys())
 }
 
 pub(super) async fn recheck(

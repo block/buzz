@@ -6,6 +6,7 @@ use buzz_media::{
     ObjectVersionsPage, UploadRecord, UPLOAD_RECORD_VERSION,
 };
 use serde_json::Value;
+use std::collections::HashSet;
 use std::io::{BufWriter, Write};
 #[path = "media_inventory.rs"]
 mod inventory;
@@ -163,6 +164,7 @@ async fn run_handler_with_inventory(
     mut inventory: Inventory,
 ) -> Result<Value> {
     let keys = db.targets(pubkey).await?;
+    let keys_set: HashSet<_> = keys.agents.iter().cloned().collect();
     let mut after = String::new();
     loop {
         let page = db.candidates(&keys, &after).await?;
@@ -177,7 +179,15 @@ async fn run_handler_with_inventory(
     }
     // Finish discovery before classifying storage-only candidates. Historical
     // upload claims may precede the target's claim in the listing.
-    scan_storage(media, &keys, &mut inventory, "_uploads/", true).await?;
+    scan_storage(
+        media,
+        &keys.human,
+        &keys_set,
+        &mut inventory,
+        "_uploads/",
+        true,
+    )
+    .await?;
     after.clear();
     loop {
         let hashes = inventory.unchecked_candidates(&after).await?;
@@ -192,8 +202,24 @@ async fn run_handler_with_inventory(
     if !inventory.candidates("").await?.is_empty() {
         // These community-first namespaces cannot be looked up by hash alone.
         // Keep complete historical coverage, including removed communities.
-        scan_storage(media, &keys, &mut inventory, "_uploads/", false).await?;
-        scan_storage(media, &keys, &mut inventory, "_meta/", false).await?;
+        scan_storage(
+            media,
+            &keys.human,
+            &keys_set,
+            &mut inventory,
+            "_uploads/",
+            false,
+        )
+        .await?;
+        scan_storage(
+            media,
+            &keys.human,
+            &keys_set,
+            &mut inventory,
+            "_meta/",
+            false,
+        )
+        .await?;
     }
     after.clear();
     loop {
@@ -205,7 +231,15 @@ async fn run_handler_with_inventory(
         for (hash, _) in page {
             // The dot excludes other hash families while covering all blob
             // extensions, thumbnails, historical versions and delete markers.
-            scan_storage(media, &keys, &mut inventory, &format!("{hash}."), false).await?;
+            scan_storage(
+                media,
+                &keys.human,
+                &keys_set,
+                &mut inventory,
+                &format!("{hash}."),
+                false,
+            )
+            .await?;
         }
     }
     inventory.require_immutable_versions().await?;
@@ -214,16 +248,10 @@ async fn run_handler_with_inventory(
     Ok(result)
 }
 
-async fn require_current_targets(db: &impl Database, targets: &UserDeletionTargets) -> Result<()> {
-    if db.targets(&targets.human).await? != *targets {
-        bail!("media agent ownership changed; retry to discover current community ownership");
-    }
-    Ok(())
-}
-
 async fn scan_storage(
     media: &impl Storage,
-    targets: &UserDeletionTargets,
+    human: &str,
+    keys_set: &HashSet<(uuid::Uuid, String)>,
     inventory: &mut Inventory,
     prefix: &str,
     candidates_only: bool,
@@ -278,10 +306,11 @@ async fn scan_storage(
                     let owner = buzz_db::user_deletion::normalize_user_deletion_pubkey(
                         &record.uploader_id,
                     )?;
-                    if candidates_only && targets.contains(*community, &owner) {
+                    let targeted = owner == human || keys_set.contains(&(*community, owner));
+                    if candidates_only && targeted {
                         candidates.push(hash.clone());
                     }
-                    if !candidates_only && !targets.contains(*community, &owner) {
+                    if !candidates_only && !targeted {
                         shared.push(hash.clone());
                     }
                 }
@@ -394,7 +423,6 @@ mod tests {
     struct FakeDb {
         targets: Vec<(uuid::Uuid, String)>,
         target_calls: RefCell<usize>,
-        changed_targets: Option<(usize, Vec<(uuid::Uuid, String)>)>,
         candidates: Vec<String>,
         shared: Vec<String>,
         checked: RefCell<Vec<String>>,
@@ -405,12 +433,7 @@ mod tests {
             *self.target_calls.borrow_mut() += 1;
             Ok(UserDeletionTargets {
                 human: pubkey.to_owned(),
-                agents: match &self.changed_targets {
-                    Some((after, targets)) if *self.target_calls.borrow() > *after => {
-                        targets.clone()
-                    }
-                    _ => self.targets.clone(),
-                },
+                agents: self.targets.clone(),
             })
         }
         async fn candidates(
@@ -714,6 +737,7 @@ mod tests {
         let report: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(report["target_pubkeys"], json!([AGENT, ALICE]));
         assert_eq!(report["summary"], preview);
+        assert!(report.get("agent_communities").is_none());
         let files = report["files"].as_array().unwrap();
         assert_eq!(files.len(), 4);
         assert!(files.iter().all(|file| file.get("owners").is_none()));
@@ -740,7 +764,7 @@ mod tests {
         assert_eq!(preview["selected_files"], 4);
         assert_eq!(preview["kept_files"], 2);
         assert_eq!(preview["deleted_versions"], 0);
-        assert!(*db.target_calls.borrow() >= 1);
+        assert_eq!(*db.target_calls.borrow(), 1);
         let expected_passes: Vec<String> =
             ["_uploads/".into(), "_uploads/".into(), "_meta/".into()]
                 .into_iter()
@@ -762,7 +786,7 @@ mod tests {
         assert_eq!(result["selected_files"], 4);
         assert_eq!(result["kept_files"], 2);
         assert_eq!(result["deleted_versions"], 5);
-        assert!(*db.target_calls.borrow() > 2);
+        assert_eq!(*db.target_calls.borrow(), 2);
         assert_eq!(
             *media.passes.borrow(),
             expected_passes

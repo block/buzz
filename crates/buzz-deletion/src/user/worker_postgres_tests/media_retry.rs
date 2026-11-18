@@ -131,6 +131,16 @@ async fn workflow_media_retry_refetches_agent_ownership_before_deleting() {
     }
     sqlx::query("INSERT INTO users(community_id, pubkey, agent_owner_pubkey) VALUES ($1, decode($2, 'hex'), decode($3, 'hex'))")
         .bind(Uuid::from_u128(11)).bind(&agent).bind(&human).execute(&fixture.pool).await.unwrap();
+    // Retain ownership elsewhere on retry: flattening agent keys would still
+    // select the upload in community 11 after that community changes owner.
+    sqlx::query("INSERT INTO users(community_id, pubkey) VALUES ($1, decode($2, 'hex'))")
+        .bind(Uuid::from_u128(12))
+        .bind(&human)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO users(community_id, pubkey, agent_owner_pubkey) VALUES ($1, decode($2, 'hex'), decode($3, 'hex'))")
+        .bind(Uuid::from_u128(12)).bind(&agent).bind(&human).execute(&fixture.pool).await.unwrap();
     sqlx::query("UPDATE media_uploaders SET pubkey = decode($1, 'hex') WHERE sha256 = $2")
         .bind(&agent)
         .bind("a".repeat(64))
@@ -151,10 +161,11 @@ async fn workflow_media_retry_refetches_agent_ownership_before_deleting() {
     assert_eq!(failed.stage_history[1].status, "failed");
     assert!(!fixture.deleted.load(Ordering::SeqCst));
     sqlx::query(
-        "UPDATE users SET agent_owner_pubkey = decode($1, 'hex') WHERE pubkey = decode($2, 'hex')",
+        "UPDATE users SET agent_owner_pubkey = decode($1, 'hex') WHERE pubkey = decode($2, 'hex') AND community_id = $3",
     )
     .bind(&bob)
     .bind(&agent)
+    .bind(Uuid::from_u128(11))
     .execute(&fixture.pool)
     .await
     .unwrap();

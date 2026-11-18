@@ -260,13 +260,14 @@ profiles. A missing profile grants no agent cleanup authority.
 Every invocation and retry discovers again. Content, account, and profile
 handlers use the utility inside their existing batch transactions with row
 locks when rechecking ownership. Profile cleanup compares against the identities
-that remain after its own committed batches. Media rechecks before each storage
-mutation, uploader-row removal, and successful completion. These checks do not
-replace the requirement to stop writers, or make PostgreSQL and storage atomic.
+that remain after its own committed batches. Media discovers once per invocation
+and uses that snapshot through inventory and deletion. Writers must remain
+stopped throughout the operation.
 
-Discovery rejects more than 10,000 ownership pairs or distinct target keys
-(including the human), rather than returning a partial set. Individual handlers
-retain their additional operation and output limits. Ownership profiles must
+Discovery preserves each caller's existing limits: media, content and profile
+allow 10,000 distinct identities including the human; account discovery allows
+10,000 agents. Account scope capture retains its existing total-key bound.
+Media retains every owned community for each selected agent. Ownership profiles must
 remain until all dependent cleanup completes; profile removal goes last.
 
 ## Media discovery and remaining limits
@@ -286,8 +287,8 @@ history filter: relay membership rows can be deleted on departure.
 Sharing checks span all communities for the selected hashes. Any outside
 uploader in either database source or an upload-record version protects the
 file, including the same agent's uploads in an unowned community. No per-file
-owner-list query is made. The report includes `agent_communities` alongside the
-deduplicated `target_pubkeys`; the latter alone is not deletion authority.
+owner-list query is made. The report retains its deduplicated `target_pubkeys`;
+community ownership is used internally for every media decision.
 
 Storage discovery scans `_uploads/` for target claims, then reads candidate
 claims in a second `_uploads/` listing to protect outside claims encountered
@@ -308,11 +309,6 @@ pages and database/HTTP clients allocate separately. It replaces the former
 1 GiB disk inventory, so large jobs may reach capacity sooner. Exhausting a
 limit aborts before mutation, with a capacity error; no partial inventory is
 used for deletion. Retries rebuild discovery from PostgreSQL and storage.
-The handler re-fetches the full ownership set before each storage delete and
-uploader-row removal, and before returning success. Any change aborts for a
-fresh retry. These checks do not serialize a remote storage write with ownership
-updates: the existing requirement to stop all writers during deletion still
-applies.
 Unversioned exclusive objects also abort. Upload claim objects are deleted
 last, and the target's database uploader rows are removed only after that
 file's storage processing succeeds, so a partial failure can be retried.

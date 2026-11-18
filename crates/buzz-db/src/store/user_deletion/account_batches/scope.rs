@@ -87,9 +87,15 @@ impl UserDeletionStore {
         if communities.len() > super::super::MAX_COMMUNITIES {
             return Err(invalid("account scope exceeds community limit"));
         }
-        let agents = agent_ownership::discover(&mut tx, &target, None, false)
-            .await?
-            .agents;
+        let agents = agent_ownership::discover(
+            &mut tx,
+            &target,
+            None,
+            false,
+            agent_ownership::DiscoveryLimit::AgentRows,
+        )
+        .await?
+        .agents;
         let scope = AccountScope {
             version: 1,
             target: target.clone(),

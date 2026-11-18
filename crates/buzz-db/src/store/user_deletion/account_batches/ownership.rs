@@ -74,14 +74,18 @@ pub(super) async fn agents(
     target: &str,
     lock: bool,
 ) -> Result<Vec<String>> {
-    Ok(
-        super::super::agent_ownership::discover(conn, target, Some(community), lock)
-            .await?
-            .agents
-            .into_iter()
-            .map(|(_, key)| key)
-            .collect(),
+    Ok(super::super::agent_ownership::discover(
+        conn,
+        target,
+        Some(community),
+        lock,
+        super::super::agent_ownership::DiscoveryLimit::AgentRows,
     )
+    .await?
+    .agents
+    .into_iter()
+    .map(|(_, key)| key)
+    .collect())
 }
 
 pub(super) async fn recheck(conn: &mut PgConnection, options: &Options, lock: bool) -> Result<()> {

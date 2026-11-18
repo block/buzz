@@ -176,14 +176,21 @@ async fn discovery_is_direct_normalized_and_holds_the_callers_row_locks() {
         .to_bech32()
         .unwrap();
     let mut tx = f.db.pool().begin().await.unwrap();
-    let targets = discover(&mut tx, &npub, Some(f.communities[0]), true)
-        .await
-        .unwrap();
+    let targets = discover(
+        &mut tx,
+        &npub,
+        Some(f.communities[0]),
+        true,
+        DiscoveryLimit::TargetKeys,
+    )
+    .await
+    .unwrap();
     assert_eq!(targets.human, f.human);
     assert_eq!(targets.agents, vec![(f.communities[0], f.agent.clone())]);
-    assert!(!targets.contains(f.communities[1], &f.agent));
-    assert!(!targets.contains(f.communities[0], &nested));
-    assert!(targets.contains(f.communities[2], &f.human));
+    assert!(!targets
+        .agents
+        .contains(&(f.communities[1], f.agent.clone())));
+    assert!(!targets.agents.contains(&(f.communities[0], nested.clone())));
     let mut transfer = f.db.pool().begin().await.unwrap();
     sqlx::query("SET LOCAL lock_timeout='50ms'")
         .execute(&mut *transfer)
@@ -201,17 +208,92 @@ async fn discovery_is_direct_normalized_and_holds_the_callers_row_locks() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn discovery_rejects_oversized_ownership_without_returning_a_partial_scope() {
+async fn discovery_preserves_each_callers_original_limit_without_truncating_communities() {
     let f = Fixture::new().await;
-    sqlx::query("INSERT INTO users(community_id,pubkey,agent_owner_pubkey) SELECT $1,decode(lpad(to_hex(n),64,'0'),'hex'),decode($2,'hex') FROM generate_series(1,10000) n")
+    sqlx::query("INSERT INTO users(community_id,pubkey,agent_owner_pubkey) SELECT c,decode(lpad(to_hex(n),64,'0'),'hex'),decode($3,'hex') FROM unnest(ARRAY[$1::uuid,$2::uuid]) c CROSS JOIN generate_series(1,5000) n")
+        .bind(f.communities[0]).bind(f.communities[1]).bind(&f.human)
+        .execute(f.db.pool()).await.unwrap();
+    let media = f.db.user_media_targets(&f.human).await.unwrap();
+    assert_eq!(media.agents.len(), 10001);
+    assert_eq!(media.pubkeys().len(), 5002);
+    assert!(media
+        .agents
+        .contains(&(f.communities[1], format!("{:064x}", 5000))));
+    sqlx::query("INSERT INTO users(community_id,pubkey,agent_owner_pubkey) SELECT $1,decode(lpad(to_hex(n),64,'0'),'hex'),decode($2,'hex') FROM generate_series(5001,9998) n")
         .bind(f.communities[0]).bind(&f.human).execute(f.db.pool()).await.unwrap();
-    for community in [None, Some(f.communities[0])] {
-        let mut tx = f.db.pool().begin().await.unwrap();
-        assert!(discover(&mut tx, &f.human, community, false)
+    assert_eq!(
+        f.db.user_media_targets(&f.human)
             .await
-            .unwrap_err()
-            .to_string()
-            .contains("no partial scope"));
-        tx.rollback().await.unwrap();
+            .unwrap()
+            .pubkeys()
+            .len(),
+        MAX_TARGETS
+    );
+    let mut tx = f.db.pool().begin().await.unwrap();
+    assert_eq!(
+        discover(
+            &mut tx,
+            &f.human,
+            Some(f.communities[0]),
+            false,
+            DiscoveryLimit::TargetKeys
+        )
+        .await
+        .unwrap()
+        .pubkeys()
+        .len(),
+        MAX_TARGETS
+    );
+    tx.rollback().await.unwrap();
+    sqlx::query("INSERT INTO users(community_id,pubkey,agent_owner_pubkey) VALUES ($1,decode($2,'hex'),decode($3,'hex'))")
+        .bind(f.communities[0]).bind(format!("{:064x}", 9999)).bind(&f.human)
+        .execute(f.db.pool()).await.unwrap();
+    let mut tx = f.db.pool().begin().await.unwrap();
+    assert_eq!(
+        discover(
+            &mut tx,
+            &f.human,
+            Some(f.communities[0]),
+            false,
+            DiscoveryLimit::AgentRows
+        )
+        .await
+        .unwrap()
+        .agents
+        .len(),
+        MAX_TARGETS
+    );
+    for community in [None, Some(f.communities[0])] {
+        assert!(discover(
+            &mut tx,
+            &f.human,
+            community,
+            false,
+            DiscoveryLimit::TargetKeys
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("no partial scope"));
     }
+    assert!(
+        discover(&mut tx, &f.human, None, false, DiscoveryLimit::AgentRows)
+            .await
+            .is_err()
+    );
+    tx.rollback().await.unwrap();
+    sqlx::query("INSERT INTO users(community_id,pubkey,agent_owner_pubkey) VALUES ($1,decode($2,'hex'),decode($3,'hex'))")
+        .bind(f.communities[0]).bind(format!("{:064x}", 10000)).bind(&f.human)
+        .execute(f.db.pool()).await.unwrap();
+    let mut tx = f.db.pool().begin().await.unwrap();
+    assert!(discover(
+        &mut tx,
+        &f.human,
+        Some(f.communities[0]),
+        false,
+        DiscoveryLimit::AgentRows
+    )
+    .await
+    .is_err());
+    tx.rollback().await.unwrap();
 }

@@ -7,12 +7,18 @@ pub(super) async fn targets(
     subject: &str,
     lock: bool,
 ) -> Result<Vec<Vec<u8>>> {
-    super::super::agent_ownership::discover(conn, subject, Some(community), lock)
-        .await?
-        .pubkeys()
-        .iter()
-        .map(|key| hex::decode(key).map_err(|_| invalid("invalid target key")))
-        .collect()
+    super::super::agent_ownership::discover(
+        conn,
+        subject,
+        Some(community),
+        lock,
+        super::super::agent_ownership::DiscoveryLimit::TargetKeys,
+    )
+    .await?
+    .pubkeys()
+    .iter()
+    .map(|key| hex::decode(key).map_err(|_| invalid("invalid target key")))
+    .collect()
 }
 
 pub(super) async fn excluded(

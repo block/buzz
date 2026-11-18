@@ -50,7 +50,14 @@ impl Db {
         sqlx::query("SET LOCAL statement_timeout = '120s'")
             .execute(&mut *tx)
             .await?;
-        let targets = agent_ownership::discover(&mut tx, &human, None, false).await?;
+        let targets = agent_ownership::discover(
+            &mut tx,
+            &human,
+            None,
+            false,
+            agent_ownership::DiscoveryLimit::TargetKeys,
+        )
+        .await?;
         tx.commit().await?;
         Ok(targets)
     }
