@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/diagnostics/diagnostic_filter.dart';
@@ -14,7 +15,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:sentry_flutter/sentry_flutter.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 // The SDK's own processors and integrations, so tests see what it really
 // sends rather than hand-built events.
 // ignore: implementation_imports
@@ -219,6 +219,8 @@ void main() {
   for (final (name, destination) in [
     ('no reporting destination', ''),
     ('a destination the SDK cannot parse', 'https://key@example.org'),
+    ('a destination without a public key', 'https://example.org/1'),
+    ('a destination without an HTTP host', 'ftp://key@example.org/1'),
   ]) {
     test('a build with $name starts without the SDK', () async {
       DiagnosticReporter? started;
@@ -233,13 +235,20 @@ void main() {
   }
 
   test('an installation keeps one install ID across launches', () async {
-    SharedPreferences.setMockInitialValues({});
-    final first = await diagnosticInstallId();
-    expect(first, isNotNull);
-    expect(await diagnosticInstallId(), first);
+    final installation = await Directory.systemTemp.createTemp('install');
+    addTearDown(() => installation.delete(recursive: true));
+    Future<Directory> storage() async => installation;
 
-    SharedPreferences.setMockInitialValues({});
-    expect(await diagnosticInstallId(), isNot(first));
+    final first = await diagnosticInstallId(directory: storage);
+    expect(first, isNotNull);
+    expect(await diagnosticInstallId(directory: storage), first);
+
+    final other = await Directory.systemTemp.createTemp('install');
+    addTearDown(() => other.delete(recursive: true));
+    expect(
+      await diagnosticInstallId(directory: () async => other),
+      isNot(first),
+    );
   });
 
   test('a reporting call that fails does not reach the caller', () async {

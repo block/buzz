@@ -1,8 +1,9 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import 'diagnostic_filter.dart';
@@ -42,19 +43,28 @@ Future<void> runWithDiagnostics({
   );
 }
 
-const _installIdKey = 'diagnostics.install_id';
+const _installIdFile = 'diagnostics_install_id';
 
-/// A random identifier for this installation, kept in app storage, so
-/// reports from one device can be matched up across sign-ins and sign-outs.
-/// Created on first use; null if storage fails, since reporting must never
-/// stop the app from starting.
-Future<String?> diagnosticInstallId() async {
+/// A random identifier for this installation, so reports from one device can
+/// be matched up across sign-ins and sign-outs. Created on first use and kept
+/// in a file that device backups and transfers leave behind, so a phone
+/// restored from another gets its own: Android's files directory, excluded
+/// by the backup rules, and iOS's caches directory, which is never backed
+/// up. Null if storage fails, since reporting must never stop the app from
+/// starting.
+Future<String?> diagnosticInstallId({
+  Future<Directory> Function()? directory,
+}) async {
   try {
-    final prefs = await SharedPreferences.getInstance();
-    final saved = prefs.getString(_installIdKey);
-    if (saved != null) return saved;
+    final dir = await (directory ?? _installIdDirectory)();
+    final file = File('${dir.path}/$_installIdFile');
+    if (await file.exists()) {
+      final saved = (await file.readAsString()).trim();
+      if (saved.isNotEmpty) return saved;
+    }
     final created = const Uuid().v4();
-    await prefs.setString(_installIdKey, created);
+    await dir.create(recursive: true);
+    await file.writeAsString(created, flush: true);
     return created;
   } on Object catch (error) {
     debugPrint('[Diagnostics] no install ID: ${error.runtimeType}');
@@ -62,10 +72,23 @@ Future<String?> diagnosticInstallId() async {
   }
 }
 
+Future<Directory> _installIdDirectory() => Platform.isIOS
+    ? getApplicationCacheDirectory()
+    : getApplicationSupportDirectory();
+
 bool _isUsable(String destination) {
   if (destination.isEmpty) return false;
   try {
-    Dsn.parse(destination);
+    final dsn = Dsn.parse(destination);
+    // The native SDKs also need an HTTP(S) host and a public key, which the
+    // Dart parser lets through; they would fail after Dart installs its
+    // handlers.
+    if (!{'http', 'https'}.contains(dsn.uri?.scheme) ||
+        (dsn.uri?.host ?? '').isEmpty ||
+        dsn.publicKey.isEmpty ||
+        dsn.projectId.isEmpty) {
+      throw const FormatException();
+    }
     return true;
   } on Object catch (error) {
     // Dsn.parse throws ArgumentError or FormatException; the message would
