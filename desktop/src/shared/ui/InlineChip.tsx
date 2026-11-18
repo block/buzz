@@ -31,7 +31,17 @@ type InlineChipProps =
         as: "button";
       });
 
-/** Shared visual primitive for mention, channel, and Buzz permalink chips. */
+/**
+ * Shared visual primitive for mention, channel, and Buzz permalink chips.
+ *
+ * Copy reads a chip's text back against the label its `data-*-label` attribute
+ * declares (`matchChipTextToLabel`) to tell a whole chip from the fragment a
+ * boundary-crossing selection leaves. Text rendered here that isn't part of
+ * that label — a count badge, a glyph with a text fallback — makes a whole chip
+ * look like a fragment, which silently drops its identity from the clipboard.
+ * Render such additions as `aria-hidden` CSS content, or teach the predicate
+ * the new form.
+ */
 export function InlineChip({
   as = "span",
   children,

@@ -303,3 +303,116 @@ describe("live observer journal retention — eviction floor (reconnect replay)"
     );
   });
 });
+
+describe("live observer journal — in-order append fast path ordering/dedup", () => {
+  // The common live path (every batch strictly after the retained tail) skips
+  // the whole-journal dedup Set and re-sort. These pin the observable
+  // invariants that authorize that skip: identical ordering, dedup, and
+  // transcript against the general path.
+  beforeEach(() => {
+    resetAgentObserverStore();
+  });
+
+  /** An event with an explicit timestamp, for equal-timestamp tie-breaks. */
+  function makeEventAt(seq, timestampMs) {
+    return {
+      ...makeEvent(seq),
+      timestamp: new Date(timestampMs).toISOString(),
+    };
+  }
+
+  it("test_equal_timestamp_batch_orders_by_seq", () => {
+    // A one-second harness frame batches several events sharing a timestamp;
+    // the tie-break is seq. Deliver them out of seq order in one batch.
+    const t = 1_760_000_100_000;
+    syncAgentObserverEvents(AGENT_PUBKEY, [makeEventAt(1, t - 1000)]);
+    syncAgentObserverEvents(AGENT_PUBKEY, [
+      makeEventAt(4, t),
+      makeEventAt(2, t),
+      makeEventAt(3, t),
+    ]);
+    assert.deepEqual(
+      getAgentObserverSnapshot(AGENT_PUBKEY).events.map((event) => event.seq),
+      [1, 2, 3, 4],
+      "equal-timestamp events are retained in seq order",
+    );
+  });
+
+  it("test_duplicate_batch_redelivery_is_ignored", () => {
+    // Relay redelivery of the newest batch: every event duplicates the tail,
+    // so nothing is admitted, nothing is notified.
+    const batch = [makeEvent(1), makeEvent(2), makeEvent(3)];
+    syncAgentObserverEvents(AGENT_PUBKEY, batch);
+    let notifications = 0;
+    const unsubscribe = subscribeAgentObserverStore(() => {
+      notifications += 1;
+    });
+    try {
+      syncAgentObserverEvents(AGENT_PUBKEY, batch);
+    } finally {
+      unsubscribe();
+    }
+    assert.deepEqual(
+      getAgentObserverSnapshot(AGENT_PUBKEY).events.map((event) => event.seq),
+      [1, 2, 3],
+      "a redelivered batch adds nothing",
+    );
+    assert.equal(notifications, 0, "a pure-duplicate batch notifies no one");
+  });
+
+  it("test_batch_with_intra_batch_duplicate_admits_once", () => {
+    // A batch strictly after the tail still dedups within itself.
+    syncAgentObserverEvents(AGENT_PUBKEY, [makeEvent(1)]);
+    syncAgentObserverEvents(AGENT_PUBKEY, [
+      makeEvent(2),
+      makeEvent(3),
+      makeEvent(2),
+    ]);
+    assert.deepEqual(
+      getAgentObserverSnapshot(AGENT_PUBKEY).events.map((event) => event.seq),
+      [1, 2, 3],
+      "an intra-batch duplicate is admitted exactly once",
+    );
+  });
+
+  it("test_late_arrival_overlapping_tail_takes_slow_path_and_dedups", () => {
+    // A replayed window straddling the tail: partly duplicate, partly new,
+    // partly older-than-tail. Not all-after, so the general path must dedup
+    // against the whole journal and re-sort.
+    syncAgentObserverEvents(AGENT_PUBKEY, [
+      makeEvent(1),
+      makeEvent(2),
+      makeEvent(4),
+    ]);
+    syncAgentObserverEvents(AGENT_PUBKEY, [
+      makeEvent(2),
+      makeEvent(3),
+      makeEvent(4),
+      makeEvent(5),
+    ]);
+    const events = getAgentObserverSnapshot(AGENT_PUBKEY).events;
+    assert.deepEqual(
+      events.map((event) => event.seq),
+      [1, 2, 3, 4, 5],
+      "overlapping late arrival dedups against the journal and sorts into place",
+    );
+    assert.deepEqual(
+      getAgentTranscript(AGENT_PUBKEY),
+      buildTranscript(events),
+      "the transcript equals a full replay after a mixed-path sequence",
+    );
+  });
+
+  it("test_fast_path_transcript_equals_full_replay", () => {
+    // Pure in-order streaming (fast path every time) must produce the same
+    // derived transcript as a replay of the retained window.
+    fillSequential(50);
+    const events = getAgentObserverSnapshot(AGENT_PUBKEY).events;
+    assert.equal(events.length, 50);
+    assert.deepEqual(
+      getAgentTranscript(AGENT_PUBKEY),
+      buildTranscript(events),
+      "in-order fast-path appends derive the same transcript as a replay",
+    );
+  });
+});

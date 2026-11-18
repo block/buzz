@@ -8,6 +8,10 @@
 //! Auth: NIP-98 on all routes (clone + push). No public repos for v1.
 //! Transport: shells out to `git --stateless-rpc` with `env_clear()`.
 
+// Response is the natural error type for axum handlers.
+#![allow(clippy::result_large_err)]
+
+use crate::access::{auth_error_code, AccessSlot, AuthMethod, AuthResult};
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
@@ -29,7 +33,10 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tracing::{error, info, warn};
 
 use super::binding::{resolve_repo_binding, RepoBinding};
-use super::cas_publish::{cas_publish, CasError, ParentState, PublishLimits};
+use super::cas_publish::{
+    cas_publish, push_disposition, snapshot_workspace, CasError, ParentState, PublishLimits,
+    PushDisposition, WorkspaceState,
+};
 use super::hook::install_hook;
 use super::hydrate::{
     hydrate_for_read, hydrate_for_write, load_manifest_for_read, HydrateError, HydratedRepo,
@@ -62,7 +69,8 @@ const UPLOAD_PACK_MAX_DECODED_BYTES: u64 = 64 * 1024 * 1024;
 /// NIP-98 auth extractor for git routes.
 ///
 /// Validates the `Authorization: Nostr <base64>` header before the request body
-/// is read. Same pattern as `AuthenticatedUpload` in media.rs.
+/// is read. Same pattern as `UploadContext` in media.rs: auth is deferred out of
+/// the extractor so NIP-FI admission can map failures to canonical denial bytes.
 ///
 /// Authorization model: reads (ref advertisement, upload-pack) require the
 /// caller's *current* active membership in the repo's bound channel — see
@@ -79,58 +87,79 @@ pub struct GitAuth {
 impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
     type Rejection = Response;
 
+    #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
     async fn from_request_parts(
         parts: &mut axum::http::request::Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
+        let global = state.config.nip_fi.mode;
+        if !global.evaluates() {
+            return Self::from_parts_with_policy(parts, state, global).await;
+        }
+        match crate::nip_fi_policy::resolve(state, &parts.headers).await {
+            Ok(policy) => {
+                crate::nip_fi_policy::with_policy(policy, async {
+                    let mode = crate::nip_fi_policy::mode(state, &parts.headers).await;
+                    Self::from_parts_with_policy(parts, state, mode).await
+                })
+                .await
+            }
+            Err(response) => {
+                // Preserve the early gate's legacy host-miss ordering. A failed
+                // lookup is never turned into a usable optional policy scope.
+                let mode = if response.status() == StatusCode::NOT_FOUND {
+                    global
+                } else {
+                    buzz_auth::NipFiMode::unavailable()
+                };
+                Self::from_parts_with_policy(parts, state, mode).await
+            }
+        }
+    }
+}
+
+impl GitAuth {
+    async fn from_parts_with_policy(
+        parts: &mut axum::http::request::Parts,
+        state: &Arc<AppState>,
+        mode: buzz_auth::NipFiMode,
+    ) -> Result<Self, Response> {
         let method = parts.method.as_str();
 
-        let auth_header = parts
-            .headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| {
-                Response::builder()
-                    .status(StatusCode::UNAUTHORIZED)
-                    .header(
-                        "WWW-Authenticate",
-                        format!("Nostr realm=\"buzz\", method=\"{method}\""),
-                    )
-                    .body(Body::from("missing Authorization header"))
-                    .unwrap()
-            })?;
-
-        let token = auth_header.strip_prefix("Nostr ").ok_or_else(|| {
-            Response::builder()
-                .status(StatusCode::UNAUTHORIZED)
-                .header(
-                    "WWW-Authenticate",
-                    format!("Nostr realm=\"buzz\", method=\"{method}\""),
-                )
-                .body(Body::from("expected Authorization: Nostr <base64>"))
-                .unwrap()
-        })?;
-
-        let event_bytes = base64::engine::general_purpose::STANDARD
-            .decode(token)
-            .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token))
-            .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid base64").into_response())?;
-        let event_json = String::from_utf8(event_bytes)
-            .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid utf-8").into_response())?;
+        // Off mode: parse and validate the Authorization header BEFORE tenant
+        // lookup.  [FI-INV-15] — Off mode preserves pre-NIP-FI error precedence:
+        // missing credentials → 401 + WWW-Authenticate challenge;
+        // malformed credentials (bad base64, bad UTF-8) → 401 without challenge;
+        // regardless of whether the Host resolves to a known community.  No
+        // tenant-binding work for syntactically bad requests. In evaluating modes,
+        // policy resolution first prevents a required row taking the legacy path.
+        //
+        // Enforce: the header syntax is validated
+        // inside the NIP-FI admission closure below, where proof failures are
+        // mapped to NIP-FI denial bytes.  (DenyProtected returns 503 at the
+        // start of admission without running the closure.)  Tenant lookup still happens before
+        // admission (immediately after this block) because the signed `u` tag
+        // must be verified against the tenant-bound host, not a process-global
+        // domain.
+        let slot = AccessSlot::of(parts);
+        if !mode.restricts() {
+            if let Err(rejection) = parse_git_auth_header(&parts.headers, method) {
+                git_header_rejected(&slot, &parts.headers);
+                // Off returns `rejection` as is; shadow also records the
+                // enforce verdict for the failed proof.
+                crate::nip_fi_http::observe_failed_proof(state, &parts.headers).await;
+                return Err(rejection);
+            }
+        }
 
         // Row zero for Git HTTP: bind the request Host to a server-resolved
         // tenant before URL verification. We still do not trust forwarded
         // headers; the signed `u` tag is checked against the host that resolved
         // through the authoritative communities table, not a deployment-global
         // `config.relay_url` and not any client-supplied community value.
-        let raw_host = parts
-            .headers
-            .get(header::HOST)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        let tenant = crate::tenant::bind_community(&state.db, raw_host)
+        let tenant = crate::nip_fi_shadow::bind_tenant(state, &parts.headers)
             .await
-            .map_err(|_| (StatusCode::NOT_FOUND, "repository not found").into_response())?;
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "repository not found").into_response())?;
         let expected_url = git_expected_url(
             &state.config.relay_url,
             &tenant,
@@ -142,90 +171,163 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         )
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "unrecognized git endpoint").into_response())?;
 
-        // Repo-root URL verification.
+        // NIP-FI admission: the NIP-98 extraction closure runs inside
+        // `admit_nip_fi_http_on_state` so all proof failures (missing header,
+        // invalid base64, bad signature) are mapped to NIP-FI denial bytes in
+        // Enforce mode, and cardinality is enforced uniformly.  Off mode
+        // preserves legacy Git 401 responses per [FI-INV-15]; Off-mode header
+        // syntax was already validated above so the closure cannot fail on the
+        // syntax cases.
+        // [FI-TRACE-AUTHORITY-UNIFORM, FI-TRACE-DENIAL-ORACLE]
         //
-        // The credential helper signs a NIP-98 token with:
-        //   u = <repo-root>   (e.g., http://host/git/{owner}/{repo})
-        //
-        // Git's credential protocol does NOT pass query strings to helpers, so
-        // service-scoping (`?service=...`) cannot be implemented at the NIP-98
-        // level without protocol changes. The token is repo-scoped, not service-scoped.
-        //
-        // Security is still provided by:
-        // - ±60s timestamp window (limits replay)
-        // - HTTPS in production (prevents token theft)
-        // - Pre-receive hook for push authorization (role + protection rules)
-        // - Endpoint routing (clone/push are different HTTP paths)
-
         // Skip HTTP method check for git routes.
         //
         // Git's credential helper signs with `method=GET` (the initial /info/refs request)
         // then reuses the token for POST (pack data). Method binding can't work here.
         //
         // Security is provided by: service-binding in the URL (clone vs push scoped),
-        // ±60s timestamp, and the pre-receive hook for push authorization.
+        // ±120s timestamp, and the pre-receive hook for push authorization.
         // We pass the method from the event itself so verify_nip98_event always accepts.
-        let event_method = serde_json::from_str::<serde_json::Value>(&event_json)
-            .ok()
-            .and_then(|v| {
-                v["tags"]
-                    .as_array()?
-                    .iter()
-                    .find(|t| t[0].as_str() == Some("method"))?[1]
-                    .as_str()
-                    .map(str::to_owned)
-            })
-            .unwrap_or_else(|| method.to_owned());
-
-        // SECURITY: method intentionally not verified for git routes. The tautological
-        // check (event.method == event.method) is deliberate — see comment block above.
-        // Git's credential protocol signs once with GET and reuses for POST. The URL tag
-        // provides the real security boundary (±60s timestamp + URL lock + HTTPS).
-
+        //
         // body=None: can't buffer streaming pack data to verify payload hash.
-        // Token is time-bounded (±60s) and URL-locked — acceptable trade-off.
-        let pubkey =
-            buzz_auth::nip98::verify_nip98_event(&event_json, &expected_url, &event_method, None)
-                .map_err(|e| {
-                warn!(error = %e, "git NIP-98 auth failed");
-                (StatusCode::UNAUTHORIZED, "NIP-98 auth failed").into_response()
-            })?;
+        // Token is time-bounded (±120s) and URL-locked — acceptable trade-off.
+        let headers_clone = parts.headers.clone();
+        let method_str = method.to_owned();
+        let proof_slot = slot.clone();
+        let admission = crate::nip_fi_http::admit_nip_fi_http_on_state(
+            state,
+            &parts.headers,
+            &slot,
+            move || verify_git_proof(&headers_clone, &method_str, &expected_url, &proof_slot),
+        )
+        .await?;
 
-        // NOTE: NIP-98 event-ID dedup intentionally NOT implemented here.
-        // Git's credential protocol reuses one signed token across multiple requests
-        // in a session (info_refs GET → upload-pack/receive-pack POST). Rejecting
-        // replayed event IDs would break normal clone/push operations.
-        // The ±60s timestamp window + URL scoping + HTTPS transport provide sufficient
-        // replay protection for v1. Per-request signing requires protocol changes.
-
-        let event: nostr::Event = serde_json::from_str(&event_json)
-            .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid auth event").into_response())?;
+        let pubkey = *admission.proven_pubkey();
+        // Git reuses one signed token per session, so there is no replay
+        // step: the membership and ban gates below make the final decision.
+        slot.in_community(tenant.community());
+        let token_owner = admission.token_owner();
+        let (event, signed_auth_created_at) = admission.into_extra();
 
         // Relay membership gate (NIP-43). Git cannot carry a standalone
         // x-auth-tag header through the credential-helper protocol, so agents
         // attach their NIP-OA attestation to the signed NIP-98 event, matching
         // the WebSocket NIP-42 flow.
         let event_auth_tag = crate::handlers::auth::extract_auth_tag_json(&event);
-        let header_auth_tag = parts
-            .headers
-            .get("x-auth-tag")
-            .and_then(|value| value.to_str().ok());
+        let header_auth_tag = crate::api::relay_members::extract_auth_tag_header(&parts.headers);
         let auth_tag = event_auth_tag.as_deref().or(header_auth_tag);
-        if crate::api::relay_members::enforce_relay_membership(
+        // A failed policy lookup is 503 (the canonical NIP-FI body when the
+        // mode restricts); only a real refusal is 403.
+        let unavailable = |legacy: Response| {
+            if mode.restricts() {
+                crate::nip_fi_core::http_denial(buzz_auth::DenialClass::AuthorizationUnavailable)
+            } else {
+                legacy
+            }
+        };
+        // A verified agent token gets only NIP-FI's fixed denial, so the
+        // response never shows which step refused it.
+        let denied = |legacy: Response| {
+            if token_owner.is_some() {
+                crate::nip_fi_core::http_denial(buzz_auth::DenialClass::AuthorizationDenied)
+            } else {
+                legacy
+            }
+        };
+        #[cfg(test)]
+        crate::nip_fi_test_hooks::before_git_membership(tenant.community()).await;
+        match crate::api::relay_members::check_relay_membership(
             state,
             tenant.community(),
             pubkey.as_bytes(),
             auth_tag,
+            Some(signed_auth_created_at),
+            token_owner,
         )
         .await
-        .is_err()
         {
-            warn!(pubkey = %pubkey.to_hex(), "git: relay membership denied");
-            return Err((StatusCode::FORBIDDEN, "restricted: not a relay member").into_response());
+            Ok(crate::api::relay_members::MembershipDecision::Denied) => {
+                warn!(pubkey = %pubkey.to_hex(), "git: relay membership denied");
+                slot.finish(AuthResult::Denied(
+                    crate::access::AuthReason::NotRelayMember,
+                ));
+                return Err(denied(
+                    (StatusCode::FORBIDDEN, "restricted: not a relay member").into_response(),
+                ));
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!(pubkey = %pubkey.to_hex(), error = %e, "git: relay membership lookup failed");
+                slot.finish(AuthResult::Denied(
+                    crate::access::AuthReason::MembershipUnavailable,
+                ));
+                return Err(unavailable(
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "error: internal error checking relay membership",
+                    )
+                        .into_response(),
+                ));
+            }
         }
 
-        deny_banned_git_principal(&state.db, tenant.community(), &pubkey, auth_tag).await?;
+        deny_banned_git_principal(
+            &state.db,
+            tenant.community(),
+            &pubkey,
+            auth_tag,
+            Some(signed_auth_created_at),
+            token_owner,
+        )
+        .await
+        .map_err(|denial| {
+            if denial.status() == StatusCode::SERVICE_UNAVAILABLE {
+                slot.finish(AuthResult::Denied(
+                    crate::access::AuthReason::BanCheckUnavailable,
+                ));
+                unavailable(denial)
+            } else {
+                slot.finish(AuthResult::Denied(crate::access::AuthReason::Banned));
+                denied(denial)
+            }
+        })?;
 
+        // A token owner other than the agent's stored owner is refused; an
+        // unset stored owner is recorded.
+        if let Some(owner) = token_owner {
+            use crate::api::relay_members::{link_agent_owner, OwnerLink};
+            match link_agent_owner(state, &tenant, &pubkey, &owner).await {
+                OwnerLink::Linked => {}
+                OwnerLink::Conflict => {
+                    crate::nip_fi_http::owner_refused(
+                        buzz_auth::DenialClass::AuthorizationDenied,
+                        "not_stored_owner",
+                    );
+                    slot.finish(AuthResult::Denied(crate::access::AuthReason::OwnerMismatch));
+                    return Err(crate::nip_fi_core::http_denial(
+                        buzz_auth::DenialClass::AuthorizationDenied,
+                    ));
+                }
+                OwnerLink::Unavailable => {
+                    crate::nip_fi_http::owner_refused(
+                        buzz_auth::DenialClass::AuthorizationUnavailable,
+                        "owner_link_unavailable",
+                    );
+                    slot.finish(AuthResult::Denied(
+                        crate::access::AuthReason::NipOaOwnerUnlinked,
+                    ));
+                    return Err(unavailable(
+                        (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            crate::handlers::auth::OWNER_LINK_ERROR,
+                        )
+                            .into_response(),
+                    ));
+                }
+            }
+        }
+
+        slot.finish(AuthResult::Success);
         Ok(GitAuth { pubkey, tenant })
     }
 }
@@ -241,27 +343,61 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
 /// Cascades to the proven NIP-OA owner, matching the NIP-42 gate in
 /// `handlers::auth`: banning a human must also revoke their agents, or the ban
 /// is bypassable by cloning and pushing through an agent key.
-async fn deny_banned_git_principal(
+pub(super) async fn deny_banned_git_principal(
     db: &buzz_db::Db,
     community: buzz_core::CommunityId,
     pubkey: &nostr::PublicKey,
     auth_tag: Option<&str>,
+    signed_auth_created_at: Option<u64>,
+    token_owner: Option<nostr::PublicKey>,
 ) -> Result<(), Response> {
-    let agent = git_restriction_state(db, community, pubkey).await?;
+    // A verified agent token's ban state is its owner step: an unreadable
+    // ban state or a banned token owner is that step's refusal, as shadow
+    // records it.
+    let owner_refused = |class, reason| {
+        if token_owner.is_some() {
+            crate::nip_fi_http::owner_refused(class, reason);
+        }
+    };
+    let unavailable = |denial| {
+        owner_refused(
+            buzz_auth::DenialClass::AuthorizationUnavailable,
+            "owner_ban_unavailable",
+        );
+        denial
+    };
+    let agent = git_restriction_state(db, community, pubkey)
+        .await
+        .map_err(unavailable)?;
 
     // Skip the owner read when the agent is already banned: the denial is
     // identical either way. Mirrors the WebSocket cascade's short-circuit.
     let owner = if agent.banned {
         None
     } else {
-        crate::api::relay_members::extract_nip_oa_owner(pubkey.as_bytes(), auth_tag)
+        token_owner.or_else(|| {
+            crate::api::relay_members::extract_nip_oa_owner(
+                pubkey.as_bytes(),
+                auth_tag,
+                signed_auth_created_at,
+            )
+        })
     };
     let owner_state = match owner {
-        Some(owner) => Some(git_restriction_state(db, community, &owner).await?),
+        Some(owner) => Some(
+            git_restriction_state(db, community, &owner)
+                .await
+                .map_err(unavailable)?,
+        ),
         None => None,
     };
 
     enforce_git_ban_cascade(&agent, owner_state.as_ref()).map_err(|status| {
+        // The agent's own ban is not its owner's; a ban inherited from its
+        // stored owner, or its token owner's, is.
+        if !agent.own_banned {
+            owner_refused(buzz_auth::DenialClass::AuthorizationDenied, "owner_banned");
+        }
         warn!(
             pubkey = %pubkey.to_hex(),
             owner = ?owner.map(|owner| owner.to_hex()),
@@ -313,6 +449,154 @@ fn enforce_git_ban_cascade(
     }
 }
 
+/// Record a rejected git proof.
+fn git_failed(slot: &AccessSlot, reason: &'static str) {
+    slot.method(AuthMethod::Nip98);
+    slot.finish(AuthResult::Failed(reason));
+}
+
+/// Verify a git request's NIP-98 proof (the admission closure). Each failure
+/// records a fixed code, never the error text.
+#[allow(clippy::result_large_err)]
+fn verify_git_proof(
+    headers: &axum::http::HeaderMap,
+    method: &str,
+    expected_url: &str,
+    slot: &AccessSlot,
+) -> Result<crate::nip_fi_http::Nip98Proof<(nostr::Event, u64)>, Response> {
+    // In Off mode `parse_git_auth_header` already ran above and
+    // succeeded, so re-parsing here is purely for the return value.
+    // In Enforce mode it runs for the first time inside this closure
+    // (on the auth-rejection path the NIP-FI layer maps the error).
+    let (event_json, method_for_verify) = parse_git_auth_header_full(headers, method)
+        .inspect_err(|_| git_header_rejected(slot, headers))?;
+
+    // SECURITY: method intentionally not verified for git routes. The tautological
+    // check (event.method == event.method) is deliberate — see comment block above.
+    // Git's credential protocol signs once with GET and reuses for POST. The URL tag
+    // provides the real security boundary (±120s timestamp + URL lock + HTTPS).
+    let pubkey =
+        buzz_auth::nip98::verify_nip98_event(&event_json, expected_url, &method_for_verify, None)
+            .map_err(|e| {
+            // Fixed code only: a URL-mismatch error echoes the
+            // client's whole signed `u` tag.
+            git_failed(slot, auth_error_code(&e));
+            (StatusCode::UNAUTHORIZED, "NIP-98 auth failed").into_response()
+        })?;
+
+    // NOTE: NIP-98 event-ID dedup intentionally NOT implemented here.
+    // Git's credential protocol reuses one signed token across multiple requests
+    // in a session (info_refs GET -> upload-pack/receive-pack POST). Rejecting
+    // replayed event IDs would break normal clone/push operations.
+    // The ±120s timestamp window + URL scoping + HTTPS transport provide sufficient
+    // replay protection for v1. Per-request signing requires protocol changes.
+
+    let event: nostr::Event = serde_json::from_str(&event_json).map_err(|_| {
+        git_failed(slot, "nip98_invalid");
+        (StatusCode::UNAUTHORIZED, "invalid auth event").into_response()
+    })?;
+    let signed_auth_created_at = event.created_at.as_secs();
+
+    Ok(crate::nip_fi_http::Nip98Proof::new(
+        pubkey,
+        (event, signed_auth_created_at),
+    ))
+}
+
+/// The access-log code for a git `Authorization` header that failed to parse.
+/// Log a request whose `Authorization` header was refused. A missing header
+/// is git's credential-less first request, answered with the 401 challenge
+/// it asks for, so it is `challenged`; a header that is present but bad is a
+/// failed proof.
+fn git_header_rejected(slot: &AccessSlot, headers: &axum::http::HeaderMap) {
+    if headers.contains_key(header::AUTHORIZATION) {
+        git_failed(slot, "nip98_invalid");
+    } else {
+        slot.method(AuthMethod::Nip98);
+        slot.finish(AuthResult::Challenged);
+    }
+}
+
+/// Parse and syntax-validate the `Authorization: Nostr <base64>` header for
+/// Git HTTP requests.  Returns `Ok(())` on success (the caller only needs to
+/// know whether the syntax is valid); on failure returns a `Response` that
+/// already carries the correct 401 + `WWW-Authenticate` challenge.
+///
+/// Shared by the Off-mode early-exit path and the full extraction below.
+/// Keeps the response bytes identical between the two call sites.
+///
+/// [FI-INV-15] — Off mode must return 401 + challenge for missing/malformed
+/// credentials before any tenant lookup.
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
+fn parse_git_auth_header(headers: &axum::http::HeaderMap, method: &str) -> Result<(), Response> {
+    parse_git_auth_header_full(headers, method).map(|_| ())
+}
+
+/// Full extraction: parse the Authorization header and return
+/// `(event_json, method_for_verify)`.  `method_for_verify` is taken from the
+/// NIP-98 event's `method` tag when present, falling back to the HTTP method;
+/// this is the "tautological" bypass that lets git clients reuse a GET token
+/// for the subsequent POST.
+///
+/// Returns `Err(Response)` for missing/malformed-scheme → 401 + `WWW-Authenticate`;
+/// bad-base64/bad-utf-8 → 401 without `WWW-Authenticate` (use `into_response()`
+/// which does not add the challenge header).
+#[allow(clippy::result_large_err)]
+fn parse_git_auth_header_full(
+    headers: &axum::http::HeaderMap,
+    method: &str,
+) -> Result<(String, String), Response> {
+    let auth_header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .header(
+                    "WWW-Authenticate",
+                    format!("Nostr realm=\"buzz\", method=\"{method}\""),
+                )
+                .body(Body::from("missing Authorization header"))
+                .unwrap()
+        })?;
+
+    let token = auth_header.strip_prefix("Nostr ").ok_or_else(|| {
+        Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header(
+                "WWW-Authenticate",
+                format!("Nostr realm=\"buzz\", method=\"{method}\""),
+            )
+            .body(Body::from("expected Authorization: Nostr <base64>"))
+            .unwrap()
+    })?;
+
+    let event_bytes = base64::engine::general_purpose::STANDARD
+        .decode(token)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token))
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid base64").into_response())?;
+    let event_json = String::from_utf8(event_bytes)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid utf-8").into_response())?;
+
+    // Extract `method` from the NIP-98 event tag; fall back to HTTP method.
+    // SECURITY: method intentionally not verified for git routes (see GitAuth
+    // comment block).  Git's credential helper signs once with GET and reuses
+    // for POST; the tautological self-comparison is deliberate.
+    let method_for_verify = serde_json::from_str::<serde_json::Value>(&event_json)
+        .ok()
+        .and_then(|v| {
+            v["tags"]
+                .as_array()?
+                .iter()
+                .find(|t| t[0].as_str() == Some("method"))?[1]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| method.to_owned());
+
+    Ok((event_json, method_for_verify))
+}
+
 /// Construct the repo-root NIP-98 `u` URL expected for a git HTTP request.
 ///
 /// The host is always the server-resolved tenant host. `config_relay_url` only
@@ -351,7 +635,7 @@ fn git_expected_url(
 /// repo root — but the *name* validation stays because owner/repo are
 /// still used as object-store key components via `manifest::pointer_key`.
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
-fn validate_repo_id<'a>(owner: &str, repo: &'a str) -> Result<&'a str, Response> {
+pub(super) fn validate_repo_id<'a>(owner: &str, repo: &'a str) -> Result<&'a str, Response> {
     // Owner must be exactly 64 lowercase hex chars.
     if owner.len() != 64
         || !owner
@@ -472,13 +756,13 @@ fn hydrate_error_to_response(owner: &str, repo: &str, err: HydrateError) -> Resp
 /// — so the remediation body leaks nothing, and only the author can rebind
 /// (kind:30617 is keyed by `(author, d)`). A *broken* binding stays generic
 /// even for the author: ambiguity fails closed.
-async fn authorize_git_read(
+pub(super) async fn authorize_git_read(
     db: &buzz_db::Db,
     community: buzz_core::CommunityId,
     caller: &nostr::PublicKey,
     owner_hex: &str,
     repo_name: &str,
-) -> Result<(), Response> {
+) -> Result<nostr::Event, Response> {
     fn denied() -> Response {
         (StatusCode::NOT_FOUND, "repository not found").into_response()
     }
@@ -541,7 +825,7 @@ async fn authorize_git_read(
         .get_member_role(community, channel_id, &caller.to_bytes())
         .await
     {
-        Ok(role) if read_role_allows(role.as_deref()) => Ok(()),
+        Ok(role) if read_role_allows(role.as_deref()) => Ok(repo_event.event),
         Ok(_) => Err(denied()),
         Err(e) => {
             error!(repo = %repo_name, error = %e, "git read gate: role lookup failed (deny)");
@@ -1087,9 +1371,10 @@ pub async fn upload_pack(
 /// 4. Run `receive-pack --stateless-rpc` against the tempdir. The hook
 ///    enforces fast-forward + branch protection in-process.
 /// 5. `finalize_push(PushContext { pack, parent_state, repo, ... })` is
-///    the only path that builds a push `Response`. It calls
-///    `cas_publish` (§Push steps 2–7) and emits kind:30618 on `Won`,
-///    *only then* builds the 2xx.
+///    the only path that builds a push `Response`. It compares the
+///    workspace refs with the hydrated ones (§Push step 3); if they
+///    changed it calls `cas_publish` (§Push steps 4–7) and emits
+///    kind:30618 on `Won`, and *only then* builds the 2xx.
 pub async fn receive_pack(
     State(state): State<Arc<AppState>>,
     auth: GitAuth,
@@ -1103,19 +1388,18 @@ pub async fn receive_pack(
     let _permit = acquire_git_permit(&state, "receive_pack")?;
 
     // **No per-repo advisory lock — by design.** Writer serialization is
-    // the pointer CAS at `cas_publish` step 7 (`Inv_NoFork` proves this
-    // sufficient). The previous code held a per-repo `tokio::Mutex`, but
-    // that only spanned one process; once we run >1 relay instance
-    // (which is the point of "no local stateful disk"), it spans nothing
-    // and CAS is the only serialization that holds. The named tradeoff:
-    // two concurrent same-repo pushes each hydrate + run receive-pack,
-    // and the loser's CPU/IO is thrown away on `Conflict`. **Accepted
-    // for v1** — same-ref contention is rare, and a cross-instance lock
-    // would be a distributed-lock service we explicitly don't want.
-    // If contention shows up in metrics, the fix is a short local
-    // best-effort lock as a *latency optimization*, never a correctness
-    // dependency. (Eva's call, on record in #proj-git-on-s3 with the
-    // ParentState seam review.)
+    // the pointer CAS at `cas_publish` step 7 (the `Refines` check in
+    // `docs/spec/GitOnObjectStore.tla` shows this is sufficient). The
+    // previous code held a per-repo `tokio::Mutex`, but that only spanned
+    // one process; once we run >1 relay instance (which is the point of
+    // "no local stateful disk"), it spans nothing and CAS is the only
+    // serialization that holds. The named tradeoff: two concurrent
+    // same-repo pushes each hydrate + run receive-pack, and the loser's
+    // CPU/IO is thrown away on `Conflict`. **Accepted for v1** — same-ref
+    // contention is rare, and a cross-instance lock would be a
+    // distributed-lock service we explicitly don't want. If contention
+    // shows up in metrics, the fix is a short local best-effort lock as a
+    // *latency optimization*, never a correctness dependency.
 
     // Hydrate parent state + workspace in one round-trip. ParentState
     // travels with the workspace into finalize_push so the CAS predicates
@@ -1217,18 +1501,15 @@ fn receive_pack_git_config(hooks_dir: String) -> Vec<(&'static str, String)> {
 /// [`finalize_push`] has decided to build a `Response` from these bytes.
 pub(crate) struct PackOutput {
     pub stdout: Vec<u8>,
-    /// Whether the push is safe to publish: the `git receive-pack` subprocess
-    /// exited 0 **and** its report-status reported no rejected (`ng`) ref.
+    /// Whether the git subprocess exited with status 0.
     ///
-    /// A pre-receive hook decline (authorization denied) does NOT surface as a
-    /// non-zero exit — `git receive-pack --stateless-rpc` exits 0 and reports
-    /// the rejection only in-band as report-status. So `ok` must fold in the
-    /// report-status scan (`receive_pack_report_rejected`), not the exit code
-    /// alone. `finalize_push` treats `false` as "push did not happen": skip the
-    /// CAS publish and the derived kind:30618 so a rejected push leaves **no
-    /// published state**. The buffered stdout still carries git's in-band
-    /// report-status so the client prints the rejection.
-    pub ok: bool,
+    /// For `receive-pack` this says nothing about whether the push was
+    /// accepted: git exits 0 when a pre-receive hook declines the push, when
+    /// some ref updates are refused, and when the request carries no commands
+    /// at all. [`finalize_push`] therefore decides from the refs the workspace
+    /// holds afterwards (`push_disposition`), and uses this flag only to
+    /// refuse to publish the result of a run that failed part-way.
+    pub exited_ok: bool,
 }
 
 /// Spawn a `git --stateless-rpc <service>` subprocess against the given
@@ -1351,37 +1632,21 @@ async fn run_git_at(
     }
 
     if !status.success() {
+        // Hook output lands in stderr, so it stays out of WARN.
         let stderr = read_log_prefix(stderr_tmp.path(), 64 * 1024).await;
-        warn!(stderr = %stderr, service = %service, "git subprocess exited with error");
+        warn!(service = %service, ?status, "git subprocess exited with error");
+        tracing::debug!(stderr = %stderr, service = %service, "git subprocess stderr");
         // Still return output — git protocol errors are communicated in-band.
-        // A non-zero exit feeds `PackOutput.ok` below, but it is NOT the signal
-        // for a pre-receive hook decline: `git receive-pack --stateless-rpc`
-        // exits 0 on a hook decline, reporting the rejection only in-band as
-        // report-status (see `receive_pack_report_rejected`). The exit code
-        // still guards genuine subprocess failures (spawn/IO/abort).
     }
 
-    // Primary fence for a denied push: scan the report-status for an `ng`
-    // (rejected) ref update. `git receive-pack` exits 0 on a pre-receive hook
-    // decline, so the exit code alone is insufficient — the rejection lives in
-    // the in-band report-status. Fold both signals into `ok` so `finalize_push`
-    // skips CAS publish + kind:30618 on any rejected ref.
     let stdout = tokio::fs::read(stdout_tmp.path()).await.map_err(|e| {
         error!(error = %e, service = %service, "git stdout read failed");
         (StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response()
     })?;
 
-    let report_rejected = service == "receive-pack" && receive_pack_report_rejected(&stdout);
-    if report_rejected {
-        warn!(
-            service = %service,
-            "git receive-pack report-status contains a rejected (ng) ref update"
-        );
-    }
-
     Ok(PackOutput {
         stdout,
-        ok: status.success() && !report_rejected,
+        exited_ok: status.success(),
     })
 }
 
@@ -1397,97 +1662,6 @@ async fn read_log_prefix(path: &Path, max_bytes: u64) -> String {
         return "<stderr unavailable>".to_string();
     }
     String::from_utf8_lossy(&bytes).to_string()
-}
-
-/// Returns true when a `git receive-pack` report-status stream contains an
-/// `ng <ref> <reason>` line — i.e. git rejected at least one ref update.
-///
-/// Empirically, `git receive-pack --stateless-rpc` exits **0** even when a
-/// pre-receive hook rejects a push: the rejection is communicated only in-band
-/// to the client as report-status (`unpack ok` followed by `ng refs/...
-/// pre-receive hook declined`). The relay must therefore treat an `ng` status
-/// as "push did not happen" for the publish fence, not rely on the exit code.
-///
-/// ## Wire format
-///
-/// The report-status is a pkt-line stream. When side-band-64k is negotiated
-/// (which the stock client does), the status pkt-lines are **nested**: each
-/// outer pkt-line's payload begins with a channel byte (`1` = data, `2`/`3` =
-/// progress/error text), and the band-1 payload carries its *own* inner
-/// pkt-line stream:
-///
-/// ```text
-/// <outer-len>\x01<inner-len>unpack ok\n<inner-len>ng refs/heads/main ...\n0000
-/// ```
-///
-/// A naive "strip the band byte then split on \n" misses this: the rejection
-/// line surfaces as `0031ng refs/...` (inner length prefix glued on), which
-/// does not start with `ng `. So we de-frame one level deeper — for a band-1
-/// payload we parse the inner pkt-lines before matching. Without side-band the
-/// status pkt-lines appear directly at the outer level, which we also match.
-fn receive_pack_report_rejected(stdout: &[u8]) -> bool {
-    for payload in PktLineIter::new(stdout) {
-        match payload.first() {
-            // Side-band channel 1 (data): carries a nested pkt-line stream.
-            Some(1) => {
-                if PktLineIter::new(&payload[1..]).any(|line| line.starts_with(b"ng ")) {
-                    return true;
-                }
-            }
-            // Side-band channel 2/3 (progress/error text): never status lines.
-            Some(2 | 3) => {}
-            // No side-band: the status pkt-line payload is the line itself.
-            _ => {
-                if payload.starts_with(b"ng ") {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-/// Iterator over the payloads of a pkt-line stream.
-///
-/// Yields the bytes between the 4-hex length prefix and the end of each
-/// pkt-line. Skips flush (`0000`) / delim (`0001`) / response-end (`0002`)
-/// control pkts. Stops on the first malformed length or truncated frame
-/// (defensive: a corrupt stream simply produces no further matches rather
-/// than panicking).
-struct PktLineIter<'a> {
-    buf: &'a [u8],
-    i: usize,
-}
-
-impl<'a> PktLineIter<'a> {
-    fn new(buf: &'a [u8]) -> Self {
-        Self { buf, i: 0 }
-    }
-}
-
-impl<'a> Iterator for PktLineIter<'a> {
-    type Item = &'a [u8];
-
-    fn next(&mut self) -> Option<&'a [u8]> {
-        loop {
-            if self.i + 4 > self.buf.len() {
-                return None;
-            }
-            let len_hex = std::str::from_utf8(&self.buf[self.i..self.i + 4]).ok()?;
-            let len = usize::from_str_radix(len_hex, 16).ok()?;
-            // 0000 (flush), 0001 (delim), 0002 (response-end): no payload.
-            if len < 4 {
-                self.i += 4;
-                continue;
-            }
-            if self.i + len > self.buf.len() {
-                return None;
-            }
-            let payload = &self.buf[self.i + 4..self.i + len];
-            self.i += len;
-            return Some(payload);
-        }
-    }
 }
 
 /// Keeps the git subprocess and its hydrated workspace alive for exactly as
@@ -1789,6 +1963,10 @@ struct FinalizePushHooks {
     post_cas_gate: Option<Arc<PostCasGate>>,
     #[cfg(test)]
     fail_ref_state_insert: bool,
+    /// Fire the lease-loss signal as the pointer CAS completes, as a failed
+    /// heartbeat renewal would, while the durable lease stays valid.
+    #[cfg(test)]
+    lose_lease_signal_after_cas: bool,
 }
 
 #[cfg(test)]
@@ -1811,6 +1989,19 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
     finalize_push_inner(state, ctx, &FinalizePushHooks::default()).await
 }
 
+/// Read what a finished `receive-pack` run left in the workspace and decide
+/// what the relay owes the client: git's answer alone, a publication, or a
+/// failure. The returned snapshot is the one a publication must use.
+async fn observe_push(
+    pack: &PackOutput,
+    parent_state: &ParentState,
+    repo_path: &Path,
+) -> Result<(PushDisposition, WorkspaceState), CasError> {
+    let workspace = snapshot_workspace(repo_path).await?;
+    let disposition = push_disposition(pack.exited_ok, &parent_state.parent.refs, &workspace.refs);
+    Ok((disposition, workspace))
+}
+
 async fn finalize_push_inner(
     state: &Arc<AppState>,
     ctx: PushContext,
@@ -1819,39 +2010,77 @@ async fn finalize_push_inner(
     #[cfg(not(test))]
     let _ = hooks;
 
-    // The push fence, part 0 — **a rejected push publishes nothing.**
+    // The push fence, part 0 — **publish exactly what the push changed.**
     //
-    // `ctx.pack.ok` is false when git aborted the ref updates: either the
-    // subprocess exited non-zero (genuine failure) OR — the important case —
-    // a pre-receive hook declined the push. A hook decline does NOT yield a
-    // non-zero exit; `git receive-pack --stateless-rpc` exits 0 and reports
-    // the rejection only in-band as report-status (`ng <ref> <reason>`), which
-    // `run_git_at` folds into `ok` via `receive_pack_report_rejected`. In
-    // either case the workspace refs were NOT advanced, so there is no
-    // committed state to publish: skip the CAS pointer write AND the derived
-    // kind:30618. Otherwise a denied push would emit a relay-signed, fanned-out
-    // 30618 falsely attributing the ref state to the *denied* pusher
-    // (`actor = ctx.pusher`), breaking the invariant "rejected push → no
-    // published state".
+    // The workspace refs are the only evidence of what receive-pack did, so
+    // the decision is taken from them (`push_disposition`), not from git's
+    // exit status or its report to the client:
     //
-    // git's in-band report-status (already buffered in `ctx.pack.stdout`)
-    // still streams back so the client prints `! [remote rejected]` / the
-    // hook's decline message; only the publish side effects are suppressed.
-    if !ctx.pack.ok {
-        warn!(
-            owner = %ctx.owner,
-            repo = %ctx.repo_id,
-            "receive-pack exited non-zero (e.g. pre-receive hook decline); \
-             skipping CAS publish and kind:30618 — no state published"
-        );
-        let response = build_git_response("receive-pack", ctx.pack);
-        drop(ctx.repo_handle);
-        return response;
+    // - Refs unchanged: nothing was accepted. This covers a hook decline, a
+    //   request with no commands, and a push whose every command was refused.
+    //   Publishing here would move the pointer and emit a relay-signed
+    //   kind:30618 naming a pusher the policy never approved.
+    // - Refs changed, git exited 0: at least one command was applied, and git
+    //   reports `ok` for it even if it reports `ng` for others. Those refs must
+    //   be published before the client sees that report.
+    // - Refs changed, git exited non-zero: the run failed part-way and its
+    //   report may be incomplete. Nothing is published and the request fails.
+    let (disposition, workspace) =
+        match observe_push(&ctx.pack, &ctx.parent_state, ctx.repo_handle.path()).await {
+            Ok(observed) => observed,
+            Err(CasError::ResourceLimit(e)) => {
+                warn!(
+                    owner = %ctx.owner,
+                    repo = %ctx.repo_id,
+                    error = %e,
+                    "push rejected: repo exceeds relay resource limits"
+                );
+                return (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "repository exceeds relay resource limits",
+                )
+                    .into_response();
+            }
+            Err(error) => {
+                error!(
+                    owner = %ctx.owner,
+                    repo = %ctx.repo_id,
+                    %error,
+                    "could not read workspace refs after receive-pack; nothing published"
+                );
+                return (StatusCode::INTERNAL_SERVER_ERROR, "git backend error").into_response();
+            }
+        };
+    match disposition {
+        PushDisposition::Publish => {}
+        PushDisposition::RelayOnly => {
+            info!(
+                owner = %ctx.owner,
+                repo = %ctx.repo_id,
+                exited_ok = ctx.pack.exited_ok,
+                "receive-pack changed no ref; nothing published"
+            );
+            let response = build_git_response("receive-pack", ctx.pack);
+            drop(ctx.repo_handle);
+            return response;
+        }
+        PushDisposition::Abort => {
+            error!(
+                owner = %ctx.owner,
+                repo = %ctx.repo_id,
+                "receive-pack exited non-zero after changing refs; nothing published"
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "git receive-pack failed; nothing was published",
+            )
+                .into_response();
+        }
     }
 
     // An already-running receive-pack may cross the durable fence after
-    // request admission. Revalidate immediately before object-store CAS; DB
-    // trigger fencing alone cannot roll back an S3 pointer mutation.
+    // request admission. Revalidate immediately before object-store CAS;
+    // database admission alone cannot roll back an S3 pointer mutation.
     let serving_write = match buzz_deletion::acquire_serving_write(
         &state.db,
         ctx.tenant.community(),
@@ -1890,76 +2119,31 @@ async fn finalize_push_inner(
         &ctx.owner,
         &ctx.repo,
         &ctx.parent_state,
+        &workspace,
         PublishLimits {
             parent_hydrated_bytes: ctx.repo_handle.hydrated_bytes(),
             max_pack_bytes: state.config.git_max_pack_bytes,
             max_repo_bytes: state.config.git_max_repo_bytes,
         },
     );
-    let success = match serving_write.protect(publish).await {
-        Ok(result) => match result {
-            Ok(s) => s,
-            Err(CasError::Conflict {
-                winner_manifest_key,
-                ..
-            }) => {
-                warn!(
-                    owner = %ctx.owner,
-                    repo = %ctx.repo,
-                    winner = %winner_manifest_key,
-                    "push lost CAS race; tempdir dropped, returning 409"
-                );
-                return (
-                    StatusCode::CONFLICT,
-                    "push superseded by a concurrent writer; pull and retry",
-                )
-                    .into_response();
-            }
-            Err(CasError::ManifestInvalid(e)) => {
-                // 4xx-class: the workspace produced refs/HEAD/oids the
-                // manifest validator rejects (unsafe refname, malformed oid,
-                // empty head, malformed parent). Pre-CAS — no pointer was
-                // written.
-                warn!(
-                    owner = %ctx.owner,
-                    repo = %ctx.repo,
-                    error = %e,
-                    "push rejected: manifest validation failed"
-                );
-                return (
-                    StatusCode::BAD_REQUEST,
-                    "push produced invalid manifest state",
-                )
-                    .into_response();
-            }
-            Err(CasError::ResourceLimit(e)) => {
-                warn!(
-                    owner = %ctx.owner,
-                    repo = %ctx.repo,
-                    error = %e,
-                    "push rejected: repo exceeds relay resource limits"
-                );
-                return (
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "repository exceeds relay resource limits",
-                )
-                    .into_response();
-            }
-            Err(e) => {
-                // 5xx-class: ManifestReadFailed (parent corruption),
-                // Backend, PackCapture. The tempdir drops on scope exit; no
-                // pointer was written (or, on rare ManifestReadFailed during
-                // winner-fetch, the winner is already installed and the
-                // loser's data is unrelated).
-                error!(
-                    owner = %ctx.owner,
-                    repo = %ctx.repo,
-                    error = %e,
-                    "push failed pre-response"
-                );
-                return (StatusCode::INTERNAL_SERVER_ERROR, "git backend error").into_response();
-            }
-        },
+    #[cfg(test)]
+    let lost_after_cas = hooks
+        .lose_lease_signal_after_cas
+        .then(|| serving_write.lost());
+    #[cfg(test)]
+    let publish = async move {
+        let result = publish.await;
+        if let Some(lost) = lost_after_cas {
+            lost.cancel();
+        }
+        result
+    };
+    // `protect_landed`, not `protect`: once `cas_publish` returns, its outcome
+    // stands even if the lease check that follows fails. A landed pointer CAS
+    // cannot be undone, so reporting it as a failure would tell the client
+    // the push did not land when it did, and would skip its kind:30618.
+    let (result, lease_after_cas) = match serving_write.protect_landed(publish).await {
+        Ok(landed) => landed,
         Err(error) => {
             warn!(owner = %ctx.owner, repo = %ctx.repo, %error, "push lost community serving lease during CAS publish");
             return (
@@ -1969,6 +2153,82 @@ async fn finalize_push_inner(
                 .into_response();
         }
     };
+    let success = match result {
+        Ok(s) => s,
+        Err(CasError::Conflict {
+            winner_manifest_key,
+            ..
+        }) => {
+            warn!(
+                owner = %ctx.owner,
+                repo = %ctx.repo,
+                winner = %winner_manifest_key,
+                "push lost CAS race; tempdir dropped, returning 409"
+            );
+            return (
+                StatusCode::CONFLICT,
+                "push superseded by a concurrent writer; pull and retry",
+            )
+                .into_response();
+        }
+        Err(CasError::ManifestInvalid(e)) => {
+            // 4xx-class: the workspace produced refs/HEAD/oids the
+            // manifest validator rejects (unsafe refname, malformed oid,
+            // empty head, malformed parent). Pre-CAS — no pointer was
+            // written.
+            warn!(
+                owner = %ctx.owner,
+                repo = %ctx.repo,
+                error = %e,
+                "push rejected: manifest validation failed"
+            );
+            return (
+                StatusCode::BAD_REQUEST,
+                "push produced invalid manifest state",
+            )
+                .into_response();
+        }
+        Err(CasError::ResourceLimit(e)) => {
+            warn!(
+                owner = %ctx.owner,
+                repo = %ctx.repo,
+                error = %e,
+                "push rejected: repo exceeds relay resource limits"
+            );
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "repository exceeds relay resource limits",
+            )
+                .into_response();
+        }
+        Err(e) => {
+            // 5xx-class: ManifestReadFailed (parent corruption),
+            // Backend, PackCapture. The tempdir drops on scope exit; no
+            // pointer was written (or, on rare ManifestReadFailed during
+            // winner-fetch, the winner is already installed and the
+            // loser's data is unrelated).
+            error!(
+                owner = %ctx.owner,
+                repo = %ctx.repo,
+                error = %e,
+                "push failed pre-response"
+            );
+            return (StatusCode::INTERNAL_SERVER_ERROR, "git backend error").into_response();
+        }
+    };
+    // The pointer is committed. A lapsed lease no longer decides the response:
+    // the kind:30618 insert below is admitted against the durable lease, so it
+    // fails if deletion has fenced the community, and succeeds if only the
+    // local heartbeat signal fired.
+    if let Err(error) = lease_after_cas {
+        warn!(
+            owner = %ctx.owner,
+            repo = %ctx.repo,
+            manifest = %success.manifest_key,
+            %error,
+            "serving lease check failed after the pointer CAS landed; continuing publication"
+        );
+    }
 
     #[cfg(test)]
     if let Some(gate) = &hooks.post_cas_gate {
@@ -1977,34 +2237,16 @@ async fn finalize_push_inner(
     }
 
     // Derived after CAS: kind:30618 ref-state event over the *committed*
-    // manifest's refs/head. Spec §Implementation Correspondence:
-    // "kind:30618 is derived after CAS, never the commit." We emit only
-    // when the committed manifest differs from the parent — a true no-op
-    // push pays no 30618 cost.
-    //
-    // **Strict no-op detection.** We emit unless the canonical manifest
-    // is byte-identical to the parent (Dawn's `canonical_bytes` is
-    // deterministic, so equal published state ⇒ equal digest by
-    // construction). The cases this differs from "refs+head equality":
-    // pack-only changes (rare; internal recompaction, or a push that
-    // produces a new pack covering existing tips with different deltas)
-    // would emit a 30618 with identical `(refs, head)`. The relay DB's
-    // `Ok((_, false))` arm below dedups it for free — one extra DB
-    // round-trip per pack-only push, which clients don't normally
-    // generate. Tightening to refs+head equality is a future
-    // micro-optimization only if that dedup cost becomes visible.
-    let parent_digest_str: Option<&str> = ctx.parent_state.parent_digest.as_deref();
-    let after_digest = success.manifest_key.strip_prefix("manifests/");
-    let manifest_changed = match (parent_digest_str, after_digest) {
-        (Some(before), Some(after)) => before != after,
-        _ => true, // first push (parent None) or impossible-shape after key → publish
-    };
-    let publication_result: Result<(), String> = if manifest_changed {
+    // manifest's refs/head. The event is derived from the commit and is never
+    // the commit itself. Every publication reaches this point with changed
+    // refs (`PushDisposition::Publish`), so there is always an event to emit.
+    let publication_result: Result<(), String> = {
         let inputs = RefStateInputs {
             repo_id: &ctx.repo_id,
             head: &success.manifest.head,
             refs: &success.manifest.refs,
             actor_pubkey_hex: &hex::encode(ctx.pusher.to_bytes()),
+            published_at: success.manifest.published_at,
         };
         match build_ref_state_event(&inputs, &state.relay_keypair) {
             Ok(event) => {
@@ -2058,20 +2300,15 @@ async fn finalize_push_inner(
             }
             Err(error) => Err(format!("kind:30618 build failed: {error}")),
         }
-    } else {
-        Ok(())
     };
 
     // The admitted serving write spans the complete publication attempt. Fence
     // acquisition cannot overtake the pointer CAS, durable 30618 insert, or
     // local fan-out attempt; only now may the lease be released.
+    // A failed release does not change the outcome either: the pointer CAS
+    // and the lease-guarded kind:30618 insert have both already happened.
     if let Err(error) = serving_write.finish().await {
         warn!(owner = %ctx.owner, repo = %ctx.repo, %error, "failed to release community serving lease after push publication");
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "community write lease lost during publication",
-        )
-            .into_response();
     }
     if let Err(error) = publication_result {
         error!(
@@ -2107,6 +2344,7 @@ pub fn git_router(state: Arc<AppState>) -> Router {
         .route("/git/{owner}/{repo}/info/refs", get(info_refs))
         .route("/git/{owner}/{repo}/git-upload-pack", post(upload_pack))
         .route("/git/{owner}/{repo}/git-receive-pack", post(receive_pack))
+        .merge(super::settings::router())
         .layer(RequestBodyLimitLayer::new(body_limit))
         .with_state(state)
 }
@@ -2252,14 +2490,376 @@ mod track_c_tests {
             "receive-pack failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(
-            !receive_pack_report_rejected(&output.stdout),
-            "receive-pack rejected the deletion: {}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-
         assert!(!remote.join("refs/heads/main").exists());
         assert!(remote.join("refs/heads/master").exists());
+    }
+
+    /// A pack with no objects, which a client sends when the refs it pushes
+    /// name objects the remote already has.
+    #[cfg(unix)]
+    const EMPTY_PACK: &[u8] = &[
+        b'P', b'A', b'C', b'K', 0, 0, 0, 2, 0, 0, 0, 0, 0x02, 0x9d, 0x08, 0x82, 0x3b, 0xd8, 0xa8,
+        0xea, 0xb5, 0x10, 0xad, 0x6a, 0xc7, 0x5c, 0x82, 0x3c, 0xfd, 0x3e, 0xd3, 0x1e,
+    ];
+
+    /// A `receive-pack` request body: one pkt-line per `(old, new, ref)`
+    /// command, the capability list on the first, a flush, and an empty pack
+    /// when there is a command.
+    #[cfg(unix)]
+    fn push_request(commands: &[(&str, &str, &str)], capabilities: &str) -> Vec<u8> {
+        let mut request = Vec::new();
+        for (index, (old, new, name)) in commands.iter().enumerate() {
+            let line = if index == 0 {
+                format!("{old} {new} {name}\0{capabilities}\n")
+            } else {
+                format!("{old} {new} {name}\n")
+            };
+            request.extend_from_slice(format!("{:04x}", line.len() + 4).as_bytes());
+            request.extend_from_slice(line.as_bytes());
+        }
+        request.extend_from_slice(b"0000");
+        if !commands.is_empty() {
+            request.extend_from_slice(EMPTY_PACK);
+        }
+        request
+    }
+
+    /// A hydrated workspace stand-in: a bare repository whose `main` is the
+    /// second of two commits, with a pre-receive hook that accepts or declines
+    /// every push. Returns the scratch root, the repository path, and the two
+    /// commit ids, oldest first. Unix only: the hook is a shell script made
+    /// executable through its file mode.
+    #[cfg(unix)]
+    fn push_fixture(hook_accepts: bool) -> (TempDir, std::path::PathBuf, String, String) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = TempDir::new().expect("tempdir");
+        let remote = root.path().join("remote.git");
+        let source = root.path().join("source");
+        let remote_arg = remote.to_str().expect("utf-8 remote path");
+        let source_arg = source.to_str().expect("utf-8 source path");
+        let setup: [(&Path, &[&str]); 9] = [
+            (root.path(), &["init", "--bare", "--quiet", remote_arg]),
+            (
+                root.path(),
+                &["init", "--quiet", "--initial-branch=main", source_arg],
+            ),
+            (&source, &["config", "user.name", "Buzz Test"]),
+            (&source, &["config", "user.email", "buzz-test@example.com"]),
+            (
+                &source,
+                &["commit", "--quiet", "--allow-empty", "-m", "first"],
+            ),
+            (
+                &source,
+                &["commit", "--quiet", "--allow-empty", "-m", "second"],
+            ),
+            (&source, &["push", "--quiet", remote_arg, "main"]),
+            (&source, &["rev-parse", "HEAD~1"]),
+            (&source, &["rev-parse", "HEAD"]),
+        ];
+        let mut oids = Vec::new();
+        for (cwd, args) in setup {
+            let output = run_test_git(cwd, args, &[]);
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if args[0] == "rev-parse" {
+                oids.push(String::from_utf8(output.stdout).expect("utf-8 oid"));
+            }
+        }
+        let hook = remote.join("hooks").join("pre-receive");
+        std::fs::create_dir_all(remote.join("hooks")).expect("hooks directory");
+        let exit_code = if hook_accepts { 0 } else { 1 };
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\ncat >/dev/null\nexit {exit_code}\n"),
+        )
+        .expect("write hook");
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+            .expect("make hook executable");
+        (
+            root,
+            remote,
+            oids[0].trim().to_string(),
+            oids[1].trim().to_string(),
+        )
+    }
+
+    /// The publish decision is taken from what `git receive-pack` did to the
+    /// workspace, for each way a push can end. Every case runs real git through
+    /// the production `run_git_at` and decides with the production
+    /// `observe_push`.
+    ///
+    /// The first two cases are the ones the earlier rule (publish when git
+    /// exits 0 and reports no `ng`) got wrong in the permissive direction: git
+    /// exits 0 and reports nothing, yet no push was accepted. A rule that
+    /// publishes when the report has an `ok` line or no `ng` line gets them
+    /// wrong in the same way. The last two cases are the ones the earlier rule
+    /// got wrong in the other direction: git reports `ok` for a ref it
+    /// updated, and the rule dropped that update because another ref was
+    /// refused, for a stale old value or for a name that conflicts with
+    /// another ref in the same push. The case before them shows that an `ok` line does not by itself
+    /// mean a ref changed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn push_is_published_exactly_when_receive_pack_changed_refs() {
+        /// One ref-update command: `(old, new, ref)`.
+        type RefCommand = (String, String, &'static str);
+        struct Case {
+            name: &'static str,
+            hook_accepts: bool,
+            capabilities: &'static str,
+            /// Builds the commands from the two fixture commits.
+            commands: fn(&str, &str) -> Vec<RefCommand>,
+            expect: PushDisposition,
+            /// Status lines git must have reported to the client.
+            reported: &'static [&'static str],
+        }
+        let create_feature = |first: &str, _second: &str| {
+            vec![("0".repeat(40), first.to_string(), "refs/heads/feature")]
+        };
+        let cases = [
+            Case {
+                name: "request with no commands, hook would decline",
+                hook_accepts: false,
+                capabilities: "",
+                commands: |_, _| Vec::new(),
+                expect: PushDisposition::RelayOnly,
+                reported: &[],
+            },
+            Case {
+                name: "declined push from a client that asked for no status report",
+                hook_accepts: false,
+                capabilities: "",
+                commands: create_feature,
+                expect: PushDisposition::RelayOnly,
+                reported: &[],
+            },
+            Case {
+                name: "declined push with a status report",
+                hook_accepts: false,
+                capabilities: "report-status",
+                commands: create_feature,
+                expect: PushDisposition::RelayOnly,
+                reported: &["ng refs/heads/feature"],
+            },
+            Case {
+                name: "accepted push",
+                hook_accepts: true,
+                capabilities: "report-status",
+                commands: create_feature,
+                expect: PushDisposition::Publish,
+                reported: &["ok refs/heads/feature"],
+            },
+            Case {
+                name: "accepted command that asks for the value the ref already has",
+                hook_accepts: true,
+                capabilities: "report-status",
+                // git reports `ok` and changes nothing, so there is nothing
+                // to publish and the report is true of the published state.
+                commands: |_, second| {
+                    vec![(second.to_string(), second.to_string(), "refs/heads/main")]
+                },
+                expect: PushDisposition::RelayOnly,
+                reported: &["ok refs/heads/main"],
+            },
+            Case {
+                name: "accepted push, one ref updated and one refused",
+                hook_accepts: true,
+                capabilities: "report-status",
+                // `main` is at the second commit, so an update that names the
+                // first commit as its old value is refused.
+                commands: |first, second| {
+                    vec![
+                        ("0".repeat(40), first.to_string(), "refs/heads/feature"),
+                        (first.to_string(), second.to_string(), "refs/heads/main"),
+                    ]
+                },
+                expect: PushDisposition::Publish,
+                reported: &["ok refs/heads/feature", "ng refs/heads/main"],
+            },
+            Case {
+                name: "accepted push, two refs whose names conflict",
+                hook_accepts: true,
+                capabilities: "report-status",
+                // A ref name cannot be both a file and a directory, so git
+                // creates one of `feature` and `feature/x` and refuses the
+                // other. Which one it creates depends on the git version, so
+                // the expected lines match either outcome and the check below
+                // ties each ref's presence to its own `ok` line.
+                commands: |first, second| {
+                    vec![
+                        ("0".repeat(40), first.to_string(), "refs/heads/feature"),
+                        ("0".repeat(40), second.to_string(), "refs/heads/feature/x"),
+                    ]
+                },
+                expect: PushDisposition::Publish,
+                reported: &["ok refs/heads/feature", "ng refs/heads/feature"],
+            },
+        ];
+
+        for case in cases {
+            let (root, remote, first, second) = push_fixture(case.hook_accepts);
+            let before = snapshot_workspace(&remote).await.expect("snapshot before");
+            assert_eq!(before.refs.get("refs/heads/main"), Some(&second));
+            let mut parent_state = ParentState::fresh();
+            parent_state.parent.refs = before.refs.clone();
+
+            let commands = (case.commands)(&first, &second);
+            let borrowed: Vec<(&str, &str, &str)> = commands
+                .iter()
+                .map(|(old, new, name)| (old.as_str(), new.as_str(), *name))
+                .collect();
+            let request = push_request(&borrowed, case.capabilities);
+            let git_config = receive_pack_git_config(remote.join("hooks").display().to_string());
+            let pack = match run_git_at(
+                &remote,
+                "receive-pack",
+                Body::from(request),
+                &git_config,
+                root.path(),
+                RECEIVE_PACK_MAX_OUTPUT_BYTES,
+            )
+            .await
+            {
+                Ok(pack) => pack,
+                Err(response) => panic!("{}: run_git_at failed: {}", case.name, response.status()),
+            };
+            // git exits 0 in every case, so the exit status cannot be what
+            // separates an accepted push from a declined or empty one.
+            assert!(pack.exited_ok, "{}: receive-pack exit status", case.name);
+            let stdout = String::from_utf8_lossy(&pack.stdout).to_string();
+            for line in case.reported {
+                assert!(
+                    stdout.contains(line),
+                    "{}: expected {line:?} in {stdout:?}",
+                    case.name
+                );
+            }
+            if case.reported.is_empty() {
+                assert!(
+                    !stdout.contains("ng ") && !stdout.contains("ok "),
+                    "{}: expected no status report, got {stdout:?}",
+                    case.name
+                );
+            }
+
+            let (disposition, after) = observe_push(&pack, &parent_state, &remote)
+                .await
+                .expect("observe push");
+            assert_eq!(disposition, case.expect, "{}", case.name);
+            // The snapshot handed to the publication holds exactly the refs
+            // git reported as created.
+            for created in ["refs/heads/feature", "refs/heads/feature/x"] {
+                assert_eq!(
+                    after.refs.contains_key(created),
+                    stdout.contains(&format!("ok {created}\n")),
+                    "{}: {created} in snapshot",
+                    case.name
+                );
+            }
+            assert_eq!(
+                after.refs.get("refs/heads/main"),
+                Some(&second),
+                "{}",
+                case.name
+            );
+        }
+    }
+
+    /// A push whose ref snapshot crosses the manifest ref cap is a permanent
+    /// repository limit: it must answer 413, as the publish path did before
+    /// the snapshot moved ahead of the publish decision, not a 500 a client
+    /// would retry.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn snapshot_resource_limit_answers_413() {
+        let state = crate::state::tests::test_state().await;
+        let scratch = TempDir::new().expect("scratch");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock object store listener");
+        let addr = listener.local_addr().expect("mock address");
+        let app = Router::new().fallback(|| async { StatusCode::NOT_FOUND });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let store = super::super::store::GitStore::new(
+            &format!("http://{addr}"),
+            "fixture",
+            "fixture",
+            "fixture",
+            "us-east-1",
+            buzz_media::config::S3AddressingStyle::Path,
+        )
+        .expect("mock Git store");
+        let tenant = TenantContext::resolved(
+            CommunityId::from_uuid(uuid::Uuid::from_u128(1)),
+            "git.example",
+        );
+        let (hydrated, parent_state) = hydrate_for_write(
+            &store,
+            &tenant,
+            &"a".repeat(64),
+            "snapshot-limit",
+            HydrationOptions {
+                pack_cache: &state.git_pack_cache,
+                scratch_dir: scratch.path(),
+                max_pack_bytes: 1024 * 1024,
+                max_repo_bytes: 2 * 1024 * 1024,
+            },
+        )
+        .await
+        .expect("hydrate empty fixture");
+        server.abort();
+        let _ = server.await;
+
+        let (_fixture_root, source, _, tip) = push_fixture(true);
+        assert_git_success(
+            run_test_git(
+                &source,
+                &["push", "--quiet", hydrated.path().to_str().unwrap(), "main"],
+                &[],
+            ),
+            "seed fixture commit",
+        );
+        let mut packed_refs = String::from("# pack-refs with: peeled fully-peeled sorted\n");
+        for index in 0..=super::super::manifest::MAX_MANIFEST_REFS {
+            packed_refs.push_str(&format!("{tip} refs/heads/ref-{index:05}\n"));
+        }
+        std::fs::write(hydrated.path().join("packed-refs"), packed_refs).expect("fixture refs");
+        assert!(matches!(
+            snapshot_workspace(hydrated.path()).await,
+            Err(CasError::ResourceLimit(_))
+        ));
+        let response = finalize_push(
+            &state,
+            PushContext {
+                pack: PackOutput {
+                    stdout: Vec::new(),
+                    exited_ok: true,
+                },
+                parent_state,
+                owner: "a".repeat(64),
+                repo: "snapshot-limit".into(),
+                repo_id: "snapshot-limit".into(),
+                pusher: Keys::generate().public_key(),
+                tenant,
+                repo_handle: hydrated,
+            },
+        )
+        .await;
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            status,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "snapshot resource limits must not become backend errors; body: {}",
+            String::from_utf8_lossy(&body)
+        );
     }
 
     async fn run_finalize_git(repo: &Path, args: &[&str]) -> std::process::Output {
@@ -2277,7 +2877,7 @@ mod track_c_tests {
 
     async fn finalize_test_state() -> (Arc<AppState>, sqlx::PgPool) {
         const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
-        let mut config = crate::config::Config::from_env().expect("default config loads");
+        let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         config.database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
@@ -2288,9 +2888,7 @@ mod track_c_tests {
             .expect("connect test DB");
         let db = buzz_db::Db::from_pool(pool.clone());
         db.migrate().await.expect("migrate test DB");
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool");
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -2333,7 +2931,12 @@ mod track_c_tests {
 
         let store = state.db.deletion_store();
         let request = store
-            .submit(host, "git-finalize-test", Some("post-CAS lease regression"))
+            .submit(
+                Some(host),
+                "git-finalize-test",
+                Some("post-CAS lease regression"),
+                None,
+            )
             .await
             .expect("submit deletion");
         let inventory = FrozenInventory {
@@ -2370,7 +2973,10 @@ mod track_c_tests {
         (request, claim)
     }
 
-    async fn pushed_context(
+    /// A push context whose workspace is exactly as hydrated: what
+    /// `finalize_push` receives when `receive-pack` exited 0 without applying
+    /// a command (a declined push, or a request with no commands).
+    async fn unchanged_context(
         state: &AppState,
         community: CommunityId,
         host: &str,
@@ -2394,6 +3000,32 @@ mod track_c_tests {
         )
         .await
         .expect("hydrate empty test repo");
+        PushContext {
+            pack: PackOutput {
+                stdout: b"git-answer".to_vec(),
+                exited_ok: true,
+            },
+            parent_state,
+            owner,
+            repo: repo.clone(),
+            repo_id: repo,
+            pusher,
+            tenant,
+            repo_handle: hydrated,
+        }
+    }
+
+    /// A push context whose workspace gained a commit on `main`.
+    async fn pushed_context(
+        state: &AppState,
+        community: CommunityId,
+        host: &str,
+        owner: String,
+        repo: String,
+        pusher: nostr::PublicKey,
+        scratch: &Path,
+    ) -> PushContext {
+        let mut ctx = unchanged_context(state, community, host, owner, repo, pusher, scratch).await;
         let source = scratch.join("source");
         tokio::fs::create_dir(&source)
             .await
@@ -2406,26 +3038,113 @@ mod track_c_tests {
             .expect("write source file");
         run_finalize_git(&source, &["add", "file.txt"]).await;
         run_finalize_git(&source, &["commit", "--quiet", "-m", "committed"]).await;
-        let remote = hydrated.path().to_str().expect("hydrated path utf8");
-        run_finalize_git(&source, &["push", "--quiet", remote, "main"]).await;
-
-        PushContext {
-            pack: PackOutput {
-                stdout: b"push-ok".to_vec(),
-                ok: true,
-            },
-            parent_state,
-            owner,
-            repo: repo.clone(),
-            repo_id: repo,
-            pusher,
-            tenant,
-            repo_handle: hydrated,
-        }
+        let remote = ctx
+            .repo_handle
+            .path()
+            .to_str()
+            .expect("hydrated path utf8")
+            .to_string();
+        run_finalize_git(&source, &["push", "--quiet", &remote, "main"]).await;
+        ctx.pack.stdout = b"push-ok".to_vec();
+        ctx
     }
 
-    #[tokio::test]
-    #[ignore = "requires Postgres and MinIO"]
+    async fn repo_announcement_holds_serving_lease_until_pointer_is_seeded() {
+        let (state, pool) = finalize_test_state().await;
+        let host = format!(
+            "git-announce-lease-{}.example",
+            uuid::Uuid::new_v4().simple()
+        );
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("create test community")
+            .id;
+        let (request, claim) = approved_deletion(&state, &host).await;
+        let tenant = TenantContext::resolved(community, host.clone());
+        let owner_keys = Keys::generate();
+        let repo = format!("repo-{}", uuid::Uuid::new_v4().simple());
+        let event = EventBuilder::new(Kind::Custom(30_617), "")
+            .tags([Tag::parse(["d", &repo]).expect("d tag")])
+            .sign_with_keys(&owner_keys)
+            .expect("sign announcement");
+        let gate = Arc::new(crate::handlers::side_effects::GitRepoAnnouncementGate::default());
+        let hooks = crate::handlers::side_effects::GitRepoAnnouncementHooks {
+            post_lease_gate: Some(Arc::clone(&gate)),
+        };
+        let announce_state = Arc::clone(&state);
+        let announce_tenant = tenant.clone();
+        let announce = tokio::spawn(async move {
+            let result = crate::handlers::side_effects::handle_git_repo_announcement_inner(
+                &announce_tenant,
+                &event,
+                &announce_state,
+                &hooks,
+            )
+            .await;
+            let owner_hex = hex::encode(owner_keys.public_key().to_bytes());
+            (result, owner_hex)
+        });
+
+        gate.reached.notified().await;
+        state
+            .db
+            .deletion_store()
+            .begin_quiescing(&claim.lease)
+            .await
+            .expect("quiesce after announcement lease");
+        let error = state
+            .db
+            .deletion_store()
+            .fence(&claim.lease)
+            .await
+            .expect_err("announcement serving lease must block fence");
+        assert!(matches!(
+            error,
+            buzz_db::DbError::ServingWritesNotDrained { .. }
+        ));
+
+        gate.resume.notify_one();
+        let (announce_result, owner_hex) = announce.await.expect("announcement task");
+        announce_result.expect("announcement completes");
+        let pointer_key = crate::api::git::manifest::pointer_key(community, &owner_hex, &repo);
+        assert!(
+            state
+                .git_store
+                .get_pointer(&pointer_key)
+                .await
+                .expect("read pointer")
+                .is_some(),
+            "announcement pointer must be durable before lease release"
+        );
+        assert!(state
+            .db
+            .deletion_store()
+            .serving_writes_drained(community)
+            .await
+            .expect("serving lease released"));
+        let generation = state
+            .db
+            .deletion_store()
+            .fence(&claim.lease)
+            .await
+            .expect("fence after pointer seed");
+        assert_eq!(generation, 1);
+        assert_eq!(
+            state
+                .db
+                .deletion_store()
+                .get(request.id)
+                .await
+                .expect("fenced request")
+                .stage,
+            buzz_db::deletion::DeletionStage::Fenced
+        );
+        drop(state);
+        pool.close().await;
+    }
+
     async fn finalize_push_holds_serving_lease_through_post_cas_publication() {
         let (state, pool) = finalize_test_state().await;
         let host = format!("git-finalize-{}.example", uuid::Uuid::new_v4().simple());
@@ -2453,6 +3172,7 @@ mod track_c_tests {
         let hooks = FinalizePushHooks {
             post_cas_gate: Some(Arc::clone(&gate)),
             fail_ref_state_insert: false,
+            lose_lease_signal_after_cas: false,
         };
         let finalize_state = Arc::clone(&state);
         let finalize =
@@ -2517,8 +3237,6 @@ mod track_c_tests {
         pool.close().await;
     }
 
-    #[tokio::test]
-    #[ignore = "requires Postgres and MinIO"]
     async fn finalize_push_db_failure_after_cas_is_not_success_and_releases_lease() {
         let (state, pool) = finalize_test_state().await;
         let host = format!(
@@ -2545,6 +3263,7 @@ mod track_c_tests {
         let hooks = FinalizePushHooks {
             post_cas_gate: None,
             fail_ref_state_insert: true,
+            lose_lease_signal_after_cas: false,
         };
 
         let response = finalize_push_inner(&state, ctx, &hooks).await;
@@ -2557,6 +3276,163 @@ mod track_c_tests {
             .expect("serving lease released on failure"));
         drop(state);
         pool.close().await;
+    }
+
+    async fn finalize_push_lease_signal_after_landed_cas_still_publishes() {
+        let (state, pool) = finalize_test_state().await;
+        let host = format!(
+            "git-finalize-lease-signal-{}.example",
+            uuid::Uuid::new_v4().simple()
+        );
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("create test community")
+            .id;
+        let scratch = TempDir::new().expect("scratch");
+        let owner = format!("owner-{}", uuid::Uuid::new_v4().simple());
+        let repo = format!("repo-{}", uuid::Uuid::new_v4().simple());
+        let ctx = pushed_context(
+            &state,
+            community,
+            &host,
+            owner.clone(),
+            repo.clone(),
+            Keys::generate().public_key(),
+            scratch.path(),
+        )
+        .await;
+        let hooks = FinalizePushHooks {
+            post_cas_gate: None,
+            fail_ref_state_insert: false,
+            lose_lease_signal_after_cas: true,
+        };
+
+        let response = finalize_push_inner(&state, ctx, &hooks).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "a landed CAS must not be reported as a failed push"
+        );
+        let pointer = crate::api::git::manifest::pointer_key(community, &owner, &repo);
+        assert!(
+            state
+                .git_store
+                .get_pointer(&pointer)
+                .await
+                .expect("read pointer")
+                .is_some(),
+            "the CAS landed"
+        );
+        let mut query = buzz_db::event::EventQuery::for_community(community);
+        query.kinds = Some(vec![30_618]);
+        query.d_tag = Some(repo);
+        let events = state.db.query_events(&query).await.expect("query 30618");
+        assert_eq!(
+            events.len(),
+            1,
+            "the landed CAS still derives its kind:30618"
+        );
+        assert!(state
+            .db
+            .deletion_store()
+            .serving_writes_drained(community)
+            .await
+            .expect("serving lease released"));
+        drop(state);
+        pool.close().await;
+    }
+
+    /// git exits 0 for a push the hook declined and for a request with no
+    /// commands. Neither changes a ref, so the relay must answer with git's
+    /// output and publish nothing: no pointer write, and no kind:30618 naming
+    /// the caller as the pusher of a state they were not allowed to push.
+    async fn finalize_push_publishes_nothing_when_receive_pack_changed_no_ref() {
+        let (state, pool) = finalize_test_state().await;
+        let host = format!(
+            "git-finalize-unchanged-{}.example",
+            uuid::Uuid::new_v4().simple()
+        );
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("create test community")
+            .id;
+        let scratch = TempDir::new().expect("scratch");
+        let owner = format!("owner-{}", uuid::Uuid::new_v4().simple());
+        let repo = format!("repo-{}", uuid::Uuid::new_v4().simple());
+        let ctx = unchanged_context(
+            &state,
+            community,
+            &host,
+            owner.clone(),
+            repo.clone(),
+            Keys::generate().public_key(),
+            scratch.path(),
+        )
+        .await;
+
+        let response = finalize_push_inner(&state, ctx, &FinalizePushHooks::default()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        assert_eq!(&body[..], b"git-answer", "git's own answer is relayed");
+
+        let pointer = crate::api::git::manifest::pointer_key(community, &owner, &repo);
+        assert!(
+            state
+                .git_store
+                .get_pointer(&pointer)
+                .await
+                .expect("read pointer")
+                .is_none(),
+            "a push that changed no ref must not write the pointer"
+        );
+        let mut query = buzz_db::event::EventQuery::for_community(community);
+        query.kinds = Some(vec![30_618]);
+        query.d_tag = Some(repo);
+        let events = state.db.query_events(&query).await.expect("query 30618");
+        assert!(
+            events.is_empty(),
+            "a push that changed no ref must not be attributed to the caller"
+        );
+        drop(state);
+        pool.close().await;
+    }
+
+    mod external_infra_minio_tests {
+        #[tokio::test]
+        #[ignore = "requires Postgres and MinIO"]
+        async fn repo_announcement_holds_serving_lease_until_pointer_is_seeded() {
+            super::repo_announcement_holds_serving_lease_until_pointer_is_seeded().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres and MinIO"]
+        async fn finalize_push_holds_serving_lease_through_post_cas_publication() {
+            super::finalize_push_holds_serving_lease_through_post_cas_publication().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres and MinIO"]
+        async fn finalize_push_db_failure_after_cas_is_not_success_and_releases_lease() {
+            super::finalize_push_db_failure_after_cas_is_not_success_and_releases_lease().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres and MinIO"]
+        async fn finalize_push_lease_signal_after_landed_cas_still_publishes() {
+            super::finalize_push_lease_signal_after_landed_cas_still_publishes().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres and MinIO"]
+        async fn finalize_push_publishes_nothing_when_receive_pack_changed_no_ref() {
+            super::finalize_push_publishes_nothing_when_receive_pack_changed_no_ref().await;
+        }
     }
 
     /// A gzip-encoded request body is transparently inflated before it
@@ -2679,6 +3555,7 @@ mod track_c_tests {
             refs,
             packs: vec!["packs/deadbeef".to_string()],
             parent: None,
+            published_at: None,
         }
     }
 
@@ -2696,12 +3573,6 @@ mod track_c_tests {
             .sign_with_keys(keys)
             .expect("sign NIP-98 event");
         serde_json::to_string(&event).expect("serialize")
-    }
-
-    fn pkt(payload: &[u8]) -> Vec<u8> {
-        let mut out = Vec::new();
-        super::pkt_line(&mut out, payload);
-        out
     }
 
     #[test]
@@ -2755,95 +3626,6 @@ mod track_c_tests {
         while stream.next().await.is_some() {}
 
         assert_eq!(stream.streamed_bytes, 5);
-    }
-
-    /// Wrap inner status pkt-lines in one side-band-64k band-1 (data) outer
-    /// pkt-line — the real shape git emits when side-band is negotiated:
-    /// `<outer-len>\x01<inner-pkt-lines>`.
-    fn sideband_data(inner_pkts: &[&[u8]]) -> Vec<u8> {
-        let mut inner = vec![0x01u8]; // band 1 = data channel
-        for p in inner_pkts {
-            inner.extend(pkt(p));
-        }
-        pkt(&inner)
-    }
-
-    #[test]
-    fn receive_pack_report_rejected_detects_plain_ng_line() {
-        // No side-band: status pkt-lines at the outer level.
-        let mut out = Vec::new();
-        out.extend(pkt(b"unpack ok\n"));
-        out.extend(pkt(b"ng refs/heads/main pre-receive hook declined\n"));
-        out.extend_from_slice(b"0000");
-
-        assert!(receive_pack_report_rejected(&out));
-    }
-
-    #[test]
-    fn receive_pack_report_rejected_detects_sideband_ng_line() {
-        // Real side-band-64k shape: status pkt-lines NESTED inside a band-1
-        // outer pkt-line. A naive "strip band byte, split on \n" parser misses
-        // this — the rejection surfaces as `0031ng refs/...`.
-        let mut out = sideband_data(&[
-            b"unpack ok\n",
-            b"ng refs/heads/main pre-receive hook declined\n",
-        ]);
-        out.extend_from_slice(b"0000");
-
-        assert!(receive_pack_report_rejected(&out));
-    }
-
-    #[test]
-    fn receive_pack_report_rejected_ignores_ok_status() {
-        // Real side-band-64k success shape — nested `ok` pkt-lines, no `ng`.
-        let mut out = sideband_data(&[b"unpack ok\n", b"ok refs/heads/main\n"]);
-        out.extend_from_slice(b"0000");
-
-        assert!(!receive_pack_report_rejected(&out));
-    }
-
-    #[test]
-    fn receive_pack_report_rejected_matches_real_git_deny_shape() {
-        // Mirrors report-status captured from `git receive-pack` (2.50.1) on a
-        // pre-receive hook decline:
-        //   <band2>policy: denied\n                 (progress/error text)
-        //   <band1>000eunpack ok\n0031ng refs/heads/main pre-receive hook declined\n
-        //   0000
-        // The band-1 payload carries its OWN inner pkt stream — the exact case
-        // a flat parser returns `false` on.
-        let mut out = Vec::new();
-        out.extend(pkt(b"\x02policy: denied\n")); // band 2 = progress/error
-        out.extend(sideband_data(&[
-            b"unpack ok\n",
-            b"ng refs/heads/main pre-receive hook declined\n",
-        ]));
-        out.extend_from_slice(b"0000");
-
-        assert!(
-            receive_pack_report_rejected(&out),
-            "must detect the nested band-1 ng line on a real deny"
-        );
-    }
-
-    #[test]
-    fn receive_pack_report_rejected_ignores_progress_channel_noise() {
-        // A band-2 (progress) line must never be mistaken for a status line,
-        // even if it contained bytes resembling a status — only band-1 counts.
-        let mut out = Vec::new();
-        out.extend(pkt(b"\x02ng-looking progress noise\n")); // band 2 noise
-        out.extend(sideband_data(&[b"unpack ok\n", b"ok refs/heads/main\n"]));
-        out.extend_from_slice(b"0000");
-
-        assert!(!receive_pack_report_rejected(&out));
-    }
-
-    #[test]
-    fn receive_pack_report_rejected_handles_truncated_and_malformed() {
-        // Defensive: malformed length / truncated frame yields no match, never
-        // a panic.
-        assert!(!receive_pack_report_rejected(b""));
-        assert!(!receive_pack_report_rejected(b"zzzz"));
-        assert!(!receive_pack_report_rejected(b"0048")); // length, no payload
     }
 
     #[test]
@@ -3071,7 +3853,7 @@ mod track_c_tests {
 }
 
 #[cfg(test)]
-mod sec005_read_gate_tests {
+mod sec005_postgres_tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
@@ -3098,6 +3880,7 @@ mod sec005_read_gate_tests {
     fn durable_ban_denies_git_even_with_otherwise_valid_auth() {
         let restriction = buzz_db::moderation::RestrictionState {
             banned: true,
+            own_banned: true,
             muted_until: None,
         };
 
@@ -3108,6 +3891,7 @@ mod sec005_read_gate_tests {
     fn timeout_without_ban_does_not_revoke_git_access() {
         let restriction = buzz_db::moderation::RestrictionState {
             banned: false,
+            own_banned: false,
             muted_until: Some(chrono::Utc::now()),
         };
 
@@ -3117,6 +3901,7 @@ mod sec005_read_gate_tests {
     fn restriction(banned: bool) -> buzz_db::moderation::RestrictionState {
         buzz_db::moderation::RestrictionState {
             banned,
+            own_banned: banned,
             muted_until: None,
         }
     }
@@ -3182,7 +3967,7 @@ mod sec005_read_gate_tests {
     /// can assert on the exact bytes a git client would see. A blind
     /// `.is_err()` cannot distinguish the generic 404 from the remediation
     /// 404 — and that distinction IS the security property.
-    async fn denial_parts(result: Result<(), Response>) -> (StatusCode, String) {
+    async fn denial_parts<T: std::fmt::Debug>(result: Result<T, Response>) -> (StatusCode, String) {
         let response = result.expect_err("expected a denial");
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -3554,7 +4339,7 @@ mod sec005_read_gate_tests {
         db.ensure_user(community, &member_pk).await.expect("member");
 
         assert!(
-            deny_banned_git_principal(&db, community, &member.public_key(), None)
+            deny_banned_git_principal(&db, community, &member.public_key(), None, None, None)
                 .await
                 .is_ok(),
             "precondition: an unbanned member passes the git ban gate"
@@ -3565,7 +4350,7 @@ mod sec005_read_gate_tests {
             .expect("ban");
 
         let (status, body) = denial_parts(
-            deny_banned_git_principal(&db, community, &member.public_key(), None).await,
+            deny_banned_git_principal(&db, community, &member.public_key(), None, None, None).await,
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -3588,9 +4373,16 @@ mod sec005_read_gate_tests {
             .expect("auth tag");
 
         assert!(
-            deny_banned_git_principal(&db, community, &agent.public_key(), Some(&auth_tag))
-                .await
-                .is_ok(),
+            deny_banned_git_principal(
+                &db,
+                community,
+                &agent.public_key(),
+                Some(&auth_tag),
+                Some(200),
+                None,
+            )
+            .await
+            .is_ok(),
             "precondition: neither agent nor owner is banned"
         );
 
@@ -3600,7 +4392,15 @@ mod sec005_read_gate_tests {
             .expect("ban owner");
 
         let (status, _) = denial_parts(
-            deny_banned_git_principal(&db, community, &agent.public_key(), Some(&auth_tag)).await,
+            deny_banned_git_principal(
+                &db,
+                community,
+                &agent.public_key(),
+                Some(&auth_tag),
+                Some(200),
+                None,
+            )
+            .await,
         )
         .await;
         assert_eq!(
@@ -3612,7 +4412,7 @@ mod sec005_read_gate_tests {
         // An unattested request from the same agent key is unaffected: the
         // cascade must follow a verified owner, not punish every agent.
         assert!(
-            deny_banned_git_principal(&db, community, &agent.public_key(), None)
+            deny_banned_git_principal(&db, community, &agent.public_key(), None, None, None)
                 .await
                 .is_ok(),
             "without an attestation there is no owner to inherit from"
@@ -3634,7 +4434,15 @@ mod sec005_read_gate_tests {
 
         let community = buzz_core::CommunityId::from_uuid(uuid::Uuid::new_v4());
         let (status, body) = denial_parts(
-            deny_banned_git_principal(&db, community, &Keys::generate().public_key(), None).await,
+            deny_banned_git_principal(
+                &db,
+                community,
+                &Keys::generate().public_key(),
+                None,
+                None,
+                None,
+            )
+            .await,
         )
         .await;
         assert_eq!(
@@ -3643,5 +4451,1798 @@ mod sec005_read_gate_tests {
             "a store outage must deny as retryable, never allow and never claim a 403"
         );
         assert_eq!(body, "authorization unavailable");
+    }
+}
+
+// ── R4 Off-mode precedence regression tests ───────────────────────────────
+//
+// Proves that in Off mode, missing/malformed Authorization headers are rejected
+// with 401 + WWW-Authenticate BEFORE any tenant lookup.  [FI-INV-15]
+//
+// The `parse_git_auth_header` helper is the single source of this behavior;
+// these tests cover all four cases Thufir specified.
+//
+// Mutation evidence for all tests: replacing the Off-mode early-exit
+// (`if matches!(mode, NipFiMode::Off) { parse_git_auth_header(...)?; }`)
+// with a no-op causes the request to proceed to `bind_community()`.  On an
+// unmapped host that returns 404 `repository not found` — the test's
+// status assertion fires (404 ≠ 401).  On a mapped host the parse
+// runs inside the NIP-FI closure, but at that point the `admit_nip_fi_http`
+// wrapper (Off mode) propagates the legacy response — so the status still
+// matches.  Only the unmapped-host cases truly distinguish the regression.
+// Both cases are included so the full invariant (credential-before-DB) is
+// visible in the test record.
+#[cfg(test)]
+mod off_mode_precedence_tests {
+    use super::*;
+    use axum::http::HeaderMap;
+
+    fn make_headers(auth: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        if let Some(a) = auth {
+            h.insert(
+                header::AUTHORIZATION,
+                a.parse().expect("valid header value"),
+            );
+        }
+        h
+    }
+
+    // ── Case A: missing Authorization header ─────────────────────────────
+
+    /// Off mode, no Authorization header → 401 + WWW-Authenticate challenge.
+    ///
+    /// Scope: this test exercises `parse_git_auth_header` directly, not the
+    /// full `GitAuth::from_request_parts` path.  It proves the parser
+    /// rejects a missing header with the correct status and challenge.
+    ///
+    /// Falsifying mutation: return `Ok(())` from `parse_git_auth_header`
+    /// when no Authorization header is present → `unwrap_err()` panics.
+    #[test]
+    fn off_mode_missing_auth_header_returns_401_with_challenge() {
+        let headers = make_headers(None);
+        let err = parse_git_auth_header(&headers, "GET").unwrap_err();
+        assert_eq!(
+            err.status(),
+            StatusCode::UNAUTHORIZED,
+            "Off mode: missing Authorization must yield 401, not a tenant-lookup result"
+        );
+        let challenge = err
+            .headers()
+            .get("WWW-Authenticate")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            challenge.contains("Nostr realm=\"buzz\""),
+            "Off mode: missing Authorization must include WWW-Authenticate: Nostr challenge; got {challenge:?}"
+        );
+    }
+
+    // ── Case B: wrong scheme (not "Nostr ") ──────────────────────────────
+
+    /// Off mode, wrong Authorization scheme → 401 + challenge.
+    ///
+    /// Scope: parser-only test (calls `parse_git_auth_header` directly).
+    /// Falsifying mutations: return `Ok(())` for non-Nostr schemes, or
+    /// emit 403 instead of 401 — status assertion fires; or omit the
+    /// WWW-Authenticate header — challenge assertion fires.
+    #[test]
+    fn off_mode_wrong_scheme_returns_401_with_challenge() {
+        let headers = make_headers(Some("Bearer sometoken"));
+        let err = parse_git_auth_header(&headers, "GET").unwrap_err();
+        assert_eq!(
+            err.status(),
+            StatusCode::UNAUTHORIZED,
+            "Off mode: wrong auth scheme must yield 401"
+        );
+        let challenge = err
+            .headers()
+            .get("WWW-Authenticate")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            challenge.contains("Nostr realm=\"buzz\""),
+            "Off mode: wrong scheme must include Nostr challenge"
+        );
+    }
+
+    // ── Case C: invalid base64 ────────────────────────────────────────────
+
+    /// Off mode, Authorization: Nostr <invalid-base64> → 401.
+    ///
+    /// Scope: parser-only test. Falsifying mutation: accept invalid
+    /// base64 and return `Ok(())` → `unwrap_err()` panics.
+    #[test]
+    fn off_mode_invalid_base64_returns_401() {
+        let headers = make_headers(Some("Nostr !!!not-base64!!!"));
+        let err = parse_git_auth_header(&headers, "GET").unwrap_err();
+        assert_eq!(
+            err.status(),
+            StatusCode::UNAUTHORIZED,
+            "Off mode: invalid base64 must yield 401"
+        );
+    }
+
+    // ── Case D: valid base64 but invalid UTF-8 bytes ─────────────────────
+
+    /// Off mode, Authorization: Nostr <valid-base64-but-not-utf8> → 401.
+    ///
+    /// Scope: parser-only test. Falsifying mutation: skip UTF-8 check,
+    /// return `Ok(())` → `unwrap_err()` panics.
+    #[test]
+    fn off_mode_invalid_utf8_returns_401() {
+        // 0xC3 0x28 is invalid UTF-8.
+        let bad_utf8 = base64::engine::general_purpose::STANDARD.encode([0xC3u8, 0x28]);
+        let headers = make_headers(Some(&format!("Nostr {bad_utf8}")));
+        let err = parse_git_auth_header(&headers, "GET").unwrap_err();
+        assert_eq!(
+            err.status(),
+            StatusCode::UNAUTHORIZED,
+            "Off mode: non-UTF-8 base64 payload must yield 401"
+        );
+    }
+
+    // ── Positive control ──────────────────────────────────────────────────
+
+    /// Valid Nostr base64 JSON payload passes syntax validation.
+    ///
+    /// Scope: parser-only test. A structurally correct credential passes
+    /// `parse_git_auth_header`, allowing the request to proceed to tenant
+    /// lookup in the full path.
+    ///
+    /// Falsifying mutation: always return `Err(...)` from
+    /// `parse_git_auth_header` → `is_ok()` fails and the assertion fires.
+    /// Without this positive control, an always-denying parser could pass
+    /// all four negative cases above while also breaking valid requests.
+    #[test]
+    fn off_mode_valid_nostr_token_passes_syntax_check() {
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+
+        let keys = Keys::generate();
+        let tags = vec![
+            Tag::parse(["u", "http://example.local/git/abc/def"]).unwrap(),
+            Tag::parse(["method", "GET"]).unwrap(),
+        ];
+        let event = EventBuilder::new(Kind::Custom(27235), "")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .unwrap();
+        let token = format!(
+            "Nostr {}",
+            base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&event).unwrap())
+        );
+        let headers = make_headers(Some(&token));
+        assert!(
+            parse_git_auth_header(&headers, "GET").is_ok(),
+            "Off mode: a valid Nostr token must pass syntax validation"
+        );
+    }
+
+    // ── Router-level Off-precedence tests (require Postgres) ─────────────
+    //
+    // These tests go through `git_router` → `GitAuth::from_request_parts`
+    // and prove that the Off-mode early-exit at transport.rs:100-102 fires
+    // BEFORE `bind_community()`.
+    //
+    // Key falsifiability: the unmapped-host cases assert 401.  Deleting lines
+    // 100-102 causes `bind_community()` to run for the unmapped host and
+    // return 404 — the status assertions fire.  Parser-only unit tests above
+    // cannot prove this ordering because they never call `from_request_parts`.
+    #[cfg(test)]
+    mod postgres_tests {
+        use super::*;
+        use axum::body::to_bytes;
+        use tower::ServiceExt;
+
+        const UNMAPPED_HOST: &str = "off-prec-unmapped.git.test.invalid";
+        // Valid 64-hex owner (all zeros except last digit = 1) so validate_repo_id
+        // passes owner validation in the handler body.  The NIP-FI gate fires in
+        // GitAuth::from_request_parts BEFORE validate_repo_id in Enforce mode;
+        // the valid owner ensures tests that probe post-auth behavior see the
+        // correct downstream path.
+        const OWNER_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+        const GIT_PATH: &str = concat!(
+            "/git/0000000000000000000000000000000000000000000000000000000000000001",
+            "/myrepo/info/refs?service=git-upload-pack"
+        );
+
+        async fn off_mode_state() -> Option<Arc<AppState>> {
+            let mut config = crate::config::Config::for_test();
+            config.nip_fi.mode = buzz_auth::NipFiMode::Off;
+            config.require_auth_token = false;
+            config.require_relay_membership = false;
+            config.redis_url =
+                std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+            config.database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+                .or_else(|_| std::env::var("DATABASE_URL"))
+                .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
+
+            let pool = sqlx::PgPool::connect(&config.database_url).await.ok()?;
+            let db = buzz_db::Db::from_pool(pool.clone());
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
+            let pubsub = Arc::new(
+                buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                    .await
+                    .ok()?,
+            );
+            let audit = buzz_audit::AuditService::new(pool.clone());
+            let auth = buzz_auth::AuthService::new(config.auth.clone());
+            let search = buzz_search::SearchService::new(pool.clone());
+            let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+                db.clone(),
+                buzz_workflow::WorkflowConfig::default(),
+            ));
+            let media_storage = buzz_media::MediaStorage::new(&config.media).ok()?;
+            let (state, _) = AppState::new(
+                config,
+                db,
+                redis_pool,
+                audit,
+                pubsub,
+                auth,
+                search,
+                workflow_engine,
+                nostr::Keys::generate(),
+                media_storage,
+            );
+            Some(Arc::new(state))
+        }
+
+        /// A NIP-98-authenticated Git request whose restriction lookup fails
+        /// answers 503, not the 403 a real ban or non-member gets. Enforce sends
+        /// the canonical NIP-FI `authorization unavailable` bytes; Off keeps the
+        /// legacy text. Mutations: treat every membership-step error as 403, or
+        /// skip the Enforce mapping → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn failed_restriction_lookup_is_503_not_403() {
+            use base64::Engine as _;
+            struct AdmitAnyAssertion(nostr::PublicKey);
+            impl buzz_auth::VerifyAssertion for AdmitAnyAssertion {
+                fn verify_assertion(
+                    &self,
+                    _token: &str,
+                    _community: &buzz_auth::CommunityBinding,
+                ) -> Result<buzz_auth::VerifiedAssertion, buzz_auth::VerifierError>
+                {
+                    Ok(buzz_auth::VerifiedAssertion::new_for_test(self.0))
+                }
+            }
+            for mode in [buzz_auth::NipFiMode::Off, buzz_auth::NipFiMode::Enforce] {
+                let Some(mut state) = off_mode_state().await else {
+                    panic!("local Postgres not reachable");
+                };
+                let host = format!("git-ban-lookup-{}.test", uuid::Uuid::new_v4().simple());
+                state
+                    .db
+                    .ensure_configured_community(&host)
+                    .await
+                    .expect("ensure community");
+                let (db, admin, schema) =
+                    crate::test_support::restriction_lookup_failing_db().await;
+                let keys = nostr::Keys::generate();
+                {
+                    let s = Arc::get_mut(&mut state).expect("fixture state is uniquely owned");
+                    s.db = db;
+                    Arc::make_mut(&mut s.config).nip_fi.mode = mode;
+                    Arc::make_mut(&mut s.config).nip_fi.communities =
+                        crate::nip_fi_core::test_support::any_host(
+                            "https://git-ban-lookup.relay.invalid",
+                        );
+                    s.nip_fi_verifier = Some(Arc::new(AdmitAnyAssertion(keys.public_key())));
+                }
+                let scheme = if state.config.relay_url.starts_with("wss://") {
+                    "https"
+                } else {
+                    "http"
+                };
+                let signed_url = format!("{scheme}://{host}/git/{OWNER_HEX}/myrepo");
+                let event_json = serde_json::to_string(
+                    &nostr::EventBuilder::new(nostr::Kind::HttpAuth, "")
+                        .tags([
+                            nostr::Tag::parse(["u", signed_url.as_str()]).expect("u tag"),
+                            nostr::Tag::parse(["method", "GET"]).expect("method tag"),
+                        ])
+                        .sign_with_keys(&keys)
+                        .expect("sign NIP-98 event"),
+                )
+                .expect("serialize");
+                let auth = format!(
+                    "Nostr {}",
+                    base64::engine::general_purpose::STANDARD.encode(event_json)
+                );
+                let req = axum::http::Request::builder()
+                    .method("GET")
+                    .uri(GIT_PATH)
+                    .header("host", &host)
+                    .header("authorization", &auth)
+                    .header(buzz_auth::CLIENT_ATTACHED_HEADER, "Bearer any.valid.token")
+                    .body(axum::body::Body::empty())
+                    .expect("build request");
+                let resp = git_router(Arc::clone(&state))
+                    .layer(axum::middleware::from_fn_with_state(
+                        Arc::clone(&state),
+                        crate::access::http_access_log,
+                    ))
+                    .oneshot(req)
+                    .await
+                    .expect("router oneshot");
+                let status = resp.status();
+                let content_type = resp
+                    .headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned);
+                let body = to_bytes(resp.into_body(), 4096).await.unwrap_or_default();
+                let expected: &[u8] = match mode {
+                    buzz_auth::NipFiMode::Off => b"authorization unavailable",
+                    _ => b"authorization unavailable\n",
+                };
+                assert_eq!(
+                    status,
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "{mode:?}: {body:?}"
+                );
+                assert_eq!(
+                    content_type.as_deref(),
+                    Some("text/plain; charset=utf-8"),
+                    "{mode:?}"
+                );
+                assert_eq!(body.as_ref(), expected, "{mode:?}");
+                let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+                    .execute(&admin)
+                    .await;
+            }
+        }
+
+        /// Through the production router: git's credential-less first request
+        /// in Enforce mode is one INFO `challenged` line, a malformed proof
+        /// beside a valid assertion is one WARN `failed` line carrying the
+        /// remapped 403, and the same proof in Off mode carries its legacy 401.
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres"]
+        async fn git_access_lines_carry_level_outcome_and_status_sent() {
+            struct AdmitAnyAssertion;
+            impl buzz_auth::VerifyAssertion for AdmitAnyAssertion {
+                fn verify_assertion(
+                    &self,
+                    _token: &str,
+                    _community: &buzz_auth::CommunityBinding,
+                ) -> Result<buzz_auth::VerifiedAssertion, buzz_auth::VerifierError>
+                {
+                    Ok(buzz_auth::VerifiedAssertion::new_for_test(
+                        nostr::Keys::generate().public_key(),
+                    ))
+                }
+            }
+            /// Mode, request headers, then the expected status, outcome and level.
+            type Case = (
+                buzz_auth::NipFiMode,
+                &'static [(&'static str, &'static str)],
+                u16,
+                &'static str,
+                &'static str,
+            );
+            let cases: [Case; 3] = [
+                (
+                    buzz_auth::NipFiMode::Enforce,
+                    &[],
+                    401,
+                    "challenged",
+                    "INFO",
+                ),
+                (
+                    buzz_auth::NipFiMode::Enforce,
+                    &[
+                        ("authorization", "Nostr !!!bad!!!"),
+                        (buzz_auth::CLIENT_ATTACHED_HEADER, "Bearer any.valid.token"),
+                    ],
+                    403,
+                    "failed",
+                    "WARN",
+                ),
+                (
+                    buzz_auth::NipFiMode::Off,
+                    &[("authorization", "Nostr !!!bad!!!")],
+                    401,
+                    "failed",
+                    "WARN",
+                ),
+            ];
+            for (mode, headers, status, outcome, level) in cases {
+                let mut state = off_mode_state().await.expect("local Postgres");
+                let host = format!("git-access-{}.test", uuid::Uuid::new_v4().simple());
+                state
+                    .db
+                    .ensure_configured_community(&host)
+                    .await
+                    .expect("ensure community");
+                {
+                    let s = Arc::get_mut(&mut state).expect("fixture state is uniquely owned");
+                    Arc::make_mut(&mut s.config).nip_fi.mode = mode;
+                    Arc::make_mut(&mut s.config).nip_fi.communities =
+                        crate::nip_fi_core::test_support::any_host(
+                            "https://git-access.relay.invalid",
+                        );
+                    s.nip_fi_verifier = Some(Arc::new(AdmitAnyAssertion));
+                }
+                let mut req = axum::http::Request::builder()
+                    .method("GET")
+                    .uri(GIT_PATH)
+                    .header("host", &host);
+                for (name, value) in headers {
+                    req = req.header(*name, *value);
+                }
+                let req = req.body(axum::body::Body::empty()).expect("build request");
+                let (guard, out) = crate::access::tests::capture_scoped();
+                let resp = crate::router::build_router(state)
+                    .oneshot(req)
+                    .await
+                    .expect("router oneshot");
+                drop(guard);
+                assert_eq!(resp.status().as_u16(), status, "{mode:?} {headers:?}");
+                let lines: Vec<_> = out
+                    .lines()
+                    .into_iter()
+                    .filter(|l| l["event"] == "http")
+                    .collect();
+                assert_eq!(lines.len(), 1, "{mode:?} {headers:?}: {lines:?}");
+                let line = &lines[0];
+                assert_eq!(line["outcome"], outcome, "{line}");
+                assert_eq!(line["level"], level, "{line}");
+                assert_eq!(line["status"], status, "{line}");
+            }
+        }
+
+        /// A Git request dropped while its relay-membership lookup is in
+        /// flight still writes one `aborted` line.
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres"]
+        async fn git_request_dropped_during_membership_logs_one_aborted_line() {
+            use base64::Engine as _;
+            let state = off_mode_state().await.expect("local Postgres");
+            let host = format!("git-drop-{}.test", uuid::Uuid::new_v4().simple());
+            let tenant = {
+                state
+                    .db
+                    .ensure_configured_community(&host)
+                    .await
+                    .expect("ensure community");
+                crate::tenant::bind_community(&state.db, &host)
+                    .await
+                    .expect("bind community")
+            };
+            let keys = nostr::Keys::generate();
+            let scheme = if state.config.relay_url.starts_with("wss://") {
+                "https"
+            } else {
+                "http"
+            };
+            let signed_url = format!("{scheme}://{host}/git/{OWNER_HEX}/myrepo");
+            let event = nostr::EventBuilder::new(nostr::Kind::HttpAuth, "")
+                .tags([
+                    nostr::Tag::parse(["u", signed_url.as_str()]).expect("u tag"),
+                    nostr::Tag::parse(["method", "GET"]).expect("method tag"),
+                ])
+                .sign_with_keys(&keys)
+                .expect("sign NIP-98 event");
+            let auth = format!(
+                "Nostr {}",
+                base64::engine::general_purpose::STANDARD
+                    .encode(serde_json::to_string(&event).expect("serialize"))
+            );
+            // The hook parks the request right before the membership lookup.
+            let (arrived, _release) =
+                crate::nip_fi_test_hooks::git_membership_hook::arm(tenant.community());
+            let (guard, out) = crate::access::tests::capture_scoped();
+            tokio::select! {
+                _ = production_git_request(state, &host, &auth) => {
+                    panic!("the membership wait must stall");
+                }
+                arrived = arrived => arrived.expect("request reached the membership wait"),
+            }
+            drop(guard);
+            crate::access::tests::assert_one_aborted_line(&out, &keys.public_key());
+        }
+
+        /// Sends the request through the production router, whose access
+        /// layer owns the line written when the request is dropped.
+        async fn production_git_request(state: Arc<AppState>, host: &str, auth: &str) {
+            let req = axum::http::Request::builder()
+                .method("GET")
+                .uri(GIT_PATH)
+                .header("host", host)
+                .header("authorization", auth)
+                .body(axum::body::Body::empty())
+                .expect("build request");
+            let _ = crate::router::build_router(state)
+                .oneshot(req)
+                .await
+                .expect("router oneshot");
+        }
+
+        async fn git_request(
+            state: Arc<AppState>,
+            host: &str,
+            auth: Option<&str>,
+        ) -> (axum::http::StatusCode, axum::http::HeaderMap, bytes::Bytes) {
+            let mut builder = axum::http::Request::builder()
+                .method("GET")
+                .uri(GIT_PATH)
+                .header("host", host);
+            if let Some(a) = auth {
+                builder = builder.header("authorization", a);
+            }
+            let req = builder
+                .body(axum::body::Body::empty())
+                .expect("build request");
+            let resp = git_router(Arc::clone(&state))
+                .oneshot(req)
+                .await
+                .expect("router oneshot");
+            let status = resp.status();
+            let headers = resp.headers().clone();
+            let body = to_bytes(resp.into_body(), 4096).await.unwrap_or_default();
+            (status, headers, body)
+        }
+
+        // ── Unmapped host — missing auth: must be 401 before DB lookup ────
+        //
+        // An unmapped host has no community row.  If the Off-mode early-exit
+        // is removed, `bind_community()` returns 404 for this host.
+        // The assertion fires because 404 ≠ 401.
+        //
+        // Falsifying mutation: delete the `if matches!(mode, Off)` block
+        // (transport.rs:101-104) → unmapped host proceeds to `bind_community()` → 404.
+        //
+        // NOTE: missing-auth and wrong-scheme carry WWW-Authenticate; bad-base64
+        // and bad-UTF8 do NOT (those use `into_response()` without the header).
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn off_mode_unmapped_host_missing_auth_returns_401_before_tenant_binding() {
+            let Some(state) = off_mode_state().await else {
+                panic!("local Postgres not reachable");
+            };
+            let (status, headers, body) = git_request(state, UNMAPPED_HOST, None).await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Off mode + unmapped host + missing auth must yield 401 BEFORE \
+                 bind_community (not 404). \
+                 Falsifying mutation: delete Off-mode early-exit (transport.rs:101-104) \
+                 → bind_community returns 404 for unmapped host → assertion fires."
+            );
+            assert_eq!(
+                body.as_ref(),
+                b"missing Authorization header",
+                "missing-auth 401 body must be exact 'missing Authorization header'"
+            );
+            // FI-INV-15: Off-mode bytes match origin/main, whose legacy 401
+            // builder sets no Content-Type on this response.
+            assert!(
+                headers.get("content-type").is_none(),
+                "missing-auth 401 must carry no Content-Type (legacy Off bytes); got {:?}",
+                headers.get("content-type")
+            );
+            let challenge = headers
+                .get("www-authenticate")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert_eq!(
+                challenge,
+                "Nostr realm=\"buzz\", method=\"GET\"",
+                "missing-auth 401 must carry exact WWW-Authenticate: Nostr realm=\"buzz\", method=\"GET\"; got {challenge:?}"
+            );
+        }
+
+        // ── Unmapped host — wrong scheme: must be 401 before DB lookup ────
+        //
+        // Same falsifiability as the missing-auth case.
+        //
+        // Falsifying mutation: delete transport.rs:101-104 → 404.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn off_mode_unmapped_host_wrong_scheme_returns_401_before_tenant_binding() {
+            let Some(state) = off_mode_state().await else {
+                panic!("local Postgres not reachable");
+            };
+            let (status, headers, body) =
+                git_request(state, UNMAPPED_HOST, Some("Bearer token")).await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Off mode + unmapped host + wrong auth scheme must yield 401 before \
+                 bind_community. \
+                 Falsifying mutation: delete transport.rs:101-104 → 404."
+            );
+            assert_eq!(
+                body.as_ref(),
+                b"expected Authorization: Nostr <base64>",
+                "wrong-scheme 401 body must be 'expected Authorization: Nostr <base64>'"
+            );
+            assert!(
+                headers.get("content-type").is_none(),
+                "wrong-scheme 401 must carry no Content-Type (legacy Off bytes); got {:?}",
+                headers.get("content-type")
+            );
+            let challenge_ws = headers
+                .get("www-authenticate")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert_eq!(
+                challenge_ws, "Nostr realm=\"buzz\", method=\"GET\"",
+                "wrong-scheme 401 must carry exact WWW-Authenticate: \
+                 Nostr realm=\"buzz\", method=\"GET\"; got {challenge_ws:?}"
+            );
+        }
+
+        // ── Unmapped host — invalid base64: must be 401 before DB lookup ──
+        //
+        // bad-base64 and bad-UTF8 use `into_response()` — NO WWW-Authenticate.
+        // Falsifying mutation: delete transport.rs:101-104 → 404.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn off_mode_unmapped_host_invalid_base64_returns_401_before_tenant_binding() {
+            let Some(state) = off_mode_state().await else {
+                panic!("local Postgres not reachable");
+            };
+            let (status, headers, body) =
+                git_request(state, UNMAPPED_HOST, Some("Nostr !!!not-base64!!!")).await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Off mode + unmapped host + invalid base64 must yield 401 before \
+                 bind_community. \
+                 Falsifying mutation: delete transport.rs:101-104 → 404."
+            );
+            assert_eq!(
+                body.as_ref(),
+                b"invalid base64",
+                "invalid-base64 401 body must be exact 'invalid base64'"
+            );
+            assert!(
+                headers.get("www-authenticate").is_none(),
+                "invalid-base64 401 MUST NOT carry WWW-Authenticate \
+                 (uses into_response(), not the WWW-Authenticate builder path)"
+            );
+        }
+
+        // ── Unmapped host — bad UTF-8 payload: must be 401 before DB lookup ─
+        //
+        // A Nostr token where base64 decodes to non-UTF8 bytes triggers the
+        // UTF-8 guard in `parse_git_auth_header_full` (transport.rs:379-380).
+        // Body: "invalid utf-8"; NO WWW-Authenticate (uses `into_response()`).
+        //
+        // Falsifying mutation: delete transport.rs:101-104 → 404.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn off_mode_unmapped_host_bad_utf8_returns_401_before_tenant_binding() {
+            let Some(state) = off_mode_state().await else {
+                panic!("local Postgres not reachable");
+            };
+            // base64-encode non-UTF8 bytes (0xff 0xfe is an invalid UTF-8 start)
+            let bad_utf8_b64 = base64::engine::general_purpose::STANDARD.encode(b"\xff\xfe\x00");
+            let (status, headers, body) =
+                git_request(state, UNMAPPED_HOST, Some(&format!("Nostr {bad_utf8_b64}"))).await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Off mode + unmapped host + bad-UTF8 payload must yield 401 before \
+                 bind_community. \
+                 Falsifying mutation: delete transport.rs:101-104 → 404."
+            );
+            assert_eq!(
+                body.as_ref(),
+                b"invalid utf-8",
+                "bad-UTF8 401 body must be exact 'invalid utf-8'"
+            );
+            assert!(
+                headers.get("www-authenticate").is_none(),
+                "bad-UTF8 401 MUST NOT carry WWW-Authenticate \
+                 (uses into_response(), not the WWW-Authenticate builder path)"
+            );
+        }
+
+        // ── Mapped host — missing auth: compatibility control ──────────────
+        //
+        // Proves the same missing-auth behavior holds for mapped hosts.
+        // Compatibility control: the Off-mode early-exit (`transport.rs:101-104`)
+        // and the Enforce-mode NIP-FI closure both route through
+        // `parse_git_auth_header_full()`, which produces the same 401 + challenge.
+        //
+        // Falsifying mutation: replace `parse_git_auth_header` with always-pass
+        // → missing auth is not caught → request proceeds to URL verification
+        // → different status or body.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn off_mode_mapped_host_missing_auth_returns_401() {
+            let Some(state) = off_mode_state().await else {
+                panic!("local Postgres not reachable");
+            };
+            let host = format!(
+                "off-prec-mapped-{}.git.test.invalid",
+                uuid::Uuid::new_v4().simple()
+            );
+            state
+                .db
+                .ensure_configured_community(&host)
+                .await
+                .expect("ensure community");
+            let (status, headers, body) = git_request(state, &host, None).await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Off mode + mapped host + missing auth must yield 401 from Off-mode early-exit \
+                 (compatibility control: same response via NIP-FI closure in Enforce mode). \
+                 Falsifying mutation: skip parse_git_auth_header for missing auth → different error."
+            );
+            assert_eq!(
+                body.as_ref(),
+                b"missing Authorization header",
+                "mapped-host missing-auth 401 body must be 'missing Authorization header'"
+            );
+            let challenge = headers
+                .get("www-authenticate")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert_eq!(
+                challenge, "Nostr realm=\"buzz\", method=\"GET\"",
+                "mapped-host missing-auth 401 must carry exact WWW-Authenticate: Nostr realm=\"buzz\", method=\"GET\"; got {challenge:?}"
+            );
+        }
+
+        // ── Mapped host — invalid base64: compatibility control ───────────
+        //
+        // Proves the bad-base64 check holds for mapped hosts.
+        // `parse_git_auth_header_full()` handles bad base64 and returns 401 (no
+        // WWW-Authenticate).  This is a compatibility assertion: both the Off-mode
+        // early-exit and the Enforce-mode NIP-FI closure call the same function, so
+        // the same 401 body is produced in both modes.
+        //
+        // Falsifying mutation: remove `parse_git_auth_header` error for bad base64
+        // → bad-base64 request passes syntax check → URL verification fails differently.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn off_mode_mapped_host_invalid_base64_returns_401() {
+            let Some(state) = off_mode_state().await else {
+                panic!("local Postgres not reachable");
+            };
+            let host = format!(
+                "off-prec-mapped-b64-{}.git.test.invalid",
+                uuid::Uuid::new_v4().simple()
+            );
+            state
+                .db
+                .ensure_configured_community(&host)
+                .await
+                .expect("ensure community");
+            let (status, headers, body) =
+                git_request(state, &host, Some("Nostr !!!not-base64!!!")).await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Off mode + mapped host + invalid base64 must yield 401. \
+                 Falsifying mutation: delete transport.rs:101-104 → different error."
+            );
+            assert_eq!(
+                body.as_ref(),
+                b"invalid base64",
+                "mapped-host invalid-base64 401 body must be 'invalid base64'"
+            );
+            assert!(
+                headers.get("www-authenticate").is_none(),
+                "invalid-base64 401 MUST NOT carry WWW-Authenticate"
+            );
+        }
+
+        // ── Positive control: valid syntax with unmapped host reaches DB ──
+        //
+        // A syntactically valid Nostr token PASSES the Off-mode early-exit
+        // and proceeds to `bind_community()`.  The unmapped host then yields
+        // 404 — proving the early-exit was NOT the blocker.
+        //
+        // Falsifying mutation: always-deny `parse_git_auth_header` regardless
+        // of input → this control returns 401 instead of 404 → assertion fires.
+        // The negative cases above prove the opposite direction.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn off_mode_unmapped_host_valid_syntax_reaches_db_and_returns_404() {
+            let Some(state) = off_mode_state().await else {
+                panic!("local Postgres not reachable");
+            };
+            let keys = nostr::Keys::generate();
+            let tags = vec![
+                nostr::Tag::parse(["u", &format!("http://{UNMAPPED_HOST}{GIT_PATH}")]).unwrap(),
+                nostr::Tag::parse(["method", "GET"]).unwrap(),
+            ];
+            let event = nostr::EventBuilder::new(nostr::Kind::Custom(27235), "")
+                .tags(tags)
+                .sign_with_keys(&keys)
+                .unwrap();
+            let token = format!(
+                "Nostr {}",
+                base64::engine::general_purpose::STANDARD
+                    .encode(serde_json::to_vec(&event).unwrap())
+            );
+            let (status, _headers, _body) = git_request(state, UNMAPPED_HOST, Some(&token)).await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::NOT_FOUND,
+                "Off mode + unmapped host + valid syntax: parser passes → \
+                 bind_community fires → 404. \
+                 Falsifying mutation: always-deny parser → 401 instead of 404."
+            );
+        }
+
+        // ── Enforce mode: missing assertion on info/refs → exact body/CT/challenge ─
+        //
+        // Proves that git routes (info/refs, upload-pack, receive-pack) produce the
+        // exact contract bytes for MissingEvidence in Enforce mode.  All three routes
+        // share `GitAuth::from_request_parts`; the pack routes are additionally
+        // tested in `enforce_mode_git_pack_routes_missing_assertion_exact_bytes`.
+        //
+        // A Nostr-scheme Authorization header is present (syntactically valid)
+        // so the Off-mode early-exit passes; no Nostr-Federated-Identity header
+        // is sent, so `extract_bearer_token` returns MissingEvidence → 401.
+        //
+        // Falsifying mutation: remove the `admit_nip_fi_http_on_state` call
+        // from `GitAuth::from_request_parts` → `GitAuth` falls back to the
+        // legacy NIP-98 verifier → valid proof is accepted → request reaches
+        // `validate_repo_id` which succeeds (OWNER_HEX is valid 64-hex), then
+        // `authorize_git_read` which denies (repo not member of a channel) →
+        // different status or body → assertion fires.
+        //
+        // Why no assertion header: in Enforce mode with no verifier configured
+        // (startup race) an assertion present + no verifier would return 503.
+        // The MissingEvidence path (no assertion header) is the correct gate
+        // test for git routes and is the most discriminating falsifiable case.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn enforce_mode_git_info_refs_missing_assertion_exact_bytes() {
+            use buzz_auth::NipFiMode;
+
+            let mut config = crate::config::Config::for_test();
+            config.nip_fi.mode = NipFiMode::Enforce;
+            config.nip_fi.communities =
+                crate::nip_fi_core::test_support::any_host("https://git-pack-test.relay.invalid");
+            config.require_auth_token = false;
+            config.require_relay_membership = false;
+            // Pin relay_url to a ws:// value so git_expected_url() deterministically
+            // derives the http:// scheme for the NIP-98 `u` tag.
+            config.relay_url = "ws://nip-fi-git-test.invalid".to_string();
+            config.redis_url =
+                std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+            config.database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+                .or_else(|_| std::env::var("DATABASE_URL"))
+                .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
+
+            let pool = match sqlx::PgPool::connect(&config.database_url).await {
+                Ok(p) => p,
+                Err(_) => panic!("local Postgres not reachable (enforce git)"),
+            };
+            let db = buzz_db::Db::from_pool(pool.clone());
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
+            let pubsub = Arc::new(
+                buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                    .await
+                    .expect("pubsub"),
+            );
+            let audit = buzz_audit::AuditService::new(pool.clone());
+            let auth = buzz_auth::AuthService::new(config.auth.clone());
+            let search = buzz_search::SearchService::new(pool.clone());
+            let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+                db.clone(),
+                buzz_workflow::WorkflowConfig::default(),
+            ));
+            let media_storage =
+                buzz_media::MediaStorage::new(&config.media).expect("media storage");
+            let (state, _) = AppState::new(
+                config,
+                db,
+                redis_pool,
+                audit,
+                pubsub,
+                auth,
+                search,
+                workflow_engine,
+                nostr::Keys::generate(),
+                media_storage,
+            );
+            let state = Arc::new(state);
+
+            // Register a mapped host so bind_community succeeds → the NIP-FI
+            // gate is the first denial point after Off-mode early-exit.
+            let host = format!(
+                "nip-fi-git-enf-{}.test.invalid",
+                uuid::Uuid::new_v4().simple()
+            );
+            state
+                .db
+                .ensure_configured_community(&host)
+                .await
+                .expect("ensure community");
+
+            // Build a syntactically valid Nostr token signed for the repo-root URL.
+            // `git_expected_url()` strips `/info/refs?service=…` and keeps only
+            // the repository path prefix: `http://{host}/git/{OWNER_HEX}/myrepo`.
+            // No Nostr-Federated-Identity header → MissingEvidence in Enforce.
+            let keys = nostr::Keys::generate();
+            // GIT_PATH strips "/info/refs?..." suffix → repo root used for URL signing.
+            // OWNER_HEX is valid 64-hex so validate_repo_id would pass if auth succeeded.
+            let git_repo_root = format!("/git/{OWNER_HEX}/myrepo");
+            let tags = vec![
+                nostr::Tag::parse(["u", &format!("http://{host}{git_repo_root}")]).unwrap(),
+                nostr::Tag::parse(["method", "GET"]).unwrap(),
+            ];
+            let event = nostr::EventBuilder::new(nostr::Kind::Custom(27235), "")
+                .tags(tags)
+                .sign_with_keys(&keys)
+                .unwrap();
+            let auth_token = format!(
+                "Nostr {}",
+                base64::engine::general_purpose::STANDARD
+                    .encode(serde_json::to_vec(&event).unwrap())
+            );
+
+            let (status, headers, body) = git_request(state, &host, Some(&auth_token)).await;
+
+            assert_eq!(
+                status,
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Enforce mode + info/refs + missing assertion MUST deny 401 MissingEvidence. \
+                 Falsifying mutation: remove admit_nip_fi_http_on_state from GitAuth → \
+                 legacy NIP-98 verifier accepts the valid proof → request proceeds past \
+                 the admission gate → different status or body → assertion fires."
+            );
+            assert_eq!(
+                body.as_ref(),
+                b"authentication required\n",
+                "Enforce mode: git MissingEvidence body must be exact 'authentication required\\n' \
+                 [FI-TRACE-DENIAL-ORACLE]. Different body means the legacy git error path fired \
+                 instead of the NIP-FI gate."
+            );
+            let ct = headers
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert_eq!(
+                ct, "text/plain; charset=utf-8",
+                "Enforce mode: git 401 content-type must be text/plain; charset=utf-8"
+            );
+            let www_auth = headers
+                .get("www-authenticate")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert_eq!(
+                www_auth, "Nostr",
+                "Enforce mode: git 401 must carry WWW-Authenticate: Nostr"
+            );
+        }
+
+        // ── Enforce mode: pack routes (upload-pack + receive-pack) missing assertion ─
+        //
+        // Parameterized test: both POST pack routes share `GitAuth::from_request_parts`
+        // and must produce the same exact denial bytes as `info/refs` when the
+        // Nostr-Federated-Identity assertion header is absent.
+        //
+        // For each route:
+        //   - missing assertion → 401 MissingEvidence (exact body + CT + challenge)
+        //   - EvidenceRejected (invalid base64 Nostr token) → 401 (NIP-FI maps it)
+        //   - duplicate Authorization headers → 403 cardinality in Enforce mode
+        //
+        // Falsifying mutation: remove `admit_nip_fi_http_on_state` from
+        // `GitAuth::from_request_parts` → NIP-98 validates the token, no assertion
+        // check, request reaches `validate_repo_id` → succeeds (OWNER_HEX valid)
+        // → `authorize_git_read` denies (no channel membership) → 403 or 404
+        // → 401 assertion fires.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn enforce_mode_git_pack_routes_missing_assertion_exact_bytes() {
+            use buzz_auth::NipFiMode;
+
+            let mut config = crate::config::Config::for_test();
+            config.nip_fi.mode = NipFiMode::Enforce;
+            config.nip_fi.communities =
+                crate::nip_fi_core::test_support::any_host("https://git-pack-test.relay.invalid");
+            config.require_auth_token = false;
+            config.require_relay_membership = false;
+            config.relay_url = "ws://nip-fi-git-pack-test.invalid".to_string();
+            config.redis_url =
+                std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+            config.database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+                .or_else(|_| std::env::var("DATABASE_URL"))
+                .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
+
+            let pool = match sqlx::PgPool::connect(&config.database_url).await {
+                Ok(p) => p,
+                Err(_) => panic!("local Postgres not reachable (pack routes)"),
+            };
+            let db = buzz_db::Db::from_pool(pool.clone());
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool");
+            let pubsub = Arc::new(
+                buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                    .await
+                    .expect("pubsub"),
+            );
+            let audit = buzz_audit::AuditService::new(pool.clone());
+            let auth = buzz_auth::AuthService::new(config.auth.clone());
+            let search = buzz_search::SearchService::new(pool.clone());
+            let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+                db.clone(),
+                buzz_workflow::WorkflowConfig::default(),
+            ));
+            let media_storage =
+                buzz_media::MediaStorage::new(&config.media).expect("media storage");
+            let (state, _) = AppState::new(
+                config,
+                db,
+                redis_pool,
+                audit,
+                pubsub,
+                auth,
+                search,
+                workflow_engine,
+                nostr::Keys::generate(),
+                media_storage,
+            );
+            // Inject a static NIP-FI verifier into the Enforce state so that
+            // every case requiring cryptographic assertion validation (including
+            // the malformed-assertion Case 3) reaches the verifier rather than
+            // hitting the absent-verifier 503.  Without this, Case 3 sends
+            // `Bearer !!!not-valid-base64!!!` which passes `extract_bearer_token`
+            // (scheme/cardinality checks only) and then trips the absent-verifier
+            // check in `nip_fi_core::evaluate_attached_assertion` → 503, not 403.
+            // [FI-TRACE-DENIAL-ORACLE: verifier required for all crypto cases]
+            let state = {
+                use buzz_auth::{
+                    AssertionKeySet, FederatedAssertionVerifier, FreshnessClass, IssuerPolicy,
+                    IssuerRegistry, StaticIssuerKeySource, TokenClass, VerifyAssertion,
+                };
+                use jsonwebtoken::{jwk::JwkSet, Algorithm, EncodingKey};
+
+                const GIT_TEST_ISSUER: &str = "https://git-pack-test.issuer.invalid";
+                const GIT_TEST_AUDIENCE: &str = "https://git-pack-test.relay.invalid";
+                const GIT_TEST_KID: &str = "git-pack-test-key-1";
+                const GIT_TEST_EC_PEM: &str = concat!(
+                    "-----BEGIN PRIVATE KEY-----\n", // sadscan:disable kingfisher.privkey.2 -- test-only ES256 fixture
+                    "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n",
+                    "WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n",
+                    "zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n",
+                    "-----END PRIVATE KEY-----\n",
+                );
+
+                let jwks: JwkSet = serde_json::from_value(serde_json::json!({
+                    "keys": [{
+                        "kty": "EC", "crv": "P-256", "use": "sig", "alg": "ES256",
+                        "kid": GIT_TEST_KID,
+                        "x": "RW-mZ7H5Kjjl8hIY9ygUKYRiheL02s4Xm22r22dWaJI",
+                        "y": "WqQXVwaD6NM7us40BUTNe9dRa1XoJ0NX6vJuJWYU_bA"
+                    }]
+                }))
+                .expect("valid test JWKS");
+                let hard_deadline = chrono::Utc::now() + chrono::Duration::seconds(3600);
+                let key_set = AssertionKeySet::new_for_test(
+                    GIT_TEST_ISSUER.to_owned(),
+                    1,
+                    jwks,
+                    hard_deadline,
+                )
+                .expect("valid test key set");
+                let jwks_contract = buzz_auth::JwksSourceContract::new(
+                    format!("{GIT_TEST_ISSUER}/.well-known/jwks.json"),
+                    300,
+                    3600,
+                )
+                .expect("valid jwks contract");
+                let policy = IssuerPolicy::new(
+                    GIT_TEST_ISSUER.to_owned(),
+                    vec![GIT_TEST_AUDIENCE.to_owned()],
+                    TokenClass::DedicatedNipFi,
+                    FreshnessClass::OfflineJwt,
+                    vec![Algorithm::ES256],
+                    60,
+                    3600,
+                    None,
+                    jwks_contract,
+                )
+                .expect("valid issuer policy");
+                let mut registry = IssuerRegistry::new();
+                registry.insert(policy);
+                let verifier: Arc<dyn VerifyAssertion> = Arc::new(FederatedAssertionVerifier::new(
+                    registry,
+                    StaticIssuerKeySource::new([key_set]),
+                ));
+
+                // Encode the test key for use in Case 4 assertions.
+                // Store in a Mutex so it can be read from the outer scope later.
+                let enc_key =
+                    EncodingKey::from_ec_pem(GIT_TEST_EC_PEM.as_bytes()).expect("valid EC PEM");
+
+                let mut s = state;
+                s.nip_fi_verifier = Some(verifier);
+                (
+                    Arc::new(s),
+                    GIT_TEST_ISSUER,
+                    GIT_TEST_AUDIENCE,
+                    GIT_TEST_KID,
+                    enc_key,
+                )
+            };
+            let (state, git_test_issuer, git_test_audience, git_test_kid, git_enc_key) = state;
+
+            let host = format!(
+                "nip-fi-git-pack-{}.test.invalid",
+                uuid::Uuid::new_v4().simple()
+            );
+            state
+                .db
+                .ensure_configured_community(&host)
+                .await
+                .expect("ensure community");
+
+            // Build a valid NIP-98 token signed for the upload-pack repo root.
+            // Git credential helper signs once with GET and reuses for POST pack requests.
+            let keys = nostr::Keys::generate();
+            let repo_root = format!("/git/{OWNER_HEX}/myrepo");
+            let tags = vec![
+                nostr::Tag::parse(["u", &format!("http://{host}{repo_root}")]).unwrap(),
+                nostr::Tag::parse(["method", "GET"]).unwrap(),
+            ];
+            let event = nostr::EventBuilder::new(nostr::Kind::Custom(27235), "")
+                .tags(tags)
+                .sign_with_keys(&keys)
+                .unwrap();
+            let nip98_token = format!(
+                "Nostr {}",
+                base64::engine::general_purpose::STANDARD
+                    .encode(serde_json::to_vec(&event).unwrap())
+            );
+
+            // Helper: send a pack-route POST request and return (status, headers, body).
+            let send_pack_request =
+                |state: Arc<AppState>,
+                 route: &'static str,
+                 auth_headers: Vec<(&'static str, String)>| {
+                    let host = host.clone();
+                    async move {
+                        let uri = format!("/git/{OWNER_HEX}/myrepo/{route}");
+                        let mut builder = axum::http::Request::builder()
+                            .method("POST")
+                            .uri(&uri)
+                            .header("host", &host)
+                            .header(
+                                "content-type",
+                                if route == "git-upload-pack" {
+                                    "application/x-git-upload-pack-request"
+                                } else {
+                                    "application/x-git-receive-pack-request"
+                                },
+                            );
+                        for (name, value) in &auth_headers {
+                            builder = builder.header(*name, value);
+                        }
+                        let req = builder
+                            .body(axum::body::Body::empty())
+                            .expect("build request");
+                        let resp = git_router(Arc::clone(&state))
+                            .oneshot(req)
+                            .await
+                            .expect("router oneshot");
+                        let status = resp.status();
+                        let headers = resp.headers().clone();
+                        let body = to_bytes(resp.into_body(), 4096).await.unwrap_or_default();
+                        (status, headers, body)
+                    }
+                };
+
+            // ── Same-key material: built once, shared by Cases 5–7 and Case 4 ──
+            //
+            // Hoisted here so Cases 5–7 (inside the per-route loop below) can
+            // reference `same_key_assertion` without a forward-reference error.
+            // Case 4 reuses the same variables — no duplication.
+            {
+                use jsonwebtoken::{Algorithm, Header};
+                let test_keys_outer = nostr::Keys::generate();
+                let test_pubkey_hex_outer = test_keys_outer.public_key().to_hex();
+                let now_outer = chrono::Utc::now().timestamp();
+                let claims_outer = serde_json::json!({
+                    "iss": git_test_issuer,
+                    "aud": git_test_audience,
+                    "iat": now_outer,
+                    "exp": now_outer + 600,
+                    "sub": "test-subject",
+                    "nostr_pubkey": test_pubkey_hex_outer,
+                });
+                let mut hdr_outer = Header::new(Algorithm::ES256);
+                hdr_outer.kid = Some(git_test_kid.to_owned());
+                hdr_outer.typ = Some("nip-fi+jwt".to_owned());
+                let same_key_assertion =
+                    jsonwebtoken::encode(&hdr_outer, &claims_outer, &git_enc_key)
+                        .expect("sign assertion");
+
+                for route in &["git-upload-pack", "git-receive-pack"] {
+                    let route: &'static str = route;
+
+                    // ── Case 1: missing assertion → 401 MissingEvidence ─────────
+                    let (status, headers, body) = send_pack_request(
+                        Arc::clone(&state),
+                        route,
+                        vec![("authorization", nip98_token.clone())],
+                    )
+                    .await;
+                    assert_eq!(
+                        status,
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        "{route}: missing assertion MUST deny 401 MissingEvidence. \
+                     Falsifying mutation: remove admit_nip_fi_http_on_state from GitAuth \
+                     → legacy NIP-98 accepts → reaches validate_repo_id (valid owner) \
+                     → authorize_git_read denies → different status/body."
+                    );
+                    assert_eq!(
+                    body.as_ref(),
+                    b"authentication required\n",
+                    "{route}: MissingEvidence body must be exact 'authentication required\\n'. \
+                     [FI-TRACE-DENIAL-ORACLE]"
+                );
+                    let ct = headers
+                        .get("content-type")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    assert_eq!(
+                        ct, "text/plain; charset=utf-8",
+                        "{route}: 401 content-type must be 'text/plain; charset=utf-8'"
+                    );
+                    let www_auth = headers
+                        .get("www-authenticate")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    assert_eq!(
+                        www_auth, "Nostr",
+                        "{route}: 401 must carry WWW-Authenticate: Nostr"
+                    );
+
+                    // ── Case 2: duplicate Authorization → 403 cardinality ───────
+                    // Two NIP-98 tokens → cardinality gate fires before NIP-FI assertion check.
+                    // No assertion header needed — cardinality fires first.
+                    let (dup_status, dup_headers, dup_body) = send_pack_request(
+                        Arc::clone(&state),
+                        route,
+                        vec![
+                            ("authorization", nip98_token.clone()),
+                            ("authorization", nip98_token.clone()),
+                        ],
+                    )
+                    .await;
+                    assert_eq!(
+                        dup_status,
+                        axum::http::StatusCode::FORBIDDEN,
+                        "{route}: duplicate Authorization headers MUST deny 403 EvidenceRejected \
+                     (cardinality gate). \
+                     Falsifying mutation: remove cardinality check from admit_nip_fi_http \
+                     → request reaches NIP-FI assertion check → different denial."
+                    );
+                    assert_eq!(
+                        dup_body.as_ref(),
+                        b"evidence rejected\n",
+                        "{route}: cardinality 403 body must be exact 'evidence rejected\\n'. \
+                     [FI-TRACE-DENIAL-ORACLE]"
+                    );
+                    let dup_ct = dup_headers
+                        .get("content-type")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    assert_eq!(
+                        dup_ct, "text/plain; charset=utf-8",
+                        "{route}: cardinality 403 content-type must be 'text/plain; charset=utf-8'"
+                    );
+                    assert!(
+                        dup_headers.get("www-authenticate").is_none(),
+                        "{route}: cardinality 403 MUST NOT carry WWW-Authenticate \
+                     (client has a token, it's malformed — not absent)"
+                    );
+
+                    // ── Case 3: invalid base64 assertion → 403 EvidenceRejected ─
+                    // A syntactically invalid Nostr-Federated-Identity value (non-base64
+                    // after the "Nostr " prefix) → EvidenceRejected → 403.
+                    // This is distinct from MissingEvidence (absent header → 401).
+                    //
+                    // Falsifying mutation: skip assertion validation for malformed tokens →
+                    // request reaches handler → different status/body.
+                    let (inv_status, inv_headers, inv_body) = send_pack_request(
+                        Arc::clone(&state),
+                        route,
+                        vec![
+                            ("authorization", nip98_token.clone()),
+                            (
+                                buzz_auth::CLIENT_ATTACHED_HEADER,
+                                "Bearer !!!not-valid-base64!!!".to_string(),
+                            ),
+                        ],
+                    )
+                    .await;
+                    assert_eq!(
+                        inv_status,
+                        axum::http::StatusCode::FORBIDDEN,
+                        "{route}: invalid base64 assertion MUST deny 403 EvidenceRejected. \
+                     Falsifying mutation: skip assertion parsing on bad input → \
+                     handler reached → different status/body."
+                    );
+                    assert_eq!(
+                        inv_body.as_ref(),
+                        b"evidence rejected\n",
+                        "{route}: invalid assertion body must be exact 'evidence rejected\\n'. \
+                     [FI-TRACE-DENIAL-ORACLE]"
+                    );
+                    let inv_ct = inv_headers
+                        .get("content-type")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    assert_eq!(
+                    inv_ct, "text/plain; charset=utf-8",
+                    "{route}: invalid assertion 403 content-type must be 'text/plain; charset=utf-8'"
+                );
+                    assert!(
+                        inv_headers.get("www-authenticate").is_none(),
+                        "{route}: invalid assertion 403 MUST NOT carry WWW-Authenticate \
+                     (client has a token, it's malformed — not absent)"
+                    );
+
+                    // ── Case 5: missing proof + valid assertion → 401 MissingEvidence ─
+                    //
+                    // Valid NFI assertion present, but NO Authorization (NIP-98) header.
+                    // NIP-98 extraction closure returns MissingEvidence (no Authorization) →
+                    // maps to 401 `authentication required\n`.
+                    // Proves proof validation is not bypassed by a valid assertion.
+                    //
+                    // Falsifying mutation: make the NIP-98 closure skip missing-auth →
+                    // NIP-98 proves something other than 401 → assertion fires.
+                    let (miss_proof_status, _miss_proof_headers, miss_proof_body) =
+                        send_pack_request(
+                            Arc::clone(&state),
+                            route,
+                            vec![(
+                                buzz_auth::CLIENT_ATTACHED_HEADER,
+                                format!("Bearer {same_key_assertion}"),
+                            )],
+                        )
+                        .await;
+                    assert_eq!(
+                        miss_proof_status,
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        "{route}: missing proof + valid assertion MUST deny 401 MissingEvidence. \
+                     A valid assertion does NOT bypass NIP-98 proof requirement. \
+                     Falsifying mutation: skip NIP-98 when assertion present → handler reached."
+                    );
+                    assert_eq!(
+                    miss_proof_body.as_ref(),
+                    b"authentication required\n",
+                    "{route}: missing-proof 401 body must be exact 'authentication required\\n'. \
+                     [FI-TRACE-DENIAL-ORACLE]"
+                );
+
+                    // ── Case 6: malformed proof + valid assertion → 403 EvidenceRejected ─
+                    //
+                    // Valid NFI assertion + syntactically malformed NIP-98 (`Nostr !!!bad!!!`).
+                    // NIP-98 closure fails (bad base64) → maps to 403 EvidenceRejected.
+                    // Proves malformed-proof detection is not bypassed by a valid assertion.
+                    //
+                    // Falsifying mutation: accept malformed NIP-98 when assertion present →
+                    // admission bypassed → response is not 403 EvidenceRejected.
+                    let (mal_proof_status, _mal_proof_headers, mal_proof_body) = send_pack_request(
+                        Arc::clone(&state),
+                        route,
+                        vec![
+                            ("authorization", "Nostr !!!not-valid-base64!!!".to_string()),
+                            (
+                                buzz_auth::CLIENT_ATTACHED_HEADER,
+                                format!("Bearer {same_key_assertion}"),
+                            ),
+                        ],
+                    )
+                    .await;
+                    assert_eq!(
+                    mal_proof_status,
+                    axum::http::StatusCode::FORBIDDEN,
+                    "{route}: malformed proof + valid assertion MUST deny 403 EvidenceRejected. \
+                     Falsifying mutation: skip NIP-98 validation when assertion present → \
+                     admission bypassed → not 403."
+                );
+                    assert_eq!(
+                        mal_proof_body.as_ref(),
+                        b"evidence rejected\n",
+                        "{route}: malformed-proof 403 body must be exact 'evidence rejected\\n'. \
+                     [FI-TRACE-DENIAL-ORACLE]"
+                    );
+
+                    // ── Case 7: duplicate proof + valid assertion → 403 cardinality ─
+                    //
+                    // Two Authorization headers + valid NFI assertion.  The cardinality gate
+                    // fires before NIP-98 extraction (it runs on Authorization count).
+                    // 403 EvidenceRejected — same result as Case 2 (dup without assertion),
+                    // proving the assertion does not gate the cardinality check.
+                    //
+                    // `nip98_token` is signed by `keys` while `same_key_assertion` names
+                    // `test_keys_outer`, so disabling cardinality predicts key pairing
+                    // denial: 403 `authorization denied\n`.  The exact
+                    // `evidence rejected\n` body below distinguishes that mutation.
+                    let (dup_proof_status, _dup_proof_headers, dup_proof_body) = send_pack_request(
+                        Arc::clone(&state),
+                        route,
+                        vec![
+                            ("authorization", nip98_token.clone()),
+                            ("authorization", nip98_token.clone()),
+                            (
+                                buzz_auth::CLIENT_ATTACHED_HEADER,
+                                format!("Bearer {same_key_assertion}"),
+                            ),
+                        ],
+                    )
+                    .await;
+                    assert_eq!(
+                        dup_proof_status,
+                        axum::http::StatusCode::FORBIDDEN,
+                        "{route}: duplicate proof + valid assertion MUST deny 403 cardinality. \
+                     Disabling cardinality → key pairing 403 'authorization denied\\n'."
+                    );
+                    assert_eq!(
+                        dup_proof_body.as_ref(),
+                        b"evidence rejected\n",
+                        "{route}: dup-proof 403 body must be exact 'evidence rejected\\n'. \
+                     [FI-TRACE-DENIAL-ORACLE]"
+                    );
+                }
+
+                // ── Case 4: same-key admission → passes NIP-FI, reaches handler ──
+                //
+                // The verifier was injected into `state` at the top of this test.
+                // Same-key: NIP-98 signed by test_keys; assertion nostr_pubkey =
+                // test_keys.public_key().  Key pairing passes → request reaches
+                // `validate_repo_id` → `authorize_git_read`.
+                //
+                // The repo does not exist in the test database, so `authorize_git_read`
+                // returns 404 "repository not found" — not a NIP-FI code.
+                //
+                // Falsifying mutation: replace the pairing check with always-deny →
+                // 403 `authorization denied\n` → status/body checks fire.
+                //
+                // Also covers `info/refs` (GET) with the same assertion; the route
+                // shares `GitAuth::from_request_parts` and `authorize_git_read`.
+                {
+                    use jsonwebtoken::{Algorithm, Header};
+
+                    // Same-key: NIP-98 signed by test_keys; assertion nostr_pubkey =
+                    // test_keys.public_key().  Pairing passes.
+                    let test_keys = nostr::Keys::generate();
+                    let test_pubkey_hex = test_keys.public_key().to_hex();
+                    let now = chrono::Utc::now().timestamp();
+                    let claims = serde_json::json!({
+                        "iss": git_test_issuer,
+                        "aud": git_test_audience,
+                        "iat": now,
+                        "exp": now + 600,
+                        "sub": "test-subject",
+                        "nostr_pubkey": test_pubkey_hex,
+                    });
+                    let mut header = Header::new(Algorithm::ES256);
+                    header.kid = Some(git_test_kid.to_owned());
+                    header.typ = Some("nip-fi+jwt".to_owned());
+                    let same_key_assertion = jsonwebtoken::encode(&header, &claims, &git_enc_key)
+                        .expect("sign assertion");
+
+                    // Build same-key NIP-98 token for upload-pack repo root.
+                    let admitted_nip98_tags = vec![
+                        nostr::Tag::parse(["u", &format!("http://{host}{repo_root}")]).unwrap(),
+                        nostr::Tag::parse(["method", "GET"]).unwrap(),
+                    ];
+                    let admitted_event = nostr::EventBuilder::new(nostr::Kind::Custom(27235), "")
+                        .tags(admitted_nip98_tags)
+                        .sign_with_keys(&test_keys)
+                        .unwrap();
+                    let admitted_nip98_token = format!(
+                        "Nostr {}",
+                        base64::engine::general_purpose::STANDARD
+                            .encode(serde_json::to_vec(&admitted_event).unwrap())
+                    );
+
+                    // ── git-upload-pack (POST): same-key admission → 404 ─────────
+                    //
+                    // upload-pack calls authorize_git_read which queries DB for
+                    // kind:30617 announcement. Repo absent → 404 "repository not found".
+                    //
+                    // Falsifying mutation: key-pairing always-deny → 403
+                    // `authorization denied\n` → body check fires.
+                    {
+                        let (s_up, _h_up, b_up) = send_pack_request(
+                            Arc::clone(&state),
+                            "git-upload-pack",
+                            vec![
+                                ("authorization", admitted_nip98_token.clone()),
+                                (
+                                    buzz_auth::CLIENT_ATTACHED_HEADER,
+                                    format!("Bearer {same_key_assertion}"),
+                                ),
+                            ],
+                        )
+                        .await;
+                        assert_eq!(
+                            s_up,
+                            axum::http::StatusCode::NOT_FOUND,
+                            "git-upload-pack: same-key admission MUST reach authorize_git_read \
+                             → 404 (repo absent). \
+                             If 401/403: NIP-FI denial — check verifier injection and key pairing. \
+                             Body: {b_up:?}"
+                        );
+                        assert_eq!(
+                            b_up.as_ref(),
+                            b"repository not found",
+                            "git-upload-pack: same-key admitted 404 body must be exact \
+                             'repository not found'. \
+                             Falsifying mutation: key pairing always-deny → 403 \
+                             'authorization denied\\n'."
+                        );
+                    }
+
+                    // ── git-receive-pack (POST): same-key admission → git busy 503 ─
+                    //
+                    // Every `git_semaphore` permit is held, so an admitted request
+                    // stops at `receive_pack` → `acquire_git_permit`, which returns
+                    // exactly 503, `Retry-After: 5`, body `git service busy`, no
+                    // Content-Type, no challenge — before hydration, the
+                    // subprocess, or finalize.  Any NIP-FI denial (401
+                    // `authentication required\n`, 403 `evidence rejected\n` /
+                    // `authorization denied\n`, 503 `authorization unavailable\n`)
+                    // happens in `GitAuth` before the handler and cannot produce
+                    // these bytes.
+                    {
+                        let held: Vec<_> = std::iter::from_fn(|| {
+                            Arc::clone(&state.git_semaphore).try_acquire_owned().ok()
+                        })
+                        .collect();
+                        assert!(
+                            !held.is_empty(),
+                            "fixture must hold at least one git permit"
+                        );
+                        let (s_rp, h_rp, b_rp) = send_pack_request(
+                            Arc::clone(&state),
+                            "git-receive-pack",
+                            vec![
+                                ("authorization", admitted_nip98_token.clone()),
+                                (
+                                    buzz_auth::CLIENT_ATTACHED_HEADER,
+                                    format!("Bearer {same_key_assertion}"),
+                                ),
+                            ],
+                        )
+                        .await;
+                        drop(held);
+                        assert_eq!(
+                            s_rp,
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                            "git-receive-pack: admitted request MUST reach acquire_git_permit \
+                             → 503 busy. Body: {b_rp:?}"
+                        );
+                        assert_eq!(
+                            h_rp.get("retry-after").and_then(|v| v.to_str().ok()),
+                            Some("5"),
+                            "git-receive-pack: busy 503 carries Retry-After: 5"
+                        );
+                        assert!(
+                            h_rp.get("content-type").is_none(),
+                            "git-receive-pack: busy 503 carries no Content-Type"
+                        );
+                        assert!(
+                            h_rp.get("www-authenticate").is_none(),
+                            "git-receive-pack: busy 503 carries no challenge"
+                        );
+                        assert_eq!(
+                            b_rp.as_ref(),
+                            b"git service busy",
+                            "git-receive-pack: exact busy body from acquire_git_permit"
+                        );
+                    }
+
+                    // ── info/refs (GET): shares GitAuth + authorize_git_read ──────
+                    //
+                    // info/refs is a GET with ?service=git-upload-pack sharing
+                    // `GitAuth::from_request_parts` and `authorize_git_read`: missing
+                    // assertion, missing / malformed / duplicate proof with a valid
+                    // assertion, and the same-key positive.
+                    {
+                        let uri =
+                            format!("/git/{OWNER_HEX}/myrepo/info/refs?service=git-upload-pack");
+                        // ── info/refs Case 1: missing assertion → 401 ────────────
+                        let (s, _, b) = {
+                            let req = axum::http::Request::builder()
+                                .method("GET")
+                                .uri(&uri)
+                                .header("host", &host)
+                                .header("authorization", &nip98_token)
+                                .body(axum::body::Body::empty())
+                                .expect("build request");
+                            let resp = git_router(Arc::clone(&state))
+                                .oneshot(req)
+                                .await
+                                .expect("router oneshot");
+                            let st = resp.status();
+                            let hd = resp.headers().clone();
+                            let bd = to_bytes(resp.into_body(), 4096).await.unwrap_or_default();
+                            (st, hd, bd)
+                        };
+                        assert_eq!(
+                            s,
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            "info/refs: missing assertion MUST deny 401. Body: {b:?}"
+                        );
+                        assert_eq!(
+                        b.as_ref(),
+                        b"authentication required\n",
+                        "info/refs: missing assertion 401 body must be 'authentication required\\n'."
+                    );
+
+                        // ── info/refs Case 5: missing proof + valid assertion → 401 ─
+                        let (s5, _, b5) = {
+                            let req = axum::http::Request::builder()
+                                .method("GET")
+                                .uri(&uri)
+                                .header("host", &host)
+                                .header(
+                                    buzz_auth::CLIENT_ATTACHED_HEADER,
+                                    format!("Bearer {same_key_assertion}"),
+                                )
+                                .body(axum::body::Body::empty())
+                                .expect("build request");
+                            let resp = git_router(Arc::clone(&state))
+                                .oneshot(req)
+                                .await
+                                .expect("router oneshot");
+                            let st = resp.status();
+                            let bd = to_bytes(resp.into_body(), 4096).await.unwrap_or_default();
+                            (st, (), bd)
+                        };
+                        assert_eq!(
+                        s5,
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        "info/refs: missing proof + valid assertion MUST deny 401. Body: {b5:?}"
+                    );
+                        assert_eq!(
+                        b5.as_ref(),
+                        b"authentication required\n",
+                        "info/refs: missing-proof 401 body must be 'authentication required\\n'."
+                    );
+
+                        // ── info/refs Cases 6/7: malformed / duplicate proof +
+                        //    valid same-key assertion → 403 `evidence rejected\n` ─
+                        for (authorization, case) in [
+                            (
+                                vec!["Nostr !!!not-valid-base64!!!".to_string()],
+                                "malformed proof",
+                            ),
+                            (
+                                vec![admitted_nip98_token.clone(), admitted_nip98_token.clone()],
+                                "duplicate proof",
+                            ),
+                        ] {
+                            let mut builder = axum::http::Request::builder()
+                                .method("GET")
+                                .uri(&uri)
+                                .header("host", &host)
+                                .header(
+                                    buzz_auth::CLIENT_ATTACHED_HEADER,
+                                    format!("Bearer {same_key_assertion}"),
+                                );
+                            for value in &authorization {
+                                builder = builder.header("authorization", value);
+                            }
+                            let resp = git_router(Arc::clone(&state))
+                                .oneshot(builder.body(axum::body::Body::empty()).expect("build"))
+                                .await
+                                .expect("router oneshot");
+                            let st = resp.status();
+                            let hd = resp.headers().clone();
+                            let bd = to_bytes(resp.into_body(), 4096).await.unwrap_or_default();
+                            assert_eq!(
+                                st,
+                                axum::http::StatusCode::FORBIDDEN,
+                                "info/refs {case}: MUST deny 403. Body: {bd:?}"
+                            );
+                            assert_eq!(
+                                hd.get("content-type").and_then(|v| v.to_str().ok()),
+                                Some("text/plain; charset=utf-8"),
+                                "info/refs {case}: 403 Content-Type"
+                            );
+                            assert!(
+                                hd.get("www-authenticate").is_none(),
+                                "info/refs {case}: 403 carries no challenge"
+                            );
+                            assert_eq!(
+                                bd.as_ref(),
+                                b"evidence rejected\n",
+                                "info/refs {case}: exact EvidenceRejected body"
+                            );
+                        }
+
+                        // ── info/refs Case 4 (same-key positive) → 404 ───────────
+                        let (s4, _, b4) = {
+                            let req = axum::http::Request::builder()
+                                .method("GET")
+                                .uri(&uri)
+                                .header("host", &host)
+                                .header("authorization", &admitted_nip98_token)
+                                .header(
+                                    buzz_auth::CLIENT_ATTACHED_HEADER,
+                                    format!("Bearer {same_key_assertion}"),
+                                )
+                                .body(axum::body::Body::empty())
+                                .expect("build request");
+                            let resp = git_router(Arc::clone(&state))
+                                .oneshot(req)
+                                .await
+                                .expect("router oneshot");
+                            let st = resp.status();
+                            let bd = to_bytes(resp.into_body(), 4096).await.unwrap_or_default();
+                            (st, (), bd)
+                        };
+                        assert_eq!(
+                            s4,
+                            axum::http::StatusCode::NOT_FOUND,
+                            "info/refs: same-key admission MUST reach handler → \
+                         404 (repo not found). Body: {b4:?}"
+                        );
+                        assert_eq!(
+                        b4.as_ref(),
+                        b"repository not found",
+                        "info/refs: same-key admitted 404 body must be 'repository not found'. \
+                         Falsifying mutation: key pairing always-deny → 403 body."
+                    );
+                    }
+                }
+            } // closes same-key outer block (test_keys_outer / same_key_assertion)
+        }
+    }
+}
+
+#[cfg(test)]
+mod access_log_tests {
+    use super::*;
+
+    // A URL-mismatch failure logs one fixed-code access line; the client's
+    // signed `u` tag (and anything smuggled into it) never reaches the logs.
+    #[test]
+    fn git_url_mismatch_logs_a_fixed_code_without_the_signed_url() {
+        const MARKER: &str = "sentinel-7f3c9a";
+        let event = nostr::EventBuilder::new(nostr::Kind::HttpAuth, "")
+            .tag(
+                nostr::Tag::parse(["u", &format!("https://evil.example/x?token={MARKER}")])
+                    .unwrap(),
+            )
+            .tag(nostr::Tag::parse(["method", "GET"]).unwrap())
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap();
+        let token =
+            base64::engine::general_purpose::STANDARD.encode(nostr::JsonUtil::as_json(&event));
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Nostr {token}").parse().unwrap(),
+        );
+
+        let (refused, out) = crate::access::tests::capture(|| {
+            let slot = AccessSlot::default();
+            let refused = verify_git_proof(
+                &headers,
+                "GET",
+                "https://relay.example/git/o/r.git/info/refs",
+                &slot,
+            )
+            .is_err();
+            slot.emit("/git/{owner}/{repo}/info/refs", 401);
+            refused
+        });
+        assert!(refused);
+        let lines = out.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["outcome"], "failed");
+        assert_eq!(lines[0]["reason"], "nip98_invalid");
+        assert!(!out.raw().contains(MARKER), "marker leaked: {}", out.raw());
     }
 }

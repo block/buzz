@@ -11,6 +11,8 @@ class AppListCard extends StatelessWidget {
     super.key,
     this.label,
     this.dividerIndent,
+    this.verticalPadding = Grid.xxs,
+    this.horizontalPadding = Grid.gutter,
     required this.children,
   });
 
@@ -21,6 +23,15 @@ class AppListCard extends StatelessWidget {
   /// column, clearing a leading icon. Icon-free cards can pass [_inset] so
   /// separators align with their row content on both sides.
   final double? dividerIndent;
+
+  /// Outer padding above and below this section.
+  ///
+  /// Adjacent cards contribute this padding from both sides. For example,
+  /// passing [Grid.twelve] creates a 24dp rhythm between grouped surfaces.
+  final double verticalPadding;
+
+  /// Outer horizontal inset; use zero inside an already padded sheet.
+  final double horizontalPadding;
 
   final List<Widget> children;
 
@@ -45,7 +56,7 @@ class AppListCard extends StatelessWidget {
             // which lands them within a few levels of the card fill — invisible.
             // Tinting with the text color instead keeps the hairline readable on
             // the card in both brightnesses.
-            color: context.colors.onSurface.withValues(alpha: 0.12),
+            color: context.colors.onSurface.withValues(alpha: 0.07),
           ),
         );
       }
@@ -53,13 +64,14 @@ class AppListCard extends StatelessWidget {
     }
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        Grid.gutter,
-        Grid.xxs,
-        Grid.gutter,
-        Grid.xxs,
+      padding: EdgeInsets.fromLTRB(
+        horizontalPadding,
+        verticalPadding,
+        horizontalPadding,
+        verticalPadding,
       ),
       child: Column(
+        mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (label != null)
@@ -80,12 +92,15 @@ class AppListCard extends StatelessWidget {
             // does. The dividers carry the group structure, so the fill only has
             // to separate the card from the page.
             color: context.colors.surfaceContainerHighest,
-            borderRadius: BorderRadius.circular(Radii.card),
+            borderRadius: BorderRadius.circular(Radii.container),
             // Keeps row ripples inside the rounded corners.
             clipBehavior: Clip.antiAlias,
             child: AppListInset(
               horizontal: _inset,
-              child: Column(children: separated),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: separated,
+              ),
             ),
           ),
         ],

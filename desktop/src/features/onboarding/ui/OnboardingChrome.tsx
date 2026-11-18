@@ -67,7 +67,7 @@ export function OnboardingChrome({
         <BuzzMark className="h-auto w-full" />
       </span>
       <div
-        className="absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 items-center gap-2"
+        className="absolute left-1/2 top-1/2 -mt-3 flex -translate-x-1/2 -translate-y-1/2 items-center gap-2"
         data-testid="onboarding-step-dots"
       >
         {Array.from({ length: total }, (_, i) => i + 1).map((position) => (

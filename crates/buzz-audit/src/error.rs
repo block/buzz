@@ -14,6 +14,10 @@ pub enum AuditError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 
+    /// Community write admission failed before the audit chain was locked.
+    #[error("audit write admission failed")]
+    Admission(#[from] buzz_db::DbError),
+
     /// The `prev_hash` of an entry does not match the hash of the preceding
     /// entry in the same community's chain.
     #[error(
@@ -34,6 +38,13 @@ pub enum AuditError {
     /// An unrecognised action string was found in the database.
     #[error("unknown audit action in database")]
     UnknownAction,
+
+    /// The stored hash encoding version is not supported.
+    #[error("unsupported audit hash version {version}")]
+    UnsupportedHashVersion {
+        /// Unrecognised encoding version.
+        version: i16,
+    },
 
     /// A JSON serialization error occurred (e.g. while canonicalising `detail`).
     #[error("serialization error: {0}")]
@@ -69,6 +80,10 @@ mod tests {
             AuditError::ChainViolation { seq: 7 },
             AuditError::HashMismatch { seq: 42 },
             AuditError::UnknownAction,
+            AuditError::UnsupportedHashVersion { version: 99 },
+            AuditError::Admission(buzz_db::DbError::AccessDenied(format!(
+                "community {community} is write-fenced"
+            ))),
         ];
 
         for err in &domain_errors {

@@ -21,11 +21,15 @@ export type ImetaEntry = {
 export type ImetaLookup = Map<string, ImetaEntry>;
 
 export type MessageLinkPillProps = {
-  channels: Channel[];
+  /** Member channels available synchronously from the caller's runtime. */
+  channels?: Channel[];
+  /** Resolve a missing channel id with a bounded detail query. */
+  resolveChannelReference?: boolean;
   /** Original permalink text, preserved for the context menu's Copy action. */
   href?: string;
   interactive: boolean;
   link: ParsedMessageLink;
+  onOpenChannel: (channelId: string) => void;
   onOpenMessageLink: (link: ParsedMessageLink) => void;
   threadExcerpt?: string | null;
   variant?: "default" | "sent-from-thread";
@@ -48,6 +52,7 @@ export type MarkdownRuntime = {
    * validate that clone-URL rewrites point to the active relay only.
    */
   relayOrigin: string | null;
+  resolveChannelReferences?: boolean;
   /** Display name of the message author sharing an agent snapshot. */
   snapshotSharedBy?: string;
   /**
@@ -69,8 +74,21 @@ export type MarkdownProps = {
   className?: string;
   content: string;
   customEmoji?: CustomEmoji[];
+  /**
+   * When true (default), single newlines become `<br>` — chat Enter behavior.
+   * Git commit bodies are hard-wrapped at ~72 columns; pass false so those
+   * wraps reflow with the panel instead of staying a narrow column.
+   */
+  hardLineBreaks?: boolean;
   imetaByUrl?: ImetaLookup;
   interactive?: boolean;
+  /**
+   * Render fenced code as scrollable code blocks even when `interactive` is
+   * false. Non-interactive surfaces default to inlining code (compact
+   * previews); document surfaces like repository READMEs pass true so long
+   * lines scroll inside the block instead of stretching the layout.
+   */
+  blockCode?: boolean;
   agentMentionPubkeysByName?: Record<string, string>;
   mentionNames?: string[];
   mentionPubkeysByName?: Record<string, string>;

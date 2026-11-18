@@ -1,4 +1,5 @@
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { channelAgentMembers } from "@/shared/lib/rosterDerivations";
 
 /**
  * Pure merge behind `useKnownAgentPubkeys`: managed agents ∪ relay agents,
@@ -62,10 +63,11 @@ export function mergeChannelKnownAgentPubkeys(
   relayAgents: readonly { pubkey: string }[] | undefined,
 ): ReadonlySet<string> {
   const pubkeys = new Set(mergeKnownAgentPubkeys(managedAgents, relayAgents));
-  for (const member of channelMembers ?? []) {
-    if (member.role === "bot" || member.isAgent) {
-      pubkeys.add(normalizePubkey(member.pubkey));
-    }
+  // Identity-cached agent subset: avoids walking the full roster per call.
+  for (const member of channelMembers
+    ? channelAgentMembers(channelMembers)
+    : []) {
+    pubkeys.add(normalizePubkey(member.pubkey));
   }
   return pubkeys;
 }

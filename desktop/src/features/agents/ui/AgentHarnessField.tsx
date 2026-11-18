@@ -2,8 +2,10 @@ import type { ReactNode } from "react";
 
 import type { PersonaDropdownOption } from "./agentConfigOptions";
 import { PersonaDropdownField } from "./PersonaDropdownField";
+import { HarnessCatalogRetryNotice } from "./HarnessCatalogRetryNotice";
 
 export function AgentHarnessField({
+  catalogStatus,
   disabled,
   onValueChange,
   options,
@@ -11,6 +13,7 @@ export function AgentHarnessField({
   value,
   warning,
 }: {
+  catalogStatus?: "loading" | "ready" | "error";
   disabled: boolean;
   onValueChange: (value: string) => void;
   options: PersonaDropdownOption[];
@@ -34,7 +37,7 @@ export function AgentHarnessField({
         placeholder={placeholder}
         value={value}
       />
-      {warning}
+      {catalogStatus === "error" ? <HarnessCatalogRetryNotice /> : warning}
     </div>
   );
 }

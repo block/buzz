@@ -135,9 +135,10 @@ test("timeline history merge preserves the older window despite auxiliary events
 
 test("sortMessages tiebreaks same-second events on id, order-independent", () => {
   // Three events sharing one created_at, fed in two different input orders.
-  // The (created_at, id) sort must produce the same sequence both ways, so a
-  // history-then-live merge and a live-then-history merge can't shuffle a
-  // same-second message to a different visible position.
+  // The sort must produce the same sequence both ways, so a history-then-live
+  // merge and a live-then-history merge can't shuffle a same-second message to
+  // a different visible position. Within a second the larger id is older
+  // (the reverse of relay order), matching the channel window.
   const a = event({ id: id("aaa", 1), createdAt: 5_000 });
   const b = event({ id: id("bbb", 1), createdAt: 5_000 });
   const c = event({ id: id("ccc", 1), createdAt: 5_000 });
@@ -146,5 +147,5 @@ test("sortMessages tiebreaks same-second events on id, order-independent", () =>
   const reverse = normalizeTimelineMessages([c, b, a]).map((m) => m.id);
 
   assert.deepEqual(forward, reverse);
-  assert.deepEqual(forward, [a.id, b.id, c.id]);
+  assert.deepEqual(forward, [c.id, b.id, a.id]);
 });

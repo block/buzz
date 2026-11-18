@@ -1,5 +1,6 @@
 //! S3/MinIO storage client.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::pin::Pin;
 
@@ -9,11 +10,60 @@ use crate::config::{MediaConfig, S3AddressingStyle};
 use crate::error::MediaError;
 use bytes::Bytes;
 use s3::creds::Credentials;
+use s3::request::Request as _;
 use s3::{Bucket, Region};
 use serde::{Deserialize, Serialize};
 
+mod versions_xml;
+use versions_xml::parse_object_versions_page;
+
 /// A stream of byte chunks from S3, usable with `axum::body::Body::from_stream()`.
 pub type ByteStream = Pin<Box<dyn futures_core::Stream<Item = Result<Bytes, MediaError>> + Send>>;
+
+/// The kind of versioned S3 object-store entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectVersionKind {
+    /// A concrete object version with bytes.
+    Object,
+    /// A delete-marker version hiding older bytes from live-object listing.
+    DeleteMarker,
+}
+
+/// One S3 object version or delete marker under a tenant prefix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectVersionEntry {
+    /// Object key.
+    pub key: String,
+    /// Concrete S3 version id.
+    pub version_id: String,
+    /// Whether this entry is a byte-bearing object or delete marker.
+    pub kind: ObjectVersionKind,
+    /// Byte size for object versions; zero for delete markers.
+    pub size: u64,
+}
+
+/// Exact version identifier used for permanent deletion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectVersionRef {
+    /// Object key.
+    pub key: String,
+    /// Concrete S3 version id.
+    pub version_id: String,
+}
+
+/// One `ListObjectVersions` page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectVersionsPage {
+    /// Object versions and delete markers returned by this page.
+    pub entries: Vec<ObjectVersionEntry>,
+    /// Next key marker for truncated listings.
+    pub next_key_marker: Option<String>,
+    /// Next version-id marker for truncated listings.
+    pub next_version_id_marker: Option<String>,
+    /// Whether more pages remain.
+    pub is_truncated: bool,
+}
 
 /// S3-compatible object storage client.
 pub struct MediaStorage {
@@ -177,24 +227,6 @@ impl MediaStorage {
         }
     }
 
-    /// Detect whether the bucket has ever had versioning enabled.
-    ///
-    /// rust-s3 exposes no GetBucketVersioning, so this writes and inspects a
-    /// short-lived fleet probe object instead: versioning-enabled (and
-    /// versioning-suspended) buckets stamp new writes with a version id.
-    /// Deletion refuses versioned buckets because bulk deletes without a
-    /// VersionId would only insert delete markers, not prove logical absence.
-    pub async fn bucket_versioning_detected(&self) -> Result<bool, MediaError> {
-        let key = format!("probe/deletion-versioning-{}", uuid::Uuid::new_v4());
-        self.put(&key, b"buzz deletion versioning probe", "text/plain")
-            .await?;
-        let inspected = self.bucket.head_object(&key).await;
-        let removed = self.bucket.delete_object(&key).await;
-        let (head, _) = inspected.map_err(|e| MediaError::StorageError(e.to_string()))?;
-        removed.map_err(|e| MediaError::StorageError(e.to_string()))?;
-        Ok(head.version_id.is_some())
-    }
-
     /// Bulk-delete up to one manifest chunk of keys via S3 `DeleteObjects`.
     ///
     /// Never fails on per-key outcomes: they are folded into
@@ -210,6 +242,57 @@ impl MediaStorage {
             .iter()
             .map(|key| s3::serde_types::ObjectIdentifier::new(key.clone()))
             .collect::<Vec<_>>();
+        self.delete_object_identifiers(identifiers).await
+    }
+
+    /// Non-destructively verify that versioned bucket APIs are reachable.
+    ///
+    /// `ListObjectVersions` can be proven without mutation. S3 has no equivalent
+    /// dry-run for `DeleteObjectVersion`: `DeleteObjects` is always destructive,
+    /// even for exact versions, and deleting a fabricated version id does not
+    /// prove permission when policies can be prefix- or tag-constrained.
+    /// Operators must still provision `s3:DeleteObjectVersion`; the first exact
+    /// version deletion remains the destructive proof.
+    pub async fn preflight_version_listing(&self, prefix: &str) -> Result<(), MediaError> {
+        self.list_prefix_versions_page(prefix, None, None, 1)
+            .await
+            .map(|_| ())
+    }
+
+    /// Bulk-delete exact object versions via S3 `DeleteObjects`.
+    ///
+    /// Every identifier includes a version id, so this removes historical
+    /// versions and delete markers permanently instead of adding another
+    /// delete marker to a versioned bucket.
+    pub async fn delete_object_versions(
+        &self,
+        versions: &[ObjectVersionRef],
+    ) -> Result<BulkDeleteOutcome, MediaError> {
+        self.delete_object_versions_with_folding(versions, fold_version_delete_result)
+            .await
+    }
+
+    async fn delete_object_versions_with_folding(
+        &self,
+        versions: &[ObjectVersionRef],
+        fold: fn(s3::serde_types::DeleteObjectsResult) -> BulkDeleteOutcome,
+    ) -> Result<BulkDeleteOutcome, MediaError> {
+        if versions.is_empty() {
+            return Ok(BulkDeleteOutcome::default());
+        }
+        let identifiers = object_version_identifiers(versions);
+        let result = self
+            .bucket
+            .delete_objects(identifiers)
+            .await
+            .map_err(|e| MediaError::StorageError(e.to_string()))?;
+        Ok(fold(result))
+    }
+
+    async fn delete_object_identifiers(
+        &self,
+        identifiers: Vec<s3::serde_types::ObjectIdentifier>,
+    ) -> Result<BulkDeleteOutcome, MediaError> {
         let result = self
             .bucket
             .delete_objects(identifiers)
@@ -240,7 +323,11 @@ impl MediaStorage {
         sha256: &str,
     ) -> Result<BlobMeta, MediaError> {
         let key = Self::ctx_sidecar_key(ctx, sha256);
-        let resp = self.bucket.get_object(&key).await?;
+        let resp = match self.bucket.get_object(&key).await {
+            Ok(response) => response,
+            Err(s3::error::S3Error::HttpFailWithBody(404, _)) => return Err(MediaError::NotFound),
+            Err(error) => return Err(error.into()),
+        };
         let meta: BlobMeta = serde_json::from_slice(&resp.to_vec())?;
         Ok(meta)
     }
@@ -330,6 +417,57 @@ impl MediaStorage {
             is_truncated: result.is_truncated,
         })
     }
+
+    /// One page of object versions and delete markers under a prefix.
+    ///
+    /// This uses S3 `ListObjectVersions` (`?versions`) instead of
+    /// `ListObjectsV2`: versioned buckets can be logically empty while still
+    /// retaining historical versions or delete markers, and permanent deletion
+    /// must enumerate both. Pagination must carry both `KeyMarker` and
+    /// `VersionIdMarker`; carrying only the key marker can skip siblings when a
+    /// key has multiple versions on a page boundary.
+    pub async fn list_prefix_versions_page(
+        &self,
+        prefix: &str,
+        key_marker: Option<String>,
+        version_id_marker: Option<String>,
+        max_keys: usize,
+    ) -> Result<ObjectVersionsPage, MediaError> {
+        let mut query = HashMap::from([
+            ("versions".to_string(), String::new()),
+            ("prefix".to_string(), prefix.to_string()),
+            ("max-keys".to_string(), max_keys.to_string()),
+        ]);
+        if let Some(marker) = key_marker {
+            query.insert("key-marker".to_string(), marker);
+        }
+        if let Some(marker) = version_id_marker {
+            query.insert("version-id-marker".to_string(), marker);
+        }
+        let bucket = self
+            .bucket
+            .with_extra_query(query)
+            .map_err(|e| MediaError::StorageError(e.to_string()))?;
+        let request = s3::request::tokio_backend::ReqwestRequest::new(
+            &bucket,
+            "/",
+            s3::command::Command::GetObject,
+        )
+        .await
+        .map_err(|e| MediaError::StorageError(e.to_string()))?;
+        let response = request
+            .response_data(false)
+            .await
+            .map_err(|e| MediaError::StorageError(e.to_string()))?;
+        if response.status_code() >= 300 {
+            return Err(MediaError::StorageError(format!(
+                "list object versions failed with status {}: {}",
+                response.status_code(),
+                response.as_str().unwrap_or("")
+            )));
+        }
+        parse_object_versions_page(response.as_slice())
+    }
 }
 
 /// Per-key outcomes of one bulk `DeleteObjects` call.
@@ -349,16 +487,49 @@ pub struct BulkDeleteOutcome {
     pub failed: Vec<(String, String, String)>,
 }
 
+fn object_version_identifiers(
+    versions: &[ObjectVersionRef],
+) -> Vec<s3::serde_types::ObjectIdentifier> {
+    versions
+        .iter()
+        .map(|version| {
+            s3::serde_types::ObjectIdentifier::with_version(
+                version.key.clone(),
+                version.version_id.clone(),
+            )
+        })
+        .collect()
+}
+
 fn fold_bulk_delete_result(result: s3::serde_types::DeleteObjectsResult) -> BulkDeleteOutcome {
+    fold_delete_result(result, DeleteMode::Unversioned)
+}
+
+fn fold_version_delete_result(result: s3::serde_types::DeleteObjectsResult) -> BulkDeleteOutcome {
+    fold_delete_result(result, DeleteMode::ExplicitVersion)
+}
+
+enum DeleteMode {
+    Unversioned,
+    ExplicitVersion,
+}
+
+fn fold_delete_result(
+    result: s3::serde_types::DeleteObjectsResult,
+    mode: DeleteMode,
+) -> BulkDeleteOutcome {
     let mut outcome = BulkDeleteOutcome::default();
     for deleted in result.deleted {
-        if deleted.delete_marker == Some(true)
+        let has_version_artifact = deleted.delete_marker == Some(true)
             || deleted.delete_marker_version_id.is_some()
-            || deleted.version_id.is_some()
-        {
-            outcome.versioned_keys.push(deleted.key);
-        } else {
-            outcome.deleted += 1;
+            || deleted.version_id.is_some();
+        match mode {
+            DeleteMode::Unversioned if has_version_artifact => {
+                outcome.versioned_keys.push(deleted.key);
+            }
+            DeleteMode::Unversioned | DeleteMode::ExplicitVersion => {
+                outcome.deleted += 1;
+            }
         }
     }
     for error in result.errors {
@@ -417,6 +588,85 @@ mod tests {
                 "nope".to_string()
             )]
         );
+    }
+
+    #[test]
+    fn version_delete_fold_counts_explicit_version_artifacts_as_deleted() {
+        use s3::serde_types::{DeleteError, DeleteObjectsResult, DeletedObject};
+        let result = DeleteObjectsResult {
+            deleted: vec![DeletedObject {
+                key: "versioned".to_string(),
+                version_id: Some("v1".to_string()),
+                delete_marker: Some(true),
+                delete_marker_version_id: Some("v1".to_string()),
+            }],
+            errors: vec![
+                DeleteError {
+                    key: "retried-version".to_string(),
+                    code: "NoSuchVersion".to_string(),
+                    message: "already absent".to_string(),
+                    version_id: Some("v-gone".to_string()),
+                },
+                DeleteError {
+                    key: "denied-version".to_string(),
+                    code: "AccessDenied".to_string(),
+                    message: "denied".to_string(),
+                    version_id: Some("v-denied".to_string()),
+                },
+            ],
+        };
+
+        let outcome = fold_version_delete_result(result);
+        assert_eq!(outcome.deleted, 1);
+        assert_eq!(outcome.already_missing, 1);
+        assert!(outcome.versioned_keys.is_empty());
+        assert_eq!(
+            outcome.failed,
+            vec![(
+                "denied-version".to_string(),
+                "AccessDenied".to_string(),
+                "denied".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn object_version_identifiers_include_explicit_version_ids() {
+        let identifiers = object_version_identifiers(&[
+            ObjectVersionRef {
+                key: "_meta/tenant/a.json".to_string(),
+                version_id: "v-object".to_string(),
+            },
+            ObjectVersionRef {
+                key: "uploads/tenant/event/blob".to_string(),
+                version_id: "v-delete-marker".to_string(),
+            },
+        ]);
+
+        assert_eq!(identifiers.len(), 2);
+        assert_eq!(identifiers[0].key, "_meta/tenant/a.json");
+        assert_eq!(identifiers[0].version_id.as_deref(), Some("v-object"));
+        assert_eq!(identifiers[1].key, "uploads/tenant/event/blob");
+        assert_eq!(
+            identifiers[1].version_id.as_deref(),
+            Some("v-delete-marker")
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_object_versions_empty_input_short_circuits_before_folding() {
+        let storage = MediaStorage::new(&storage_config("buzz_dev", "buzz_dev_secret"))
+            .expect("static client");
+        let outcome = storage
+            .delete_object_versions_with_folding(&[], |_| BulkDeleteOutcome {
+                deleted: 0,
+                already_missing: 0,
+                versioned_keys: vec!["wrong-fold".to_string()],
+                failed: Vec::new(),
+            })
+            .await
+            .expect("empty delete short-circuits before fold");
+        assert_eq!(outcome, BulkDeleteOutcome::default());
     }
 
     fn tenant(n: u128) -> TenantContext {
@@ -589,4 +839,39 @@ pub struct BlobMeta {
     /// Video duration in seconds. `None` for non-video blobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_secs: Option<f64>,
+}
+
+impl MediaStorage {
+    /// Read a small attribution record at its exact immutable version. A bounded
+    /// Range request avoids fetching arbitrary media bytes as upload metadata.
+    pub async fn get_small_version(
+        &self,
+        key: &str,
+        version_id: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, MediaError> {
+        let bucket = self
+            .bucket
+            .with_extra_query(HashMap::from([(
+                "versionId".to_owned(),
+                version_id.to_owned(),
+            )]))
+            .map_err(|e| MediaError::StorageError(e.to_string()))?;
+        let response = bucket
+            .get_object_range(key, 0, Some(max_bytes as u64))
+            .await
+            .map_err(|e| MediaError::StorageError(e.to_string()))?;
+        if response.status_code() != 200 && response.status_code() != 206 {
+            return Err(MediaError::StorageError(format!(
+                "version read failed: {}",
+                response.status_code()
+            )));
+        }
+        if response.as_slice().len() > max_bytes {
+            return Err(MediaError::StorageError(
+                "upload record exceeds size bound".into(),
+            ));
+        }
+        Ok(response.to_vec())
+    }
 }

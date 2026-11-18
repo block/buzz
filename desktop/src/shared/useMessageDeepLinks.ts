@@ -32,11 +32,10 @@ export function useMessageDeepLinks(enabled = true) {
       },
       async (payload) => {
         if (cancelled) return false;
-        await goChannel(payload.channelId, {
+        return goChannel(payload.channelId, {
           messageId: payload.messageId,
           threadRootId: payload.threadRootId,
         });
-        return true;
       },
     );
     return () => {

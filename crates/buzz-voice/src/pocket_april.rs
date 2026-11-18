@@ -1336,8 +1336,10 @@ fn read_npy_f32(path: &Path) -> Result<Vec<f32>, String> {
         return Err(format!("misaligned float32 data in {}", path.display()));
     }
     Ok(data
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect())
 }
 

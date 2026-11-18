@@ -1,5 +1,6 @@
 use super::{
-    find_managed_agent_mut, kill_stale_tracked_processes, load_managed_agents, load_personas,
+    bestie_assignment::recover_pending_assignment_cleanup, find_managed_agent_mut,
+    kill_stale_tracked_processes, load_managed_agents, load_personas, managed_agents_base_dir,
     save_managed_agents, spawn_agent_child, sync_managed_agent_processes, BackendKind,
     ManagedAgentProcess,
 };
@@ -85,21 +86,72 @@ pub fn backfill_persona_snapshots(app: &tauri::AppHandle) -> Result<(), String> 
     Ok(())
 }
 
+/// Schedule launch restore: captures admission now, at scheduling, and
+/// returns the deferred restore that runs under that snapshot. A community
+/// removed after this call refuses the restore even if it is re-added before
+/// the task runs. `sweeps` is Phase A's live process sweeps.
+pub fn launch_restore_task<R, S>(
+    app: tauri::AppHandle<R>,
+    sweeps: S,
+) -> impl std::future::Future<Output = Result<(), String>>
+where
+    R: tauri::Runtime,
+    S: FnOnce(&tauri::AppHandle<R>, &[u32]),
+{
+    let admission = super::AdmissionSnapshot::capture(&app.state::<AppState>());
+    async move {
+        let state = app.state::<AppState>();
+        restore_managed_agents_on_launch(&app, &state.shutdown_started, admission, sweeps).await
+    }
+}
+
+/// Phase A's sweeps of live, untracked agent processes, skipping `tracked_pids`.
+pub fn live_process_sweeps(app: &tauri::AppHandle, tracked_pids: &[u32]) {
+    super::sweep_orphaned_agent_processes(app, tracked_pids);
+
+    // System-wide sweep: enumerate all user processes and kill any known
+    // agent binaries not tracked by this session. Catches orphans whose
+    // PID files were already cleaned up (e.g. agent workers in their own
+    // process group whose parent harness exited).
+    super::sweep_system_agent_processes(&super::current_instance_id(app), tracked_pids);
+
+    // Dead-instance reaping: find agents belonging to Buzz instances
+    // whose desktop process is no longer running and reap them.
+    super::reap_dead_instance_agents(&super::current_instance_id(app), tracked_pids);
+
+    // Exact-path sweep: kill any buzz-acp process whose executable path
+    // matches this bundle's harness binary but is not in the tracked set.
+    // Complements the env-var sweep above — catches orphans that predate
+    // BUZZ_MANAGED_AGENT injection or lost their PID-file receipt.
+    //
+    // TODO: the three sweeps above each walk the PID table independently.
+    // A future consolidation should collect a single shared process snapshot
+    // at the top of this block and thread it through all sweep functions,
+    // replacing the three separate kernel enumerations.
+    super::sweep_untracked_bundle_harnesses(tracked_pids);
+}
+
 /// Restore managed agents that were running before the app was closed.
 ///
 /// Split into three phases to minimise lock contention with the frontend:
 ///   A (under lock): sync process state, cleanup, collect agents to start
 ///   B (no locks):   resolve commands and spawn processes in parallel
 ///   C (re-lock):    write back PIDs and status to records on disk
-pub async fn restore_managed_agents_on_launch(
-    app: &tauri::AppHandle,
+async fn restore_managed_agents_on_launch<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     shutdown_started: &AtomicBool,
+    admission: super::AdmissionSnapshot,
+    sweeps: impl FnOnce(&tauri::AppHandle<R>, &[u32]),
 ) -> Result<(), String> {
     if shutdown_started.load(Ordering::SeqCst) {
         return Ok(());
     }
 
     let state = app.state::<AppState>();
+    // `apply_workspace` still holds the apply lock for this task, so the relay
+    // cannot change underneath it; pin it for the spawn loop.
+    let restore_relay = crate::relay::relay_ws_url_with_override(&state);
+    let restore_relay = restore_relay.as_str();
 
     // ── Phase A (under lock): housekeeping + collect agents to restore ──
     let mut agents_to_start: Vec<super::ManagedAgentRecord>;
@@ -114,6 +166,11 @@ pub async fn restore_managed_agents_on_launch(
         }
 
         let mut records = load_managed_agents(app)?;
+        recover_pending_assignment_cleanup(&managed_agents_base_dir(app)?, |pending_pubkey| {
+            records
+                .iter()
+                .any(|record| record.pubkey.eq_ignore_ascii_case(pending_pubkey))
+        })?;
         let mut runtimes = state
             .managed_agent_processes
             .lock()
@@ -142,28 +199,7 @@ pub async fn restore_managed_agents_on_launch(
                     }),
             )
             .collect();
-        super::sweep_orphaned_agent_processes(app, &tracked_pids);
-
-        // System-wide sweep: enumerate all user processes and kill any known
-        // agent binaries not tracked by this session. Catches orphans whose
-        // PID files were already cleaned up (e.g. agent workers in their own
-        // process group whose parent harness exited).
-        super::sweep_system_agent_processes(&super::current_instance_id(app), &tracked_pids);
-
-        // Dead-instance reaping: find agents belonging to Buzz instances
-        // whose desktop process is no longer running and reap them.
-        super::reap_dead_instance_agents(&super::current_instance_id(app), &tracked_pids);
-
-        // Exact-path sweep: kill any buzz-acp process whose executable path
-        // matches this bundle's harness binary but is not in the tracked set.
-        // Complements the env-var sweep above — catches orphans that predate
-        // BUZZ_MANAGED_AGENT injection or lost their PID-file receipt.
-        //
-        // TODO: the three sweeps above each walk the PID table independently.
-        // A future consolidation should collect a single shared process snapshot
-        // at the top of this block and thread it through all sweep functions,
-        // replacing the three separate kernel enumerations.
-        super::sweep_untracked_bundle_harnesses(&tracked_pids);
+        sweeps(app, &tracked_pids);
 
         let candidates: Vec<String> = records
             .iter()
@@ -276,90 +312,139 @@ pub async fn restore_managed_agents_on_launch(
         return Ok(());
     }
 
+    let reconcile_items = spawn_and_register_restored_agents(
+        app,
+        shutdown_started,
+        &admission,
+        restore_relay,
+        &agents_to_start,
+        owner_hex.as_deref(),
+    )?;
+
+    // ── Profile reconciliation (fire-and-forget) ────────────────────────────
+    // Spawn background tasks to ensure each restored agent's kind:0 profile is
+    // published on the relay. Same pattern as the UI start path.
+    for (pubkey, data) in reconcile_items {
+        let reconcile_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = reconcile_app.state::<AppState>();
+            if let Err(e) =
+                crate::commands::reconcile_agent_profile(&state, &reconcile_app, &pubkey, &data)
+                    .await
+            {
+                eprintln!("buzz-desktop: profile reconciliation failed for agent {pubkey}: {e}");
+            }
+        });
+    }
+
+    Ok(())
+}
+
+/// Phases B and C of launch restore: spawn `agents_to_start` on `restore_relay`
+/// if it is still admitted under the snapshot `apply_workspace` scheduled the
+/// restore with, then register them. Split from the sweeps above so tests can
+/// drive the real admission and registration without sweeping live processes.
+/// Returns the profile reconciliations to run for the agents it registered.
+fn spawn_and_register_restored_agents<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    shutdown_started: &AtomicBool,
+    admission: &super::AdmissionSnapshot,
+    restore_relay: &str,
+    agents_to_start: &[super::ManagedAgentRecord],
+    owner_hex: Option<&str>,
+) -> Result<Vec<(String, crate::commands::ProfileReconcileData)>, String> {
+    let state = app.state::<AppState>();
     // Serialize spawning and runtime registration with shutdown cleanup. The
     // shutdown flag is rechecked after taking the lock so shutdown either
     // prevents this transition or waits until every child is tracked and can
     // be terminated.
-    let restore_transition = state
-        .managed_agent_runtime_transition
-        .lock()
-        .map_err(|error| error.to_string())?;
-    if shutdown_started.load(Ordering::SeqCst) {
-        return Ok(());
-    }
-
     // ── Phase B (transition lock held): resolve commands and spawn in parallel ──
-    let spawn_results: Vec<AgentSpawnResult> = std::thread::scope(|scope| {
-        let owner_hex_ref = owner_hex.as_deref();
-        let handles: Vec<_> = agents_to_start
-            .iter()
-            .filter(|_| !shutdown_started.load(Ordering::SeqCst))
-            .map(|record| {
-                let handle = scope.spawn(move || {
-                    let workspace_relay =
-                        crate::relay::relay_ws_url_with_override(&app.state::<AppState>());
-                    let relay_url = crate::relay::effective_agent_relay_url(
-                        &record.relay_url,
-                        &workspace_relay,
-                    );
-                    let outcome =
-                        match super::ManagedAgentRuntimeKey::new(record.pubkey.clone(), &relay_url)
-                        {
-                            Ok(key) => {
-                                // F2: if a concurrent startup reconcile already
-                                // tracked a live child for this exact pair during
-                                // the Phase A window, leave it alone. Mirrors the
-                                // live-child guard in `start_pair`.
-                                let already_live = app
-                                    .state::<AppState>()
-                                    .managed_agent_processes
-                                    .lock()
-                                    .ok()
-                                    .and_then(|mut runtimes| {
-                                        runtimes.get_mut(&key).map(|runtime| {
-                                            runtime.child.try_wait().ok().flatten().is_none()
+    let spawned = spawn_if_admitted(
+        &state,
+        shutdown_started,
+        admission,
+        restore_relay,
+        |admitted| {
+            std::thread::scope(|scope| {
+                let owner_hex_ref = owner_hex;
+                let handles: Vec<_> = agents_to_start
+                    .iter()
+                    .filter(|_| !shutdown_started.load(Ordering::SeqCst))
+                    .map(|record| {
+                        let handle = scope.spawn(move || {
+                            let relay_url = crate::relay::effective_agent_relay_url(
+                                &record.relay_url,
+                                restore_relay,
+                            );
+                            let outcome = match super::ManagedAgentRuntimeKey::new(
+                                record.pubkey.clone(),
+                                &relay_url,
+                            ) {
+                                Ok(key) => {
+                                    // F2: if a concurrent startup reconcile already
+                                    // tracked a live child for this exact pair during
+                                    // the Phase A window, leave it alone. Mirrors the
+                                    // live-child guard in `start_pair`.
+                                    let already_live = app
+                                        .state::<AppState>()
+                                        .managed_agent_processes
+                                        .lock()
+                                        .ok()
+                                        .and_then(|mut runtimes| {
+                                            runtimes.get_mut(&key).map(|runtime| {
+                                                runtime.child.try_wait().ok().flatten().is_none()
+                                            })
                                         })
-                                    })
-                                    .unwrap_or(false);
-                                if already_live {
-                                    SpawnOutcome::Skipped
-                                } else {
-                                    match super::terminate_untracked_pair_runtime(app, &key)
-                                        .and_then(|()| {
-                                            // F1: restore spawns lazy, matching
-                                            // reconcile and manual start. Eager on
-                                            // restore buys nothing — a crashed
-                                            // mid-turn session is not resumed by an
-                                            // eager child — and silently reintroduces
-                                            // N idle brains on every launch.
-                                            spawn_agent_child(
-                                                app,
-                                                record,
-                                                &key.relay_url,
-                                                true,
-                                                owner_hex_ref,
-                                            )
-                                        }) {
-                                        Ok(process) => {
-                                            SpawnOutcome::Spawned(key, Box::new(process))
+                                        .unwrap_or(false);
+                                    if already_live {
+                                        SpawnOutcome::Skipped
+                                    } else {
+                                        match super::terminate_untracked_pair_runtime(app, &key)
+                                            .and_then(|()| {
+                                                // F1: restore spawns lazy, matching
+                                                // reconcile and manual start. Eager on
+                                                // restore buys nothing — a crashed
+                                                // mid-turn session is not resumed by an
+                                                // eager child — and silently reintroduces
+                                                // N idle brains on every launch.
+                                                spawn_agent_child(
+                                                    app,
+                                                    record,
+                                                    &key.relay_url,
+                                                    admitted,
+                                                    true,
+                                                    owner_hex_ref,
+                                                    None,
+                                                )
+                                            }) {
+                                            Ok(process) => {
+                                                SpawnOutcome::Spawned(key, Box::new(process))
+                                            }
+                                            Err(error) => SpawnOutcome::Failed(error),
                                         }
-                                        Err(error) => SpawnOutcome::Failed(error),
                                     }
                                 }
-                            }
-                            Err(error) => SpawnOutcome::Failed(error),
-                        };
-                    (record.pubkey.clone(), outcome)
-                });
-                handle
-            })
-            .collect();
+                                Err(error) => SpawnOutcome::Failed(error),
+                            };
+                            (record.pubkey.clone(), outcome)
+                        });
+                        handle
+                    })
+                    .collect();
 
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    });
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap())
+                    .collect::<Vec<AgentSpawnResult>>()
+            })
+        },
+    )?;
+    let Some((restore_transition, spawn_results)) = spawned else {
+        return Ok(Vec::new());
+    };
 
     if spawn_results.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     // ── Phase C (re-acquire lock): write back PIDs and status to records ──
@@ -373,7 +458,7 @@ pub async fn restore_managed_agents_on_launch(
         .lock()
         .map_err(|error| error.to_string())?;
 
-    let mut successfully_spawned: Vec<String> = Vec::new();
+    let mut successfully_spawned: Vec<(String, String)> = Vec::new();
 
     for (pubkey, outcome) in spawn_results {
         match outcome {
@@ -404,8 +489,15 @@ pub async fn restore_managed_agents_on_launch(
                 record.last_stopped_at = None;
                 record.last_exit_code = None;
                 record.last_error = None;
-                runtimes.insert(key, super::ManagedAgentPairRuntime::starting(*process));
-                successfully_spawned.push(pubkey);
+                runtimes.insert(
+                    key.clone(),
+                    super::ManagedAgentPairRuntime::starting(*process),
+                );
+                // Carry the spawn key's relay into profile reconciliation so
+                // the background task queries/publishes on the relay this
+                // spawn was actually keyed to — not whatever workspace is
+                // active when the task eventually executes.
+                successfully_spawned.push((pubkey, key.relay_url.clone()));
             }
             SpawnOutcome::Failed(error) => {
                 let Ok(record) = find_managed_agent_mut(&mut records, &pubkey) else {
@@ -425,7 +517,7 @@ pub async fn restore_managed_agents_on_launch(
     let reconcile_items: Vec<(String, crate::commands::ProfileReconcileData)> =
         successfully_spawned
             .iter()
-            .filter_map(|pubkey| {
+            .filter_map(|(pubkey, spawn_relay)| {
                 let record = records.iter().find(|r| r.pubkey == *pubkey)?;
                 // Resolve the effective harness for the avatar-fallback
                 // derivation (the snapshot may be empty/stale for an inherited
@@ -438,12 +530,19 @@ pub async fn restore_managed_agents_on_launch(
                         private_key_nsec: record.private_key_nsec.clone(),
                         name: record.name.clone(),
                         relay_url: record.relay_url.clone(),
-                        target_relay_url: None,
+                        // Pin the relay this spawn was keyed to (see the
+                        // successfully_spawned push above) so the deferred
+                        // task cannot resolve a post-switch workspace.
+                        target_relay_url: Some(spawn_relay.clone()),
                         avatar_url: record.avatar_url.clone(),
                         auth_tag: record.auth_tag.clone(),
                         pubkey: record.pubkey.clone(),
                         agent_command: effective_command,
                         persona_id: record.persona_id.clone(),
+                        about: crate::managed_agents::record_effective_description(
+                            record,
+                            &reconcile_personas,
+                        ),
                     },
                 ))
             })
@@ -454,23 +553,7 @@ pub async fn restore_managed_agents_on_launch(
     drop(_store_guard);
     drop(restore_transition);
 
-    // ── Profile reconciliation (fire-and-forget) ────────────────────────────
-    // Spawn background tasks to ensure each restored agent's kind:0 profile is
-    // published on the relay. Same pattern as the UI start path.
-    for (pubkey, data) in reconcile_items {
-        let reconcile_app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let state = reconcile_app.state::<AppState>();
-            if let Err(e) =
-                crate::commands::reconcile_agent_profile(&state, &reconcile_app, &pubkey, &data)
-                    .await
-            {
-                eprintln!("buzz-desktop: profile reconciliation failed for agent {pubkey}: {e}");
-            }
-        });
-    }
-
-    Ok(())
+    Ok(reconcile_items)
 }
 
 fn profile_reconcile_completed(outcome: crate::commands::ProfileReconcileOutcome) -> bool {
@@ -480,7 +563,7 @@ fn profile_reconcile_completed(outcome: crate::commands::ProfileReconcileOutcome
 pub(crate) fn spawn_pending_profile_reconciliations(app: &tauri::AppHandle, workspace_relay: &str) {
     let state = app.state::<AppState>();
     if !state
-        .managed_agent_profile_reconcile_enabled
+        .managed_agent_profile_reconcile_enabled()
         .load(Ordering::Acquire)
     {
         return;
@@ -524,6 +607,54 @@ pub(crate) fn spawn_pending_profile_reconciliations(app: &tauri::AppHandle, work
     }
 }
 
+#[cfg(feature = "mesh-llm")]
+fn persist_restore_error<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &AppState,
+    pubkey: &str,
+    error: String,
+) -> Result<(), String> {
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let mut records = load_managed_agents(app)?;
+    let record = find_managed_agent_mut(&mut records, pubkey)?;
+    record.updated_at = util::now_iso();
+    record.last_error = Some(error);
+    save_managed_agents(app, &records)
+}
+
+/// Restore's check-then-spawn step. Takes the runtime transition lock and runs
+/// `spawn` only if shutdown has not started and `restore_relay` is still
+/// admitted under the snapshot `apply_workspace` captured when it scheduled
+/// this restore; otherwise spawns nothing and returns `None`. On success the
+/// lock is returned still held, so the caller registers the spawned children
+/// before shutdown or a removal's stop sweep can run.
+fn spawn_if_admitted<'a, T>(
+    state: &'a AppState,
+    shutdown_started: &AtomicBool,
+    admission: &super::AdmissionSnapshot,
+    restore_relay: &str,
+    spawn: impl FnOnce(&super::Admitted<'_>) -> T,
+) -> Result<Option<(std::sync::MutexGuard<'a, super::RelayAdmissions>, T)>, String> {
+    let transition = state
+        .managed_agent_runtime_transition
+        .lock()
+        .map_err(|error| error.to_string())?;
+    if shutdown_started.load(Ordering::SeqCst) {
+        return Ok(None);
+    }
+    let spawned = match transition.admit(admission, restore_relay) {
+        Ok(admitted) => spawn(&admitted),
+        Err(error) => {
+            eprintln!("buzz-desktop: skipping managed agent restore: {error}");
+            return Ok(None);
+        }
+    };
+    Ok(Some((transition, spawned)))
+}
+
 #[cfg(test)]
 mod profile_reconcile_tests {
     use super::profile_reconcile_completed;
@@ -540,20 +671,63 @@ mod profile_reconcile_tests {
     }
 }
 
-#[cfg(feature = "mesh-llm")]
-fn persist_restore_error(
-    app: &tauri::AppHandle,
-    state: &AppState,
-    pubkey: &str,
-    error: String,
-) -> Result<(), String> {
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let mut records = load_managed_agents(app)?;
-    let record = find_managed_agent_mut(&mut records, pubkey)?;
-    record.updated_at = util::now_iso();
-    record.last_error = Some(error);
-    save_managed_agents(app, &records)
+// `build_app_state()` pulls in native Windows DLLs unavailable on the CI runner.
+#[cfg(all(test, not(target_os = "windows")))]
+mod launch_restore_admission_tests {
+    use super::spawn_if_admitted;
+    use crate::app_state::{build_app_state, AppState};
+    use crate::managed_agents::AdmissionSnapshot;
+    use crate::relay::{relay_api_base_url_with_override, relay_ws_url_with_override};
+    use std::cell::Cell;
+    use std::sync::atomic::AtomicBool;
+
+    const RELAY: &str = "wss://removed.example";
+
+    /// Runs restore's spawn step with `admission` and returns how many times it spawned.
+    fn spawns(state: &AppState, shutdown: &AtomicBool, admission: &AdmissionSnapshot) -> u32 {
+        let count = Cell::new(0);
+        let gate = spawn_if_admitted(state, shutdown, admission, RELAY, |_| {
+            count.set(count.get() + 1)
+        });
+        assert_eq!(gate.unwrap().is_some(), count.get() == 1);
+        count.get()
+    }
+
+    fn remove(state: &AppState) {
+        crate::managed_agents::remove_relay(state, RELAY).unwrap();
+    }
+
+    #[test]
+    fn restore_scheduled_before_a_removal_spawns_nothing_even_after_readd() {
+        let state = build_app_state();
+        let shutdown = AtomicBool::new(false);
+        *state.relay_url_override.lock().unwrap() = Some(RELAY.into());
+        // What `apply_workspace` captures when it schedules the restore.
+        let scheduled = AdmissionSnapshot::capture(&state);
+
+        remove(&state);
+        crate::managed_agents::readd_relay(&state, RELAY).unwrap();
+
+        assert_eq!(spawns(&state, &shutdown, &scheduled), 0);
+        assert_eq!(relay_ws_url_with_override(&state), RELAY);
+        assert_eq!(
+            relay_api_base_url_with_override(&state),
+            "https://removed.example"
+        );
+        // A restore scheduled after the re-add spawns normally.
+        let fresh = AdmissionSnapshot::capture(&state);
+        assert_eq!(spawns(&state, &shutdown, &fresh), 1);
+    }
+
+    #[test]
+    fn shutdown_spawns_nothing_even_when_admitted() {
+        let state = build_app_state();
+        let shutdown = AtomicBool::new(true);
+        let admission = AdmissionSnapshot::capture(&state);
+        assert_eq!(spawns(&state, &shutdown, &admission), 0);
+    }
 }
+
+#[cfg(all(test, not(target_os = "windows")))]
+#[path = "restore_admission_tests.rs"]
+mod admission_entry_tests;

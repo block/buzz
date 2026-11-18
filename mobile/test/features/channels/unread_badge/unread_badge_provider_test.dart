@@ -8,6 +8,8 @@ import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/channels/unread_badge/unread_badge_provider.dart';
 
+import '../../../helpers/thread_ids.dart';
+
 /// Unit tests for [unreadBadgeProvider].
 ///
 /// Strategy: override [channelsProvider] with a [_StubbedChannelsNotifier] that
@@ -118,6 +120,86 @@ void main() {
       expect(badge.generalUnreadCount, 1);
     },
   );
+
+  group('catch-up marks from the web and desktop app', () {
+    ObservedUnreadEvent event(
+      String id, {
+      String? rootId,
+      bool highPriority = false,
+      String channelType = 'stream',
+    }) => makeObservedUnreadEvent(
+      id: id,
+      createdAt: t20,
+      rootId: rootId,
+      highPriority: highPriority,
+      channelType: channelType,
+      isThreadedReply: rootId != null,
+    );
+
+    Future<UnreadBadgeState> badge(
+      Channel channel,
+      ObservedUnreadEvent observed,
+      Map<String, int> readContexts,
+    ) async {
+      final container = buildContainer(
+        channels: [channel],
+        readContexts: readContexts,
+        observedEventsByChannel: {
+          channel.id: [observed],
+        },
+      );
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      return container.read(unreadBadgeProvider);
+    }
+
+    final stream = makeChannel(id: 'ch-a', lastMessageAtSeconds: t20);
+
+    test('activity: reads an ordinary top-level message', () async {
+      final result = await badge(stream, event('m'), {'activity:ch-a': t20});
+      expect(result.generalUnreadCount, 0);
+      expect(result.highPriorityCount, 0);
+    });
+
+    test('activity: does not read a mention', () async {
+      final result = await badge(stream, event('m', highPriority: true), {
+        'activity:ch-a': t30,
+      });
+      expect(result.highPriorityCount, 1);
+    });
+
+    test('activity: does not read a thread reply', () async {
+      final result = await badge(stream, event('m', rootId: threadIdRoot), {
+        'activity:ch-a': t30,
+      });
+      expect(result.generalUnreadCount, 1);
+    });
+
+    test('activity: does not read a DM', () async {
+      final dm = makeChannel(
+        id: 'dm-a',
+        channelType: 'dm',
+        lastMessageAtSeconds: t20,
+      );
+      final result = await badge(
+        dm,
+        event('m', channelType: 'dm', highPriority: true),
+        {'activity:dm-a': t30},
+      );
+      expect(result.highPriorityCount, 1);
+    });
+
+    test('thread-activity: reads replies in its thread only', () async {
+      final read = await badge(stream, event('m', rootId: threadIdRoot), {
+        'thread-activity:$threadIdRoot': t20,
+      });
+      expect(read.generalUnreadCount, 0);
+      final other = await badge(stream, event('m', rootId: threadIdRoot), {
+        'thread-activity:other': t30,
+      });
+      expect(other.generalUnreadCount, 1);
+    });
+  });
 
   test('one unread DM channel → (1, 0) high priority', () async {
     final container = buildContainer(
@@ -274,19 +356,19 @@ void main() {
     const channelId = 'ch-a';
     final container = buildContainer(
       channels: [makeChannel(id: channelId, lastMessageAtSeconds: t30)],
-      readContexts: {'thread:root-1': t30},
+      readContexts: {'thread:$threadIdRootDash1': t30},
       observedEventsByChannel: {
         channelId: [
           _observed(
             id: 'reply-1',
             createdAt: t20,
-            rootId: 'root-1',
+            rootId: threadIdRootDash1,
             isThreadedReply: true,
           ),
           _observed(
             id: 'reply-2',
             createdAt: t20,
-            rootId: 'root-2',
+            rootId: threadIdRootDash2,
             isThreadedReply: true,
           ),
         ],
@@ -310,13 +392,13 @@ void main() {
           _observed(
             id: 'reply-1',
             createdAt: t20,
-            rootId: 'root-1',
+            rootId: threadIdRootDash1,
             isThreadedReply: true,
           ),
           _observed(
             id: 'reply-2',
             createdAt: t20,
-            rootId: 'root-1',
+            rootId: threadIdRootDash1,
             isThreadedReply: true,
           ),
         ],

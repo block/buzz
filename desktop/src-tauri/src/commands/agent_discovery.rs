@@ -4,6 +4,7 @@ use crate::managed_agents::{
     DEFAULT_ACP_COMMAND,
 };
 
+mod forced_single_flight;
 mod post_install_verification;
 
 fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
@@ -16,7 +17,6 @@ fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<Stri
 /// Returns the adapter install commands that `install_acp_runtime_blocking` would
 /// run for `runtime_id` given a resolved adapter binary at `adapter_path` (or `None` if not found).
 /// Returns `None` when no install is needed; `Some(cmds)` when adapter is missing or outdated.
-///
 /// For the codex **outdated** case, returns a two-step reinstall: uninstall `@zed-industries/codex-acp`
 /// then install `@agentclientprotocol/codex-acp` (npm ≥7 refuses to overwrite a bin from another pkg).
 /// For the **missing** case, catalog's `adapter_install_commands` are used as-is.
@@ -49,23 +49,15 @@ pub(crate) fn plan_adapter_install<'c>(
     }
 }
 
+/// Discover the ACP runtime catalog. `force: false` (the default) serves the
+/// cheap cached path; `force: true` runs the expensive re-discovery. See
+/// [`forced_single_flight`] for the split and single-flight coalescing.
 #[tauri::command]
 pub async fn discover_acp_providers(
     app: tauri::AppHandle,
+    force: Option<bool>,
 ) -> Result<Vec<AcpRuntimeCatalogEntry>, String> {
-    tokio::task::spawn_blocking(move || {
-        use tauri::Manager;
-        crate::managed_agents::clear_resolve_cache();
-        crate::managed_agents::refresh_login_shell_path();
-        let custom_dir = app
-            .path()
-            .app_data_dir()
-            .ok()
-            .map(|d| d.join("custom_harnesses"));
-        crate::managed_agents::discover_acp_runtimes_from(custom_dir.as_deref())
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))
+    forced_single_flight::discover(app, force.unwrap_or(false)).await
 }
 
 /// Write a user-defined harness definition to `<app-data>/custom_harnesses/<id>.json`.
@@ -157,6 +149,7 @@ pub async fn save_custom_harness(
         model_env_var: None,
         provider_env_var: None,
         thinking_env_var: None,
+        effort_canonical_values: None,
         max_tokens_env_var: None,
         context_limit_env_var: None,
         max_rounds_env_var: None,
@@ -521,7 +514,8 @@ async fn restart_single_agent_after_install(
     let app_for_stop = app.clone();
     let pubkey_owned = pubkey.to_string();
     let runtime_id_owned = runtime_id.to_string();
-
+    let state = app.state::<AppState>();
+    let gate = crate::managed_agents::AdmissionSnapshot::capture(&state);
     let stop_result = tokio::task::spawn_blocking(move || {
         let state = app_for_stop.state::<AppState>();
 
@@ -617,9 +611,8 @@ async fn restart_single_agent_after_install(
         }
     };
 
-    let relay_urls: Vec<_> = runtime_keys.into_iter().map(|key| key.relay_url).collect();
-    let state = app.state::<AppState>();
-    match super::agents::start_local_agent_pairs_with_preflight(app, &state, pubkey, &relay_urls)
+    let urls: Vec<_> = runtime_keys.into_iter().map(|key| key.relay_url).collect();
+    match super::agents::start_local_agent_pairs_with_preflight(app, &state, pubkey, &urls, &gate)
         .await
     {
         Ok(_) => {
@@ -1033,7 +1026,7 @@ pub async fn discover_managed_agent_prereqs(
 mod relay_directory;
 #[cfg(test)]
 use relay_directory::advance_relay_cursor;
-pub use relay_directory::list_relay_agents;
+pub use relay_directory::{list_relay_agents, revalidate_relay_agents};
 
 #[cfg(test)]
 mod tests {
@@ -1174,7 +1167,7 @@ mod tests {
         // Simulate the minimum supported adapter version.
         std::fs::write(
             &bin,
-            "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.7'\nexit 0\n",
+            "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.10.0'\nexit 0\n",
         )
         .expect("write script");
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
@@ -1196,10 +1189,10 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("codex-acp");
-        // A 1.x adapter below MIN_CODEX_ACP_VERSION must still be reinstalled.
+        // The observed adapter bundles Codex 0.148.x and must be upgraded.
         std::fs::write(
             &bin,
-            "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.5'\nexit 0\n",
+            "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.6.2'\nexit 0\n",
         )
         .expect("write script");
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))

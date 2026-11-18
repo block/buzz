@@ -74,8 +74,8 @@ async function writeProjectIssueAssignment({
   );
   const isAssignment = operation === "assign";
   const content = isAssignment
-    ? `Assigned this issue to ${normalizedLabel}`
-    : `Unassigned ${normalizedLabel} from this issue`;
+    ? `Assigned this task to ${normalizedLabel}`
+    : `Unassigned ${normalizedLabel} from this task`;
   const label = isAssignment
     ? ISSUE_ASSIGNMENT_LABEL
     : ISSUE_UNASSIGNMENT_LABEL;
@@ -113,8 +113,8 @@ async function writeProjectIssueAssignment({
 
   await relayClient.publishEvent(
     event,
-    `Timed out ${operation}ing issue.`,
-    `Failed to ${operation} issue.`,
+    `Timed out ${operation}ing task.`,
+    `Failed to ${operation} task.`,
   );
 }
 

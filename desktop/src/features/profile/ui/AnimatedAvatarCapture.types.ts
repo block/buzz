@@ -11,4 +11,6 @@ export type AnimatedAvatarCaptureProps = {
   showApplyButton?: boolean;
   autoStartCamera?: boolean;
   compactReview?: boolean;
+  compactColorPicker?: boolean;
+  stackCameraOptions?: boolean;
 };

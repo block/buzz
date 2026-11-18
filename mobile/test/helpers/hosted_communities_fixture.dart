@@ -1,0 +1,236 @@
+import 'dart:convert';
+import 'dart:async';
+
+import 'package:buzz/shared/deeplink/deep_link.dart';
+import 'package:buzz/shared/hosted/account_identity_store.dart';
+import 'package:buzz/shared/hosted/browser_auth.dart';
+import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/hosted/hosted_flow.dart';
+import 'package:buzz/shared/hosted/hosted_identity_service.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:nostr/nostr.dart' as nostr;
+
+class DiscoveryBrowser extends BrowserAuth {
+  final callbacks = StreamController<BrowserAuthCode>.broadcast();
+  Map<String, String>? startedIntent;
+  @override
+  Future<void> start(Map<String, String> intent) async {
+    startedIntent = intent;
+  }
+
+  @override
+  Stream<BrowserAuthCode> get codes => callbacks.stream;
+  @override
+  Future<void> dispose() async {
+    await callbacks.close();
+    await super.dispose();
+  }
+
+  @override
+  Future<void> initialize() async {}
+
+  /// Thrown by [clearIntent] while set, as unavailable storage would.
+  Object? clearIntentError;
+  @override
+  Future<void> clearIntent() async {
+    if (clearIntentError case final error?) throw error;
+  }
+
+  @override
+  Future<void> cancel() async {}
+}
+
+class WidgetDiscoveryAccount extends BuilderlabAccountClient {
+  WidgetDiscoveryAccount(this.fixture);
+  final HostedCommunitiesFixture fixture;
+  @override
+  BuilderlabAccount? get account => fixture.expired
+      ? null
+      : BuilderlabAccount(
+          subject: fixture.subject,
+          expiresAt: DateTime.now().add(const Duration(hours: 1)),
+        );
+  @override
+  Future<BuilderlabAccount?> restore() async => account;
+  @override
+  Future<void> rememberCommunity(
+    String relay, {
+    required String expectedSubject,
+  }) async {
+    if (account?.subject != expectedSubject) throw AccountFailure.denied;
+    fixture.remembered.add(relay);
+  }
+
+  @override
+  Future<Map<String, dynamic>> post(
+    String path,
+    Map<String, dynamic> body, {
+    String? expectedSubject,
+  }) async {
+    fixture.requests.add(path);
+    if (path.endsWith('/current')) {
+      if (fixture.rejectCurrent) throw AccountFailure.denied;
+      return {
+        'identity': {'pubkey_hex': fixture.bound},
+      };
+    }
+    if (path.endsWith('/known-communities/list')) {
+      return {'communities': fixture.rows};
+    }
+    throw AccountFailure.unavailable;
+  }
+}
+
+class HostedCommunitiesFixture {
+  final keys = nostr.Keys('1'.padLeft(64, '0'));
+  AccountIdentityStore get store => AccountIdentityStore(subject: subject);
+  final browser = DiscoveryBrowser();
+  late BuilderlabAccountClient account;
+  late final HostedFlow flow;
+  final admitted = <String>[];
+  String? openedCommunity;
+  Future<void> Function()? beforeOpen;
+  final remembered = <String>[];
+  final requests = <String>[];
+  List<Map<String, dynamic>> rows = [];
+  String? bound;
+  bool rejectList = false;
+  bool rejectCurrent = false;
+  bool expired = false;
+  bool unavailable = false;
+  String subject = 'owner';
+  Future<void> Function(String)? beforeAdmission;
+  Future<void> Function()? beforeList;
+  Future<void> Function()? beforeMe;
+  Uri? opened;
+
+  Map<String, dynamic> row(String name) => {
+    'community_url': 'wss://$name.communities.buzz.xyz',
+  };
+
+  Future<void> initialize({
+    bool backup = true,
+    bool widget = false,
+    bool withIdentity = true,
+    FlutterSecureStorage? accountStorage,
+    bool coldAccount = false,
+  }) async {
+    bound = withIdentity ? keys.public : null;
+    final expiry = DateTime.now()
+        .toUtc()
+        .add(const Duration(hours: 1))
+        .toIso8601String();
+    final client = MockClient((request) async {
+      final path = request.url.path;
+      requests.add(path);
+      if (path.endsWith('/exchange')) {
+        return http.Response(
+          jsonEncode({'session_credential': 'fixture', 'expires_at': expiry}),
+          200,
+        );
+      }
+      if (path.endsWith('/me')) {
+        await beforeMe?.call();
+        if (expired) return http.Response('{}', 401);
+        if (unavailable) return http.Response('{}', 503);
+        return http.Response(
+          jsonEncode({
+            'subject': subject,
+            'email': 'owner@example.com',
+            'expires_at': expiry,
+          }),
+          200,
+        );
+      }
+      if (path.endsWith('/current')) {
+        return http.Response(
+          jsonEncode({
+            'identity': bound == null ? null : {'pubkey_hex': bound},
+          }),
+          200,
+        );
+      }
+      if (path.endsWith('/nsec-backups/status')) {
+        return http.Response(
+          jsonEncode({
+            'backup_nostr_pubkeys': <String>[],
+            'current_nostr_pubkey': bound,
+          }),
+          200,
+        );
+      }
+      if (path.endsWith('/known-communities/list')) {
+        await beforeList?.call();
+        if (rejectList) return http.Response('{}', 503);
+        return http.Response(jsonEncode({'communities': rows}), 200);
+      }
+      if (path.endsWith('/known-communities/add')) {
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        return http.Response(
+          jsonEncode({
+            'community': {'community_url': body['community_url']},
+          }),
+          200,
+        );
+      }
+      return http.Response('{}', 503);
+    });
+    account = BuilderlabAccountClient(
+      storage: accountStorage,
+      httpClient: client,
+    );
+    if (widget) {
+      account.dispose();
+      account = WidgetDiscoveryAccount(this);
+    } else {
+      await account.exchange(code: 'code', verifier: 'a' * 43);
+      if (coldAccount) {
+        // A later process: the session is saved but not restored yet.
+        account.dispose();
+        account = BuilderlabAccountClient(
+          storage: accountStorage,
+          httpClient: client,
+        );
+      }
+    }
+    if (withIdentity) await store.create(keys.nsec);
+    if (backup && withIdentity) {
+      await store.confirmBackup(
+        BackupReceipt(
+          backend: BuilderlabAccountClient.origin.toString(),
+          subject: 'owner',
+          pubkey: keys.public,
+          backupId: 'fixture-backup',
+        ),
+      );
+    }
+    flow = HostedFlow(
+      account: account,
+      browser: browser,
+      store: store,
+      identity: HostedIdentityService(account: account, store: store),
+      openWeb: (uri) async {
+        opened = uri;
+        return true;
+      },
+      openLandingCommunity: (link, subject, pubkey, current) async {
+        await beforeOpen?.call();
+        if (current()) openedCommunity = link.relayUrl;
+      },
+      enterCommunity: (link, subject, pubkey, current) async {
+        // Record the relay host: names are display labels.
+        final host = Uri.parse((link as AddCommunityDeepLink).relayUrl).host;
+        await beforeAdmission?.call(host);
+        if (current()) admitted.add(host);
+      },
+    );
+  }
+
+  Future<void> dispose() async {
+    flow.dispose();
+    await browser.dispose();
+    account.dispose();
+  }
+}

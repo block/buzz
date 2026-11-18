@@ -3,7 +3,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
-import { useChannelsQuery } from "@/features/channels/hooks";
+import { useChannelReferences } from "@/features/channels/openChannelDirectory";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import {
   resolveUserLabel,
@@ -37,13 +37,21 @@ export type ReminderSource = {
   avatarUrl: string | null;
   channel: Channel | null;
   channelLabel: string;
+  isAgent?: boolean;
 };
 
 export function useReminderSources(reminders: readonly Reminder[]) {
   const identityQuery = useIdentityQuery();
   const currentPubkey = identityQuery.data?.pubkey;
-  const channelsQuery = useChannelsQuery();
-  const channels = channelsQuery.data;
+  const channelIds = React.useMemo(
+    () =>
+      reminders.flatMap((reminder) => {
+        const target = reminder.content.target;
+        return hasNavigableTarget(target) ? [target.channelId] : [];
+      }),
+    [reminders],
+  );
+  const { channelsById } = useChannelReferences(channelIds);
   const authorPubkeys = React.useMemo(
     () =>
       reminders
@@ -56,9 +64,6 @@ export function useReminderSources(reminders: readonly Reminder[]) {
     usersBatchQuery.data?.profiles;
 
   return React.useMemo(() => {
-    const channelsById = new Map(
-      (channels ?? []).map((channel) => [channel.id, channel]),
-    );
     const map = new Map<string, ReminderSource>();
     for (const reminder of reminders) {
       const target = reminder.content.target;
@@ -76,10 +81,13 @@ export function useReminderSources(reminders: readonly Reminder[]) {
         channelLabel: channel
           ? resolveChannelDisplayLabel(channel, currentPubkey, profiles)
           : UNKNOWN_CHANNEL_LABEL,
+        ...(profiles?.[normalizePubkey(target.authorPubkey)]?.isAgent === true
+          ? { isAgent: true }
+          : {}),
       });
     }
     return map;
-  }, [channels, currentPubkey, profiles, reminders]);
+  }, [channelsById, currentPubkey, profiles, reminders]);
 }
 
 function formatRelativeTime(timestamp: number): string {
@@ -190,6 +198,7 @@ function ReminderRow({
               avatarUrl={source.avatarUrl}
               className="h-4 w-4 shrink-0"
               displayName={source.authorLabel}
+              shape={source.isAgent ? "squircle" : "circle"}
               size="xs"
             />
             <span className="truncate font-medium text-foreground">
@@ -440,6 +449,7 @@ export function ReminderDetailPane({
                 avatarUrl={source.avatarUrl}
                 className="h-6 w-6"
                 displayName={source.authorLabel}
+                shape={source.isAgent ? "squircle" : "circle"}
                 size="sm"
               />
               <span className="font-medium text-foreground">

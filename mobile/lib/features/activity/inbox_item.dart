@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 
+import '../../shared/relay/thread_reference.dart';
 import 'feed_item.dart';
 
 /// Inbox filters, mirroring desktop's `InboxFilter` in
@@ -7,6 +8,7 @@ import 'feed_item.dart';
 enum InboxFilter {
   all,
   mention,
+  dm,
   thread,
   needsAction,
   activity,
@@ -26,22 +28,10 @@ int categoryPriority(String category) {
   };
 }
 
-/// Thread reference from NIP-10 tags — desktop's `getThreadReference`.
+/// Validated, lowercase thread IDs shared with timeline navigation.
 ({String? parentId, String? rootId}) threadReferenceOf(
   List<List<String>> tags,
-) {
-  List<String>? rootTag;
-  List<String>? replyTag;
-  for (final tag in tags) {
-    if (tag.length >= 4 && tag[0] == 'e') {
-      if (tag[3] == 'root') rootTag = tag;
-      if (tag[3] == 'reply') replyTag = tag;
-    }
-  }
-  if (replyTag == null) return (parentId: null, rootId: null);
-  final parentId = replyTag[1];
-  return (parentId: parentId, rootId: rootTag?[1] ?? parentId);
-}
+) => parseThreadReference(tags);
 
 /// Broadcast replies surface at the channel top level — desktop's
 /// `isBroadcastReply`.
@@ -67,8 +57,8 @@ String inboxConversationId(
 }) {
   final thread = threadReferenceOf(tags);
   final threadId = thread.rootId ?? thread.parentId;
-  if (threadId != null) return threadId;
   if (dmChannelId != null) return 'dm:$dmChannelId';
+  if (threadId != null) return threadId;
   return eventId;
 }
 
@@ -113,20 +103,18 @@ class InboxItem {
     return null;
   }
 
-  /// The event the row should deep-link to: the oldest event in the group
-  /// newer than [readAt] (oldest unread), falling back to the latest event.
-  FeedItem deepLinkTarget(int? readAt) {
-    if (readAt != null) {
-      FeedItem? oldestUnread;
-      for (final candidate in groupItems) {
-        if (candidate.createdAt <= readAt) continue;
-        if (oldestUnread == null ||
-            candidate.createdAt < oldestUnread.createdAt) {
-          oldestUnread = candidate;
-        }
+  /// The event the row should deep-link to: the oldest grouped event that
+  /// [isRead] rejects (oldest unread), falling back to the latest event.
+  FeedItem deepLinkTarget(bool Function(FeedItem event) isRead) {
+    FeedItem? oldestUnread;
+    for (final candidate in groupItems) {
+      if (isRead(candidate)) continue;
+      if (oldestUnread == null ||
+          candidate.createdAt < oldestUnread.createdAt) {
+        oldestUnread = candidate;
       }
-      if (oldestUnread != null) return oldestUnread;
     }
+    if (oldestUnread != null) return oldestUnread;
     return item;
   }
 }
@@ -146,7 +134,10 @@ class InboxItem {
     );
   }
 
-  final category = item.categories.firstOrNull ?? item.item.category;
+  // Label the event the row displays. A group can hold an older mention and
+  // a newer plain reply; the row shows the reply, so it must not say
+  // "Mentioned in". [InboxItem.categories] still drives filtering.
+  final category = item.item.category;
   if (category == 'mention') {
     return (
       text: channelName != null ? 'Mentioned in' : 'Mentioned',
@@ -178,6 +169,7 @@ class InboxItem {
 bool matchesInboxFilter(InboxItem item, InboxFilter filter) {
   return switch (filter) {
     InboxFilter.all => true,
+    InboxFilter.dm => item.conversationId.startsWith('dm:'),
     InboxFilter.thread => [
       item.item,
       ...item.groupItems,
@@ -240,45 +232,4 @@ List<InboxItem> buildInboxItems(
 
   rows.sort((a, b) => b.latestActivityAt.compareTo(a.latestActivityAt));
   return rows;
-}
-
-/// Date-bucket label for section headers — desktop's `groupInboxItems`:
-/// Today / Yesterday / weekday (within 7 days) / short date.
-String inboxDayLabel(int unixSeconds, {DateTime? now}) {
-  final current = now ?? DateTime.now();
-  final date = DateTime.fromMillisecondsSinceEpoch(unixSeconds * 1000);
-  final today = DateTime(current.year, current.month, current.day);
-  final day = DateTime(date.year, date.month, date.day);
-  final dayDiff = today.difference(day).inDays;
-
-  if (dayDiff == 0) return 'Today';
-  if (dayDiff == 1) return 'Yesterday';
-  if (dayDiff < 7 && dayDiff > 0) {
-    const weekdays = [
-      'Monday',
-      'Tuesday',
-      'Wednesday',
-      'Thursday',
-      'Friday',
-      'Saturday',
-      'Sunday',
-    ];
-    return weekdays[date.weekday - 1];
-  }
-  const months = [
-    'Jan',
-    'Feb',
-    'Mar',
-    'Apr',
-    'May',
-    'Jun',
-    'Jul',
-    'Aug',
-    'Sep',
-    'Oct',
-    'Nov',
-    'Dec',
-  ];
-  final label = '${months[date.month - 1]} ${date.day}';
-  return date.year == current.year ? label : '$label, ${date.year}';
 }

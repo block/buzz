@@ -155,6 +155,7 @@ class _Particle {
 class EmojiBurstController extends ChangeNotifier {
   final List<_Particle> _particles = [];
   final Random _random;
+  Offset? _lastBurstOrigin;
 
   /// Set when a spawn arrives so the overlay knows to start its ticker.
   VoidCallback? onSpawn;
@@ -163,12 +164,16 @@ class EmojiBurstController extends ChangeNotifier {
 
   bool get hasParticles => _particles.isNotEmpty;
 
+  @visibleForTesting
+  Offset? get debugLastBurstOrigin => _lastBurstOrigin;
+
   /// Spawn a burst of [emoji] centred on [origin] (global coordinates).
   /// Mirrors desktop's `spawnPickerEmojiBurst`.
   void burst(String emoji, Offset origin) {
     final trimmed = emoji.trim();
     if (trimmed.isEmpty) return;
     if (_particles.length + _particlesPerBurst > _maxActiveParticles) return;
+    _lastBurstOrigin = origin;
 
     for (var i = 0; i < _particlesPerBurst; i += 1) {
       final horizontalDrift = (_random.nextDouble() - 0.5) * 4.4;
@@ -211,6 +216,7 @@ class EmojiBurstController extends ChangeNotifier {
   }
 
   void clear() {
+    _lastBurstOrigin = null;
     if (_particles.isEmpty) return;
     _particles.clear();
     notifyListeners();
@@ -353,11 +359,6 @@ TextPainter _glyphFor(String emoji) {
   _glyphCache[emoji] = painter;
   return painter;
 }
-
-/// Drop the cached glyph layouts. Exposed for tests; the cache is not
-/// community- or account-scoped, so nothing else needs to reset it.
-@visibleForTesting
-void clearEmojiBurstGlyphCache() => _glyphCache.clear();
 
 class _EmojiBurstPainter extends CustomPainter {
   final EmojiBurstController controller;

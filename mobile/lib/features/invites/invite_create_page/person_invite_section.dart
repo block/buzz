@@ -73,8 +73,9 @@ class _PersonInviteSection extends HookConsumerWidget {
         candidatePubkey.value = null;
         searchController.clear();
         ref.invalidate(communityMembershipProvider);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Invited to the community')),
+        ScaffoldMessenger.of(context).showFeedbackSnackBar(
+          const SnackBar(content: Text('Invite sent')),
+          kind: ToastKind.success,
         );
       } catch (error) {
         if (context.mounted) {
@@ -199,7 +200,7 @@ class _InviteeResolutionCard extends StatelessWidget {
               ),
             ),
             title: const Text('Resolving profile'),
-            subtitle: Text(shortCommunityInviteNpub(pubkey)),
+            subtitle: Text(shortPubkey(pubkey)),
           ),
         ],
       ),
@@ -208,7 +209,7 @@ class _InviteeResolutionCard extends StatelessWidget {
           AppListRow(
             key: Key('community-invite-resolution-error-$pubkey'),
             title: 'Could not resolve profile',
-            subtitle: shortCommunityInviteNpub(pubkey),
+            subtitle: shortPubkey(pubkey),
             trailing: TextButton(
               onPressed: onRetry,
               child: const Text('Retry'),
@@ -223,7 +224,7 @@ class _InviteeResolutionCard extends StatelessWidget {
               AppListRow(
                 key: Key('community-invite-unresolved-$pubkey'),
                 title: 'Invalid npub',
-                subtitle: shortCommunityInviteNpub(pubkey),
+                subtitle: shortPubkey(pubkey),
               ),
             ],
           );
@@ -234,7 +235,7 @@ class _InviteeResolutionCard extends StatelessWidget {
           children: [
             AppListRow(
               key: Key('community-invite-resolved-$pubkey'),
-              title: shortCommunityInviteNpub(invitee.pubkey),
+              title: shortPubkey(invitee.pubkey),
               trailing: FilledButton(
                 key: const Key('community-invite-submit'),
                 onPressed: isSubmitting ? null : () => onInvite(invitee),

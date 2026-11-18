@@ -87,7 +87,9 @@ Clients **partition by kind before any cursor math**:
 2. **Aux closure** (`include_aux`) — reactions (7), deletions (5, 9005),
    and edits (40003) targeting the retained rows by `#e`, **plus**
    deletions targeting those aux events (the transitive second hop, e.g.
-   a delete-of-a-reaction). One round trip; no client `#e` fan-out.
+   a delete-of-a-reaction). One round trip; no client `#e` fan-out. Each
+   hop is drained server-side across the DB page clamp, so the closure is
+   complete rather than newest-1000.
 3. **Thread summaries** (`include_summaries`) — one relay-signed
    `kind:39005` per row that has replies.
 4. **Window bounds** — exactly one relay-signed `kind:39006` per window
@@ -97,7 +99,7 @@ Clients **partition by kind before any cursor math**:
 
 - tags: `["e", <root-id>]`, `["d", <root-id>]`, `["h", <channel-id>]`
 - content: `{"reply_count":n,"descendant_count":n,"last_reply_at":ts|null,"participants":["<hex-pubkey>",...]}`
-  (participants: up to 10, most recent first)
+  (participants: up to 10 from the newest 1000 replies, deleted ones included, most recent first)
 - Signed by the relay keypair. Synthesized at query time, **never stored**.
   Clients treat it as replace-by-target metadata keyed by the `e`/`d` tag
   (the `d` tag gives parameterized-replaceable semantics natively); it is
@@ -126,7 +128,9 @@ Both kinds are relay-only: client submission is rejected at ingest.
 - Reconnect refetches page 0 and re-arms the live subscription
   (`since: now`); deeper pages need no repair path.
 - Replies never enter the channel timeline; the thread panel uses the
-  existing `thread_cursor` surface (#1418).
+  existing `thread_cursor` surface (#1418). Thread filters may opt into
+  `include_aux` to append the same authorized two-hop reactions, edits, and
+  deletions closure as a channel-window response.
 
 ## Siblings
 

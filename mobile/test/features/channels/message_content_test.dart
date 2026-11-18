@@ -1,50 +1,348 @@
+import 'package:buzz/shared/widgets/buzz_agent_icon.dart';
+import 'package:buzz/features/channels/local_send_bubble_surface.dart';
+import 'dart:async';
+import 'dart:convert';
+import 'package:http/testing.dart';
+import 'package:buzz/shared/widgets/media_loading_placeholder.dart';
+import 'package:buzz/shared/widgets/skeleton.dart';
+import 'dart:ui' as ui;
+
+import 'package:flutter/rendering.dart'
+    show RenderParagraph, RenderRepaintBoundary;
+
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'package:buzz/shared/widgets/page_indicator.dart';
+import 'package:flutter/semantics.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:http/http.dart' as http;
+import 'package:just_audio/just_audio.dart' as audio;
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/message_content.dart';
+import 'package:buzz/features/channels/message_long_press_region.dart';
+import 'package:buzz/features/channels/message_content/edited_marker.dart';
 import 'package:buzz/features/channels/media_viewer_page.dart';
+import 'package:buzz/features/channels/voice_note_attachment.dart';
+import 'package:buzz/features/channels/voice_note_waveform.dart';
+import 'package:buzz/features/channels/voice_note_recording.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 import 'package:buzz/shared/emoji/emoji_only.dart';
+import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
+
+import '../../helpers/message_link_finders.dart';
+
+part 'message_content_bubble_cases.dart';
+part 'message_carousel_preview_cases.dart';
+part 'message_stack_cases.dart';
 
 Widget _testable(
   Widget child, {
   List<Override> overrides = const [],
   bool disableAnimations = false,
-  VideoPreviewFrameLoader? videoPreviewFrameLoader,
+  bool dark = false,
+  ThemeData? theme,
 }) {
   return ProviderScope(
-    overrides: [
-      videoPreviewFrameLoaderProvider.overrideWithValue(
-        videoPreviewFrameLoader ?? (_) async => null,
-      ),
-      ...overrides,
-    ],
+    overrides: overrides,
     child: MaterialApp(
-      theme: AppTheme.light(),
-      home: Builder(
-        builder: (context) => MediaQuery(
-          data: MediaQuery.of(
-            context,
-          ).copyWith(disableAnimations: disableAnimations),
-          child: Scaffold(body: child),
-        ),
+      theme: theme ?? (dark ? AppTheme.dark() : AppTheme.light()),
+      // Use MaterialApp.builder so the MediaQuery override (including
+      // disableAnimations) applies to every pushed route, not just the
+      // home scaffold.  Navigator-pushed routes (e.g. MediaVideoViewerPage)
+      // skip a home-level Builder wrapper entirely.
+      builder: (context, child) => MediaQuery(
+        data: MediaQuery.of(
+          context,
+        ).copyWith(disableAnimations: disableAnimations),
+        // AppMarkdownTheme must wrap all routes that render message content.
+        child: AppMarkdownTheme(child: child!),
       ),
+      home: Scaffold(body: child),
     ),
   );
+}
+
+/// Answers connectivity queries, which tables' scroll views trigger.
+void _mockConnectivity(WidgetTester tester) {
+  const connectivity = MethodChannel(
+    'dev.fluttercommunity.plus/connectivity_status',
+  );
+  final messenger = tester.binding.defaultBinaryMessenger;
+  messenger.setMockMethodCallHandler(connectivity, (_) async => null);
+  addTearDown(() => messenger.setMockMethodCallHandler(connectivity, null));
+}
+
+/// The RGBA pixels of the [RepaintBoundary] at [key], at a pixel ratio of 1.
+Future<({int width, Uint8List bytes})> _capturePixels(
+  WidgetTester tester,
+  GlobalKey key,
+) async => (await tester.runAsync(() async {
+  final boundary =
+      key.currentContext!.findRenderObject()! as RenderRepaintBoundary;
+  final image = await boundary.toImage(pixelRatio: 1);
+  final data = (await image.toByteData(format: ui.ImageByteFormat.rawRgba))!;
+  final width = image.width;
+  image.dispose();
+  return (width: width, bytes: Uint8List.fromList(data.buffer.asUint8List()));
+}))!;
+
+/// How many pixels differ between [before] and [after], counting only
+/// columns that pass [where].
+int _changedPixels(
+  ({int width, Uint8List bytes}) before,
+  ({int width, Uint8List bytes}) after, {
+  bool Function(int x)? where,
+}) {
+  expect(after.bytes.length, before.bytes.length);
+  var changed = 0;
+  for (var i = 0; i < before.bytes.length; i += 4) {
+    if (where != null && !where((i ~/ 4) % before.width)) continue;
+    for (var c = 0; c < 4; c++) {
+      if (before.bytes[i + c] != after.bytes[i + c]) {
+        changed++;
+        break;
+      }
+    }
+  }
+  return changed;
 }
 
 void _setSurfaceSize(WidgetTester tester, Size size) {
   tester.view.devicePixelRatio = 1.0;
   tester.view.physicalSize = size;
+}
+
+class _FakeVoiceNotePlayer extends VoiceNotePlayerController {
+  VoiceNotePlaybackState _state = const VoiceNotePlaybackState();
+
+  @override
+  VoiceNotePlaybackState get state => _state;
+
+  double speed = 1;
+
+  @override
+  Future<void> loadLocal(
+    String path, {
+    required Duration fallbackDuration,
+  }) async {
+    _state = VoiceNotePlaybackState(duration: fallbackDuration);
+    notifyListeners();
+  }
+
+  @override
+  Future<void> loadRemote(
+    String url, {
+    required FutureOr<Map<String, String>> Function() headers,
+    required Duration fallbackDuration,
+  }) => loadLocal(url, fallbackDuration: fallbackDuration);
+
+  @override
+  Future<void> pause() async {
+    _state = _state.copyWith(isPlaying: false);
+    notifyListeners();
+  }
+
+  @override
+  Future<void> seek(Duration position) async {
+    _state = _state.copyWith(position: position);
+    notifyListeners();
+  }
+
+  @override
+  Future<void> setSpeed(double value) async => speed = value;
+
+  @override
+  Future<void> toggle() async {
+    _state = _state.copyWith(isPlaying: !_state.isPlaying);
+    notifyListeners();
+  }
+}
+
+class _HeadersVoiceNotePlayer extends _FakeVoiceNotePlayer {
+  FutureOr<Map<String, String>> Function()? headers;
+
+  @override
+  Future<void> loadRemote(
+    String url, {
+    required FutureOr<Map<String, String>> Function() headers,
+    required Duration fallbackDuration,
+  }) {
+    this.headers = headers;
+    return super.loadRemote(
+      url,
+      headers: headers,
+      fallbackDuration: fallbackDuration,
+    );
+  }
+}
+
+class _FixedRelayConfig extends RelayConfigNotifier {
+  _FixedRelayConfig(this.config);
+
+  final RelayConfig config;
+
+  @override
+  RelayConfig build() => config;
+}
+
+/// A hosted relay whose cached assertion has expired, so only a fresh
+/// request carries one.
+class _ExpiredHostedRelayAuth extends HostedRelayAuth {
+  _ExpiredHostedRelayAuth() : super(BuilderlabAccountClient(), enabled: false);
+
+  @override
+  Map<String, String>? cachedHeaders(RelayConfig config) => null;
+
+  @override
+  Future<Map<String, String>> headersForUrl(
+    RelayConfig config,
+    Uri url,
+  ) async => {'Nostr-Federated-Identity': 'Bearer fresh-token'};
+}
+
+class _LoadingVoiceNotePlayer extends _FakeVoiceNotePlayer {
+  @override
+  VoiceNotePlaybackState get state =>
+      const VoiceNotePlaybackState(isLoading: true, canCancelLoading: true);
+
+  @override
+  Future<void> loadRemote(
+    String url, {
+    required FutureOr<Map<String, String>> Function() headers,
+    required Duration fallbackDuration,
+  }) async {}
+}
+
+class _ReadyTransitionVoiceNotePlayer extends _LoadingVoiceNotePlayer {
+  bool loading = true;
+  @override
+  VoiceNotePlaybackState get state => VoiceNotePlaybackState(
+    isLoading: loading,
+    canCancelLoading: loading,
+    duration: const Duration(seconds: 3),
+  );
+  void finishLoading() {
+    loading = false;
+    notifyListeners();
+  }
+}
+
+class _ToggleTrackingLoadingVoiceNotePlayer extends _LoadingVoiceNotePlayer {
+  int toggleCount = 0;
+
+  @override
+  Future<void> toggle() async {
+    toggleCount += 1;
+  }
+}
+
+class _BufferingVoiceNotePlayer extends _FakeVoiceNotePlayer {
+  int toggleCount = 0;
+
+  @override
+  VoiceNotePlaybackState get state => const VoiceNotePlaybackState(
+    duration: Duration(seconds: 3),
+    isPlaying: true,
+    isLoading: true,
+    canCancelLoading: true,
+  );
+
+  @override
+  Future<void> loadRemote(
+    String url, {
+    required FutureOr<Map<String, String>> Function() headers,
+    required Duration fallbackDuration,
+  }) async {}
+
+  @override
+  Future<void> toggle() async {
+    toggleCount += 1;
+  }
+}
+
+class _HeldAudioPlayerBackend implements VoiceNoteAudioPlayerBackend {
+  final positions = const Stream<Duration>.empty();
+  final durations = const Stream<Duration?>.empty();
+  final states = const Stream<audio.PlayerState>.empty();
+  final pathLoad = Completer<Duration?>();
+
+  @override
+  Stream<Duration> get positionStream => positions;
+
+  @override
+  Stream<Duration?> get durationStream => durations;
+
+  @override
+  Stream<audio.PlayerState> get playerStateStream => states;
+
+  @override
+  bool get playing => false;
+
+  @override
+  Future<Duration?> setFilePath(String path) => pathLoad.future;
+
+  @override
+  Future<Duration?> setUrl(String url, {Map<String, String>? headers}) async =>
+      null;
+
+  @override
+  Future<void> play() async {}
+
+  @override
+  Future<void> pause() async {}
+
+  @override
+  Future<void> cancelPendingLoad() async {}
+
+  @override
+  Future<void> seek(Duration position) async {}
+
+  @override
+  Future<void> setSpeed(double speed) async {}
+
+  @override
+  Future<void> dispose() async {}
+}
+
+class _NoopHttpClient extends http.BaseClient {
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) {
+    throw UnsupportedError('Local playback must not issue HTTP requests');
+  }
+}
+
+class _RetryableVoiceNotePlayer extends _FakeVoiceNotePlayer {
+  _RetryableVoiceNotePlayer() {
+    _state = const VoiceNotePlaybackState(hasError: true);
+  }
+
+  int toggleCount = 0;
+
+  @override
+  Future<void> loadRemote(
+    String url, {
+    required FutureOr<Map<String, String>> Function() headers,
+    required Duration fallbackDuration,
+  }) async {}
+
+  @override
+  Future<void> toggle() async {
+    toggleCount += 1;
+    _state = _state.copyWith(hasError: false, isPlaying: true);
+    notifyListeners();
+  }
 }
 
 Finder _imagePreview(String imageUrl) {
@@ -86,9 +384,49 @@ bool _isImageViewerHeroEnabled(WidgetTester tester) {
   return tester.widget<HeroMode>(_imageViewerHeroMode()).enabled;
 }
 
+/// Whether any placeholder span in the tree contains a further placeholder.
+///
+/// This is the shape that renders as nothing on iOS: a token component's
+/// `WidgetSpan` nested inside the `WidgetSpan` a link is already drawn in.
+/// Each placeholder becomes its own paragraph, so a paragraph that both sits
+/// under another paragraph's placeholder and holds a placeholder of its own is
+/// the defect.
+bool _hasNestedPlaceholder(WidgetTester tester) {
+  for (final rich in tester.widgetList<RichText>(_anyRichText())) {
+    var placeholders = 0;
+    rich.text.visitChildren((span) {
+      if (span is PlaceholderSpan) placeholders++;
+      return true;
+    });
+    if (placeholders == 0) continue;
+    // A paragraph holding a placeholder is fine on its own — the message body
+    // does that for every link. It is only a defect when that paragraph is
+    // itself inside another paragraph's placeholder.
+    final ancestors = find.ancestor(
+      of: find.byWidget(rich),
+      matching: _anyRichText(),
+    );
+    if (ancestors.evaluate().isNotEmpty) return true;
+  }
+  return false;
+}
+
+/// Matches every `RichText` in the tree, including subclasses.
+///
+/// gpt_markdown renders body paragraphs through `BidiRichText`, a `RichText`
+/// subclass. `find.byType` matches the exact runtime type only, so it silently
+/// skips those paragraphs — an assertion that text is rendered then fails, and
+/// an assertion that text is absent then passes for the wrong reason.
+Finder _anyRichText() {
+  return find.byWidgetPredicate(
+    (widget) => widget is RichText,
+    description: 'any RichText (including subclasses)',
+  );
+}
+
 /// Extracts all plain text from all RichText widgets in the tree.
 String _allRichText(WidgetTester tester) {
-  final richTexts = tester.widgetList<RichText>(find.byType(RichText));
+  final richTexts = tester.widgetList<RichText>(_anyRichText());
   return richTexts.map((rt) => rt.text.toPlainText()).join('\n');
 }
 
@@ -103,7 +441,7 @@ Finder _findRich(String text) {
 /// Checks that the given text appears as bold (fontWeight >= w600) in some
 /// TextSpan within any RichText widget.
 bool _hasBoldSpan(WidgetTester tester, String text) {
-  for (final rt in tester.widgetList<RichText>(find.byType(RichText))) {
+  for (final rt in tester.widgetList<RichText>(_anyRichText())) {
     if (_spanHasStyle(
       rt.text,
       text,
@@ -117,7 +455,7 @@ bool _hasBoldSpan(WidgetTester tester, String text) {
 }
 
 bool _hasItalicSpan(WidgetTester tester, String text) {
-  for (final rt in tester.widgetList<RichText>(find.byType(RichText))) {
+  for (final rt in tester.widgetList<RichText>(_anyRichText())) {
     if (_spanHasStyle(rt.text, text, (s) => s.fontStyle == FontStyle.italic)) {
       return true;
     }
@@ -126,7 +464,7 @@ bool _hasItalicSpan(WidgetTester tester, String text) {
 }
 
 bool _hasStrikethroughSpan(WidgetTester tester, String text) {
-  for (final rt in tester.widgetList<RichText>(find.byType(RichText))) {
+  for (final rt in tester.widgetList<RichText>(_anyRichText())) {
     if (_spanHasStyle(
       rt.text,
       text,
@@ -171,7 +509,206 @@ class _TestChannelsNotifier extends ChannelsNotifier {
 }
 
 void main() {
+  carouselPreviewTests();
+  stackJourneyTests();
+  bubbleContentTests();
+  editedMarkerTests();
+  test('wide voice-note waveforms distribute bars across their full width', () {
+    const width = 320.0;
+    const sampleCount = 48;
+    final layout = voiceNoteWaveformBarLayout(
+      width: width,
+      sampleCount: sampleCount,
+    );
+
+    expect(layout.barWidth, 3);
+    expect(
+      (layout.barWidth * sampleCount) + (layout.gap * (sampleCount - 1)),
+      closeTo(width, 0.001),
+    );
+  });
+
+  testWidgets('voice-note waveform semantics seek within bounded steps', (
+    tester,
+  ) async {
+    final progress = ValueNotifier(0.0);
+    addTearDown(progress.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ValueListenableBuilder<double>(
+          valueListenable: progress,
+          builder: (context, value, _) => VoiceNoteWaveform(
+            samples: const [0.2, 0.8],
+            progress: value,
+            onSeek: (next) => progress.value = next,
+          ),
+        ),
+      ),
+    );
+
+    final semantics = tester.getSemantics(
+      find.bySemanticsLabel('Voice note waveform'),
+    );
+    expect(semantics.value, '0 percent');
+    semantics.owner!.performAction(semantics.id, SemanticsAction.increase);
+    await tester.pump();
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Voice note waveform')).value,
+      '10 percent',
+    );
+
+    progress.value = 0.5;
+    await tester.pump();
+    final middle = tester.getSemantics(
+      find.bySemanticsLabel('Voice note waveform'),
+    );
+    middle.owner!.performAction(middle.id, SemanticsAction.decrease);
+    await tester.pump();
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Voice note waveform')).value,
+      '40 percent',
+    );
+
+    progress.value = 1;
+    await tester.pump();
+    final end = tester.getSemantics(
+      find.bySemanticsLabel('Voice note waveform'),
+    );
+    end.owner!.performAction(end.id, SemanticsAction.increase);
+    await tester.pump();
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Voice note waveform')).value,
+      '100 percent',
+    );
+  });
+
   group('MessageContent', () {
+    testWidgets('renders backslash escapes as the escaped character', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      String visible() => [
+        for (final element in find.byType(RichText).evaluate())
+          (element.widget as RichText).text.toPlainText(),
+      ].join('|');
+
+      for (final (content, shown) in [
+        (r'plain \# \* \_ \\ end', r'plain # * _ \ end'),
+        // Escaped mention and channel sigils stay text, not pills.
+        (r'hi \@Alice there', 'hi @Alice there'),
+        (r'hi \#general there', 'hi #general there'),
+        // Authored stand-in characters stay themselves and don't stop
+        // escapes.
+        ('\uE0A0\uE0A1 \uE0A0 \\@Alice', '\uE0A0\uE0A1 \uE0A0 @Alice'),
+        (r'**bold \#x** \[not math\](y)', '[not math](y)'),
+        (r'[\#buzz-mobile](https://example.com/x)', '#buzz-mobile'),
+        (
+          r'[\#buzz-mobile](buzz://channel/9f18f3c6-b5e5-453d-b36d-65487913be0b)',
+          '#buzz-mobile',
+        ),
+        ('```\nx \\# y\n```', r'x \# y'),
+        (r'code `a\#b`', r'a\#b'),
+        (r'\`literal\` then `a\#b`', '`literal` then '),
+        // Authored stand-in characters are not mistaken for escapes.
+        ('\uFF0A \u2060\uFF0A \\#', '\uFF0A \u2060\uFF0A #'),
+        ('~~~\nx \\# y\n~~~', r'x \# y'),
+        // A fence that never closes is still code inside a quote or list.
+        ('> ```sh\n> echo \\#x', r'echo \#x'),
+        ('- item\n\n      ```\n      echo \\#x', r'echo \#x'),
+        // A fence closes only at the quote depth it opened at.
+        ('```md\n> ```\necho \\#g\n```', r'echo \#g'),
+        ('> ```sh\n> x\n\n```\necho \\#g\n```', r'echo \#g'),
+        // A quoted fence ends with its quote, so later prose is parsed.
+        ('> ```sh\n> echo x\n\nplain \\#text', 'plain #text'),
+        // An unclosed run ends with its paragraph, so later code stays code.
+        ('x ``` y\n- ``` p ```\n- q ``` \\[r\\] ``` s', r'\[r\]'),
+        // A strike that spans a line break still decodes its escapes.
+        ('~~a\nb \\#c~~', 'b #c'),
+        // A bare link's trailing backslash stays outside the link.
+        (r'see https://example.com/a\', 'see '),
+        (r'in buzz://channel/9f18f3c6-b5e5-453d-b36d-65487913be0b.\', r'.\'),
+        (r'*https://example.com/a\**', '*'),
+        (r'see \<https://example.com/b>', 'see <'),
+        (r'see \https://example.com/c', r'see \'),
+        (r'see <https://example.com/a\>', r'https://example.com/a\'),
+        (
+          '![shot \\#1](https://example.com/a.png)\n'
+              '![shot \\#2](https://example.com/b.png)',
+          null,
+        ),
+      ]) {
+        for (final bubble in [false, true]) {
+          await tester.pumpWidget(
+            _testable(
+              MessageContent(
+                content: content,
+                bubble: bubble,
+                mentionNames: const {'pk1': 'Alice'},
+                channelNames: const {'general': 'general-id'},
+              ),
+            ),
+          );
+          final reason = '$content (bubble: $bubble) showed ${visible()}';
+          if (shown != null) {
+            expect(
+              find.textContaining(shown, findRichText: true),
+              findsWidgets,
+              reason: reason,
+            );
+          }
+          // No stand-in or leaked link syntax reaches text or semantics.
+          if (content.contains('\u2060')) continue;
+          expect(
+            find.textContaining(
+              RegExp('\u2060|\\]\\(http'),
+              findRichText: true,
+            ),
+            findsNothing,
+            reason: reason,
+          );
+          expect(
+            find.bySemanticsLabel(RegExp('\u2060')),
+            findsNothing,
+            reason: reason,
+          );
+        }
+      }
+      // Gallery labels drop their escapes too.
+      expect(find.bySemanticsLabel(RegExp(r'shot #1')), findsWidgets);
+      semantics.dispose();
+    });
+
+    testWidgets('a quote opening with an alert marker stays a quote', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _testable(const MessageContent(content: '> [!NOTE]\n> Builds run.')),
+      );
+      expect(find.textContaining('[!NOTE]', findRichText: true), findsWidgets);
+    });
+
+    testWidgets('a table typed under its caption renders as a table', (
+      tester,
+    ) async {
+      Finder pipes() => find.textContaining('|', findRichText: true);
+      for (final (content, table) in [
+        ('**Sizes:**\n| Folder | Size |\n|---|---|\n| `~/a` | 9 GB |', true),
+        ('Sizes:\n\n| Folder | Size |\n|---|---|\n| a | 9 GB |', true),
+        // As in GFM, a delimiter row with a different cell count does not
+        // open a table.
+        ('Sizes:\n| Folder | Size | Note |\n|---|---|\n| a | 9 GB |', false),
+        ('```\nSizes:\n| Folder | Size |\n|---|---|\n```', false),
+      ]) {
+        await tester.pumpWidget(_testable(MessageContent(content: content)));
+        expect(pipes(), table ? findsNothing : findsWidgets, reason: content);
+        expect(
+          find.textContaining('Folder', findRichText: true),
+          findsWidgets,
+          reason: content,
+        );
+      }
+    });
+
     testWidgets('forwards text alignment to markdown rendering', (
       tester,
     ) async {
@@ -202,30 +739,398 @@ void main() {
         nsec: nostr.Keys.generate().nsec,
       );
 
+      // An inline link, reference links, whose definitions must keep their
+      // destination as written, and destinations holding text a mention or
+      // channel pattern would match.
+      for (final (content, url) in [
+        ('[report.pdf]($url)', url),
+        ('See [report.pdf]\n\n[report.pdf]: $url', url),
+        ('See [report.pdf][r]\n\n[r]: $url "Report"', url),
+        ('[report.pdf]($url?u=@Alice)', '$url?u=@Alice'),
+        ('[report.pdf]($url?c=#general)', '$url?c=#general'),
+        ('See <$url?u=@Alice> or [report.pdf]($url?u=@Alice)', '$url?u=@Alice'),
+      ]) {
+        openedUrl = null;
+        await tester.pumpWidget(
+          _testable(
+            MessageContent(
+              content: content,
+              mentionNames: const {'pk1': 'Alice'},
+              channelNames: const {'general': 'general-id'},
+            ),
+            overrides: [
+              mediaGetAuthServiceProvider.overrideWithValue(auth),
+              openDownloadedFileProvider.overrideWithValue((
+                url,
+                headers,
+                filename,
+              ) async {
+                openedUrl = url;
+                openedHeaders = headers;
+                openedFilename = filename;
+              }),
+            ],
+          ),
+        );
+
+        await tester.tapAt(linkCenter(tester, 'report.pdf'));
+        await tester.pump();
+
+        expect(openedUrl, url, reason: content);
+        expect(openedFilename, 'report.pdf');
+        expect(openedHeaders?['Authorization'], startsWith('Nostr '));
+      }
+    });
+
+    testWidgets('a link nothing can open offers only copy and share', (
+      tester,
+    ) async {
       await tester.pumpWidget(
         _testable(
-          const MessageContent(content: '[report.pdf]($url)'),
-          overrides: [
-            mediaGetAuthServiceProvider.overrideWithValue(auth),
-            openDownloadedFileProvider.overrideWithValue((
-              url,
-              headers,
-              filename,
-            ) async {
-              openedUrl = url;
-              openedHeaders = headers;
-              openedFilename = filename;
-            }),
-          ],
+          const MessageContent(
+            content: 'Write to [support](mailto:support@example.com)',
+          ),
         ),
       );
+      await tester.longPressAt(linkCenter(tester, 'support'));
+      await tester.pumpAndSettle();
+      expect(find.text('mailto:support@example.com'), findsOneWidget);
+      expect(find.text('Copy link'), findsOneWidget);
+      expect(find.text('Share link'), findsOneWidget);
+      expect(find.text('Open link'), findsNothing);
+    });
 
-      await tester.tap(find.text('report.pdf'));
+    testWidgets('tapping a link nothing can open shows its actions', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      await tester.pumpWidget(
+        _testable(
+          const MessageContent(
+            content: 'Write to [support](mailto:support@example.com)',
+          ),
+        ),
+      );
+      await tester.tapAt(linkCenter(tester, 'support'));
+      await tester.pumpAndSettle();
+      expect(find.text('Copy link'), findsOneWidget);
+      expect(find.text('Share link'), findsOneWidget);
+      expect(find.text('Open link'), findsNothing);
+
+      // A screen reader's activate reaches the same actions.
+      await tester.drag(find.text('Copy link'), const Offset(0, 500));
+      await tester.pumpAndSettle();
+      expect(find.text('Copy link'), findsNothing);
+      tester.semantics.tap(find.semantics.byLabel('support'));
+      await tester.pumpAndSettle();
+      expect(find.text('Copy link'), findsOneWidget);
+      semantics.dispose();
+    });
+
+    for (final (platform, label) in [
+      (TargetPlatform.iOS, 'report'),
+      (TargetPlatform.android, 'report'),
+      (TargetPlatform.iOS, '`report`'),
+      (TargetPlatform.android, '`report`'),
+    ]) {
+      testWidgets('holding $label opens link actions on ${platform.name}', (
+        tester,
+      ) async {
+        debugDefaultTargetPlatformOverride = platform;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        const url = 'https://relay.example/media/report.pdf';
+        final opened = <String>[];
+        final clipboard = <String>[];
+        var messageMenus = 0;
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async {
+            if (call.method == 'Clipboard.setData') {
+              clipboard.add((call.arguments as Map)['text'] as String);
+            }
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            null,
+          ),
+        );
+        final auth = MediaGetAuthService(
+          baseUrl: 'https://relay.example',
+          nsec: nostr.Keys.generate().nsec,
+        );
+
+        await tester.pumpWidget(
+          _testable(
+            MessageLongPressInkWell(
+              onLongPress: (_) => messageMenus++,
+              child: MessageContent(
+                content: 'See the [$label]($url) before standup',
+              ),
+            ),
+            overrides: [
+              mediaGetAuthServiceProvider.overrideWithValue(auth),
+              openDownloadedFileProvider.overrideWithValue(
+                (url, headers, filename) async => opened.add(url),
+              ),
+            ],
+          ),
+        );
+
+        // A hold on the surrounding text still opens the message menu.
+        await tester.longPressAt(textCenter(tester, 'standup'));
+        await tester.pumpAndSettle();
+        expect(messageMenus, 1);
+        expect(find.text('Copy link'), findsNothing);
+
+        // A finger that slides off the link before the hold is up scrolls:
+        // no link actions, no message menu and nothing opened.
+        final press = await tester.startGesture(textCenter(tester, 'report'));
+        await press.moveBy(const Offset(0, 40));
+        await tester.pump(const Duration(seconds: 1));
+        await press.up();
+        await tester.pumpAndSettle();
+        expect(find.text('Copy link'), findsNothing);
+        expect(messageMenus, 1);
+        expect(opened, isEmpty);
+
+        // A hold on the link opens its own actions instead.
+        await tester.longPressAt(textCenter(tester, 'report'));
+        await tester.pumpAndSettle();
+        expect(messageMenus, 1);
+        expect(find.text(url), findsOneWidget);
+        expect(find.text('Share link'), findsOneWidget);
+
+        await tester.tap(find.text('Copy link'));
+        await tester.pumpAndSettle();
+        expect(clipboard, [url]);
+        expect(find.text('Copy link'), findsNothing);
+
+        await tester.longPressAt(textCenter(tester, 'report'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Open link'));
+        await tester.pumpAndSettle();
+        expect(opened, [url]);
+
+        // An ordinary tap still opens the link directly.
+        await tester.tapAt(textCenter(tester, 'report'));
+        await tester.pumpAndSettle();
+        expect(opened, [url, url]);
+        expect(messageMenus, 1);
+
+        // A short landscape sheet still reaches every action.
+        _setSurfaceSize(tester, const Size(640, 260));
+        addTearDown(tester.view.reset);
+        await tester.pumpAndSettle();
+        await tester.longPressAt(textCenter(tester, 'report'));
+        await tester.pumpAndSettle();
+        await tester.ensureVisible(find.text('Share link'));
+        await tester.pumpAndSettle();
+        expect(find.text('Share link').hitTestable(), findsOneWidget);
+        debugDefaultTargetPlatformOverride = null;
+      });
+    }
+
+    testWidgets('removing a link during a hold cancels its actions', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final content = ValueNotifier('See [report](https://example.com/report)');
+      addTearDown(content.dispose);
+      await tester.pumpWidget(
+        _testable(
+          ValueListenableBuilder<String>(
+            valueListenable: content,
+            builder: (context, value, child) => MessageContent(content: value),
+          ),
+        ),
+      );
+      final press = await tester.startGesture(textCenter(tester, 'report'));
+      await tester.pump(const Duration(milliseconds: 150));
+      content.value = 'The report was removed';
       await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+      await press.up();
+      expect(tester.takeException(), isNull);
+      expect(find.text('Copy link'), findsNothing);
+      debugDefaultTargetPlatformOverride = null;
+    });
 
-      expect(openedUrl, url);
-      expect(openedFilename, 'report.pdf');
-      expect(openedHeaders?['Authorization'], startsWith('Nostr '));
+    testWidgets('pressing a text link tints it until the finger lifts', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _testable(
+          const MessageContent(
+            content: 'See [report](https://example.com/report) now',
+          ),
+        ),
+      );
+      RenderObject content() =>
+          tester.renderObject(find.byType(MessageContent));
+      expect(content(), isNot(paints..rrect()));
+
+      final press = await tester.startGesture(textCenter(tester, 'report'));
+      await tester.pump();
+      expect(content(), paints..rrect());
+
+      // A finger that slides off scrolls, which clears the tint too.
+      await press.moveBy(const Offset(0, 40));
+      await tester.pump();
+      expect(content(), isNot(paints..rrect()));
+      await press.up();
+
+      final tap = await tester.startGesture(textCenter(tester, 'report'));
+      await tester.pump();
+      expect(content(), paints..rrect());
+      await tap.up();
+      await tester.pump();
+      expect(content(), isNot(paints..rrect()));
+
+      // Lifting a second finger keeps the first finger's tint.
+      final primary = await tester.startGesture(
+        textCenter(tester, 'report'),
+        pointer: 21,
+      );
+      final secondary = await tester.startGesture(
+        textCenter(tester, 'report'),
+        pointer: 22,
+      );
+      await secondary.up();
+      await tester.pump();
+      expect(content(), paints..rrect());
+      await primary.cancel();
+      await tester.pump();
+      expect(content(), isNot(paints..rrect()));
+
+      // Removing a message while its link is pressed cleans up safely.
+      final removed = await tester.startGesture(textCenter(tester, 'report'));
+      await tester.pump();
+      expect(content(), paints..rrect());
+      await tester.pumpWidget(_testable(const SizedBox()));
+      await tester.pump(const Duration(seconds: 1));
+      await removed.up();
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets(
+      'a pressed link in a scrolled table tints only inside the table',
+      (tester) async {
+        _mockConnectivity(tester);
+        _setSurfaceSize(tester, const Size(400, 300));
+        addTearDown(tester.view.reset);
+        final capture = GlobalKey();
+        await tester.pumpWidget(
+          _testable(
+            RepaintBoundary(
+              key: capture,
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 100),
+                child: MessageContent(
+                  content:
+                      '| Link |\n| --- |\n| [abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz](https://example.com) |',
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final paragraph = tester.renderObject<RenderParagraph>(
+          findLinkParagraph(
+            'abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz',
+          ),
+        );
+        final point = paragraph.localToGlobal(const Offset(10, 10));
+        final before = await _capturePixels(tester, capture);
+        final press = await tester.startGesture(point);
+        await tester.pump();
+        final after = await _capturePixels(tester, capture);
+        await press.cancel();
+        await tester.pump();
+        expect(
+          _changedPixels(before, after, where: (x) => x < 300),
+          greaterThan(0),
+          reason: 'The link is tinted inside the table viewport',
+        );
+        expect(
+          _changedPixels(before, after, where: (x) => x >= 300),
+          0,
+          reason: 'Nothing is tinted beyond the table viewport',
+        );
+      },
+    );
+
+    for (final (name, content, bubble) in [
+      ('inline code', 'See [`report`](https://example.com) now', false),
+      (
+        'inline code in a bubble',
+        'See [`report`](https://example.com) now',
+        true,
+      ),
+      (
+        'a table header',
+        '| [report](https://example.com) |\n| --- |\n| a value |',
+        false,
+      ),
+    ]) {
+      testWidgets('a pressed link in $name shows its tint', (tester) async {
+        _mockConnectivity(tester);
+        final capture = GlobalKey();
+        await tester.pumpWidget(
+          _testable(
+            RepaintBoundary(
+              key: capture,
+              child: Align(
+                alignment: Alignment.topLeft,
+                child: MessageContent(content: content, bubble: bubble),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final before = await _capturePixels(tester, capture);
+        final press = await tester.startGesture(textCenter(tester, 'report'));
+        await tester.pump();
+        final after = await _capturePixels(tester, capture);
+        await press.cancel();
+        await tester.pump();
+        // A tint hidden under the background changes only a few edge pixels.
+        expect(_changedPixels(before, after), greaterThan(100));
+      });
+    }
+
+    testWidgets('a second finger does not restart a link hold', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      var messageMenus = 0;
+      await tester.pumpWidget(
+        _testable(
+          MessageLongPressInkWell(
+            onLongPress: (_) => messageMenus++,
+            child: const MessageContent(
+              content: 'See [report](https://example.com/report) now',
+            ),
+          ),
+        ),
+      );
+      final point = textCenter(tester, 'report');
+      final first = await tester.startGesture(point, pointer: 1);
+      await tester.pump(const Duration(milliseconds: 200));
+      final second = await tester.startGesture(
+        point + const Offset(1, 0),
+        pointer: 2,
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+      await second.up();
+      await tester.pump(const Duration(milliseconds: 250));
+      await first.up();
+      await tester.pumpAndSettle();
+      expect(messageMenus, 0);
+      expect(find.text('Copy link'), findsOneWidget);
+      debugDefaultTargetPlatformOverride = null;
     });
 
     test('buildImageViewerRoute uses modal-style page route builder', () {
@@ -580,8 +1485,9 @@ void main() {
           find.byKey(ValueKey('buzz-link-chip:$messageUrl')),
           findsOneWidget,
         );
-        expect(find.text(joinUrl), findsOneWidget);
-        expect(_allRichText(tester), contains('See \u{FFFC}. Then \u{FFFC}!'));
+        expect(findLinkParagraph(joinUrl), findsOneWidget);
+        // The message link is a chip; the join link is text in the sentence.
+        expect(_allRichText(tester), contains('See \u{FFFC}. Then $joinUrl!'));
 
         await tester.tap(find.byKey(ValueKey('buzz-link-chip:$messageUrl')));
         await tester.pump();
@@ -598,7 +1504,7 @@ void main() {
         );
 
         container.read(pendingDeepLinkProvider.notifier).consume();
-        await tester.tap(find.text(joinUrl));
+        await tester.tapAt(linkCenter(tester, joinUrl));
         await tester.pump();
         expect(
           container.read(pendingDeepLinkProvider),
@@ -646,8 +1552,8 @@ void main() {
           _testable(const MessageContent(content: 'Join with $url')),
         );
 
-        expect(find.text(url), findsOneWidget);
-        await tester.tap(find.text(url));
+        expect(findLinkParagraph(url), findsOneWidget);
+        await tester.tapAt(linkCenter(tester, url));
         await tester.pump();
 
         final container = ProviderScope.containerOf(
@@ -774,6 +1680,40 @@ void main() {
         expect(container.read(pendingDeepLinkProvider), isNull);
       });
 
+      testWidgets('a long link label wraps with its sentence', (tester) async {
+        _setSurfaceSize(tester, const Size(320, 600));
+        addTearDown(tester.view.reset);
+        const label = 'the release checklist for the next mobile build';
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'Heads up: [$label](https://example.com/c) is ready',
+            ),
+          ),
+        );
+
+        // One paragraph, so the label breaks mid-label and "is ready"
+        // continues on the line where the label ends.
+        final paragraph = tester.renderObject<RenderParagraph>(
+          findLinkParagraph(label),
+        );
+        expect(paragraph.text.toPlainText(), 'Heads up: $label is ready');
+        final start = 'Heads up: '.length;
+        final labelBoxes = paragraph.getBoxesForSelection(
+          TextSelection(baseOffset: start, extentOffset: start + label.length),
+        );
+        final after = paragraph
+            .getBoxesForSelection(
+              TextSelection(
+                baseOffset: start + label.length + 1,
+                extentOffset: start + label.length + 3,
+              ),
+            )
+            .first;
+        expect(labelBoxes.length, greaterThan(1));
+        expect(after.top, labelBoxes.last.top);
+      });
+
       testWidgets('renders bare URL as link', (tester) async {
         await tester.pumpWidget(
           _testable(
@@ -781,12 +1721,14 @@ void main() {
           ),
         );
 
-        // The URL text should be rendered and tappable.
-        expect(find.text('https://example.com'), findsOneWidget);
-        final linkText = tester.widget<Text>(find.text('https://example.com'));
+        // The URL is drawn as link text in the sentence.
         expect(
-          linkText.style?.decoration ?? linkText.textSpan?.style?.decoration,
+          linkStyle(tester, 'https://example.com')?.decoration,
           TextDecoration.underline,
+        );
+        expect(
+          _allRichText(tester),
+          contains('Visit https://example.com today'),
         );
       });
     });
@@ -817,6 +1759,556 @@ void main() {
     });
 
     group('media attachments', () {
+      testWidgets('reserves image metadata dimensions while bytes load', (
+        tester,
+      ) async {
+        const url = 'https://example.com/content-shaped-loading.png';
+        final response = Completer<http.Response>();
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '![image]($url)',
+              channelNames: {'general': 'general-id'},
+              tags: [
+                ['imeta', 'url $url', 'm image/png', 'dim 1200x2400'],
+              ],
+            ),
+            disableAnimations: true,
+            overrides: [
+              mediaGetAuthServiceProvider.overrideWithValue(
+                MediaGetAuthService(baseUrl: 'https://example.com', nsec: null),
+              ),
+              mediaHttpClientProvider.overrideWithValue(
+                MockClient((_) => response.future),
+              ),
+            ],
+          ),
+        );
+        await tester.pump();
+        final preview = find.byKey(
+          const ValueKey('message-media-image-preview:$url'),
+        );
+        final before = tester.getSize(preview);
+        expect(before.height, 240);
+        expect(before.width, 120);
+        expect(find.byType(MediaLoadingPlaceholder), findsOneWidget);
+        response.complete(
+          http.Response.bytes(
+            base64Decode(
+              'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aL1sAAAAASUVORK5CYII=',
+            ),
+            200,
+          ),
+        );
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 100)),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(MediaLoadingPlaceholder), findsNothing);
+        expect(tester.getSize(preview), before);
+        expect(tester.takeException(), isNull);
+      });
+
+      testWidgets('uses the shared Buzz loader while a voice note loads', (
+        tester,
+      ) async {
+        const url = 'https://example.com/media/loading-voice-note.mp4';
+
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '![audio]($url)',
+              tags: [
+                [
+                  'imeta',
+                  'url $url',
+                  'm video/mp4',
+                  'duration 3.0',
+                  'filename voice-note-loading.mp4',
+                ],
+              ],
+            ),
+            overrides: [
+              voiceNotePlayerFactoryProvider.overrideWithValue(
+                _LoadingVoiceNotePlayer.new,
+              ),
+            ],
+          ),
+        );
+        await tester.pump();
+
+        expect(
+          find.descendant(
+            of: find.byType(SkeletonShimmer),
+            matching: find.byType(VoiceNoteWaveform),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          tester
+              .widget<VoiceNoteWaveform>(find.byType(VoiceNoteWaveform))
+              .onSeek,
+          isNull,
+        );
+        expect(find.text('0:03'), findsOneWidget);
+        expect(find.byType(BuzzLoadingIndicator), findsOneWidget);
+        final spinner = find.byType(BuzzLoadingIndicator);
+        expect(tester.getSize(spinner), const Size.square(18));
+        expect(
+          tester.widget<BuzzLoadingIndicator>(spinner).color,
+          tester.element(spinner).colors.onSecondaryContainer,
+        );
+
+        expect(find.byType(CircularProgressIndicator), findsNothing);
+        expect(
+          find.bySemanticsLabel('Cancel voice note loading'),
+          findsOneWidget,
+        );
+        expect(find.bySemanticsLabel('Loading voice note'), findsNothing);
+      });
+
+      testWidgets(
+        'voice waveform semantics return only when playback is ready',
+        (tester) async {
+          final semantics = tester.ensureSemantics();
+
+          final player = _ReadyTransitionVoiceNotePlayer();
+          await tester.pumpWidget(
+            _testable(
+              const VoiceNoteAttachment.remote(
+                url: 'https://example.com/voice.m4a',
+                duration: Duration(seconds: 3),
+                waveform: [],
+              ),
+              overrides: [
+                voiceNotePlayerFactoryProvider.overrideWithValue(() => player),
+              ],
+            ),
+          );
+          await tester.pump();
+          expect(find.bySemanticsLabel('Voice note waveform'), findsNothing);
+          player.finishLoading();
+          await tester.pumpAndSettle();
+          final node = tester.getSemantics(
+            find.bySemanticsLabel('Voice note waveform'),
+          );
+          expect(
+            node.getSemanticsData().hasAction(SemanticsAction.increase),
+            isTrue,
+          );
+          expect(
+            node.getSemanticsData().hasAction(SemanticsAction.decrease),
+            isTrue,
+          );
+          semantics.dispose();
+        },
+      );
+
+      testWidgets('remote voice notes renew an expired relay assertion', (
+        tester,
+      ) async {
+        final player = _HeadersVoiceNotePlayer();
+        final hosted = _ExpiredHostedRelayAuth();
+        addTearDown(hosted.dispose);
+        final nsec = nostr.Keys.generate().nsec;
+        await tester.pumpWidget(
+          _testable(
+            const VoiceNoteAttachment.remote(
+              url: 'https://relay.example/media/voice.m4a',
+              duration: Duration(seconds: 3),
+              waveform: [],
+            ),
+            overrides: [
+              voiceNotePlayerFactoryProvider.overrideWithValue(() => player),
+              relayConfigProvider.overrideWith(
+                () => _FixedRelayConfig(
+                  RelayConfig(baseUrl: 'https://relay.example', nsec: nsec),
+                ),
+              ),
+              mediaGetAuthServiceProvider.overrideWithValue(
+                MediaGetAuthService(
+                  baseUrl: 'https://relay.example',
+                  nsec: nsec,
+                ),
+              ),
+              hostedRelayAuthProvider.overrideWithValue(hosted),
+            ],
+          ),
+        );
+        await tester.pump();
+
+        final headers = await player.headers!();
+        expect(headers['Authorization'], startsWith('Nostr '));
+        expect(headers['Nostr-Federated-Identity'], 'Bearer fresh-token');
+      });
+
+      testWidgets('routes repeated loading-control taps through toggle', (
+        tester,
+      ) async {
+        const url = 'https://example.com/media/cancel-loading-voice-note.mp4';
+        final player = _ToggleTrackingLoadingVoiceNotePlayer();
+
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '![audio]($url)',
+              tags: [
+                [
+                  'imeta',
+                  'url $url',
+                  'm video/mp4',
+                  'duration 3.0',
+                  'filename voice-note-loading.mp4',
+                ],
+              ],
+            ),
+            overrides: [
+              voiceNotePlayerFactoryProvider.overrideWithValue(() => player),
+            ],
+          ),
+        );
+        await tester.pump();
+
+        final control = find.bySemanticsLabel('Cancel voice note loading');
+        final controlSemantics = tester.getSemantics(control);
+        expect(
+          controlSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
+          isTrue,
+        );
+        tester.binding.performSemanticsAction(
+          SemanticsActionEvent(
+            type: SemanticsAction.tap,
+            viewId: tester.view.viewId,
+            nodeId: controlSemantics.id,
+          ),
+        );
+        await tester.pump();
+
+        expect(player.toggleCount, 1);
+      });
+
+      testWidgets('active buffering playback keeps its pause action', (
+        tester,
+      ) async {
+        const url = 'https://example.com/media/buffering-voice-note.mp4';
+        final player = _BufferingVoiceNotePlayer();
+
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '![audio]($url)',
+              tags: [
+                [
+                  'imeta',
+                  'url $url',
+                  'm video/mp4',
+                  'duration 3.0',
+                  'filename voice-note-buffering.mp4',
+                ],
+              ],
+            ),
+            overrides: [
+              voiceNotePlayerFactoryProvider.overrideWithValue(() => player),
+            ],
+          ),
+        );
+        await tester.pump();
+
+        final control = find.bySemanticsLabel('Pause voice note');
+        expect(control, findsOneWidget);
+        expect(
+          tester
+              .getSemantics(control)
+              .getSemanticsData()
+              .hasAction(SemanticsAction.tap),
+          isTrue,
+        );
+
+        await tester.tap(find.byKey(const ValueKey('voice-note-play-pause')));
+        await tester.pump();
+
+        expect(player.toggleCount, 1);
+      });
+
+      testWidgets(
+        'local preview loading is non-actionable while remote loading cancels',
+        (tester) async {
+          final backend = _HeldAudioPlayerBackend();
+          final player = DeviceVoiceNotePlayerController(
+            coordinator: VoiceNotePlaybackCoordinator(),
+            client: _NoopHttpClient(),
+            player: backend,
+          );
+          addTearDown(() {
+            if (!backend.pathLoad.isCompleted) backend.pathLoad.complete(null);
+          });
+
+          await tester.pumpWidget(
+            _testable(
+              const VoiceNoteAttachment.local(
+                path: '/tmp/local-voice-note.m4a',
+                duration: Duration(seconds: 3),
+                waveform: [],
+              ),
+              overrides: [
+                voiceNotePlayerFactoryProvider.overrideWithValue(() => player),
+              ],
+            ),
+          );
+          await tester.pump();
+
+          expect(backend.pathLoad.isCompleted, isFalse);
+
+          final control = find.bySemanticsLabel('Loading voice note');
+          final controlSemantics = tester.getSemantics(control);
+          expect(control, findsOneWidget);
+          expect(
+            controlSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
+            isFalse,
+          );
+          expect(
+            find.bySemanticsLabel('Cancel voice note loading'),
+            findsNothing,
+          );
+          await tester.tap(find.byKey(const ValueKey('voice-note-play-pause')));
+          await tester.pump();
+          expect(player.state.canCancelLoading, isFalse);
+          expect(backend.pathLoad.isCompleted, isFalse);
+        },
+      );
+
+      testWidgets('offers an accessible retry after a voice note fails', (
+        tester,
+      ) async {
+        const url = 'https://example.com/media/retry-voice-note.mp4';
+        final player = _RetryableVoiceNotePlayer();
+
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '![audio]($url)',
+              tags: [
+                [
+                  'imeta',
+                  'url $url',
+                  'm video/mp4',
+                  'duration 3.0',
+                  'filename voice-note-retry.mp4',
+                ],
+              ],
+            ),
+            overrides: [
+              voiceNotePlayerFactoryProvider.overrideWithValue(() => player),
+            ],
+          ),
+        );
+        await tester.pump();
+
+        expect(find.text('Voice note unavailable'), findsOneWidget);
+        expect(find.byTooltip('Retry voice note'), findsOneWidget);
+        expect(find.bySemanticsLabel('Retry voice note'), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('voice-note-retry-icon')),
+          findsOneWidget,
+        );
+
+        await tester.tap(find.byTooltip('Retry voice note'));
+        await tester.pump();
+
+        expect(player.toggleCount, 1);
+        expect(find.byTooltip('Pause voice note'), findsOneWidget);
+        expect(find.text('Voice note unavailable'), findsNothing);
+      });
+
+      testWidgets('renders desktop packaged voice-note links as audio cards', (
+        tester,
+      ) async {
+        const url = 'https://example.com/media/desktop-voice-note.mp4';
+
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '[voice-note-desktop.mp4]($url)',
+              tags: [
+                [
+                  'imeta',
+                  'url $url',
+                  'm video/mp4',
+                  'duration 3.0',
+                  'filename voice-note-desktop.mp4',
+                ],
+              ],
+            ),
+            overrides: [
+              voiceNotePlayerFactoryProvider.overrideWithValue(
+                _FakeVoiceNotePlayer.new,
+              ),
+            ],
+          ),
+        );
+        await tester.pump();
+
+        expect(
+          find.byKey(const ValueKey('voice-note-attachment:$url')),
+          findsOneWidget,
+        );
+        expect(find.text('voice-note-desktop.mp4'), findsNothing);
+      });
+
+      testWidgets('keeps audio-looking links without imeta as ordinary links', (
+        tester,
+      ) async {
+        const url = 'https://example.com/media/not-an-attachment.mp4';
+
+        await tester.pumpWidget(
+          _testable(const MessageContent(content: '[recording.mp4]($url)')),
+        );
+        await tester.pump();
+
+        expect(
+          find.byKey(const ValueKey('voice-note-attachment:$url')),
+          findsNothing,
+        );
+        expect(find.text('recording.mp4'), findsOneWidget);
+      });
+
+      testWidgets('renders an audio imeta attachment as a voice note card', (
+        tester,
+      ) async {
+        const url = 'https://example.com/media/voice-note.mp4';
+        final player = _FakeVoiceNotePlayer();
+        final hapticCalls = <MethodCall>[];
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async {
+            if (call.method == 'HapticFeedback.vibrate') hapticCalls.add(call);
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            null,
+          ),
+        );
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '![audio]($url)',
+              tags: [
+                [
+                  'imeta',
+                  'url $url',
+                  'm video/mp4',
+                  'duration 3.0',
+                  'filename voice-note-test.mp4',
+                ],
+              ],
+            ),
+            overrides: [
+              voiceNotePlayerFactoryProvider.overrideWithValue(() => player),
+            ],
+          ),
+        );
+        await tester.pump();
+
+        expect(
+          find.byKey(const ValueKey('voice-note-attachment:$url')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('voice-note-play-pause')),
+          findsOneWidget,
+        );
+        final cardFinder = find.byKey(
+          const ValueKey('voice-note-attachment:$url'),
+        );
+        final rateFinder = find.byKey(
+          const ValueKey('voice-note-playback-rate'),
+        );
+        final card = tester.widget<Container>(cardFinder);
+        expect(card.padding, const EdgeInsets.all(Grid.twelve));
+        expect(
+          tester.getTopLeft(find.byType(VoiceNoteWaveform)).dx,
+          tester
+              .getTopLeft(find.byKey(const ValueKey('voice-note-duration')))
+              .dx,
+        );
+        final leadingInset =
+            tester
+                .getTopLeft(find.byKey(const ValueKey('voice-note-play-pause')))
+                .dx -
+            tester.getTopLeft(cardFinder).dx;
+        final trailingInset =
+            tester.getTopRight(cardFinder).dx -
+            tester.getTopRight(rateFinder).dx;
+        expect(leadingInset, Grid.twelve + 1);
+        expect(trailingInset, leadingInset);
+        expect(rateFinder, findsOneWidget);
+        final rateSize = tester.getSize(rateFinder);
+        final ratePadding = tester
+            .widgetList<Padding>(
+              find.descendant(of: rateFinder, matching: find.byType(Padding)),
+            )
+            .singleWhere(
+              (widget) =>
+                  widget.padding ==
+                  const EdgeInsets.symmetric(
+                    horizontal: Grid.xxs,
+                    vertical: Grid.half + Grid.quarter,
+                  ),
+            );
+        expect(
+          ratePadding.padding,
+          const EdgeInsets.symmetric(
+            horizontal: Grid.xxs,
+            vertical: Grid.half + Grid.quarter,
+          ),
+        );
+        final rateValueFinder = find.byKey(
+          const ValueKey('voice-note-playback-rate-value'),
+        );
+        hapticCalls.clear();
+        await tester.tap(find.byKey(const ValueKey('voice-note-play-pause')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 500));
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
+        expect(
+          tester
+              .widget<VoiceNoteWaveform>(find.byType(VoiceNoteWaveform))
+              .progress,
+          greaterThan(0),
+        );
+
+        final waveformRect = tester.getRect(find.byType(VoiceNoteWaveform));
+        await tester.dragFrom(
+          Offset(
+            waveformRect.left + waveformRect.width * 0.25,
+            waveformRect.center.dy,
+          ),
+          Offset(waveformRect.width * 0.5, 0),
+        );
+        await tester.pump();
+        expect(player.state.position.inMilliseconds, closeTo(2250, 80));
+
+        expect(tester.widget<Text>(rateValueFinder).data, '1×');
+        hapticCalls.clear();
+        await tester.tap(rateFinder);
+        await tester.pump();
+        expect(tester.widget<Text>(rateValueFinder).data, '1.5×');
+        expect(player.speed, 1.5);
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
+        expect(tester.getSize(rateFinder), rateSize);
+        await tester.tap(rateFinder);
+        await tester.pump();
+        expect(tester.widget<Text>(rateValueFinder).data, '2×');
+        expect(tester.getSize(rateFinder), rateSize);
+        await tester.tap(rateFinder);
+        await tester.pump();
+        expect(tester.widget<Text>(rateValueFinder).data, '.5×');
+        expect(tester.getSize(rateFinder), rateSize);
+      });
+
       testWidgets(
         'renders image markdown as a media preview and opens viewer',
         (tester) async {
@@ -912,10 +2404,71 @@ void main() {
       });
 
       testWidgets(
+        'keeps voice notes out of image carousels for audio-only and mixed media',
+        (tester) async {
+          const firstAudio = 'https://example.com/media/voice-note-first.mp4';
+          const secondAudio = 'https://example.com/media/voice-note-second.mp4';
+          const image = 'https://example.com/media/photo.png';
+
+          Widget message(String content, List<List<String>> tags) => _testable(
+            MessageContent(content: content, tags: tags),
+            overrides: [
+              voiceNotePlayerFactoryProvider.overrideWithValue(
+                _FakeVoiceNotePlayer.new,
+              ),
+            ],
+          );
+
+          await tester.pumpWidget(
+            message('![audio]($firstAudio)\n![audio]($secondAudio)', const [
+              [
+                'imeta',
+                'url $firstAudio',
+                'm video/mp4',
+                'filename voice-note-first.mp4',
+              ],
+              [
+                'imeta',
+                'url $secondAudio',
+                'm video/mp4',
+                'filename voice-note-second.mp4',
+              ],
+            ]),
+          );
+          await tester.pumpAndSettle();
+          expect(
+            find.byKey(const ValueKey('message-media-carousel')),
+            findsNothing,
+          );
+          expect(find.byType(VoiceNoteAttachment), findsNWidgets(2));
+
+          await tester.pumpWidget(
+            message('![image]($image)\n![audio]($firstAudio)', const [
+              ['imeta', 'url $image', 'm image/png'],
+              [
+                'imeta',
+                'url $firstAudio',
+                'm video/mp4',
+                'filename voice-note-first.mp4',
+              ],
+            ]),
+          );
+          await tester.pumpAndSettle();
+          expect(
+            find.byKey(const ValueKey('message-media-carousel')),
+            findsNothing,
+          );
+          expect(find.byType(VoiceNoteAttachment), findsOneWidget);
+          expect(_imagePreview(image), findsOneWidget);
+        },
+      );
+
+      testWidgets(
         'groups uploaded photos into a carousel and opens the full gallery',
         (tester) async {
           const first = 'https://example.com/media/one.png';
-          const second = 'https://example.com/media/two.png';
+          // The second destination is escaped; the carousel must unescape it.
+          const second = 'https://example.com/media/two_2.png';
           const third = 'https://example.com/media/three.png';
           await tester.pumpWidget(
             _testable(
@@ -924,7 +2477,7 @@ void main() {
                     '''
 Photos
 ![image]($first)
-![image]($second)
+![image](https://example.com/media/two\\_2.png)
 ![image]($third)
 ''',
                 tags: [
@@ -954,29 +2507,16 @@ Photos
             findsOneWidget,
           );
           expect(
-            find.byKey(const ValueKey('message-media-image-viewer-filmstrip')),
-            findsOneWidget,
-          );
-          expect(
-            find.byKey(
-              const ValueKey('message-media-image-viewer-thumbnail:1'),
-            ),
+            find.byKey(const ValueKey('message-media-image-viewer-pagination')),
             findsOneWidget,
           );
           final displayedImage = tester.widget<MediaImage>(
             find.byKey(const ValueKey('message-media-image-viewer-image:1')),
           );
           expect(displayedImage.decodeWidth, isNotNull);
-          final selectedThumbnailClip = tester.widget<ClipRRect>(
-            find.byKey(
-              const ValueKey('message-media-image-viewer-thumbnail-clip:1'),
-            ),
-          );
-          final selectedThumbnailRadius =
-              selectedThumbnailClip.borderRadius as BorderRadius;
           expect(
-            selectedThumbnailRadius.topLeft.x,
-            closeTo(Radii.sm - 2.5, 0.01),
+            tester.widget<PageIndicator>(find.byType(PageIndicator)).selected,
+            1,
           );
 
           await tester.fling(
@@ -986,111 +2526,203 @@ Photos
           );
           await tester.pumpAndSettle();
 
-          final thirdThumbnail = find.byKey(
-            const ValueKey('message-media-image-viewer-thumbnail:2'),
+          expect(
+            tester.widget<PageIndicator>(find.byType(PageIndicator)).selected,
+            2,
           );
-          final thirdSemantics = tester.widget<Semantics>(
-            find
-                .ancestor(of: thirdThumbnail, matching: find.byType(Semantics))
-                .first,
-          );
-          expect(thirdSemantics.properties.selected, isTrue);
+          expect(find.bySemanticsLabel('Image 3 of 3'), findsOneWidget);
         },
       );
 
       testWidgets(
-        'keeps adjacent carousel images active and ends with a gutter',
+        'paints neighboring photos through the avatar gutter after paging',
         (tester) async {
-          const first = 'https://example.com/media/gutter-one.png';
-          const second = 'https://example.com/media/gutter-two.png';
+          const connectivity = MethodChannel(
+            'dev.fluttercommunity.plus/connectivity_status',
+          );
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            connectivity,
+            (_) async => null,
+          );
+          addTearDown(
+            () => tester.binding.defaultBinaryMessenger
+                .setMockMethodCallHandler(connectivity, null),
+          );
+          _setSurfaceSize(tester, const Size(390, 844));
+          addTearDown(tester.view.resetPhysicalSize);
+          addTearDown(tester.view.resetDevicePixelRatio);
+          const urls = [
+            'https://example.com/media/gutter-one.png',
+            'https://example.com/media/gutter-two.png',
+            'https://example.com/media/gutter-three.png',
+          ];
+          final boundaryKey = GlobalKey();
           await tester.pumpWidget(
             _testable(
-              const MessageContent(
-                content:
-                    '''
-![image]($first)
-![image]($second)
-''',
-                tags: [
-                  ['imeta', 'url $first', 'm image/png'],
-                  ['imeta', 'url $second', 'm image/png'],
-                ],
+              RepaintBoundary(
+                key: boundaryKey,
+                child: Padding(
+                  padding: const EdgeInsets.only(left: 64, right: 16),
+                  child: MessageContent(
+                    mediaCarouselTrailingOverflow: 16,
+                    content: urls.map((url) => '![image]($url)').join('\n'),
+                    tags: [
+                      for (final url in urls)
+                        ['imeta', 'url $url', 'm image/png'],
+                    ],
+                  ),
+                ),
               ),
             ),
           );
           await tester.pumpAndSettle();
-
           final carousel = find.byKey(const ValueKey('message-media-carousel'));
-          final pageViewFinder = find.descendant(
-            of: carousel,
-            matching: find.byType(PageView),
+          final scroll = tester.widget<CustomScrollView>(
+            find.descendant(
+              of: carousel,
+              matching: find.byType(CustomScrollView),
+            ),
           );
-          final pageView = tester.widget<PageView>(pageViewFinder);
+          final controller = scroll.controller! as PageController;
+          final first = find.byKey(
+            ValueKey('message-media-carousel-item:${urls[0]}'),
+          );
+          expect(tester.getRect(first).left, 64);
+          final sampleY = tester.getRect(first).top.toInt() + 30;
 
-          expect(pageView.allowImplicitScrolling, isTrue);
-          expect(pageView.clipBehavior, Clip.none);
+          Future<List<int>> pixel(int x) async {
+            return (await tester.runAsync(() async {
+              final boundary =
+                  boundaryKey.currentContext!.findRenderObject()!
+                      as RenderRepaintBoundary;
+              final image = await boundary.toImage(pixelRatio: 1);
+              final bytes = (await image.toByteData(
+                format: ui.ImageByteFormat.rawRgba,
+              ))!;
+              final offset = (sampleY * image.width + x) * 4;
+              final rgba = bytes.buffer.asUint8List().sublist(
+                offset,
+                offset + 4,
+              );
+              image.dispose();
+              return rgba;
+            }))!;
+          }
 
-          pageView.controller!.jumpToPage(1);
+          final photoColor = await pixel(100);
+          expect(await pixel(20), isNot(photoColor));
+          controller.jumpToPage(1);
           await tester.pumpAndSettle();
+          // A layout-only assertion missed the original bug: the old sliver
+          // retained the image but stopped painting it in this visible gutter.
+          expect(tester.getRect(first).right, closeTo(64 - Grid.half, 0.01));
+          expect(await pixel(20), photoColor);
+          await tester.pump(const Duration(seconds: 2));
+          expect(await pixel(20), photoColor);
 
-          final lastCard = find.byKey(
-            const ValueKey('message-media-carousel-item:$second'),
+          controller.jumpToPage(2);
+          await tester.pumpAndSettle();
+          final last = find.byKey(
+            ValueKey('message-media-carousel-item:${urls[2]}'),
           );
           expect(
-            tester.getRect(carousel).right - tester.getRect(lastCard).right,
-            Grid.gutter,
+            tester.getRect(carousel).right - tester.getRect(last).right,
+            closeTo(Grid.gutter, 0.01),
           );
+          expect(await pixel(20), photoColor);
+          controller.jumpToPage(0);
+          await tester.pumpAndSettle();
+          expect(tester.getRect(first).left, 64);
+          expect(await pixel(20), isNot(photoColor));
         },
       );
 
-      testWidgets(
-        'jumps to a selected gallery thumbnail when motion is disabled',
-        (tester) async {
-          const first = 'https://example.com/media/reduced-motion-one.png';
-          const second = 'https://example.com/media/reduced-motion-two.png';
-          await tester.pumpWidget(
-            _testable(
-              const MessageContent(
-                content:
-                    '''
+      testWidgets('jumps to a selected gallery dot when motion is disabled', (
+        tester,
+      ) async {
+        const first = 'https://example.com/media/reduced-motion-one.png';
+        const second = 'https://example.com/media/reduced-motion-two.png';
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content:
+                  '''
 ![image]($first)
 ![image]($second)
 ''',
-                tags: [
-                  ['imeta', 'url $first', 'm image/png'],
-                  ['imeta', 'url $second', 'm image/png'],
-                ],
-              ),
-              disableAnimations: true,
+              tags: [
+                ['imeta', 'url $first', 'm image/png'],
+                ['imeta', 'url $second', 'm image/png'],
+              ],
             ),
-          );
-          await tester.pumpAndSettle();
+            disableAnimations: true,
+          ),
+        );
+        await tester.pumpAndSettle();
 
-          await tester.tap(
-            find.byKey(const ValueKey('message-media-carousel-item:$first')),
-          );
-          await tester.pumpAndSettle();
-          await tester.tap(
-            find.byKey(
-              const ValueKey('message-media-image-viewer-thumbnail:1'),
+        await tester.tap(
+          find.byKey(const ValueKey('message-media-carousel-item:$first')),
+        );
+        await tester.pumpAndSettle();
+        final indicatorFinder = find.byType(PageIndicator);
+        await tester.tap(find.byKey(const ValueKey('page-indicator-dot-1')));
+        await tester.pump();
+        expect(tester.widget<PageIndicator>(indicatorFinder).selected, 1);
+        final pages = tester.widget<PageView>(
+          find.byKey(const ValueKey('message-media-image-viewer-pages')),
+        );
+        expect(pages.controller!.page, 1);
+        expect(tester.takeException(), isNull);
+      });
+
+      testWidgets('uses glass photo controls and image pagination on iOS', (
+        tester,
+      ) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        await tester.pumpWidget(
+          _testable(
+            MediaImageViewerPage(
+              imageUrl: 'https://example.com/one.png',
+              heroTag: 'one',
+              galleryItems: const [
+                MediaViewerImage(
+                  url: 'https://example.com/one.png',
+                  heroTag: 'one',
+                ),
+                MediaViewerImage(
+                  url: 'https://example.com/two.png',
+                  heroTag: 'two',
+                ),
+              ],
+              onReply: () {},
+              onMore: (_, _) {},
             ),
-          );
-          await tester.pumpAndSettle();
-
-          final selectedThumbnail = tester.widget<Semantics>(
-            find
-                .ancestor(
-                  of: find.byKey(
-                    const ValueKey('message-media-image-viewer-thumbnail:1'),
-                  ),
-                  matching: find.byType(Semantics),
-                )
-                .first,
-          );
-          expect(selectedThumbnail.properties.selected, isTrue);
-          expect(tester.takeException(), isNull);
-        },
-      );
+          ),
+        );
+        await tester.pumpAndSettle();
+        final views = tester.widgetList<UiKitView>(find.byType(UiKitView));
+        final pagination = views.singleWhere(
+          (view) => view.viewType == 'buzz/theme_pagination_glass',
+        );
+        final params = pagination.creationParams! as Map<String, Object>;
+        expect(params['accessibilityLabel'], 'Image');
+        expect(params['containerHeight'], 48);
+        expect(params['brightness'], 'dark');
+        expect(params['count'], 2);
+        expect(params['selected'], 0);
+        final buttons = views.where(
+          (view) => view.viewType == 'buzz/navigation_glass',
+        );
+        expect(
+          buttons.map(
+            (view) => (view.creationParams! as Map<String, Object>)['icon'],
+          ),
+          unorderedEquals(['reply', 'more']),
+        );
+        expect(tester.takeException(), isNull);
+        debugDefaultTargetPlatformOverride = null;
+      });
 
       testWidgets('resets carousel paging when gallery images change', (
         tester,
@@ -1116,10 +2748,10 @@ Photos
 
         await tester.pumpWidget(gallery(firstGallery));
         await tester.pumpAndSettle();
-        final firstCarousel = tester.widget<PageView>(
+        final firstCarousel = tester.widget<CustomScrollView>(
           find.descendant(
             of: find.byKey(const ValueKey('message-media-carousel')),
-            matching: find.byType(PageView),
+            matching: find.byType(CustomScrollView),
           ),
         );
 
@@ -1129,14 +2761,17 @@ Photos
           1200,
         );
         await tester.pumpAndSettle();
-        expect(firstCarousel.controller!.page, greaterThan(0));
+        expect(
+          (firstCarousel.controller! as PageController).page,
+          greaterThan(0),
+        );
 
         await tester.pumpWidget(gallery(secondGallery));
         await tester.pumpAndSettle();
-        final secondCarousel = tester.widget<PageView>(
+        final secondCarousel = tester.widget<CustomScrollView>(
           find.descendant(
             of: find.byKey(const ValueKey('message-media-carousel')),
-            matching: find.byType(PageView),
+            matching: find.byType(CustomScrollView),
           ),
         );
 
@@ -1144,7 +2779,7 @@ Photos
           secondCarousel.controller,
           isNot(same(firstCarousel.controller)),
         );
-        expect(secondCarousel.controller!.page, 0);
+        expect((secondCarousel.controller! as PageController).page, 0);
       });
 
       testWidgets(
@@ -1372,7 +3007,7 @@ Photos
       });
 
       testWidgets(
-        'keeps no-dim image previews max-bounded without fixed crop',
+        'reserves no-dim image bounds without cropping decoded content',
         (tester) async {
           _setSurfaceSize(tester, const Size(400, 800));
           addTearDown(() {
@@ -1409,8 +3044,8 @@ Photos
           );
 
           expect(preview.constraints, isNotNull);
-          expect(preview.constraints!.minWidth, 0);
-          expect(preview.constraints!.minHeight, 0);
+          expect(preview.constraints!.minWidth, closeTo(288, 0.1));
+          expect(preview.constraints!.minHeight, closeTo(240, 0.1));
           expect(preview.constraints!.maxWidth, closeTo(288, 0.1));
           expect(preview.constraints!.maxHeight, closeTo(240, 0.1));
           expect(image.fit, BoxFit.contain);
@@ -1443,53 +3078,7 @@ Photos
           ),
           findsOneWidget,
         );
-        expect(find.byIcon(LucideIcons.play), findsOneWidget);
-      });
-
-      testWidgets('derives a first frame for a posterless video event', (
-        tester,
-      ) async {
-        const videoUrl = 'https://example.com/media/legacy-video.mp4';
-        var disposed = false;
-
-        await tester.pumpWidget(
-          _testable(
-            const MessageContent(
-              content: '![video]($videoUrl)',
-              tags: [
-                ['imeta', 'url $videoUrl', 'm video/mp4', 'dim 1080x1920'],
-              ],
-            ),
-            videoPreviewFrameLoader: (url) async {
-              expect(url, videoUrl);
-              return LoadedVideoPreviewFrame(
-                aspectRatio: 9 / 16,
-                child: const ColoredBox(
-                  key: ValueKey('derived-video-frame'),
-                  color: Colors.blue,
-                ),
-                dispose: () async => disposed = true,
-              );
-            },
-          ),
-        );
-        await tester.pumpAndSettle();
-
-        expect(
-          find.byKey(
-            const ValueKey('message-media-video-first-frame:$videoUrl'),
-          ),
-          findsOneWidget,
-        );
-        expect(
-          find.byKey(const ValueKey('derived-video-frame')),
-          findsOneWidget,
-        );
-        expect(find.text('Video attachment'), findsNothing);
-
-        await tester.pumpWidget(const SizedBox.shrink());
-        await tester.pump();
-        expect(disposed, isTrue);
+        expect(find.byIcon(BuzzIcons.play), findsOneWidget);
       });
 
       testWidgets(
@@ -1507,6 +3096,7 @@ Photos
                   ],
                 ],
               ),
+              disableAnimations: true,
             ),
           );
           await tester.pumpAndSettle();
@@ -1575,6 +3165,7 @@ Photos
                 ],
               ],
             ),
+            disableAnimations: true,
           ),
         );
         await tester.pumpAndSettle();
@@ -1719,7 +3310,13 @@ Photos
             find.byKey(ValueKey('buzz-link-chip:${entry.value}')),
             findsNothing,
           );
-          expect(find.text(entry.key), findsOneWidget);
+          // Repository links have no tap, so they stay a widget with a hold.
+          expect(
+            entry.key == 'Release candidate'
+                ? find.text(entry.key)
+                : findLinkParagraph(entry.key),
+            findsOneWidget,
+          );
         }
       });
 
@@ -1769,11 +3366,11 @@ Photos
           expect(find.text('engineering'), findsOneWidget);
           expect(find.text('buzz'), findsOneWidget);
           expect(find.text('buzz · cdcdcdcd'), findsNWidgets(2));
-          expect(find.byIcon(LucideIcons.messageSquare), findsOneWidget);
-          expect(find.byIcon(LucideIcons.hash), findsOneWidget);
-          expect(find.byIcon(LucideIcons.folderGit2), findsOneWidget);
-          expect(find.byIcon(LucideIcons.gitPullRequest), findsOneWidget);
-          expect(find.byIcon(LucideIcons.circleDot), findsOneWidget);
+          expect(find.byIcon(BuzzIcons.messageSquare), findsOneWidget);
+          expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
+          expect(find.byIcon(BuzzIcons.folderGit2), findsOneWidget);
+          expect(find.byIcon(BuzzIcons.gitPullRequest), findsOneWidget);
+          expect(find.byIcon(BuzzIcons.circleDot), findsOneWidget);
           expect(
             find.bySemanticsLabel(
               'Open message cdcdcdcd in channel engineering',
@@ -1784,20 +3381,31 @@ Photos
             find.bySemanticsLabel('Pull request cdcdcdcd in repository buzz'),
             findsOneWidget,
           );
+          // Repo, PR and issue chips have no destination, so a hold offers
+          // only Copy and Share for the exact URL.
+          final clipboard = <String>[];
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            (call) async {
+              if (call.method == 'Clipboard.setData') {
+                clipboard.add((call.arguments as Map)['text'] as String);
+              }
+              return null;
+            },
+          );
+          addTearDown(
+            () => tester.binding.defaultBinaryMessenger
+                .setMockMethodCallHandler(SystemChannels.platform, null),
+          );
           for (final url in urls.skip(2)) {
-            final chipKey = ValueKey('buzz-link-chip:$url');
-            final ignoredChip = find.ancestor(
-              of: find.byKey(chipKey),
-              matching: find.byWidgetPredicate(
-                (widget) => widget is IgnorePointer && widget.ignoring,
-              ),
-            );
-            expect(ignoredChip, findsOneWidget, reason: url);
-            expect(
-              tester.widget<IgnorePointer>(ignoredChip).ignoring,
-              isTrue,
-              reason: url,
-            );
+            await tester.longPress(find.byKey(ValueKey('buzz-link-chip:$url')));
+            await tester.pumpAndSettle();
+            expect(find.text(url), findsOneWidget, reason: url);
+            expect(find.text('Share link'), findsOneWidget, reason: url);
+            expect(find.text('Open link'), findsNothing, reason: url);
+            await tester.tap(find.text('Copy link'));
+            await tester.pumpAndSettle();
+            expect(clipboard.last, url);
           }
         },
       );
@@ -1851,7 +3459,7 @@ Photos
           ),
         );
 
-        expect(find.byIcon(LucideIcons.bot), findsOneWidget);
+        expect(find.byType(BuzzAgentIcon), findsOneWidget);
         expect(find.text('@'), findsNothing);
         expect(find.text('Helper Bot'), findsOneWidget);
       });
@@ -1869,7 +3477,7 @@ Photos
           ),
         );
 
-        expect(find.byIcon(LucideIcons.bot), findsOneWidget);
+        expect(find.byType(BuzzAgentIcon), findsOneWidget);
         expect(find.text('Helper Bot'), findsOneWidget);
         expect(_allRichText(tester), isNot(contains('Bot Bot')));
       });
@@ -1890,6 +3498,28 @@ Photos
         expect(find.text('Kenny Lopez'), findsOneWidget);
         expect(find.text('@Kenny'), findsNothing);
         expect(_allRichText(tester), isNot(contains('Lopez Lopez')));
+      });
+
+      testWidgets('leaves mentions in code and stray backticks as written', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content:
+                  '~~~\n@Kenny Lopez ran it\n~~~\n\n'
+                  'stray ` tick then **bold** and @Kenny Lopez',
+              mentionNames: {'pk1': 'Kenny Lopez'},
+            ),
+          ),
+        );
+
+        final text = _allRichText(tester);
+        // The fence keeps the author's space, not the chip's NBSP.
+        expect(text, contains('@Kenny Lopez ran it'));
+        expect(text, contains('stray ` tick then bold and '));
+        // Only the prose mention becomes a chip.
+        expect(find.text('Kenny Lopez'), findsOneWidget);
       });
 
       testWidgets('renders unknown @mention as-is', (tester) async {
@@ -1982,9 +3612,32 @@ Photos
           ),
         );
 
-        expect(find.byIcon(LucideIcons.hash), findsOneWidget);
+        expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
         expect(find.text('general'), findsOneWidget);
         expect(find.text('#general'), findsNothing);
+      });
+
+      testWidgets('a channel that opens the message is a link, not a heading', (
+        tester,
+      ) async {
+        String? tappedId;
+        await tester.pumpWidget(
+          _testable(
+            MessageContent(
+              content: '#general is busy',
+              channelNames: const {'general': 'ch-id-1'},
+              onChannelTap: (id) => tappedId = id,
+            ),
+          ),
+        );
+
+        expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
+        expect(
+          find.textContaining('is busy', findRichText: true),
+          findsWidgets,
+        );
+        await tester.tap(find.text('general'));
+        expect(tappedId, 'ch-id-1');
       });
 
       testWidgets('channel tap callback fires', (tester) async {
@@ -2045,16 +3698,49 @@ Photos
         );
       });
 
-      testWidgets('unknown channel renders without tap', (tester) async {
+      testWidgets('unknown #token stays text', (tester) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'Took over #8700 from #general',
+              channelNames: {'general': 'ch-id-1'},
+            ),
+          ),
+        );
+
+        expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
+        expect(find.text('general'), findsOneWidget);
+        expect(_allRichText(tester), contains('Took over #8700 from'));
+      });
+
+      testWidgets('no #token becomes a chip before channel names load', (
+        tester,
+      ) async {
         await tester.pumpWidget(
           _testable(
             const MessageContent(content: 'Check #unknown', channelNames: {}),
           ),
         );
 
-        expect(find.byIcon(LucideIcons.hash), findsOneWidget);
-        expect(find.text('unknown'), findsOneWidget);
-        expect(find.text('#unknown'), findsNothing);
+        expect(find.byIcon(BuzzIcons.hash), findsNothing);
+        expect(_allRichText(tester), contains('Check #unknown'));
+      });
+
+      testWidgets('possessive #channel keeps the pill and the suffix', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: "See #general's pinned plan",
+              channelNames: {'general': 'ch-id-1'},
+            ),
+          ),
+        );
+
+        expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
+        expect(find.text('general'), findsOneWidget);
+        expect(_allRichText(tester), contains("'s pinned plan"));
       });
 
       testWidgets('does not treat URL fragments as channel links', (
@@ -2071,6 +3757,89 @@ Photos
 
         expect(_allRichText(tester), contains('https://example.com/docs#frag'));
         expect(find.text('#frag'), findsNothing);
+      });
+    });
+
+    // Regression: https://github.com/block/buzz/issues/6124
+    //
+    // gpt_markdown renders a link's label by recursing with
+    // `MarkdownScope.linkLabel`. A token component that claims the label
+    // returns a WidgetSpan, which then sits inside the link's own WidgetSpan
+    // — and a placeholder nested in a placeholder does not paint on iOS, so
+    // the whole link disappears. The components opt out of that scope; these
+    // tests fail if any of the `scopes` overrides is removed.
+    group('authored link labels', () {
+      testWidgets('a #channel label stays link text, not a channel pill', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'See [#2959](https://example.com/x) for details.',
+              // Known name and generic token both reach the component; use the
+              // known one so the pill would definitely render if not excluded.
+              channelNames: {'2959': 'ch-id-1'},
+            ),
+          ),
+        );
+
+        expect(_findRich('#2959'), findsOneWidget);
+        expect(find.byIcon(BuzzIcons.hash), findsNothing);
+        expect(_hasNestedPlaceholder(tester), isFalse);
+      });
+
+      testWidgets('an @mention label stays link text, not a mention pill', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'Ask [@Alice](https://example.com/x) about it.',
+              mentionNames: {'pk1': 'Alice'},
+            ),
+          ),
+        );
+
+        expect(_findRich('@Alice'), findsOneWidget);
+        // The pill splits the label into a separate '@' and name; the link
+        // must not.
+        expect(find.text('@'), findsNothing);
+        expect(_hasNestedPlaceholder(tester), isFalse);
+      });
+
+      testWidgets('a label with no token renders unchanged', (tester) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'See [ticket 2959](https://example.com/x) for details.',
+              channelNames: {'2959': 'ch-id-1'},
+            ),
+          ),
+        );
+
+        expect(_findRich('ticket 2959'), findsOneWidget);
+        expect(_hasNestedPlaceholder(tester), isFalse);
+      });
+
+      testWidgets('tokens outside a link label still render as pills', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'See #2959 and @Alice, plus [#2959](https://x.test/y).',
+              channelNames: {'2959': 'ch-id-1'},
+              mentionNames: {'pk1': 'Alice'},
+            ),
+          ),
+        );
+
+        // Excluding the link-label scope must not disable the components
+        // everywhere else: the bare tokens keep their pills.
+        expect(find.byIcon(BuzzIcons.hash), findsOneWidget);
+        expect(find.text('@'), findsOneWidget);
+        expect(find.text('Alice'), findsOneWidget);
+        expect(_findRich('#2959'), findsOneWidget);
       });
     });
 
@@ -2103,6 +3872,50 @@ Photos
         expect(find.text('@'), findsOneWidget);
         expect(find.text('Alice'), findsOneWidget);
         expect(_allRichText(tester), isNot(contains('**')));
+      });
+
+      testWidgets('renders inline code in the app code style', (tester) async {
+        // The message surfaces pass this style in; the widget's own fallback
+        // is the smaller `bodyMedium`, which would move the expected size.
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'Run `just test` now',
+              baseStyle: messageBodyTextStyle,
+            ),
+          ),
+        );
+
+        // gpt_markdown tags inline code with a CodeTextSpan carrying both the
+        // resolved text style and the colours the chip behind it is painted
+        // with. It renders through BidiRichText, a RichText subclass, so
+        // find.byType(RichText) would miss it.
+        final codeSpans = <CodeTextSpan>[];
+        for (final rich in tester.widgetList<RichText>(
+          find.byWidgetPredicate((widget) => widget is RichText),
+        )) {
+          rich.text.visitChildren((span) {
+            if (span is CodeTextSpan && span.text == 'just test') {
+              codeSpans.add(span);
+            }
+            return true;
+          });
+        }
+
+        expect(codeSpans, hasLength(1));
+        final code = codeSpans.single;
+        const scheme = lightColorScheme;
+
+        // Face, size and ink — the values a fenced code block is drawn with,
+        // not the package's bundled mono at its own 0.94 of the body size.
+        expect(code.style?.fontFamily, CodeStyle.fontFamily);
+        expect(code.style?.fontSize, closeTo(CodeStyle.fontSize, 0.001));
+        expect(code.style?.color, scheme.onSurface);
+
+        // Chip fill and outline come from the app's code surface rather than
+        // the package's `onSurface` tints.
+        expect(code.codeStyle.backgroundColor, CodeStyle.background(scheme));
+        expect(code.codeStyle.borderColor, CodeStyle.border(scheme));
       });
 
       testWidgets('renders code block between paragraphs', (tester) async {

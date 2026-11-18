@@ -16,6 +16,8 @@ quote = "1"
 syn = { version = "2", features = ["full"] }
 
 [dev-dependencies]
+metrics = { workspace = true }
+metrics-util = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tokio = { workspace = true }

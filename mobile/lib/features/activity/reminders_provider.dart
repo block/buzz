@@ -215,10 +215,3 @@ final remindersProvider =
     AsyncNotifierProvider<RemindersNotifier, List<Reminder>>(
       RemindersNotifier.new,
     );
-
-/// Count of due pending reminders — powers the filter badge.
-final dueReminderCountProvider = Provider<int>((ref) {
-  final reminders = ref.watch(remindersProvider).value ?? const <Reminder>[];
-  final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-  return reminders.where((r) => r.isDue(now)).length;
-});

@@ -378,6 +378,162 @@ Until a complete load succeeds, the client MUST evaluate unread state from its o
 
 The number of coordinates a full-state load must retrieve is bounded by the number of installations that have ever used the override layer, plus their not-yet-deleted rotation predecessors. It grows with the user's device history, not with elapsed time, and — because a coordinate carrying `ov_*` entries may not be deleted until it has been carried forward (see Client-ID Rotation) — it does not shrink on its own. Clients SHOULD carry forward and delete rotation predecessors promptly so the count stays near one coordinate per live installation.
 
+#### Buzz Atomic Snapshot Extension (version 1)
+
+A relay MAY offer a complete **point-in-time** alternative to the paginated
+full-state load above through the existing authenticated HTTP Nostr query bridge.
+This extension does not change kind 30078, encryption, register algebra, or the
+ordinary `POST /query` array response. It does not assert the five WebSocket
+conformance properties above.
+
+Discovery: obtain NIP-11 from the configured, trusted relay origin. Its optional
+`read_state_snapshot` descriptor contains `version: 1`, `community_id` (canonical
+UUID string), `max_events: 4096`, and `max_event_array_bytes: 8388608`. The byte
+budget applies only to the compact JSON `events` array, not the complete HTTP
+response; clients MUST allow additional space for the success envelope metadata.
+The community identifier is resolved from that request's Host through the active
+community map; it is not supplied by the client or derived from its key. An
+unresolved host omits the descriptor. This is TLS/origin-bound discovery, not an
+independently signed global community identity. Clients MUST bind discovery and
+queries to the same trusted relay origin and community session, and fence
+asynchronous results on identity or community changes.
+
+Request: NIP-98 authenticated `POST /query` with exactly one raw filter:
+
+```json
+[{"kinds":[30078],"authors":["<authenticated-self-hex>"],"read_state_snapshot":1}]
+```
+
+No extra keys, tags, time bounds, pagination, other kinds/authors, or mixed filters
+are accepted. Admission, replay protection, and relay membership gates apply as
+for ordinary bridge reads. The relay never substitutes an agent owner's identity
+for the authenticated signing identity.
+
+Success is a versioned envelope, **not an event array**:
+
+```json
+{
+  "read_state_snapshot": 1,
+  "complete": true,
+  "community_id": "<host-resolved-uuid>",
+  "pubkey": "<authenticated-self-hex>",
+  "snapshot_id": "<64-lowercase-hex>",
+  "events": []
+}
+```
+
+`events` contains every non-deleted own-author kind-30078 event retained at one
+writer-database MVCC statement cut, including unrelated application coordinates
+and events without a `t` tag. There is no ordinary query cap, age window, replica
+routing, or multi-request pagination. A coordinate replaced during the statement
+is consistently represented by the version visible at its cut; a later snapshot
+sees the replacement. This guarantee covers retained current state, not purged
+history, uncommitted writes, or future commits.
+
+`snapshot_id` is SHA-256 of the concatenation of UTF-8
+`buzz-read-state-snapshot-v1` plus a zero byte, the 16 raw community UUID bytes,
+the 32 author bytes, and each 32-byte event id in `created_at DESC, id ASC` order.
+It is a content identifier, **not** a monotone write revision, CAS precondition,
+or live-delivery cursor. An unchanged view may have the same identifier.
+
+Both event count and bytes are hard bounded. More than 4096 events, more than
+8 MiB of stored content plus PostgreSQL JSON tag text, or more than 8 MiB of
+compact encoded event-array bytes fails the whole request (HTTP 413). No partial
+envelope is returned. Row reconstruction, signature verification, serialization,
+or database failure produces an explicit non-success response (HTTP 503 after
+authentication). Invalid extension requests produce HTTP 400; normal auth,
+unknown-host, membership, replay and admission errors retain their bridge status.
+Clients MUST treat **all** such errors as `cannot prove complete`. There is no
+permission to delete old coordinates to get under the snapshot cap.
+
+Clients MUST reject absent discovery, version mismatch, ordinary arrays (including
+an old relay silently ignoring the extension), missing/false completeness,
+community/pubkey mismatch, invalid signatures, duplicate/conflicting coordinates,
+or invalid event envelopes. Read-state selection/decryption is client-side. An
+unreadable or unsupported recognized read-state coordinate MUST block override
+actions/publication; it MUST NOT be interpreted as absent state.
+
+A validated snapshot substitutes for the paginated enumeration and mutation fence
+**only for its point-in-time load**. Before **each** override action, canonical
+publication, or carry-forward/deletion decision, obtain a fresh snapshot from
+**every** write relay and merge those snapshots with durable local state. Failure
+on any required relay blocks that operation. Do not publish own coordinates while
+loading. Ordinary read-before-write, primary co-location, permanent clear floors,
+uint32/budget exhaustion, and per-relay acceptance-before-deletion rules remain.
+A failed/ambiguous publish does not report synchronized action success.
+
+Actions after different snapshot cuts are concurrent CRDT actions, not serialized
+transactions. A snapshot does not reserve a coordinate, prevent another writer,
+or make subsequent live delivery lossless. Clients MUST NOT cache `complete:true`
+as a session-wide authority or use it to label live freshness. On reconnect,
+identity changes, or later canonical publication, acquire a new snapshot; merge
+arriving live state as evidence but do not infer a complete load from it.
+
+### Buzz Frontier-Only Retention Profile
+
+Buzz clients use the following frontier-only profile. This section takes
+precedence over the legacy finite-horizon, per-message-writing, frontier
+replication, and unconditional frontier-slot deletion guidance in this document; the manual-unread override register algebra and durability rules
+are unchanged.
+
+- **Semantic retention:** `floor = max(0, now - 2592000)` (30 days, Unix
+  seconds). Every effective frontier includes this floor in its maximum,
+  including missing contexts and unresolved parents. A message at the floor is
+  read; a message one second newer is not read without a covering frontier.
+  Forced-unread overrides still take precedence. Legacy per-message entries
+  remain readable, but clients MUST NOT create or republish `msg:` hints outside
+  an existing primary override group. Sparse device-local UI feedback may be
+  persisted locally, but is not synchronized state and MUST NOT be described as
+  synchronized. Individual-message menu and dwell actions MUST NOT acknowledge
+  their entire channel or thread; direct mentions do not opt into msg writes.
+- **Catch-up frontiers:** `activity:<channel-id>` covers ordinary top-level
+  channel messages, excluding DMs, mentions and broadcasts.
+  `thread-activity:<root-event-id>` covers that thread's replies. Neither is a
+  substitute for the broad channel frontier. A partial/nested thread view MUST
+  NOT advance the entire thread solely because that view reached its bottom.
+- **Own values, not observed maxima:** publish only frontiers advanced locally,
+  or recovered from the installation's owned coordinates/journal. Keep these
+  values separate from the merged view. If a local value is 5, a peer supplies
+  50, and a local read advances to 10, the observed value is 50 but this
+  installation publishes 10. Peer delivery alone does not trigger publication.
+  Legacy journals that did not retain provenance may carry their existing
+  publishable values during migration, but MUST NOT absorb further peer maxima.
+- **No loss to fit:** prune frontier hints below the floor, but never evict a
+  still-required frontier merely to fit a blob or local count limit. Overflow
+  uses additional persisted random 32-hex coordinates under the same client ID.
+  Each plaintext is at most 40 KiB including the compact JSON envelope.
+  Existing snapshot/storage bounds remain real limits: report capacity failure
+  and retain pending local work rather than silently truncating state. Before
+  sending, project each replacement/addition against the complete own-author
+  kind-30078 snapshot (including unrelated application coordinates): no prefix
+  may knowingly exceed 4096 events or the 8 MiB compact event-array bound.
+  Include the encrypted content and signed-event envelope, not plaintext alone.
+  This preflight is not a reservation against concurrent writes by peers.
+- **Stable placement:** initial allocation sorts keys; later updates preserve
+  persisted key-to-slot placement and sort within each slot. Persist slot IDs
+  and assignments before publication. Publish changed coordinates only. Never
+  remove a sole carrier before its replacement is accepted. Unused slots may be
+  reused after their entries are below the floor, with read-before-write conflict
+  detection. Override groups and their frontiers remain on the primary.
+- **Recovery:** save pending signed event bytes durably before sending. An
+  unknown outcome retries those exact bytes. A partially accepted batch is not
+  whole-revision success; successful slots need not be resent, and unsynced
+  slots and local advances survive restart. Successors MUST have timestamps
+  strictly above pending events they supersede, even when the pending packet
+  never reached the relay or the clock moved backwards. Journal writers MUST
+  be scoped to identity/community and fenced across owner replacement; a late
+  acknowledgement from a retired owner cannot overwrite successor local work.
+  A transient journal failure MUST remain retryable without another user edit.
+- **Retrieval:** use the validated full-state snapshot above, with no `since`
+  or tag filter. The floor is evaluated on frontier values, not containing
+  event age. An old blob can carry a newer frontier because message timestamps
+  are author-controlled. Orphan slots are not automatically deleted or ignored.
+  No age policy applies to override tombstone floors.
+
+Legacy clients do not gain the semantic floor automatically. A mixed-version
+installation may continue showing old messages unread; wire max-register
+interoperability alone does not imply identical unread presentation.
+
 ### Merge Rule
 
 After decrypting all fetched blobs, the effective read timestamp for each context is:
@@ -783,9 +939,9 @@ that expose read activity to other users MUST require explicit user consent.
 
 ## Backwards Compatibility
 
-This NIP introduces no changes to existing event kinds and adds no new kind, wire message, or relay-stored read-state logic. It uses only standard NIP-01 event storage, NIP-33 addressable event semantics, NIP-44 encryption, and NIP-78 application data conventions. Clients that do not implement this NIP are unaffected, as are clients that implement everything but the manual-unread override layer.
+This NIP introduces no changes to existing event kinds or relay-stored read-state logic. The baseline uses only standard NIP-01 event storage, NIP-33 addressable event semantics, NIP-44 encryption, and NIP-78 application data conventions. The optional Buzz Atomic Snapshot Extension adds explicitly discovered, versioned query/discovery envelopes; ordinary query arrays and WebSocket messages remain unchanged. Clients that do not implement this NIP are unaffected, as are clients that implement everything but the manual-unread override layer.
 
-The override layer is the exception, and it is a relay-compatibility one rather than a client one. Its full-state load carries the completeness guarantee only against a relay that satisfies the ordering, capacity, floor, push, and barrier requirements enumerated in Full-State Load. Against a relay known or evidenced not to conform, every load resolves to *cannot prove complete* and the actions that depend on a complete load report as failed; against an undetectably nonconforming relay, a load may still return *complete*, and the completeness guarantee does not apply to that verdict. In either case the layer still runs and still merges, and frontier sync is unaffected.
+The override layer is the exception, and it is a relay-compatibility one rather than a client one. Its paginated full-state load carries the completeness guarantee only against a relay that satisfies the ordering, capacity, floor, push, and barrier requirements enumerated in Full-State Load. A validated atomic snapshot supplies the alternative point-in-time guarantee described in Buzz Atomic Snapshot Extension, without asserting those WebSocket properties. Without either proof, every load resolves to *cannot prove complete* and the actions that depend on a complete load report as failed; against an undetectably nonconforming relay, a load may still return *complete*, and the completeness guarantee does not apply to that verdict. In either case the layer still runs and still merges, and frontier sync is unaffected.
 
 ## References
 

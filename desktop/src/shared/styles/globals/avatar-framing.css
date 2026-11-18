@@ -132,8 +132,8 @@
   width: 100%;
   max-width: none;
   color: hsl(var(--muted-foreground) / 0.72);
-  font-size: 0.875rem;
-  line-height: 1.25rem;
+  font-size: calc(var(--buzz-type-rem) * 0.875);
+  line-height: calc(var(--buzz-type-rem) * 1.25);
   text-align: center;
   opacity: 0;
   pointer-events: none;

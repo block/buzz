@@ -7,6 +7,7 @@ import {
   entityDiscussionQuery,
   formatNameList,
   groupDiscussionChannels,
+  mergeOriginDiscussionChannel,
   repositoryDiscussionQuery,
 } from "./discussionChannels.ts";
 
@@ -21,6 +22,38 @@ test("query builders emit the tokens FTS needs, nothing else", () => {
     repositoryDiscussionQuery({ owner: OWNER, dtag: "buzz-world" }),
     `${OWNER} buzz-world`,
   );
+});
+
+test("mergeOriginDiscussionChannel prepends the origin when search missed it", () => {
+  const discussed = groupDiscussionChannels([
+    { channelId: "c1", channelName: "general", createdAt: 100, pubkey: ALICE },
+  ]);
+  assert.deepEqual(
+    mergeOriginDiscussionChannel(discussed, {
+      channelId: "origin",
+      createdAt: 50,
+      pubkey: BOB,
+    }),
+    [
+      {
+        id: "origin",
+        name: null,
+        messageCount: 1,
+        lastActivityAt: 50,
+        participants: [BOB],
+      },
+      discussed[0],
+    ],
+  );
+  assert.equal(
+    mergeOriginDiscussionChannel(discussed, {
+      channelId: "c1",
+      createdAt: 1,
+      pubkey: BOB,
+    }),
+    discussed,
+  );
+  assert.equal(mergeOriginDiscussionChannel(discussed, null), discussed);
 });
 
 test("commit queries match full or short hash citations", () => {
@@ -119,6 +152,13 @@ test("discussionSnippet strips entity links and coordinates", () => {
   assert.equal(
     discussionSnippet(`buzz://repo?owner=${OWNER}&d=buzz`),
     "Shared a link to this.",
+  );
+});
+
+test("discussionSnippet keeps markdown markers for the preview renderer", () => {
+  assert.equal(
+    discussionSnippet("**blessed** — @Tyler + [PR #5825](https://example.com)"),
+    "**blessed** — @Tyler + [PR #5825](https://example.com)",
   );
 });
 

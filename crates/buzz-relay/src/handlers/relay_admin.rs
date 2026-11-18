@@ -25,7 +25,8 @@ use buzz_core::tenant::TenantContext;
 use buzz_db::relay_members::RemoveResult;
 
 use crate::handlers::side_effects::{
-    publish_nip43_member_added, publish_nip43_member_removed, publish_nip43_membership_list,
+    auto_join_default_channels, fan_out_nip43_membership_list, publish_nip43_member_added,
+    publish_nip43_member_removed,
 };
 use crate::state::AppState;
 
@@ -133,8 +134,9 @@ fn may_set_workspace_profile(
 /// [`super::push_lease::AcceptError`] and its `map_push_accept_error` seam.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum RelayAdminError {
-    /// Sender is under a durable community ban — `blocked:` / HTTP 403.
-    Banned,
+    /// Sender is under a durable community ban — `blocked:` / HTTP 403. The
+    /// source says whether its own row or its owner's decided it.
+    Banned(crate::handlers::auth::BanSource),
     /// Legacy command rejection — `invalid:` / HTTP 400. This is whatever
     /// [`execute_relay_admin_command`] returned as a `String`, which is mostly
     /// validation and authorization but also still includes that function's own
@@ -161,7 +163,9 @@ fn admits_relay_admin_command(
     restriction: &buzz_db::moderation::RestrictionState,
 ) -> Result<(), RelayAdminError> {
     if restriction.banned {
-        return Err(RelayAdminError::Banned);
+        return Err(RelayAdminError::Banned(
+            crate::handlers::auth::BanSource::of(restriction),
+        ));
     }
     Ok(())
 }
@@ -192,6 +196,8 @@ pub(super) async fn handle_relay_admin_event(
     //
     // This gate wraps execution rather than opening it so no future early
     // return inside the command body can precede it.
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_command_ban_check(tenant.community()).await;
     let restriction = state
         .db
         .moderation_restriction_state(tenant.community(), &event.pubkey.to_bytes())
@@ -333,11 +339,18 @@ async fn execute_relay_admin_command(
             // Note: idempotent — if target already exists at any role, this is a
             // silent no-op. The existing role is NOT overwritten. Use kind:9032
             // to change an existing member's role.
-            let was_inserted = state
+            let write = state
                 .db
-                .add_relay_member(tenant.community(), &target_hex, &role, Some(&sender_hex))
+                .add_relay_member_with_default_channels(
+                    tenant.community(),
+                    &target_hex,
+                    &role,
+                    &sender_hex,
+                    &state.relay_keypair,
+                )
                 .await
                 .map_err(|e| format!("database error: {e}"))?;
+            let was_inserted = write.outcome;
 
             info!(
                 sender = %sender_hex,
@@ -353,10 +366,10 @@ async fn execute_relay_admin_command(
                 if let Err(e) = publish_nip43_member_added(tenant, state, &target_hex).await {
                     warn!(error = %e, "failed to publish NIP-43 member added event");
                 }
-                if let Err(e) = publish_nip43_membership_list(tenant, state).await {
-                    warn!(error = %e, "failed to publish NIP-43 membership list");
-                }
             }
+            // A no-op re-add also resumes unfinished work from the original actor.
+            auto_join_default_channels(tenant, state, &target_hex, None).await;
+            fan_out_nip43_membership_list(tenant, state, write.snapshot).await;
         }
 
         // kind:9031 — Remove relay member
@@ -376,22 +389,27 @@ async fn execute_relay_admin_command(
             //   This eliminates the TOCTOU race where the target could be promoted
             //   between a prior role read and the delete.
             // - Owners: can remove admins and members, not other owners.
-            let remove_result = if sender_role == "admin" {
+            let write = if sender_role == "admin" {
                 state
                     .db
-                    .remove_relay_member_if_role(tenant.community(), &target_hex, "member")
+                    .remove_relay_member_if_role(
+                        tenant.community(),
+                        &target_hex,
+                        "member",
+                        &state.relay_keypair,
+                    )
                     .await
                     .map_err(|e| format!("database error: {e}"))?
             } else {
                 // Owner path — atomic delete that refuses to remove other owners.
                 state
                     .db
-                    .remove_relay_member(tenant.community(), &target_hex)
+                    .remove_relay_member(tenant.community(), &target_hex, &state.relay_keypair)
                     .await
                     .map_err(|e| format!("database error: {e}"))?
             };
 
-            match remove_result {
+            match write.outcome {
                 RemoveResult::Removed => {}
                 RemoveResult::IsOwner => {
                     return Err("cannot remove the relay owner".to_string());
@@ -410,12 +428,27 @@ async fn execute_relay_admin_command(
                 "relay member removed"
             );
 
+            // Removal ends access now: close the member's and their agents'
+            // live sessions (agents hold membership through their owner).
+            let revoked = match hex::decode(&target_hex) {
+                Ok(target_bytes) => state
+                    .revoke_live_access(
+                        tenant,
+                        &target_bytes,
+                        &event.id.to_hex(),
+                        "restricted: you were removed from this relay",
+                    )
+                    .await
+                    .map(|_| ()),
+                Err(e) => Err(format!("invalid target pubkey: {e}")),
+            };
+
             if let Err(e) = publish_nip43_member_removed(tenant, state, &target_hex).await {
                 warn!(error = %e, "failed to publish NIP-43 member removed event");
             }
-            if let Err(e) = publish_nip43_membership_list(tenant, state).await {
-                warn!(error = %e, "failed to publish NIP-43 membership list");
-            }
+            fan_out_nip43_membership_list(tenant, state, write.snapshot).await;
+            revoked
+                .map_err(|e| format!("error: member removed but live revoke incomplete: {e}"))?;
         }
 
         // kind:9032 — Change relay member role
@@ -443,13 +476,18 @@ async fn execute_relay_admin_command(
                 return Err(format!("invalid role: {new_role}"));
             }
 
-            let updated = state
+            let write = state
                 .db
-                .update_relay_member_role(tenant.community(), &target_hex, &new_role)
+                .update_relay_member_role(
+                    tenant.community(),
+                    &target_hex,
+                    &new_role,
+                    &state.relay_keypair,
+                )
                 .await
                 .map_err(|e| format!("database error: {e}"))?;
 
-            if !updated {
+            if !write.outcome {
                 // Distinguish "owner (protected)" from "doesn't exist"
                 let exists = state
                     .db
@@ -470,9 +508,7 @@ async fn execute_relay_admin_command(
                 "relay member role changed"
             );
 
-            if let Err(e) = publish_nip43_membership_list(tenant, state).await {
-                warn!(error = %e, "failed to publish NIP-43 membership list");
-            }
+            fan_out_nip43_membership_list(tenant, state, write.snapshot).await;
         }
 
         other => {
@@ -484,7 +520,7 @@ async fn execute_relay_admin_command(
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
@@ -497,11 +533,14 @@ mod tests {
     fn banned_actor_is_not_admitted_to_a_relay_admin_command() {
         let banned = buzz_db::moderation::RestrictionState {
             banned: true,
+            own_banned: true,
             muted_until: None,
         };
         assert_eq!(
             admits_relay_admin_command(&banned),
-            Err(RelayAdminError::Banned),
+            Err(RelayAdminError::Banned(
+                crate::handlers::auth::BanSource::Own
+            )),
             "a durably banned admin must never reach a relay-admin command"
         );
     }
@@ -513,6 +552,7 @@ mod tests {
     fn timed_out_actor_is_still_admitted() {
         let timed_out = buzz_db::moderation::RestrictionState {
             banned: false,
+            own_banned: false,
             muted_until: Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
         };
         assert!(
@@ -705,7 +745,7 @@ mod tests {
         host: &str,
         require_relay_membership: bool,
     ) -> (Arc<AppState>, TenantContext) {
-        let mut config = crate::config::Config::from_env().expect("config from env");
+        let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| TEST_DB_URL.to_string());
@@ -724,9 +764,8 @@ mod tests {
             .expect("ensure community");
         let tenant = TenantContext::resolved(record.id, host);
 
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("redis pool config");
+        let redis_pool =
+            buzz_pubsub::redis_connection(&config.redis_url).expect("redis pool config");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -811,8 +850,10 @@ mod tests {
                 &owner.public_key().to_hex(),
                 "owner",
                 None,
+                &nostr::Keys::generate(),
             )
             .await
+            .map(|write| write.outcome)
             .expect("seed owner");
         let refused = submit_9033(&state, &tenant, &roleless, "https://evil.example/pwn.png").await;
         assert_eq!(
@@ -858,8 +899,10 @@ mod tests {
                 &member.public_key().to_hex(),
                 "member",
                 None,
+                &nostr::Keys::generate(),
             )
             .await
+            .map(|write| write.outcome)
             .expect("seed member");
         state
             .db
@@ -868,8 +911,10 @@ mod tests {
                 &admin.public_key().to_hex(),
                 "admin",
                 None,
+                &nostr::Keys::generate(),
             )
             .await
+            .map(|write| write.outcome)
             .expect("seed admin");
 
         for (keys, label) in [(&roleless, "roleless"), (&member, "member")] {
@@ -895,5 +940,565 @@ mod tests {
             stored_icon(&state, &tenant).await.as_deref(),
             Some("https://example.com/closed.png")
         );
+    }
+
+    /// Member removal (kind 9031) ends the removed member's live sessions,
+    /// and no one else's.
+    /// Mutation: drop the `revoke_live_access` call from the 9031 arm → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn removing_a_member_closes_their_live_connections() {
+        use crate::state::CommunityConnectionControl;
+        use tokio_util::sync::CancellationToken;
+
+        let host = format!("remove-revoke-{}.example", uuid::Uuid::new_v4().simple());
+        let (state, tenant) = workspace_profile_test_state(&host, true).await;
+        let (owner, member, bystander) = (Keys::generate(), Keys::generate(), Keys::generate());
+        for (keys, role) in [
+            (&owner, "owner"),
+            (&member, "member"),
+            (&bystander, "member"),
+        ] {
+            state
+                .db
+                .add_relay_member(
+                    tenant.community(),
+                    &keys.public_key().to_hex(),
+                    role,
+                    None,
+                    &nostr::Keys::generate(),
+                )
+                .await
+                .map(|write| write.outcome)
+                .expect("seed member");
+        }
+        let bound = |keys: &Keys| {
+            let control = CommunityConnectionControl::new(CancellationToken::new());
+            control.bind_pubkey(keys.public_key().to_bytes());
+            let guard = state.community_connections.register(
+                uuid::Uuid::new_v4(),
+                tenant.community(),
+                control.clone(),
+            );
+            (control, guard)
+        };
+        let (member_socket, _g1) = bound(&member);
+        let (bystander_socket, _g2) = bound(&bystander);
+
+        let removal = EventBuilder::new(Kind::Custom(RELAY_ADMIN_REMOVE_MEMBER as u16), "")
+            .tags(vec![Tag::public_key(member.public_key())])
+            .sign_with_keys(&owner)
+            .expect("sign 9031");
+        handle_relay_admin_event(&tenant, &state, &removal)
+            .await
+            .expect("owner removes member");
+
+        assert!(member_socket.cancellation_token().is_cancelled());
+        assert!(!bystander_socket.cancellation_token().is_cancelled());
+    }
+
+    /// A kind:9030 add joins the new relay member to the community's
+    /// effective default channels, once: the flagged open channel gains them
+    /// as a member with one kind:44100; the unflagged channel does not. A
+    /// kind:9022 leave followed by a repeat kind:9030 (an idempotent no-op on
+    /// the roster) does not re-add them. An added agent's `channel_add_policy`
+    /// holds against the adder. Mutations: delete the
+    /// `auto_join_default_channels` call → RED; pass no actor, or drop the
+    /// policy check → the `nobody` agent is joined (RED); check the policy
+    /// against anyone but the adder → the owned `owner_only` agent is not
+    /// (RED).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn adding_a_member_auto_joins_default_channels() {
+        use crate::handlers::group_state_postgres_tests::{
+            create_channel, edit_channel, http_auth,
+        };
+        use crate::handlers::ingest::ingest_event;
+
+        let host = format!("add-auto-join-{}.example", uuid::Uuid::new_v4().simple());
+        let (state, tenant) = workspace_profile_test_state(&host, true).await;
+        let (owner, target) = (Keys::generate(), Keys::generate());
+        state
+            .db
+            .add_relay_member(
+                tenant.community(),
+                &owner.public_key().to_hex(),
+                "owner",
+                None,
+                &nostr::Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("seed owner");
+        let flagged = create_channel(&state, &tenant, &owner, &[]).await;
+        let control = create_channel(&state, &tenant, &owner, &[]).await;
+        edit_channel(&state, &tenant, &owner, flagged, &[&["auto_join", "true"]])
+            .await
+            .expect("relay owner flags channel");
+
+        let roles = |keys: &Keys| {
+            let state = state.clone();
+            let community = tenant.community();
+            let pubkey = keys.public_key().to_bytes();
+            async move {
+                let mut roles = Vec::new();
+                for channel_id in [flagged, control] {
+                    roles.push(
+                        state
+                            .db
+                            .get_member_role(community, channel_id, &pubkey)
+                            .await
+                            .expect("member role"),
+                    );
+                }
+                roles
+            }
+        };
+        let added_notifications = || {
+            let state = state.clone();
+            let community = tenant.community();
+            let target_hex = target.public_key().to_hex();
+            async move {
+                state
+                    .db
+                    .count_events(&buzz_db::EventQuery {
+                        kinds: Some(vec![buzz_core::kind::KIND_MEMBER_ADDED_NOTIFICATION as i32]),
+                        p_tag_hex: Some(target_hex),
+                        global_only: true,
+                        ..buzz_db::EventQuery::for_community(community)
+                    })
+                    .await
+                    .expect("count 44100")
+            }
+        };
+        let add = || {
+            EventBuilder::new(Kind::Custom(RELAY_ADMIN_ADD_MEMBER as u16), "")
+                .tags(vec![Tag::public_key(target.public_key())])
+                .sign_with_keys(&owner)
+                .expect("sign 9030")
+        };
+
+        handle_relay_admin_event(&tenant, &state, &add())
+            .await
+            .expect("owner adds member");
+        assert_eq!(roles(&target).await, [Some("member".to_string()), None]);
+        assert_eq!(added_notifications().await, 1);
+
+        let leave = EventBuilder::new(Kind::Custom(9022), "")
+            .tags([Tag::parse(["h", &flagged.to_string()]).expect("h tag")])
+            .sign_with_keys(&target)
+            .expect("sign 9022");
+        let left = ingest_event(&state, &tenant, leave, http_auth(&target))
+            .await
+            .expect("ingest 9022");
+        assert!(left.accepted, "{:?}", left.message);
+        handle_relay_admin_event(&tenant, &state, &add())
+            .await
+            .expect("repeat add is a roster no-op");
+        assert_eq!(
+            roles(&target).await,
+            [None, None],
+            "a repeat kind:9030 must not resurrect a kind:9022 leave"
+        );
+        assert_eq!(added_notifications().await, 1);
+
+        // The adder acts for someone else, so the added agent's
+        // `channel_add_policy` decides, as for the same actor's kind:9000:
+        // `nobody` refuses every default channel; `owner_only` admits only
+        // the agent's owner.
+        let (refusing, owned) = (Keys::generate(), Keys::generate());
+        for keys in [&owner, &refusing, &owned] {
+            state
+                .db
+                .ensure_user(tenant.community(), &keys.public_key().to_bytes())
+                .await
+                .expect("user row");
+        }
+        for (agent, policy) in [(&refusing, "nobody"), (&owned, "owner_only")] {
+            state
+                .db
+                .set_channel_add_policy(tenant.community(), &agent.public_key().to_bytes(), policy)
+                .await
+                .expect("agent policy");
+        }
+        state
+            .db
+            .set_agent_owner(
+                tenant.community(),
+                &owned.public_key().to_bytes(),
+                &owner.public_key().to_bytes(),
+            )
+            .await
+            .expect("agent owner");
+        for (agent, expected) in [
+            (&refusing, [None, None]),
+            (&owned, [Some("member".to_string()), None]),
+        ] {
+            let add = EventBuilder::new(Kind::Custom(RELAY_ADMIN_ADD_MEMBER as u16), "")
+                .tags(vec![Tag::public_key(agent.public_key())])
+                .sign_with_keys(&owner)
+                .expect("sign 9030");
+            handle_relay_admin_event(&tenant, &state, &add)
+                .await
+                .expect("owner adds agent");
+            assert!(
+                state
+                    .db
+                    .get_relay_member(tenant.community(), &agent.public_key().to_hex())
+                    .await
+                    .expect("relay member")
+                    .is_some(),
+                "the roster add stands either way"
+            );
+            assert_eq!(roles(agent).await, expected);
+        }
+    }
+
+    /// A pod-local root socket registered and bound to `keys`, as root AUTH
+    /// leaves it.
+    fn bound_root_socket(
+        state: &crate::state::AppState,
+        community: buzz_core::tenant::CommunityId,
+        keys: &Keys,
+    ) -> tokio_util::sync::CancellationToken {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let (ctrl, _ctrl_rx) = tokio::sync::mpsc::channel(4);
+        let (terminal, _terminal_rx) = tokio::sync::mpsc::channel(1);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let conn_id = uuid::Uuid::new_v4();
+        state.conn_manager.register(
+            conn_id,
+            tx,
+            ctrl,
+            terminal,
+            None,
+            cancel.clone(),
+            community,
+            std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            3,
+            crate::state::CommunityConnectionControl::new(cancel.clone()),
+        );
+        state
+            .conn_manager
+            .set_authenticated_pubkey(conn_id, keys.public_key().to_bytes().to_vec());
+        cancel
+    }
+
+    /// Live sockets around a NIP-43 self-leave: the member's root and audio
+    /// sockets, their owned agent's root and audio sockets, and the member's
+    /// root socket in another community.
+    struct SelfLeaveFixture {
+        state: std::sync::Arc<crate::state::AppState>,
+        tenant: buzz_core::tenant::TenantContext,
+        member: Keys,
+        closing: Vec<(&'static str, tokio_util::sync::CancellationToken)>,
+        other_community: tokio_util::sync::CancellationToken,
+        _guards: Vec<crate::state::CommunityConnectionGuard>,
+    }
+
+    async fn self_leave_fixture() -> SelfLeaveFixture {
+        use crate::state::CommunityConnectionControl;
+        use tokio_util::sync::CancellationToken;
+
+        let host = format!("self-leave-{}.example", uuid::Uuid::new_v4().simple());
+        let (state, tenant) = workspace_profile_test_state(&host, true).await;
+        let other_host = format!(
+            "self-leave-control-{}.example",
+            uuid::Uuid::new_v4().simple()
+        );
+        let (_, other_tenant) = workspace_profile_test_state(&other_host, true).await;
+        let (member, agent) = (Keys::generate(), Keys::generate());
+        state
+            .db
+            .add_relay_member(
+                tenant.community(),
+                &member.public_key().to_hex(),
+                "member",
+                None,
+                &nostr::Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("seed member");
+        for keys in [&member, &agent] {
+            state
+                .db
+                .ensure_user(tenant.community(), keys.public_key().as_bytes())
+                .await
+                .expect("ensure user");
+        }
+        assert!(state
+            .db
+            .set_agent_owner(
+                tenant.community(),
+                agent.public_key().as_bytes(),
+                member.public_key().as_bytes(),
+            )
+            .await
+            .expect("link agent"));
+
+        let mut guards = Vec::new();
+        let mut audio = |keys: &Keys| {
+            let control = CommunityConnectionControl::new(CancellationToken::new());
+            control.bind_pubkey(keys.public_key().to_bytes());
+            guards.push(state.community_connections.register(
+                uuid::Uuid::new_v4(),
+                tenant.community(),
+                control.clone(),
+            ));
+            control.cancellation_token()
+        };
+        let closing = vec![
+            ("member audio", audio(&member)),
+            ("agent audio", audio(&agent)),
+            (
+                "member root",
+                bound_root_socket(&state, tenant.community(), &member),
+            ),
+            (
+                "agent root",
+                bound_root_socket(&state, tenant.community(), &agent),
+            ),
+        ];
+        let other_community = bound_root_socket(&state, other_tenant.community(), &member);
+        SelfLeaveFixture {
+            state,
+            tenant,
+            member,
+            closing,
+            other_community,
+            _guards: guards,
+        }
+    }
+
+    fn signed_leave(keys: &Keys) -> nostr::Event {
+        EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_NIP43_LEAVE_REQUEST as u16),
+            "",
+        )
+        .tags([nostr::Tag::parse(["-"]).unwrap()])
+        .sign_with_keys(keys)
+        .expect("sign leave")
+    }
+
+    fn assert_left(f: &SelfLeaveFixture) {
+        for (name, socket) in &f.closing {
+            assert!(socket.is_cancelled(), "the {name} socket closes");
+        }
+        assert!(
+            !f.other_community.is_cancelled(),
+            "the member's socket in another community stays open"
+        );
+    }
+
+    /// A NIP-43 self-leave ends access now: the member's and their owned
+    /// agent's sockets close; the member's socket in another community stays.
+    /// Mutation: drop `revoke_live_access` from the leave path → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+    async fn self_leave_closes_member_audio_and_agent_sockets() {
+        let f = self_leave_fixture().await;
+        let auth = crate::handlers::ingest::IngestAuth::Http {
+            pubkey: f.member.public_key(),
+            scopes: vec![buzz_auth::Scope::ChannelsRead],
+            auth_method: crate::handlers::ingest::HttpAuthMethod::Nip98,
+        };
+        crate::handlers::ingest::ingest_event(&f.state, &f.tenant, signed_leave(&f.member), auth)
+            .await
+            .expect("member leaves");
+        assert_left(&f);
+    }
+
+    /// A leave sent as `EVENT` over an authenticated WebSocket removes the
+    /// membership and closes the same sockets. Kind 28936 is in the ephemeral
+    /// range, so it must be routed to ingest, not the ephemeral fan-out.
+    /// Mutation: drop the leave exclusion from `handle_event`'s ephemeral
+    /// branch → `OK true`, membership kept, sockets open → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+    async fn websocket_self_leave_removes_membership_and_closes_sockets() {
+        let f = self_leave_fixture().await;
+        let auth = crate::connection::AuthState::Authenticated(buzz_auth::AuthContext {
+            pubkey: f.member.public_key(),
+            scopes: buzz_auth::Scope::all_known(),
+            channel_ids: None,
+            auth_method: buzz_auth::AuthMethod::Nip42,
+            agent_owner_pubkey: None,
+        });
+        let (mut conn, mut sent) = crate::connection::tests::test_conn_with_auth(auth);
+        std::sync::Arc::get_mut(&mut conn).unwrap().tenant = f.tenant.clone();
+        let leave = signed_leave(&f.member);
+        crate::handlers::event::handle_event(leave.clone(), conn, f.state.clone()).await;
+
+        let axum::extract::ws::Message::Text(ack) = sent.try_recv().expect("OK frame") else {
+            panic!("expected an OK frame");
+        };
+        let ack: serde_json::Value = serde_json::from_str(&ack).unwrap();
+        assert_eq!(ack[1], leave.id.to_hex());
+        assert_eq!(ack[2], true, "the leave is accepted: {ack}");
+        assert!(
+            !f.state
+                .db
+                .is_relay_member_writer(f.tenant.community(), &f.member.public_key().to_hex())
+                .await
+                .expect("membership read"),
+            "the membership row is gone"
+        );
+        assert_left(&f);
+    }
+
+    /// A direct ban (kind 9040) whose audit insert fails still closes the
+    /// banned member's socket, and the command still reports the failure.
+    /// A bystander stays connected.
+    /// Mutation: move `revoke_live_access` back after `insert_audit(...)?`
+    /// in `handle_ban` → the socket stays open → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+    async fn ban_closes_socket_even_when_audit_insert_fails() {
+        let host = format!("ban-audit-{}.example", uuid::Uuid::new_v4().simple());
+        let (state, tenant) = workspace_profile_test_state(&host, true).await;
+        let (owner, target, bystander) = (Keys::generate(), Keys::generate(), Keys::generate());
+        for (keys, role) in [
+            (&owner, "owner"),
+            (&target, "member"),
+            (&bystander, "member"),
+        ] {
+            state
+                .db
+                .add_relay_member(
+                    tenant.community(),
+                    &keys.public_key().to_hex(),
+                    role,
+                    None,
+                    &nostr::Keys::generate(),
+                )
+                .await
+                .map(|write| write.outcome)
+                .expect("seed member");
+        }
+        let target_socket = bound_root_socket(&state, tenant.community(), &target);
+        let bystander_socket = bound_root_socket(&state, tenant.community(), &bystander);
+
+        // Audit inserts fail for this community only.
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let community = *tenant.community().as_uuid();
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "CREATE FUNCTION fail_audit_{suffix}() RETURNS trigger AS $$ BEGIN \
+               IF NEW.community_id = '{community}' THEN RAISE EXCEPTION 'audit unavailable'; END IF; \
+               RETURN NEW; END $$ LANGUAGE plpgsql; \
+             CREATE TRIGGER fail_audit_{suffix} BEFORE INSERT ON moderation_actions \
+               FOR EACH ROW EXECUTE FUNCTION fail_audit_{suffix}();"
+        )))
+        .execute(state.db.pool())
+        .await
+        .expect("install audit-failure trigger");
+
+        let ban = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_MODERATION_BAN as u16),
+            "",
+        )
+        .tags([Tag::public_key(target.public_key())])
+        .sign_with_keys(&owner)
+        .expect("sign 9040");
+        let result =
+            crate::handlers::moderation_commands::handle_moderation_command(&tenant, &state, &ban)
+                .await;
+
+        let _ = sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "DROP TRIGGER fail_audit_{suffix} ON moderation_actions; \
+             DROP FUNCTION fail_audit_{suffix}();"
+        )))
+        .execute(state.db.pool())
+        .await;
+
+        let error = result.expect_err("the audit failure is reported");
+        assert!(
+            matches!(&error, crate::handlers::ingest::IngestError::Rejected(m) if m.contains("audit")),
+            "reports the audit failure: {error:?}"
+        );
+        assert!(
+            state
+                .db
+                .moderation_restriction_state(tenant.community(), target.public_key().as_bytes())
+                .await
+                .expect("restriction read")
+                .banned,
+            "the ban committed"
+        );
+        assert!(target_socket.is_cancelled(), "the banned socket closes");
+        assert!(!bystander_socket.is_cancelled(), "the bystander stays");
+    }
+
+    /// Each of the ban, unban, timeout and untimeout commands drops the
+    /// target's cached restriction row, so HTTP gates, typing and observer
+    /// frames see the change at once instead of after the cache's max age.
+    /// Mutation: remove `invalidate_restrictions` from any of them → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+    async fn restriction_commands_drop_the_cached_restriction_row() {
+        let host = format!("timeout-cache-{}.example", uuid::Uuid::new_v4().simple());
+        let (state, tenant) = workspace_profile_test_state(&host, true).await;
+        let (owner, target) = (Keys::generate(), Keys::generate());
+        for (keys, role) in [(&owner, "owner"), (&target, "member")] {
+            state
+                .db
+                .add_relay_member(
+                    tenant.community(),
+                    &keys.public_key().to_hex(),
+                    role,
+                    None,
+                    &nostr::Keys::generate(),
+                )
+                .await
+                .map(|write| write.outcome)
+                .expect("seed member");
+        }
+        let key = (tenant.community(), target.public_key().to_bytes().to_vec());
+        let until = (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp();
+        let command = |kind: u32, tags: Vec<Tag>| {
+            EventBuilder::new(Kind::Custom(kind as u16), "")
+                .tags(tags)
+                .sign_with_keys(&owner)
+                .expect("sign moderation command")
+        };
+
+        for event in [
+            command(
+                buzz_core::kind::KIND_MODERATION_TIMEOUT,
+                vec![
+                    Tag::public_key(target.public_key()),
+                    Tag::parse(["expiration", &until.to_string()]).expect("expiration tag"),
+                ],
+            ),
+            command(
+                buzz_core::kind::KIND_MODERATION_UNTIMEOUT,
+                vec![Tag::public_key(target.public_key())],
+            ),
+            command(
+                buzz_core::kind::KIND_MODERATION_BAN,
+                vec![Tag::public_key(target.public_key())],
+            ),
+            command(
+                buzz_core::kind::KIND_MODERATION_UNBAN,
+                vec![Tag::public_key(target.public_key())],
+            ),
+        ] {
+            state.seed_restriction(
+                key.clone(),
+                buzz_db::moderation::RestrictionState::default(),
+            );
+            crate::handlers::moderation_commands::handle_moderation_command(
+                &tenant, &state, &event,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("kind {} must apply: {e:?}", event.kind.as_u16()));
+            assert_eq!(
+                state.restriction_cache.entry(&key).map(|(state, _)| state),
+                None,
+                "kind {} must drop the cached row",
+                event.kind.as_u16()
+            );
+        }
     }
 }

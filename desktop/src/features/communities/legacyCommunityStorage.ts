@@ -1,5 +1,6 @@
 import { invokeTauri } from "@/shared/api/tauri";
 import { getStorageItem } from "@/shared/lib/safeStorage";
+import { readmitRelay } from "@/features/agents/managedAgentRelayCleanup";
 import { migrateLegacyCommunityStorage } from "./communityStorage";
 
 const BUZZ_COMMUNITIES_KEY = "buzz-communities";
@@ -74,34 +75,66 @@ function shouldWriteLegacyCommunities({
   return !hasNonLocalCurrentCommunities(currentCommunitiesRaw);
 }
 
+/** Relay URLs in `nextRaw` that aren't already saved in `currentRaw`. */
+function newRelayUrls(currentRaw: string | null, nextRaw: string): string[] {
+  // Deliberately raw: native canonicalizes and validates on re-add, and a
+  // JavaScript notion of "same relay" can skip a URL native would admit.
+  const seen = new Set(
+    (parseCommunityList(currentRaw) ?? []).map((c) => c.relayUrl),
+  );
+  const introduced: string[] = [];
+  for (const { relayUrl } of parseCommunityList(nextRaw) ?? []) {
+    if (typeof relayUrl !== "string" || seen.has(relayUrl)) continue;
+    seen.add(relayUrl);
+    introduced.push(relayUrl);
+  }
+  return introduced;
+}
+
 export function applyLegacyCommunityStorage(
   legacyStorage: LegacyCommunityStorageSnapshot,
   storage: Storage = window.localStorage,
-): void {
+): string[] {
   const currentCommunitiesRaw = storage.getItem(BUZZ_COMMUNITIES_KEY);
   const shouldWriteCommunities = shouldWriteLegacyCommunities({
     currentCommunitiesRaw,
     legacyCommunitiesRaw: legacyStorage.workspaces,
   });
 
+  let introducedRelayUrls: string[] = [];
   if (shouldWriteCommunities && legacyStorage.workspaces) {
     storage.setItem(BUZZ_COMMUNITIES_KEY, legacyStorage.workspaces);
+    introducedRelayUrls = newRelayUrls(
+      currentCommunitiesRaw,
+      legacyStorage.workspaces,
+    );
   }
 
-  const currentActiveCommunityId = storage.getItem(BUZZ_ACTIVE_COMMUNITY_KEY);
-  if (
-    legacyStorage.activeWorkspaceId &&
-    (!currentActiveCommunityId || shouldWriteCommunities)
-  ) {
-    storage.setItem(BUZZ_ACTIVE_COMMUNITY_KEY, legacyStorage.activeWorkspaceId);
-  }
-
-  for (const completion of legacyStorage.onboardingCompletions) {
-    const key = `${BUZZ_ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX}${completion.pubkey}`;
-    if (storage.getItem(key) === null) {
-      storage.setItem(key, completion.value);
+  // The list is saved, so its new relays must still be re-admitted even if
+  // these follow-up writes fail; a later reload would skip the migration.
+  try {
+    const currentActiveCommunityId = storage.getItem(BUZZ_ACTIVE_COMMUNITY_KEY);
+    if (
+      legacyStorage.activeWorkspaceId &&
+      (!currentActiveCommunityId || shouldWriteCommunities)
+    ) {
+      storage.setItem(
+        BUZZ_ACTIVE_COMMUNITY_KEY,
+        legacyStorage.activeWorkspaceId,
+      );
     }
+
+    for (const completion of legacyStorage.onboardingCompletions) {
+      const key = `${BUZZ_ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX}${completion.pubkey}`;
+      if (storage.getItem(key) === null) {
+        storage.setItem(key, completion.value);
+      }
+    }
+  } catch (error) {
+    console.warn("Failed to migrate legacy Sprout onboarding state.", error);
   }
+
+  return introducedRelayUrls;
 }
 
 /**
@@ -129,13 +162,27 @@ export async function migrateLegacyCommunityStorageBeforeRender(): Promise<void>
     return;
   }
 
+  let introducedRelayUrls: string[];
   try {
-    applyLegacyCommunityStorage(
+    introducedRelayUrls = applyLegacyCommunityStorage(
       await invokeTauri<LegacyCommunityStorageSnapshot>(
         "get_legacy_workspace_storage",
       ),
     );
   } catch (error) {
     console.warn("Failed to read legacy Sprout community storage.", error);
+    return;
   }
+  // A webview reload keeps the native process, so a relay removed earlier in
+  // this session stays refused unless the migration re-admits it here.
+  await Promise.all(
+    introducedRelayUrls.map((relayUrl) =>
+      readmitRelay(relayUrl).catch((error) => {
+        console.error(
+          "[communities] re-admitting local agents on a migrated relay failed:",
+          error,
+        );
+      }),
+    ),
+  );
 }

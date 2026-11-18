@@ -427,7 +427,7 @@ To verify the owner attestation:
 
 #### Conditions in Git Context
 
-NIP-OA conditions (`kind=<n>`, `created_at<t>`, `created_at>t`) reference Nostr
+NIP-OA conditions (`kind=<n>`, `created_at<t`, `created_at>t`) reference Nostr
 event fields that do not exist in git commits. For git commit signing:
 
 - An **empty conditions string** (unconditional authorization) is RECOMMENDED.

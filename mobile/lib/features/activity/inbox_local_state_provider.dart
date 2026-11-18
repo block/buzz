@@ -3,9 +3,11 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/relay/relay.dart';
+import '../../shared/theme/community_theme_preference.dart';
 import '../../shared/theme/theme_provider.dart';
 
-const _localStateKey = 'activity_inbox_local_state_v1';
+const _localStateKeyPrefix = 'activity_inbox_local_state_v1';
 const _maxTrackedIds = 500;
 
 /// Local, per-device inbox row overrides — mirrors desktop's
@@ -25,10 +27,24 @@ class InboxLocalState {
 }
 
 class InboxLocalStateNotifier extends Notifier<InboxLocalState> {
+  String? _key;
+
   @override
   InboxLocalState build() {
+    // Rows belong to one identity in one community, and each keeps its own cap.
+    final relayUrl = ref.watch(relayConfigProvider).baseUrl;
+    final pubkey = ref.watch(myPubkeyProvider);
+    if (pubkey == null) {
+      _key = null;
+      return const InboxLocalState.empty();
+    }
+    final key = _key =
+        '$_localStateKeyPrefix:$pubkey:${Uri.encodeComponent(normalizeCommunityRelayUrl(relayUrl))}';
     final prefs = ref.read(savedPrefsProvider);
-    final raw = prefs.getString(_localStateKey);
+    // Each community starts from the earlier device-wide entry, which stays
+    // for the others. Its ids are event ids, so they only ever match rows in
+    // their own community.
+    final raw = prefs.getString(key) ?? prefs.getString(_localStateKeyPrefix);
     if (raw == null) return const InboxLocalState.empty();
     try {
       final decoded = jsonDecode(raw);
@@ -76,14 +92,17 @@ class InboxLocalStateNotifier extends Notifier<InboxLocalState> {
       doneIds: capped(doneIds),
       unreadIds: capped(unreadIds),
     );
-    final prefs = ref.read(savedPrefsProvider);
-    prefs.setString(
-      _localStateKey,
-      jsonEncode({
-        'done': state.doneIds.toList(),
-        'unread': state.unreadIds.toList(),
-      }),
-    );
+    final key = _key;
+    if (key == null) return;
+    ref
+        .read(savedPrefsProvider)
+        .setString(
+          key,
+          jsonEncode({
+            'done': state.doneIds.toList(),
+            'unread': state.unreadIds.toList(),
+          }),
+        );
   }
 }
 

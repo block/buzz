@@ -4,6 +4,10 @@ about: Report a reproducible bug in Buzz
 labels: bug
 ---
 
+> [!IMPORTANT]
+> Do not include security vulnerabilities in a public issue. [Report them
+> privately through a GitHub security advisory](https://github.com/block/buzz/security/advisories/new).
+
 **Describe the bug**
 A clear and concise description of what the bug is.
 

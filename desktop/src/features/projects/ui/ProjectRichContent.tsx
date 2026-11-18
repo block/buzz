@@ -10,10 +10,12 @@ import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 export function ProjectRichContent({
   className = "text-sm",
   content,
+  hardLineBreaks,
   tags,
 }: {
   className?: string;
   content: string;
+  hardLineBreaks?: boolean;
   tags?: string[][];
 }) {
   const imetaByUrl = React.useMemo(
@@ -22,6 +24,11 @@ export function ProjectRichContent({
   );
 
   return (
-    <Markdown className={className} content={content} imetaByUrl={imetaByUrl} />
+    <Markdown
+      className={className}
+      content={content}
+      hardLineBreaks={hardLineBreaks}
+      imetaByUrl={imetaByUrl}
+    />
   );
 }

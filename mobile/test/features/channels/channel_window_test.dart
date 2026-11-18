@@ -63,6 +63,70 @@ void main() {
   });
 
   group('ChannelWindowStore', () {
+    test(
+      'renders ms order while paging and live admission keep relay order',
+      () {
+        final store = replaceNewestChannelWindow(
+          const ChannelWindowStore.empty(),
+          _page(
+            rows: [
+              _row('a', ms: '100'),
+              _row('m', ms: '900'),
+            ],
+            hasMore: true,
+          ),
+        );
+        final cursor = channelWindowNextCursor(store)!;
+        expect(cursor.eventId, 'm');
+        expect(channelWindowFloor(store)!.eventId, 'm');
+        final withLive = mergeLiveChannelWindowEvent(
+          store,
+          _row('b', ms: '800'),
+          isTimelineRow: true,
+        );
+        final outside = _row('z', ms: '500');
+        expect(
+          identical(
+            mergeLiveChannelWindowEvent(withLive, outside, isTimelineRow: true),
+            withLive,
+          ),
+          isTrue,
+        );
+        final complete = appendOlderChannelWindow(
+          withLive,
+          _page(startCursor: cursor, rows: [outside]),
+        );
+        expect(flattenChannelWindowEvents(complete).map((event) => event.id), [
+          'a',
+          'z',
+          'b',
+          'm',
+        ]);
+        expect(channelWindowHasMore(complete), isFalse);
+      },
+    );
+
+    test('flattens equal-second rows in desktop channel order', () {
+      final store = replaceNewestChannelWindow(
+        const ChannelWindowStore.empty(),
+        _page(
+          rows: [_row('a', createdAt: 10), _row('m', createdAt: 10)],
+          hasMore: false,
+        ),
+      );
+      final withLive = mergeLiveChannelWindowEvent(
+        store,
+        _row('z', createdAt: 10),
+        isTimelineRow: true,
+      );
+
+      expect(flattenChannelWindowEvents(withLive).map((event) => event.id), [
+        'z',
+        'm',
+        'a',
+      ]);
+    });
+
     test('rejects cursor interval and row order violations', () {
       expect(
         () => appendOlderChannelWindow(
@@ -121,25 +185,42 @@ void main() {
       expect(refreshed.pages.single.rows.single.event.id, 'b');
     });
 
-    test('drops live rows at or older than oldest loaded boundary', () {
-      final store = replaceNewestChannelWindow(
-        const ChannelWindowStore.empty(),
-        _page(rows: [_row('a', createdAt: 10), _row('m', createdAt: 9)]),
-      );
-      final ignored = mergeLiveChannelWindowEvent(
-        store,
-        _row('z', createdAt: 8),
-        isTimelineRow: true,
-      );
-      expect(identical(ignored, store), isTrue);
+    test(
+      'keeps the loaded boundary closed but accepts exhausted live rows',
+      () {
+        final store = replaceNewestChannelWindow(
+          const ChannelWindowStore.empty(),
+          _page(
+            rows: [_row('a', createdAt: 10), _row('m', createdAt: 9)],
+            hasMore: true,
+          ),
+        );
+        final ignored = mergeLiveChannelWindowEvent(
+          store,
+          _row('z', createdAt: 8),
+          isTimelineRow: true,
+        );
+        expect(identical(ignored, store), isTrue);
 
-      final merged = mergeLiveChannelWindowEvent(
-        store,
-        _row('live', createdAt: 11),
-        isTimelineRow: true,
-      );
-      expect(merged.liveOverlay.map((event) => event.id), ['live']);
-    });
+        final merged = mergeLiveChannelWindowEvent(
+          store,
+          _row('live', createdAt: 11),
+          isTimelineRow: true,
+        );
+        expect(merged.liveOverlay.map((event) => event.id), ['live']);
+
+        final exhausted = replaceNewestChannelWindow(
+          const ChannelWindowStore.empty(),
+          _page(rows: [_row('a', createdAt: 10)], hasMore: false),
+        );
+        final sameSecond = mergeLiveChannelWindowEvent(
+          exhausted,
+          _row('z', createdAt: 10),
+          isTimelineRow: true,
+        );
+        expect(sameSecond.liveOverlay.map((event) => event.id), ['z']);
+      },
+    );
   });
 
   group('live thread summaries', () {
@@ -454,12 +535,13 @@ ChannelWindowPage _page({
   );
 }
 
-NostrEvent _row(String id, {int createdAt = 10}) => _event(
+NostrEvent _row(String id, {int createdAt = 10, String? ms}) => _event(
   id: id,
   createdAt: createdAt,
   kind: EventKind.streamMessageV2,
-  tags: const [
+  tags: [
     ['h', _channelId],
+    if (ms != null) ['ms', ms],
   ],
 );
 

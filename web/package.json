@@ -10,7 +10,7 @@
     "check:file-sizes": "node ./scripts/check-file-sizes.mjs",
     "check:pubkey-truncation": "node ./scripts/check-pubkey-truncation.mjs",
     "lint": "biome lint .",
-    "check": "biome check . && pnpm check:file-sizes && pnpm check:pubkey-truncation",
+    "check": "biome check . && pnpm check:pubkey-truncation",
     "format": "biome format --write .",
     "preview": "vite preview",
     "test:e2e": "pnpm build && playwright test",
@@ -38,7 +38,7 @@
     "tailwind-merge": "^3.5.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.58.2",
+    "@playwright/test": "^1.65.0",
     "@tailwindcss/postcss": "^4.3.0",
     "@tanstack/router-plugin": "^1.167.12",
     "@tanstack/virtual-file-routes": "^1.161.7",

@@ -86,6 +86,32 @@ export type TimeoutState = {
   expiresAtMs: number | null;
 };
 
+/**
+ * Subscribe to only the boolean "is a timeout in effect" flag. Unlike
+ * {@link useTimeoutState}, this never starts an interval, so it re-renders its
+ * subscriber only when `active` flips (record, clear, or the expiry-driven
+ * clear) — not once a second.
+ *
+ * Use this in an expensive subtree (e.g. a channel pane hosting an
+ * un-memoized message list) that needs to know *whether* the member is timed
+ * out but not the live countdown. Mount the countdown UI
+ * ({@link ComposerTimeoutBanner}) behind this flag; that component owns the
+ * per-second tick and the clear-at-expiry effect, so the tick is scoped to its
+ * lifetime and the flag flips (unmounting it) exactly when the block lifts.
+ *
+ * The snapshot is the raw `active` flag. When a known expiry passes, the flag
+ * stays `true` until the mounted banner's effect calls `clearTimeoutState`,
+ * which flips it to `false` on the next render — so a subscriber gated on this
+ * boolean keeps the composer blocked until the store is actually cleared.
+ */
+export function useTimeoutActive(): boolean {
+  return React.useSyncExternalStore(
+    subscribe,
+    () => snapshot.active,
+    () => false,
+  );
+}
+
 const INACTIVE: TimeoutState = { active: false, expiresAtMs: null };
 
 function currentState(state: TimeoutState, nowMs: number): TimeoutState {
@@ -104,6 +130,14 @@ function currentState(state: TimeoutState, nowMs: number): TimeoutState {
  * Subscribe to the timeout state. Re-renders on record/clear and, while a
  * known-expiry timeout is active, ticks once a second so a countdown UI stays
  * live and auto-clears exactly at expiry.
+ *
+ * When the timeout has a known expiry that has now passed, the store is
+ * proactively cleared via an effect so all subscribers see INACTIVE on the
+ * next render without waiting for a successful send to call clearTimeoutState.
+ *
+ * When the timeout has an unknown (null) expiry the interval is not started —
+ * there is no timestamp to compare against, so ticking would never change
+ * derived state. The block remains until a successful send clears it.
  */
 export function useTimeoutState(): TimeoutState {
   const [nowMs, setNowMs] = React.useState(() => Date.now());
@@ -113,6 +147,18 @@ export function useTimeoutState(): TimeoutState {
     () => INACTIVE,
   );
 
+  const derived = currentState(state, nowMs);
+
+  // When the derived state is INACTIVE but the store still says active,
+  // clear the store so other subscribers see INACTIVE on their next render.
+  React.useEffect(() => {
+    if (!derived.active && state.active) {
+      clearTimeoutState();
+    }
+  }, [derived.active, state.active]);
+
+  // Tick every second only when a known expiry is in play — this drives the
+  // countdown display and the INACTIVE transition exactly at the expiry instant.
   React.useEffect(() => {
     if (!state.active || state.expiresAtMs === null) {
       return;
@@ -126,5 +172,5 @@ export function useTimeoutState(): TimeoutState {
     };
   }, [state.active, state.expiresAtMs]);
 
-  return currentState(state, nowMs);
+  return derived;
 }

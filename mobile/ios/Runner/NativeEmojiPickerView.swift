@@ -1,0 +1,550 @@
+import ImageIO
+import SwiftUI
+import UIKit
+
+struct NativeEmojiPickerView: View {
+  let data: NativeEmojiPickerData
+  let appearance: NativeEmojiPickerAppearance
+  let largeEmoji: Bool
+  let onSelect: (String) -> Void
+  let onSkinToneChanged: (Int) -> Void
+  let onClose: () -> Void
+
+  @State private var query = ""
+  @State private var categorySelection: NativeEmojiCategorySelection
+  @State private var selectedSkinTone: Int
+
+  private var columns: [GridItem] {
+    Array(
+      repeating: GridItem(.flexible(minimum: 36), spacing: 0),
+      count: largeEmoji ? 5 : 8
+    )
+  }
+
+  private let sectionListSpace = "buzz.emoji.sectionList"
+
+  init(
+    data: NativeEmojiPickerData,
+    appearance: NativeEmojiPickerAppearance,
+    largeEmoji: Bool = false,
+    initialSkinTone: Int,
+    onSelect: @escaping (String) -> Void,
+    onSkinToneChanged: @escaping (Int) -> Void,
+    onClose: @escaping () -> Void
+  ) {
+    self.data = data
+    self.appearance = appearance
+    self.largeEmoji = largeEmoji
+    self.onSelect = onSelect
+    self.onSkinToneChanged = onSkinToneChanged
+    self.onClose = onClose
+    _categorySelection = State(
+      initialValue: NativeEmojiCategorySelection(
+        initialSectionID: data.sections.first?.id
+      )
+    )
+    _selectedSkinTone = State(
+      initialValue: validNativeEmojiSkinTone(initialSkinTone)
+    )
+  }
+
+  var body: some View {
+    ScrollViewReader { proxy in
+      VStack(spacing: 0) {
+        header
+        if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+          categoryRail(proxy)
+        }
+        Divider().overlay(Color(uiColor: appearance.divider))
+        pickerContent
+      }
+      .background(Color(uiColor: appearance.surface))
+    }
+  }
+
+  private var header: some View {
+    HStack(spacing: 8) {
+      HStack(spacing: 10) {
+        TablerNativeIcon(symbol: "magnifyingglass")
+          .font(.system(size: 17, weight: .medium))
+          .foregroundStyle(Color(uiColor: appearance.secondaryText))
+        TextField("Search emoji", text: $query)
+          .textInputAutocapitalization(.never)
+          .autocorrectionDisabled(true)
+          .submitLabel(.search)
+          .foregroundStyle(Color(uiColor: appearance.text))
+        if !query.isEmpty {
+          Button {
+            query = ""
+          } label: {
+            TablerNativeIcon(symbol: "xmark.circle.fill")
+              .foregroundStyle(Color(uiColor: appearance.secondaryText))
+          }
+          .buttonStyle(.plain)
+          .accessibilityLabel("Clear search")
+        }
+      }
+      .padding(.horizontal, 14)
+      .frame(height: 44)
+      .background(Color(uiColor: appearance.control), in: Capsule())
+      .overlay {
+        Capsule()
+          .stroke(Color(uiColor: appearance.divider), lineWidth: 1)
+      }
+
+      Button(action: onClose) {
+        TablerNativeIcon(symbol: "xmark")
+          .font(.system(size: 17, weight: .semibold))
+          .foregroundStyle(Color(uiColor: appearance.text))
+          .frame(width: 44, height: 44)
+          .background(Color(uiColor: appearance.control), in: Circle())
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel("Close sheet")
+    }
+    .padding(.horizontal, 16)
+    .padding(.top, 16)
+    .padding(.bottom, 8)
+  }
+
+  private func categoryRail(_ proxy: ScrollViewProxy) -> some View {
+    HStack(spacing: 0) {
+      ForEach(data.sections) { section in
+        NativeEmojiCategoryButton(
+          section: section,
+          appearance: appearance,
+          selection: categorySelection
+        ) {
+          categorySelection.select(section.id)
+          // Category navigation is a frequent shortcut. Keeping it immediate
+          // means an in-progress proxy animation can never fight a finger drag.
+          proxy.scrollTo("section-\(section.id)", anchor: .top)
+        }
+        .frame(maxWidth: .infinity)
+      }
+      Divider()
+        .frame(height: 24)
+        .overlay(Color(uiColor: appearance.divider))
+      skinToneSelector
+        .frame(maxWidth: .infinity)
+    }
+    .padding(.horizontal, 16)
+    .frame(height: 44)
+  }
+
+  private var skinToneSelector: some View {
+    Menu {
+      ForEach(nativeEmojiSkinTones) { tone in
+        Button {
+          selectedSkinTone = tone.id
+          onSkinToneChanged(tone.id)
+        } label: {
+          Label {
+            Text(tone.label)
+          } icon: {
+            Image(uiImage: skinTonePreviewImage(tone))
+              .renderingMode(.original)
+          }
+        }
+      }
+    } label: {
+      skinToneDot(nativeEmojiSkinTones[selectedSkinTone])
+        .frame(maxWidth: .infinity)
+        .frame(height: 36)
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel("Skin tone")
+  }
+
+  private func skinToneDot(_ tone: NativeEmojiSkinTone) -> some View {
+    Circle()
+      .fill(Color(uiColor: tone.color))
+      .frame(width: 16, height: 16)
+      .overlay {
+        Circle()
+          .fill(
+            LinearGradient(
+              colors: [.white.opacity(0.2), .clear],
+              startPoint: .top,
+              endPoint: .bottom
+            )
+          )
+          .blendMode(.overlay)
+      }
+      .overlay {
+        Circle().stroke(.black.opacity(0.8), lineWidth: 1)
+      }
+  }
+
+  private func skinTonePreviewImage(_ tone: NativeEmojiSkinTone) -> UIImage {
+    let size = CGSize(width: 16, height: 16)
+    return UIGraphicsImageRenderer(size: size).image { rendererContext in
+      let context = rendererContext.cgContext
+      let rect = CGRect(origin: .zero, size: size).insetBy(dx: 0.5, dy: 0.5)
+      let circle = UIBezierPath(ovalIn: rect)
+
+      tone.color.setFill()
+      circle.fill()
+
+      if let gradient = CGGradient(
+        colorsSpace: CGColorSpaceCreateDeviceRGB(),
+        colors: [
+          UIColor.white.withAlphaComponent(0.2).cgColor,
+          UIColor.clear.cgColor,
+        ] as CFArray,
+        locations: [0, 1]
+      ) {
+        context.saveGState()
+        circle.addClip()
+        context.setBlendMode(.overlay)
+        context.drawLinearGradient(
+          gradient,
+          start: CGPoint(x: size.width / 2, y: 0),
+          end: CGPoint(x: size.width / 2, y: size.height),
+          options: []
+        )
+        context.restoreGState()
+      }
+
+      UIColor.black.withAlphaComponent(0.8).setStroke()
+      circle.lineWidth = 1
+      circle.stroke()
+    }
+  }
+
+  @ViewBuilder
+  private var pickerContent: some View {
+    let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmedQuery.isEmpty {
+      sectionList(data.sections, tracksSelection: true)
+    } else {
+      let custom = NativeEmojiSearch.results(
+        query: trimmedQuery,
+        items: data.customItems
+      )
+      let standard = NativeEmojiSearch.results(
+        query: trimmedQuery,
+        items: data.standardItems
+      )
+      let sections = [
+        NativeEmojiSection(
+          id: "search-custom",
+          title: "Custom",
+          systemImage: "sparkles",
+          items: custom
+        ),
+        NativeEmojiSection(
+          id: "search-standard",
+          title: "Emoji",
+          systemImage: "face.smiling",
+          items: standard
+        ),
+      ].filter { !$0.items.isEmpty }
+
+      if sections.isEmpty {
+        VStack(spacing: 10) {
+          TablerNativeIcon(symbol: "magnifyingglass")
+            .font(.system(size: 28))
+          Text("No emoji found").font(.body)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .foregroundStyle(Color(uiColor: appearance.secondaryText))
+      } else {
+        sectionList(sections, tracksSelection: false)
+      }
+    }
+  }
+
+  private func sectionList(
+    _ sections: [NativeEmojiSection],
+    tracksSelection: Bool
+  ) -> some View {
+    ScrollView {
+      LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
+        ForEach(sections) { section in
+          Section {
+            LazyVGrid(columns: columns, spacing: 0) {
+              ForEach(section.items) { item in
+                emojiButton(item)
+              }
+            }
+            .padding(.horizontal, 16)
+          } header: {
+            HStack {
+              Text(section.title)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(Color(uiColor: appearance.secondaryText))
+              Spacer()
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 30)
+            .background(Color(uiColor: appearance.surface))
+            .background(sectionOffsetReporter(id: section.id))
+            .id("section-\(section.id)")
+          }
+        }
+      }
+      .padding(.bottom, 8)
+      .background(contentBoundaryReporter())
+    }
+    .coordinateSpace(name: sectionListSpace)
+    .background(viewportBoundaryReporter())
+    .scrollDismissesKeyboard(.interactively)
+    .onPreferenceChange(NativeEmojiSectionOffsetsKey.self) { offsets in
+      guard tracksSelection else { return }
+      categorySelection.select(
+        NativeEmojiCategoryTracker.selectedSectionID(
+          order: data.sections.map(\.id),
+          offsets: offsets,
+          viewportTop: 0,
+          viewportBottom: offsets[nativeEmojiViewportBottomKey],
+          contentBottom: offsets[nativeEmojiContentBottomKey],
+          currentSelection: categorySelection.selectedSectionID
+        )
+      )
+    }
+  }
+
+  private func sectionOffsetReporter(id: String) -> some View {
+    GeometryReader { geometry in
+      Color.clear.preference(
+        key: NativeEmojiSectionOffsetsKey.self,
+        value: [id: geometry.frame(in: .named(sectionListSpace)).minY]
+      )
+    }
+  }
+
+  // The end of the scrolling content, relative to the viewport top. At the
+  // clamped bottom of an overflowing list this converges on the viewport
+  // height, which lets the tracker highlight a short final section that can
+  // never scroll its own header to the top.
+  private func contentBoundaryReporter() -> some View {
+    GeometryReader { geometry in
+      Color.clear.preference(
+        key: NativeEmojiSectionOffsetsKey.self,
+        value: [
+          nativeEmojiContentBottomKey:
+            geometry.frame(in: .named(sectionListSpace)).maxY
+        ]
+      )
+    }
+  }
+
+  // The fixed viewport height, reported through the same preference stream so
+  // it stays consistent with the section offsets in each update.
+  private func viewportBoundaryReporter() -> some View {
+    GeometryReader { geometry in
+      Color.clear.preference(
+        key: NativeEmojiSectionOffsetsKey.self,
+        value: [nativeEmojiViewportBottomKey: geometry.size.height]
+      )
+    }
+  }
+
+  private func emojiButton(_ item: NativeEmojiItem) -> some View {
+    let value = displayValue(for: item)
+    return Button {
+      onSelect(value)
+    } label: {
+      Group {
+        if let url = item.imageURL {
+          NativeEmojiRemoteImage(
+            url: url,
+            fallbackColor: appearance.secondaryText
+          )
+          .frame(width: largeEmoji ? 48 : 28, height: largeEmoji ? 48 : 28)
+        } else {
+          Text(value).font(.system(size: largeEmoji ? 48 : 28))
+        }
+      }
+      .frame(maxWidth: .infinity)
+      .frame(height: largeEmoji ? 60 : 44)
+      .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel(item.name)
+  }
+
+  private func displayValue(for item: NativeEmojiItem) -> String {
+    guard item.imageURL == nil else { return item.value }
+    guard item.skinVariants.indices.contains(selectedSkinTone) else {
+      return item.skinVariants.first ?? item.value
+    }
+    return item.skinVariants[selectedSkinTone]
+  }
+}
+
+/// Observes only the rail selection. Keeping this in a leaf view prevents a
+/// scroll-frame highlight update from rebuilding the picker grid itself.
+private struct NativeEmojiCategoryButton: View {
+  let section: NativeEmojiSection
+  let appearance: NativeEmojiPickerAppearance
+  @ObservedObject var selection: NativeEmojiCategorySelection
+  let onSelect: () -> Void
+
+  var body: some View {
+    let isSelected = selection.selectedSectionID == section.id
+    Button(action: onSelect) {
+      TablerNativeIcon(symbol: section.systemImage)
+        .font(.system(size: 18, weight: .medium))
+        .foregroundStyle(
+          Color(
+            uiColor: isSelected
+              ? appearance.accent : appearance.secondaryText
+          )
+        )
+        .frame(maxWidth: .infinity)
+        .frame(height: 36)
+        .background(
+          isSelected ? Color(uiColor: appearance.control) : Color.clear,
+          in: Circle()
+        )
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel(section.title)
+    .accessibilityAddTraits(isSelected ? .isSelected : [])
+  }
+}
+
+struct NativeEmojiRemoteImage: View {
+  let url: URL
+  let fallbackColor: UIColor
+
+  @State private var phase: Phase = .loading
+
+  private enum Phase {
+    case loading
+    case success(UIImage)
+    case failure
+  }
+
+  var body: some View {
+    Group {
+      switch phase {
+      case .loading:
+        ProgressView().controlSize(.mini)
+      case .success(let image):
+        NativeEmojiAnimatedImage(image: image)
+      case .failure:
+        TablerNativeIcon(symbol: "sparkles")
+          .foregroundStyle(Color(uiColor: fallbackColor))
+      }
+    }
+    .task(id: url) {
+      do {
+        phase = .success(try await NativeEmojiRemoteImageLoader.image(for: url))
+      } catch {
+        if !Task.isCancelled { phase = .failure }
+      }
+    }
+    // Keep only the first frame of a cell scrolled away, as before animation:
+    // reappearing decodes every frame again anyway.
+    .onDisappear {
+      if case .success(let image) = phase, let first = image.images?.first {
+        phase = .success(first)
+      }
+    }
+  }
+}
+
+/// SwiftUI's `Image` draws only the first frame of an animated `UIImage`;
+/// a `UIImageView` plays every frame.
+/// With Reduce Motion on it shows the first frame, following the setting live.
+private struct NativeEmojiAnimatedImage: UIViewRepresentable {
+  let image: UIImage
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+  func makeUIView(context: Context) -> UIImageView {
+    let view = UIImageView()
+    view.contentMode = .scaleAspectFit
+    view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    view.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+    return view
+  }
+
+  func updateUIView(_ view: UIImageView, context: Context) {
+    let shown = reduceMotion ? image.images?.first ?? image : image
+    if view.image !== shown { view.image = shown }
+  }
+}
+
+/// Custom emoji, decoded at the picker's glyph size. Flutter serves the bytes
+/// from its memory and disk caches, so a reopen never downloads again.
+enum NativeEmojiRemoteImageLoader {
+  /// The picker's 28-point custom emoji glyph at 3x.
+  private static let maximumPixelSize = 84
+
+  @MainActor
+  static func image(for url: URL) async throws -> UIImage {
+    let bytes = try await NativeEmojiPickerCoordinator.mediaBytes(for: url)
+    // Bytes can arrive after the cell left; don't decode for a dead view
+    // while visible cells wait for the decode threads.
+    try Task.checkCancellation()
+    // Cached bytes skip Flutter's download gate, so decodes have their own.
+    try await NativeEmojiDecodeGate.acquire()
+    defer { NativeEmojiDecodeGate.release() }
+    let decode = Task.detached(priority: .userInitiated) {
+      NativeMessageImageLoader.decode(bytes, maximumPixelSize: maximumPixelSize) {
+        Task.isCancelled
+      }
+    }
+    // A cell that leaves stops its decode between frames.
+    let decoded = await withTaskCancellationHandler {
+      await decode.value
+    } onCancel: {
+      decode.cancel()
+    }
+    try Task.checkCancellation()
+    guard let decoded else { throw NativeEmojiRemoteImageError.invalidImage }
+    return decoded
+  }
+}
+
+/// Admits four custom emoji decodes at a time, in request order. A waiter
+/// whose cell leaves gives up its place.
+@MainActor
+enum NativeEmojiDecodeGate {
+  static let limit = 4
+  private static var active = 0
+  private static var waiting: [(id: UUID, continuation: CheckedContinuation<Void, Error>)] = []
+
+  static func acquire() async throws {
+    if active < limit {
+      active += 1
+      return
+    }
+    let id = UUID()
+    try await withTaskCancellationHandler {
+      try await withCheckedThrowingContinuation { continuation in
+        waiting.append((id, continuation))
+      }
+    } onCancel: {
+      Task { @MainActor in
+        guard let index = waiting.firstIndex(where: { $0.id == id }) else { return }
+        waiting.remove(at: index).continuation.resume(throwing: CancellationError())
+      }
+    }
+  }
+
+  /// Hands the slot to the next waiter, if any.
+  static func release() {
+    if waiting.isEmpty {
+      active -= 1
+    } else {
+      waiting.removeFirst().continuation.resume()
+    }
+  }
+}
+
+enum NativeEmojiRemoteImageError: Error {
+  case invalidImage
+}
+
+private struct TablerNativeIcon: View {
+  let symbol: String
+  var body: some View {
+    if let image = NativeTabler.image(symbol) {
+      Image(uiImage: image).renderingMode(.template)
+    }
+  }
+}

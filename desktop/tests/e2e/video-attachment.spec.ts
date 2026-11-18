@@ -1,4 +1,4 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 import { expectCornerRadiusPx, expectSmoothCorners } from "../helpers/css";
@@ -64,15 +64,20 @@ function emitMockMessage(
   page: Page,
   channelName: string,
   content: string,
-  options: { extraTags?: string[][]; parentEventId?: string } = {},
+  options: {
+    createdAt?: number;
+    extraTags?: string[][];
+    parentEventId?: string;
+  } = {},
 ) {
   return page.evaluate(
-    ({ channelName, content, extraTags, parentEventId }) => {
+    ({ channelName, content, createdAt, extraTags, parentEventId }) => {
       const emit = (
         window as Window & {
           __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
             channelName: string;
             content: string;
+            createdAt?: number;
             extraTags?: string[][];
             parentEventId?: string;
           }) => unknown;
@@ -81,11 +86,18 @@ function emitMockMessage(
       if (!emit) {
         throw new Error("Mock message emitter is unavailable.");
       }
-      return emit({ channelName, content, extraTags, parentEventId });
+      return emit({
+        channelName,
+        content,
+        createdAt,
+        extraTags,
+        parentEventId,
+      });
     },
     {
       channelName,
       content,
+      createdAt: options.createdAt,
       extraTags: options.extraTags,
       parentEventId: options.parentEventId,
     },
@@ -233,7 +245,9 @@ async function openReviewWithPostedTimecode(
 
   await page.getByRole("button", { name: "Attach file" }).click();
   await expect(
-    page.getByTestId("message-composer").getByAltText("Video attachment bbbb"),
+    page
+      .getByTestId("message-composer")
+      .getByRole("button", { name: "Video attachment bbbb", exact: true }),
   ).toBeVisible();
   await page.getByTestId("send-message").click();
   await expect(page.getByText("Sending")).toHaveCount(0);
@@ -289,8 +303,12 @@ test("video upload previews use poster frames and inline videos open review mode
   await page.getByRole("button", { name: "Attach file" }).click();
 
   const composer = page.getByTestId("message-composer");
-  const composerPoster = composer.getByAltText("Video attachment bbbb");
-  await expect(composerPoster).toBeVisible();
+  const composerTrigger = composer.getByRole("button", {
+    name: "Video attachment bbbb",
+    exact: true,
+  });
+  await expect(composerTrigger).toBeVisible();
+  const composerPoster = composerTrigger.locator("img");
   await expect(composerPoster).toHaveAttribute("src", POSTER_DATA_URL);
 
   const box = await composerPoster.boundingBox();
@@ -889,18 +907,24 @@ test("inline video hover reveals a timeline without a second play control", asyn
     )
     .toBe("50%");
 
-  const restingControlsBox = await controls.boundingBox();
+  // The timeline can shift the whole row by a pixel while the pointer moves
+  // in, so measure the controls against their own player in a single frame.
+  const controlsOffset = () =>
+    controls.evaluate((element) => {
+      const playerTop = element
+        .closest('[data-testid="video-player"]')
+        ?.getBoundingClientRect().top;
+      return element.getBoundingClientRect().top - (playerTop ?? Number.NaN);
+    });
+  const restingControlsOffset = await controlsOffset();
   const restingIconTransform = await centerIcon.evaluate(
     (element) => window.getComputedStyle(element).transform,
   );
-  expect(restingControlsBox).not.toBeNull();
   await expect(controls).toHaveCSS("opacity", "0");
   await surface.hover();
   await expect(controls).toHaveCSS("opacity", "1");
-  const hoveredControlsBox = await controls.boundingBox();
-  expect(hoveredControlsBox).not.toBeNull();
   expect(
-    Math.abs((hoveredControlsBox?.y ?? 0) - (restingControlsBox?.y ?? 0)),
+    Math.abs((await controlsOffset()) - restingControlsOffset),
   ).toBeLessThan(0.5);
   await expect
     .poll(() =>
@@ -930,6 +954,67 @@ test("inline video hover reveals a timeline without a second play control", asyn
   await expect
     .poll(() => video.evaluate((element) => element.paused))
     .toBe(true);
+});
+
+test("expanded video controls fade with the video hover boundary", async ({
+  page,
+}) => {
+  await installVideoReviewHarness(page);
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await emitMockMessage(page, "general", `![video](${VIDEO_URL})`, {
+    extraTags: [
+      [
+        "imeta",
+        `url ${VIDEO_URL}`,
+        "m video/mp4",
+        `x ${VIDEO_SHA}`,
+        "size 987654",
+        "dim 160x80",
+        "duration 12.5",
+        `image ${POSTER_DATA_URL}`,
+        "filename launch-demo.mp4",
+      ],
+    ],
+  });
+
+  await page.getByRole("button", { name: "Open video review" }).last().click();
+
+  const dialog = page.getByTestId("video-review-dialog");
+  const mediaSurface = dialog.locator(".video-review-media-surface");
+  const controls = dialog.locator(".video-review-controls");
+  await expect(mediaSurface).toBeVisible();
+
+  await dialog.getByTestId("video-review-comments-panel").hover();
+  const restingControlsBox = await controls.boundingBox();
+  expect(restingControlsBox).not.toBeNull();
+  await expect(controls).toHaveCSS("opacity", "0");
+
+  await mediaSurface.hover();
+  await expect(controls).toHaveCSS("opacity", "1");
+  const hoveredControlsBox = await controls.boundingBox();
+  expect(hoveredControlsBox).not.toBeNull();
+  expect(
+    Math.abs((hoveredControlsBox?.y ?? 0) - (restingControlsBox?.y ?? 0)),
+  ).toBeLessThan(0.5);
+  await expect(controls).toHaveCSS("transition-property", "opacity");
+  await expect(controls).toHaveCSS("transition-duration", "0.15s");
+
+  const playButton = controls.getByRole("button", { name: /review video$/ });
+  await playButton.click();
+  await expect(playButton).toBeFocused();
+  await dialog.getByTestId("video-review-comments-panel").hover();
+  await expect(controls).toHaveCSS("opacity", "0");
+
+  await page.keyboard.press("Tab");
+  await expect(controls).toHaveCSS("opacity", "1");
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(controls).toHaveCSS("transition-property", "none");
 });
 
 test("video replies in threads open the review comments view", async ({
@@ -1380,9 +1465,15 @@ test("dark accent uses a contrast-safe review foreground", async ({ page }) => {
 // player and, for the relay case, a resolvable download URL.
 function emitVideoMessage(
   page: Page,
-  { url, sha, filename }: { url: string; sha: string; filename: string },
+  {
+    url,
+    sha,
+    filename,
+    createdAt,
+  }: { url: string; sha: string; filename: string; createdAt?: number },
 ) {
   return emitMockMessage(page, "general", `![video](${url})`, {
+    createdAt,
     extraTags: [
       [
         "imeta",
@@ -1399,6 +1490,31 @@ function emitVideoMessage(
   });
 }
 
+// A live row reaches the timeline floor in two scroll steps: first to the
+// virtualizer's estimated floor, which leaves a video row hanging under the
+// composer overlay, then to its measured floor. Right-click only once the
+// player clears the composer. Earlier, the click lands on the composer, and
+// the second step's scroll dismisses any menu that did open.
+async function rightClickSettledPlayer(player: Locator) {
+  await expect
+    .poll(() =>
+      player.evaluate((element) => {
+        const composer = document.querySelector(
+          '[data-testid="message-composer"]',
+        );
+        return (
+          composer !== null &&
+          element.getBoundingClientRect().bottom <=
+            composer.getBoundingClientRect().top
+        );
+      }),
+    )
+    .toBe(true);
+  // No `force`: the Play button is inside the player, so the hit-target check
+  // passes, and the contextmenu still reaches the surface's capture handler.
+  await player.click({ button: "right" });
+}
+
 test("right-click menus expose distinct selectors for links, relay video, and off-relay video", async ({
   page,
 }) => {
@@ -1408,12 +1524,15 @@ test("right-click menus expose distinct selectors for links, relay video, and of
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
+  // One second per message keeps the three rows in a fixed order.
+  const createdAt = Math.floor(Date.now() / 1000);
 
   // ── Link menu: Open link + Copy link, never image/video attributes ────────
   await emitMockMessage(
     page,
     "general",
     "Docs at https://example.com/handbook",
+    { createdAt },
   );
   const link = page.getByRole("link", { name: "https://example.com/handbook" });
   await expect(link).toBeVisible();
@@ -1446,17 +1565,17 @@ test("right-click menus expose distinct selectors for links, relay video, and of
 
   // ── Relay video menu: Download video + Copy link, appearing only once the
   // relay origin resolves (the reactivity fix) ─────────────────────────────
-  await emitVideoMessage(page, {
+  const relayMessage = (await emitVideoMessage(page, {
     url: MENU_RELAY_VIDEO_URL,
     sha: MENU_RELAY_VIDEO_SHA,
     filename: "relay-clip.mp4",
-  });
-  const relayPlayer = page.getByTestId("video-player").last();
+    createdAt: createdAt + 1,
+  })) as { id: string };
+  const relayPlayer = page
+    .locator(`[data-message-id="${relayMessage.id}"]`)
+    .getByTestId("video-player");
   await expect(relayPlayer).toBeVisible();
-  // Right-click the player surface. `force` skips the actionability guard: the
-  // Play-button overlay sits above the video, but the contextmenu event still
-  // capture-bubbles to the surface handler that opens the menu.
-  await relayPlayer.click({ button: "right", force: true });
+  await rightClickSettledPlayer(relayPlayer);
 
   const videoMenu = page.locator("[data-video-context-menu]");
   await expect(videoMenu).toBeVisible();
@@ -1492,14 +1611,17 @@ test("right-click menus expose distinct selectors for links, relay video, and of
   await expect(page.locator("[data-video-context-menu]")).toHaveCount(0);
 
   // ── Off-relay video control: renders and offers Copy link, never Download ─
-  await emitVideoMessage(page, {
+  const offRelayMessage = (await emitVideoMessage(page, {
     url: MENU_OFF_RELAY_VIDEO_URL,
     sha: MENU_OFF_RELAY_VIDEO_SHA,
     filename: "external-clip.mp4",
-  });
-  const offRelayPlayer = page.getByTestId("video-player").last();
+    createdAt: createdAt + 2,
+  })) as { id: string };
+  const offRelayPlayer = page
+    .locator(`[data-message-id="${offRelayMessage.id}"]`)
+    .getByTestId("video-player");
   await expect(offRelayPlayer).toBeVisible();
-  await offRelayPlayer.click({ button: "right", force: true });
+  await rightClickSettledPlayer(offRelayPlayer);
 
   const offRelayMenu = page.locator("[data-video-context-menu]");
   await expect(offRelayMenu).toBeVisible();
@@ -1511,4 +1633,92 @@ test("right-click menus expose distinct selectors for links, relay video, and of
   await expect(
     offRelayMenu.getByRole("button", { name: "Download video" }),
   ).toHaveCount(0);
+});
+
+test("playback speed persists across videos and reloads", async ({ page }) => {
+  await installVideoReviewHarness(page);
+
+  const openGeneralWithVideo = async (
+    url: string,
+    sha: string,
+    filename: string,
+  ) => {
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await waitForMockLiveSubscription(page, "general");
+    const emitted = (await emitMockMessage(
+      page,
+      "general",
+      `![video](${url})`,
+      {
+        extraTags: [
+          [
+            "imeta",
+            `url ${url}`,
+            "m video/mp4",
+            `x ${sha}`,
+            "size 987654",
+            "dim 160x80",
+            "duration 12.5",
+            `image ${POSTER_DATA_URL}`,
+            `filename ${filename}`,
+          ],
+        ],
+      },
+    )) as { id: string };
+    const player = page
+      .locator(`[data-message-id="${emitted.id}"]`)
+      .getByTestId("video-player");
+    await expect(player).toBeVisible();
+    await player.getByRole("button", { name: "Play video" }).click();
+    return player;
+  };
+
+  await page.goto("/");
+  const firstPlayer = await openGeneralWithVideo(
+    VIDEO_URL,
+    VIDEO_SHA,
+    "launch-demo.mp4",
+  );
+  const firstSpeedButton = firstPlayer.getByTestId("video-inline-speed");
+  await expect(firstSpeedButton).toHaveText("1x");
+  await firstSpeedButton.click();
+  await page
+    .getByTestId("video-inline-speed-menu")
+    .getByRole("button", { name: "2x", exact: true })
+    .click();
+  await expect(firstSpeedButton).toHaveText("2x");
+
+  // A different video in the same session starts at the chosen speed.
+  const secondPlayer = await openGeneralWithVideo(
+    MENU_RELAY_VIDEO_URL,
+    MENU_RELAY_VIDEO_SHA,
+    "second-demo.mp4",
+  );
+  const secondVideo = secondPlayer.locator("video");
+  await expect(secondPlayer.getByTestId("video-inline-speed")).toHaveText("2x");
+  await expect
+    .poll(() =>
+      secondVideo.evaluate((video) => (video as HTMLVideoElement).playbackRate),
+    )
+    .toBe(2);
+
+  // And the preference survives an app restart.
+  await page.reload();
+  const reloadedPlayer = await openGeneralWithVideo(
+    VIDEO_URL,
+    VIDEO_SHA,
+    "launch-demo.mp4",
+  );
+  const reloadedVideo = reloadedPlayer.locator("video");
+  await expect(reloadedPlayer.getByTestId("video-inline-speed")).toHaveText(
+    "2x",
+  );
+  await expect
+    .poll(() =>
+      reloadedVideo.evaluate(
+        (video) => (video as HTMLVideoElement).playbackRate,
+      ),
+    )
+    .toBe(2);
 });

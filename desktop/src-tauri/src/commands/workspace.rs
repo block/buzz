@@ -5,10 +5,36 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::app_state::AppState;
 use crate::managed_agents::{
-    effective_repos_dir, ensure_repos_symlink, nest_dir, restore_managed_agents_on_launch,
-    try_regenerate_nest, write_persisted_repos_dir,
+    effective_repos_dir, ensure_repos_symlink, nest_dir, try_regenerate_nest,
+    write_persisted_repos_dir,
 };
 use crate::relay;
+
+const WORKSPACE_APPLY_SUPERSEDED: &str = "workspace apply superseded by a newer request";
+
+fn next_apply_generation(generation: &std::sync::atomic::AtomicU64) -> u64 {
+    generation.fetch_add(1, Ordering::AcqRel).wrapping_add(1)
+}
+
+fn assert_current_apply_generation(
+    generation: &std::sync::atomic::AtomicU64,
+    ticket: u64,
+) -> Result<(), String> {
+    if generation.load(Ordering::Acquire) == ticket {
+        Ok(())
+    } else {
+        Err(WORKSPACE_APPLY_SUPERSEDED.to_string())
+    }
+}
+
+async fn begin_workspace_apply(
+    lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    generation: &std::sync::atomic::AtomicU64,
+) -> (tokio::sync::OwnedMutexGuard<()>, u64) {
+    let guard = lock.lock_owned().await;
+    let ticket = next_apply_generation(generation);
+    (guard, ticket)
+}
 
 /// Adopt the pre-scoping global retention database's pending rows into `scope`.
 ///
@@ -110,6 +136,48 @@ pub async fn validate_repos_dir(dir: String) -> Result<(), String> {
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
+/// Refresh avatar source trust without reconnecting or restoring the workspace.
+/// Only the user's saved community list may supply these origins.
+#[tauri::command]
+pub fn set_agent_avatar_communities(
+    relay_urls: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    *state
+        .agent_avatar_communities
+        .lock()
+        .map_err(|e| e.to_string())? = relay_urls;
+    Ok(())
+}
+
+/// Refuse local agent pairs on a community's relay after it is removed from
+/// this device; see `managed_agents::remove_relay`. The frontend calls this
+/// only when no other saved community uses the relay, before its stop sweep.
+///
+/// Leaves `relay_url_override` untouched: the outgoing relay stays applied
+/// until the next `apply_workspace` replaces it. Never takes
+/// `workspace_apply_lock`, which launch restore holds while waiting on the
+/// transition lock this takes.
+#[tauri::command]
+pub async fn remove_community_relay(relay_url: String, app: AppHandle) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        crate::managed_agents::remove_relay(&app.state::<AppState>(), &relay_url)
+    })
+    .await
+    .map_err(|e| format!("remove_community_relay task failed: {e}"))?
+}
+
+/// Admit local agent pairs on a relay again after a saved community on it is
+/// explicitly re-added, whether or not it becomes the active community.
+#[tauri::command]
+pub async fn readd_community_relay(relay_url: String, app: AppHandle) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        crate::managed_agents::readd_relay(&app.state::<AppState>(), &relay_url)
+    })
+    .await
+    .map_err(|e| format!("readd_community_relay task failed: {e}"))?
+}
+
 /// Apply a workspace's configuration to the backend session.
 ///
 /// Called by the frontend on app init (after reload) to configure the
@@ -131,11 +199,24 @@ pub async fn apply_workspace(
     agent_managed_profiles: Option<bool>,
     app: AppHandle,
 ) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    // Take the generation only after entering the serialized transaction. An
+    // apply that is already running remains authoritative until it releases
+    // the lock; the next apply then advances the generation. This keeps every
+    // awaited reconciliation/event-sync phase inside one ordered transaction.
+    let (apply_guard, apply_generation) = begin_workspace_apply(
+        state.workspace_apply_lock.clone(),
+        &state.workspace_apply_generation,
+    )
+    .await;
+
     let restore_app = app.clone();
+    let apply_app = app.clone();
     // Capture the caller's relay before the blocking apply. Reading shared
     // state afterward could pick up a newer concurrent community switch.
     let profile_reconcile_relay = relay_url.clone();
     tokio::task::spawn_blocking(move || {
+        let app = apply_app;
         let state = app.state::<AppState>();
 
         // ── Validate before mutating ──────────────────────────────────────────
@@ -166,6 +247,11 @@ pub async fn apply_workspace(
             None => None,
         };
 
+        // Defense in depth: this transaction still owns the serialized apply
+        // generation before making its first mutation. Normal queued applies
+        // cannot advance it until this transaction releases the guard.
+        assert_current_apply_generation(&state.workspace_apply_generation, apply_generation)?;
+
         // ── Apply all state changes (nothing below can fail) ──────────────────
         {
             let mut override_guard = state.relay_url_override.lock().map_err(|e| e.to_string())?;
@@ -184,9 +270,8 @@ pub async fn apply_workspace(
         // experiment before launch-time restore can spawn any agents. Missing
         // means the stable behavior: desktop remains authoritative.
         state
-            .managed_agent_profile_reconcile_enabled
+            .managed_agent_profile_reconcile_enabled()
             .store(!agent_managed_profiles.unwrap_or(false), Ordering::Release);
-
         // ── Filesystem side-effect (non-fatal) ────────────────────────────────
         // Persist the *effective* repos_dir (None when the candidate failed
         // validation) for the backend to read at boot, then re-point REPOS to
@@ -213,6 +298,8 @@ pub async fn apply_workspace(
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))??;
+
+    assert_current_apply_generation(&state.workspace_apply_generation, apply_generation)?;
 
     let state = restore_app.state::<AppState>();
     super::agents::provider_access::reconcile_on_workspace_apply(&restore_app, &state).await?;
@@ -272,18 +359,24 @@ pub async fn apply_workspace(
     let restore_pending = state
         .managed_agent_restore_pending
         .swap(false, Ordering::AcqRel);
+    // Scheduled (admission captured) before the task is spawned: a community
+    // removal that lands before restore begins must still refuse it.
+    let restore = restore_pending.then(|| {
+        crate::managed_agents::launch_restore_task(
+            restore_app.clone(),
+            crate::managed_agents::live_process_sweeps,
+        )
+    });
 
-    // The coordinator starts before React applies the selected workspace, so
-    // its startup publication may have used the fallback relay and placeholder
-    // identity. Correct it off the command path so an unavailable relay cannot
-    // hold the frontend on its loading gate. On initial launch, restore MeshLLM
-    // first so a slow stopped-status request cannot overwrite a newly restored
-    // serving status, then restore managed agents after the admission identity
-    // has been published (or the bounded publication attempt has timed out).
+    // Transfer the apply guard to launch restoration. The command can return
+    // promptly, but a queued workspace cannot mutate relay/identity until the
+    // restore has completed every mutable workspace read and side effect.
     #[cfg(feature = "mesh-llm")]
     {
+        let restore_lock = apply_guard;
         let app = restore_app.clone();
         tauri::async_runtime::spawn(async move {
+            let _restore_lock = restore_lock;
             let state = app.state::<AppState>();
             if restore_pending {
                 if let Err(error) =
@@ -293,28 +386,79 @@ pub async fn apply_workspace(
                 }
             }
             crate::mesh_llm::publish_current_status_once(&app, "workspace apply").await;
-            if restore_pending {
-                if let Err(error) =
-                    restore_managed_agents_on_launch(&app, &state.shutdown_started).await
-                {
+            if let Some(restore) = restore {
+                if let Err(error) = restore.await {
                     eprintln!("buzz-desktop: failed to restore managed agents: {error}");
                 }
             }
         });
+        Ok(())
     }
 
     #[cfg(not(feature = "mesh-llm"))]
-    if restore_pending {
-        let app = restore_app.clone();
+    if let Some(restore) = restore {
+        let restore_lock = apply_guard;
         tauri::async_runtime::spawn(async move {
-            let state = app.state::<AppState>();
-            if let Err(error) =
-                restore_managed_agents_on_launch(&app, &state.shutdown_started).await
-            {
+            let _restore_lock = restore_lock;
+            if let Err(error) = restore.await {
                 eprintln!("buzz-desktop: failed to restore managed agents: {error}");
             }
         });
+        return Ok(());
     }
 
-    Ok(())
+    #[cfg(not(feature = "mesh-llm"))]
+    {
+        assert_current_apply_generation(&state.workspace_apply_generation, apply_generation)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    };
+
+    use super::{assert_current_apply_generation, begin_workspace_apply, next_apply_generation};
+
+    #[test]
+    fn explicit_newer_generation_supersedes_older_ticket() {
+        let generation = AtomicU64::new(0);
+        let older = next_apply_generation(&generation);
+        let newer = next_apply_generation(&generation);
+
+        let error = assert_current_apply_generation(&generation, older).unwrap_err();
+        assert!(error.contains("superseded"), "{error}");
+        assert_current_apply_generation(&generation, newer).unwrap();
+    }
+
+    #[tokio::test]
+    async fn queued_apply_cannot_supersede_running_transaction_or_restore_phase() {
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let generation = Arc::new(AtomicU64::new(0));
+        let (running_guard, running_ticket) =
+            begin_workspace_apply(Arc::clone(&lock), &generation).await;
+
+        let queued_lock = Arc::clone(&lock);
+        let queued_generation = Arc::clone(&generation);
+        let queued = tokio::spawn(async move {
+            let (_guard, ticket) = begin_workspace_apply(queued_lock, &queued_generation).await;
+            ticket
+        });
+        tokio::task::yield_now().await;
+
+        // A queued workspace has not advanced the generation, so every awaited
+        // phase of the running transaction, including one-shot launch restore,
+        // remains authoritative while it holds the lock.
+        assert_eq!(generation.load(Ordering::Acquire), running_ticket);
+        assert_current_apply_generation(&generation, running_ticket).unwrap();
+        assert!(!queued.is_finished());
+
+        drop(running_guard);
+        let queued_ticket = queued.await.unwrap();
+        assert!(queued_ticket > running_ticket);
+        assert_current_apply_generation(&generation, queued_ticket).unwrap();
+    }
 }

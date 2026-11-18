@@ -1,0 +1,449 @@
+import BuzzPushKit
+import Flutter
+import Intents
+import UserNotifications
+import XCTest
+
+@testable import Buzz
+
+final class BuzzCommunicationNotificationTests: XCTestCase {
+  func testIntentUsesVerifiedSenderAvatarAndGroupName() throws {
+    let resolution = communicationResolution(
+      displayName: "Alice",
+      groupName: "General",
+      avatarPNG: Data([0x89, 0x50, 0x4E, 0x47])
+    )
+    let descriptor = try XCTUnwrap(
+      BuzzCommunicationNotificationDescriptor(resolution: resolution)
+    )
+
+    let intent = BuzzCommunicationNotificationPresenter.makeIntent(descriptor)
+
+    XCTAssertEqual(intent.sender?.displayName, "Alice")
+    XCTAssertEqual(intent.sender?.customIdentifier, descriptor.senderIdentifier)
+    XCTAssertNotNil(intent.sender?.image)
+    XCTAssertNotNil(intent.image(forParameterNamed: \.speakableGroupName))
+    XCTAssertEqual(intent.content, "Hello Buzz")
+    XCTAssertEqual(intent.speakableGroupName?.spokenPhrase, "General")
+    XCTAssertEqual(intent.conversationIdentifier, resolution.conversationIdentifier)
+    XCTAssertNil(intent.recipients)
+    XCTAssertEqual(descriptor.recipientCount, 1)
+    XCTAssertEqual(
+      (intent.donationMetadata as? INSendMessageIntentDonationMetadata)?.recipientCount,
+      1
+    )
+  }
+
+  func testDirectMessageRetainsSenderAvatarWithoutGroupMetadata() throws {
+    let resolution = communicationResolution(
+      displayName: "Alice",
+      groupName: nil,
+      avatarPNG: Data([0x89, 0x50, 0x4E, 0x47])
+    )
+    let descriptor = try XCTUnwrap(
+      BuzzCommunicationNotificationDescriptor(resolution: resolution)
+    )
+
+    let intent = BuzzCommunicationNotificationPresenter.makeIntent(descriptor)
+
+    XCTAssertEqual(intent.sender?.displayName, "Alice")
+    XCTAssertNotNil(intent.sender?.image)
+    XCTAssertNil(intent.image(forParameterNamed: \.speakableGroupName))
+    XCTAssertNil(intent.speakableGroupName)
+    XCTAssertNil(intent.donationMetadata)
+  }
+
+  func testMissingVerifiedRecipientCountUsesOrdinaryPresentation() {
+    XCTAssertNil(
+      BuzzCommunicationNotificationDescriptor(
+        resolution: communicationResolution(recipientCount: nil)
+      )
+    )
+  }
+
+  func testPresentationSpecializesOrFallsBackToOrdinaryContent() {
+    let ordinary = UNMutableNotificationContent()
+    ordinary.title = "Alice"
+    ordinary.body = "Hello Buzz"
+    let specialized = BuzzCommunicationNotificationPresenter(updateContent: { _, _ in
+      let content = UNMutableNotificationContent()
+      content.title = "specialized"
+      return content
+    }).present(ordinaryContent: ordinary, resolution: communicationResolution())
+    XCTAssertEqual(specialized.title, "specialized")
+
+    let failed = BuzzCommunicationNotificationPresenter(updateContent: { _, _ in
+      throw NSError(domain: "test", code: 2)
+    }).present(ordinaryContent: ordinary, resolution: communicationResolution())
+    XCTAssertEqual(failed.title, "Alice")
+    XCTAssertEqual(failed.body, "Hello Buzz")
+  }
+
+  private func communicationResolution(
+    displayName: String = "Alice",
+    groupName: String? = "General",
+    avatarPNG: Data? = nil,
+    recipientCount: Int? = 1
+  ) -> BuzzPushResolution {
+    let communityID = "community-id"
+    let channelID = "channel/general:v5"
+    return BuzzPushResolution(
+      title: displayName,
+      body: "Hello Buzz",
+      subtitle: "Community",
+      threadIdentifier: BuzzPushPresentationIdentity.notificationThread(
+        communityID: communityID,
+        channelID: channelID
+      ),
+      navigationTarget: BuzzPushNavigationTarget(
+        eventID: "message-id",
+        communityID: communityID,
+        channelID: channelID
+      ),
+      senderPubkey: String(repeating: "a", count: 64),
+      senderAvatarPNG: avatarPNG,
+      conversationIdentifier: BuzzPushPresentationIdentity.conversation(
+        communityID: communityID,
+        channelID: channelID
+      ),
+      conversationDisplayName: groupName,
+      conversationRecipientCount: recipientCount
+    )
+  }
+}
+
+/// Callbacks only record what they receive and assertions run after the wait,
+/// so a callback that lands after its test returned cannot fail a later test.
+/// The timeout is a cap; a passing test returns as soon as its callback runs.
+final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
+  private let callbackTimeout: TimeInterval = 10
+
+  /// Waits for a bridge callback. On timeout the failure also reports how long
+  /// one fresh user-initiated-queue-then-main-queue hop takes right then (the
+  /// path every bridge reply follows), capped at 2 s. A starved test host reads
+  /// "a fresh queue->main hop did not finish within 2 s" or hundreds of ms; a
+  /// callback that never fired reads "took 0.4 ms". The hop is measured after
+  /// the 10 s window, so a fast hop does not rule out starvation that ended at
+  /// the deadline. The 2026-11-01 CI failures predate this measurement; their
+  /// timings fit starvation, since the RunnerTests host is the full Flutter app
+  /// and its launch saturated the 3-vCPU runner mid-class. A passing wait
+  /// returns as soon as the callback runs and measures nothing.
+  private func waitForCallback(
+    _ expectation: XCTestExpectation, file: StaticString = #filePath, line: UInt = #line
+  ) {
+    guard XCTWaiter().wait(for: [expectation], timeout: callbackTimeout) != .completed else { return }
+    let hop = XCTestExpectation(description: "queue to main hop")
+    let started = Date()
+    DispatchQueue(label: "xyz.block.buzz.test-hop", qos: .userInitiated).async {
+      DispatchQueue.main.async { hop.fulfill() }
+    }
+    let hopResult = XCTWaiter().wait(for: [hop], timeout: 2)
+    let elapsed = String(format: "%.1f ms", Date().timeIntervalSince(started) * 1000)
+    let hopReport = hopResult == .completed ? "took \(elapsed)" : "did not finish within 2 s"
+    XCTFail(
+      "'\(expectation.expectationDescription)' not fulfilled within \(Int(callbackTimeout)) s;"
+        + " a fresh queue->main hop \(hopReport)",
+      file: file, line: line
+    )
+  }
+
+  func testAgeSignalRequestDoesNotDependOnNotificationStorage() {
+    let delegate = MissingAppGroupDelegate()
+    var completed = false
+    delegate.handleAgeSignalMethodCall(
+      FlutterMethodCall(methodName: "requestAgeSignal", arguments: nil),
+      viewController: nil
+    ) { value in
+      if #available(iOS 26.0, *) {
+        XCTAssertEqual((value as? FlutterError)?.code, "age_signal_unavailable")
+      } else {
+        XCTAssertEqual((value as? [String: Any])?["status"] as? String, "noSignal")
+      }
+      completed = true
+    }
+    XCTAssertTrue(completed)
+  }
+
+  @MainActor
+  func testNativeAgeRequestDeliversKnownMinorAndFailureThroughFlutterCallback() async {
+    guard #available(iOS 26.0, *) else { return }
+    let delegate = MissingAppGroupDelegate()
+    delegate.requestPlatformAgeSignal = { _ in
+      BuzzAgeSignalPayload.sharing(exclusiveUpperBound: 18, lowerBound: 13)
+    }
+    let minor = expectation(description: "native minor response")
+    var minorValue: Any?
+    delegate.handleAgeSignalMethodCall(
+      FlutterMethodCall(methodName: "requestAgeSignal", arguments: nil),
+      viewController: UIViewController()
+    ) { value in
+      minorValue = value
+      minor.fulfill()
+    }
+    await fulfillment(of: [minor], timeout: callbackTimeout)
+    XCTAssertEqual((minorValue as? [String: Any])?["status"] as? String, "signal")
+    XCTAssertEqual((minorValue as? [String: Any])?["ageUpper"] as? Int, 17)
+
+    delegate.requestPlatformAgeSignal = { _ in
+      throw NSError(domain: "InjectedAgeFailure", code: 1)
+    }
+    let failed = expectation(description: "native error response")
+    var failedValue: Any?
+    delegate.handleAgeSignalMethodCall(
+      FlutterMethodCall(methodName: "requestAgeSignal", arguments: nil),
+      viewController: UIViewController()
+    ) { value in
+      failedValue = value
+      failed.fulfill()
+    }
+    await fulfillment(of: [failed], timeout: callbackTimeout)
+    XCTAssertEqual((failedValue as? FlutterError)?.code, "age_signal_unavailable")
+  }
+
+  func testAllowedNotificationRestoreNeedsNoAppGroupStore() {
+    let bridge = BuzzPushSnapshotBridge(
+      appGroupIdentifier: nil,
+      endpointGrantStore: BuzzPushEndpointGrantKeychainStore(accessGroup: nil),
+      keychainAccessGroup: nil
+    )
+    let completed = expectation(description: "allowed without storage")
+    var received: Any?
+    XCTAssertTrue(bridge.handle(
+      FlutterMethodCall(methodName: "restoreAgeRestrictedNotifications", arguments: nil)
+    ) { value in
+      received = value
+      completed.fulfill()
+    })
+    waitForCallback(completed)
+    XCTAssertNil(received)
+  }
+
+  func testRestrictionCleanupFailurePreservesSnapshotAndRestoreReleasesAuthority() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = BuzzPushPresentationCacheStore(containerURL: directory)
+    try store.replaceCommunities([
+      PushLeaseCommunity(id: "retained", name: "Retained", relayUrl: "https://relay.example",
+        pubkey: nil, policies: [])
+    ])
+    let snapshotURL = directory.appendingPathComponent(BuzzPushPresentationCacheStore.fileName)
+    let original = try Data(contentsOf: snapshotURL)
+    var deletionCalls = 0
+    var deletionQoS: [qos_class_t] = []
+    let bridge = BuzzPushSnapshotBridge(
+      appGroupIdentifier: nil,
+      endpointGrantStore: BuzzPushEndpointGrantKeychainStore(accessGroup: nil),
+      keychainAccessGroup: nil,
+      containerURL: { directory },
+      interactionDeletionDeadline: BuzzInteractionDeletionDeadline(
+        timeout: 5,
+        deleteAllInteractions: { completion in
+          deletionCalls += 1
+          deletionQoS.append(qos_class_self())
+          completion(deletionCalls == 1 ? NSError(domain: "InjectedCleanupFailure", code: 1) : nil)
+        },
+        scheduleTimeout: { _, _ in }
+      )
+    )
+    let restricted = expectation(description: "restriction despite cleanup failure")
+    var purgeResult: Any?
+    XCTAssertTrue(bridge.handle(
+      FlutterMethodCall(methodName: "purgeAgeRestrictedNotifications", arguments: nil)
+    ) { value in
+      purgeResult = value
+      restricted.fulfill()
+    })
+    waitForCallback(restricted)
+    XCTAssertEqual((purgeResult as? FlutterError)?.code, "age_restriction_purge_failed")
+    XCTAssertTrue(BuzzAgeRestrictionSession.isRestricted(containerURL: directory))
+    XCTAssertEqual(try Data(contentsOf: snapshotURL), original)
+
+    let restored = expectation(description: "allowed without restoring snapshot")
+    var restoreResult: Any?
+    XCTAssertTrue(bridge.handle(
+      FlutterMethodCall(methodName: "restoreAgeRestrictedNotifications", arguments: nil)
+    ) { value in
+      restoreResult = value
+      restored.fulfill()
+    })
+    waitForCallback(restored)
+    XCTAssertNil(restoreResult)
+    XCTAssertFalse(BuzzAgeRestrictionSession.isRestricted(containerURL: directory))
+    XCTAssertEqual(deletionCalls, 2)
+    // Flutter awaits these replies; a lower QoS left them starved on busy hosts.
+    for qos in deletionQoS {
+      XCTAssertEqual(
+        qos, QOS_CLASS_USER_INITIATED,
+        "deletion ran at QoS class \(qos.rawValue), expected user-initiated (\(QOS_CLASS_USER_INITIATED.rawValue))"
+      )
+    }
+    XCTAssertEqual(try Data(contentsOf: snapshotURL), original)
+  }
+
+  func testNewBridgeRetriesRecordedCleanupWithoutRestrictingAccess() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let failure = NSError(domain: "InjectedCleanupFailure", code: 1)
+    let deletion = BuzzInteractionDeletionDeadline(timeout: 5,
+      deleteAllInteractions: { $0(failure) }, scheduleTimeout: { _, _ in })
+    var seedError: Error?
+    BuzzInteractionCleanupRetry(containerURL: directory, deletion: deletion).request {
+      seedError = $0
+    }
+    XCTAssertNotNil(seedError)
+    let bridge = BuzzPushSnapshotBridge(
+      appGroupIdentifier: nil,
+      endpointGrantStore: BuzzPushEndpointGrantKeychainStore(accessGroup: nil),
+      keychainAccessGroup: nil, containerURL: { directory },
+      interactionDeletionDeadline: deletion
+    )
+    let completed = expectation(description: "retry failure stays allowed")
+    var received: Any?
+    XCTAssertTrue(bridge.handle(
+      FlutterMethodCall(methodName: "restoreAgeRestrictedNotifications", arguments: nil)
+    ) { value in
+      received = value
+      completed.fulfill()
+    })
+    waitForCallback(completed)
+    XCTAssertEqual((received as? FlutterError)?.code, "interaction_cleanup_retry_failed")
+    XCTAssertFalse(BuzzAgeRestrictionSession.isRestricted(containerURL: directory))
+  }
+
+  func testMetadataAuthorityUsesNewestGrantForMatchingRelay() {
+    let correctRelay = grant(
+      generation: 2,
+      metadataPubkey: String(repeating: "a", count: 64)
+    )
+    let wrongRelay = grant(
+      relayOrigin: "https://other.example",
+      generation: 99,
+      metadataPubkey: String(repeating: "b", count: 64)
+    )
+
+    XCTAssertEqual(
+      BuzzPushSnapshotBridge.relayMetadataPubkey(
+        relayURL: "wss://relay.example/",
+        grants: [wrongRelay, correctRelay, grant(
+          generation: 1, metadataPubkey: String(repeating: "d", count: 64)
+        )]
+      ),
+      correctRelay.relayMetadataPubkey
+    )
+  }
+
+  private func grant(
+    relayOrigin: String = "https://relay.example",
+    generation: Int64,
+    metadataPubkey: String
+  ) -> BuzzPushEndpointGrantRecord {
+    BuzzPushEndpointGrantRecord(
+      gatewayOrigin: "https://push.example",
+      relayOrigin: relayOrigin,
+      relayPubkey: String(repeating: "c", count: 64),
+      relayMetadataPubkey: metadataPubkey,
+      appAttestKeyId: Data(repeating: 0xAA, count: 32).base64EncodedString(),
+      installationId: "installation",
+      endpointGrant: "opaque-grant",
+      endpointHash: String(repeating: "d", count: 64),
+      endpointEpoch: 1,
+      generation: generation,
+      expiresAt: 1_900_000_000
+    )
+  }
+}
+
+final class BuzzPushNotificationResponseTests: XCTestCase {
+  func testValidDefaultActionRoutesAndCompletesExactlyOnce() {
+    let target = BuzzPushNavigationTarget(
+      eventID: "message-id",
+      communityID: "community-id",
+      channelID: "opaque-channel-id"
+    )
+    var routedTargets: [BuzzPushNavigationTarget] = []
+    var forwarded = 0
+    var completions = 0
+
+    BuzzPushNotificationResponseCoordinator.handle(
+      actionIdentifier: UNNotificationDefaultActionIdentifier,
+      userInfo: [BuzzPushNavigationTarget.userInfoKey: target.userInfoValue],
+      onTarget: { routedTargets.append($0) },
+      forwardToFlutter: { pluginCompletion in
+        forwarded += 1
+        pluginCompletion()
+        pluginCompletion()
+      },
+      completion: { completions += 1 }
+    )
+
+    XCTAssertEqual(routedTargets, [target])
+    XCTAssertEqual(forwarded, 1)
+    XCTAssertEqual(completions, 1)
+  }
+
+  func testMalformedTargetFallsBackToOneCompletion() {
+    var routedTargets: [BuzzPushNavigationTarget] = []
+    var completions = 0
+
+    BuzzPushNotificationResponseCoordinator.handle(
+      actionIdentifier: UNNotificationDefaultActionIdentifier,
+      userInfo: [BuzzPushNavigationTarget.userInfoKey: ["event_id": ""]],
+      onTarget: { routedTargets.append($0) },
+      forwardToFlutter: { _ in },
+      completion: { completions += 1 }
+    )
+
+    XCTAssertTrue(routedTargets.isEmpty)
+    XCTAssertEqual(completions, 1)
+  }
+
+  func testNonDefaultActionIgnoresLateDuplicatePluginCompletion() throws {
+    var routedTargets: [BuzzPushNavigationTarget] = []
+    var pluginCompletion: (() -> Void)?
+    var completions = 0
+
+    BuzzPushNotificationResponseCoordinator.handle(
+      actionIdentifier: "buzz.reply",
+      userInfo: [:],
+      onTarget: { routedTargets.append($0) },
+      forwardToFlutter: { pluginCompletion = $0 },
+      completion: { completions += 1 }
+    )
+    let capturedCompletion = try XCTUnwrap(pluginCompletion)
+    capturedCompletion()
+    capturedCompletion()
+
+    XCTAssertTrue(routedTargets.isEmpty)
+    XCTAssertEqual(completions, 1)
+  }
+}
+
+private final class MissingAppGroupDelegate: AppDelegate {
+  override var appGroupIdentifier: String? { nil }
+}
+
+final class BuzzPushNavigationBridgeTests: XCTestCase {
+  func testWarmAndColdNavigationCarryTheSameThreadArguments() throws {
+    let target = BuzzPushNavigationTarget(
+      eventID: String(repeating: "a", count: 64), communityID: "community",
+      channelID: "channel", threadRootID: String(repeating: "b", count: 64)
+    )
+    let expected = ["eventId": target.eventID, "communityId": "community",
+      "channelId": "channel", "threadRootId": String(repeating: "b", count: 64)]
+    XCTAssertEqual(target.flutterArguments, expected)
+    let buffer = BuzzPushNavigationBuffer()
+    buffer.record(target)
+    XCTAssertEqual(try XCTUnwrap(buffer.take()).flutterArguments, expected)
+    XCTAssertNil(buffer.take())
+  }
+
+  func testChannelNavigationOmitsOptionalThreadArgument() {
+    let target = BuzzPushNavigationTarget(
+      eventID: "event", communityID: "community", channelID: "channel"
+    )
+    XCTAssertEqual(target.flutterArguments,
+      ["eventId": "event", "communityId": "community", "channelId": "channel"])
+  }
+}

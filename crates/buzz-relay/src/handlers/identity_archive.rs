@@ -437,16 +437,14 @@ mod tests {
 
     async fn test_pool() -> Option<sqlx::PgPool> {
         let url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".into());
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".into()); // sadscan:disable np.postgres.1 -- local test fixture
         sqlx::PgPool::connect(&url).await.ok()
     }
 
     async fn test_state(pool: sqlx::PgPool) -> Option<Arc<AppState>> {
         let db = buzz_db::Db::from_pool(pool.clone());
-        let config = crate::config::Config::from_env().ok()?;
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .ok()?;
+        let config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -510,6 +508,274 @@ mod tests {
             .await
             .expect("insert test community");
         TenantContext::resolved(CommunityId::from_uuid(id), host)
+    }
+
+    #[tokio::test]
+    async fn archival_snapshot_advances_timestamp_for_rapid_state_replacement() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        if sqlx::query("SELECT 1 FROM archived_identities LIMIT 1")
+            .execute(&pool)
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let Some(state) = test_state(pool.clone()).await else {
+            return;
+        };
+        let tenant = seed_test_community(&pool).await;
+        let target_hex = Keys::generate().public_key().to_hex();
+        let request_id = "a".repeat(64);
+
+        state
+            .db
+            .archive(
+                tenant.community(),
+                &target_hex,
+                "self",
+                &target_hex,
+                None,
+                None,
+                &request_id,
+            )
+            .await
+            .expect("archive identity");
+        publish_nipia_archival_list(&tenant, &state)
+            .await
+            .expect("publish archived snapshot");
+        let archived_snapshot = state
+            .db
+            .query_events(&EventQuery {
+                kinds: Some(vec![buzz_core::kind::KIND_IA_ARCHIVED_LIST as i32]),
+                pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
+                global_only: true,
+                limit: Some(1),
+                ..EventQuery::for_community(tenant.community())
+            })
+            .await
+            .expect("query archived snapshot")
+            .into_iter()
+            .next()
+            .expect("archived snapshot exists");
+
+        state
+            .db
+            .unarchive(tenant.community(), &target_hex)
+            .await
+            .expect("unarchive identity");
+        publish_nipia_archival_list(&tenant, &state)
+            .await
+            .expect("publish unarchived snapshot");
+        let final_snapshot = state
+            .db
+            .query_events(&EventQuery {
+                kinds: Some(vec![buzz_core::kind::KIND_IA_ARCHIVED_LIST as i32]),
+                pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
+                global_only: true,
+                limit: Some(1),
+                ..EventQuery::for_community(tenant.community())
+            })
+            .await
+            .expect("query final snapshot")
+            .into_iter()
+            .next()
+            .expect("final snapshot exists");
+
+        assert!(
+            final_snapshot.event.created_at > archived_snapshot.event.created_at,
+            "replacement snapshots must not rely on random same-second event-id ordering"
+        );
+        assert!(
+            !final_snapshot.event.tags.iter().any(|tag| {
+                let fields = tag.as_slice();
+                fields.first().map(String::as_str) == Some("p")
+                    && fields.get(1).map(String::as_str) == Some(target_hex.as_str())
+            }),
+            "final snapshot must reflect the canonical empty archive set"
+        );
+    }
+
+    /// Carl review 4954871389 test (b): a stale (pre-unarchive) publisher whose
+    /// canonical read predates the unarchive must not strand `target` in the
+    /// authoritative 13535. Deterministic via the `publish_test_hooks` barrier:
+    /// the stale publisher is held right after it reads `{target}`; the
+    /// unarchive and the compliant `{}` publish then run; only then is the stale
+    /// publisher released to attempt its write. Its post-insert
+    /// `snapshot_is_current` drift check sees canonical `{}` ≠ its `{target}`
+    /// snapshot, so it rebuilds and converges. RED-on-revert: replace that guard
+    /// with `let snapshot_is_current = true;` and the released stale publisher
+    /// commits `{target}` last, stranding the unarchived identity.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_archival_publishers_converge_on_canonical_state() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        if sqlx::query("SELECT 1 FROM archived_identities LIMIT 1")
+            .execute(&pool)
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let Some(state) = test_state(pool.clone()).await else {
+            return;
+        };
+        let tenant = seed_test_community(&pool).await;
+        let target_hex = Keys::generate().public_key().to_hex();
+        let request_id = "b".repeat(64);
+
+        // canonical -> {target}
+        state
+            .db
+            .archive(
+                tenant.community(),
+                &target_hex,
+                "self",
+                &target_hex,
+                None,
+                None,
+                &request_id,
+            )
+            .await
+            .expect("archive identity");
+
+        // Arm the barrier, then spawn the stale publisher. It reads the
+        // `{target}` view, reaches the hook, and blocks until released.
+        let (reached_hook, release) =
+            crate::handlers::side_effects::publish_test_hooks::arm(tenant.community());
+        let stale_tenant = tenant.clone();
+        let stale_state = state.clone();
+        let stale_publisher =
+            tokio::spawn(
+                async move { publish_nipia_archival_list(&stale_tenant, &stale_state).await },
+            );
+        // Deterministically wait until the stale publisher has read `{target}`.
+        reached_hook
+            .await
+            .expect("stale publisher reached the post-list_archived hook");
+
+        // canonical -> {} while the stale publisher holds its `{target}` view.
+        state
+            .db
+            .unarchive(tenant.community(), &target_hex)
+            .await
+            .expect("unarchive identity");
+        // Production publishes after every archive-state mutation; do the same.
+        publish_nipia_archival_list(&tenant, &state)
+            .await
+            .expect("publish after unarchive");
+
+        // Release the stale publisher: it must detect drift and converge on `{}`.
+        release.notify_one();
+        stale_publisher
+            .await
+            .expect("join stale publisher")
+            .expect("stale publisher converges without error");
+
+        let final_snapshot = state
+            .db
+            .query_events(&EventQuery {
+                kinds: Some(vec![buzz_core::kind::KIND_IA_ARCHIVED_LIST as i32]),
+                pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
+                global_only: true,
+                limit: Some(1),
+                ..EventQuery::for_community(tenant.community())
+            })
+            .await
+            .expect("query final snapshot")
+            .into_iter()
+            .next()
+            .expect("final snapshot exists");
+
+        assert!(
+            !final_snapshot.event.tags.iter().any(|tag| {
+                let fields = tag.as_slice();
+                fields.first().map(String::as_str) == Some("p")
+                    && fields.get(1).map(String::as_str) == Some(target_hex.as_str())
+            }),
+            "a stale publisher must converge on the canonical empty set, never \
+             strand the unarchived identity in the authoritative 13535"
+        );
+    }
+
+    mod postgres_tests {
+        use super::*;
+
+        /// NIP-IA: every snapshot's `created_at` is strictly past the previous
+        /// one's, even when publishers race on one head. Concurrent publishers
+        /// each read the head behind the replacement lock. The head is first
+        /// pinned an hour ahead, so each snapshot is stamped exactly one second
+        /// past the one it replaces. A superseded kind:13535 is deleted, so the
+        /// coordinate stores one row, 16 seconds past the pinned one only if
+        /// each of the 16 publishers stored exactly one snapshot one second
+        /// later. RED-on-revert: with the head read before the lock, publishers
+        /// keep tying on head + 1, so a same-second replacement leaves the row
+        /// short of + 16 s, or a publisher exhausts its replacement attempts.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires Postgres and Redis"]
+        async fn concurrent_archival_publishers_stamp_strictly_increasing_snapshots() {
+            // Ignored, so it runs only where Postgres and Redis are provided: a
+            // missing one is a failure, never a silent pass.
+            let pool = test_pool().await.expect("Postgres for an ignored test");
+            let state = test_state(pool.clone())
+                .await
+                .expect("Redis for an ignored test");
+            let tenant = seed_test_community(&pool).await;
+            let pinned = EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_IA_ARCHIVED_LIST as u16),
+                "",
+            )
+            .tags([Tag::parse(["-"]).expect("'-' tag")])
+            .custom_created_at(nostr::Timestamp::from(
+                nostr::Timestamp::now().as_secs() + 3600,
+            ))
+            .sign_with_keys(&state.relay_keypair)
+            .expect("sign pinned kind:13535");
+            assert!(
+                state
+                    .db
+                    .replace_addressable_event(tenant.community(), &pinned, None)
+                    .await
+                    .expect("store pinned kind:13535")
+                    .1
+            );
+            let pinned_at = chrono::DateTime::from_timestamp(pinned.created_at.as_secs() as i64, 0)
+                .expect("pinned created_at");
+
+            let publishers: Vec<_> = (0..16)
+                .map(|_| {
+                    let tenant = tenant.clone();
+                    let state = state.clone();
+                    tokio::spawn(async move { publish_nipia_archival_list(&tenant, &state).await })
+                })
+                .collect();
+            for publisher in publishers {
+                publisher
+                    .await
+                    .expect("join publisher")
+                    .expect("publisher succeeds");
+            }
+
+            // Every stored row of the coordinate, retired rows included.
+            let stamps: Vec<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+                "SELECT created_at FROM events WHERE community_id = $1 AND kind = $2 \
+                 AND pubkey = $3 ORDER BY created_at",
+            )
+            .bind(tenant.community().as_uuid())
+            .bind(buzz_core::kind::KIND_IA_ARCHIVED_LIST as i32)
+            .bind(state.relay_keypair.public_key().to_bytes().as_slice())
+            .fetch_all(&pool)
+            .await
+            .expect("read stored snapshots");
+            assert_eq!(
+                stamps,
+                [pinned_at + chrono::Duration::seconds(16)],
+                "each publisher stores one snapshot one second past the head it \
+                 replaces, and deletes that head"
+            );
+        }
     }
 
     #[tokio::test]

@@ -1,6 +1,7 @@
 import * as React from "react";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useLocation } from "@tanstack/react-router";
 
+import { selectSearchHighlightRouteState } from "@/app/routes/searchHighlightRouteState";
 import { usePreviewFeatureWarning } from "@/shared/features";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
@@ -33,6 +34,9 @@ function ForumPostRouteComponent() {
   usePreviewFeatureWarning("forum");
   const { channelId, postId } = Route.useParams();
   const search = Route.useSearch();
+  const searchHighlight = useLocation({
+    select: selectSearchHighlightRouteState,
+  });
 
   return (
     <React.Suspense
@@ -41,6 +45,7 @@ function ForumPostRouteComponent() {
       <ChannelRouteScreen
         autoSendDraftKey={null}
         channelId={channelId}
+        searchHighlight={searchHighlight}
         selectedPostId={postId}
         targetMessageId={null}
         targetReplyId={search.replyId ?? null}

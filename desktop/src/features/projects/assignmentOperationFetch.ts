@@ -68,6 +68,7 @@ export async function fetchAssignmentOperationEvents(
   fetchEvents: (
     filter: FetchEventsInput,
   ) => Promise<RelayEvent[]> = relayClient.fetchEvents.bind(relayClient),
+  signal?: AbortSignal,
 ): Promise<RelayEvent[]> {
   if (issueIds.length === 0) return [];
   const chunks: string[][] = [];
@@ -75,7 +76,9 @@ export async function fetchAssignmentOperationEvents(
     chunks.push(issueIds.slice(i, i + ISSUE_ID_CHUNK_SIZE));
   }
   const pages = await Promise.all(
-    chunks.map((chunk) => fetchIssueCommentsExhaustively(chunk, fetchEvents)),
+    chunks.map((chunk) =>
+      fetchIssueCommentsExhaustively(chunk, fetchEvents, signal),
+    ),
   );
   const seen = new Map<string, RelayEvent>();
   for (const page of pages) {
@@ -91,11 +94,15 @@ export async function fetchAssignmentOperationEvents(
 async function fetchIssueCommentsExhaustively(
   issueIds: string[],
   fetchEvents: (filter: FetchEventsInput) => Promise<RelayEvent[]>,
+  signal?: AbortSignal,
 ): Promise<RelayEvent[]> {
   const seen = new Map<string, RelayEvent>();
   let limit = ASSIGNMENT_PAGE_LIMIT;
   let until: number | undefined;
   for (;;) {
+    // Leaving the Projects surface cancels its queries; stop queuing pages
+    // behind the next surface's fetches.
+    signal?.throwIfAborted();
     const page = await fetchEvents({
       kinds: [KIND_TEXT_NOTE],
       "#e": issueIds,

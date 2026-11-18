@@ -8,6 +8,7 @@ import {
   getAgentMentionAdmission,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
+  isAgentDirectoryReady,
   isAgentIdentityInAllowedList,
   isAgentMentionChannelType,
   relayAgentCanRespondInChannel,
@@ -41,6 +42,15 @@ function makeAgent(overrides = {}) {
     ...overrides,
   };
 }
+
+test("isAgentDirectoryReady: requires successful cached directory evidence", () => {
+  assert.equal(isAgentDirectoryReady({ data: [], error: null }), true);
+  assert.equal(isAgentDirectoryReady({ data: undefined, error: null }), false);
+  assert.equal(
+    isAgentDirectoryReady({ data: [], error: new Error("offline") }),
+    false,
+  );
+});
 
 test("getSharedChannelIds: includes only active joined channels", () => {
   assert.deepEqual(
@@ -278,7 +288,6 @@ test("isAgentIdentityInAllowedList: keeps people and only explicitly allowed age
 test("shouldHideAgentFromMentions: never hides non-agents", () => {
   assert.equal(
     shouldHideAgentFromMentions({
-      ownerOnly: false,
       isAgent: false,
       isMember: false,
       pubkey: PUB_A,
@@ -292,7 +301,6 @@ test("shouldHideAgentFromMentions: never hides non-agents", () => {
 test("shouldHideAgentFromMentions: shows invocable agents even when non-member", () => {
   assert.equal(
     shouldHideAgentFromMentions({
-      ownerOnly: false,
       isAgent: true,
       isMember: false,
       pubkey: PUB_A,
@@ -306,7 +314,6 @@ test("shouldHideAgentFromMentions: shows invocable agents even when non-member",
 test("shouldHideAgentFromMentions: hides non-member non-invocable agents", () => {
   assert.equal(
     shouldHideAgentFromMentions({
-      ownerOnly: false,
       isAgent: true,
       isMember: false,
       pubkey: PUB_A,
@@ -320,7 +327,6 @@ test("shouldHideAgentFromMentions: hides non-member non-invocable agents", () =>
 test("shouldHideAgentFromMentions: hides member agents with an explicit not-invocable directory entry (Fizz)", () => {
   assert.equal(
     shouldHideAgentFromMentions({
-      ownerOnly: false,
       isAgent: true,
       isMember: true,
       pubkey: PUB_A,
@@ -334,7 +340,6 @@ test("shouldHideAgentFromMentions: hides member agents with an explicit not-invo
 test("shouldHideAgentFromMentions: hides member agents without an affirmative directory grant", () => {
   assert.equal(
     shouldHideAgentFromMentions({
-      ownerOnly: false,
       isAgent: true,
       isMember: true,
       pubkey: PUB_A,
@@ -348,7 +353,6 @@ test("shouldHideAgentFromMentions: hides member agents without an affirmative di
 test("shouldHideAgentFromMentions: hides unknown member agents while directories load", () => {
   assert.equal(
     shouldHideAgentFromMentions({
-      ownerOnly: false,
       isAgent: true,
       isMember: true,
       pubkey: PUB_A,
@@ -363,7 +367,6 @@ test("shouldHideAgentFromMentions: hides unknown member agents while directories
 test("shouldHideAgentFromMentions: hides mentionable member agents while directories load", () => {
   assert.equal(
     shouldHideAgentFromMentions({
-      ownerOnly: false,
       isAgent: true,
       isMember: true,
       pubkey: PUB_A,
@@ -378,7 +381,6 @@ test("shouldHideAgentFromMentions: hides mentionable member agents while directo
 test("shouldHideAgentFromMentions: shows non-agent members while directories load", () => {
   assert.equal(
     shouldHideAgentFromMentions({
-      ownerOnly: false,
       isAgent: false,
       isMember: true,
       pubkey: PUB_A,
@@ -393,7 +395,6 @@ test("shouldHideAgentFromMentions: shows non-agent members while directories loa
 test("shouldHideAgentFromMentions: hides unknown member agents after empty directories settle", () => {
   assert.equal(
     shouldHideAgentFromMentions({
-      ownerOnly: false,
       isAgent: true,
       isMember: true,
       pubkey: PUB_A,
@@ -405,16 +406,15 @@ test("shouldHideAgentFromMentions: hides unknown member agents after empty direc
   );
 });
 
-test("shouldHideAgentFromMentions: hides agents while owner policy loads", () => {
+test("shouldHideAgentFromMentions: shows authorized agents without managed-owner policy", () => {
   assert.equal(
     shouldHideAgentFromMentions({
       isAgent: true,
       pubkey: PUB_A,
       mentionableAgentPubkeys: new Set([PUB_A]),
       directoryReady: true,
-      ownerOnly: undefined,
     }),
-    true,
+    false,
   );
 });
 
@@ -424,7 +424,6 @@ test("shouldHideAgentFromMentions: normalizes the pubkey before lookup", () => {
 
   assert.equal(
     shouldHideAgentFromMentions({
-      ownerOnly: false,
       isAgent: true,
       isMember: true,
       pubkey: mixedCase,
@@ -435,28 +434,21 @@ test("shouldHideAgentFromMentions: normalizes the pubkey before lookup", () => {
   );
 });
 
-test("getAgentMentionAdmission: owner-only requires current verified ownership", () => {
+test("getAgentMentionAdmission: authorized relay agents are independent of owner", () => {
   const common = {
     isAgent: true,
-    isManagedAgent: false,
     pubkey: PUB_A,
-    currentPubkey: CURRENT_PUBKEY,
     mentionableAgentPubkeys: new Set([PUB_A]),
     directoryReady: true,
-    ownerOnly: true,
   };
 
+  assert.equal(getAgentMentionAdmission(common), "allow");
   assert.equal(
-    getAgentMentionAdmission({ ...common, ownerPubkey: CURRENT_PUBKEY }),
-    "allow",
-  );
-  assert.equal(
-    getAgentMentionAdmission({ ...common, ownerPubkey: OTHER_OWNER_PUBKEY }),
+    getAgentMentionAdmission({
+      ...common,
+      mentionableAgentPubkeys: new Set(),
+    }),
     "deny",
-  );
-  assert.equal(
-    getAgentMentionAdmission({ ...common, ownerPubkey: null }),
-    "unknown",
   );
 });
 
@@ -464,13 +456,9 @@ test("getAgentMentionAdmission: unresolved directory state stays unknown", () =>
   assert.equal(
     getAgentMentionAdmission({
       isAgent: true,
-      isManagedAgent: false,
       pubkey: PUB_A,
-      currentPubkey: CURRENT_PUBKEY,
-      ownerPubkey: CURRENT_PUBKEY,
       mentionableAgentPubkeys: new Set([PUB_A]),
       directoryReady: false,
-      ownerOnly: false,
     }),
     "unknown",
   );
@@ -559,4 +547,93 @@ test("coalesceAgentAutocompleteCandidates: leaves non-agents alone", () => {
   const second = makeAgent({ pubkey: PUB_B, isAgent: false });
 
   assert.deepEqual(coalesce([first, second]), [first, second]);
+});
+
+test("owners remain admitted by allowlist policy without listing themselves", () => {
+  assert.equal(
+    relayAgentCanRespondInChannel(
+      {
+        ownerPubkey: CURRENT_PUBKEY,
+        respondTo: "allowlist",
+        respondToAllowlist: [],
+        channelIds: ["general"],
+      },
+      "general",
+      CURRENT_PUBKEY,
+    ),
+    true,
+  );
+});
+
+test("owned discovery does not require a shared channel, but sending does", () => {
+  for (const respondTo of ["owner-only", "allowlist", "anyone"]) {
+    const agent = {
+      pubkey: PUB_B,
+      ownerPubkey: CURRENT_PUBKEY,
+      respondTo,
+      respondToAllowlist: [],
+      channelIds: [],
+    };
+    assert.equal(
+      relayAgentIsSharedWithUser(agent, new Set(), CURRENT_PUBKEY),
+      true,
+    );
+    assert.equal(
+      relayAgentCanRespondInChannel(agent, "general", CURRENT_PUBKEY),
+      false,
+    );
+  }
+});
+
+test("DM ownership is independent of local configuration and still requires membership", () => {
+  const base = {
+    currentPubkey: CURRENT_PUBKEY,
+    managedAgentPubkeys: [PUB_A],
+    sharedChannelIds: new Set(),
+    relayAgents: [
+      {
+        pubkey: PUB_B,
+        ownerPubkey: CURRENT_PUBKEY,
+        respondTo: "allowlist",
+        respondToAllowlist: [],
+        channelIds: ["dm"],
+      },
+      {
+        pubkey: PUB_C,
+        ownerPubkey: OTHER_OWNER_PUBKEY,
+        respondTo: "anyone",
+        respondToAllowlist: [],
+        channelIds: ["dm"],
+      },
+      {
+        pubkey: PUB_D,
+        ownerPubkey: CURRENT_PUBKEY,
+        respondTo: "nobody",
+        respondToAllowlist: [],
+        channelIds: ["dm"],
+      },
+    ],
+  };
+  assert.deepEqual(
+    getMentionableAgentPubkeys({
+      ...base,
+      eligibilityScope: { type: "owned", channelId: "dm" },
+    }),
+    new Set([PUB_A, PUB_B]),
+  );
+  assert.deepEqual(
+    getMentionableAgentPubkeys({
+      ...base,
+      eligibilityScope: { type: "owned", channelId: "other" },
+    }),
+    new Set([PUB_A]),
+  );
+  assert.deepEqual(
+    getMentionableAgentPubkeys({
+      ...base,
+      eligibilityScope: { type: "owned", channelId: null },
+      phase: "prepare",
+    }),
+    new Set([PUB_A, PUB_B]),
+  );
 });

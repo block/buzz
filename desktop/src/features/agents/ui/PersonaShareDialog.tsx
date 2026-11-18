@@ -391,7 +391,10 @@ export function SnapshotShareDialog({
       toast.success(`Sent a copy of ${displayName}`);
       onOpenChange(false);
     } else if (sent === false) {
-      toast.error(`Couldn’t send ${itemLabel}. Try again.`);
+      toast.error(
+        snapshotSendController.getCurrentError() ??
+          `Couldn’t send ${itemLabel}. Try again.`,
+      );
     }
   }
 

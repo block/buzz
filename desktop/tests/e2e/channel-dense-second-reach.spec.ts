@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
+import { waitForMockChannelHeadReady } from "../helpers/channelHeadReady";
 
 // Lane 1c regression — the dense-second reachability wall.
 //
@@ -19,7 +20,7 @@ import { installMockBridge } from "../helpers/bridge";
 //   (a) a *continuation* window request fired (cursor != null) — the head load
 //       always issues `get_channel_window`, so only a cursor-bearing request
 //       proves keyset paging engaged, and
-//   (b) every dense-second message becomes reachable (union of rendered rows
+//   (b) every dense-second message becomes reachable (union of viewport-visible rows
 //       equals the full seed) — impossible behind a bare-`until` wall.
 const DENSE_SECOND = 1_700_000_000;
 const DENSE_COUNT = 450; // many multiples of CHANNEL_WINDOW_PAGE_SIZE (50)
@@ -64,6 +65,11 @@ test("dense single second beyond one window page is fully reachable via composit
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockChannelHeadReady(
+    page,
+    "general",
+    "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+  );
   const timeline = page.getByTestId("message-timeline");
   await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
   await page.waitForFunction(() => {
@@ -73,15 +79,29 @@ test("dense single second beyond one window page is fully reachable via composit
     return element ? element.scrollHeight > element.clientHeight + 500 : false;
   });
 
-  // Collect the union of dense-second indices ever rendered. Virtualization
-  // only mounts a window of rows, so we accumulate across scroll passes rather
-  // than snapshot once.
-  const renderedDenseIndices = async () =>
+  // Collect only visible rows intersecting the timeline viewport, not mounted
+  // overscan rows. Accumulate across overlapping scroll steps so every seeded
+  // identity must actually become user-reachable.
+  const visibleDenseIndices = async () =>
     timeline.evaluate((element) => {
       const found: number[] = [];
+      const viewport = element.getBoundingClientRect();
       for (const row of (
         element as HTMLDivElement
       ).querySelectorAll<HTMLElement>("[data-message-id]")) {
+        const bounds = row.getBoundingClientRect();
+        if (
+          !row.checkVisibility({
+            checkOpacity: true,
+            checkVisibilityCSS: true,
+          }) ||
+          bounds.bottom <= viewport.top ||
+          bounds.top >= viewport.bottom ||
+          bounds.right <= viewport.left ||
+          bounds.left >= viewport.right
+        ) {
+          continue;
+        }
         const match = row.textContent?.match(/dense (\d+)/);
         if (match) found.push(Number(match[1]));
       }
@@ -92,20 +112,26 @@ test("dense single second beyond one window page is fully reachable via composit
   // a genuine leave→enter transition (IntersectionObserver), so a raw
   // `scrollTop = 0` write on the virtualized container can fail to re-fire.
   // A wheel event is what a real user issues and what the observer honors.
+  const wheelStep = await timeline.evaluate(
+    (element) => element.clientHeight / 2,
+  );
   const wheelToTop = async () => {
     for (let step = 0; step < 12; step += 1) {
       const atTop = await timeline.evaluate(
         (element) => (element as HTMLDivElement).scrollTop <= 1,
       );
       if (atTop) break;
-      await page.mouse.wheel(0, -6000);
+      // Overlapping viewport steps let the virtualizer actually mount each
+      // row. A 6,000px jump can skip rows even when every page is reachable.
+      await page.mouse.wheel(0, -wheelStep);
       await page.waitForTimeout(40);
+      await collectVisible();
     }
   };
 
   const seen = new Set<number>();
-  const collectRendered = async () => {
-    for (const index of await renderedDenseIndices()) {
+  const collectVisible = async () => {
+    for (const index of await visibleDenseIndices()) {
       seen.add(index);
     }
   };
@@ -127,7 +153,7 @@ test("dense single second beyond one window page is fully reachable via composit
       await expect
         .poll(
           async () => {
-            await collectRendered();
+            await collectVisible();
             return seen.size;
           },
           { timeout: 4_000 },
@@ -136,7 +162,7 @@ test("dense single second beyond one window page is fully reachable via composit
     } catch {
       // No growth this pass — count it toward a genuine stall.
     }
-    await collectRendered();
+    await collectVisible();
     if (seen.size > before) {
       stallStreak = 0;
     } else {
@@ -158,11 +184,94 @@ test("dense single second beyond one window page is fully reachable via composit
   );
   expect(continuationRequests).toBeGreaterThan(0);
 
-  // (b) Reachability parity: the union of paged dense rows crosses far past
-  // one window page — impossible behind a bare-`until` wall, where paging
-  // stalls on the newest slice of the dense second. We assert the vast
-  // majority became reachable; virtualization can drop a few transient rows
-  // between scroll settles, so we allow a small slack rather than demanding
-  // an exact 450.
-  expect(seen.size).toBeGreaterThan(DENSE_COUNT * 0.9);
+  // (b) Every seeded identity must be reachable: cardinality or a percentage
+  // threshold can silently accept an interior gap in the dense second.
+  expect([...seen].sort((a, b) => a - b)).toEqual(
+    Array.from({ length: DENSE_COUNT }, (_, index) => index),
+  );
+});
+
+// The live cache merge and the channel-window projection both write the
+// rendered timeline. They must tie-break a shared second identically, or the
+// pair flips as each write lands (closing any menu open on either row).
+test("same-second live messages render in one order and never swap", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+            channelName: "general",
+            kind: 9,
+            exactChannel: true,
+          }) ?? false,
+      ),
+    )
+    .toBe(true);
+
+  const low = "1".repeat(64);
+  const high = "f".repeat(64);
+  // Record every order the pair is ever committed in. The observer runs right
+  // after each DOM commit, before any later task, so the read below has seen
+  // the final commit. Sampling on animation frames missed it whenever the read
+  // beat the next frame.
+  await page.evaluate(
+    ({ low, high }) => {
+      const orders: string[] = [];
+      Object.assign(window, { __SAME_SECOND_ORDERS__: orders });
+      new MutationObserver(() => {
+        const order = [...document.querySelectorAll("[data-message-id]")]
+          .map((row) => row.getAttribute("data-message-id"))
+          .filter((id) => id === low || id === high)
+          .join(",");
+        if (order.includes(",") && orders.at(-1) !== order) orders.push(order);
+      }).observe(document.body, {
+        attributeFilter: ["data-message-id"],
+        childList: true,
+        subtree: true,
+      });
+    },
+    { low, high },
+  );
+  const createdAt = Math.floor(Date.now() / 1000);
+  for (const id of [low, high]) {
+    await page.evaluate(
+      ({ createdAt, id }) =>
+        window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+          channelName: "general",
+          content: `same second ${id[0]}`,
+          createdAt,
+          id,
+        }),
+      { createdAt, id },
+    );
+  }
+  // Live events apply in order, so once a later message renders, both writes
+  // for the pair have landed.
+  await page.evaluate(
+    (createdAt) =>
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: "one second later",
+        createdAt: createdAt + 1,
+      }),
+    createdAt,
+  );
+  await expect(
+    page.getByTestId("message-timeline").getByText("one second later"),
+  ).toBeVisible();
+
+  // Within a second the larger id is older: the reverse of relay order.
+  expect(
+    await page.evaluate(
+      () =>
+        (window as Window & { __SAME_SECOND_ORDERS__?: string[] })
+          .__SAME_SECOND_ORDERS__,
+    ),
+  ).toEqual([`${high},${low}`]);
 });

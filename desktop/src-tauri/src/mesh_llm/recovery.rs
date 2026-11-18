@@ -443,7 +443,9 @@ mod tests {
             id: pubkey.to_string(),
             display_name: pubkey.to_string(),
             avatar_url: None,
+            description: None,
             system_prompt: String::new(),
+            acp_command: None,
             runtime: None,
             model: None,
             provider: None,
@@ -454,6 +456,7 @@ mod tests {
             source_team: None,
             source_team_persona_slug: None,
             catalog_source: None,
+            team_catalog_source: None,
             env_vars: std::collections::BTreeMap::from([
                 ("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string()),
                 (
@@ -469,6 +472,7 @@ mod tests {
             respond_to: None,
             respond_to_allowlist: Vec::new(),
             parallelism: None,
+            session_policy: crate::managed_agents::AcpSessionPolicy::Channel,
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
         }

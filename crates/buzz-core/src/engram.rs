@@ -438,6 +438,27 @@ pub fn build_event(
     body: &Body,
     created_at: u64,
 ) -> Result<Event, EngramError> {
+    let plaintext = encode_body(body)?;
+    let k_c = conversation_key(agent_keys.secret_key(), owner_pubkey);
+    let ciphertext = nip44::encrypt(
+        agent_keys.secret_key(),
+        owner_pubkey,
+        &plaintext,
+        Version::V2,
+    )
+    .map_err(|e| EngramError::Encrypt(e.to_string()))?;
+    let d = d_tag(&k_c, body.slug());
+    event_builder(owner_pubkey, &d, ciphertext, created_at)?
+        .sign_with_keys(agent_keys)
+        .map_err(|e| EngramError::Sign(e.to_string()))
+}
+
+/// The NIP-44 plaintext for `body`. Returns `BodyTooLarge` if it exceeds
+/// 65,535 bytes.
+///
+/// Together with [`event_builder`], this lets a caller whose key lives behind
+/// a signer build an engram from separate encrypt, `d`-tag and sign steps.
+pub fn encode_body(body: &Body) -> Result<String, EngramError> {
     let plaintext = body.to_json_bytes();
     if plaintext.len() > NIP44_PLAINTEXT_MAX {
         return Err(EngramError::BodyTooLarge(plaintext.len()));
@@ -446,30 +467,28 @@ pub fn build_event(
     // this is always Ok. We still verify rather than `.expect()` so a future
     // change to the serializer can't silently introduce a panic on the hot
     // path.
-    let plaintext_str = std::str::from_utf8(&plaintext)
-        .map_err(|e| EngramError::Encrypt(format!("body JSON not UTF-8: {e}")))?;
+    String::from_utf8(plaintext)
+        .map_err(|e| EngramError::Encrypt(format!("body JSON not UTF-8: {e}")))
+}
 
-    let k_c = conversation_key(agent_keys.secret_key(), owner_pubkey);
-    let ciphertext = nip44::encrypt(
-        agent_keys.secret_key(),
-        owner_pubkey,
-        plaintext_str,
-        Version::V2,
-    )
-    .map_err(|e| EngramError::Encrypt(e.to_string()))?;
-
-    let d = d_tag(&k_c, body.slug());
+/// The unsigned `kind:30174` event for an already-encrypted body: `d` is the
+/// slug's [`d_tag`], `ciphertext` the NIP-44 payload to the owner.
+pub fn event_builder(
+    owner_pubkey: &PublicKey,
+    d: &str,
+    ciphertext: String,
+    created_at: u64,
+) -> Result<EventBuilder, EngramError> {
     let tags = vec![
-        Tag::parse(["d", &d]).map_err(|e| EngramError::Encrypt(e.to_string()))?,
+        Tag::parse(["d", d]).map_err(|e| EngramError::Encrypt(e.to_string()))?,
         Tag::parse(["p", &owner_pubkey.to_hex()])
             .map_err(|e| EngramError::Encrypt(e.to_string()))?,
     ];
-
-    EventBuilder::new(Kind::Custom(KIND_AGENT_ENGRAM as u16), ciphertext)
-        .tags(tags)
-        .custom_created_at(nostr::Timestamp::from(created_at))
-        .sign_with_keys(agent_keys)
-        .map_err(|e| EngramError::Sign(e.to_string()))
+    Ok(
+        EventBuilder::new(Kind::Custom(KIND_AGENT_ENGRAM as u16), ciphertext)
+            .tags(tags)
+            .custom_created_at(nostr::Timestamp::from(created_at)),
+    )
 }
 
 /// Validate an event against *Head selection* rules (1) and (5) and return
@@ -492,6 +511,40 @@ pub fn validate_and_decrypt(
     my_seckey: &SecretKey,
     their_pubkey: &PublicKey,
 ) -> Result<Body, EngramError> {
+    let d_value = validate_envelope(event, expected_agent, expected_owner)?;
+
+    // Decrypt. `K_c` is symmetric per NIP-44, so the caller's `(my_seckey,
+    // their_pubkey)` pair yields the same conversation key regardless of
+    // whether the caller is the agent or the owner.
+    let plaintext = nip44::decrypt(my_seckey, their_pubkey, &event.content)
+        .map_err(|_| EngramError::Decrypt)?;
+    let body = Body::from_json_bytes(plaintext.as_bytes())?;
+
+    // Rule (4): body slug re-derives to the event's d tag.
+    let k_c = conversation_key(my_seckey, their_pubkey);
+    check_d_tag(&d_value, &d_tag(&k_c, body.slug()))?;
+    Ok(body)
+}
+
+/// Rule (4): the decrypted body's slug must re-derive (`derived`) to the
+/// event's `d` tag (`d_value`, from [`validate_envelope`]).
+pub fn check_d_tag(d_value: &str, derived: &str) -> Result<(), EngramError> {
+    if derived != d_value {
+        return Err(EngramError::InvalidEnvelope(
+            "body slug does not re-derive to d tag".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The envelope half of [`validate_and_decrypt`]: kind, author, exactly one
+/// canonical `d` tag and exactly one `p` tag naming the owner. Returns the
+/// `d` value for [`check_d_tag`] once the content is decrypted.
+pub fn validate_envelope(
+    event: &Event,
+    expected_agent: &PublicKey,
+    expected_owner: &PublicKey,
+) -> Result<String, EngramError> {
     if event.kind.as_u16() as u32 != KIND_AGENT_ENGRAM {
         return Err(EngramError::InvalidEnvelope(format!(
             "wrong kind: {}",
@@ -537,23 +590,7 @@ pub fn validate_and_decrypt(
             "p tag != expected_owner".into(),
         ));
     }
-
-    // Decrypt. `K_c` is symmetric per NIP-44, so the caller's `(my_seckey,
-    // their_pubkey)` pair yields the same conversation key regardless of
-    // whether the caller is the agent or the owner.
-    let plaintext = nip44::decrypt(my_seckey, their_pubkey, &event.content)
-        .map_err(|_| EngramError::Decrypt)?;
-    let body = Body::from_json_bytes(plaintext.as_bytes())?;
-
-    // Rule (4): body slug re-derives to the event's d tag.
-    let k_c = conversation_key(my_seckey, their_pubkey);
-    let derived = d_tag(&k_c, body.slug());
-    if derived != d_value {
-        return Err(EngramError::InvalidEnvelope(
-            "body slug does not re-derive to d tag".into(),
-        ));
-    }
-    Ok(body)
+    Ok(d_value)
 }
 
 /// Pick the head from a set of events targeting the same slug — greatest

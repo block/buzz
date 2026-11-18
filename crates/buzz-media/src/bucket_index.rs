@@ -13,7 +13,7 @@
 //!
 //! | Class | Shape |
 //! |---|---|
-//! | thumb | `{sha256}.thumb.jpg` |
+//! | thumb | `{sha256}.thumb.{webp,jpg}` |
 //! | blob | `{sha256}.{ext}` (ext: 1-8 mixed-case alphanumeric) |
 //! | sidecar | `_meta/{community-uuid}/{sha256}.json` |
 //! | auxiliary | `_uploads/{community-uuid}/{sha256}/{ulid}.json` |
@@ -25,6 +25,7 @@ use std::future::Future;
 use uuid::Uuid;
 
 use crate::error::MediaError;
+use crate::thumbnail::Thumb;
 
 /// The classification of one bucket key. `Unknown` is the deliberate
 /// catch-all — a malformed variant of a known prefix (e.g. a truncated
@@ -32,7 +33,7 @@ use crate::error::MediaError;
 /// `Auxiliary`, so visibility gauges stay loud instead of silently wrong.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyClass {
-    /// `{sha256}.thumb.jpg` — attributed to the blob's sha.
+    /// `{sha256}.thumb.{webp,jpg}` — attributed to the blob's sha.
     Thumb { sha256: String },
     /// `{sha256}.{ext}` — physical bytes, logical join key.
     Blob { sha256: String, ext: String },
@@ -125,16 +126,10 @@ fn parse_canonical_uuid(s: &str) -> Option<Uuid> {
     Uuid::parse_str(s).ok()
 }
 
-/// `{sha256}.thumb.jpg`
+/// `{sha256}.thumb.{webp,jpg}`
 fn parse_thumb_key(key: &str) -> Option<String> {
-    let mut parts = key.split('.');
-    let sha256 = parts.next()?;
-    let thumb = parts.next()?;
-    let jpg = parts.next()?;
-    if parts.next().is_some() || thumb != "thumb" || jpg != "jpg" || !is_sha256(sha256) {
-        return None;
-    }
-    Some(sha256.to_string())
+    let (sha256, _) = Thumb::parse(key)?;
+    is_sha256(sha256).then(|| sha256.to_string())
 }
 
 /// `{sha256}.{ext}` — exactly two dot-separated segments.
@@ -193,7 +188,7 @@ fn parse_auxiliary_key(key: &str) -> Option<(Uuid, String, String)> {
 }
 
 /// Per-community logical storage: bytes and object count of bound shas.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CommunityStorage {
     pub bytes: u64,
     pub objects: u64,
@@ -202,7 +197,7 @@ pub struct CommunityStorage {
 /// The full computed sweep result: fleet physical/logical totals,
 /// per-community logical breakdown, and anomaly/visibility gauges. Pure
 /// data — no I/O, cheap to clone into a cached snapshot.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BucketSnapshot {
     /// Every listed object, every class (kind=physical).
     pub physical_bytes: u64,
@@ -233,8 +228,7 @@ pub struct BucketAggregate {
     /// sha -> bytes of every blob variant seen for that sha (D-EXT: multiple
     /// entries is the multi-variant anomaly).
     blob_variant_bytes: HashMap<String, Vec<u64>>,
-    /// sha -> thumb bytes. At most one thumb key per sha, so a plain insert
-    /// is correct (no accumulation needed).
+    /// sha -> bytes of every thumb variant for that sha.
     thumb_bytes: HashMap<String, u64>,
     /// (community, sha) -> sidecar object's own byte size (informational;
     /// not part of logical bytes).
@@ -252,7 +246,7 @@ impl BucketAggregate {
         self.physical_bytes += size;
         match classify_key(key) {
             KeyClass::Thumb { sha256 } => {
-                self.thumb_bytes.insert(sha256, size);
+                *self.thumb_bytes.entry(sha256).or_default() += size;
             }
             KeyClass::Blob { sha256, .. } => {
                 self.blob_variant_bytes
@@ -422,15 +416,39 @@ mod tests {
         Uuid::from_u128(n)
     }
 
+    #[test]
+    fn bucket_snapshot_json_round_trip_preserves_community_keys() {
+        let community = community(7);
+        let mut snapshot = BucketSnapshot {
+            physical_objects: 3,
+            ..BucketSnapshot::default()
+        };
+        snapshot.per_community.insert(
+            community,
+            CommunityStorage {
+                bytes: 42,
+                objects: 1,
+            },
+        );
+
+        let encoded = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        let decoded: BucketSnapshot =
+            serde_json::from_value(encoded).expect("deserialize snapshot");
+        assert_eq!(decoded, snapshot);
+    }
+
     // --- classify_key ---
 
     #[test]
     fn classifies_thumb_key() {
         let s = sha(0xaa);
-        assert_eq!(
-            classify_key(&format!("{s}.thumb.jpg")),
-            KeyClass::Thumb { sha256: s }
-        );
+        for ext in ["webp", "jpg"] {
+            assert_eq!(
+                classify_key(&format!("{s}.thumb.{ext}")),
+                KeyClass::Thumb { sha256: s.clone() }
+            );
+        }
+        assert_eq!(classify_key(&format!("{s}.thumb.png")), KeyClass::Unknown);
     }
 
     #[test]
@@ -609,14 +627,15 @@ mod tests {
         let mut agg = BucketAggregate::default();
         agg.fold(&format!("{s}.jpg"), 1000);
         agg.fold(&format!("{s}.thumb.jpg"), 50);
+        agg.fold(&format!("{s}.thumb.webp"), 30);
         agg.fold(&format!("_meta/{c}/{s}.json"), 5);
 
         let snap = agg.finish();
-        assert_eq!(snap.per_community[&c].bytes, 1050);
+        assert_eq!(snap.per_community[&c].bytes, 1080);
         assert_eq!(snap.per_community[&c].objects, 1);
         // Fleet physical totals count every object separately.
-        assert_eq!(snap.physical_objects, 3);
-        assert_eq!(snap.physical_bytes, 1055);
+        assert_eq!(snap.physical_objects, 4);
+        assert_eq!(snap.physical_bytes, 1085);
     }
 
     #[test]

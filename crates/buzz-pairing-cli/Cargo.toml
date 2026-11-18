@@ -23,3 +23,10 @@ hex = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
+
+# Explicit rustls dep with ring provider — required to install the process-level
+# CryptoProvider at startup. Without this, `buzz-pair` panics on any `wss://`
+# relay (including the default `wss://relay.damus.io`) when a multi-package
+# release build unifies both ring and aws-lc-rs features. See crates/buzz-cli.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+

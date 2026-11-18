@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -53,6 +54,7 @@ void main() {
   }) {
     return ChannelSectionsManager(
       pubkey: keychain.public,
+      relayUrl: 'https://relay.example',
       prefs: prefs,
       crypto: crypto,
       relaySession: relaySession,
@@ -243,32 +245,53 @@ void main() {
     },
   );
 
-  test('backoff resets after full recovery so later failures start from the '
-      'base delay', () async {
+  test('tie_break_lower_id_wins_at_equal_second', () async {
+    // Relay retains `ORDER BY created_at DESC, id ASC` — the lower event ID
+    // wins at equal second. Pre-fix the manager kept the higher ID, which
+    // permanently disagreed with desktop post-#7805.
     await setUpEnv();
-    // Climb the failure counter: 5 rate-limited attempts before success.
-    // With a 5ms base, attempt 5 would wait 5<<5 = 160ms if the counter
-    // were never reset.
-    final relay = _RateLimitedRelaySession(failuresBeforeSuccess: 5);
+    final relay = _RateLimitedRelaySession(failuresBeforeSuccess: 0);
     final manager = buildManager(relaySession: relay);
     await manager.initialize();
-    await _waitUntil(() => relay.subscribeCalls > 5);
 
-    // Fully recovered. A later transient failure (late CLOSED) must retry
-    // from the base delay, not the climbed ceiling.
-    final subscribeCallsAfterRecovery = relay.subscribeCalls;
-    relay.closeLiveSubscription('rate-limited: quota exceeded');
-    final stopwatch = Stopwatch()..start();
-    await _waitUntil(() => relay.subscribeCalls > subscribeCallsAfterRecovery);
-    stopwatch.stop();
-
-    expect(
-      stopwatch.elapsedMilliseconds,
-      lessThan(100),
-      reason:
-          'retry after recovery must wait ~base delay (5ms), '
-          'not the pre-recovery backoff (160ms)',
+    // Deliver two equal-second events in higher-then-lower ID order via the
+    // live subscription and verify the lower-ID blob is the final state.
+    final higherIdEvent = sectionsEvent(
+      sections: [
+        {'id': 's-high', 'name': 'From Higher ID', 'order': 0},
+      ],
+      createdAt: 100,
+      id: 'zzzz',
     );
+    final lowerIdEvent = sectionsEvent(
+      sections: [
+        {'id': 's-low', 'name': 'From Lower ID', 'order': 0},
+      ],
+      createdAt: 100,
+      id: 'aaaa',
+    );
+
+    relay.emit(higherIdEvent);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(manager.store.sections.single.name, 'From Higher ID');
+
+    relay.emit(lowerIdEvent);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(
+      manager.store.sections.single.name,
+      'From Lower ID',
+      reason: 'lower-ID event must win at equal second (relay id ASC order)',
+    );
+
+    // Re-delivery of the higher-ID event must NOT roll back.
+    relay.emit(higherIdEvent);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(
+      manager.store.sections.single.name,
+      'From Lower ID',
+      reason: 'higher-ID event re-delivery must be rejected by tie-break guard',
+    );
+
     manager.dispose(flushPending: false);
   });
 
@@ -284,7 +307,9 @@ void main() {
         onChanged: () {
           callbackCount++;
           expect(
-            prefs.getString(channelSectionsKey(keychain.public)),
+            prefs.getString(
+              channelSectionsKey(keychain.public, manager.relayUrl),
+            ),
             jsonEncode(manager.store.toJson()),
             reason: 'persistence must be visible before onChanged returns',
           );
@@ -300,7 +325,9 @@ void main() {
           reason: '$description must update manager.store',
         );
         expect(
-          prefs.getString(channelSectionsKey(keychain.public)),
+          prefs.getString(
+            channelSectionsKey(keychain.public, manager.relayUrl),
+          ),
           jsonEncode(manager.store.toJson()),
           reason: '$description must persist before notifying',
         );
@@ -321,7 +348,7 @@ void main() {
       final beta = manager.store.sections[1];
 
       final persistedBeforeNoOp = prefs.getString(
-        channelSectionsKey(keychain.public),
+        channelSectionsKey(keychain.public, manager.relayUrl),
       );
       manager.moveSectionUp(alpha.id);
       expect(
@@ -330,7 +357,7 @@ void main() {
         reason: 'moving the first section up is a no-op',
       );
       expect(
-        prefs.getString(channelSectionsKey(keychain.public)),
+        prefs.getString(channelSectionsKey(keychain.public, manager.relayUrl)),
         persistedBeforeNoOp,
         reason: 'a no-op move must not persist or notify',
       );
@@ -339,7 +366,7 @@ void main() {
         manager.moveSectionDown(alpha.id);
       });
       final persistedAfterMoveDown = prefs.getString(
-        channelSectionsKey(keychain.public),
+        channelSectionsKey(keychain.public, manager.relayUrl),
       );
       manager.moveSectionDown(alpha.id);
       expect(
@@ -348,7 +375,7 @@ void main() {
         reason: 'moving the last section down is a no-op',
       );
       expect(
-        prefs.getString(channelSectionsKey(keychain.public)),
+        prefs.getString(channelSectionsKey(keychain.public, manager.relayUrl)),
         persistedAfterMoveDown,
         reason: 'a no-op move must not persist or notify',
       );
@@ -391,7 +418,9 @@ void main() {
           callbackCount++;
           expect(manager.store.sections.single.name, 'Alpha');
           expect(
-            prefs.getString(channelSectionsKey(keychain.public)),
+            prefs.getString(
+              channelSectionsKey(keychain.public, manager.relayUrl),
+            ),
             jsonEncode(manager.store.toJson()),
           );
           manager.dispose();
@@ -403,7 +432,7 @@ void main() {
       expect(callbackCount, 1);
       expect(manager.store.sections.single.name, 'Alpha');
       expect(
-        prefs.getString(channelSectionsKey(keychain.public)),
+        prefs.getString(channelSectionsKey(keychain.public, manager.relayUrl)),
         jsonEncode(manager.store.toJson()),
       );
       final submitted = await signedRelay.submitted.future.timeout(
@@ -427,6 +456,35 @@ void main() {
       expect(published['assignments'], isEmpty);
     },
   );
+  test('backoff resets after full recovery so later failures start from the '
+      'base delay', () {
+    fakeAsync((async) {
+      setUpEnv();
+      async.flushMicrotasks();
+      // Climb the failure counter: 5 rate-limited attempts before success.
+      // With a 5ms base, attempt 5 would wait 5<<5 = 160ms if the counter
+      // were never reset.
+      final relay = _RateLimitedRelaySession(failuresBeforeSuccess: 5);
+      final manager = buildManager(relaySession: relay);
+      manager.initialize();
+      async.elapse(const Duration(seconds: 1));
+      expect(relay.subscribeCalls, greaterThan(5));
+
+      // Fully recovered. A later transient failure (late CLOSED) must retry
+      // from the base delay, not the climbed ceiling.
+      final subscribeCallsAfterRecovery = relay.subscribeCalls;
+      relay.closeLiveSubscription('rate-limited: quota exceeded');
+      async.elapse(const Duration(milliseconds: 6));
+      expect(
+        relay.subscribeCalls,
+        greaterThan(subscribeCallsAfterRecovery),
+        reason:
+            'retry after recovery must wait ~base delay (5ms), '
+            'not the pre-recovery backoff (160ms)',
+      );
+      manager.dispose(flushPending: false);
+    });
+  });
 }
 
 Future<void> _waitUntil(

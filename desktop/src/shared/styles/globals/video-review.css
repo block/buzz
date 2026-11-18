@@ -2,6 +2,29 @@
    The review dialog uses the shadcn "neutral" dark palette regardless of
    the app theme. Applied together with `.dark` on the portal root; this
    block is intentionally unlayered so it overrides the layered theme vars. */
+.video-review-controls {
+  transition: opacity 150ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .video-review-media-surface .video-review-controls {
+    pointer-events: none;
+    opacity: 0;
+  }
+
+  .video-review-media-surface:hover .video-review-controls,
+  .video-review-media-surface:has(:focus-visible) .video-review-controls {
+    pointer-events: auto;
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .video-review-controls {
+    transition: none;
+  }
+}
+
 .video-review-theme {
   --background: 0 0% 3.9%;
   --foreground: 0 0% 98%;

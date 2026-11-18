@@ -112,6 +112,8 @@ mod tests {
             instructions: Some("Coordinate carefully.".to_string()),
             persona_ids: vec!["p1".to_string(), "p2".to_string()],
             is_builtin: false,
+            shared: false,
+            catalog_source: None,
             source_dir: Some(PathBuf::from("/local/only/path")),
             is_symlink: true,
             symlink_target: Some("/somewhere".to_string()),

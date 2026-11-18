@@ -2,7 +2,6 @@ import {
   CHANNEL_AUX_EVENT_KINDS,
   CHANNEL_EVENT_KINDS,
   CHANNEL_TIMELINE_CONTENT_KINDS,
-  HOME_MENTION_EVENT_KINDS,
   KIND_DELETION,
   KIND_NIP29_DELETE_EVENT,
   KIND_REACTION,
@@ -159,19 +158,5 @@ export function buildGlobalStreamFilter(
   return {
     kinds: [...CHANNEL_EVENT_KINDS],
     limit,
-  };
-}
-
-export function buildChannelMentionFilter(
-  channelId: string,
-  pubkey: string,
-  limit: number,
-): RelaySubscriptionFilter {
-  return {
-    kinds: [...HOME_MENTION_EVENT_KINDS],
-    "#h": [channelId],
-    "#p": [pubkey],
-    limit,
-    since: Math.floor(Date.now() / 1_000),
   };
 }

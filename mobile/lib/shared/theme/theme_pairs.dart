@@ -1,3 +1,4 @@
+import 'buzz_theme.dart';
 import 'theme_catalog.dart';
 
 /// Light → dark theme counterparts, ported from the desktop app's `THEME_PAIRS`
@@ -59,8 +60,9 @@ class ThemeGroups {
 
 ThemeGroups? _groups;
 
-/// [themeCatalog] grouped for the appearance picker, each list sorted by
-/// display name. Computed once — the catalog is a compile-time constant.
+/// [themeCatalog] grouped for the appearance picker. Buzz is always first;
+/// borrowed themes follow in display-name order. Computed once — the catalog
+/// is a compile-time constant.
 ThemeGroups themeGroups() {
   final cached = _groups;
   if (cached != null) return cached;
@@ -78,11 +80,16 @@ ThemeGroups themeGroups() {
     if (themePairs.containsKey(theme.name)) paired.add(theme);
   }
 
-  int byDisplayName(ThemeColors a, ThemeColors b) =>
-      a.displayName.compareTo(b.displayName);
-  paired.sort(byDisplayName);
-  light.sort(byDisplayName);
-  dark.sort(byDisplayName);
+  int byPickerOrder(ThemeColors a, ThemeColors b) {
+    final aIsBuzz = isBuzzTheme(a.name);
+    final bIsBuzz = isBuzzTheme(b.name);
+    if (aIsBuzz != bIsBuzz) return aIsBuzz ? -1 : 1;
+    return a.displayName.compareTo(b.displayName);
+  }
+
+  paired.sort(byPickerOrder);
+  light.sort(byPickerOrder);
+  dark.sort(byPickerOrder);
 
   return _groups = ThemeGroups(paired: paired, light: light, dark: dark);
 }

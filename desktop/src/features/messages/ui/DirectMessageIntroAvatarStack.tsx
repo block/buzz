@@ -5,6 +5,7 @@ import { UserAvatar } from "@/shared/ui/UserAvatar";
 export type DirectMessageIntroParticipant = {
   avatarUrl: string | null;
   displayName: string;
+  isAgent?: boolean;
   pubkey: string;
 };
 
@@ -28,23 +29,23 @@ export function DirectMessageIntroAvatarStack({
           pubkey={participant.pubkey}
           triggerAriaLabel={`Open profile for ${participant.displayName}`}
           triggerElement="span"
+          role={participant.isAgent ? "bot" : undefined}
         >
           <span
             className={index > 0 ? "-ml-5" : ""}
             data-testid="message-dm-intro-avatar-stack-participant"
-            style={{
-              zIndex: index + 1,
-              ...(index < stackItemCount - 1 && {
-                mask: "radial-gradient(circle 34px at calc(100% + 10px) 50%, transparent 99%, #fff 100%)",
-                WebkitMask:
-                  "radial-gradient(circle 34px at calc(100% + 10px) 50%, transparent 99%, #fff 100%)",
-              }),
-            }}
+            style={{ zIndex: index + 1 }}
           >
             <UserAvatar
+              accent={participant.isAgent === true}
               avatarUrl={participant.avatarUrl}
-              className="h-[60px] w-[60px] text-base"
+              className={
+                index < stackItemCount - 1
+                  ? "h-[60px] w-[60px] text-base ring-2 ring-background"
+                  : "h-[60px] w-[60px] text-base"
+              }
               displayName={participant.displayName}
+              shape={participant.isAgent ? "squircle" : "circle"}
               size="md"
             />
           </span>

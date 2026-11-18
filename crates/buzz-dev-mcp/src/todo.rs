@@ -11,7 +11,7 @@
 //! On replacement, open items that disappear without being marked done
 //! trigger a soft warning appended to the tool response.
 
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::ErrorData;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -239,12 +239,12 @@ fn render_items(items: &[Item]) -> String {
 
 /// Wrap a string result as an MCP CallToolResult with text content.
 pub fn text_result(s: String) -> Result<CallToolResult, ErrorData> {
-    Ok(CallToolResult::success(vec![Content::text(s)]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(s)]))
 }
 
 /// Wrap an error string as an MCP CallToolResult with isError=true.
 pub fn error_result(s: String) -> Result<CallToolResult, ErrorData> {
-    Ok(CallToolResult::error(vec![Content::text(s)]))
+    Ok(CallToolResult::error(vec![ContentBlock::text(s)]))
 }
 
 #[cfg(test)]

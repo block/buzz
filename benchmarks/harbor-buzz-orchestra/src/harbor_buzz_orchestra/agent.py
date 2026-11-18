@@ -170,7 +170,11 @@ class BuzzOrchestraAgent(BaseAgent):
         # GUI shows one recognisable channel per problem per attempt.
         channel_label = getattr(environment, "environment_name", None)
         handle = self.provisioner.create_trial(
-            run_id, trial_id, self.manifest, channel_label=channel_label
+            run_id,
+            trial_id,
+            self.manifest,
+            channel_label=channel_label,
+            task_name=channel_label,
         )
         if handle.trial_id != trial_id:
             raise RuntimeError("provisioner returned a handle for a different trial_id")

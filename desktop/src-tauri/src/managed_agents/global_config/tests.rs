@@ -299,6 +299,8 @@ fn default_global_config_serializes_all_fields() {
 
 fn bare_record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        session_policy: Default::default(),
+        description: None,
         pubkey: "agent".to_string(),
         name: "Agent".to_string(),
         persona_id: None,
@@ -348,7 +350,9 @@ fn bare_record() -> ManagedAgentRecord {
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         relay_mesh: None,
+        effort_level: None,
         auto_restart_on_config_change: false,
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
@@ -358,10 +362,13 @@ fn bare_record() -> ManagedAgentRecord {
 
 fn persona(id: &str, model: Option<&str>, provider: Option<&str>) -> AgentDefinition {
     AgentDefinition {
+        session_policy: Default::default(),
+        description: None,
         id: id.to_string(),
         display_name: "Test Persona".to_string(),
         avatar_url: None,
         system_prompt: "".to_string(),
+        acp_command: None,
         runtime: None,
         model: model.map(str::to_string),
         provider: provider.map(str::to_string),
@@ -372,6 +379,7 @@ fn persona(id: &str, model: Option<&str>, provider: Option<&str>) -> AgentDefini
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: vec![],
@@ -504,7 +512,7 @@ fn inherited_shared_compute_translates_to_supported_agent_transport() {
     );
     assert_eq!(
         effective.env.get("BUZZ_AGENT_MODEL").map(String::as_str),
-        Some("auto")
+        Some(super::super::RELAY_MESH_VIRTUAL_MODEL_ID)
     );
     assert_eq!(
         effective
@@ -529,6 +537,98 @@ fn resolve_global_fallback_when_no_persona_linked() {
 
     assert_eq!(model.as_deref(), Some("global-model"));
     assert_eq!(provider.as_deref(), Some("global-provider"));
+}
+
+/// P1 (Carl): a user-supplied `GIT_CONFIG_*` entry — at any layer — must never
+/// reach `descriptor.env`, which `spawn_agent_child` writes onto the child
+/// *after* the relay credential-helper `GIT_CONFIG_*`. A surviving
+/// `GIT_CONFIG_COUNT=0` would orphan the helper, erasing relay git auth. This drives the real
+/// six-layer resolver — the same path spawn and remote-deploy both consume —
+/// not a fresh `Command`, so it witnesses the actual Desktop→harness layering.
+#[test]
+fn git_config_stripped_from_every_env_layer_before_descriptor() {
+    // Seed the attacker value at all three user-settable layers: global,
+    // live persona, and per-agent overrides.
+    let mut persona = persona("p", Some("model"), Some("anthropic"));
+    persona.env_vars = [
+        ("GIT_CONFIG_COUNT".to_string(), "0".to_string()),
+        (
+            "GIT_CONFIG_KEY_0".to_string(),
+            "credential.helper".to_string(),
+        ),
+        ("BENIGN".to_string(), "persona".to_string()),
+    ]
+    .into_iter()
+    .collect();
+    let personas = vec![persona];
+
+    let mut record = bare_record();
+    record.persona_id = Some("p".to_string());
+    record.env_vars = [("GIT_CONFIG_GLOBAL".to_string(), "/dev/null".to_string())]
+        .into_iter()
+        .collect();
+
+    let global = GlobalAgentConfig {
+        env_vars: [("GIT_CONFIG_SYSTEM".to_string(), "/dev/null".to_string())]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    };
+    let runtime = super::super::known_acp_runtime("buzz-agent").expect("buzz-agent runtime");
+
+    let effective = super::super::readiness::resolve_effective_agent_env(
+        &record,
+        &personas,
+        Some(runtime),
+        &global,
+    );
+
+    for key in effective.env.keys() {
+        assert!(
+            !key.to_ascii_uppercase().starts_with("GIT_CONFIG"),
+            "descriptor env must not carry a user GIT_CONFIG* key, found `{key}`"
+        );
+    }
+    // Non-reserved overrides still flow through — the strip is surgical.
+    assert_eq!(
+        effective.env.get("BENIGN").map(String::as_str),
+        Some("persona")
+    );
+}
+
+/// `BUZZ_GIT_IDENTITY` reaches the harness only through this resolved env, and
+/// the harness reads it once at startup. A per-agent value must therefore beat
+/// the persona and global values here, in both directions.
+#[test]
+fn per_agent_git_identity_mode_beats_persona_and_global() {
+    let runtime = super::super::known_acp_runtime("buzz-agent").expect("buzz-agent runtime");
+    for (agent, global) in [("user", "agent"), ("agent", "user")] {
+        let mut persona = persona("p", Some("model"), Some("anthropic"));
+        persona.env_vars = [("BUZZ_GIT_IDENTITY".to_string(), global.to_string())]
+            .into_iter()
+            .collect();
+        let mut record = bare_record();
+        record.persona_id = Some("p".to_string());
+        record.env_vars = [("BUZZ_GIT_IDENTITY".to_string(), agent.to_string())]
+            .into_iter()
+            .collect();
+        let global_config = GlobalAgentConfig {
+            env_vars: [("BUZZ_GIT_IDENTITY".to_string(), global.to_string())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let effective = super::super::readiness::resolve_effective_agent_env(
+            &record,
+            &[persona],
+            Some(runtime),
+            &global_config,
+        );
+        assert_eq!(
+            effective.env.get("BUZZ_GIT_IDENTITY").map(String::as_str),
+            Some(agent)
+        );
+    }
 }
 
 /// All-None: no source provides model/provider → both must be None.
@@ -619,10 +719,13 @@ fn record_runtime_wins_over_persona_runtime_for_command_resolution() {
     record.persona_id = Some("p1".to_string());
 
     let persona = AgentDefinition {
+        session_policy: Default::default(),
+        description: None,
         id: "p1".to_string(),
         display_name: "Goose persona".to_string(),
         avatar_url: None,
         system_prompt: "".to_string(),
+        acp_command: None,
         runtime: Some("goose".to_string()),
         model: None,
         provider: None,
@@ -633,6 +736,7 @@ fn record_runtime_wins_over_persona_runtime_for_command_resolution() {
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: vec![],

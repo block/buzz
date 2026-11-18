@@ -2,92 +2,25 @@ use super::project_git_exec::{
     build_git_auth_config, clean_branch, clean_target_ref, run_git, validate_workspace_clone_url,
     GitAuthConfig,
 };
+use super::project_git_file_content::{checkout_project_repo, read_preview_content};
 use super::project_git_push::push_project_local_repository_blocking;
+pub use super::project_git_types::{
+    GitIdentityInfo, ProjectLocalRepoInfo, ProjectLocalRepoSnapshotInfo, ProjectRepoCommitInfo,
+    ProjectRepoContributorInfo, ProjectRepoFileInfo, ProjectRepoPullResult, ProjectRepoPushResult,
+    ProjectRepoSnapshotInfo, ProjectRepoSyncStatusInfo,
+};
 use super::project_repo_paths::{canonical_repos_roots, find_local_repo_dir};
 use crate::app_state::AppState;
-use serde::Serialize;
 use std::time::UNIX_EPOCH;
-use tauri::State;
-#[derive(Clone, Serialize)]
-pub struct ProjectRepoCommitInfo {
-    pub hash: String,
-    pub short_hash: String,
-    pub author_name: String,
-    pub author_email: String,
-    pub timestamp: i64,
-    pub subject: String,
-}
-#[derive(Serialize)]
-pub struct ProjectRepoFileInfo {
-    pub path: String,
-    pub kind: String,
-    pub size: Option<u64>,
-    pub preview_content: Option<String>,
-    pub last_changed_at: Option<i64>,
-    pub latest_commit: Option<ProjectRepoCommitInfo>,
-}
-#[derive(Serialize)]
-pub struct ProjectRepoContributorInfo {
-    pub name: String,
-    pub email: String,
-    pub commit_count: usize,
-    pub last_commit_at: i64,
-}
-#[derive(Serialize)]
-pub struct ProjectRepoSnapshotInfo {
-    pub latest_commit: Option<ProjectRepoCommitInfo>,
-    pub commits: Vec<ProjectRepoCommitInfo>,
-    pub files: Vec<ProjectRepoFileInfo>,
-    pub contributors: Vec<ProjectRepoContributorInfo>,
-}
-#[derive(Serialize)]
-pub struct ProjectLocalRepoSnapshotInfo {
-    pub path: String,
-    pub snapshot: ProjectRepoSnapshotInfo,
-}
-#[derive(Serialize)]
-pub struct ProjectLocalRepoInfo {
-    pub name: String,
-    pub path: String,
-}
-#[derive(Serialize)]
-pub struct ProjectRepoSyncStatusInfo {
-    pub local_path: Option<String>,
-    pub local_branch: Option<String>,
-    pub local_branches: Vec<String>,
-    pub local_head: Option<String>,
-    pub local_short_head: Option<String>,
-    pub remote_branch: Option<String>,
-    pub remote_head: Option<String>,
-    pub remote_short_head: Option<String>,
-    pub merge_base: Option<String>,
-    pub ahead_count: usize,
-    pub behind_count: usize,
-    pub has_uncommitted_changes: bool,
-    pub has_untracked_files: bool,
-    pub can_push: bool,
-    pub push_block_reason: Option<String>,
-    pub can_pull: bool,
-    pub pull_block_reason: Option<String>,
-}
-#[derive(Serialize)]
-pub struct ProjectRepoPushResult {
-    pub pushed: bool,
-    pub message: String,
-    pub branch: String,
-    pub commit: String,
-    pub merge_base: Option<String>,
-}
-#[derive(Serialize)]
-pub struct ProjectRepoPullResult {
-    pub pulled: bool,
-    pub message: String,
-}
-#[derive(Serialize)]
-pub struct GitIdentityInfo {
-    pub name: Option<String>,
-    pub email: Option<String>,
-}
+use tauri::{AppHandle, State};
+use tauri_plugin_opener::OpenerExt;
+
+// Bound eager content without truncating the repository tree.
+const MAX_EAGER_FILE_PREVIEWS: usize = 250;
+
+#[cfg(test)]
+#[path = "project_git_tests.rs"]
+mod tests;
 fn parse_latest_commit(output: &str) -> Option<ProjectRepoCommitInfo> {
     let line = output.lines().next()?;
     let mut parts = line.split('\0');
@@ -132,30 +65,6 @@ fn has_uncommitted_changes(output: &str) -> bool {
 
 fn has_untracked_files(output: &str) -> bool {
     output.lines().any(|line| line.starts_with("??"))
-}
-
-fn read_preview_content(
-    repo_dir: &std::path::Path,
-    path: &str,
-    size: Option<u64>,
-) -> Option<String> {
-    const MAX_PREVIEW_BYTES: u64 = 64 * 1024;
-    if size.is_some_and(|value| value > MAX_PREVIEW_BYTES) {
-        return None;
-    }
-
-    let full_path = repo_dir.join(path);
-    let normalized = full_path.canonicalize().ok()?;
-    let repo_root = repo_dir.canonicalize().ok()?;
-    if !normalized.starts_with(repo_root) {
-        return None;
-    }
-
-    let bytes = std::fs::read(normalized).ok()?;
-    if bytes.contains(&0) {
-        return None;
-    }
-    String::from_utf8(bytes).ok()
 }
 
 fn parse_commits(output: &str) -> Vec<ProjectRepoCommitInfo> {
@@ -254,24 +163,26 @@ fn parse_worktree_files(
         .filter_map(|path| {
             let full_path = repo_dir.join(path);
             let metadata = std::fs::metadata(&full_path).ok()?;
-            if !metadata.is_file() {
-                return None;
-            }
+            metadata.is_file().then_some((path, full_path, metadata))
+        })
+        .enumerate()
+        .map(|(index, (path, full_path, metadata))| {
             let size = Some(metadata.len());
             let latest_commit = latest_commit_by_path.get(path).cloned();
-            Some(ProjectRepoFileInfo {
+            ProjectRepoFileInfo {
                 path: path.to_string(),
                 kind: "blob".to_string(),
                 size,
-                preview_content: read_preview_content(repo_dir, path, size),
+                preview_content: (index < MAX_EAGER_FILE_PREVIEWS)
+                    .then(|| read_preview_content(repo_dir, path, size))
+                    .flatten(),
                 last_changed_at: latest_commit
                     .as_ref()
                     .map(|commit| commit.timestamp)
                     .or_else(|| path_modified_at(&full_path)),
                 latest_commit,
-            })
+            }
         })
-        .take(250)
         .collect()
 }
 
@@ -314,6 +225,7 @@ fn parse_ls_tree(
     output: &str,
     latest_commit_by_path: &std::collections::HashMap<String, ProjectRepoCommitInfo>,
 ) -> Vec<ProjectRepoFileInfo> {
+    let mut blob_index = 0;
     output
         .lines()
         .filter_map(|line| {
@@ -323,11 +235,12 @@ fn parse_ls_tree(
             let kind = parts.next()?.to_string();
             let _object = parts.next()?;
             let size = parts.next().and_then(|value| value.parse::<u64>().ok());
-            let preview_content = if kind == "blob" {
-                read_preview_content(repo_dir, path, size)
-            } else {
-                None
-            };
+            if kind == "blob" {
+                blob_index += 1;
+            }
+            let preview_content = (kind == "blob" && blob_index <= MAX_EAGER_FILE_PREVIEWS)
+                .then(|| read_preview_content(repo_dir, path, size))
+                .flatten();
             Some(ProjectRepoFileInfo {
                 path: path.to_string(),
                 kind,
@@ -339,7 +252,6 @@ fn parse_ls_tree(
                 latest_commit: latest_commit_by_path.get(path).cloned(),
             })
         })
-        .take(250)
         .collect()
 }
 
@@ -727,61 +639,14 @@ pub async fn get_project_repo_snapshot(
     tauri::async_runtime::spawn_blocking(move || {
         let temp_dir = tempfile::tempdir().map_err(|error| format!("create temp dir: {error}"))?;
         let repo_dir = temp_dir.path().join("repo");
-        let repo_path = repo_dir
-            .to_str()
-            .ok_or_else(|| "temporary repository path is not UTF-8".to_string())?;
-
-        let explicit_target = target_ref.as_deref().or(target_commit.as_deref());
-        if let Some(fetch_ref) = explicit_target {
-            run_git(
-                &[
-                    "clone",
-                    "--filter=blob:none",
-                    "--no-checkout",
-                    clone_url.as_str(),
-                    repo_path,
-                ],
-                None,
-                &auth,
-            )?;
-            run_git(
-                &["fetch", "--depth=100", "origin", fetch_ref],
-                Some(&repo_dir),
-                &auth,
-            )?;
-            if let Some(expected_commit) = target_commit.as_deref() {
-                let fetched_commit = run_git(&["rev-parse", "FETCH_HEAD"], Some(&repo_dir), &auth)
-                    .ok()
-                    .and_then(|output| first_output_line(&output))
-                    .map(|commit| commit.to_ascii_lowercase())
-                    .ok_or_else(|| "Could not resolve the requested repository ref.".to_string())?;
-                if fetched_commit != expected_commit {
-                    return Err(
-                        "The requested repository ref changed. Refresh and try again.".to_string(),
-                    );
-                }
-            }
-            run_git(
-                &["checkout", "--detach", "FETCH_HEAD"],
-                Some(&repo_dir),
-                &auth,
-            )?;
-        } else {
-            let mut clone_args = vec!["clone", "--filter=blob:none"];
-            if let Some(ref branch) = branch {
-                clone_args.push("--branch");
-                clone_args.push(branch.as_str());
-            }
-            clone_args.push(clone_url.as_str());
-            clone_args.push(repo_path);
-            if run_git(&clone_args, None, &auth).is_err() && branch.is_some() {
-                run_git(
-                    &["clone", "--filter=blob:none", clone_url.as_str(), repo_path],
-                    None,
-                    &auth,
-                )?;
-            }
-        }
+        checkout_project_repo(
+            &repo_dir,
+            &clone_url,
+            branch.as_deref(),
+            target_ref.as_deref(),
+            target_commit.as_deref(),
+            &auth,
+        )?;
 
         let snapshot =
             snapshot_from_repo(&repo_dir, &auth, branch.as_deref(), base_branch.as_deref());
@@ -859,6 +724,26 @@ pub async fn list_project_local_repositories(
     })
     .await
     .map_err(|error| format!("local repo list task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn open_project_repository_folder(
+    repos_dir: Option<String>,
+    project_dtag: String,
+    clone_url: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    validate_workspace_clone_url(&clone_url, &state)?;
+    let repo_dir = tauri::async_runtime::spawn_blocking(move || {
+        find_local_repo_dir(repos_dir.as_deref(), &project_dtag, Some(&clone_url))?
+            .ok_or_else(|| "No local checkout found.".to_string())
+    })
+    .await
+    .map_err(|error| format!("local repo lookup task failed: {error}"))??;
+    app.opener()
+        .open_path(repo_dir.to_string_lossy(), None::<&str>)
+        .map_err(|error| format!("open local repository folder: {error}"))
 }
 
 #[tauri::command]

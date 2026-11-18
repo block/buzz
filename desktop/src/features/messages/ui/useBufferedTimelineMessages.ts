@@ -1,5 +1,12 @@
 import * as React from "react";
 
+type TimelineRow = { id: string; renderKey?: string };
+
+/** A row's identity, stable across an optimistic send and its relay ack. */
+function rowKey(message: TimelineRow) {
+  return message.renderKey ?? message.id;
+}
+
 /**
  * Keeps the logical tail stable while a reader is away from the bottom.
  *
@@ -8,30 +15,37 @@ import * as React from "react";
  * history before the retained tail is admitted immediately, while newer output
  * is released atomically when the reader returns to the bottom.
  */
-export function selectBufferedTimelineMessages<T extends { id: string }>({
-  frozenMessageIds,
+export function selectBufferedTimelineMessages<T extends TimelineRow>({
+  frozenRowKeys,
   isAtBottom,
   messages,
 }: {
-  frozenMessageIds: readonly string[] | null;
+  frozenRowKeys: readonly string[] | null;
   isAtBottom: boolean;
   messages: T[];
 }): T[] {
-  if (isAtBottom || frozenMessageIds === null) return messages;
-  if (frozenMessageIds.length === 0) return [];
+  if (isAtBottom || frozenRowKeys === null) return messages;
+  if (frozenRowKeys.length === 0) return [];
 
-  const currentById = new Map(messages.map((message) => [message.id, message]));
-  if (frozenMessageIds.some((id) => !currentById.has(id))) {
-    // A deletion or authoritative replacement removed part of the frozen
-    // snapshot. Keeping stale message objects would be worse than accepting it.
-    return messages;
-  }
+  const currentByKey = new Map(
+    messages.map((message) => [rowKey(message), message]),
+  );
+  // A deletion drops only its own row: the rest stays frozen, so later
+  // arrivals still count as pending. Once the whole snapshot is gone (an
+  // authoritative replacement), accept the new list rather than keep stale
+  // message objects.
+  const survivingKeys = frozenRowKeys.filter((key) => currentByKey.has(key));
+  if (survivingKeys.length === 0) return messages;
 
-  const firstFrozenIndex = messages.findIndex(
-    (message) => message.id === frozenMessageIds[0],
+  // Frozen rows can come back reordered: an acked send changes its id and so
+  // its place among same-second rows. Older history ends at the first frozen
+  // row of any key, so no frozen row is also prepended and counted twice.
+  const frozenKeys = new Set(survivingKeys);
+  const firstFrozenIndex = messages.findIndex((message) =>
+    frozenKeys.has(rowKey(message)),
   );
   const prepended = messages.slice(0, firstFrozenIndex);
-  const frozen = frozenMessageIds.map((id) => currentById.get(id) as T);
+  const frozen = survivingKeys.map((key) => currentByKey.get(key) as T);
   const buffered = [...prepended, ...frozen];
   if (
     buffered.length === messages.length &&
@@ -46,7 +60,7 @@ export function selectBufferedTimelineMessages<T extends { id: string }>({
   return buffered;
 }
 
-export function useBufferedTimelineMessages<T extends { id: string }>({
+export function useBufferedTimelineMessages<T extends TimelineRow>({
   channelId,
   isAtBottom,
   messages,
@@ -55,22 +69,22 @@ export function useBufferedTimelineMessages<T extends { id: string }>({
   isAtBottom: boolean;
   messages: T[];
 }): { messages: T[]; pendingCount: number } {
-  const frozenMessageIdsRef = React.useRef<string[] | null>(null);
+  const frozenRowKeysRef = React.useRef<string[] | null>(null);
   const previousChannelIdRef = React.useRef(channelId);
 
   if (previousChannelIdRef.current !== channelId) {
     previousChannelIdRef.current = channelId;
-    frozenMessageIdsRef.current = null;
+    frozenRowKeysRef.current = null;
   }
 
   if (isAtBottom) {
-    frozenMessageIdsRef.current = messages.map((message) => message.id);
-  } else if (frozenMessageIdsRef.current === null) {
-    frozenMessageIdsRef.current = messages.map((message) => message.id);
+    frozenRowKeysRef.current = messages.map(rowKey);
+  } else if (frozenRowKeysRef.current === null) {
+    frozenRowKeysRef.current = messages.map(rowKey);
   }
 
   const buffered = selectBufferedTimelineMessages({
-    frozenMessageIds: frozenMessageIdsRef.current,
+    frozenRowKeys: frozenRowKeysRef.current,
     isAtBottom,
     messages,
   });

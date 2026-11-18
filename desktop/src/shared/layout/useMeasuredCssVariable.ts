@@ -1,9 +1,14 @@
 import * as React from "react";
 
-import { observeElementBlockSize } from "./observeElementBlockSize";
+import {
+  observeElementBlockSize,
+  observeElementInlineSize,
+} from "./observeElementBlockSize";
 
 type UseMeasuredCssVariableArgs = {
   cssVariable: string;
+  /** Which box dimension to observe. Defaults to `"block"` (height). */
+  dimension?: "block" | "inline";
   enabled?: boolean;
   resetKey?: unknown;
   resetValue: string;
@@ -11,9 +16,9 @@ type UseMeasuredCssVariableArgs = {
 };
 
 /**
- * Observes an element's block size and writes it as a CSS custom property on a
- * target element. Uses `useLayoutEffect` so the first measurement happens
- * before paint.
+ * Observes an element's block (or inline) size and writes it as a CSS custom
+ * property on a target element. Uses `useLayoutEffect` so the first
+ * measurement happens before paint.
  *
  * Returns a callback ref for the source element. Attach it instead of a ref
  * object so the measurement re-runs when the source mounts later than this
@@ -22,6 +27,7 @@ type UseMeasuredCssVariableArgs = {
 export function useMeasuredCssVariable({
   targetRef,
   cssVariable,
+  dimension = "block",
   resetValue,
   resetKey,
   enabled = true,
@@ -53,13 +59,25 @@ export function useMeasuredCssVariable({
       targetEl.style.setProperty(cssVariable, `${px}px`);
     };
 
-    const disconnect = observeElementBlockSize(sourceEl, applySize);
+    const observe =
+      dimension === "inline"
+        ? observeElementInlineSize
+        : observeElementBlockSize;
+    const disconnect = observe(sourceEl, applySize);
 
     return () => {
       disconnect();
       targetEl.style.setProperty(cssVariable, resetValue);
     };
-  }, [sourceEl, targetRef, cssVariable, resetValue, resetKey, enabled]);
+  }, [
+    sourceEl,
+    targetRef,
+    cssVariable,
+    dimension,
+    resetValue,
+    resetKey,
+    enabled,
+  ]);
 
   return setSourceEl;
 }

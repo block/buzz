@@ -347,7 +347,10 @@ async fn reconcile_roster(
     Ok(())
 }
 
-pub(crate) async fn publish_current_status_once(app: &AppHandle, reason: &str) {
+pub(crate) async fn publish_current_status_once<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    reason: &str,
+) {
     let state = app.state::<AppState>();
     match tokio::time::timeout(
         STATUS_PUBLISH_TIMEOUT,

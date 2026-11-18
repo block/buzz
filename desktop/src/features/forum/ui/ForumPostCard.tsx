@@ -45,9 +45,11 @@ export function ForumPostCard({
     preferResolvedSelfLabel: true,
   });
   const avatarUrl = profiles?.[post.pubkey.toLowerCase()]?.avatarUrl ?? null;
+  const authorIsAgent = profiles?.[post.pubkey.toLowerCase()]?.isAgent === true;
   const { mentionNames, mentionPubkeysByName } = resolveMentionProps(
     post.tags,
     profiles,
+    post.content,
   );
   // Memoize the imeta map: `parseImetaTags` builds a fresh object each render,
   // and the `Markdown` memo compares `imetaByUrl` by reference. Without this,
@@ -83,14 +85,19 @@ export function ForumPostCard({
       <div className="flex items-center gap-2">
         {/* biome-ignore lint/a11y/noStaticElementInteractions: presentation wrapper stops click propagation to parent card */}
         <div onClick={(e) => e.stopPropagation()} role="presentation">
-          <UserProfilePopover pubkey={post.pubkey}>
+          <UserProfilePopover
+            pubkey={post.pubkey}
+            role={authorIsAgent ? "bot" : undefined}
+          >
             <button
               className="flex items-center gap-2 rounded-lg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
               type="button"
             >
               <UserAvatar
+                accent={authorIsAgent}
                 avatarUrl={avatarUrl}
                 displayName={authorLabel}
+                shape={authorIsAgent ? "squircle" : "circle"}
                 size="sm"
               />
               <span className="truncate text-sm font-medium text-foreground hover:underline">

@@ -9,16 +9,16 @@ import {
   createHostedCommunity,
   deleteBuilderlabIdentity,
   getBuilderlabAuth,
-  HOSTED_COMMUNITY_LIMIT,
   HOSTED_COMMUNITY_SUFFIX,
   hostedCommunityErrorMessage,
   hostedCommunityRelayUrl,
-  type BuilderlabAuth,
-  type HostedCommunity,
-  type HostedNostrIdentity,
   loadHostedCommunityAccount,
+  normalizedBoundKeyHex,
   startBuilderlabLogin,
+  usableBoundIdentityNpub,
   VALID_HOSTED_COMMUNITY_NAME,
+  type BuilderlabAuth,
+  type HostedNostrIdentity,
 } from "@/features/communities/hostedCommunityApi";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import {
@@ -28,6 +28,7 @@ import {
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { cn } from "@/shared/lib/cn";
 import { safeNpub } from "@/shared/lib/nostrUtils";
+import { UNAVAILABLE_KEY_LABEL } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 
@@ -44,7 +45,7 @@ export function HostedCommunityCreateFlow({
   const [identity, setIdentity] = React.useState<HostedNostrIdentity | null>(
     null,
   );
-  const [communities, setCommunities] = React.useState<HostedCommunity[]>([]);
+  const [canCreate, setCanCreate] = React.useState(true);
   const [name, setName] = React.useState("");
   const [availability, setAvailability] = React.useState<boolean | null>(null);
   const [checkingName, setCheckingName] = React.useState(false);
@@ -57,7 +58,7 @@ export function HostedCommunityCreateFlow({
   const loadAccount = React.useCallback(async () => {
     const account = await loadHostedCommunityAccount();
     setIdentity(account.identity);
-    setCommunities(account.communities);
+    setCanCreate(account.canCreate);
   }, []);
 
   React.useEffect(() => {
@@ -144,17 +145,34 @@ export function HostedCommunityCreateFlow({
       await clearBuilderlabAuth();
       setAuth(null);
       setIdentity(null);
-      setCommunities([]);
+      setCanCreate(true);
     });
 
-  const boundPubkey = identity?.pubkey_hex ?? null;
+  // Identity rows display npubs derived from the same key the mismatch gate
+  // and recovery actions act on: the account row from the authoritative
+  // bound `pubkey_hex` — the server-sent `npub` is an independent field that
+  // nothing on this path proves encodes the same key — and the device row
+  // from the local key. An unencodable or non-identity-length key renders the
+  // neutral label instead of leaking raw hex or the unverified npub. Both
+  // keys are compared in the one normalized hex form, so a padded or
+  // mixed-case spelling of the same key never reads as a mismatch, and an
+  // npub stored in the hex field is not a key at all.
+  const boundHex = normalizedBoundKeyHex(identity?.pubkey_hex);
+  const localHex = normalizedBoundKeyHex(localPubkey);
+  const localNpub = localHex === null ? null : safeNpub(localHex);
+  const boundNpub = usableBoundIdentityNpub(identity);
+  // The account is only usable to this flow when its authoritative
+  // `pubkey_hex` normalizes to a hex key: without that key the flow cannot
+  // establish which identity create/connect actions would affect. An
+  // identity payload without a usable authoritative key therefore counts as
+  // a mismatch that requires recovery — never as a connected, ready
+  // account.
+  const usableBoundIdentity = boundHex !== null;
   const identityMismatch = Boolean(
     identity &&
-      boundPubkey &&
-      localPubkey &&
-      boundPubkey.toLowerCase() !== localPubkey.toLowerCase(),
+      (!usableBoundIdentity ||
+        (boundHex !== null && localHex !== null && boundHex !== localHex)),
   );
-  const localNpub = localPubkey ? safeNpub(localPubkey) : null;
 
   const switchToDeviceIdentity = () =>
     run("Switching identity…", async () => {
@@ -189,8 +207,8 @@ export function HostedCommunityCreateFlow({
   const validName =
     normalizedName.length <= 63 &&
     VALID_HOSTED_COMMUNITY_NAME.test(normalizedName);
-  const atCommunityLimit = communities.length >= HOSTED_COMMUNITY_LIMIT;
-  const ready = Boolean(auth && identity && !identityMismatch);
+  const atCommunityLimit = !canCreate;
+  const ready = Boolean(auth && usableBoundIdentity && !identityMismatch);
 
   React.useEffect(() => {
     if (!ready || !normalizedName || !validName) {
@@ -222,7 +240,13 @@ export function HostedCommunityCreateFlow({
 
   const create = (event: React.FormEvent) => {
     event.preventDefault();
-    if (!validName || !identity || identityMismatch || atCommunityLimit) return;
+    if (
+      !validName ||
+      !usableBoundIdentity ||
+      identityMismatch ||
+      atCommunityLimit
+    )
+      return;
     void run("Creating community…", async () => {
       const available = await checkHostedCommunityName(normalizedName);
       if (available.error || !available.available) {
@@ -343,9 +367,11 @@ export function HostedCommunityCreateFlow({
           this device, or sign in with another account.
         </p>
         <div className="rounded-xl bg-muted/40 px-4 py-3 font-mono text-xs text-muted-foreground">
-          <p className="break-all">Account: {identity.npub ?? boundPubkey}</p>
+          <p className="break-all">
+            Account: {boundNpub ?? UNAVAILABLE_KEY_LABEL}
+          </p>
           <p className="mt-1 break-all">
-            This device: {localNpub ?? localPubkey}
+            This device: {localNpub ?? UNAVAILABLE_KEY_LABEL}
           </p>
         </div>
         {errorBox}
@@ -372,7 +398,7 @@ export function HostedCommunityCreateFlow({
   }
 
   const feedback = atCommunityLimit
-    ? `You’ve reached the limit of ${HOSTED_COMMUNITY_LIMIT} hosted communities.`
+    ? "You’ve reached your hosted community creation limit."
     : name && !validName
       ? "Use lowercase letters, numbers, and single hyphens."
       : checkingName

@@ -113,7 +113,7 @@ export function projectBranchManagementState(input: {
       : !activeRemoteBranch
         ? "Only a published remote branch can be deleted."
         : input.hasOpenPullRequest
-          ? "Close the branch's pull request before deleting it."
+          ? "Close the branch's review before deleting it."
           : null;
   return { activeBranchCommit, activeRemoteBranch, deleteBranchReason };
 }

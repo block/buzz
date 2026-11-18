@@ -29,6 +29,15 @@ export function isRelayConnectionDegraded(state: ConnectionState): boolean {
   );
 }
 
+/**
+ * Aggregate cap on explicit `#h` channel values the relay accepts across one
+ * REQ's filters before rejecting it as `restricted: too many explicit
+ * channels`. Mirrors `MAX_EXPLICIT_CHANNEL_VALUES` in
+ * `crates/buzz-relay/src/handlers/req.rs`. A subscription over more hidden DMs
+ * than this must be split into multiple REQs, each within the cap.
+ */
+export const MAX_EXPLICIT_CHANNEL_VALUES = 128;
+
 export type RelaySubscriptionFilter = {
   ids?: string[];
   kinds: number[];
@@ -36,14 +45,19 @@ export type RelaySubscriptionFilter = {
   authors?: string[];
   since?: number;
   until?: number;
+  /** Relay extension: composite pagination tiebreak paired with `until`. */
+  before_id?: string;
 } & Partial<Record<`#${string}`, string[]>>;
 
 type HistorySubscription = {
   mode: "history";
+  filter: RelaySubscriptionFilter;
   events: RelayEvent[];
   resolve: (events: RelayEvent[]) => void;
   reject: (error: Error) => void;
   timeout: number;
+  timeoutMs: number;
+  closedRetryAttempt?: number;
 };
 
 type FirstEventSubscription = {
@@ -59,9 +73,21 @@ export type LiveSubscriptionReadiness = "eose" | "closed" | "timeout";
 type LiveSubscription = {
   mode: "live";
   filter: RelaySubscriptionFilter;
+  /** Client-side admission only; interactive consumers still obey cooldown/pacing. */
+  priority?: "interactive";
   onEvent: (event: RelayEvent) => void;
   resolveReady?: (readiness: LiveSubscriptionReadiness) => void;
+  /** Release readiness/cancellation listeners when this entry is retired. */
+  onRemoved?: () => void;
   lastSeenCreatedAt?: number;
+  /** Connection generation on which this subscription last reached EOSE. */
+  eoseGeneration?: number;
+  /**
+   * Unix seconds up to which this subscription was registered on a connection
+   * that delivered its EOSE: that connection's last inbound frame, stamped on
+   * close. Not proof of delivery; see `relayResumeCursor.ts`.
+   */
+  liveUntil?: number;
   /**
    * Lower bound of a reconnect backfill window that has not yet completed.
    *
@@ -73,6 +99,26 @@ type LiveSubscription = {
    * `min(pendingReplaySince, cursor window)`.
    */
   pendingReplaySince?: number;
+  /** Dispatch-level duplicate suppression shared by restored-live and repair. */
+  reconnectReplay?: {
+    generation: number;
+    seenEventIds: Set<string>;
+    liveEose: boolean;
+    repairDone: boolean;
+    /** When the restored live REQ went out; its EOSE deadline runs from here. */
+    liveReqSentAtMs?: number;
+    /**
+     * Set when the history fallback follows an unacknowledged live REQ: a late
+     * original EOSE is then indistinguishable from the fallback's, so no EOSE
+     * ends dedupe; only the fallback's deadline or teardown does.
+     */
+    ignoreEose?: boolean;
+    /**
+     * Wakes the repair worker waiting for the restored live REQ's EOSE: on
+     * EOSE, or when a newer replay supersedes this one.
+     */
+    liveEoseWaiter?: () => void;
+  };
   closedRetryAttempt?: number;
   closedRetryTimeout?: number;
 };
@@ -89,17 +135,35 @@ export type RelaySubscription =
   | FirstEventSubscription
   | LiveSubscription;
 
+export type SubscriptionEventBufferItem = {
+  subId: string;
+  event: RelayEvent;
+  generation: number;
+};
+
 export function sortEvents(events: RelayEvent[]) {
   return [...events].sort((left, right) => {
     if (left.created_at !== right.created_at) {
       return left.created_at - right.created_at;
     }
-    // Same (created_at, id) tiebreak as the cache sort (sortMessages) so a
-    // history REQ resolves same-second events in a stable, relay-matching
-    // order. Currently every consumer re-sorts downstream, but keeping the
-    // two sorts on one invariant avoids a latent ordering drift.
+    // Tiebreak same-second events on ascending id so a history REQ resolves
+    // in a stable order; project issues replay assignment operations in it.
+    // Timeline consumers re-sort with compareChronologicalOrder.
     return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
   });
+}
+
+/**
+ * Splits a native websocket delivery into individual frames.
+ *
+ * The native plugin coalesces inbound frames into one IPC delivery, so a
+ * delivery is an array of frames. Older single-frame deliveries stay valid:
+ * `getTextPayload` rejects arrays, so every consumer must unwrap here rather
+ * than per-client — an un-unwrapped consumer drops batched frames silently
+ * instead of failing.
+ */
+export function toRelayFrames(message: unknown): unknown[] {
+  return Array.isArray(message) ? message : [message];
 }
 
 export function getTextPayload(message: unknown) {

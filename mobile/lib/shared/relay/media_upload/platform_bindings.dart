@@ -1,0 +1,36 @@
+part of '../media_upload.dart';
+
+/// Whether saving media needs Android's pre-scoped-storage runtime permission.
+Future<bool> requiresLegacyMediaStoragePermission() async {
+  if (defaultTargetPlatform != TargetPlatform.android) {
+    return false;
+  }
+  return await _mediaUploadPlatformChannel.invokeMethod<bool>(
+        _requiresLegacyMediaStoragePermissionMethod,
+      ) ??
+      false;
+}
+
+final mediaUploadServiceProvider = Provider<MediaUploadService>((ref) {
+  final config = ref.watch(relayConfigProvider);
+  final client = ref.watch(hostedHttpClientFactoryProvider)(
+    traffic: HttpTraffic.media,
+  );
+  ref.onDispose(client.close);
+  final picker = ImagePicker();
+  final service = MediaUploadService(
+    httpClient: client,
+    baseUrl: config.baseUrl,
+    nsec: config.nsec,
+    pickGalleryImage: () => picker.pickImage(
+      source: ImageSource.gallery,
+      requestFullMetadata: false,
+    ),
+    pickGalleryImages: () =>
+        picker.pickMultipleMedia(requestFullMetadata: false),
+    pickGalleryVideo: () => picker.pickVideo(source: ImageSource.gallery),
+    pickAttachmentFile: file_selector.openFile,
+  );
+  ref.onDispose(service.dispose);
+  return service;
+});

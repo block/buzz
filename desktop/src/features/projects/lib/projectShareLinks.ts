@@ -14,6 +14,7 @@ import {
   KIND_REPO_ANNOUNCEMENT,
 } from "@/shared/constants/kinds";
 import {
+  buildCommitLink,
   buildIssueLink,
   buildProjectLink,
   buildPullRequestLink,
@@ -29,6 +30,7 @@ import type { ProjectPullRequest } from "../projectPullRequests.mjs";
 type Coordinate = { kind: number; owner: string; dtag: string };
 
 const HEX64_RE = /^[a-fA-F0-9]{64}$/;
+const GIT_OBJECT_ID_RE = /^(?:[a-fA-F0-9]{40}|[a-fA-F0-9]{64})$/;
 
 /**
  * Split an addressable coordinate (`<kind>:<owner>:<d>`). Only the first two
@@ -115,6 +117,18 @@ export function repositoryShareLink(repository: Repository): string | null {
   const coordinate = repositoryCoordinate(repository.repoAddress);
   return coordinate && isLinkableCoordinate(coordinate.owner, coordinate.dtag)
     ? buildRepoLink(coordinate)
+    : null;
+}
+
+export function commitShareLink(
+  repository: Repository,
+  commitHash: string,
+): string | null {
+  const coordinate = repositoryCoordinate(repository.repoAddress);
+  return coordinate &&
+    GIT_OBJECT_ID_RE.test(commitHash) &&
+    isLinkableCoordinate(coordinate.owner, coordinate.dtag)
+    ? buildCommitLink({ ...coordinate, commitHash })
     : null;
 }
 
