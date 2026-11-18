@@ -50,15 +50,6 @@ pub enum ArtifactScope {
     /// An explicitly signed tenant determines access.
     Community,
 }
-impl ArtifactScope {
-    /// Stable storage discriminator.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Channel => "channel",
-            Self::Community => "community",
-        }
-    }
-}
 /// Maximum stored community type policies, including explicit `everyone` entries.
 pub const MAX_COMMUNITY_POLICIES: usize = 256;
 /// The authoritative envelope, independent of any client's content schema.
