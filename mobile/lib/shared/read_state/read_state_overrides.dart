@@ -234,14 +234,20 @@ extension ReadStateOverrides on ReadStateManager {
 
   /// Takes in one decoded unread record. A foreign record at this
   /// installation's coordinate moves it to a fresh slot.
-  void _mergeUnreadRecord(String slot, ReadStateBlob blob) {
+  void _mergeUnreadRecord(String slot, ReadStateBlob blob, NostrEvent event) {
     if (slot == _unreadSlot) {
       if (blob.clientId == _clientId) {
         _unreadPublished = Map.of(blob.contexts);
+        // Our own head raises the reservation floor whatever its clock, so
+        // the next version can replace it (the peer filter doesn't apply).
+        _lastReserved = max(_lastReserved, event.createdAt);
+        final head = _unreadHead;
+        if (head == null || !_outranks(head, event)) _unreadHead = event;
       } else {
         _pending.remove(_unreadCoordinate);
         _unreadSlot = generateReadStateSlotId();
         _unreadPublished = const {};
+        _unreadHead = null;
       }
     }
     _mergeOverrides(blob.contexts);
@@ -254,3 +260,8 @@ extension ReadStateOverrides on ReadStateManager {
     }
   }
 }
+
+/// Replaceable-event order: the later `created_at`, then the lower id.
+bool _outranks(NostrEvent a, NostrEvent b) =>
+    a.createdAt > b.createdAt ||
+    (a.createdAt == b.createdAt && a.id.compareTo(b.id) < 0);

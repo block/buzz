@@ -73,11 +73,25 @@ extension ReadStateFollows on ReadStateManager {
       _onChanged();
       return false;
     }
+    final previousSlots = List.of(_followSlots);
+    final previousPlacement = _followPlacement;
     _ownFollows[key] = {...?previous, 'follow': follow, 'at': _now()};
     _followEdits[key] = generation;
     if (!_packFollows()) {
       revert();
       _lastReserved = previousReserved;
+      return false;
+    }
+    // Refused where the user sees it, not later in publication.
+    if (!_followsFitSnapshot()) {
+      revert();
+      _lastReserved = previousReserved;
+      _followSlots
+        ..clear()
+        ..addAll(previousSlots);
+      _followPlacement = previousPlacement;
+      syncError = StateError(threadFollowsFullMessage);
+      _onChanged();
       return false;
     }
     _onChanged();
@@ -158,6 +172,35 @@ extension ReadStateFollows on ReadStateManager {
             written[key] == (_followEdits[key] ?? 0))
           key,
     };
+  }
+
+  /// Whether every changed follow slot, at its largest timestamp, still fits
+  /// the last full snapshot alongside the retained packets.
+  bool _followsFitSnapshot() {
+    final writes = [
+      ..._pending.values,
+      for (final MapEntry(key: slot, value: plaintext)
+          in _plannedFollowSlots().entries)
+        if (_followPublished[slot] != plaintext)
+          NostrEvent(
+            id: '0' * 64,
+            pubkey: pubkey,
+            sig: '0' * 128,
+            kind: EventKind.readState,
+            createdAt: 4294967295,
+            tags: [
+              ['d', '$threadFollowsDTagPrefix$slot'],
+              ['t', threadFollowsTag],
+            ],
+            content: _crypto.encrypt(plaintext),
+          ),
+    ];
+    try {
+      _checkSnapshotCapacity(_capacitySnapshot, writes);
+      return true;
+    } on StateError {
+      return false;
+    }
   }
 
   /// Re-place own follow entries. Before spilling into more slots, drops own

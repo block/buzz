@@ -75,9 +75,12 @@ extension ReadStateJournal on ReadStateManager {
       for (final entry in (journal['published'] as Map).entries) {
         _published[entry.key as String] = contexts(entry.value);
       }
-      // Follow events have their own field, which older builds ignore.
+      // Follow and v2 unread events have their own fields, which older
+      // builds ignore; v2 entries an earlier build wrote to `pending` load
+      // here too and move to `unreadPending` on the next save.
       for (final entry in {
         ...journal['pending'] as Map,
+        ...?journal['unreadPending'] as Map?,
         ...?journal['followPending'] as Map?,
       }.entries) {
         _pending[entry.key as String] = NostrEvent.fromJson(
@@ -111,6 +114,13 @@ extension ReadStateJournal on ReadStateManager {
     }
     _persistLocalState();
   }
+
+  /// The journal field that keeps a retained packet for coordinate [key].
+  String _pendingField(String key) => key.startsWith(threadFollowsDTagPrefix)
+      ? 'followPending'
+      : key.startsWith(readStateUnreadDTagPrefix)
+      ? 'unreadPending'
+      : 'pending';
 
   /// Saves like [_persistLocalState], resolving with the follow keys the
   /// write it awaited actually covered; see [_savedFollows].
@@ -171,11 +181,11 @@ extension ReadStateJournal on ReadStateManager {
         'slots': _slots,
         'placement': _placement,
         'published': _published,
-        for (final follows in [false, true])
-          follows ? 'followPending' : 'pending': {
+        // `pending` stays v1-only, so an older build can replay it.
+        for (final field in ['pending', 'unreadPending', 'followPending'])
+          field: {
             for (final MapEntry(:key, :value) in _pending.entries)
-              if (key.startsWith(threadFollowsDTagPrefix) == follows)
-                key: value.toJson(),
+              if (_pendingField(key) == field) key: value.toJson(),
           },
         'createdAt': _maxFetchedCreatedAt,
       });

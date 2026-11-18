@@ -137,6 +137,63 @@ void main() {
     expect(phone.activeChannelOverrides, isEmpty);
   });
 
+  test('a read past the baseline stamps a clear with the advance', () async {
+    final phone = await device('phone');
+    phone.markContextRead(channel, clock - 100);
+    expect(phone.markChannelUnread(channel), isTrue);
+    await phone.flush();
+    final set = ownGroup(phone)['ov_s:$channel']!;
+    clock++;
+    phone.markContextRead(channel, clock - 50);
+    await phone.flush();
+    final group = ownGroup(phone);
+    expect(group[channel], clock - 50);
+    // A fresh clear, not only the old max(S,C) floor: it defeats a peer's
+    // equal-stamp set made concurrently at the newer baseline.
+    expect(group['ov_c:$channel'], greaterThan(set));
+  });
+
+  test('an own v2 head far ahead raises the next reservation above it', () async {
+    final phone = await device('phone');
+    phone.markContextRead(channel, clock - 100);
+    expect(phone.markChannelUnread(channel), isTrue);
+    await phone.flush();
+    final journal = ReadStateStorage(prefs).readJournal(
+      '${keys.public}:${Uri.encodeComponent(normalizeCommunityRelayUrl(phone.relayUrl))}',
+    )!;
+    final slot = journal['unreadSlot'] as String;
+    // A restored or fast-clocked copy of this installation wrote ahead.
+    final ahead = clock + 1000;
+    final record = NostrEvent(
+      id: 'event-ahead',
+      pubkey: keys.public,
+      createdAt: ahead,
+      kind: EventKind.readState,
+      tags: [
+        ['d', '$readStateUnreadDTagPrefix$slot'],
+        ['t', readStateUnreadTag],
+      ],
+      content: crypto.encrypt(
+        jsonEncode(
+          ReadStateBlob(
+            clientId: journal['clientId'] as String,
+            contexts: ownUnread(phone),
+            version: 2,
+          ).toJson(),
+        ),
+      ),
+      sig: 'sig',
+    );
+    relay.retained['$readStateUnreadDTagPrefix$slot'] = record;
+    relay.deliver(record);
+    await pumpEventQueue();
+    phone.clearChannelOverride(channel);
+    await phone.flush();
+    final head = relay.retained['$readStateUnreadDTagPrefix$slot']!;
+    expect(head.createdAt, greaterThan(ahead));
+    expect(phone.activeChannelOverrides, isEmpty);
+  });
+
   test('a peer read that never saw the mark unread deactivates it', () async {
     final phone = await device('phone');
     final desktop = await device('desktop');
@@ -570,6 +627,50 @@ void main() {
         expect(decodeReadStateBlob(crypto.decrypt(content)), isNotNull);
       }
     });
+
+    test(
+      'a retained v2 unread packet never enters the v1 `pending` field',
+      () async {
+        final phone = await device('phone');
+        await phone.flush();
+        relay.failNext = true;
+        expect(phone.markChannelUnread(channel), isTrue);
+        await phone.flush();
+        final name = [
+          for (final name in prefs.getKeys())
+            if (prefs.getString(name) case final raw?
+                when raw.contains('"unreadPending"'))
+              name,
+        ].single;
+        Map<String, dynamic> journal() =>
+            jsonDecode(prefs.getString(name)!) as Map<String, dynamic>;
+        expect(journal()['unreadPending'] as Map, isNotEmpty);
+        // The older build decodes every `pending` entry as read state.
+        for (final event in (journal()['pending'] as Map).values) {
+          final content = NostrEvent.fromJson(
+            Map<String, dynamic>.from(event as Map),
+          ).content;
+          expect(decodeReadStateBlob(crypto.decrypt(content)), isNotNull);
+        }
+        // A journal from before the field: the v2 packet sits in `pending`.
+        phone.dispose(flushPending: false);
+        final legacy = journal();
+        final v2 = Map.of(legacy['unreadPending'] as Map);
+        legacy['pending'] = {
+          ...legacy['pending'] as Map,
+          ...legacy['unreadPending'] as Map,
+        };
+        legacy.remove('unreadPending');
+        await prefs.setString(name, jsonEncode(legacy));
+        relay.offline = true;
+        final restarted = await device('phone');
+        await restarted.flush();
+        expect(journal()['unreadPending'], v2);
+        for (final key in v2.keys) {
+          expect(journal()['pending'] as Map, isNot(contains(key)));
+        }
+      },
+    );
 
     test(
       'an overfull merged primary still publishes reads and follows',
@@ -1117,7 +1218,7 @@ void main() {
       final other = '${channel}b';
       final release = Completer<void>();
       store.onJournal = (encoded) async {
-        final pending = (jsonDecode(encoded) as Map)['pending'] as Map;
+        final pending = (jsonDecode(encoded) as Map)['unreadPending'] as Map;
         if (!pending.containsKey(coordinate)) return;
         store.onJournal = null;
         // Our own coordinate, already the only carrier of a held mark.

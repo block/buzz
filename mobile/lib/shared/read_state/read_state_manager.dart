@@ -18,6 +18,7 @@ import '../theme/community_theme_preference.dart';
 
 part 'read_state_follows.dart';
 part 'read_state_journal.dart';
+part 'read_state_capacity.dart';
 part 'read_state_overrides.dart';
 
 class ReadStateCrypto {
@@ -131,6 +132,11 @@ enum _ApplyRemoteContextResult { unchanged, advanced }
 const threadFollowsNotReadyMessage =
     'Follow choices are not ready. Connect and try again.';
 
+/// The failure shown when a follow choice would overfill the account's
+/// full read-state snapshot.
+const threadFollowsFullMessage =
+    'Follow choices are full for this account. Unfollow a thread and try again.';
+
 class ReadStateManager {
   final String pubkey;
   final String relayUrl;
@@ -191,6 +197,8 @@ class ReadStateManager {
   // The unread record's coordinate slot and its last published contexts.
   String _unreadSlot = generateReadStateSlotId();
   Map<String, int> _unreadPublished = const {};
+  // The verified head of this installation's own unread coordinate.
+  NostrEvent? _unreadHead;
   // The durable, never-decreasing expiry clock; see [_expiryNow].
   int _expiryWatermark = 0;
 
@@ -223,16 +231,9 @@ class ReadStateManager {
   // The highest timestamp reserved here; every edit and packet takes a
   // strictly later one, so a wall-clock rollback cannot reuse a version.
   int _lastReserved = 0;
-
-  /// Reserves the next timestamp. `created_at` is uint32 on the wire, so a
-  /// reservation past it fails rather than wrapping or reusing one.
-  int _reserve() {
-    final next = max(max(_now(), _maxFetchedCreatedAt + 1), _lastReserved + 1);
-    if (next > 4294967295) {
-      throw StateError('No later read-state timestamp can be reserved');
-    }
-    return _lastReserved = next;
-  }
+  // The newest full snapshot a publish read: the shared size basis that
+  // follow acceptance checks against.
+  List<NostrEvent> _capacitySnapshot = const [];
 
   Timer? _debounceTimer;
   void Function()? _unsubscribeLive;
@@ -324,12 +325,14 @@ class ReadStateManager {
   }) {
     if (_disposed || isOverrideContext(contextId) || unixTimestamp < 0) return;
     final publishable = explicit || !contextId.startsWith(msgContextPrefix);
+    // Whether a clear is owed is decided before the read moves the frontier
+    // past the group's baseline, and both are saved together.
+    final cleared = _clearChannelOverride(contextId) == true;
     final advanced = _advanceContext(
       contextId,
       unixTimestamp,
       publishable: publishable,
     );
-    final cleared = _clearChannelOverride(contextId) == true;
     if (advanced || cleared) {
       _persistLocalState();
       _onChanged();
@@ -534,6 +537,7 @@ class ReadStateManager {
         _mergeUnreadRecord(
           decoded.dTag.substring(readStateUnreadDTagPrefix.length),
           decoded.blob,
+          event,
         );
         continue;
       }
@@ -769,7 +773,7 @@ class ReadStateManager {
           return;
         }
         checkConnection?.call();
-        snapshot = events;
+        snapshot = _capacitySnapshot = events;
         _mergeEvents(events);
         _followsLoaded = recovered = true;
         // Unchanged slots publish nothing, so no echo would announce marks
@@ -924,10 +928,24 @@ class ReadStateManager {
       // Check replay and successor prefixes before sending. Not a reservation:
       // another device can still grow the remote snapshot concurrently.
       _checkSnapshotCapacity(snapshot, _pending.values);
-      _checkSnapshotCapacity(snapshot, [
-        ..._pending.values,
-        ...prepared.values,
-      ]);
+      // A follow candidate that overfills the snapshot waits, visibly; read
+      // positions that fit still publish.
+      Object? followsFull;
+      try {
+        _checkSnapshotCapacity(snapshot, [
+          ..._pending.values,
+          ...prepared.values,
+        ]);
+      } on StateError {
+        prepared.removeWhere(
+          (coordinate, _) => coordinate.startsWith(threadFollowsDTagPrefix),
+        );
+        _checkSnapshotCapacity(snapshot, [
+          ..._pending.values,
+          ...prepared.values,
+        ]);
+        followsFull = StateError(threadFollowsFullMessage);
+      }
       for (final entry in _pending.entries.toList()) {
         if (entry.key.startsWith(threadFollowsDTagPrefix) &&
             !_canPublishFollows) {
@@ -1033,16 +1051,24 @@ class ReadStateManager {
             (_disposed && !allowDisposed)) {
           return;
         }
-        _unreadPublished = unread;
+        // `OK true` (a `duplicate:` no-op included) doesn't prove this
+        // became the head: a newer own head supersedes it, so its intent is
+        // rebuilt above that head rather than acknowledged.
+        final head = _unreadHead;
+        final superseded =
+            head != null && head.id != event.id && _outranks(head, event);
+        if (!superseded) _unreadPublished = unread;
         _pending.remove(unreadCoordinate);
         _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
         await _persistLocalState();
+        if (superseded) _schedulePublish();
       }
       for (final MapEntry(key: slot, value: plaintext)
           in followPlanned.entries) {
         final coordinate = '$threadFollowsDTagPrefix$slot';
         final event = prepared[coordinate];
         if (_followPublished[slot] == plaintext) continue;
+        if (followsFull != null) continue;
         if (event == null) {
           // Skipped for a pending replay; send the newer choice next pass.
           _publishAgain = true;
@@ -1099,6 +1125,7 @@ class ReadStateManager {
           'Unreadable thread follow coordinate blocks publication',
         );
       }
+      if (followsFull != null) throw followsFull;
       syncError = _standingError;
     } catch (error) {
       // The journal retains local advances, placements and exact pending
@@ -1108,31 +1135,6 @@ class ReadStateManager {
         '[ReadStateManager] publish failed (journal retained): $error',
       );
       if (_isPermanentReadStateRemoteError(error)) _remoteUnsupported = true;
-    }
-  }
-
-  void _checkSnapshotCapacity(
-    List<NostrEvent> snapshot,
-    Iterable<NostrEvent> writes,
-  ) {
-    String coordinate(NostrEvent event) =>
-        '${event.kind}:${event.pubkey}:${event.tags.where((tag) => tag.length >= 2 && tag.first == 'd').map((tag) => tag[1]).firstOrNull ?? ''}';
-    final projected = {for (final event in snapshot) coordinate(event): event};
-    for (final event in writes) {
-      projected[coordinate(event)] = event;
-      if (projected.length > readStateSnapshotMaxEvents ||
-          utf8
-                  .encode(
-                    jsonEncode(
-                      projected.values.map((event) => event.toJson()).toList(),
-                    ),
-                  )
-                  .length >
-              readStateSnapshotMaxBytes) {
-        throw StateError(
-          'Read-state publication exceeds full snapshot capacity',
-        );
-      }
     }
   }
 

@@ -64,10 +64,17 @@ class ThreadFollowsNotifier extends Notifier<ThreadFollowsState> {
     if (_legacy.isNotEmpty && !readState.threadFollowsIncomplete) {
       Future.microtask(_importLegacy);
     }
+    final synced = {
+      for (final key in readState.threadFollows.keys) threadFollowRoot(key),
+    };
     return ThreadFollowsState(
       followedRootIds: {
         for (final MapEntry(:key, :value) in readState.threadFollows.entries)
           if (value.follow) threadFollowRoot(key),
+        // A pre-sync follow not yet imported still shows; a synced choice
+        // for the same root is newer and wins.
+        for (final entry in _legacy)
+          if (!synced.contains(entry.rootId)) entry.rootId,
       },
       unfollowedRootIds: {
         for (final MapEntry(:key, :value) in readState.threadFollows.entries)
@@ -84,10 +91,15 @@ class ThreadFollowsNotifier extends Notifier<ThreadFollowsState> {
       _set(channelId, rootId, false);
 
   /// The failure to show when a follow or unfollow was refused.
-  String get failureMessage =>
-      ref.read(readStateProvider.notifier).threadFollowsReady
-      ? 'Couldn’t save that. Try again.'
-      : threadFollowsNotReadyMessage;
+  String get failureMessage {
+    if (!ref.read(readStateProvider.notifier).threadFollowsReady) {
+      return threadFollowsNotReadyMessage;
+    }
+    final error = ref.read(readStateProvider).syncError;
+    return error is StateError && error.message == threadFollowsFullMessage
+        ? threadFollowsFullMessage
+        : 'Couldn’t save that. Try again.';
+  }
 
   Future<bool> _set(String channelId, String rootId, bool follow) async {
     if (rootId.isEmpty) return false;
