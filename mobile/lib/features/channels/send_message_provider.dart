@@ -121,12 +121,14 @@ class SendMessage {
     ];
 
     _ensureDeliveryValid();
+    final stamp = ClientStamp.now();
     NostrEvent? localMessage;
     try {
       await _signedEventRelay.submit(
         kind: EventKind.streamMessage,
         content: content,
-        tags: tags,
+        tags: [...tags, ...stamp.tags],
+        createdAt: stamp.createdAt,
         onSigned: (event) async {
           await beforePublish?.call(event);
           _ensureDeliveryValid();

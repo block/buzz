@@ -107,6 +107,7 @@ Future<Channel> _createMeChat(
 }) async {
   sync = _currentMeSync(ref, sync);
   final pending = MeChatCreation.pending(sync);
+  final stamp = ClientStamp.now();
   final initialMessage = initialContent == null
       ? null
       : pending?.initialMessage ??
@@ -118,8 +119,10 @@ Future<Channel> _createMeChat(
                   ['h', channelId],
                   ['p', assistant],
                   ...initialMediaTags,
+                  ...stamp.tags,
                 ],
                 secretKey: sync.privateHex,
+                createdAt: stamp.createdAt,
               ).toMap(),
             );
   // Desktop's unified record can arrive mid-creation and owns filings then.
