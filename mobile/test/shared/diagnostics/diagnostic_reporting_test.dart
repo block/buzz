@@ -22,6 +22,14 @@ import 'package:sentry_flutter/src/breadcrumbs/debug_print_integration.dart';
 // ignore: implementation_imports
 import 'package:sentry_flutter/src/exception/flutter_error_integration.dart';
 // ignore: implementation_imports
+import 'package:sentry_flutter/src/enrichment/flutter_enricher_event_processor.dart';
+// ignore: implementation_imports
+import 'package:sentry_flutter/src/enrichment/widget_event_processor.dart';
+// ignore: implementation_imports
+import 'package:sentry_flutter/src/url_filter/url_filter_event_processor.dart';
+// ignore: implementation_imports
+import 'package:sentry_flutter/src/exception/flutter_exception_event_processor.dart';
+// ignore: implementation_imports
 import 'package:sentry_flutter/src/exception/platform_exception_event_processor.dart';
 
 void main() {
@@ -146,9 +154,14 @@ void main() {
       transport = _MemoryTransport();
       options = SentryFlutterOptions();
       configureDiagnostics(options, 'https://key@example.org/1');
+      // The processors SentryFlutter.init installs, in its order.
       options
         ..transport = transport
         ..sendClientReports = false
+        ..addEventProcessor(FlutterExceptionEventProcessor())
+        ..addEventProcessor(FlutterEnricherEventProcessor(options))
+        ..addEventProcessor(WidgetEventProcessor())
+        ..addEventProcessor(UrlFilterEventProcessor(options))
         ..addEventProcessor(PlatformExceptionEventProcessor());
       hub = Hub(options);
     });
@@ -179,6 +192,54 @@ void main() {
         expect(exception['stacktrace'], isNotNull);
       });
     }
+
+    test('a report right after a member change names the new member', () async {
+      SentryDiagnosticReporter(hub: hub)
+        ..setMember('a' * 64)
+        ..reportError(
+          StateError('failed'),
+          StackTrace.current,
+          operation: DiagnosticOperation.relayFrame,
+        );
+      await transport.first();
+
+      expect(transport.events.single['user']['id'], 'a' * 64);
+    });
+
+    testWidgets('sends only the allowed contexts', (tester) async {
+      tester.platformDispatcher.accessibilityFeaturesTestValue =
+          const FakeAccessibilityFeatures(accessibleNavigation: true);
+      addTearDown(
+        tester.platformDispatcher.clearAccessibilityFeaturesTestValue,
+      );
+
+      await tester.runAsync(
+        () => hub.captureException(
+          StateError('failed'),
+          stackTrace: StackTrace.current,
+        ),
+      );
+
+      expect(
+        (transport.events.single['contexts'] as Map).keys,
+        everyElement(
+          isIn(['app', 'device', 'os', 'runtime', 'runtimes', 'trace']),
+        ),
+      );
+    });
+
+    test('drops the name a person gave their device', () {
+      final event = SentryEvent(
+        contexts: Contexts(
+          device: SentryDevice(name: 'private-marker', model: 'iPhone'),
+        ),
+      );
+
+      final device = DiagnosticFilter.filterEvent(event).contexts.device!;
+
+      expect(device.name, isNull);
+      expect(device.model, 'iPhone');
+    });
 
     testWidgets('leaves out what a framework error says about the screen', (
       tester,
@@ -221,6 +282,7 @@ void main() {
     ('a destination the SDK cannot parse', 'https://key@example.org'),
     ('a destination without a public key', 'https://example.org/1'),
     ('a destination without an HTTP host', 'ftp://key@example.org/1'),
+    ('a destination with an uppercase scheme', 'HTTPS://key@example.org/1'),
   ]) {
     test('a build with $name starts without the SDK', () async {
       DiagnosticReporter? started;

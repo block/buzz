@@ -88,8 +88,10 @@ bool _isUsable(String destination) {
     final dsn = Dsn.parse(destination);
     // The native SDKs also need an HTTP(S) host and a public key, which the
     // Dart parser lets through; they would fail after Dart installs its
-    // handlers.
-    if (!{'http', 'https'}.contains(dsn.uri?.scheme) ||
+    // handlers. The scheme is checked on the raw text because Dart lowercases
+    // it and Cocoa does not.
+    if (!(destination.startsWith('https://') ||
+            destination.startsWith('http://')) ||
         (dsn.uri?.host ?? '').isEmpty ||
         dsn.publicKey.isEmpty ||
         dsn.projectId.isEmpty) {

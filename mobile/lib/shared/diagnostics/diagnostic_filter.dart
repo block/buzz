@@ -30,6 +30,18 @@ abstract final class DiagnosticFilter {
 
   static const _breadcrumbCategories = {networkCategory, lifecycleCategory};
 
+  /// Report contexts that may leave the device: the app, operating system and
+  /// device details, the Dart runtime, and the SDK's trace identifiers. The
+  /// SDK adds others on its own, such as accessibility settings and locale.
+  static const _contexts = {
+    'app',
+    'device',
+    'os',
+    'runtime',
+    'runtimes',
+    'trace',
+  };
+
   static final _urlTail = RegExp(
     r'''(\b[a-z][a-z0-9+.-]*://[^\s?#'"]*)[?#][^\s'"]*''',
     caseSensitive: false,
@@ -54,9 +66,11 @@ abstract final class DiagnosticFilter {
   /// Filters an error report.
   static SentryEvent filterEvent(SentryEvent event) {
     event.request = null;
-    // The SDK adds the widget and error description here, which can quote
-    // what is on screen.
-    event.contexts.remove('flutter_error_details');
+    // Kept by name, like tags: the SDK adds contexts such as the widget and
+    // error description, accessibility settings and locale.
+    event.contexts.removeWhere((key, _) => !_contexts.contains(key));
+    // The name a person gave their device.
+    event.contexts.device?.name = null;
     event.tags?.removeWhere((key, _) => !_allowsTag(key));
     event.message = switch (event.message) {
       final message? => SentryMessage(stripUrlTails(message.formatted)),
