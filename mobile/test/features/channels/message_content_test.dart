@@ -798,6 +798,43 @@ void main() {
       }
     });
 
+    testWidgets('opens attachments under the imeta filename, not the link text', (
+      tester,
+    ) async {
+      const url = 'https://relay.example/media/sha256.pdf';
+      String? openedFilename;
+      final auth = MediaGetAuthService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+      );
+
+      await tester.pumpWidget(
+        _testable(
+          const MessageContent(
+            content: '[Quarterly report]($url)',
+            tags: [
+              ['imeta', 'url $url', 'filename q3-report.pdf'],
+            ],
+          ),
+          overrides: [
+            mediaGetAuthServiceProvider.overrideWithValue(auth),
+            openDownloadedFileProvider.overrideWithValue((
+              url,
+              headers,
+              filename,
+            ) async {
+              openedFilename = filename;
+            }),
+          ],
+        ),
+      );
+
+      await tester.tapAt(linkCenter(tester, 'Quarterly report'));
+      await tester.pump();
+
+      expect(openedFilename, 'q3-report.pdf');
+    });
+
     testWidgets('a link nothing can open offers only copy and share', (
       tester,
     ) async {
