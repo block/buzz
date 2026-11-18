@@ -321,6 +321,55 @@ async fn thread_window_predicates_corruption_and_legacy() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn thread_aux_full_batch_matches_only_positional_e_tags() {
+    let (db, cid, ch, keys, root) = fixture().await;
+    let base = Timestamp::now().as_secs();
+    let rows = replies(&db, cid, ch, &keys, &root, 2).await;
+    // Two real reactions, and a decoy holding a target id in a tag that is not
+    // `e` at position 0: containment admits it, the positional check must not.
+    let decoy = EventBuilder::new(Kind::Custom(7), "decoy")
+        .tags([
+            Tag::parse(["h", &ch.to_string()]).unwrap(),
+            Tag::parse(["x", "e", &rows[0].id.to_hex()]).unwrap(),
+        ])
+        .custom_created_at(Timestamp::from(base + 30))
+        .sign_with_keys(&keys)
+        .unwrap();
+    for event in [
+        make_event(&keys, ch, 7, "older", Some(&rows[0]), base + 10),
+        make_event(&keys, ch, 7, "newer", Some(&rows[1]), base + 20),
+        decoy,
+    ] {
+        db.insert_event(cid, &event, Some(ch)).await.unwrap();
+    }
+    let mut targets: Vec<String> = (1..=198).map(|i| format!("{i:064x}")).collect();
+    targets.extend(rows.iter().map(|row| row.id.to_hex()));
+    let accessible = [ch];
+    let query = AuxQuery {
+        community: cid,
+        targets: &targets,
+        kinds: &[7],
+        accessible: &accessible,
+        cursor: None,
+    };
+    let mut session = ReadSession {
+        inner: ReadSessionInner::Writer(db.pool.clone()),
+    };
+    let page = session
+        .thread_window_aux(&query, &mut ScanBudget::default())
+        .await
+        .unwrap();
+    let contents: Vec<&str> = page
+        .events
+        .iter()
+        .map(|e| e.event.content.as_str())
+        .collect();
+    assert_eq!(contents, ["newer", "older"]);
+    assert!(page.next_cursor.is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn thread_aux_tombstone_ids_and_raw_cursor_survive_damaged_payload() {
     let (db, cid, ch, keys, root) = fixture().await;
     let rows = replies(&db, cid, ch, &keys, &root, 1001).await;
