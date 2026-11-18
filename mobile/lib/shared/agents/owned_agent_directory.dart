@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:nostr/nostr.dart' as nostr;
 
 import '../crypto/event_signing.dart';
 import '../crypto/nip_oa.dart';
@@ -23,39 +24,70 @@ class OwnedAgentDirectoryEntry extends AgentDirectoryEntry {
   final String? runtime;
 }
 
-/// The owner's agents in the active community, as desktop's Agents tab lists
-/// them: each agent's newest kind:30177 registration must name it and carry
-/// the `runtime` tag of its agent type. Registrations an earlier Buzz wrote
-/// have no `runtime` until the agent is imported, so they are not listed.
-/// Signed profiles prove ownership.
+/// The owner's agents for the Agents page and for conversation pickers.
+typedef OwnedAgentInventory = ({
+  List<OwnedAgentDirectoryEntry> listed,
+  List<OwnedAgentDirectoryEntry> recipients,
+});
+
+/// Shares one relay read across the Agents page and the conversation pickers.
+/// Invalidate this inventory when an owner registration changes.
+final ownedAgentInventoryProvider = FutureProvider<OwnedAgentInventory>((
+  ref,
+) async {
+  ref.watch(relayConfigProvider);
+  final owner = ref.watch(myPubkeyProvider);
+  final session = ref.watch(relaySessionProvider);
+  if (owner == null) {
+    const empty = <OwnedAgentDirectoryEntry>[];
+    return (listed: empty, recipients: empty);
+  }
+  // A disconnected session has not established which agents are registered.
+  if (session.status != SessionStatus.connected) {
+    return Completer<OwnedAgentInventory>().future;
+  }
+  final relay = ref.read(relaySessionProvider.notifier);
+  return _loadOwnedAgentInventory(
+    owner,
+    (filter) => relay.queryRelay([filter]),
+    includeRecipients: true,
+  );
+});
+
+/// The owner's agents as desktop's Agents tab lists them. Each agent must
+/// have a named registration with a well-formed `runtime` tag.
 final ownedAgentDirectoryProvider =
     FutureProvider<List<OwnedAgentDirectoryEntry>>((ref) async {
-      ref.watch(relayConfigProvider);
-      final owner = ref.watch(myPubkeyProvider);
-      final session = ref.watch(relaySessionProvider);
-      if (owner == null) return const [];
-      // Stay loading until connected: an empty list would read as "no
-      // listed agents" and hide the owner's agents from mentions. The
-      // provider rebuilds when the session status changes.
-      if (session.status != SessionStatus.connected) {
-        return Completer<List<OwnedAgentDirectoryEntry>>().future;
-      }
-      final relay = ref.read(relaySessionProvider.notifier);
-      return loadOwnedAgentDirectory(
-        owner,
-        (filter) => relay.queryRelay([filter]),
-      );
+      return (await ref.watch(ownedAgentInventoryProvider.future)).listed;
+    });
+
+/// Agents eligible for mentions, Add members and New DM. An owner-signed
+/// named registration and a verified agent profile establish eligibility.
+/// Externally hosted agents can use this path without a desktop runtime tag.
+final ownedAgentRecipientsProvider =
+    FutureProvider<List<OwnedAgentDirectoryEntry>>((ref) async {
+      return (await ref.watch(ownedAgentInventoryProvider.future)).recipients;
     });
 
 /// Registration pages read before failing, as `loadMeAgentInventory` bounds
 /// the same inventory.
 const ownedAgentDirectoryPageBudget = 50;
 
-/// Uses the active community's authenticated query boundary and paginates it.
+/// Reads the desktop-style Agents listing without fetching other profiles.
 Future<List<OwnedAgentDirectoryEntry>> loadOwnedAgentDirectory(
   String owner,
   Future<List<NostrEvent>> Function(NostrFilter) query,
-) async {
+) async => (await _loadOwnedAgentInventory(
+  owner,
+  query,
+  includeRecipients: false,
+)).listed;
+
+Future<OwnedAgentInventory> _loadOwnedAgentInventory(
+  String owner,
+  Future<List<NostrEvent>> Function(NostrFilter) query, {
+  required bool includeRecipients,
+}) async {
   final registrations = <String, NostrEvent>{};
   final seen = <String>{};
   for (var page = 1; ; page++) {
@@ -85,12 +117,24 @@ Future<List<OwnedAgentDirectoryEntry>> loadOwnedAgentDirectory(
     }
     if (events.length < 100 || fresh.isEmpty) break;
   }
-  final keys = {
-    for (final MapEntry(:key, :value) in registrations.entries)
-      if (isListedAgentRegistration(value)) key,
-  };
-  final results = <OwnedAgentDirectoryEntry>[];
-  final ordered = keys.toList();
+  final metadata = <String, ({String? runtime, String? model})>{};
+  for (final MapEntry(:key, :value) in registrations.entries) {
+    final runtimeTag = _tagValue(value, 'runtime');
+    final runtime = _runtimePattern.hasMatch(runtimeTag ?? '')
+        ? runtimeTag
+        : null;
+    if (!includeRecipients && runtime == null) continue;
+    final data = _namedRegistrationData(value);
+    if (data == null) continue;
+    final model = data['model'];
+    metadata[key] = (
+      runtime: runtime,
+      model: model is String && model.trim().isNotEmpty ? model.trim() : null,
+    );
+  }
+  final listed = <OwnedAgentDirectoryEntry>[];
+  final recipients = <OwnedAgentDirectoryEntry>[];
+  final ordered = metadata.keys.toList();
   for (var offset = 0; offset < ordered.length; offset += 50) {
     final batch = ordered.skip(offset).take(50).toList();
     final events = await query(NostrFilters.profilesBatch(batch));
@@ -106,55 +150,49 @@ Future<List<OwnedAgentDirectoryEntry>> loadOwnedAgentDirectory(
       }
     }
     for (final event in latest.values) {
-      if (verifiedProfileOaOwnerPubkey(event) == owner) {
-        final profile = AgentDirectoryEntry.fromEvent(event);
-        String? model;
-        String? runtime;
-        try {
-          final registration = registrations[event.pubkey]!;
-          // Native libsecp256k1 verification; the pure-Dart codec took
-          // several milliseconds per registration on the UI isolate.
-          verifiedNostrEventFromJson(jsonEncode(registration.toJson()));
-          runtime = _tagValue(registration, 'runtime');
-          final data = jsonDecode(registration.content);
-          if (data is Map && data['model'] is String) {
-            final value = (data['model'] as String).trim();
-            if (value.isNotEmpty) model = value;
-          }
-        } catch (_) {
-          /* Older registrations may have no metadata. */
-        }
-        results.add(
-          OwnedAgentDirectoryEntry(
-            pubkey: profile.pubkey,
-            displayName: profile.displayName,
-            avatarUrl: profile.avatarUrl,
-            model: model,
-            runtime: runtime,
-          ),
-        );
-      }
+      if (verifiedProfileOaOwnerPubkey(event) != owner) continue;
+      final profile = AgentDirectoryEntry.fromEvent(event);
+      final data = metadata[event.pubkey]!;
+      final signed = _hasVerifiedSignature(registrations[event.pubkey]!);
+      final entry = OwnedAgentDirectoryEntry(
+        pubkey: profile.pubkey,
+        displayName: profile.displayName,
+        avatarUrl: profile.avatarUrl,
+        model: signed ? data.model : null,
+        runtime: signed ? data.runtime : null,
+      );
+      if (data.runtime != null) listed.add(entry);
+      if (includeRecipients && signed) recipients.add(entry);
     }
   }
-  return results;
+  return (listed: listed, recipients: recipients);
 }
 
 /// An agent type key, `pluginId/typeId`, as desktop's `RUNTIME` pattern
 /// (buzz-app `src/features/agents/service.ts`) accepts it.
 final _runtimePattern = RegExp(r'^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$');
 
-/// Whether desktop lists this kind:30177 registration as one of the owner's
-/// agents: it names the agent and carries a valid `runtime` tag.
-bool isListedAgentRegistration(NostrEvent event) {
-  if (!_runtimePattern.hasMatch(_tagValue(event, 'runtime') ?? '')) {
-    return false;
-  }
+Map<String, dynamic>? _namedRegistrationData(NostrEvent event) {
   try {
     final content = jsonDecode(event.content);
-    return content is Map &&
+    if (content is Map<String, dynamic> &&
         content['name'] is String &&
-        (content['name'] as String).trim().isNotEmpty;
+        (content['name'] as String).trim().isNotEmpty) {
+      return content;
+    }
   } on FormatException {
+    // A malformed registration payload supplies no agent metadata.
+    return null;
+  }
+  return null;
+}
+
+bool _hasVerifiedSignature(NostrEvent event) {
+  try {
+    verifiedNostrEventFromJson(jsonEncode(event.toJson()));
+    return true;
+  } on nostr.EventValidationException {
+    // A malformed or forged event cannot establish recipient eligibility.
     return false;
   }
 }

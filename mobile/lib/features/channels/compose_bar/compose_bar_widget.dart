@@ -284,7 +284,7 @@ class ComposeBar extends HookConsumerWidget {
     // owners so @mention suggestions show names ("managed by …" included).
     final relayAgents = ref.watch(agentDirectoryProvider).asData?.value;
     final agentOwners = ref.watch(agentOwnersProvider).asData?.value;
-    final ownedAgents = ref.watch(ownedAgentDirectoryProvider).asData?.value;
+    final ownedAgents = ref.watch(ownedAgentRecipientsProvider).asData?.value;
     final agentMentionLabels = _agentMentionLabels(bindings: mentionMap.value);
     final agentMentionLabelsKey = (agentMentionLabels.toList()..sort()).join(
       '\u0000',

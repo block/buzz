@@ -11,17 +11,11 @@ NostrEvent registration(
   String content = '{"name":"Agent"}',
   String? runtime = 'block.builderlab/builderlab',
   int createdAt = 1,
-}) => NostrEvent.fromJson(
-  nostr.Event.from(
-    kind: 30177,
-    content: content,
-    secretKey: fakeOwner.secret,
-    createdAt: createdAt,
-    tags: [
-      ['d', agent],
-      if (runtime != null) ['runtime', runtime],
-    ],
-  ).toMap(),
+}) => signedAgentRegistration(
+  agent,
+  content: content,
+  runtime: runtime,
+  createdAt: createdAt,
 );
 
 class _Session extends RelaySessionNotifier {
@@ -83,6 +77,16 @@ void main() {
     session.connect();
     final found = await container.read(ownedAgentDirectoryProvider.future);
     expect(found.map((entry) => entry.pubkey), [fakeAgent]);
+    final recipients = await container.read(
+      ownedAgentRecipientsProvider.future,
+    );
+    expect(recipients.map((entry) => entry.pubkey), [fakeAgent]);
+
+    session.registrations.clear();
+    container.invalidate(ownedAgentInventoryProvider);
+    await container.pump();
+    expect(await container.read(ownedAgentDirectoryProvider.future), isEmpty);
+    expect(await container.read(ownedAgentRecipientsProvider.future), isEmpty);
   });
 
   test('lists owned agents as desktop does, without runtime directory '
@@ -208,20 +212,78 @@ void main() {
     expect(found.model, isNull);
   });
 
-  test('a registration is listed only with a type runtime and a name', () {
-    final agent = fakeAgent;
-    final cases = <(String, NostrEvent, bool)>[
-      ('valid', registration(agent), true),
-      ('no runtime', registration(agent, runtime: null), false),
-      ('runtime without a type', registration(agent, runtime: 'goose'), false),
-      ('uppercase runtime', registration(agent, runtime: 'Block/Goose'), false),
-      ('empty name', registration(agent, content: '{"name":"  "}'), false),
-      ('no name', registration(agent, content: '{}'), false),
-      ('not JSON', registration(agent, content: 'instance'), false),
-      ('JSON list', registration(agent, content: '[]'), false),
+  test('recipient discovery requires the latest signed registration and a '
+      'matching owner profile', () async {
+    final hosted = registration(fakeAgent, runtime: null);
+    final profile = signedAgentProfile(fakeAgentKeys, fakeOwner);
+    final forgedNewer = NostrEvent.fromJson({
+      ...registration(fakeAgent, runtime: null, createdAt: 2).toJson(),
+      'sig': '0' * 128,
+    });
+    final otherOwner = nostr.Keys('0' * 63 + '3');
+    final cases = <(String, List<NostrEvent>, NostrEvent, bool, bool)>[
+      ('desktop', [registration(fakeAgent)], profile, true, true),
+      ('no runtime', [hosted], profile, false, true),
+      for (final runtime in ['goose', 'Block/Goose'])
+        (
+          runtime,
+          [registration(fakeAgent, runtime: runtime)],
+          profile,
+          false,
+          true,
+        ),
+      for (final content in ['{"name":"  "}', '{}', 'instance', '[]'])
+        (
+          content,
+          [registration(fakeAgent, content: content)],
+          profile,
+          false,
+          false,
+        ),
+      ('unregistered', [], profile, false, false),
+      ('invalid latest', [hosted, forgedNewer], profile, false, false),
+      (
+        'wrong owner',
+        [hosted],
+        signedAgentProfile(fakeAgentKeys, otherOwner),
+        false,
+        false,
+      ),
+      (
+        'forged profile',
+        [hosted],
+        NostrEvent.fromJson({...profile.toJson(), 'sig': '0' * 128}),
+        false,
+        false,
+      ),
     ];
-    for (final (label, event, listed) in cases) {
-      expect(isListedAgentRegistration(event), listed, reason: label);
+    for (final (label, registrations, profile, listed, recipient) in cases) {
+      final session = _Session(registrations, [profile]);
+      final container = ProviderContainer(
+        overrides: [
+          relayConfigProvider.overrideWith(_RelayConfig.new),
+          myPubkeyProvider.overrideWithValue(fakeOwner.public),
+          relaySessionProvider.overrideWith(() => session),
+        ],
+      );
+      try {
+        container.read(relaySessionProvider.notifier);
+        session.connect();
+        expect(
+          await container.read(ownedAgentDirectoryProvider.future),
+          hasLength(listed ? 1 : 0),
+          reason: label,
+        );
+        expect(
+          (await container.read(
+            ownedAgentRecipientsProvider.future,
+          )).map((entry) => entry.pubkey),
+          recipient ? [fakeAgent] : const [],
+          reason: label,
+        );
+      } finally {
+        container.dispose();
+      }
     }
   });
 }

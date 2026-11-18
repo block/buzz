@@ -121,7 +121,7 @@ void main() {
           return ref.read(_shared.notifier).loads[load].future;
         }),
         agentOwnersProvider.overrideWith((ref) async => const {}),
-        ownedAgentDirectoryProvider.overrideWith((ref) {
+        ownedAgentRecipientsProvider.overrideWith((ref) {
           final load = ref.watch(_owned);
           return ref.read(_owned.notifier).loads[load].future;
         }),
@@ -132,9 +132,9 @@ void main() {
     );
     if (!sharedLater) container.read(_shared.notifier).land(const []);
     if (loadFirst) {
-      container.listen(ownedAgentDirectoryProvider, (_, _) {});
+      container.listen(ownedAgentRecipientsProvider, (_, _) {});
       container.read(_owned.notifier).land(const []);
-      await container.read(ownedAgentDirectoryProvider.future);
+      await container.read(ownedAgentRecipientsProvider.future);
       container.read(_owned.notifier).reload();
     }
     await tester.pumpWidget(

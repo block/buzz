@@ -25,7 +25,7 @@ Future<void> _openMobileHuddle({
   try {
     final channel = ref.read(channelByIdProvider(invite.parentChannelId));
     if (ref.read(dmVoiceCandidateProvider(invite.parentChannelId)) != null) {
-      ref.invalidate(ownedAgentDirectoryProvider);
+      ref.invalidate(ownedAgentInventoryProvider);
       ref.invalidate(identityArchivesProvider);
       final agents = await ref.read(ownedCodexVoiceAgentsProvider.future);
       if (!context.mounted) return;
@@ -51,7 +51,7 @@ Future<void> _openMobileHuddle({
             confirmLabel: 'Invite and join',
           );
           if (!confirmed || !context.mounted) return;
-          ref.invalidate(ownedAgentDirectoryProvider);
+          ref.invalidate(ownedAgentInventoryProvider);
           ref.invalidate(identityArchivesProvider);
           final currentAgents = await ref.read(
             ownedCodexVoiceAgentsProvider.future,

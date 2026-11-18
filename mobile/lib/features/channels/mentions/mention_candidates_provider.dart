@@ -352,8 +352,8 @@ List<MentionCandidate> _chooserCandidates(
       ref.watch(agentDirectoryProvider).asData?.value ??
       const <AgentDirectoryEntry>[];
   final owners = ref.watch(agentOwnersProvider).asData?.value ?? const {};
-  // Null while loading or failed: nothing is known to be unlisted.
-  final ownedAgents = ref.watch(ownedAgentDirectoryProvider).asData?.value;
+  // Null while loading or failed: registration is unknown.
+  final ownedAgents = ref.watch(ownedAgentRecipientsProvider).asData?.value;
   final userCache = ref.watch(userCacheProvider);
   final currentPubkey = ref.watch(currentPubkeyProvider);
   final searches = ref.watch(mentionSearchCacheProvider);

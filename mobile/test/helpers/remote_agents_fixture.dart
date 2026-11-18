@@ -171,6 +171,25 @@ class RelayFakeController extends RemoteAgentController {
   }
 }
 
+/// A kind:30177 registration signed by the fixture owner.
+NostrEvent signedAgentRegistration(
+  String agent, {
+  String content = '{"name":"Agent"}',
+  String? runtime,
+  int createdAt = 1,
+}) => NostrEvent.fromJson(
+  nostr.Event.from(
+    kind: 30177,
+    content: content,
+    secretKey: fakeOwner.secret,
+    createdAt: createdAt,
+    tags: [
+      ['d', agent],
+      if (runtime != null) ['runtime', runtime],
+    ],
+  ).toMap(),
+);
+
 /// A signed agent profile carrying [owner]'s attestation under [conditions].
 NostrEvent signedAgentProfile(
   nostr.Keys agent,

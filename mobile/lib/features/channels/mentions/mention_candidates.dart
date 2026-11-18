@@ -61,13 +61,11 @@ String? recipientRowDetail(
 /// then the viewer's own agents where they can be invited, then eligible
 /// non-member relay agents, then global user-search results.
 ///
-/// [ownedAgents] are the viewer's agents as desktop's Agents tab lists them
-/// (`ownedAgentDirectoryProvider`), or null while that list is unknown.
-/// Outside the channel, an agent the viewer owns is offered only when it is
-/// listed. An unlisted one is an agent of an earlier Buzz, which cannot
-/// answer until desktop imports it, and mobile cannot import. While the list
-/// is unknown, owned agents are not held back. [offerOwnedAgents] offers the
-/// listed agents unprompted, as desktop does in streams and forums.
+/// [ownedAgents] are the viewer's verified, registered conversation
+/// recipients (`ownedAgentRecipientsProvider`), or null while that list is
+/// unknown. Once the inventory is known, non-member agents the viewer owns
+/// must be registered in the community. [offerOwnedAgents] offers those
+/// agents before the viewer types.
 /// [offerUnsharedAgents] keeps searched agents that do not answer the
 /// viewer, for pickers that add them to a channel rather than address them.
 List<MentionCandidate> buildMentionCandidates({
@@ -85,14 +83,14 @@ List<MentionCandidate> buildMentionCandidates({
   final candidates = <MentionCandidate>[];
   final seen = <String>{};
   final currentLower = currentPubkey?.toLowerCase();
-  final listedOwned = ownedAgents == null
+  final registeredOwned = ownedAgents == null
       ? null
       : {for (final agent in ownedAgents) agent.pubkey};
-  bool unlistedOwnAgent(String pubkey, String? ownerPubkey) =>
-      listedOwned != null &&
+  bool unregisteredOwnAgent(String pubkey, String? ownerPubkey) =>
+      registeredOwned != null &&
       currentLower != null &&
       ownerPubkey?.toLowerCase() == currentLower &&
-      !listedOwned.contains(pubkey);
+      !registeredOwned.contains(pubkey);
 
   for (final member in members) {
     final pk = member.pubkey.toLowerCase();
@@ -152,7 +150,7 @@ List<MentionCandidate> buildMentionCandidates({
     if (!sharedAgentPubkeys.contains(pk)) continue;
     final profile = userCache[pk];
     final ownerPubkey = ownerByAgentPubkey[pk] ?? profile?.ownerPubkey;
-    if (unlistedOwnAgent(pk, ownerPubkey)) continue;
+    if (unregisteredOwnAgent(pk, ownerPubkey)) continue;
     seen.add(pk);
     candidates.add(
       MentionCandidate(
@@ -186,7 +184,7 @@ List<MentionCandidate> buildMentionCandidates({
           !sharedAgentPubkeys.contains(pk)) {
         continue;
       }
-      if (unlistedOwnAgent(pk, ownerPubkey)) continue;
+      if (unregisteredOwnAgent(pk, ownerPubkey)) continue;
     }
     seen.add(pk);
     candidates.add(

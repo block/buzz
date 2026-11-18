@@ -82,8 +82,8 @@ void exactMentionTests() {
     'tainted',
     'non-member human',
     'non-member denied agent',
-    'non-member unlisted own agent',
-    'non-member listed own agent',
+    'non-member unregistered own agent',
+    'non-member registered own agent',
     'non-member own agent, list unknown',
   ]) {
     testWidgets('persisted selection restore to signed send: $scenario', (
@@ -103,15 +103,15 @@ void exactMentionTests() {
             mediaTags: mediaTags,
           ),
           signer: signer,
-          // The Agents page lists the owned agent only in its own scenario.
+          // The recipient inventory contains the agent only when registered.
           ownedAgents: switch (scenario) {
-            'non-member unlisted own agent' => const [],
-            'non-member listed own agent' => [
+            'non-member unregistered own agent' => const [],
+            'non-member registered own agent' => [
               OwnedAgentDirectoryEntry(pubkey: first),
             ],
             _ => null,
           },
-          // Still loading (or offline): nothing is known to be unlisted.
+          // Still loading (or offline): registration is unknown.
           ownedAgentsUnknown: scenario == 'non-member own agent, list unknown',
         );
         final container = ProviderScope.containerOf(
@@ -163,8 +163,8 @@ void exactMentionTests() {
           'removed',
           'non-member human',
           'non-member denied agent',
-          'non-member unlisted own agent',
-          'non-member listed own agent',
+          'non-member unregistered own agent',
+          'non-member registered own agent',
           'non-member own agent, list unknown',
         ].contains(scenario))
           ChannelMember(
@@ -182,12 +182,10 @@ void exactMentionTests() {
               UserProfile(
                 pubkey: first,
                 displayName: 'Renamed',
-                // The viewer's own agent. An earlier Buzz's agent is not on
-                // the Agents page; a listed one is.
                 ownerPubkey: switch (scenario) {
                   'non-member denied agent' => second,
-                  'non-member unlisted own agent' ||
-                  'non-member listed own agent' ||
+                  'non-member unregistered own agent' ||
+                  'non-member registered own agent' ||
                   'non-member own agent, list unknown' => signer.public,
                   _ => null,
                 },
@@ -224,7 +222,7 @@ void exactMentionTests() {
       // Admitted people and agents outside the channel are asked about.
       final outsider = [
         'non-member human',
-        'non-member listed own agent',
+        'non-member registered own agent',
         'non-member own agent, list unknown',
       ].contains(scenario);
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
@@ -244,7 +242,7 @@ void exactMentionTests() {
         'rename',
         'legacy',
         'non-member human',
-        'non-member listed own agent',
+        'non-member registered own agent',
         'non-member own agent, list unknown',
         'map reset',
         'map plain',
@@ -286,6 +284,61 @@ void exactMentionTests() {
       await tester.pump(const Duration(milliseconds: 250));
     });
   }
+
+  testWidgets('a registered external agent can be picked and restored', (
+    tester,
+  ) async {
+    List<List<String>>? sentTags;
+    Future<void> mount() async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(fakeOwner.nsec),
+          currentPubkey: fakeOwner.public,
+          relayConfig: () => _SwitchableRelayConfigNotifier(
+            RelayConfig(baseUrl: 'https://relay.example', nsec: fakeOwner.nsec),
+          ),
+          channels: [_makeCurrentChannel()],
+          overrides: [
+            relaySessionProvider.overrideWith(
+              () => RecipientDirectorySession(
+                {fakeAgent: 'Scout'},
+                registrations: [signedAgentRegistration(fakeAgent)],
+                signedProfiles: {
+                  fakeAgent: signedAgentProfile(
+                    fakeAgentKeys,
+                    fakeOwner,
+                    content: '{"name":"Scout"}',
+                  ),
+                },
+              ),
+            ),
+          ],
+          onSend: (_, _, {mediaTags = const []}) async => sentTags = mediaTags,
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    await mount();
+    await _expandComposer(tester);
+    await pick(tester, '@Sco');
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpAndSettle();
+
+    await mount();
+    await tester.tap(find.textContaining('@Scout'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Scout is not in this channel'), findsOneWidget);
+    await tester.tap(find.text('Do nothing'));
+    await tester.pumpAndSettle();
+
+    expect(sentTags, [
+      ['mention', fakeAgent],
+    ]);
+  });
+
   testWidgets(
     'same-name picker selections retain exact recipients through removal',
     (tester) async {

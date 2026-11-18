@@ -438,7 +438,7 @@ class AgentsPage extends HookConsumerWidget {
       await controller.run(controller.refresh);
       if (context.mounted) {
         attempt.value++;
-        ref.invalidate(ownedAgentDirectoryProvider);
+        ref.invalidate(ownedAgentInventoryProvider);
         // A refresh also rereads archives: an agent restored elsewhere
         // reappears, and one archived elsewhere leaves.
         ref.invalidate(identityArchivesProvider);
@@ -457,7 +457,7 @@ class AgentsPage extends HookConsumerWidget {
               initialDraft: initialDraft,
               onCreated: () {
                 ref.invalidate(agentDirectoryProvider);
-                ref.invalidate(ownedAgentDirectoryProvider);
+                ref.invalidate(ownedAgentInventoryProvider);
               },
             ),
           ),
