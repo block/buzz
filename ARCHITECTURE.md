@@ -652,7 +652,7 @@ Note: Both `TriggerDef` and `ActionDef` use serde internally-tagged enums. Trigg
 | Action | Description |
 |--------|-------------|
 | `send_message` | Post to the workflow's channel (or override channel) |
-| `send_dm` | Direct message to a user (pubkey hex or `{{trigger.author}}`) |
+| `send_dm` | Direct message to a pubkey or local NIP-05 handle; event `{{trigger.author}}` or webhook `{{trigger.recipient}}` ([webhook setup](docs/workflow-webhook-dms.md)) |
 | `set_channel_topic` | Update channel topic |
 | `add_reaction` | React to the trigger message |
 | `call_webhook` | HTTP POST to external URL (SSRF-protected, redirects disabled, 1 MiB response cap) |
@@ -988,4 +988,4 @@ These are verified gaps in the current implementation — not design aspirations
 | 3 | **No dedicated typing REST endpoint** | Typing indicators (kind 20002) are delivered via both local fan-out and Redis pub/sub (cross-node). There is no REST endpoint to query current typers — `/api/presence` returns online/away status only, not typing state. |
 | 4 | **Huddle recording/tracks not built** | Voice, room lifecycle, and join/leave/end events are wired (see Huddle Audio above). Recording and per-track publishing have reserved kinds but no producer yet. |
 | 5 | **Approval gates not wired end-to-end** | The executor returns `StepResult::Suspended` and the relay has grant/deny API endpoints with DB CRUD, but the engine intercepts before creating `WaitingApproval` rows — runs that hit an approval gate are marked as Failed (🚧 WF-08). |
-| 6 | **Workflow actions partially stubbed** | The `send_dm` and `set_channel_topic` workflow actions are in the schema but return `NotImplemented` — a run that reaches one fails at execution (🚧 WF-07). |
+| 6 | **Workflow actions partially stubbed** | The `set_channel_topic` workflow action is in the schema but returns `NotImplemented` — a run that reaches one fails at execution (🚧 WF-07). |
