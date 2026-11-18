@@ -83,7 +83,10 @@ A `"newer"` window is the exact mirror: rows are ordered `(created_at ASC,
 id DESC)`, and the keyset is
 `created_at > $after OR (created_at = $after AND id < $after_id)`. Its
 `next_cursor` is the last retained row, sent back as `after` + `after_id`.
-Reading the same channel from both ends meets without a gap or overlap.
+Reading the same channel from both ends meets without a gap or overlap
+while no rows are being written. A row accepted with a past `created_at`
+after a page was served can sort behind that page's cursor; see NIP-CW
+§Direction.
 
 `has_more` is a **server fact**: the relay probes `limit + 1` rows after
 all predicates (access, deletion, top-level, kinds), returns at most
