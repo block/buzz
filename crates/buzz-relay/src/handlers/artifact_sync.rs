@@ -248,6 +248,15 @@ impl ArtifactSyncs {
         }
     }
 
+    /// End exactly the syncs that read from the community signal receiver.
+    fn resync_community_interests(&self, reason: &'static str) {
+        for entry in self.syncs.iter() {
+            if entry.community.is_some() {
+                entry.resync(reason);
+            }
+        }
+    }
+
     /// End every sync on this node: a loss here can affect any of them.
     pub fn resync_all(&self, reason: &'static str) {
         for entry in self.syncs.iter() {
@@ -325,8 +334,8 @@ impl ArtifactSyncs {
     }
 }
 
-/// Consume typed metadata from the existing Redis subscriber. A lag is a
-/// possible gap and ends exact copies; ordinary ChannelEvent never carries it.
+/// Consume typed metadata from the existing Redis subscriber. A gap in this
+/// receiver can only affect community syncs.
 pub fn spawn_signals(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
     let mut rx = state.pubsub.subscribe_artifacts();
     tokio::spawn(async move {
@@ -335,9 +344,9 @@ pub fn spawn_signals(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
                 () = state.community_revalidator_cancel.cancelled() => return,
                 result = rx.recv() => match result {
                     Ok(scoped) => state.artifact_syncs.signal_community(scoped.community_id, &scoped.signal),
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => state.artifact_syncs.resync_all("resync: live delivery lagged"),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => state.artifact_syncs.resync_community_interests("resync: live delivery lagged"),
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        state.artifact_syncs.resync_all("resync: live delivery interrupted");
+                        state.artifact_syncs.resync_community_interests("resync: live delivery interrupted");
                         return;
                     }
                 }
@@ -1058,9 +1067,20 @@ async fn run_live(
                         head.channel_id.is_some_and(|id| allowed.contains(&id))
                     })
                 }),
+                Err(buzz_db::DbError::AccessDenied(_)) if handle.community.is_some() => {
+                    close(
+                        sub_id,
+                        owner,
+                        "resync: community access changed",
+                        conn,
+                        state,
+                    )
+                    .await;
+                    return;
+                }
                 Err(e) => {
                     warn!(conn_id = %conn.conn_id, error_kind = %e.kind(), "artifact sync head read failed");
-                    close(sub_id, owner, "error: sync read failed", conn, state).await;
+                    close(sub_id, owner, READ_FAILED, conn, state).await;
                     return;
                 }
             };

@@ -746,7 +746,6 @@ fn build_query_events_sql(
 
     // Use unqualified column names when no join, qualified when joined.
     let col_prefix = if q.p_tag_hex.is_some() { "e." } else { "" };
-    push_community_artifact_exclusion(&mut qb, col_prefix);
     push_event_filters(&mut qb, col_prefix, q);
     // A per-channel read scopes each lateral to one channel of the set.
     if per_channel.is_some() {
@@ -1844,10 +1843,12 @@ pub(crate) async fn get_event_by_id_with_operation(
     operation: crate::observability::WriterOperation,
 ) -> Result<Option<StoredEvent>> {
     let mut connection = crate::observability::acquire_writer(pool, operation).await?;
-    let row = sqlx::query(
+    let row = sqlx::query(concat!(
         "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
-         FROM events WHERE community_id = $1 AND id = $2 AND (kind <> 45010 OR (channel_id IS NOT NULL AND NOT tags @> '[[\"community\"]]'::jsonb)) AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
-    )
+         FROM events WHERE community_id = $1 AND id = $2 AND (kind <> 45010 OR (channel_id IS NOT NULL AND NOT ",
+        crate::community_artifact_tag_sql!("tags"),
+        ")) AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
+    ))
     .bind(community_id.as_uuid())
     .bind(id_bytes)
     .fetch_optional(&mut *connection)
@@ -1921,10 +1922,12 @@ pub(crate) async fn get_event_by_id_including_deleted_with_operation(
     operation: crate::observability::WriterOperation,
 ) -> Result<Option<StoredEvent>> {
     let mut connection = crate::observability::acquire_writer(pool, operation).await?;
-    let row = sqlx::query(
+    let row = sqlx::query(concat!(
         "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
-         FROM events WHERE community_id = $1 AND id = $2 AND (kind <> 45010 OR (channel_id IS NOT NULL AND NOT tags @> '[[\"community\"]]'::jsonb)) ORDER BY created_at DESC LIMIT 1",
-    )
+         FROM events WHERE community_id = $1 AND id = $2 AND (kind <> 45010 OR (channel_id IS NOT NULL AND NOT ",
+        crate::community_artifact_tag_sql!("tags"),
+        ")) ORDER BY created_at DESC LIMIT 1",
+    ))
     .bind(community_id.as_uuid())
     .bind(id_bytes)
     .fetch_optional(&mut *connection)
@@ -7268,5 +7271,12 @@ mod postgres_tests {
 /// even on disabled/bridge relays. A missing home also fails closed. This only
 /// withholds data; it never derives or grants an audience from unsigned metadata.
 fn push_community_artifact_exclusion(qb: &mut QueryBuilder<sqlx::Postgres>, prefix: &str) {
-    qb.push(format!(" AND ({prefix}kind <> 45010 OR ({prefix}channel_id IS NOT NULL AND NOT {prefix}tags @> '[[\"community\"]]'::jsonb))"));
+    let tag_sql = if prefix.is_empty() {
+        crate::community_artifact_tag_sql!("tags")
+    } else {
+        crate::community_artifact_tag_sql!("e.tags")
+    };
+    qb.push(format!(
+        " AND ({prefix}kind <> 45010 OR ({prefix}channel_id IS NOT NULL AND NOT {tag_sql}))"
+    ));
 }

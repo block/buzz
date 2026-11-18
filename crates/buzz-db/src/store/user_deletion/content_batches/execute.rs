@@ -98,6 +98,7 @@ pub(super) fn items(batch: &Value) -> Result<&Vec<Value>> {
 pub(super) fn selection(item: &Value) -> Result<(&'static str, &'static str)> {
     Ok(match item["table"].as_str() {
         Some("events") => ("events", "id=decode($2->>'id','hex') AND created_at=($2->>'created_at')::timestamptz"),
+        Some("artifact_revisions") => ("artifact_revisions", "scope='community' AND event_id=decode($2->>'event_id','hex')"),
         Some("reactions") => ("reactions", "event_id=decode($2->>'event_id','hex') AND event_created_at=($2->>'event_created_at')::timestamptz AND pubkey=decode($2->>'pubkey','hex') AND emoji=$2->>'emoji'"),
         Some("event_mentions") => ("event_mentions", "event_id=decode($2->>'event_id','hex') AND pubkey_hex=$2->>'pubkey_hex'"),
         Some("push_match_queue") => ("push_match_queue", "event_id=decode($2->>'event_id','hex')"),

@@ -549,20 +549,22 @@ pub async fn get_event_preview(
     community_id: Uuid,
     id: &[u8],
 ) -> Result<Option<AdminEventPreview>> {
-    let row = sqlx::query(
+    let row = sqlx::query(concat!(
         r#"
         SELECT id, pubkey, kind, content, created_at, deleted_at, channel_id
         FROM events
         WHERE community_id = $1 AND id = $2 AND kind <> ALL($3)
           AND pubkey <> ''::bytea
-          AND (kind <> 45010 OR (channel_id IS NOT NULL AND NOT tags @> '[["community"]]'::jsonb))
+          AND (kind <> 45010 OR (channel_id IS NOT NULL AND NOT "#,
+        crate::community_artifact_tag_sql!("tags"),
+        r#"))
           AND NOT (kind = 5 AND EXISTS (
               SELECT 1 FROM jsonb_array_elements(tags) t
               WHERE t->>0 = 'k' AND t->>1 = ANY($4::text[])))
         ORDER BY created_at DESC
         LIMIT 1
         "#,
-    )
+    ))
     .bind(community_id)
     .bind(id)
     .bind(admin_hidden_kinds())

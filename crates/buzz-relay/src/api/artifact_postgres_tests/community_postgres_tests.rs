@@ -383,6 +383,83 @@ async fn ordinary_apis_withhold_unexpected_community_event_rows() {
     .is_empty());
 }
 
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn channel_artifact_with_community_tag_value_remains_visible() {
+    use crate::handlers::group_state_postgres_tests::{req_event_ids, test_conn};
+
+    let mut f = Fixture::new().await;
+    Arc::make_mut(&mut Arc::get_mut(&mut f.state).unwrap().config).community_artifacts_enabled =
+        false;
+    let d = Uuid::new_v4();
+    let event = f.revision(d, "create", None);
+    let event = resign(
+        &event,
+        &f.owner,
+        &[["project", "community"]],
+        event.created_at.as_secs(),
+    );
+    f.publish(&event).await;
+    let id = event.id.to_hex();
+    let filter = json!({"kinds":[45010],"#h":[f.home]});
+
+    for read in [
+        filter.clone(),
+        json!({"ids":[id]}),
+        json!({"artifact":"current","#d":[d]}),
+        json!({"artifact":"history","#d":[d]}),
+        json!({"kinds":[45010],"#h":[f.home],"search":"searchable"}),
+    ] {
+        let (status, body) = f.request("/query", json!([read])).await;
+        assert!(status.is_success(), "{read}: {status} {body}");
+        assert_eq!(body.as_array().unwrap().len(), 1, "{read}: {body}");
+        assert_eq!(body[0]["id"], id, "{read}: {body}");
+    }
+    let (status, body) = f.request("/count", json!([filter])).await;
+    assert!(status.is_success(), "{status}: {body}");
+    assert_eq!(body["count"], 1, "{body}");
+
+    let tenant = crate::tenant::bind_community(&f.state.db, &f.host)
+        .await
+        .unwrap();
+    assert_eq!(
+        req_event_ids(&f.state, &tenant, &f.owner, filter.clone()).await,
+        [id.clone()]
+    );
+    let (conn, mut rx) = test_conn(&tenant, &f.owner);
+    let filter = serde_json::from_value(filter).unwrap();
+    crate::handlers::count::handle_count("c".into(), vec![filter], conn, f.state.clone()).await;
+    let axum::extract::ws::Message::Text(frame) = rx.try_recv().expect("COUNT reply") else {
+        panic!("expected a WebSocket text frame");
+    };
+    let message: Value = serde_json::from_str(&frame).unwrap();
+    assert_eq!(message, json!(["COUNT", "c", {"count":1}]));
+
+    let db = &f.state.db;
+    let bytes = event.id.as_bytes();
+    assert_eq!(
+        db.get_event_by_id(f.community, bytes)
+            .await
+            .unwrap()
+            .map(|stored| stored.event.id),
+        Some(event.id)
+    );
+    assert_eq!(
+        db.get_event_by_id_including_deleted(f.community, bytes)
+            .await
+            .unwrap()
+            .map(|stored| stored.event.id),
+        Some(event.id)
+    );
+    assert_eq!(
+        db.admin_get_event_preview(*f.community.as_uuid(), bytes)
+            .await
+            .unwrap()
+            .map(|preview| preview.id),
+        Some(id)
+    );
+}
+
 /// The production policy command must roll back its CAS if its hash-chain
 /// audit cannot persist, and the exact command can then be retried.
 #[tokio::test]

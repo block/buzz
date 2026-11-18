@@ -1330,6 +1330,62 @@ mod community {
         .await
         .is_err());
     }
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn cluster_global_artifact_admission_and_owner_transfer_both_finish() {
+        use crate::relay_members::{transfer_ownership, TransferResult};
+        use crate::test_support::{named_pool, wait_for_lock_wait};
+
+        let f = Fixture::new().await;
+        role(&f, &f.owner, "owner").await;
+        role(&f, &f.peer, "member").await;
+
+        // Pause the transfer after it takes the community row and before it
+        // promotes the transferee. Admission for that member must wait without
+        // holding a member lock the transfer needs.
+        let mut blocker = f.db.pool.begin().await.unwrap();
+        let owner = f.owner.public_key().to_hex();
+        sqlx::query("SELECT 1 FROM relay_members WHERE community_id=$1 AND pubkey=$2 FOR UPDATE")
+            .bind(f.community.as_uuid())
+            .bind(&owner)
+            .fetch_one(&mut *blocker)
+            .await
+            .unwrap();
+
+        let transfer_name = format!("artifact-transfer-{}", Uuid::new_v4().simple());
+        let transfer_pool = named_pool(&transfer_name).await;
+        let read_name = format!("artifact-admission-{}", Uuid::new_v4().simple());
+        let reader_db = Db::from_pool(named_pool(&read_name).await);
+        let community = f.community;
+        let peer = f.peer.public_key().to_hex();
+        let relay = f.relay.clone();
+        let transfer = tokio::spawn(async move {
+            transfer_ownership(&transfer_pool, community, &peer, &owner, &relay).await
+        });
+        wait_for_lock_wait(&f.db.pool, &transfer_name).await;
+
+        let reader = principal(&f.peer, true);
+        let admission = tokio::spawn(async move {
+            reader_db
+                .community_artifact_read_guard(community, &reader)
+                .await?
+                .finish()
+                .await
+        });
+        wait_for_lock_wait(&f.db.pool, &read_name).await;
+        blocker.rollback().await.unwrap();
+
+        let result = transfer
+            .await
+            .unwrap()
+            .expect("ownership transfer succeeds");
+        assert!(matches!(result.outcome, TransferResult::Transferred { .. }));
+        admission
+            .await
+            .unwrap()
+            .expect("artifact admission succeeds");
+    }
+
     /// A policy update's uncommitted state must fence new artifact admission,
     /// even when that type had no previous policy row.
     #[tokio::test]

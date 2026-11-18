@@ -139,6 +139,84 @@ async fn ended(task: tokio::task::JoinHandle<()>) {
         .unwrap();
 }
 
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn community_signal_lag_preserves_channel_sync() {
+    use buzz_pubsub::artifact_signal::{ArtifactChange, ArtifactSignal};
+    use tokio::sync::{broadcast::error::TryRecvError, oneshot};
+
+    let f = community_fixture().await;
+    let owner = Keys::generate();
+    member(&f, &owner, "owner").await;
+    let home = create_channel(&f.state, &f.tenant, &owner, &[]).await;
+    let (community, mut community_rx) = connect(&f, &owner);
+    let (channel, mut channel_rx) = connect(&f, &owner);
+    let community_task = start_sync(&f, &community, filter());
+    let channel_task = start_sync(&f, &channel, sync_filter(&[home]));
+    assert!(initial_set(&mut community_rx).await.is_empty());
+    assert!(initial_set(&mut channel_rx).await.is_empty());
+
+    // Subscribe now and start polling on a separate runtime only after Redis
+    // fills the receiver. This exercises actual lag without a test hook.
+    let (ready, ready_rx) = oneshot::channel();
+    let (resume, resume_rx) = oneshot::channel();
+    let cancel = f.state.community_revalidator_cancel.clone();
+    let _shutdown = cancel.clone().drop_guard();
+    let state = Arc::clone(&f.state);
+    let worker = tokio::task::spawn_blocking(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let signals = {
+            let _enter = runtime.enter();
+            artifact_sync::spawn_signals(state)
+        };
+        ready.send(()).unwrap();
+        if resume_rx.blocking_recv().is_ok() {
+            runtime.block_on(signals).unwrap();
+        }
+    });
+    ready_rx.await.unwrap();
+
+    let mut probe = f.state.pubsub.subscribe_artifacts();
+    let signal = ArtifactSignal {
+        d: Uuid::new_v4(),
+        artifact_type: "example.other".into(),
+        cause: ArtifactChange::Changed,
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        // The local artifact broadcast holds 4096 messages.
+        for _ in 0..=4096 {
+            f.state
+                .pubsub
+                .publish_artifact(&f.tenant, &signal)
+                .await
+                .unwrap();
+        }
+        while probe.len() <= 4096 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("local artifact signal receiver overflowed");
+    assert!(matches!(probe.try_recv(), Err(TryRecvError::Lagged(_))));
+    resume.send(()).unwrap();
+
+    assert_eq!(
+        frame(&mut community_rx).await,
+        json!(["CLOSED", "s", "resync: live delivery lagged"])
+    );
+    ended(community_task).await;
+    // Let the receiver finish handling lag before checking the channel sync.
+    cancel.cancel();
+    worker.await.unwrap();
+
+    let created = super::revision(&f, &owner, home, Uuid::new_v4(), "create", None).await;
+    assert_eq!(live_event(&mut channel_rx).await, created.id.to_hex());
+    close::handle_close("s".into(), channel, Arc::clone(&f.state)).await;
+    ended(channel_task).await;
+}
+
 /// Counterfactual: removing current_guard from send_reserved emits an EVENT
 /// and EOSE after the member removal committed while output was reserved.
 #[tokio::test]
@@ -284,6 +362,33 @@ async fn revoked_live_head_never_emits_after_committed_removal() {
     assert_eq!(frame(&mut rx).await[0], "CLOSED");
     ended(task).await;
     no_frame(&mut rx).await;
+    signals.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn live_head_admission_denial_requires_resync() {
+    let f = community_fixture().await;
+    let signals = artifact_sync::spawn_signals(Arc::clone(&f.state));
+    let writer = Keys::generate();
+    let reader = Keys::generate();
+    member(&f, &writer, "owner").await;
+    member(&f, &reader, "member").await;
+    let d = Uuid::new_v4();
+    let first = revision(&f, &writer, d, None).await;
+    let (conn, mut rx) = connect(&f, &reader);
+    let task = start_sync(&f, &conn, filter());
+    assert_eq!(initial_set(&mut rx).await, vec![first.id.to_hex()]);
+
+    // Omit the invalidation so the next head read discovers the revocation.
+    remove(&f, &reader).await;
+    revision(&f, &writer, d, Some(&first)).await;
+    assert_eq!(
+        frame(&mut rx).await,
+        json!(["CLOSED", "s", "resync: community access changed"])
+    );
+    ended(task).await;
+    assert!(rx.try_recv().is_err());
     signals.abort();
 }
 

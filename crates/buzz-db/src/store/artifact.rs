@@ -10,6 +10,21 @@ use nostr::{Event, EventBuilder, Keys, Kind, Tag};
 use sqlx::Row;
 use uuid::Uuid;
 
+/// SQL predicate for an explicit `community` tag name in an event's tag column.
+/// The containment prefilter also matches tag values, so recheck the first element.
+#[macro_export]
+macro_rules! community_artifact_tag_sql {
+    ($tags:literal) => {
+        concat!(
+            "(",
+            $tags,
+            r#" @> '[["community"]]'::jsonb AND jsonb_path_exists("#,
+            $tags,
+            r#", 'strict $[*] ? (@[0] == "community")', '{}'::jsonb, true))"#,
+        )
+    };
+}
+
 /// Acceptance outcome. Only a stale-`prev` conflict carries the current head,
 /// which the caller discloses after authorizing its channel.
 #[derive(Debug)]

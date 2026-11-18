@@ -30,49 +30,56 @@ fn denied() -> DbError {
     DbError::AccessDenied("community artifact access denied".into())
 }
 
-/// Serialize with existing ban, timeout and ownership writers. Membership rows
-/// are also share-locked, so a removal cannot commit between this check and a
-/// guarded enqueue. Shared reads do not serialize readers with each other.
-async fn authorize(
-    conn: &mut PgConnection,
-    community: CommunityId,
-    principal: &CommunityArtifactPrincipal,
-) -> Result<Authority> {
-    sqlx::query("SET LOCAL statement_timeout='2s'")
-        .execute(&mut *conn)
+async fn set_admission_timeouts(conn: &mut PgConnection) -> Result<()> {
+    sqlx::raw_sql("SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='2s'")
+        .execute(conn)
         .await?;
-    sqlx::query("SET LOCAL lock_timeout='2s'")
-        .execute(&mut *conn)
-        .await?;
+    Ok(())
+}
+
+// Match relay_invite::lock_admission and take this advisory lock before any
+// row lock, so a restriction writer can commit before admission rechecks it.
+async fn lock_restriction_writers(conn: &mut PgConnection, community: CommunityId) -> Result<()> {
     sqlx::query(
         "SELECT pg_advisory_xact_lock_shared(hashtextextended('invite-admission:' || $1::text,0))",
     )
     .bind(community.as_uuid())
-    .execute(&mut *conn)
+    .execute(conn)
     .await?;
-    let direct: Option<String> = sqlx::query_scalar(
+    Ok(())
+}
+
+async fn lock_member_role(
+    conn: &mut PgConnection,
+    community: CommunityId,
+    pubkey: &[u8],
+) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar(
         "SELECT role FROM relay_members WHERE community_id=$1 AND pubkey=$2 FOR SHARE",
     )
     .bind(community.as_uuid())
-    .bind(hex::encode(&principal.pubkey))
-    .fetch_optional(&mut *conn)
-    .await?;
+    .bind(hex::encode(pubkey))
+    .fetch_optional(conn)
+    .await?)
+}
+
+/// Call with the restriction and active community locks held. Share-lock the
+/// owner's roster row before the agent's, matching cascading member removal.
+async fn authorize_members(
+    conn: &mut PgConnection,
+    community: CommunityId,
+    principal: &CommunityArtifactPrincipal,
+) -> Result<Authority> {
     let delegated = if let Some(owner) = principal
         .verified_owner
         .as_ref()
         .filter(|_| principal.owner_admission)
     {
-        sqlx::query_scalar::<_, String>(
-            "SELECT role FROM relay_members WHERE community_id=$1 AND pubkey=$2 FOR SHARE",
-        )
-        .bind(community.as_uuid())
-        .bind(hex::encode(owner))
-        .fetch_optional(&mut *conn)
-        .await?
-        .is_some()
+        lock_member_role(conn, community, owner).await?.is_some()
     } else {
         false
     };
+    let direct = lock_member_role(conn, community, &principal.pubkey).await?;
     let row = sqlx::query("SELECT COALESCE(bool_or(banned AND (ban_expires_at IS NULL OR ban_expires_at > clock_timestamp())),false) AS banned, COALESCE(bool_or(muted_until > clock_timestamp()),false) AS timed_out FROM community_bans WHERE community_id=$1 AND pubkey IN (SELECT $2::bytea UNION ALL SELECT $3::bytea UNION ALL SELECT agent_owner_pubkey FROM users WHERE community_id=$1 AND pubkey=$2)")
         .bind(community.as_uuid()).bind(&principal.pubkey).bind(&principal.verified_owner).fetch_one(&mut *conn).await?;
     if row.try_get::<bool, _>("banned")?
@@ -109,9 +116,9 @@ impl CommunityArtifactReadGuard {
     }
 }
 
-// SHARE conflicts with archive/auth-policy writers' NO KEY UPDATE lock, while
-// allowing readers together. Writers take their type lock before this row;
-// policy commands use UPDATE directly, avoiding shared-lock upgrade deadlocks.
+// Take the community row before member rows, matching ownership transfer.
+// SHARE conflicts with archive/auth-policy writers' NO KEY UPDATE lock while
+// allowing readers together. Policy commands take NO KEY UPDATE up front.
 async fn lock_active_community(conn: &mut PgConnection, community: CommunityId) -> Result<bool> {
     sqlx::query_scalar("SELECT requires_nip_fi FROM communities WHERE id=$1 AND archived_at IS NULL AND deleted_at IS NULL AND deletion_state='active' FOR SHARE")
         .bind(community.as_uuid())
@@ -192,20 +199,23 @@ pub async fn set_policy_in_transaction(
     {
         return Err(denied());
     }
+    set_admission_timeouts(tx).await?;
     crate::deletion::guard_community_write(tx, community).await?;
-    let authority = authorize(tx, community, principal).await?;
+    lock_restriction_writers(tx, community).await?;
+    // The row lock fences artifact writers' SHARE locks and permits foreign-key
+    // checks by membership writers. It also serializes policy map updates.
+    let state: Value =
+        sqlx::query_scalar("SELECT artifact_type_policies FROM communities WHERE id=$1 AND archived_at IS NULL AND deleted_at IS NULL AND deletion_state='active' FOR NO KEY UPDATE")
+            .bind(community.as_uuid())
+            .fetch_optional(&mut **tx)
+            .await?
+            .ok_or_else(denied)?;
+    let authority = authorize_members(tx, community, principal).await?;
     // Recheck the shared relay-admin write restriction under admission locks
     // before accepting either a new policy or an exact retry.
     if !authority.admin || authority.timed_out {
         return Err(denied());
     }
-    policy_lock(tx, community, &command.artifact_type).await?;
-    let state: Value =
-        sqlx::query_scalar("SELECT artifact_type_policies FROM communities WHERE id=$1 AND archived_at IS NULL AND deleted_at IS NULL AND deletion_state='active' FOR UPDATE")
-            .bind(community.as_uuid())
-            .fetch_optional(&mut **tx)
-            .await?
-            .ok_or_else(denied)?;
     let current = policy_value(&state, &command.artifact_type)?;
     // An authorized retry of the current command bypasses the freshness check.
     if current.revision.as_deref() == Some(event.id.to_hex().as_str()) {
@@ -292,12 +302,11 @@ impl Db {
         )
         .await?;
         let mut tx = Transaction::begin(connection, None).await?;
-        sqlx::raw_sql("SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='2s'")
-            .execute(&mut *tx)
-            .await?;
+        set_admission_timeouts(&mut tx).await?;
         crate::deletion::guard_community_write(&mut tx, community).await?;
-        authorize(&mut tx, community, principal).await?;
+        lock_restriction_writers(&mut tx, community).await?;
         let requires_nip_fi = lock_active_community(&mut tx, community).await?;
+        authorize_members(&mut tx, community, principal).await?;
         Ok(CommunityArtifactReadGuard {
             tx,
             requires_nip_fi,
@@ -361,9 +370,11 @@ impl Db {
             return Err(denied());
         }
         let mut tx = self.begin_event_write_transaction(community).await?;
-        let authority = authorize(tx.conn(), community, principal).await?;
-        policy_lock(tx.conn(), community, &env.artifact_type).await?;
+        set_admission_timeouts(tx.conn()).await?;
+        lock_restriction_writers(tx.conn(), community).await?;
         lock_active_community(tx.conn(), community).await?;
+        let authority = authorize_members(tx.conn(), community, principal).await?;
+        policy_lock(tx.conn(), community, &env.artifact_type).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
             .bind(format!("artifact:{community}:community:{}", env.id))
             .execute(tx.conn())
@@ -629,11 +640,13 @@ impl Db {
         target: &[u8],
     ) -> Result<Option<(Uuid, String)>> {
         let mut tx = self.begin_event_write_transaction(community).await?;
-        let authority = authorize(tx.conn(), community, principal).await?;
+        set_admission_timeouts(tx.conn()).await?;
+        lock_restriction_writers(tx.conn(), community).await?;
+        lock_active_community(tx.conn(), community).await?;
+        let authority = authorize_members(tx.conn(), community, principal).await?;
         if !authority.admin || authority.timed_out {
             return Err(denied());
         }
-        lock_active_community(tx.conn(), community).await?;
         let changed=sqlx::query("UPDATE artifact_revisions SET redacted=true WHERE community_id=$1 AND scope='community' AND event_id=$2 AND community_event IS NOT NULL AND NOT redacted")
             .bind(community.as_uuid()).bind(target).execute(tx.conn()).await?.rows_affected()>0;
         if changed {
