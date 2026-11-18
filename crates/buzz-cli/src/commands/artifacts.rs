@@ -233,7 +233,9 @@ fn conflict(error: CliError) -> CliError {
 }
 
 async fn publish(client: &BuzzClient, revision: &ArtifactRevision<'_>) -> Result<String, CliError> {
-    let event = client.sign_event(build_artifact_revision(revision).map_err(sdk_err)?)?;
+    let event = client
+        .sign_event(build_artifact_revision(revision).map_err(sdk_err)?)
+        .await?;
     artifact::validate(&event)
         .map_err(|e| CliError::Usage(format!("invalid artifact revision: {e}")))?;
     let raw = client.submit_event(event).await.map_err(conflict)?;

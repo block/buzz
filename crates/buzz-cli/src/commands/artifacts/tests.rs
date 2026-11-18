@@ -206,7 +206,11 @@ impl Harness {
         });
         Self {
             relay,
-            client: BuzzClient::new(url, Keys::generate(), None, None).unwrap(),
+            client: BuzzClient::new(
+                url,
+                crate::credentials::Credentials::from_keys(Keys::generate()),
+            )
+            .unwrap(),
             server,
         }
     }
