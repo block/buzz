@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../../shared/crypto/nip44.dart';
 import '../../../shared/relay/relay.dart';
 import '../../../shared/read_state/read_state_time.dart';
+import '../../../shared/read_state/sidebar_flags.dart';
 import 'channel_stars_storage.dart';
 
 class ChannelStarsCrypto {
@@ -39,7 +40,7 @@ class ChannelStarsManager {
   final VoidCallback _onChanged;
 
   ChannelStarStore _store;
-  ChannelStarStore? _lastPublishedStore;
+  final _changed = <String>{};
   Timer? _publishDebounce;
   int _lastRemoteCreatedAt = 0;
   String? _lastRemoteEventId;
@@ -178,24 +179,21 @@ class ChannelStarsManager {
     _unsubscribe = null;
   }
 
-  void starChannel(String channelId) {
-    if (_disposed) return;
-    final entry = ChannelStarEntry(
-      starred: true,
-      updatedAt: currentUnixSeconds(),
-    );
-    _store = ChannelStarStore(channels: {..._store.channels, channelId: entry});
-    unawaited(_persist());
-    _onChanged();
-    markDirty();
-  }
+  void starChannel(String channelId) => _setFlag(channelId, true);
 
-  void unstarChannel(String channelId) {
+  void unstarChannel(String channelId) => _setFlag(channelId, false);
+
+  void _setFlag(String channelId, bool enabled) {
     if (_disposed) return;
+    final previous = _store.channels[channelId];
     final entry = ChannelStarEntry(
-      starred: false,
-      updatedAt: currentUnixSeconds(),
+      starred: enabled,
+      updatedAt: max(
+        DateTime.now().millisecondsSinceEpoch,
+        sidebarFlagTimeMillis(previous?.updatedAt ?? 0) + 1,
+      ),
     );
+    _changed.add(channelId);
     _store = ChannelStarStore(channels: {..._store.channels, channelId: entry});
     unawaited(_persist());
     _onChanged();
@@ -281,28 +279,41 @@ class ChannelStarsManager {
       (createdAt == _lastRemoteCreatedAt &&
           id.compareTo(_lastRemoteEventId ?? '') < 0);
 
-  /// Returns false only when a newer head could not be persisted; the cursor
-  /// then stays put so the same head is retried. An undecodable head is
-  /// skipped without holding startup open.
-  Future<bool> _applyEvents(List<NostrEvent> events) async {
-    // Another community's head must never reach this community's store.
-    if (!_servesThisCommunity) return true;
+  /// A malformed head can leave the cached view usable, but cannot be used
+  /// as the basis for replacing the record.
+  Future<bool> _applyEvents(
+    List<NostrEvent> events, {
+    bool forPublish = false,
+  }) async {
+    if (!_servesThisCommunity) return false;
     var applied = true;
     for (final event in events) {
-      if (event.pubkey != pubkey || event.getTagValue('d') != 'channel-stars') {
+      if (event.kind != EventKind.readState ||
+          event.pubkey != pubkey ||
+          event.getTagValue('d') != 'channel-stars') {
+        if (forPublish) return false;
         continue;
       }
-      if (!_isAfterCursor(event.createdAt, event.id)) continue;
+      final newer = _isAfterCursor(event.createdAt, event.id);
+      if (!newer &&
+          (!forPublish ||
+              event.createdAt != _lastRemoteCreatedAt ||
+              event.id != _lastRemoteEventId)) {
+        if (forPublish) return false;
+        continue;
+      }
       try {
         final parsed = jsonDecode(_crypto.decrypt(event.content));
         if (parsed is! Map<String, dynamic>) throw const FormatException();
-        // Per-channel merge: keep the entry with the highest updatedAt.
-        _store = mergeStores(_store, ChannelStarStore.fromJson(parsed));
+        final remote = ChannelStarStore.fromJson(parsed, strict: forPublish);
+        if (!newer) continue;
+        _store = mergeStores(_store, remote);
       } catch (error) {
         debugPrint('[ChannelStarsManager] undecodable head: $error');
+        if (forPublish) return false;
         continue;
       }
-      if (!await _persist()) {
+      if (!_disposed && !await _persist()) {
         applied = false;
         continue;
       }
@@ -321,22 +332,6 @@ class ChannelStarsManager {
     );
   }
 
-  bool _isIdenticalToLastPublished() {
-    final last = _lastPublishedStore;
-    if (last == null) return false;
-    if (last.channels.length != _store.channels.length) return false;
-    for (final key in _store.channels.keys) {
-      final lastEntry = last.channels[key];
-      final currentEntry = _store.channels[key];
-      if (lastEntry == null ||
-          lastEntry.starred != currentEntry!.starred ||
-          lastEntry.updatedAt != currentEntry.updatedAt) {
-        return false;
-      }
-    }
-    return true;
-  }
-
   Future<void> _publish({bool allowDisposed = false}) async {
     if ((!allowDisposed && _disposed) ||
         !_remoteEnabled ||
@@ -345,16 +340,15 @@ class ChannelStarsManager {
       return;
     }
 
-    // Read-before-write: merge remote state before publishing
     final events = await _fetchHead();
-    if (events != null) await _applyEvents(events);
-    if (!_disposed) _onChanged();
+    if (events == null || !await _applyEvents(events, forPublish: true)) return;
+    if ((!allowDisposed && _disposed) || !_servesThisCommunity) return;
 
-    // No-op suppression: skip if nothing changed
-    if (_isIdenticalToLastPublished() || !_servesThisCommunity) return;
-
+    if (!_disposed && events.isNotEmpty) _onChanged();
+    final edited = _store;
+    final submitted = edited.forPublish(_changed);
     try {
-      final payload = jsonEncode(_store.toJson());
+      final payload = jsonEncode(submitted.toJson());
       final ciphertext = _crypto.encrypt(payload);
       final createdAt = max(currentUnixSeconds(), _lastRemoteCreatedAt + 1);
 
@@ -377,7 +371,12 @@ class ChannelStarsManager {
         _lastRemoteCreatedAt = createdAt;
         _lastRemoteEventId = signedId;
       }
-      _lastPublishedStore = ChannelStarStore(channels: Map.of(_store.channels));
+      if (!_disposed && _servesThisCommunity && identical(_store, edited)) {
+        _store = submitted;
+        _changed.clear();
+        unawaited(_persist());
+        _onChanged();
+      }
     } catch (error) {
       debugPrint('[ChannelStarsManager] publish failed: $error');
     }

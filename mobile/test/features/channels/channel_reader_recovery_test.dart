@@ -559,6 +559,106 @@ void main() {
         expect(relay.reqsFor(lane.dTag, 'l-'), hasLength(1));
       });
 
+      fakeAsyncTest('merges legacy seconds with modern milliseconds', (clock) {
+        final millis = (t - 110) * 1000;
+        relay.stored.add(
+          relay.event(
+            lane.dTag,
+            blob({'mixed': (true, millis), 'toggled': (true, (t + 90) * 1000)}),
+            t,
+          ),
+        );
+        start(clock);
+        expect(subject.values(), {'mixed': true, 'toggled': true});
+
+        relay.stored.add(
+          relay.event(
+            lane.dTag,
+            blob({'mixed': (false, t - 100), 'other': (true, t - 90)}),
+            t + 1,
+          ),
+        );
+        subject.set('toggled', false);
+        clock.elapse(const Duration(seconds: 5));
+
+        final payload = relay.decrypt(relay.published.single) as Map;
+        expect(payload['channels'], {
+          'mixed': {lane.field: false, 'updatedAt': (t - 100) * 1000},
+          'other': {lane.field: true, 'updatedAt': (t - 90) * 1000},
+          'toggled': {lane.field: false, 'updatedAt': (t + 90) * 1000 + 1},
+        });
+        expect(subject.values(), {
+          'mixed': false,
+          'toggled': false,
+          'other': true,
+        });
+      });
+
+      fakeAsyncTest('repairs oversized heads and evicts the oldest clears', (
+        clock,
+      ) {
+        final active = {
+          for (var i = 0; i < 498; i++) 'active-$i': (true, t - 1000),
+        };
+        relay.stored.add(
+          relay.event(
+            lane.dTag,
+            blob({
+              ...active,
+              'older-clear': (false, (t - 100) * 1000),
+              'newer-clear': (false, t - 90),
+              'newest-clear': (false, t - 80),
+            }),
+            t,
+          ),
+        );
+        start(clock).set('active-0', false);
+        clock.elapse(const Duration(seconds: 5));
+
+        final payload = relay.decrypt(relay.published.single) as Map;
+        final channels = payload['channels'] as Map;
+        expect(channels, hasLength(500));
+        expect(channels, isNot(contains('older-clear')));
+        expect(channels['newer-clear']['updatedAt'], (t - 90) * 1000);
+        expect(channels['active-0'][lane.field], isFalse);
+        expect(channels['active-1'][lane.field], isTrue);
+        expect(subject.values(), hasLength(500));
+      });
+
+      for (final head in <String, Object?>{
+        'failed fetch': null,
+        'bad payload': 'garbage',
+        'unknown version': {'version': 2, 'channels': {}},
+        'bad entry': {
+          'version': 1,
+          'channels': {
+            'bad': {lane.field: true},
+          },
+        },
+      }.entries) {
+        fakeAsyncTest('does not publish after ${head.key}', (clock) {
+          start(clock);
+          if (head.value == null) {
+            relay.historyFailures = 1;
+          } else {
+            relay.stored.add(relay.event(lane.dTag, head.value!, t));
+          }
+          subject.set('kept-local', true);
+          clock.elapse(const Duration(seconds: 5));
+          expect(relay.published, isEmpty);
+          expect(subject.values(), {'kept-local': true});
+
+          relay.stored.clear();
+          subject.set('next-edit', true);
+          clock.elapse(const Duration(seconds: 5));
+          final payload = relay.decrypt(relay.published.single) as Map;
+          expect(
+            (payload['channels'] as Map).keys,
+            containsAll(['kept-local', 'next-edit']),
+          );
+        });
+      }
+
       fakeAsyncTest('resume adopts a head the healthy socket missed', (clock) {
         relay.stored.add(relay.event(lane.dTag, blob({'a': (true, t)}), t));
         start(clock);

@@ -7,7 +7,7 @@
 //! desktop `channelStarsStorage.ts`, `channelMutesStorage.ts` and
 //! `projectSidebarMembership.ts`. Every write is one head read and one publish.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use buzz_core::kind::KIND_PROJECT;
 use serde_json::{json, Map, Value};
@@ -21,12 +21,6 @@ use crate::{SidebarChannelFlagCmd, SidebarProjectsCmd};
 const MAX_ENTRIES: usize = 500;
 
 #[derive(Clone, Copy)]
-enum Unit {
-    Seconds,
-    Millis,
-}
-
-#[derive(Clone, Copy)]
 enum Ids {
     Channels,
     Projects,
@@ -38,12 +32,8 @@ pub(crate) struct Spec {
     collection: &'static str,
     flag: &'static str,
     ids: Ids,
-    unit: Unit,
-    /// Oldest entries are evicted past this many (stars and mutes only).
+    /// Oldest clears, then oldest active flags, are evicted past this many.
     max_entries: Option<usize>,
-    /// Projects reject a document without a collection and accept the legacy
-    /// array of addresses; stars and mutes read a missing collection as empty.
-    strict: bool,
 }
 
 pub(crate) const STARS: Spec = Spec {
@@ -54,9 +44,7 @@ pub(crate) const STARS: Spec = Spec {
     collection: "channels",
     flag: "starred",
     ids: Ids::Channels,
-    unit: Unit::Seconds,
     max_entries: Some(MAX_ENTRIES),
-    strict: false,
 };
 
 pub(crate) const MUTES: Spec = Spec {
@@ -67,9 +55,7 @@ pub(crate) const MUTES: Spec = Spec {
     collection: "channels",
     flag: "muted",
     ids: Ids::Channels,
-    unit: Unit::Seconds,
     max_entries: Some(MAX_ENTRIES),
-    strict: false,
 };
 
 pub(crate) const PROJECTS: Spec = Spec {
@@ -80,9 +66,7 @@ pub(crate) const PROJECTS: Spec = Spec {
     collection: "projects",
     flag: "selected",
     ids: Ids::Projects,
-    unit: Unit::Millis,
     max_entries: None,
-    strict: true,
 };
 
 impl From<SidebarChannelFlagCmd> for Action {
@@ -132,36 +116,50 @@ struct Entry {
 type Store = BTreeMap<String, Entry>;
 
 fn valid_entry(spec: &Spec, key: &str, value: &Value) -> Option<Entry> {
-    if spec.strict && key.is_empty() {
+    if matches!(spec.ids, Ids::Projects) && key.is_empty() {
         return None;
     }
     let object = value.as_object()?;
     let updated_at = object.get("updatedAt")?.as_f64().filter(|n| *n >= 0.0)?;
+    // Older channel flag writers used ten-digit Unix seconds.
+    let updated_at = if matches!(spec.ids, Ids::Channels) && (1e9..1e10).contains(&updated_at) {
+        updated_at * 1000.0
+    } else {
+        updated_at
+    };
     Some(Entry {
         on: object.get(spec.flag)?.as_bool()?,
         updated_at,
     })
 }
 
-/// Desktop's `boundStarStore`: keeps the newest `max` entries, oldest first by
-/// `(updatedAt, id)`.
-fn bound(spec: &Spec, store: &mut Store) {
+/// Keep the current edit and discard older clears before active flags.
+fn bound(spec: &Spec, store: &mut Store, keep: &[String]) {
     let Some(max) = spec.max_entries else { return };
     if store.len() <= max {
         return;
     }
+    let keep: BTreeSet<_> = keep.iter().collect();
     let mut entries: Vec<_> = std::mem::take(store).into_iter().collect();
+    let priority = |id: &String, entry: &Entry| {
+        if keep.contains(id) {
+            2
+        } else {
+            u8::from(entry.on)
+        }
+    };
     entries.sort_by(|(left_id, left), (right_id, right)| {
-        left.updated_at
-            .total_cmp(&right.updated_at)
+        priority(left_id, left)
+            .cmp(&priority(right_id, right))
+            .then_with(|| left.updated_at.total_cmp(&right.updated_at))
             .then_with(|| left_id.cmp(right_id))
     });
     store.extend(entries.split_off(entries.len() - max));
 }
 
-/// Desktop's `parse*Payload`: entries that fail validation are dropped.
+/// Validate the complete star/mute head before using it as a write base.
 fn decode(spec: &Spec, json: &Value) -> Option<Store> {
-    if let (true, Some(addresses)) = (spec.strict, json.as_array()) {
+    if let (Ids::Projects, Some(addresses)) = (spec.ids, json.as_array()) {
         return Some(
             addresses
                 .iter()
@@ -183,15 +181,17 @@ fn decode(spec: &Spec, json: &Value) -> Option<Store> {
     if object.get("version")?.as_f64()? != 1.0 {
         return None;
     }
-    let mut store = match object.get(spec.collection) {
-        Some(Value::Object(entries)) => entries
-            .iter()
-            .filter_map(|(key, value)| Some((key.clone(), valid_entry(spec, key, value)?)))
-            .collect(),
-        _ if spec.strict => return None,
-        _ => Store::new(),
-    };
-    bound(spec, &mut store);
+    let entries = object.get(spec.collection)?.as_object()?;
+    let mut store = Store::new();
+    for (key, value) in entries {
+        match valid_entry(spec, key, value) {
+            Some(entry) => {
+                store.insert(key.clone(), entry);
+            }
+            None if matches!(spec.ids, Ids::Channels) => return None,
+            None => (),
+        }
+    }
     Some(store)
 }
 
@@ -244,20 +244,12 @@ fn canonical_ids(spec: &Spec, ids: &[String]) -> Result<Vec<String>, CliError> {
     }
 }
 
-fn clock(spec: &Spec) -> f64 {
-    let now = now();
-    match spec.unit {
-        Unit::Seconds => now.as_secs() as f64,
-        Unit::Millis => now.as_millis() as f64,
-    }
-}
-
 /// Sets `ids` to `on`, stamping each changed entry strictly newer than the one
 /// it replaces so the edit wins every client's merge. Returns the changed ids;
 /// an id already in the requested state, or absent when switching off, is left
 /// alone.
-fn set_flags(spec: &Spec, store: &mut Store, ids: &[String], on: bool) -> Vec<String> {
-    let clock = clock(spec);
+fn set_flags(store: &mut Store, ids: &[String], on: bool) -> Vec<String> {
+    let clock = now().as_millis() as f64;
     let mut changed = Vec::new();
     for id in ids {
         let current = store.get(id);
@@ -283,7 +275,8 @@ pub(crate) async fn run(
 ) -> Result<Value, CliError> {
     match action {
         Action::List => {
-            let (_, store) = fetch_store(spec, client).await?;
+            let (_, mut store) = fetch_store(spec, client).await?;
+            bound(spec, &mut store, &[]);
             let on: Vec<&String> = store
                 .iter()
                 .filter(|(_, entry)| entry.on)
@@ -294,12 +287,14 @@ pub(crate) async fn run(
         Action::Set { ids, on } => {
             let ids = canonical_ids(spec, &ids)?;
             let (head_created_at, mut store) = fetch_store(spec, client).await?;
-            let changed = set_flags(spec, &mut store, &ids, on);
-            if changed.is_empty() {
+            let changed = set_flags(&mut store, &ids, on);
+            let before_pruning = store.len();
+            bound(spec, &mut store, &ids);
+            if changed.is_empty() && store.len() == before_pruning {
                 return Ok(sidebar_sync::unchanged());
             }
-            bound(spec, &mut store);
-            if changed.iter().any(|id| !store.contains_key(id)) {
+            let required = if on { &ids } else { &changed };
+            if required.iter().any(|id| !store.contains_key(id)) {
                 return Err(CliError::Usage(format!(
                     "{} keeps at most {MAX_ENTRIES} entries; pass fewer ids",
                     spec.lane.label
@@ -365,7 +360,7 @@ mod tests {
             assert_eq!(list(&client).await.unwrap(), json!({"channels": []}));
 
             // Two channels land in one publish; an uppercase id is canonicalised.
-            let before = now().as_secs();
+            let before = now().as_millis() as u64;
             run(spec, set(&[C1, &C3.to_uppercase()], true), &client)
                 .await
                 .unwrap();
@@ -383,7 +378,10 @@ mod tests {
             assert_eq!(doc["version"], json!(1));
             assert_eq!(doc["channels"][C3][spec.flag], json!(true));
             let stamp = doc["channels"][C1]["updatedAt"].as_u64().unwrap();
-            assert!(stamp >= before && stamp < before + 60, "seconds: {stamp}");
+            assert!(
+                stamp >= before && stamp < before + 60_000,
+                "milliseconds: {stamp}"
+            );
             assert_eq!(list(&client).await.unwrap(), json!({"channels": [C1, C3]}));
 
             // Repeats and clearing an unknown channel publish nothing.
@@ -412,26 +410,22 @@ mod tests {
     async fn an_edit_beats_the_entry_it_replaces_and_follows_the_head() {
         let (client, relay) = setup().await;
         let future = now().as_secs() + 1_000;
-        // An entry from a clock ahead of ours, a mobile-shaped entry, and one
-        // desktop would drop.
+        // Legacy seconds ahead of our clock, alongside a millisecond entry.
         seed(
             &client,
             &relay,
             &STARS,
             json!({"version": 1.0, "channels": {
                 C1: {"starred": false, "updatedAt": future},
-                C2: {"starred": true, "updatedAt": 5},
-                C3: {"starred": "yes", "updatedAt": 5},
-                "no-time": {"starred": true},
-                "negative": {"starred": true, "updatedAt": -1},
+                C2: {"starred": true, "updatedAt": (future - 1) * 1000},
             }}),
             future,
         );
         run(&STARS, set(&[C1], true), &client).await.unwrap();
         let (event, doc) = published(&client, &relay);
         assert_eq!(event.created_at.as_secs(), future + 1);
-        assert_eq!(doc["channels"][C1]["updatedAt"], json!(future + 1));
-        assert_eq!(doc["channels"][C2]["updatedAt"], json!(5));
+        assert_eq!(doc["channels"][C1]["updatedAt"], json!(future * 1000 + 1));
+        assert_eq!(doc["channels"][C2]["updatedAt"], json!((future - 1) * 1000));
         assert_eq!(doc["channels"].as_object().unwrap().len(), 2);
     }
 
@@ -439,6 +433,9 @@ mod tests {
     async fn refuses_an_unreadable_head_and_a_dominated_write() {
         for doc in [
             json!({"version": 2, "channels": {}}),
+            json!({"version": 1}),
+            json!({"version": 1, "channels": []}),
+            json!({"version": 1, "channels": {C1: {"starred": "yes", "updatedAt": 5}}}),
             json!(["not", "a", "store"]),
             json!("text"),
         ] {
@@ -517,7 +514,7 @@ mod tests {
         assert!(!channels.contains_key(&format!("{:036}", 0)));
         assert!(channels.contains_key(&format!("{:036}", 1)));
 
-        // A head over the cap is trimmed the way desktop trims it on read.
+        // Listing an oversized head shows the same bounded view as an edit.
         let (client, relay) = setup().await;
         seed(
             &client,
@@ -538,6 +535,73 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, CliError::Usage(_)), "{err:?}");
         assert_eq!(published_count(&relay), 1);
+    }
+
+    #[tokio::test]
+    async fn repairs_oversized_flags_with_mixed_timestamps_and_keeps_the_edit() {
+        for spec in [&STARS, &MUTES] {
+            let (client, relay) = setup().await;
+            let time = now().as_secs() - 100;
+            let older_clear = "old-clear";
+            let newer_clear = "new-clear";
+            let mut channels = entries(499, spec.flag, (time - 1000) * 1000)
+                .as_object()
+                .unwrap()
+                .clone();
+            channels.insert(
+                older_clear.into(),
+                json!({spec.flag: false, "updatedAt": time * 1000}),
+            );
+            channels.insert(
+                newer_clear.into(),
+                json!({spec.flag: false, "updatedAt": time + 1}),
+            );
+            let active = format!("{:036}", 0);
+            channels.insert(C1.into(), json!({spec.flag: true, "updatedAt": time + 2}));
+            seed(
+                &client,
+                &relay,
+                spec,
+                json!({"version": 1, "channels": channels}),
+                time,
+            );
+
+            // A repeated add repairs the head and prunes the older clears first.
+            run(spec, set(&[C1], true), &client).await.unwrap();
+            let (_, doc) = published(&client, &relay);
+            let channels = doc["channels"].as_object().unwrap();
+            assert_eq!(channels.len(), 500);
+            assert!(!channels.contains_key(older_clear));
+            assert!(!channels.contains_key(newer_clear));
+            assert!(channels.contains_key(&active));
+            assert_eq!(channels[C1]["updatedAt"], json!((time + 2) * 1000));
+
+            // Reintroduce two clears with mixed units, with one excess entry.
+            let mut channels = channels.clone();
+            channels.remove(&active);
+            channels.insert(
+                older_clear.into(),
+                json!({spec.flag: false, "updatedAt": time * 1000}),
+            );
+            channels.insert(
+                newer_clear.into(),
+                json!({spec.flag: false, "updatedAt": time + 1}),
+            );
+            seed(
+                &client,
+                &relay,
+                spec,
+                json!({"version": 1, "channels": channels}),
+                now().as_secs() + 3,
+            );
+            run(spec, set(&[C1], false), &client).await.unwrap();
+            let (_, doc) = published(&client, &relay);
+            let channels = doc["channels"].as_object().unwrap();
+            assert_eq!(channels.len(), 500);
+            assert!(!channels.contains_key(older_clear));
+            assert_eq!(channels[newer_clear]["updatedAt"], json!((time + 1) * 1000));
+            assert_eq!(channels[C1][spec.flag], json!(false));
+        }
     }
 
     #[tokio::test]
