@@ -6,12 +6,12 @@
 //! writes it (`desktop/src/shared/theme/communityThemeSync.ts`). Any member
 //! may write their own; the relay applies no admin check.
 
-use nostr::nips::nip44;
-use nostr::{EventBuilder, Keys, Timestamp};
+use nostr::{EventBuilder, Timestamp};
 use serde_json::Value;
 
 use crate::client::{normalize_write_response, BuzzClient};
 use crate::commands::parse_write_response;
+use crate::credentials::Credentials;
 use crate::error::CliError;
 
 const D_TAG: &str = buzz_sdk::COMMUNITY_THEME_D_TAG;
@@ -207,8 +207,12 @@ fn newer(candidate: (u64, &str), current: (u64, &str)) -> bool {
 /// Pick the winning event the way Desktop does (newest `created_at`, lowest id
 /// on a tie) and decrypt it. Events from any other author are an error, never
 /// skipped.
-pub(crate) fn decode_head(keys: &Keys, events: &[Value]) -> Result<Option<Head>, CliError> {
-    let me = keys.public_key().to_hex();
+pub(crate) async fn decode_head(
+    credentials: &Credentials,
+    events: &[Value],
+) -> Result<Option<Head>, CliError> {
+    let me_key = credentials.public_key();
+    let me = me_key.to_hex();
     let mut best: Option<(&Value, u64, &str)> = None;
     for event in events {
         let field = |name: &str| event.get(name).and_then(Value::as_str);
@@ -231,10 +235,11 @@ pub(crate) fn decode_head(keys: &Keys, events: &[Value]) -> Result<Option<Head>,
     let Some((event, created_at, id)) = best else {
         return Ok(None);
     };
-    let theme = event
-        .get("content")
-        .and_then(Value::as_str)
-        .and_then(|content| nip44::decrypt(keys.secret_key(), &keys.public_key(), content).ok())
+    let plaintext = match event.get("content").and_then(Value::as_str) {
+        Some(content) => credentials.nip44_decrypt(&me_key, content).await?,
+        None => None,
+    };
+    let theme = plaintext
         .and_then(|plaintext| serde_json::from_str::<Value>(&plaintext).ok())
         .and_then(|value| Theme::from_json(&value));
     Ok(Some(Head {
@@ -246,19 +251,15 @@ pub(crate) fn decode_head(keys: &Keys, events: &[Value]) -> Result<Option<Head>,
 
 /// Build the replacement event. Its `created_at` is at least one second after
 /// the head so NIP-33 resolution keeps the new event.
-pub(crate) fn build_event(
-    keys: &Keys,
+pub(crate) async fn build_event(
+    credentials: &Credentials,
     theme: &Theme,
     head_created_at: Option<u64>,
     now: u64,
 ) -> Result<EventBuilder, CliError> {
-    let ciphertext = nip44::encrypt(
-        keys.secret_key(),
-        &keys.public_key(),
-        theme.to_json().to_string(),
-        nip44::Version::V2,
-    )
-    .map_err(|e| CliError::Other(format!("community theme encryption failed: {e}")))?;
+    let ciphertext = credentials
+        .nip44_encrypt(&credentials.public_key(), &theme.to_json().to_string())
+        .await?;
     let created_at = head_created_at.map_or(now, |head| now.max(head.saturating_add(1)));
     buzz_sdk::build_community_theme(&ciphertext, created_at)
         .map_err(|e| CliError::Other(format!("build_community_theme failed: {e}")))
@@ -288,7 +289,7 @@ pub(crate) fn plan_set(head: Option<&Head>, patch: &ThemePatch) -> Result<Option
 async fn fetch_head(client: &BuzzClient, writer_pinned: bool) -> Result<Option<Head>, CliError> {
     let mut filter = serde_json::json!({
         "kinds": [buzz_sdk::kind::KIND_READ_STATE],
-        "authors": [client.keys().public_key().to_hex()],
+        "authors": [client.public_key().to_hex()],
         "#d": [D_TAG],
         "limit": HEAD_QUERY_LIMIT,
     });
@@ -298,7 +299,7 @@ async fn fetch_head(client: &BuzzClient, writer_pinned: bool) -> Result<Option<H
     let raw = client.query(&filter).await?;
     let events: Vec<Value> = serde_json::from_str(&raw)
         .map_err(|e| CliError::Other(format!("failed to parse community theme query: {e}")))?;
-    decode_head(client.keys(), &events)
+    decode_head(client.credentials(), &events).await
 }
 
 async fn cmd_get(client: &BuzzClient) -> Result<(), CliError> {
@@ -329,12 +330,13 @@ async fn cmd_set(client: &BuzzClient, patch: ThemePatch) -> Result<(), CliError>
         return Ok(());
     };
     let builder = build_event(
-        client.keys(),
+        client.credentials(),
         &next,
         head.as_ref().map(|h| h.created_at),
         Timestamp::now().as_secs(),
-    )?;
-    let event = client.sign_event(builder)?;
+    )
+    .await?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     parse_write_response(
         &resp,
@@ -359,9 +361,11 @@ pub async fn dispatch(cmd: crate::CommunityCmd, client: &BuzzClient) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nostr::nips::nip44;
+    use nostr::Keys;
 
-    fn keys() -> Keys {
-        Keys::generate()
+    fn credentials() -> Credentials {
+        Credentials::from_keys(Keys::generate())
     }
 
     fn quoted_strings(block: &str) -> Vec<String> {
@@ -381,9 +385,18 @@ mod tests {
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
     }
 
-    fn signed_json(keys: &Keys, theme: &Theme, head_created_at: Option<u64>, now: u64) -> Value {
-        let builder = build_event(keys, theme, head_created_at, now).expect("build");
-        let event = builder.sign_with_keys(keys).expect("sign");
+    async fn signed_json(
+        credentials: &Credentials,
+        theme: &Theme,
+        head_created_at: Option<u64>,
+        now: u64,
+    ) -> Value {
+        let builder = build_event(credentials, theme, head_created_at, now)
+            .await
+            .expect("build");
+        let event = builder
+            .sign_with_keys(&credentials.test_keys())
+            .expect("sign");
         serde_json::to_value(&event).expect("event json")
     }
 
@@ -491,13 +504,17 @@ mod tests {
         .is_ok());
     }
 
-    #[test]
-    fn set_changes_only_the_given_fields_through_the_wire_format() {
-        let keys = keys();
+    #[tokio::test]
+    async fn set_changes_only_the_given_fields_through_the_wire_format() {
+        let credentials = credentials();
         let head_theme = stored("nord", "#22c55e", false);
-        let head = decode_head(&keys, &[signed_json(&keys, &head_theme, None, 1_000)])
-            .expect("decode")
-            .expect("head");
+        let head = decode_head(
+            &credentials,
+            &[signed_json(&credentials, &head_theme, None, 1_000).await],
+        )
+        .await
+        .expect("decode")
+        .expect("head");
         assert_eq!(head.theme.as_ref(), Some(&head_theme));
 
         let patch = ThemePatch::parse(None, Some("#ef4444".into()), None).unwrap();
@@ -507,9 +524,10 @@ mod tests {
         assert_eq!(next, stored("nord", "#ef4444", false));
 
         let republished = decode_head(
-            &keys,
-            &[signed_json(&keys, &next, Some(head.created_at), 2_000)],
+            &credentials,
+            &[signed_json(&credentials, &next, Some(head.created_at), 2_000).await],
         )
+        .await
         .unwrap()
         .unwrap();
         assert_eq!(republished.theme, Some(next));
@@ -522,41 +540,46 @@ mod tests {
         assert_eq!(next, stored("dracula", "#3b82f6", true));
     }
 
-    #[test]
-    fn set_that_changes_nothing_publishes_nothing() {
-        let keys = keys();
+    #[tokio::test]
+    async fn set_that_changes_nothing_publishes_nothing() {
+        let credentials = credentials();
         let theme = stored("nord", "neutral", true);
-        let head = decode_head(&keys, &[signed_json(&keys, &theme, None, 1_000)])
-            .unwrap()
-            .unwrap();
+        let head = decode_head(
+            &credentials,
+            &[signed_json(&credentials, &theme, None, 1_000).await],
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let patch = ThemePatch::parse(Some("nord".into()), None, Some(true)).unwrap();
         assert_eq!(plan_set(Some(&head), &patch).unwrap(), None);
     }
 
-    #[test]
-    fn replacement_is_strictly_newer_than_the_head() {
-        let keys = keys();
+    #[tokio::test]
+    async fn replacement_is_strictly_newer_than_the_head() {
+        let credentials = credentials();
         let theme = stored("buzz", "#3b82f6", true);
         for (head_at, now, expected) in [
             (5_000, 4_000, 5_001),
             (5_000, 5_000, 5_001),
             (5_000, 6_000, 6_000),
         ] {
-            let event = signed_json(&keys, &theme, Some(head_at), now);
+            let event = signed_json(&credentials, &theme, Some(head_at), now).await;
             assert_eq!(event["created_at"].as_u64(), Some(expected));
         }
         assert_eq!(
-            signed_json(&keys, &theme, None, 7_000)["created_at"].as_u64(),
+            signed_json(&credentials, &theme, None, 7_000).await["created_at"].as_u64(),
             Some(7_000)
         );
     }
 
-    #[test]
-    fn unreadable_head_blocks_partial_set_but_allows_complete_replacement() {
-        let keys = keys();
-        let mut event = signed_json(&keys, &stored("buzz", "#3b82f6", true), None, 1_000);
+    #[tokio::test]
+    async fn unreadable_head_blocks_partial_set_but_allows_complete_replacement() {
+        let credentials = credentials();
+        let mut event =
+            signed_json(&credentials, &stored("buzz", "#3b82f6", true), None, 1_000).await;
         event["content"] = Value::String("not-ciphertext".into());
-        let head = decode_head(&keys, &[event]).unwrap().unwrap();
+        let head = decode_head(&credentials, &[event]).await.unwrap().unwrap();
         assert!(head.theme.is_none());
 
         let partial = ThemePatch::parse(Some("nord".into()), None, None).unwrap();
@@ -573,9 +596,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn head_with_a_value_desktop_would_reject_is_unreadable() {
-        let keys = keys();
+    #[tokio::test]
+    async fn head_with_a_value_desktop_would_reject_is_unreadable() {
+        let credentials = credentials();
+        let keys = credentials.test_keys();
         for doc in [
             serde_json::json!({"version": 2, "theme": "buzz", "accent": "#3b82f6", "followSystem": true}),
             serde_json::json!({"version": 1, "theme": "bogus", "accent": "#3b82f6", "followSystem": true}),
@@ -593,19 +617,21 @@ mod tests {
                 .unwrap()
                 .sign_with_keys(&keys)
                 .unwrap();
-            let head = decode_head(&keys, &[serde_json::to_value(&event).unwrap()])
+            let head = decode_head(&credentials, &[serde_json::to_value(&event).unwrap()])
+                .await
                 .unwrap()
                 .unwrap();
             assert!(head.theme.is_none(), "{doc}");
         }
     }
 
-    #[test]
-    fn head_selection_matches_desktop_ordering_and_rejects_foreign_authors() {
-        let keys = keys();
-        let a = signed_json(&keys, &stored("nord", "#3b82f6", true), None, 100);
-        let b = signed_json(&keys, &stored("dracula", "#3b82f6", true), None, 200);
-        let head = decode_head(&keys, &[a.clone(), b.clone()])
+    #[tokio::test]
+    async fn head_selection_matches_desktop_ordering_and_rejects_foreign_authors() {
+        let credentials = credentials();
+        let a = signed_json(&credentials, &stored("nord", "#3b82f6", true), None, 100).await;
+        let b = signed_json(&credentials, &stored("dracula", "#3b82f6", true), None, 200).await;
+        let head = decode_head(&credentials, &[a.clone(), b.clone()])
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(head.id, b["id"].as_str().unwrap());
@@ -619,16 +645,17 @@ mod tests {
         } else {
             &tie_b
         };
-        let head = decode_head(&keys, &[tie_a.clone(), tie_b.clone()])
+        let head = decode_head(&credentials, &[tie_a.clone(), tie_b.clone()])
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(head.id, lower["id"].as_str().unwrap());
 
-        assert!(decode_head(&keys, &[]).unwrap().is_none());
-        let stranger = Keys::generate();
-        let foreign = signed_json(&stranger, &stored("nord", "#3b82f6", true), None, 100);
+        assert!(decode_head(&credentials, &[]).await.unwrap().is_none());
+        let stranger = self::credentials();
+        let foreign = signed_json(&stranger, &stored("nord", "#3b82f6", true), None, 100).await;
         assert!(matches!(
-            decode_head(&keys, &[foreign]),
+            decode_head(&credentials, &[foreign]).await,
             Err(CliError::Other(_))
         ));
     }
@@ -641,10 +668,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn event_is_kind_30078_with_desktop_tags_and_self_encryption() {
-        let keys = keys();
-        let event = build_event(&keys, &stored("buzz", "#3b82f6", true), None, 42)
+    #[tokio::test]
+    async fn event_is_kind_30078_with_desktop_tags_and_self_encryption() {
+        let credentials = credentials();
+        let keys = credentials.test_keys();
+        let event = build_event(&credentials, &stored("buzz", "#3b82f6", true), None, 42)
+            .await
             .unwrap()
             .sign_with_keys(&keys)
             .unwrap();
@@ -688,7 +717,7 @@ mod tests {
     #[tokio::test]
     async fn only_the_set_head_read_is_pinned_to_the_writer() {
         let (url, filters) = recording_relay().await;
-        let client = BuzzClient::new(url, keys(), None, None).unwrap();
+        let client = BuzzClient::new(url, credentials()).unwrap();
 
         cmd_set(&client, ThemePatch::parse(None, None, Some(false)).unwrap())
             .await
