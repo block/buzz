@@ -154,7 +154,9 @@ async fn add(
         None => {
             let builder = buzz_sdk::build_pin_message(channel, message)
                 .map_err(|e| CliError::Other(format!("build_pin_message failed: {e}")))?;
-            let raw = client.submit_event(client.sign_event(builder)?).await?;
+            let raw = client
+                .submit_event(client.sign_event(builder).await?)
+                .await?;
             let normalized = parse_write_response(
                 &raw,
                 "this message was unpinned in the same second; run the command again",
@@ -174,7 +176,7 @@ async fn remove(
     message: nostr::EventId,
 ) -> Result<Value, CliError> {
     let (channel_hex, message_hex) = (channel.hyphenated().to_string(), message.to_hex());
-    let me = client.keys().public_key().to_hex();
+    let me = client.public_key().to_hex();
     let mut removed = Vec::new();
     for (_, pin) in fetch_pins(client, &channel_hex, Some(&message_hex)).await? {
         let pin_id = parse_event_id(pin["id"].as_str().unwrap_or_default())?;
@@ -184,7 +186,9 @@ async fn remove(
             buzz_sdk::build_delete_message(channel, pin_id)
         }
         .map_err(|e| CliError::Other(format!("failed to build unpin event: {e}")))?;
-        let raw = client.submit_event(client.sign_event(builder)?).await?;
+        let raw = client
+            .submit_event(client.sign_event(builder).await?)
+            .await?;
         let response: Value = serde_json::from_str(&normalize_write_response(&raw))
             .map_err(|e| CliError::Other(format!("relay response is not JSON: {e}")))?;
         if response["accepted"] != json!(true) {
@@ -228,6 +232,7 @@ pub async fn dispatch(cmd: PinsCmd, client: &BuzzClient) -> Result<(), CliError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::credentials::Credentials;
     use axum::{body::Bytes, extract::State, http::StatusCode, routing::post, Json, Router};
     use nostr::{EventBuilder, Keys, Kind, Tag};
     use std::sync::{Arc, Mutex};
@@ -318,7 +323,7 @@ mod tests {
     async fn setup() -> (BuzzClient, Shared) {
         let relay = Shared::default();
         let url = fake_relay(relay.clone()).await;
-        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+        let client = BuzzClient::new(url, Credentials::from_keys(Keys::generate())).unwrap();
         (client, relay)
     }
 
@@ -526,7 +531,13 @@ mod tests {
         let target = message(&relay, CHANNEL, "x");
         let kept = message(&relay, CHANNEL, "y");
         let theirs = seed_pin(&relay, CHANNEL, &target, 2_000);
-        let mine = seed_pin_as(&relay, client.keys(), CHANNEL, &target, 3_000);
+        let mine = seed_pin_as(
+            &relay,
+            &client.credentials().test_keys(),
+            CHANNEL,
+            &target,
+            3_000,
+        );
         let kept_pin = seed_pin(&relay, CHANNEL, &kept, 4_000);
 
         let out = run(rm_cmd(&target), &client).await.unwrap();
