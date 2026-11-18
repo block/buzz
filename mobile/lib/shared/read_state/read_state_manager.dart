@@ -166,7 +166,8 @@ class ReadStateManager {
   Future<Map<String, int>> _savedFollows = Future.value(const {});
   bool _saveScheduled = false;
   Object? syncError;
-  // Failed synced clears: each error stands until it lands or the mark ends.
+  // Channels whose synced clear failed. Their error outlives unrelated
+  // successful syncs until the clear lands or the override ends.
   final Set<String> _failedClears = {};
 
   Object? get _standingError {
@@ -189,6 +190,7 @@ class ReadStateManager {
   // peers. The primary carries all of them (NIP-RS, Buzz profile).
   final Map<String, OverrideRegister> _overrides = {};
   final Map<String, int> _pendingClears = {}; // See _settlePendingClears.
+  // Received groups stamped too far ahead, held until the clock reaches them.
   /// Groups stamped too far ahead, each contribution kept apart with where
   /// it came from, so each meets its own admission rule once due.
   final List<({String channelId, OverrideRegister register, bool local})>
@@ -629,11 +631,7 @@ class ReadStateManager {
         // live, so read the snapshot every time it goes live: its EOSE, which
         // can come after the 500 ms fallback on a slow AUTH, on a reconnect's
         // replay, or after a CLOSED's retry.
-        onStatusChanged: (status) {
-          if (status == RelaySubscriptionStatus.ready && !_disposed) {
-            unawaited(_requestSync());
-          }
-        },
+        onStatusChanged: _onLiveStatus,
         // The session dropped it, so the next reconnect opens a new one.
         onClosed: (_) => _unsubscribeLive = null,
         // A peer's mark can carry an older created_at (its clock, or a

@@ -1221,6 +1221,52 @@ void main() {
       expect(desktop.activeChannelOverrides, isEmpty);
     });
 
+    test(
+      'a clear after lost signal keeps a newer mark it never merged',
+      () async {
+        final phone = await device('phone');
+        phone.markContextRead(channel, clock - 100);
+        expect(phone.markChannelUnread(channel), isTrue);
+        await phone.flush();
+        relay.drop();
+
+        // Another device reads the channel, then marks it unread again.
+        clock += 10;
+        final desktop = await device('desktop');
+        expect(desktop.clearChannelOverride(channel), isTrue);
+        clock += 10;
+        expect(desktop.markChannelUnread(channel), isTrue);
+        await desktop.flush();
+
+        // Without signal, the still-running phone reads to the bottom.
+        relay.offline = true;
+        clock += 10;
+        expect(phone.clearChannelOverride(channel), isTrue);
+        expect(phone.activeChannelOverrides, isEmpty);
+        await pumpEventQueue();
+
+        relay.offline = false;
+        relay.ready();
+        await pumpEventQueue();
+        await phone.flush();
+        expect(phone.activeChannelOverrides, {channel});
+        final laptop = await device('laptop');
+        expect(laptop.activeChannelOverrides, {channel});
+      },
+    );
+
+    test('a read in flight when signal drops leaves the view stale', () async {
+      final phone = await device('phone');
+      expect(phone.canSyncChannelUnread, isTrue);
+      relay.holdSnapshots = Completer();
+      relay.ready();
+      await pumpEventQueue();
+      relay.drop();
+      relay.holdSnapshots!.complete();
+      await pumpEventQueue();
+      expect(phone.canSyncChannelUnread, isFalse);
+    });
+
     test('an offline clear keeps a newer mark it never merged', () async {
       final phone = await device('phone');
       phone.markContextRead(channel, clock - 100);
@@ -1655,10 +1701,13 @@ class _MemoryRelay extends RelaySessionNotifier {
   void Function(NostrEvent event)? beforePublish;
   bool offline = false;
 
+  /// While set, snapshot reads wait for it to complete.
+  Completer<void>? holdSnapshots;
+
   /// Delivers [event] to live subscribers without retaining it.
   void deliver(NostrEvent event) {
     for (final onEvent in List.of(_live)) {
-      onEvent(event);
+      if (!_dropped.contains(onEvent)) onEvent(event);
     }
   }
 
@@ -1672,14 +1721,27 @@ class _MemoryRelay extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     if (offline) throw TimeoutException('offline');
-    return retained.values.toList();
+    final events = retained.values.toList();
+    await holdSnapshots?.future;
+    return events;
   }
 
   final List<void Function(RelaySubscriptionStatus)> _statusListeners = [];
+  final _dropped = <void Function(NostrEvent)>{};
+
+  /// Drops every open live subscription, as lost signal does: each hears
+  /// `retrying` and receives nothing until [ready].
+  void drop() {
+    _dropped.addAll(_live);
+    for (final listener in List.of(_statusListeners)) {
+      listener(RelaySubscriptionStatus.retrying);
+    }
+  }
 
   /// Reports every live subscription ready again, as a reconnect's replay
   /// does.
   void ready() {
+    _dropped.clear();
     for (final listener in List.of(_statusListeners)) {
       listener(RelaySubscriptionStatus.ready);
     }

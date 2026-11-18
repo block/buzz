@@ -114,6 +114,21 @@ extension ReadStateOverrides on ReadStateManager {
     return false;
   }
 
+  /// The live subscription's status. Ready reads the snapshot. A drop
+  /// misses what peers publish until that snapshot, so the view is
+  /// incomplete from the drop on: clears wait, and a read already in flight
+  /// cannot record success over the drop.
+  void _onLiveStatus(RelaySubscriptionStatus status) {
+    if (_disposed) return;
+    switch (status) {
+      case RelaySubscriptionStatus.ready:
+        unawaited(_requestSync());
+      case RelaySubscriptionStatus.retrying:
+        _newestSettledSnapshot = _snapshotsStarted + 1;
+        _lastSnapshotSucceeded = false;
+    }
+  }
+
   /// Issues the clears made without a complete view ([_pendingClears]:
   /// channel to the set stamp each read), once a full snapshot has merged:
   /// each one whose mark is unchanged gets its fresh stamp now; one whose
