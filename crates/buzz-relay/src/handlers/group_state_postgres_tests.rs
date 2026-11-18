@@ -1072,15 +1072,15 @@ enum HoldPublisher {
 /// holds the join after its read behind the lock until the edit is waiting
 /// for that lock, so the edit must still win with its own state.
 ///
-/// Both legs also check the timestamps: every kind:39000 publication for
-/// the coordinate, replaced rows included, leaves exactly one row, and
-/// their `created_at` strictly increase in storage order. The live event is
-/// first pinned an hour ahead, so each publication's timestamp is the live
-/// one plus a second and the clock cannot separate the two publishers.
-/// Mutation: take the live `created_at` before the lock → RED every time:
-/// the publisher that locks second computes the same second as the first,
-/// and either loses the id tie and leaves no row, or wins it and repeats
-/// the second.
+/// Both legs also check the timestamps. A superseded kind:39000 is deleted,
+/// so the coordinate stores exactly one row, and it is two seconds past the
+/// pinned one: each of the two publications stored the live `created_at`
+/// plus a second. The live event is first pinned an hour ahead, so the clock
+/// cannot separate the two publishers. Mutation: take the live `created_at`
+/// before the lock → RED every time: the publisher that locks second
+/// computes the same second as the first, and either loses the id tie and
+/// stores nothing, or wins it and repeats the second; either way the live
+/// row is one second past the pinned one.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn a_publisher_that_read_before_an_edit_cannot_replace_it() {
@@ -1089,8 +1089,10 @@ async fn a_publisher_that_read_before_an_edit_cannot_replace_it() {
     }
 }
 
-/// `created_at` of every relay-signed kind:39000 row for `channel_id`,
-/// replaced rows included, in storage order.
+/// `created_at` of every stored relay-signed kind:39000 row for
+/// `channel_id`, in storage order. Superseded rows are deleted, so a
+/// soft-deleted row here would come only from channel deletion or an older
+/// relay.
 async fn stored_metadata_created_at(
     state: &AppState,
     tenant: &TenantContext,
@@ -1155,9 +1157,13 @@ async fn join_publisher_held_against_an_auto_join_edit(hold: HoldPublisher) {
             .expect("store pinned kind:39000")
             .1
     );
-    let rows_before = stored_metadata_created_at(&state, &tenant, channel_id)
-        .await
-        .len();
+    let pinned_at = chrono::DateTime::from_timestamp(pinned.created_at.as_secs() as i64, 0)
+        .expect("pinned created_at");
+    assert_eq!(
+        stored_metadata_created_at(&state, &tenant, channel_id).await,
+        [pinned_at],
+        "{hold:?}: the pinned kind:39000 deleted the heads it superseded"
+    );
 
     let (arrived, release) = match hold {
         HoldPublisher::BeforeLock => {
@@ -1233,15 +1239,11 @@ async fn join_publisher_held_against_an_auto_join_edit(hold: HoldPublisher) {
         !tags.contains(&vec!["auto_join".to_string()]),
         "{hold:?}: the join's stale kind:39000 replaced the edit's: {tags:?}"
     );
-    let created_at = stored_metadata_created_at(&state, &tenant, channel_id).await;
     assert_eq!(
-        created_at.len(),
-        rows_before + 2,
-        "{hold:?}: the join and the edit each leave one kind:39000 row: {created_at:?}"
-    );
-    assert!(
-        created_at.windows(2).all(|pair| pair[0] < pair[1]),
-        "{hold:?}: kind:39000 timestamps must strictly increase in storage order: {created_at:?}"
+        stored_metadata_created_at(&state, &tenant, channel_id).await,
+        [pinned_at + chrono::Duration::seconds(2)],
+        "{hold:?}: the join and the edit each publish one second past the live kind:39000, \
+         and each deletes the head it supersedes"
     );
 }
 

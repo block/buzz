@@ -18,7 +18,10 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:photo_manager/photo_manager.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../helpers/thread_ids.dart';
@@ -230,9 +233,14 @@ Future<void> _pumpImageSheet(
   WidgetTester tester, {
   required TimelineMessage message,
   bool canManageMessage = false,
+  http.Client? mediaClient,
 }) async {
   await tester.pumpWidget(
     ProviderScope(
+      overrides: [
+        if (mediaClient != null)
+          mediaHttpClientProvider.overrideWithValue(mediaClient),
+      ],
       child: MaterialApp(
         theme: AppTheme.light(),
         home: Scaffold(
@@ -1204,6 +1212,79 @@ void main() {
         ),
         findsNWidgets(4),
       );
+    });
+
+    testWidgets('saving on iOS reports the result of the add-only write', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        final messenger =
+            TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+        final permissionRequests = <Object?>[];
+        // Only the permission request is answered: add-only access cannot read
+        // the library, so any other photo_manager call fails as it would there.
+        const photoManager = MethodChannel('com.fluttercandies/photo_manager');
+        const saver = MethodChannel('buzz/photo_library_saver');
+        addTearDown(() {
+          messenger.setMockMethodCallHandler(photoManager, null);
+          messenger.setMockMethodCallHandler(saver, null);
+        });
+        messenger.setMockMethodCallHandler(photoManager, (call) async {
+          if (call.method != 'requestPermissionExtend') {
+            throw PlatformException(code: 'add_only_cannot_read');
+          }
+          permissionRequests.add(call.arguments);
+          return PermissionState.authorized.index;
+        });
+        final saves = <Map<Object?, Object?>>[];
+        PlatformException? saveFailure;
+        messenger.setMockMethodCallHandler(saver, (call) async {
+          expect(call.method, 'saveImage');
+          saves.add(call.arguments as Map<Object?, Object?>);
+          if (saveFailure case final failure?) throw failure;
+          return null;
+        });
+
+        await _pumpImageSheet(
+          tester,
+          message: _message(),
+          mediaClient: MockClient(
+            (_) async => http.Response.bytes(
+              [1, 2, 3],
+              200,
+              headers: {'content-type': 'image/png'},
+            ),
+          ),
+        );
+        await tester.tap(find.text('Save image'));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Saved to Photos'), findsOneWidget);
+        expect(saves.single, {
+          'bytes': Uint8List.fromList([1, 2, 3]),
+          'filename': 'photo.png',
+        });
+        expect(
+          (permissionRequests.single
+              as Map<Object?, Object?>)['iosAccessLevel'],
+          IosAccessLevel.addOnly.index + 1,
+        );
+
+        saveFailure = PlatformException(code: 'save_failed');
+        tester
+            .state<ScaffoldMessengerState>(find.byType(ScaffoldMessenger))
+            .removeCurrentSnackBar();
+        await tester.tap(find.text('open image actions'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Save image'));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Could not save image'), findsOneWidget);
+        expect(saves, hasLength(2));
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
     });
   });
 

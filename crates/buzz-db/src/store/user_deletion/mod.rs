@@ -8,6 +8,8 @@ pub mod content_batches;
 mod discovery;
 mod inventory;
 mod media;
+/// Standalone, offline profile cleanup with read-only preview.
+pub mod profile_batches;
 mod requests;
 pub use discovery::normalize_user_deletion_pubkey;
 pub use inventory::UserDeletionInventory;

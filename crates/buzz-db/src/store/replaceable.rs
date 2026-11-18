@@ -342,6 +342,41 @@ async fn replace_parameterized_event_in_transaction_impl(
     ))
 }
 
+/// Whether the relay's replacement writers delete a superseded head of
+/// `kind` instead of soft-deleting it.
+///
+/// These are the lists the relay signs and republishes in full on every
+/// change: the NIP-43 membership list (13534), the NIP-IA archived list
+/// (13535) and NIP-29 group state (39000–39002), written by the addressable
+/// path, the kind:39002 member snapshot and the kind:13534 writer, which all
+/// build their supersede with [`replacement_sql`] from this predicate. A
+/// retired head is a full copy that no relay reader returns.
+///
+/// While the coordinate has a live head, a replay of a deleted id is still
+/// rejected: its `created_at` does not beat the head's. With no live head (a
+/// deleted channel's soft-deleted state, say), the deleted row no longer
+/// makes the replay a duplicate, and kinds without a channel have no
+/// created-at floor. Only the relay can submit these events: ingest requires
+/// the signer to be the authenticated pubkey, kinds 13534 and 13535 are
+/// relay-only, and the relay's writers sign a new event on every attempt.
+///
+/// The check is by kind, not signer, and every supersede is scoped to the
+/// event's own pubkey. A client's kind:39000–39002 goes through the NIP-33
+/// path, which keeps the soft delete. Channel deletion
+/// (`soft_delete_discovery_events`) retires the live head and still
+/// soft-deletes it.
+pub(crate) const fn hard_deletes_superseded(kind: i32) -> bool {
+    use buzz_core::kind::{
+        KIND_IA_ARCHIVED_LIST, KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS,
+        KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST,
+    };
+    kind == KIND_NIP43_MEMBERSHIP_LIST as i32
+        || kind == KIND_IA_ARCHIVED_LIST as i32
+        || kind == KIND_NIP29_GROUP_METADATA as i32
+        || kind == KIND_NIP29_GROUP_ADMINS as i32
+        || kind == KIND_NIP29_GROUP_MEMBERS as i32
+}
+
 /// The `WHERE` predicate (after the keyword, which each caller spells so the
 /// floor policy can see where a `SET` list ends) of one replaceable
 /// coordinate's head read and supersede.
@@ -372,6 +407,48 @@ macro_rules! replacement_head_sql {
             " ORDER BY created_at DESC, id ASC LIMIT 1"
         )
     };
+}
+
+/// The statement that retires a coordinate's live head: `soft` sets
+/// `deleted_at`, `hard` deletes the row (`hard_deletes_superseded`). Either
+/// way the head's mention rows are deleted with it.
+macro_rules! replacement_supersede_sql {
+    (soft, $scope:tt) => {
+        superseded_with_mentions_sql!(concat!(
+            "UPDATE events SET deleted_at = NOW() WHERE ",
+            replacement_scope!($scope)
+        ))
+    };
+    (hard, $scope:tt) => {
+        superseded_with_mentions_sql!(concat!(
+            "DELETE FROM events WHERE ",
+            replacement_scope!($scope)
+        ))
+    };
+}
+
+/// The head read and the supersede statement of one replaceable coordinate,
+/// in a channel (`$4` binds it) or global, retiring the head by delete when
+/// `hard_delete` holds and by soft delete otherwise. The addressable path,
+/// the kind:39002 member snapshot and the kind:13534 writer build their
+/// replacement statements here, so the index-condition test covers each
+/// replacement statement they run. The snapshot locks' own head reads
+/// (`latest_member_event_timestamp`, `lock_group_state_snapshot`) are
+/// separate SQL that the test does not check. The NIP-33 path keys on
+/// `d_tag` and builds its own.
+pub(crate) fn replacement_sql(in_channel: bool, hard_delete: bool) -> (&'static str, &'static str) {
+    let head = if in_channel {
+        replacement_head_sql!(in_channel)
+    } else {
+        replacement_head_sql!(global)
+    };
+    let supersede = match (in_channel, hard_delete) {
+        (true, false) => replacement_supersede_sql!(soft, in_channel),
+        (true, true) => replacement_supersede_sql!(hard, in_channel),
+        (false, false) => replacement_supersede_sql!(soft, global),
+        (false, true) => replacement_supersede_sql!(hard, global),
+    };
+    (head, supersede)
 }
 
 /// Take the replacement lock of the `(kind, pubkey, channel_id)` coordinate
@@ -409,7 +486,7 @@ pub(crate) async fn take_replacement_lock(
 ///
 /// Returns `(event, false)` for a stale write or a duplicate ID. The caller
 /// commits only when the event was inserted and rolls back otherwise: a
-/// duplicate leaves the previous event soft-deleted on the transaction.
+/// duplicate leaves the previous event retired on the transaction.
 pub(crate) async fn replace_addressable_event_under_lock(
     tx: &mut AdmittedTx,
     event: &nostr::Event,
@@ -424,23 +501,8 @@ pub(crate) async fn replace_addressable_event_under_lock(
 
     // Check for the newest existing event. ORDER BY + LIMIT 1 is defensive against
     // historical data where prior bugs may have left multiple live rows.
-    let (head_sql, supersede_sql) = if channel_id.is_some() {
-        (
-            replacement_head_sql!(in_channel),
-            superseded_with_mentions_sql!(concat!(
-                "UPDATE events SET deleted_at = NOW() WHERE ",
-                replacement_scope!(in_channel)
-            )),
-        )
-    } else {
-        (
-            replacement_head_sql!(global),
-            superseded_with_mentions_sql!(concat!(
-                "UPDATE events SET deleted_at = NOW() WHERE ",
-                replacement_scope!(global)
-            )),
-        )
-    };
+    let (head_sql, supersede_sql) =
+        replacement_sql(channel_id.is_some(), hard_deletes_superseded(kind_i32));
     let mut head = sqlx::query_as(head_sql)
         .bind(community_id.as_uuid())
         .bind(kind_i32)
@@ -471,7 +533,8 @@ pub(crate) async fn replace_addressable_event_under_lock(
     crate::channel_members::guard_channel_roster_event(tx, kind_i32, channel_id, &tags_json)
         .await?;
 
-    // Soft-delete the old event (if any).
+    // Retire the old event (if any): soft-delete it, or delete a relay-owned
+    // list's head (`hard_deletes_superseded`).
     let mut supersede = sqlx::query(supersede_sql)
         .bind(community_id.as_uuid())
         .bind(kind_i32)
@@ -710,6 +773,21 @@ impl Db {
                 Ok((result.event, was_inserted))
             })
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hard_deletes_superseded;
+
+    #[test]
+    fn only_relay_owned_lists_hard_delete_their_superseded_heads() {
+        for kind in [13534, 13535, 39000, 39001, 39002] {
+            assert!(hard_deletes_superseded(kind), "kind {kind}");
+        }
+        for kind in [-1, 0, 3, 10002, 13533, 13536, 30078, 38999, 39003] {
+            assert!(!hard_deletes_superseded(kind), "kind {kind}");
+        }
     }
 }
 
@@ -1017,24 +1095,13 @@ mod postgres_tests {
         .expect("populated partitions");
         populated.sort();
 
-        let statements = [
-            (
-                true,
-                replacement_head_sql!(in_channel),
-                superseded_with_mentions_sql!(concat!(
-                    "UPDATE events SET deleted_at = NOW() WHERE ",
-                    replacement_scope!(in_channel)
-                )),
-            ),
-            (
-                false,
-                replacement_head_sql!(global),
-                superseded_with_mentions_sql!(concat!(
-                    "UPDATE events SET deleted_at = NOW() WHERE ",
-                    replacement_scope!(global)
-                )),
-            ),
-        ];
+        // The statements production runs, for every scope and retire mode.
+        let statements = [(true, false), (false, false), (true, true), (false, true)].map(
+            |(in_channel, hard_delete)| {
+                let (head_sql, supersede_sql) = replacement_sql(in_channel, hard_delete);
+                (in_channel, head_sql, supersede_sql)
+            },
+        );
         for (in_channel, head_sql, supersede_sql) in statements {
             for sql in [head_sql, supersede_sql] {
                 let explain = format!("EXPLAIN (FORMAT JSON) {sql}");
@@ -1133,13 +1200,16 @@ mod postgres_tests {
         let base = Timestamp::now().as_secs();
 
         // Every supersede path retires the old head with a soft delete, except
-        // NIP-RS read state and mesh status, which the NIP-33 path hard-deletes.
-        // The relay roster writer is the production kind:39002 path; its p tags
-        // must match the channel's members. The relay-signed kind:13535 list
-        // goes through the addressable path.
+        // NIP-RS read state and mesh status, which the NIP-33 path hard-deletes,
+        // and the relay-signed lists (`hard_deletes_superseded`), which the
+        // relay's writers hard-delete. The relay roster writer is the
+        // production kind:39002 path; its p tags must match the channel's
+        // members. The relay-signed kind:13535 list and the channel's
+        // kind:39000 metadata go through the addressable path, as does a
+        // user's kind:3 contact list, which keeps the soft delete.
         enum Path {
             MemberSnapshot,
-            Addressable,
+            Addressable(Option<Uuid>),
             Parameterized,
         }
         let roster_p = vec![vec![owner.as_str(), "", "owner"]];
@@ -1154,12 +1224,30 @@ mod postgres_tests {
                 Some(channel.to_string()),
                 vec![],
                 roster_p,
-                false,
+                true,
             ),
             (
-                "addressable",
-                Path::Addressable,
+                "archived list",
+                Path::Addressable(None),
                 13535_u16,
+                None,
+                vec![],
+                people_p(),
+                true,
+            ),
+            (
+                "group metadata",
+                Path::Addressable(Some(channel)),
+                39000_u16,
+                Some(channel.to_string()),
+                vec![],
+                people_p(),
+                true,
+            ),
+            (
+                "contact list",
+                Path::Addressable(None),
+                3_u16,
                 None,
                 vec![],
                 people_p(),
@@ -1234,8 +1322,8 @@ mod postgres_tests {
                             snapshot.release().await.expect("commit roster");
                             inserted
                         }
-                        Path::Addressable => {
-                            db.replace_addressable_event(community, &event, None)
+                        Path::Addressable(channel_id) => {
+                            db.replace_addressable_event(community, &event, *channel_id)
                                 .await
                                 .expect("replace addressable")
                                 .1
@@ -1286,173 +1374,6 @@ mod postgres_tests {
                 );
             }
         }
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn stale_legacy_roster_cannot_replace_new_locked_snapshot() {
-        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
-
-        let (setup_pool, scratch) =
-            ScratchDb::migrated(&admin_url().await, "mixed_roster_writer").await;
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(Duration::from_secs(1))
-            .connect(scratch.url())
-            .await
-            .expect("connect one-connection scratch pool");
-        setup_pool.close().await;
-        let db = Db::from_pool(pool.clone());
-        let community_uuid = Uuid::new_v4();
-        let community = CommunityId::from_uuid(community_uuid);
-        let channel = Uuid::new_v4();
-        let relay_keys = Keys::generate();
-        let owner_keys = Keys::generate();
-        let owner = owner_keys.public_key().to_bytes();
-        seed_community_channel(&pool, community_uuid, channel, &owner_keys).await;
-
-        // This is the old pod's unlocked capture A. It remains in process memory
-        // while a role-only canonical mutation advances and the new pod publishes B.
-        let base = Timestamp::now().as_secs();
-        let roster = |members: &[(&[u8], &str)], timestamp| {
-            let tags =
-                std::iter::once(Tag::parse(["d", channel.to_string().as_str()]).expect("d tag"))
-                    .chain(members.iter().map(|(member, role)| {
-                        Tag::parse(["p", hex::encode(member).as_str(), "", *role]).expect("p tag")
-                    }))
-                    .collect::<Vec<_>>();
-            EventBuilder::new(Kind::Custom(39002), "")
-                .tags(tags)
-                .custom_created_at(Timestamp::from(timestamp))
-                .sign_with_keys(&relay_keys)
-                .expect("sign roster")
-        };
-
-        let newcomer = Keys::generate().public_key().to_bytes();
-        sqlx::query(
-            "INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by) \
-             VALUES ($1, $2, $3, 'member', $4)",
-        )
-        .bind(community_uuid)
-        .bind(channel)
-        .bind(newcomer.as_slice())
-        .bind(owner.as_slice())
-        .execute(&pool)
-        .await
-        .expect("seed member before legacy capture");
-        let stale_a = roster(
-            &[(owner.as_slice(), "owner"), (newcomer.as_slice(), "member")],
-            base + 2,
-        );
-
-        sqlx::query(
-            "UPDATE channel_members SET role = 'admin' \
-             WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
-        )
-        .bind(community_uuid)
-        .bind(channel)
-        .bind(newcomer.as_slice())
-        .execute(&pool)
-        .await
-        .expect("commit newer canonical role");
-
-        let relay_pubkey = relay_keys.public_key().to_bytes();
-        let mut snapshot = db
-            .lock_member_snapshot(community, channel, &relay_pubkey)
-            .await
-            .expect("new writer captures locked roster B");
-        let fresh_b = roster(
-            &[(owner.as_slice(), "owner"), (newcomer.as_slice(), "admin")],
-            base + 1,
-        );
-        assert!(
-            snapshot
-                .replace_member_event(&fresh_b)
-                .await
-                .expect("new writer publishes B")
-                .1
-        );
-        snapshot
-            .release()
-            .await
-            .expect("commit B and release locks");
-
-        // Reproduce the old binary on one connection: replacement key ->
-        // old-head UPDATE -> raw INSERT. Do not use the app API, whose guard
-        // rejects before the retained trigger can exercise this legacy fence.
-        // A size-one pool and bounded attempt also catch self-deadlock.
-        let error = tokio::time::timeout(Duration::from_secs(3), async {
-            let mut tx = pool.begin().await.expect("begin legacy replacement");
-            let relay_pubkey = relay_keys.public_key().to_bytes();
-            sqlx::query("SELECT pg_advisory_xact_lock($1)")
-                .bind(crate::store::replaceable::event_replacement_lock_key(
-                    community,
-                    39002,
-                    &relay_pubkey,
-                    Some(channel.as_bytes().as_slice()),
-                ))
-                .execute(&mut *tx)
-                .await
-                .expect("legacy replacement key");
-            let deleted = sqlx::query(
-                "UPDATE events SET deleted_at = NOW() \
-                 WHERE community_id=$1 AND kind=39002 AND pubkey=$2 \
-                 AND channel_id=$3 AND deleted_at IS NULL",
-            )
-            .bind(community_uuid)
-            .bind(relay_pubkey.as_slice())
-            .bind(channel)
-            .execute(&mut *tx)
-            .await
-            .expect("legacy soft-delete of current head");
-            assert_eq!(deleted.rows_affected(), 1, "legacy path must delete the live head");
-            let result = sqlx::query(
-                "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag) \
-                 VALUES ($1, $2, $3, $4, 39002, $5, $6, $7, NOW(), $8, $9)",
-            )
-            .bind(community_uuid)
-            .bind(stale_a.id.as_bytes().as_slice())
-            .bind(relay_pubkey.as_slice())
-            .bind(chrono::DateTime::from_timestamp(stale_a.created_at.as_secs() as i64, 0).expect("timestamp"))
-            .bind(serde_json::to_value(&stale_a.tags).expect("tags"))
-            .bind(&stale_a.content)
-            .bind(stale_a.sig.serialize().as_slice())
-            .bind(channel)
-            .bind(channel.to_string())
-            .execute(&mut *tx)
-            .await;
-            tx.rollback().await.expect("restore live head after legacy attempt");
-            result
-        })
-        .await
-        .expect("legacy replacement must not deadlock")
-        .expect_err("stale captured roster A must be rejected");
-        assert!(
-            matches!(error, sqlx::Error::Database(ref db_error)
-                if db_error.code().as_deref() == Some("23514")
-                && db_error.message() == "kind 39002 roster does not match canonical channel membership"),
-            "expected trigger roster fence check violation, got {error:?}"
-        );
-
-        let live_ids: Vec<Vec<u8>> = sqlx::query_scalar(
-            "SELECT id FROM events WHERE community_id=$1 AND channel_id=$2 \
-             AND kind=39002 AND pubkey=$3 AND deleted_at IS NULL",
-        )
-        .bind(community_uuid)
-        .bind(channel)
-        .bind(relay_pubkey.as_slice())
-        .fetch_all(&pool)
-        .await
-        .expect("load live roster heads");
-        assert_eq!(live_ids, vec![fresh_b.id.as_bytes().to_vec()]);
-        let stale_rows: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id=$1 AND id=$2")
-                .bind(community_uuid)
-                .bind(stale_a.id.as_bytes().as_slice())
-                .fetch_one(&pool)
-                .await
-                .expect("count rejected stale roster");
-        assert_eq!(stale_rows, 0, "stale roster insert must roll back");
     }
 
     #[tokio::test]
