@@ -760,7 +760,14 @@ class ReadStateManager {
           _scheduleSnapshotRetry();
           rethrow;
         }
-        _settleSnapshot(read, succeeded: true);
+        if (_settleSnapshot(read, succeeded: true)) {
+          // This read was the retry the backoff timer was waiting to make.
+          _snapshotRetryAttempt = 0;
+          _snapshotRetryTimer?.cancel();
+          _snapshotRetryTimer = null;
+          if (identical(syncError, _snapshotError)) syncError = null;
+          _snapshotError = null;
+        }
         if (!_servesThisCommunity ||
             !_ownsJournal ||
             (_disposed && !allowDisposed)) {

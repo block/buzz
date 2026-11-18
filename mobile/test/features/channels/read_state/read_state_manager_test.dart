@@ -1123,22 +1123,40 @@ void main() {
     },
   );
 
-  test('an explicit flush reads at once, without waiting for the backoff', () {
-    fakeAsync((async) {
-      final session = _FakeRelaySession()..failNextFetch = true;
-      final relay = _FakeSignedEventRelay();
-      final manager = recoveryManager(async, session, relay);
-      expect(manager.syncError, isNotNull);
-      final fetches = session.fetchCount;
-      manager.markContextRead('room', 1990);
-      unawaited(manager.flush());
-      async.flushMicrotasks();
-      expect(session.fetchCount, fetches + 1);
-      expect(relay.submitCount, 1);
-      expect(manager.syncError, isNull);
-      manager.dispose(flushPending: false);
+  for (final failWrite in [false, true]) {
+    test('an explicit flush reads at once, without waiting for the backoff '
+        '(write fails: $failWrite)', () {
+      fakeAsync((async) {
+        final session = _FakeRelaySession()..failNextFetch = true;
+        final relay = _ParkedSignedEventRelay(failFirst: failWrite);
+        final manager = recoveryManager(async, session, relay);
+        addTearDown(() => manager.dispose(flushPending: false));
+        expect(manager.syncError, isNotNull);
+        final fetches = session.fetchCount;
+        manager.markContextRead('room', 1990);
+        unawaited(manager.flush());
+        async.flushMicrotasks();
+        expect(session.fetchCount, fetches + 1);
+        expect(relay.contents, hasLength(1));
+        relay.release();
+        async.flushMicrotasks();
+        expect(manager.syncError, failWrite ? isNotNull : isNull);
+
+        // The flush's read was the retry the backoff was waiting for, so
+        // the backoff must not read again to retry the write.
+        async.elapse(const Duration(seconds: 10));
+        expect(session.fetchCount, fetches + 1);
+
+        // A later read failure starts the backoff over at five seconds.
+        session.failNextFetch = true;
+        session.statusListeners.last(RelaySubscriptionStatus.ready);
+        async.flushMicrotasks();
+        final failedReads = session.fetchCount;
+        async.elapse(const Duration(seconds: 5));
+        expect(session.fetchCount, failedReads + 1);
+      });
     });
-  });
+  }
 
   test('an older send cannot clear a newer read failure', () {
     fakeAsync((async) {
