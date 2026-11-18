@@ -148,9 +148,15 @@ class BestieTranscriptStore {
     if (id != null && await file.exists() && (await _data(file))['id'] != id) {
       return;
     }
-    final source = await file.exists()
-        ? (await _data(file))['source'] as String?
-        : null;
+    // Best effort: Discard must still remove a journal that cannot be read.
+    String? source;
+    try {
+      if (await file.exists()) {
+        source = (await _data(file))['source'] as String?;
+      }
+    } catch (_) {
+      source = null;
+    }
     for (final audio in [
       File('${file.path}.wav'),
       File('${file.path}.wav.tmp'),

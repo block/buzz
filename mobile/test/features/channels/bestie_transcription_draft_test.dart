@@ -88,6 +88,16 @@ void main() {
       expect(await store.read(), isNull);
     },
   );
+  for (final contents in ['{not json', '[]', '{"source": 1}']) {
+    test('discard removes a journal that cannot be read: $contents', () async {
+      final draft = await store.retain(recording(), 'bestie');
+      final journal = File(draft.audioPath.replaceFirst(RegExp(r'\.wav$'), ''));
+      await journal.writeAsString(contents);
+      await store.clear();
+      expect(await journal.exists(), isFalse);
+      expect(await File(draft.audioPath).exists(), isFalse);
+    });
+  }
   test(
     'native failure is observed while directory lookup is still pending',
     () async {
