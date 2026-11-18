@@ -245,3 +245,49 @@ async fn solo_owner_edits_active_members_and_publishes_the_new_roster() {
         .expect("query declined command")
         .is_none());
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn solo_role_change_is_refused_on_an_open_channel() {
+    let state = state().await;
+    let tenant = community(&state, "solo-role-open-channel").await;
+    let [owner, own_agent] = std::array::from_fn(|_| Keys::generate());
+    record_agent_owner(&state, &tenant, &own_agent, &owner).await;
+    let channel_id = create_channel(
+        &state,
+        &tenant,
+        &owner,
+        &[
+            &["visibility", "open"],
+            &["t", "buzz.solo"],
+            &["p", &own_agent.public_key().to_hex()],
+        ],
+    )
+    .await;
+
+    let command = role_change(&owner, channel_id, &own_agent, "member", "guest");
+    let command_id = command.id;
+    let refused = ingest_event(&state, &tenant, command, http_auth(&owner))
+        .await
+        .err();
+    assert!(
+        matches!(refused, Some(IngestError::Rejected(ref message)) if message.contains("channel is not a Solo chat")),
+        "{refused:?}"
+    );
+    assert!(state
+        .db
+        .get_event_by_id(tenant.community(), command_id.as_bytes())
+        .await
+        .expect("query declined command")
+        .is_none());
+    let active_role = state
+        .db
+        .get_member_role(
+            tenant.community(),
+            channel_id,
+            &own_agent.public_key().to_bytes(),
+        )
+        .await
+        .expect("active role");
+    assert_eq!(active_role.as_deref(), Some("member"));
+}
