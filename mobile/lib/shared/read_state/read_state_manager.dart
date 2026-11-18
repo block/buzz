@@ -494,7 +494,7 @@ class ReadStateManager {
       if (_disposed || !_servesThisCommunity) return false;
       final newest = _settleSnapshot(read, succeeded: true);
       _mergeEvents(events);
-      if (newest) _dropAbsentPeerFollows(heads, events);
+      if (newest) _dropAbsentPeerFollows(heads, _capacitySnapshot = events);
       _followsLoaded = true;
       await _persistLocalState();
       _followsRecovered = true;

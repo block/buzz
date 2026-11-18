@@ -228,6 +228,29 @@ void main() {
     expect(relay.followEvents(), isEmpty);
   });
 
+  test('a follow is refused at startup when the snapshot is already full, '
+      'before any publication', () async {
+    for (var i = 0; i < readStateSnapshotMaxEvents; i++) {
+      relay.retained['other-$i'] = NostrEvent(
+        id: 'other-$i',
+        pubkey: keys.public,
+        createdAt: clock - 1000,
+        kind: EventKind.readState,
+        tags: [
+          ['d', 'other-$i'],
+        ],
+        content: '',
+        sig: 'sig',
+      );
+    }
+    final phone = await device('phone');
+
+    expect(await phone.setThreadFollow(channel, 'a' * 64, true), isFalse);
+    expect((phone.syncError as StateError?)?.message, threadFollowsFullMessage);
+    expect(phone.threadFollows, isEmpty);
+    expect(relay.followEvents(), isEmpty);
+  });
+
   test('a peer read that never saw the mark unread deactivates it', () async {
     final phone = await device('phone');
     final desktop = await device('desktop');
