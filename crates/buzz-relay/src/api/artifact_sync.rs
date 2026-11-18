@@ -151,7 +151,9 @@ async fn execute(
     let query_binding = URL_SAFE_NO_PAD.encode(Sha256::digest(
         serde_json::to_vec(&request.query).map_err(|_| invalid())?,
     ));
-    if parsed.view != ArtifactView::Current {
+    if parsed.view != ArtifactView::Current
+        || parsed.scope != buzz_core::artifact::ArtifactScope::Channel
+    {
         return Err(invalid());
     }
     let (now, policy) = state

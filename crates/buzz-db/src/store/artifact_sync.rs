@@ -175,7 +175,7 @@ WITH readable AS NOT MATERIALIZED (
     SELECT a.modified_at AS at,1 AS source,a.artifact_id::text AS id,
            a.artifact_id,NULL::uuid AS removed_channel
     FROM artifact_heads a
-    WHERE a.community_id=$1 AND a.modified_at >= COALESCE($3::timestamptz,'epoch'::timestamptz)
+    WHERE a.community_id=$1 AND a.scope='channel' AND a.modified_at >= COALESCE($3::timestamptz,'epoch'::timestamptz)
       AND a.modified_at <= $4 AND a.channel_id IN (SELECT id FROM readable)
       AND ($3::timestamptz IS NOT NULL OR NOT a.deleted)
       AND (cardinality($8::text[])=0 OR a.artifact_type=ANY($8))
@@ -189,14 +189,14 @@ WITH readable AS NOT MATERIALIZED (
     UNION ALL
     SELECT m.sync_modified_at,2,a.artifact_id::text,a.artifact_id,NULL::uuid
     FROM channel_members m JOIN artifact_heads a
-      ON a.community_id=m.community_id AND a.channel_id=m.channel_id
+      ON a.scope='channel' AND a.community_id=m.community_id AND a.channel_id=m.channel_id
     WHERE m.community_id=$1 AND m.pubkey=$2 AND m.removed_at IS NULL
       AND $3::timestamptz IS NOT NULL AND m.sync_modified_at >= $3
       AND m.sync_modified_at <= $4 AND a.channel_id IN (SELECT id FROM readable)
       AND (cardinality($8::text[])=0 OR a.artifact_type=ANY($8))
     UNION ALL
     SELECT DISTINCT r.modified_at,3,r.artifact_id::text,r.artifact_id,NULL::uuid
-    FROM artifact_revisions r WHERE r.community_id=$1
+    FROM artifact_revisions r WHERE r.community_id=$1 AND r.scope='channel'
       AND r.source_channel_id IS NOT NULL AND r.source_channel_id IN (SELECT id FROM readable)
       AND $3::timestamptz IS NOT NULL AND r.modified_at >= $3 AND r.modified_at <= $4
 )

@@ -54,10 +54,24 @@ impl AuditService {
     pub async fn log(&self, entry: NewAuditEntry) -> Result<AuditEntry, AuditError> {
         let mut tx = self.pool.begin().await?;
         buzz_db::deletion::guard_community_write(&mut tx, entry.community_id).await?;
+        let result = Self::log_in_transaction(&mut tx, entry).await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    /// Append on a caller's transaction so an administrative mutation and its
+    /// hash-chain audit entry commit together. Admission is rechecked here.
+    /// The caller owns commit/rollback, and must not hold an audit lock before
+    /// acquiring the mutation's policy/identity locks.
+    pub async fn log_in_transaction(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        entry: NewAuditEntry,
+    ) -> Result<AuditEntry, AuditError> {
+        buzz_db::deletion::guard_community_write(tx, entry.community_id).await?;
         let lock_key = format!("{AUDIT_LOCK_NAMESPACE}{}", entry.community_id);
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(&lock_key)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
 
         // The stored row keys on the raw UUID; the typed `CommunityId` on the
@@ -71,7 +85,7 @@ impl AuditService {
              ORDER BY seq DESC LIMIT 1",
         )
         .bind(community_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
 
         let (prev_seq, prev_hash): (i64, Option<Vec<u8>>) = match head {
@@ -119,10 +133,8 @@ impl AuditService {
         .bind(&audit_entry.detail)
         .bind(audit_entry.created_at)
         .bind(audit_entry.hash_version)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-
-        tx.commit().await?;
 
         Ok(audit_entry)
     }

@@ -41,13 +41,28 @@ impl ArtifactOp {
         })
     }
 }
+/// Separate identity and audience classes within a tenant.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ArtifactScope {
+    /// A home channel determines access (the legacy wire format).
+    #[default]
+    Channel,
+    /// An explicitly signed tenant determines access.
+    Community,
+}
+/// Maximum stored community type policies, including explicit `everyone` entries.
+pub const MAX_COMMUNITY_POLICIES: usize = 256;
 /// The authoritative envelope, independent of any client's content schema.
 #[derive(Debug)]
 pub struct ArtifactEnvelope {
     /// Community-local stable identity.
     pub id: Uuid,
-    /// Home channel.
-    pub home: Uuid,
+    /// Explicit audience and identity class.
+    pub scope: ArtifactScope,
+    /// Signed tenant, present only for community scope.
+    pub community: Option<Uuid>,
+    /// Home channel, present only for channel scope.
+    pub home: Option<Uuid>,
     /// Immutable type name.
     pub artifact_type: String,
     /// Lifecycle operation.
@@ -84,7 +99,17 @@ pub fn validate(event: &Event) -> Result<ArtifactEnvelope, &'static str> {
     if event.tags.len() > MAX_TAGS {
         return Err("too many tags");
     }
-    let names = ["ar", "d", "h", "type", "title", "op", "root", "prev"];
+    let names = [
+        "ar",
+        "d",
+        "h",
+        "community",
+        "type",
+        "title",
+        "op",
+        "root",
+        "prev",
+    ];
     let mut fields = std::collections::HashMap::new();
     let mut bytes = 0;
     for tag in event.tags.iter() {
@@ -120,20 +145,24 @@ pub fn validate(event: &Event) -> Result<ArtifactEnvelope, &'static str> {
         return Err("unsupported artifact envelope version");
     }
     let id = canonical_uuid(field("d")?)?;
-    let home = canonical_uuid(field("h")?)?;
+    let home = fields.get("h").map(|s| canonical_uuid(s)).transpose()?;
+    let community = fields
+        .get("community")
+        .map(|s| canonical_uuid(s))
+        .transpose()?;
+    let scope = match (home, community) {
+        (Some(_), None) => ArtifactScope::Channel,
+        (None, Some(_)) if !fields.contains_key("root") => ArtifactScope::Community,
+        _ => {
+            return Err("exactly one channel or community scope is required; community omits root")
+        }
+    };
     let artifact_type = field("type")?;
-    if artifact_type.len() > 128
-        || !artifact_type.contains('.')
-        || !artifact_type.split('.').all(|c| {
-            !c.is_empty()
-                && c.as_bytes()[0].is_ascii_lowercase()
-                && c.bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
-        })
-    {
-        return Err("invalid namespaced artifact type");
-    }
+    validate_type(artifact_type)?;
     let op = ArtifactOp::parse(field("op")?).ok_or("invalid artifact operation")?;
+    if scope == ArtifactScope::Community && op == ArtifactOp::Move {
+        return Err("community artifacts cannot move");
+    }
     let prev = fields.get("prev").map(|s| event_id(s)).transpose()?;
     if (op == ArtifactOp::Create) != prev.is_none() {
         return Err("prev required exactly on non-create revisions");
@@ -158,6 +187,8 @@ pub fn validate(event: &Event) -> Result<ArtifactEnvelope, &'static str> {
     }
     Ok(ArtifactEnvelope {
         id,
+        scope,
+        community,
         home,
         artifact_type: artifact_type.into(),
         op,
@@ -232,6 +263,7 @@ mod tests {
             json!({"kinds":[45010],"#project":["p"]}),
             json!({"ids":["a"],"#project":["p"]}),
             json!({"kinds":"x","#project":["p"]}),
+            json!({"scope":"community"}),
         ] {
             assert!(
                 matches!(route_filter(&rejected), FilterRoute::Rejected(_)),
@@ -283,11 +315,15 @@ pub enum ArtifactView {
     /// The current revision of each artifact named by `#d`, including a
     /// deletion.
     Head,
+    /// Current community type write policy, selected by one exact `#type`.
+    Policy,
 }
 /// Explicit HTTP artifact query. All `#name` predicates compare the first
 /// value of the same tag.
 #[derive(Debug)]
 pub struct ArtifactQuery {
+    /// Explicit audience and identity class.
+    pub scope: ArtifactScope,
     /// Query view.
     pub view: ArtifactView,
     /// Exact tag-name/value predicates.
@@ -316,6 +352,9 @@ pub fn route_filter(value: &serde_json::Value) -> FilterRoute {
     if value.get("artifact").is_some() {
         return FilterRoute::Artifact;
     }
+    if value.get("scope").and_then(serde_json::Value::as_str) == Some("community") {
+        return FilterRoute::Rejected("community scope requires an explicit artifact view");
+    }
     let artifact_kind = value.get("kinds").is_none_or(|k| {
         k.as_array()
             .is_none_or(|ks| ks.iter().any(|k| matches!(k.as_u64(), Some(45010 | 45011))))
@@ -339,9 +378,20 @@ pub fn parse_query(value: &serde_json::Value) -> Result<ArtifactQuery, &'static 
         Some("current") => ArtifactView::Current,
         Some("history") => ArtifactView::History,
         Some("head") => ArtifactView::Head,
+        Some("policy") => ArtifactView::Policy,
         _ => return Err("artifact must be \"current\", \"history\" or \"head\""),
     };
-    let tags = parse_predicates(object, &["artifact", "kinds", "limit", "offset"])?;
+    let scope = parse_scope(object)?;
+    let tags = parse_predicates(object, &["artifact", "scope", "kinds", "limit", "offset"])?;
+    if scope == ArtifactScope::Community && tags.iter().any(|(n, _)| n == "h") {
+        return Err("community scope forbids #h");
+    }
+    if view == ArtifactView::Policy {
+        if scope != ArtifactScope::Community || object.len() != 3 {
+            return Err("policy requires only artifact, scope and one exact #type");
+        }
+        exact_type(&tags)?;
+    }
     let number = |name: &str, default: u64| {
         object
             .get(name)
@@ -354,10 +404,13 @@ pub fn parse_query(value: &serde_json::Value) -> Result<ArtifactQuery, &'static 
     if limit == 0 || limit > MAX_PAGE_SIZE as u64 || offset > MAX_OFFSET {
         return Err("artifact page limit exceeded");
     }
-    if view != ArtifactView::Current && !tags.iter().any(|(n, _)| n == "d") {
+    if matches!(view, ArtifactView::Head | ArtifactView::History)
+        && !tags.iter().any(|(n, _)| n == "d")
+    {
         return Err("history and head require #d");
     }
     Ok(ArtifactQuery {
+        scope,
         view,
         tags,
         limit: limit as i64,
@@ -406,4 +459,211 @@ pub(crate) fn parse_predicates(
         return Err("artifact predicate limits exceeded");
     }
     Ok(tags)
+}
+
+/// Validate a canonical namespaced artifact type.
+pub fn validate_type(value: &str) -> Result<(), &'static str> {
+    if value.len() > 128
+        || !value.contains('.')
+        || !value.split('.').all(|c| {
+            !c.is_empty()
+                && c.as_bytes()[0].is_ascii_lowercase()
+                && c.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+        })
+    {
+        return Err("invalid namespaced artifact type");
+    }
+    Ok(())
+}
+/// Parse an explicit scope; omitted scope preserves channel behavior.
+pub fn parse_scope(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<ArtifactScope, &'static str> {
+    match object.get("scope") {
+        None => Ok(ArtifactScope::Channel),
+        Some(v) if v.as_str() == Some("community") => Ok(ArtifactScope::Community),
+        _ => Err("scope must be community or absent"),
+    }
+}
+/// Require one exact canonical type predicate.
+pub fn exact_type(tags: &[(String, Vec<String>)]) -> Result<&str, &'static str> {
+    let values = &tags
+        .iter()
+        .find(|(n, _)| n == "type")
+        .ok_or("one exact #type required")?
+        .1;
+    let [value] = values.as_slice() else {
+        return Err("one exact #type required");
+    };
+    validate_type(value)?;
+    Ok(value)
+}
+/// A signed community type policy compare-and-set command.
+#[derive(Debug)]
+pub struct ArtifactTypePolicyCommand {
+    /// Signed canonical tenant.
+    pub community: Uuid,
+    /// Canonical type.
+    pub artifact_type: String,
+    /// `everyone` or `admins`.
+    pub policy: String,
+    /// Expected command ID; `None` represents the wire value `0`.
+    pub prev: Option<String>,
+}
+/// Validate kind 9034 without interpreting content as authority.
+pub fn parse_policy_command(event: &Event) -> Result<ArtifactTypePolicyCommand, &'static str> {
+    if event.kind.as_u16() != 9034 || !event.content.is_empty() || event.tags.len() != 4 {
+        return Err(
+            "policy command requires empty content and exactly community, type, policy and prev",
+        );
+    }
+    let mut fields = std::collections::HashMap::new();
+    for tag in event.tags.iter() {
+        let [name, value] = tag.as_slice() else {
+            return Err("policy tags require exactly two elements");
+        };
+        if !["community", "type", "policy", "prev"].contains(&name.as_str())
+            || fields.insert(name.as_str(), value.as_str()).is_some()
+        {
+            return Err("invalid or repeated policy command tag");
+        }
+    }
+    let field = |name| {
+        fields
+            .get(name)
+            .copied()
+            .ok_or("missing policy command tag")
+    };
+    let community = canonical_uuid(field("community")?)?;
+    let artifact_type = field("type")?;
+    validate_type(artifact_type)?;
+    let policy = field("policy")?;
+    if !["everyone", "admins"].contains(&policy) {
+        return Err("invalid artifact write policy");
+    }
+    let prev = field("prev")?;
+    let prev = if prev == "0" {
+        None
+    } else {
+        event_id(prev)?;
+        Some(prev.to_owned())
+    };
+    Ok(ArtifactTypePolicyCommand {
+        community,
+        artifact_type: artifact_type.into(),
+        policy: policy.into(),
+        prev,
+    })
+}
+
+#[cfg(test)]
+mod community_tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+    use serde_json::json;
+    fn signed(kind: u16, tags: Vec<Vec<String>>, content: &str) -> Event {
+        EventBuilder::new(Kind::Custom(kind), content)
+            .tags(tags.into_iter().map(|tag| Tag::parse(tag).unwrap()))
+            .sign_with_keys(&Keys::generate())
+            .unwrap()
+    }
+    fn tags() -> Vec<Vec<String>> {
+        vec![
+            vec!["ar".into(), "1".into()],
+            vec!["d".into(), Uuid::new_v4().to_string()],
+            vec!["community".into(), Uuid::new_v4().to_string()],
+            vec!["type".into(), "example.settings".into()],
+            vec!["title".into(), "Settings".into()],
+            vec!["op".into(), "create".into()],
+        ]
+    }
+    #[test]
+    fn signed_scope_is_exclusive_canonical_and_immovable() {
+        let valid = tags();
+        let envelope = validate(&signed(45010, valid.clone(), "{}")).unwrap();
+        assert_eq!(envelope.scope, ArtifactScope::Community);
+        assert!(envelope.home.is_none());
+        for extra in [
+            vec!["h".into(), Uuid::new_v4().to_string()],
+            valid[2].clone(),
+            vec!["root".into(), "a".repeat(64)],
+        ] {
+            let mut invalid = valid.clone();
+            invalid.push(extra);
+            assert!(validate(&signed(45010, invalid, "{}")).is_err());
+        }
+        let mut missing = valid.clone();
+        missing.remove(2);
+        assert!(validate(&signed(45010, missing, "{}")).is_err());
+        for community in [
+            Uuid::new_v4().simple().to_string(),
+            Uuid::new_v4().to_string().to_uppercase(),
+            Uuid::nil().to_string(),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[2][1] = community;
+            assert!(validate(&signed(45010, invalid, "{}")).is_err());
+        }
+        let mut moved = valid;
+        moved[5][1] = "move".into();
+        moved.push(vec!["prev".into(), "a".repeat(64)]);
+        assert!(validate(&signed(45010, moved, "{}")).is_err());
+    }
+    #[test]
+    fn policy_command_and_explicit_queries_are_strict() {
+        let valid = vec![
+            vec!["community".into(), Uuid::new_v4().to_string()],
+            vec!["type".into(), "example.settings".into()],
+            vec!["policy".into(), "everyone".into()],
+            vec!["prev".into(), "0".into()],
+        ];
+        assert!(parse_policy_command(&signed(9034, valid.clone(), ""))
+            .unwrap()
+            .prev
+            .is_none());
+        assert!(parse_policy_command(&signed(9034, valid.clone(), "{}")).is_err());
+        for extra in [
+            valid[0].clone(),
+            vec!["h".into(), Uuid::new_v4().to_string()],
+        ] {
+            let mut invalid = valid.clone();
+            invalid.push(extra);
+            assert!(parse_policy_command(&signed(9034, invalid, "")).is_err());
+        }
+        for value in [
+            json!({"artifact":"policy","scope":"community","#type":["example.settings"]}),
+            json!({"artifact":"current","scope":"community","#type":["example.settings"]}),
+            json!({"artifact":"head","scope":"community","#d":[Uuid::new_v4()]}),
+        ] {
+            assert_eq!(parse_query(&value).unwrap().scope, ArtifactScope::Community);
+        }
+        for invalid in [
+            json!({"artifact":"policy","#type":["example.settings"]}),
+            json!({"artifact":"policy","scope":"community","#type":["example.a","example.b"]}),
+            json!({"artifact":"head","scope":"community"}),
+            json!({"artifact":"current","scope":"community","#h":[Uuid::new_v4()]}),
+            json!({"artifact":"current","scope":"unknown"}),
+        ] {
+            assert!(parse_query(&invalid).is_err(), "{invalid}");
+        }
+        let valid = json!({"artifact":"current","scope":"community","#type":["example.settings"]});
+        assert!(crate::artifact_sync::parse_sync(&valid).is_ok());
+        for extra in [
+            json!({"limit":1}),
+            json!({"offset":0}),
+            json!({"#h":[Uuid::new_v4()]}),
+            json!({"#type":[]}),
+        ] {
+            let mut invalid = valid.clone();
+            invalid
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            assert!(
+                crate::artifact_sync::parse_sync(&invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
 }

@@ -8,6 +8,11 @@ pub(super) async fn plan(
     output: &mut Output<'_, impl Write>,
 ) -> Result<()> {
     let reason = json!({"type": "owned_resource"});
+    // Community artifact payloads live outside events. Keep their acceptance
+    // receipts, exactly as channel artifacts keep theirs after event erasure.
+    rows(conn, output, "artifact_revisions", &format!("SELECT jsonb_build_object('event_id',encode(event_id,'hex')) AS row_key,
+        NULL::text AS warning FROM artifact_revisions WHERE community_id=$1 AND {COMMUNITY_ARTIFACT_AUTHOR_PREDICATE}"),
+        targets, &reason, "would_scrub").await?;
     // Workflow state can contain another user's approvals or work. Leave it
     // intact in this initial ownership-only content pass.
     rows(
