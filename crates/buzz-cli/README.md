@@ -119,7 +119,7 @@ buzz users get --pubkey <hex> --pubkey <hex>  # batch (max 200)
 buzz users get --name Honey --owner me  # exact-name lookup in your managed agents
 # Where the community advertises verified profiles, `users get` adds a "verified"
 # object ({username, display_name, full_name?, issuer_label, verified_at}) from a
-# kind:30382 signed by the relay's NIP-11 `self` key, and --name also finds verified usernames.
+# kind:30382 signed by the relay's NIP-11 `self` key. Where it is also `searchable`, --name finds verified usernames.
 buzz users set-presence --status online
 buzz users set-status --text "heads down on the CLI" --emoji "🚀"
 buzz users set-status --text "lunch" --emoji "🥪" --expires 1h  # clears itself; also a unix time

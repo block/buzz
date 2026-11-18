@@ -66,7 +66,8 @@ pub async fn cmd_get_users(
 }
 
 /// kind:0 profiles for `pubkeys` (our own when empty), each with its verified
-/// profile where one exists.
+/// profile where one exists, then any requested person who has a verified
+/// profile but no kind:0.
 async fn get_profiles(
     client: &BuzzClient,
     pubkeys: &[String],
@@ -116,7 +117,21 @@ async fn get_profiles(
             HashMap::new()
         }
     };
-    Ok(with_verified(profiles, &verified))
+    let mut profiles = with_verified(profiles, &verified);
+    // A requested person with a verified profile but no kind:0 is still found,
+    // as a name search would find them.
+    let mut found: Vec<String> = profiles
+        .iter()
+        .filter_map(|p| p.get("pubkey").and_then(|v| v.as_str()))
+        .map(str::to_ascii_lowercase)
+        .collect();
+    for pubkey in requested.iter().map(|p| p.to_ascii_lowercase()) {
+        if let (false, Some(v)) = (found.contains(&pubkey), verified.get(&pubkey)) {
+            profiles.push(verified_only_profile(&pubkey, v));
+            found.push(pubkey);
+        }
+    }
+    Ok(profiles)
 }
 
 /// Verified profiles for `pubkeys`; empty where the community advertises none.
@@ -125,7 +140,7 @@ async fn verified_for(
     pubkeys: &[String],
 ) -> Result<HashMap<String, VerifiedProfile>, CliError> {
     match discover_authority(client).await? {
-        Some(authority) => fetch_verified_profiles(client, &authority, pubkeys).await,
+        Some(authority) => fetch_verified_profiles(client, &authority.pubkey, pubkeys).await,
         None => Ok(HashMap::new()),
     }
 }
@@ -430,11 +445,12 @@ fn owner_scoped_profiles(
         .collect()
 }
 
-/// Unscoped name search. Where the community advertises verified profiles,
-/// `POST /profiles/search` matches profile names and verified names (word
-/// prefixes), so a person is found by their verified username too. Otherwise,
-/// or for a query longer than that endpoint accepts, NIP-50 search over
-/// kind:0, filtered to name substring matches; returns [] if unsupported.
+/// Unscoped name search. Where the community advertises searchable verified
+/// profiles, `POST /profiles/search` matches profile names and verified names
+/// (word prefixes), so a person is found by their verified username too.
+/// Otherwise, or for a query longer than that endpoint accepts, NIP-50 search
+/// over kind:0, filtered to name substring matches (returns [] if
+/// unsupported), with verified profiles attached where advertised.
 async fn search_profiles(
     client: &BuzzClient,
     query: &str,
@@ -443,15 +459,12 @@ async fn search_profiles(
         serde_json::from_str(&raw)
             .map_err(|e| CliError::Other(format!("failed to parse response: {e}")))
     };
-    let authority = if query.trim().chars().count() <= PROFILE_SEARCH_MAX_CHARS {
-        discover_authority(client).await?
-    } else {
-        None
-    };
-    if let Some(authority) = authority {
+    let authority = discover_authority(client).await?;
+    let fits = query.trim().chars().count() <= PROFILE_SEARCH_MAX_CHARS;
+    if let Some(authority) = authority.as_ref().filter(|a| a.searchable && fits) {
         let body = serde_json::json!({"query": query.trim(), "limit": 100});
         let raw = client.post_json_authed("/profiles/search", &body).await?;
-        return Ok(search_page_profiles(&parse(raw)?, &authority));
+        return Ok(search_page_profiles(&parse(raw)?, &authority.pubkey));
     }
     let filter = serde_json::json!({
         "kinds": [0],
@@ -459,7 +472,16 @@ async fn search_profiles(
         "limit": 100
     });
     let events = parse(client.query(&filter).await?)?;
-    Ok(name_search_profiles(&events, query))
+    let profiles = name_search_profiles(&events, query);
+    let Some(authority) = authority else {
+        return Ok(profiles);
+    };
+    let pubkeys: Vec<String> = profiles
+        .iter()
+        .filter_map(|p| p.get("pubkey").and_then(|v| v.as_str()).map(str::to_owned))
+        .collect();
+    let verified = fetch_verified_profiles(client, &authority.pubkey, &pubkeys).await?;
+    Ok(with_verified(profiles, &verified))
 }
 
 /// Search for users by name. Owner-scoped searches resolve managed-agent records
@@ -1042,13 +1064,14 @@ mod tests {
     }
 
     async fn setup() -> (BuzzClient, Shared) {
+        setup_as(Keys::generate()).await
+    }
+
+    async fn setup_as(keys: Keys) -> (BuzzClient, Shared) {
         let relay = Shared::default();
         let url = fake_relay(relay.clone()).await;
-        let client = BuzzClient::new(
-            url,
-            crate::credentials::Credentials::from_keys(Keys::generate()),
-        )
-        .unwrap();
+        let client =
+            BuzzClient::new(url, crate::credentials::Credentials::from_keys(keys)).unwrap();
         (client, relay)
     }
 
@@ -1529,6 +1552,68 @@ mod tests {
 
         let found = search_profiles(&client, &long).await.unwrap();
         assert_eq!(found.len(), 1, "{found:?}");
+        assert!(relay.lock().unwrap().profile_searches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_by_pubkey_returns_people_with_only_a_verified_profile() {
+        let me = Keys::generate();
+        let (client, relay) = setup_as(me.clone()).await;
+        let authority = Keys::generate();
+        relay.lock().unwrap().info = advertising(&authority);
+        let alice = Keys::generate();
+        let bob = Keys::generate();
+        seed_profile(&relay, &bob, r#"{"name":"bob"}"#);
+        seed_verified(&relay, &authority, &alice, "alice", 100);
+        let alice_hex = alice.public_key().to_hex();
+
+        // A single key.
+        let profiles = get_profiles(&client, std::slice::from_ref(&alice_hex))
+            .await
+            .unwrap();
+        assert_eq!(profiles.len(), 1, "{profiles:?}");
+        assert_eq!(profiles[0]["pubkey"], alice_hex);
+        assert_eq!(profiles[0]["verified"], verified_json("alice"));
+
+        // A batch: kind:0 people first, then verified-only ones, once each.
+        let batch = vec![
+            alice_hex.clone(),
+            bob.public_key().to_hex(),
+            alice_hex.to_uppercase(),
+        ];
+        let profiles = get_profiles(&client, &batch).await.unwrap();
+        let pubkeys: Vec<&str> = profiles
+            .iter()
+            .map(|p| p["pubkey"].as_str().unwrap())
+            .collect();
+        assert_eq!(pubkeys, [bob.public_key().to_hex(), alice_hex.clone()]);
+
+        // The default lookup of your own profile.
+        seed_verified(&relay, &authority, &me, "me", 100);
+        let profiles = get_profiles(&client, &[]).await.unwrap();
+        assert_eq!(profiles.len(), 1, "{profiles:?}");
+        assert_eq!(profiles[0]["verified"]["username"], "me");
+    }
+
+    #[tokio::test]
+    async fn name_search_on_a_relay_without_searchable_profiles_uses_nip50() {
+        let (client, relay) = setup().await;
+        let authority = Keys::generate();
+        let mut info = advertising(&authority);
+        info["federated_identity"]["public_profile"]
+            .as_object_mut()
+            .unwrap()
+            .remove("searchable");
+        relay.lock().unwrap().info = info;
+        let alice = Keys::generate();
+        seed_profile(&relay, &alice, r#"{"name":"alice"}"#);
+        seed_verified(&relay, &authority, &alice, "alice", 100);
+        relay.lock().unwrap().profile_search = Some(json!([]));
+
+        let found = search_profiles(&client, "alice").await.unwrap();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0]["pubkey"], alice.public_key().to_hex());
+        assert_eq!(found[0]["verified"], verified_json("alice"));
         assert!(relay.lock().unwrap().profile_searches.is_empty());
     }
 
