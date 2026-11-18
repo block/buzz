@@ -72,7 +72,6 @@ abstract final class DiagnosticFilter {
     'app_build',
     'build_type',
     'app_start_time',
-    'device_app_hash',
     'app_memory',
     'in_foreground',
   };

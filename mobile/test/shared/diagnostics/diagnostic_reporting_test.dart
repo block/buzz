@@ -239,7 +239,11 @@ void main() {
             'locale': 'private-marker',
             'timezone': 'private-marker',
           }),
-          app: SentryApp.fromJson({'app_name': 'Buzz', 'x': 'private-marker'}),
+          app: SentryApp.fromJson({
+            'app_name': 'Buzz',
+            'device_app_hash': 'private-marker',
+            'x': 'private-marker',
+          }),
           operatingSystem: SentryOperatingSystem.fromJson({
             'name': 'iOS',
             'x': 'private-marker',
