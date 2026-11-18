@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Reproduce the desktop release's multi-package build shape, then prove the
+# Reproduce a release's multi-package build shape (every sidecar compiled in
+# one cargo invocation), then prove the
 # Kubernetes provider reports an unreachable cluster in-band rather than
 # panicking when rustls has multiple compiled crypto providers available.
 set -euo pipefail

@@ -10,10 +10,10 @@ name: Docker image
 # This avoids QEMU emulation (~10× slower for Rust) at zero cost on free
 # GitHub-hosted runners.
 #
-# Versioning: the relay is versioned independently of the desktop app via
-# its own `relay-v*` tags (see `just release-relay`). Desktop `v*` tags and
-# agent `sprig-v*` tags do NOT publish this image — only `relay-v*` does, so
-# the relay image version tracks crates/buzz-relay/Cargo.toml, never desktop.
+# Versioning: the relay is versioned via its own `relay-v*` tags (see
+# `just release-relay`). Agent `sprig-v*` tags do NOT publish this image —
+# only `relay-v*` does, so the relay image version tracks
+# crates/buzz-relay/Cargo.toml.
 #
 # Triggers:
 #   - push to main           → :main + :sha-<7> + :main-<commit UTC>-<7>
@@ -63,7 +63,6 @@ on:
     tags: ["relay-v[0-9]*"]
     paths:
       - "**"
-      - "!desktop/**"
       - "!mobile/**"
       - "!docs/**"
       - "!bin/**"

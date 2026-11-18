@@ -26,8 +26,8 @@ http-body-util = "0.1"
 
 # Explicit rustls dep with the ring provider — required to install the
 # process-level CryptoProvider at startup. Without it this binary panics on its
-# first TLS connection to the apiserver: the release build compiles every
-# sidecar in one cargo invocation (.github/workflows/release.yml), which unifies
+# first TLS connection to the apiserver: a release build that compiles every
+# sidecar in one cargo invocation (scripts/test-k8s-provider-release.sh) unifies
 # both ring and aws-lc-rs features and leaves rustls unable to auto-select a
 # provider. Same dependency and reason as crates/buzz-cli/Cargo.toml.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

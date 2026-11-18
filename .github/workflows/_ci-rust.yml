@@ -5,9 +5,6 @@ on:
       rust:
         required: true
         type: boolean
-      desktop_rust:
-        required: true
-        type: boolean
       lane:
         required: true
         type: string
@@ -29,7 +26,7 @@ jobs:
     name: Rust Lint
     runs-on: ubuntu-26.04
     timeout-minutes: 30
-    if: inputs.lane == 'required' && (github.event_name == 'push' || inputs.rust || inputs.desktop_rust)
+    if: inputs.lane == 'required' && (github.event_name == 'push' || inputs.rust)
     permissions:
       contents: read
     steps:
@@ -40,8 +37,6 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' }}
       - name: Format check
         run: just fmt-check
-      - name: Desktop Tauri format check
-        run: just desktop-tauri-fmt-check
       - name: Clippy
         run: just clippy
 
@@ -111,13 +106,13 @@ jobs:
   windows-rust:
     name: Windows Rust (x86_64-pc-windows-msvc)
     runs-on: windows-latest
-    # With no rust-cache (after a toolchain bump or eviction), the steps take
-    # 39-41m on main (2026-10-22..26): clippy 17-18m, Tauri check ~6m, Tauri
-    # tests 10-11m, the rest ~5m. The cache save that follows takes ~4.5m and
-    # runs inside this cap. If the cap kills it, nothing is saved and the next
-    # push is cold again. 60m leaves ~15m over that; warm runs take 15-23m.
+    # With no rust-cache (after a toolchain bump or eviction), the steps took
+    # 39-41m on main (2026-10-22..26): clippy 17-18m, the rest ~5m, plus ~16m
+    # of desktop crate steps this job no longer runs. The cache save that
+    # follows takes ~4.5m and runs inside this cap. If the cap kills it,
+    # nothing is saved and the next push is cold again.
     timeout-minutes: 60
-    if: inputs.lane == 'required' && (github.event_name == 'push' || inputs.rust || inputs.desktop_rust)
+    if: inputs.lane == 'required' && (github.event_name == 'push' || inputs.rust)
     permissions:
       contents: read
     env:
@@ -131,22 +126,8 @@ jobs:
       # honors on demand; the host triple already is x86_64-pc-windows-msvc.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
-          workspaces: |
-            .
-            desktop/src-tauri
           key: windows-msvc
           save-if: ${{ github.event_name != 'pull_request' }}
-      # Tauri validates externalBin at compile time, so the Tauri-crate steps
-      # below fail without these stubs. Mirrors scripts/bundle-sidecars.sh's
-      # Windows naming (binaries/<bin>-<triple>.exe); empty files suffice for a
-      # type-check since nothing executes them.
-      - name: Create sidecar placeholders
-        shell: bash
-        run: |
-          mkdir -p desktop/src-tauri/binaries
-          for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
-            touch "desktop/src-tauri/binaries/${bin}-${TARGET}.exe"
-          done
       # Clippy type-checks everything `cargo check` would, so no separate
       # workspace check step.
       - name: Clippy (workspace)
@@ -203,14 +184,6 @@ jobs:
           git -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m smoke
           git log -1 --format=%s | grep -qx smoke
           echo "Host bash resolved and functional; git commit round-trip passed"
-      - name: Check (Tauri crate)
-        run: cargo check --manifest-path desktop/src-tauri/Cargo.toml --workspace --all-targets --target $env:TARGET
-        env:
-          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-      - name: Test (Tauri crate)
-        run: cargo test --manifest-path desktop/src-tauri/Cargo.toml --target $env:TARGET
-        env:
-          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
 
   results:
