@@ -2,7 +2,8 @@
 //! a moderation kick and a moderation DM: each notice reaches the member's
 //! live subscription, and a channel-list read made on receipt already shows
 //! the change. "On receipt" is enforced by `notice_barrier`, which parks the
-//! producer at the notice while the test reads.
+//! producer at the notice while the test reads. A new DM message resurfaces
+//! the DM for members who hid it.
 
 use std::sync::Arc;
 
@@ -433,4 +434,51 @@ async fn moderation_dm_notifies_the_recipient_once_visible() {
         (KIND_MEMBER_ADDED_NOTIFICATION as u64, &dm)
     );
     assert_ne!(second_notice[0].2, first_notice[0].2);
+}
+
+/// A new message from someone else resurfaces a DM its reader hid, and the
+/// reader's NIP-DV snapshot shows it before the message fans out. The reader's
+/// own message leaves their hide alone.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn dm_message_from_someone_else_unhides_it() {
+    let (state, tenant) = fixture().await;
+    let reader = Keys::generate();
+    let sender = Keys::generate();
+    let (dm, _) = state
+        .db
+        .open_dm(
+            tenant.community(),
+            &[
+                &reader.public_key().to_bytes(),
+                &sender.public_key().to_bytes(),
+            ],
+            &reader.public_key().to_bytes(),
+            false,
+            &|_: &str, _: &[u8]| Ok(()),
+        )
+        .await
+        .expect("open dm");
+    let dm = dm.id.to_string();
+    publish(
+        &state,
+        &tenant,
+        &reader,
+        KIND_DM_HIDE as u16,
+        &[&["h", &dm]],
+    )
+    .await;
+    assert!(hidden_dms(&state, &tenant, &reader).await.contains(&dm));
+
+    publish(&state, &tenant, &reader, 9, &[&["h", &dm]]).await;
+    assert!(
+        hidden_dms(&state, &tenant, &reader).await.contains(&dm),
+        "the reader's own message keeps the DM hidden"
+    );
+
+    publish(&state, &tenant, &sender, 9, &[&["h", &dm]]).await;
+    assert!(
+        !hidden_dms(&state, &tenant, &reader).await.contains(&dm),
+        "someone else's message unhides the DM"
+    );
 }

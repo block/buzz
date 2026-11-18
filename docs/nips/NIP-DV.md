@@ -88,12 +88,13 @@ The `content` field is empty and carries no meaning. Clients MUST NOT parse sema
 
 ## Relay Processing Algorithm
 
-After the relay accepts and commits a DM command that changes a viewer's hide state, it republishes that viewer's snapshot:
+After the relay accepts and commits an event that changes a viewer's hide state, it republishes that viewer's snapshot:
 
 1. On `kind:41012` (hide): the viewer's `hidden_at` for the target channel is set.
 2. On `kind:41010` (open/re-open) that clears an existing `hidden_at`: the viewer's hide state for the target channel is cleared.
+3. On a new message (`kind:9`, `40002` or `40008`) in a DM: the hide state of every other member who hid it is cleared, so a new message resurfaces the conversation. The author's own hide is kept. The relay republishes these snapshots before it fans out the message, so a client that rereads its snapshot when the message arrives sees the DM.
 
-In both cases the relay recomputes the viewer's full hidden-DM set from its authoritative state (active, non-removed DM memberships with `hidden_at IS NOT NULL`) and publishes a fresh `kind:30622` snapshot signed by the relay identity, with `d` = the viewer's pubkey and one `h` tag per hidden DM.
+In each case the relay recomputes the viewer's full hidden-DM set from its authoritative state (active, non-removed DM memberships with `hidden_at IS NOT NULL`) and publishes a fresh `kind:30622` snapshot signed by the relay identity, with `d` = the viewer's pubkey and one `h` tag per hidden DM.
 
 The recompute-and-replace shape means the latest snapshot is always the complete, authoritative hidden set. There is no delta event to merge and no ordering hazard between hide and unhide: a stale snapshot is simply superseded by the newer one under NIP-01 parameterized-replaceable semantics.
 

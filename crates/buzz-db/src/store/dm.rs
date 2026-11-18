@@ -1141,6 +1141,39 @@ pub async fn unhide_dm(
     Ok(())
 }
 
+/// Unhide DM `channel_id` for every active member except `author`, and return
+/// whose hide was cleared. A new message from someone else resurfaces a hidden
+/// DM, as a re-open does. The caller checks that the channel is a DM.
+pub async fn unhide_dm_for_recipients(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    author: &[u8],
+) -> Result<Vec<Vec<u8>>> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let unhidden = sqlx::query_scalar(
+        r#"
+        UPDATE channel_members
+        SET hidden_at = NULL
+        WHERE community_id = $1 AND channel_id = $2 AND pubkey <> $3
+          AND removed_at IS NULL AND hidden_at IS NOT NULL
+        RETURNING pubkey
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(author)
+    .fetch_all(tx.conn())
+    .await?;
+    tx.commit().await?;
+    Ok(unhidden)
+}
+
 /// Return the channel IDs of all DMs the given user currently has hidden
 /// (`hidden_at IS NOT NULL`) while still being an active member. Used to build
 /// the relay-signed NIP-DV visibility snapshot.
@@ -1359,6 +1392,17 @@ impl Db {
         pubkey: &[u8],
     ) -> Result<()> {
         crate::dm::unhide_dm(&self.pool, community_id, channel_id, pubkey).await
+    }
+
+    /// Unhide a DM channel for every active member except its new message's author.
+    #[datastore_span(name = "unhide_dm_for_recipients", system = "postgresql")]
+    pub async fn unhide_dm_for_recipients(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        author: &[u8],
+    ) -> Result<Vec<Vec<u8>>> {
+        crate::dm::unhide_dm_for_recipients(&self.pool, community_id, channel_id, author).await
     }
 
     /// List the channel IDs of all DMs the given user currently has hidden.

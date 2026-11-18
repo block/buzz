@@ -4708,6 +4708,35 @@ pub async fn publish_nipia_archival_list(
     )
 }
 
+/// Resurface DM `channel_id` for every member who hid it, except the author of
+/// its new message `event`, and republish each one's NIP-DV snapshot, as a
+/// re-open does. Best effort: the message is already stored, and a failure
+/// leaves the DM hidden, as before this existed.
+pub async fn unhide_dm_on_message(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    event: &Event,
+) {
+    let author = effective_message_author(event, &state.relay_keypair.public_key());
+    let unhidden = match state
+        .db
+        .unhide_dm_for_recipients(tenant.community(), channel_id, &author)
+        .await
+    {
+        Ok(unhidden) => unhidden,
+        Err(e) => {
+            error!(channel = %channel_id, "DM unhide on new message failed: {e}");
+            return;
+        }
+    };
+    for viewer in &unhidden {
+        if let Err(e) = publish_dm_visibility_snapshot(tenant, state, viewer).await {
+            error!(channel = %channel_id, "DM unhide on new message: visibility snapshot failed: {e}");
+        }
+    }
+}
+
 /// NIP-DV: publish the relay-signed, per-viewer DM visibility snapshot for
 /// `viewer`. The event is parameterized-replaceable (`d` = viewer pubkey) and
 /// carries one `h` tag per DM the viewer currently has hidden. Called after any

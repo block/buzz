@@ -3852,6 +3852,20 @@ async fn ingest_event_inner(
         );
     }
 
+    // A new message from someone else resurfaces a DM its other members hid.
+    // Their NIP-DV snapshots are republished before the message fans out, so a
+    // client that rereads visibility when the message arrives sees the DM.
+    if let (Some(ch_id), Some(channel)) = (channel_id, &channel_row) {
+        if channel.channel_type == "dm"
+            && matches!(
+                kind_u32,
+                KIND_STREAM_MESSAGE | KIND_STREAM_MESSAGE_V2 | KIND_STREAM_MESSAGE_DIFF
+            )
+        {
+            crate::handlers::side_effects::unhide_dm_on_message(tenant, state, ch_id, &event).await;
+        }
+    }
+
     let pubkey_hex = auth.pubkey().to_hex();
     // Spec WriteInsert (line 514) / WriteInsertGlobal (line 559) /
     // WriteDuplicate (line 606): emit the abstract write at the trailing
