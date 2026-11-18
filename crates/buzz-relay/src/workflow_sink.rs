@@ -107,24 +107,33 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
     let mut seen = std::collections::HashSet::new();
     let mut hits: Vec<(usize, String)> = Vec::new();
 
+    // Only an `@` at a left boundary can start a mention, so collect those
+    // positions once and try each name only there. This keeps the cost at
+    // names × mentions rather than names × text length.
+    let anchors: Vec<usize> = (0..chars.len())
+        .filter(|&at| chars[at] == '@' && is_left_boundary(at))
+        .collect();
+    if anchors.is_empty() {
+        return out;
+    }
+
     for (name, _) in &names {
         let folded_name: Vec<char> = name.to_lowercase().chars().collect();
         if folded_name.is_empty() {
             continue;
         }
-        let mut at = 0;
-        while at < chars.len() {
-            // Anchor on `@` at a left boundary and an unconsumed span; only then
-            // attempt the fold-match. `name_len` is measured in *original* chars,
-            // so `at + 1 + name_len` is the true position just past the name.
-            let name_len = (chars[at] == '@' && is_left_boundary(at) && !consumed[at])
-                .then(|| match_name_len(at + 1, &folded_name))
-                .flatten()
-                .filter(|&n| {
-                    chars[at + 1 + n..]
-                        .first()
-                        .is_none_or(|&c| !extends_name(c))
-                });
+        for &at in &anchors {
+            // Skip anchors inside a span an earlier (longer) match consumed.
+            // `name_len` is measured in *original* chars, so `at + 1 + name_len`
+            // is the true position just past the name.
+            if consumed[at] {
+                continue;
+            }
+            let name_len = match_name_len(at + 1, &folded_name).filter(|&n| {
+                chars[at + 1 + n..]
+                    .first()
+                    .is_none_or(|&c| !extends_name(c))
+            });
             if let Some(name_len) = name_len {
                 let span = 1 + name_len;
                 if let Some(Some(pubkey)) = by_name.get(&name.to_lowercase()) {
@@ -133,9 +142,6 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
                 for slot in consumed.iter_mut().skip(at).take(span) {
                     *slot = true;
                 }
-                at += span;
-            } else {
-                at += 1;
             }
         }
     }
@@ -512,24 +518,40 @@ impl ActionSink for RelayActionSink {
             // render an `@Name` into visible output, but it cannot borrow the
             // workflow owner's authority to wake that agent. A resolution failure
             // must not drop the message, so log and proceed with the base tags.
-            let members = state
-                .db
-                .get_members_for_event_write(tenant.community(), channel_uuid)
-                .await
-                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
-            let member_pubkeys: Vec<Vec<u8>> = members.iter().map(|m| m.pubkey.clone()).collect();
-            let named_members = state
-                .db
-                .get_mention_names_for_event_write(tenant.community(), &member_pubkeys)
-                .await
-                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
-            let agent_mentions_withheld = append_workflow_mention_tags(
-                &mut tags,
-                &text,
-                &authored_text,
-                may_direct_agents,
-                &named_members,
-            )?;
+            // Text without an `@` cannot name anyone, so it skips the member
+            // and alias reads entirely.
+            let agent_mentions_withheld = if text.contains('@') {
+                let members = state
+                    .db
+                    .get_members_for_event_write(tenant.community(), channel_uuid)
+                    .await
+                    .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+                let member_pubkeys: Vec<Vec<u8>> =
+                    members.iter().map(|m| m.pubkey.clone()).collect();
+                // Verified names count only where the community advertises
+                // them, matching profile search; leftover heads stay inert.
+                let include_verified = crate::verified_profiles::discovery(&state, &tenant)
+                    .await
+                    .is_some();
+                let named_members = state
+                    .db
+                    .get_mention_names_for_event_write(
+                        tenant.community(),
+                        &member_pubkeys,
+                        include_verified,
+                    )
+                    .await
+                    .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+                append_workflow_mention_tags(
+                    &mut tags,
+                    &text,
+                    &authored_text,
+                    may_direct_agents,
+                    &named_members,
+                )?
+            } else {
+                false
+            };
 
             let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
             let event = EventBuilder::new(kind, &text)
@@ -990,6 +1012,25 @@ mod postgres_tests {
     /// Real-PG state mirroring `handlers::event::tests::test_state_with_redis_url`.
     async fn test_state() -> Arc<AppState> {
         test_state_with_agent_mentions(buzz_workflow::AgentMentions::Any).await
+    }
+
+    /// [`test_state`] with verified profiles advertised for every host, so
+    /// workflow mentions may resolve verified names.
+    async fn advertised_test_state() -> Arc<AppState> {
+        let state = test_state().await;
+        let mut advertised = (*state).clone();
+        let mut config = (*advertised.config).clone();
+        config.relay_private_key = Some(advertised.relay_keypair.secret_key().to_secret_hex());
+        config.nip_fi.mode = buzz_auth::NipFiMode::Enforce;
+        config.nip_fi.communities =
+            crate::nip_fi_core::test_support::any_host("https://relay.example");
+        config.nip_fi.profile_policies = vec![buzz_db::verified_profiles::ProfilePolicy {
+            issuer: "https://issuer.test".to_owned(),
+            label: Some("Example".to_owned()),
+            refresh_seconds: 3600,
+        }];
+        advertised.config = Arc::new(config);
+        Arc::new(advertised)
     }
 
     async fn test_state_with_agent_mentions(
@@ -1466,7 +1507,7 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn workflow_send_message_binds_authority_to_authored_mentions() {
-        let state = test_state().await;
+        let state = advertised_test_state().await;
 
         let author = nostr::Keys::generate();
         let author_hex = author.public_key().to_hex();
@@ -1705,6 +1746,7 @@ mod postgres_tests {
                 true,
             ),
             ("ambiguous-full-name", "@Alex Example", "", false, false),
+            ("no-at-sign", "alex, Alex Example", "", false, false),
             ("verified-nonmember", "@outsider", "", false, false),
             ("foreign-profile", "@foreign-only", "", false, false),
             (
@@ -1782,6 +1824,38 @@ mod postgres_tests {
                 tag_values(&event, "p"),
                 vec![author_hex.clone(), verified.to_hex()],
                 "{name}: both profile sources remain mentionable"
+            );
+        }
+
+        // Same roster without the advertisement: leftover verified heads are
+        // ignored, so the ordinary name is no longer ambiguous.
+        let unadvertised = test_state().await;
+        unadvertised
+            .workflow_engine
+            .set_action_sink(Arc::new(RelayActionSink::new(&unadvertised)));
+        for (name, text, expected) in [
+            ("unadvertised-username", "@alex", vec![]),
+            (
+                "unadvertised-ordinary",
+                "@Alex Example",
+                vec![twin.to_hex()],
+            ),
+        ] {
+            let id = execute_send_message_workflow(
+                &unadvertised,
+                community,
+                channel.id,
+                &author_bytes,
+                name,
+                text,
+                "",
+            )
+            .await;
+            let event = load_event(&id).await;
+            assert_eq!(
+                tag_values(&event, "p"),
+                [vec![author_hex.clone()], expected].concat(),
+                "{name}: verified names need the advertisement"
             );
         }
 

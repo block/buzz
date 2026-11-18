@@ -2781,7 +2781,8 @@ impl Db {
         get_users_bulk(&self.pool, community_id, pubkeys).await
     }
 
-    /// Fetch ordinary display names and verified name aliases for mention tags.
+    /// Fetch ordinary display names and, when `include_verified`, verified
+    /// name aliases for mention tags.
     ///
     /// Returns `(name, pubkey_hex)` pairs for the supplied community-local members.
     /// Keep every alias so the caller can reject names shared by distinct keys.
@@ -2790,6 +2791,7 @@ impl Db {
         &self,
         community_id: CommunityId,
         pubkeys: &[Vec<u8>],
+        include_verified: bool,
     ) -> Result<Vec<(String, String)>> {
         if pubkeys.is_empty() {
             return Ok(Vec::new());
@@ -2801,32 +2803,38 @@ impl Db {
         .await?;
         let rows = sqlx::query(
             r#"
-            SELECT member.pubkey, u.display_name, v.event
+            SELECT member.pubkey, u.display_name,
+                jsonb_path_query_first(v.event, 'strict $.tags[*] ? (@[0] == "display_name")[1]', '{}', true) #>> '{}' AS verified_display_name,
+                jsonb_path_query_first(v.event, 'strict $.tags[*] ? (@[0] == "username")[1]', '{}', true) #>> '{}' AS verified_username,
+                jsonb_path_query_first(v.event, 'strict $.tags[*] ? (@[0] == "full_name")[1]', '{}', true) #>> '{}' AS verified_full_name
             FROM unnest($2::bytea[]) AS member(pubkey)
             LEFT JOIN users u ON u.community_id = $1 AND u.pubkey = member.pubkey
             LEFT JOIN nip_fi_profile_heads v
-                ON v.community_id = $1 AND v.pubkey = encode(member.pubkey, 'hex')
+                ON $3 AND v.community_id = $1 AND v.pubkey = encode(member.pubkey, 'hex')
             "#,
         )
         .bind(community_id.as_uuid())
         .bind(pubkeys)
+        .bind(include_verified)
         .fetch_all(&mut *connection)
         .await?;
+        drop(connection);
 
+        // One entry per case-folded name and member, so a member whose aliases
+        // repeat a name does not make the resolver scan for it again.
+        let mut seen = std::collections::HashSet::new();
         let mut names = Vec::new();
         for row in rows {
             let pubkey = hex::encode(row.try_get::<Vec<u8>, _>("pubkey")?);
-            if let Some(name) = row.try_get::<Option<String>, _>("display_name")? {
-                names.push((name, pubkey.clone()));
-            }
-            let profile: Option<sqlx::types::Json<nostr::Event>> = row.try_get("event")?;
-            if let Some(profile) = profile {
-                for tag in profile.tags.iter() {
-                    let [field, name, ..] = tag.as_slice() else {
-                        continue;
-                    };
-                    if matches!(field.as_str(), "display_name" | "username" | "full_name") {
-                        names.push((name.clone(), pubkey.clone()));
+            for column in [
+                "display_name",
+                "verified_display_name",
+                "verified_username",
+                "verified_full_name",
+            ] {
+                if let Some(name) = row.try_get::<Option<String>, _>(column)? {
+                    if seen.insert((name.to_lowercase(), pubkey.clone())) {
+                        names.push((name, pubkey.clone()));
                     }
                 }
             }
