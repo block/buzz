@@ -131,8 +131,8 @@ void main() {
         // kept as a draft, or, if it may have gone out then, left alone.
         {..._reply('14'), 'recovered': 'true'},
         {..._reply('15'), 'recovered': 'true', 'publishing': 'true'},
-        // A draft that can't be saved isn't reported, so iOS keeps the reply
-        // for a later launch.
+        // A community that's gone can't keep its draft; it's settled anyway,
+        // so it isn't retried on every launch.
         {..._reply('16', communityId: 'gone'), 'recovered': 'true'},
       ];
       // What iOS hears, in order, alongside each message sent.
@@ -220,6 +220,7 @@ void main() {
         '13': 'draft in null',
         '14': 'draft in $_message',
         '15': 'unknown',
+        '16': 'draft in null',
       });
       // iOS knows a reply may go out before anything is published.
       expect(log, [

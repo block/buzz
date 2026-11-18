@@ -142,13 +142,16 @@ Future<NotificationReplyResult> sendNotificationReply(
       .holdForBackgroundWork(left + _markReadDeadline);
   var tooLate = false;
   final publishBy = Timer(publishWindow, () => tooLate = true);
+  // The clock too: after a suspension, the timer may not have run yet.
+  final publishDeadline = DateTime.now().add(publishWindow);
+  bool late() => tooLate || !DateTime.now().isBefore(publishDeadline);
   var published = false;
   // Asked right before the event goes out. The reply is saved as maybe
   // published first, so a relaunch never resends it.
   Future<bool> mayPublish() async {
-    if (tooLate) return false;
+    if (late()) return false;
     await markBuzzNotificationReplyPublishing(reply.id);
-    if (tooLate) return false;
+    if (late()) return false;
     published = true;
     return true;
   }
@@ -259,7 +262,8 @@ String? _replyHead(BuzzNotificationReply reply, Channel channel) =>
 
 /// Keeps the reply's text as a draft, after any draft already there, in the
 /// reply's own community, and returns the thread it's in once it's saved, or
-/// throws: the reply then stays with iOS until a later launch saves it. It
+/// throws: the reply then stays with iOS until a later launch saves it. When
+/// that community is gone, nothing is kept and this returns null. It
 /// goes where the reply would have gone: the subthread under the notified
 /// message, or a Solo chat itself. Whether it's a Solo chat comes from the
 /// loaded channel, or else from the notification.
@@ -279,9 +283,9 @@ Future<String?> _keepDraft(Ref ref, BuzzNotificationReply reply) async {
   final community = communities
       .where((community) => community.id == link.communityId)
       .firstOrNull;
-  if (community == null) {
-    throw StateError('Community ${link.communityId} not found');
-  }
+  // Removed, or signed out: there's nowhere to keep it, and keeping it with
+  // iOS would retry it on every launch.
+  if (community == null) return null;
   await ref
       .read(composeDraftsProvider.notifier)
       .append(
