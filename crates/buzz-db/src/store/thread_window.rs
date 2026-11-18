@@ -348,46 +348,10 @@ async fn select_aux(
         return Err(invalid("invalid thread auxiliary target batch"));
     }
     budget.query()?;
-    let mut q = QueryBuilder::new(
-        "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, deleted_at, \
-         octet_length(content) + octet_length(tags::text) AS payload_bytes \
-         FROM events WHERE community_id = ");
-    q.push_bind(query.community.as_uuid())
-        .push(" AND ((channel_id IS NULL AND kind IN (5, 9005)) OR channel_id = ANY(")
-        .push_bind(query.accessible)
-        .push("))")
-        .push(" AND kind = ANY(")
-        .push_bind(query.kinds.iter().map(|k| *k as i32).collect::<Vec<_>>())
-        .push(") AND (");
-    for (index, target) in query.targets.iter().enumerate() {
-        if index != 0 {
-            q.push(" OR ");
-        }
-        q.push("tags @> ")
-            .push_bind(serde_json::json!([["e", target]]));
-    }
-    // JSONB containment is an indexable prefilter, not a positional tag match.
-    q.push(
-        ") AND EXISTS (SELECT 1 FROM jsonb_array_elements(tags) tag \
-        WHERE tag->>0 = 'e' AND tag->>1 = ANY(",
-    )
-    .push_bind(query.targets)
-    .push("))");
-    if let Some(cursor) = &query.cursor {
-        let (ts, id) = cursor_key(cursor)?;
-        q.push(" AND (created_at < ")
-            .push_bind(ts)
-            .push(" OR (created_at = ")
-            .push_bind(ts)
-            .push(" AND id > ")
-            .push_bind(id)
-            .push("))");
-    }
-    q.push(" ORDER BY created_at DESC, id ASC LIMIT ")
-        .push_bind(AUX_LIMIT as i64 + 1);
     // Never collect a full raw page: 1,001 ingest-valid edits can contain
     // 250 MiB. Charge each row (including tombstones and the probe) before
     // reconstruction, and preserve this request-wide ledger across retries.
+    let mut q = aux_query(query)?;
     let mut raw = q.build().fetch(&mut *conn);
     let mut events = Vec::new();
     let mut target_ids = Vec::new();
@@ -420,6 +384,51 @@ async fn select_aux(
         target_ids,
         next_cursor,
     })
+}
+
+/// The auxiliary scan's SQL. Its text depends only on whether a cursor is set,
+/// never on the number of targets.
+fn aux_query(query: &AuxQuery<'_>) -> Result<QueryBuilder<sqlx::Postgres>> {
+    let mut q = QueryBuilder::new(
+        "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, deleted_at, \
+         octet_length(content) + octet_length(tags::text) AS payload_bytes \
+         FROM events WHERE community_id = ");
+    q.push_bind(query.community.as_uuid())
+        .push(" AND ((channel_id IS NULL AND kind IN (5, 9005)) OR channel_id = ANY(")
+        .push_bind(query.accessible)
+        .push("))")
+        .push(" AND kind = ANY(")
+        .push_bind(query.kinds.iter().map(|k| *k as i32).collect::<Vec<_>>())
+        .push(") AND tags @> ANY((SELECT ");
+    // JSONB containment is an indexable prefilter, not a positional tag match.
+    // Both arrays sit behind a scalar subquery so planning makes one estimate
+    // instead of one per target per partition (~24 ms at 200 targets).
+    q.push_bind(
+        query
+            .targets
+            .iter()
+            .map(|target| serde_json::json!([["e", target]]))
+            .collect::<Vec<_>>(),
+    )
+    .push(
+        ")::jsonb[]) AND EXISTS (SELECT 1 FROM jsonb_array_elements(tags) tag \
+        WHERE tag->>0 = 'e' AND tag->>1 = ANY((SELECT ",
+    )
+    .push_bind(query.targets)
+    .push(")::text[]))");
+    if let Some(cursor) = &query.cursor {
+        let (ts, id) = cursor_key(cursor)?;
+        q.push(" AND (created_at < ")
+            .push_bind(ts)
+            .push(" OR (created_at = ")
+            .push_bind(ts)
+            .push(" AND id > ")
+            .push_bind(id)
+            .push("))");
+    }
+    q.push(" ORDER BY created_at DESC, id ASC LIMIT ")
+        .push_bind(AUX_LIMIT as i64 + 1);
+    Ok(q)
 }
 
 async fn writer_aux(
@@ -475,3 +484,29 @@ impl ReadSession {
 
 #[cfg(test)]
 mod postgres_tests;
+
+#[cfg(test)]
+mod aux_query_tests {
+    use super::*;
+
+    /// A batch's size must not reach the SQL text: one bound value per target
+    /// made Postgres plan an estimate per target per partition.
+    #[test]
+    fn aux_query_text_is_independent_of_target_count() {
+        let targets: Vec<String> = (0..200).map(|i| format!("{i:064x}")).collect();
+        let sql = |n: usize| {
+            let query = AuxQuery {
+                community: CommunityId::from_uuid(Uuid::nil()),
+                targets: &targets[..n],
+                kinds: &[5, 7],
+                accessible: &[],
+                cursor: None,
+            };
+            aux_query(&query).map(|q| q.sql().as_str().to_owned())
+        };
+        let one = sql(1).expect("one target");
+        assert_eq!(one, sql(200).expect("200 targets"));
+        assert!(one.contains("tags @> ANY((SELECT $"), "{one}");
+        assert!(one.contains("tag->>1 = ANY((SELECT $"), "{one}");
+    }
+}
