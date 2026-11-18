@@ -371,6 +371,7 @@ async fn owned_agents_share_bounded_batches_and_preserve_other_owners_and_commun
                     "subscriptions" => !owned("owner_pubkey"),
                     "delivery_log" => {
                         !["sub-0", "sub-1"].contains(&row["subscription_id"].as_str().unwrap())
+                            && !selected.contains(&hex_field("event_id"))
                     }
                     "push_leases" | "push_wake_outbox" => !owned("author"),
                     "operator_listener_outbox" => {
