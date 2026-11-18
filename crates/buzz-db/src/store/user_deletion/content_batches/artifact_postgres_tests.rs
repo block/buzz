@@ -13,6 +13,7 @@ fn principal(keys: &Keys) -> CommunityArtifactPrincipal {
         verified_owner: None,
         owner_admission: false,
         require_membership: false,
+        reject_required_nip_fi: false,
     }
 }
 

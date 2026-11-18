@@ -217,18 +217,14 @@ async fn community_signal_lag_preserves_channel_sync() {
     ended(channel_task).await;
 }
 
-/// Counterfactual: removing current_guard from send_reserved emits an EVENT
-/// and EOSE after the member removal committed while output was reserved.
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
-async fn revoked_initial_snapshot_never_emits_payload_or_eose_after_output_wait() {
-    for change in 0..6 {
+async fn socket_revocation_or_local_policy_change_stops_initial_snapshot() {
+    for change in 2..6 {
         let mut f = community_fixture().await;
-        if change >= 2 {
-            Arc::make_mut(&mut Arc::get_mut(&mut f.state).unwrap().config)
-                .nip_fi
-                .mode = buzz_auth::NipFiMode::Shadow;
-        }
+        Arc::make_mut(&mut Arc::get_mut(&mut f.state).unwrap().config)
+            .nip_fi
+            .mode = buzz_auth::NipFiMode::Shadow;
         let keys = Keys::generate();
         let owner = Keys::generate();
         if change >= 3 {
@@ -276,17 +272,10 @@ async fn revoked_initial_snapshot_never_emits_payload_or_eose_after_output_wait(
             .await
             .unwrap();
         match change {
-            0 => remove(&f, &keys).await,
-            1 => {
-                sqlx::query("UPDATE communities SET archived_at=clock_timestamp() WHERE id=$1")
-                    .bind(f.tenant.community().as_uuid())
-                    .execute(f.state.db.pool())
-                    .await
-                    .unwrap();
-            }
             2 => {
                 sqlx::query("UPDATE communities SET requires_nip_fi=true,policy_generation=policy_generation+1 WHERE id=$1")
                     .bind(f.tenant.community().as_uuid()).execute(f.state.db.pool()).await.unwrap();
+                f.state.invalidate_community_host(&f.tenant);
             }
             3 | 4 => {
                 let key = if change == 3 {
@@ -318,51 +307,15 @@ async fn revoked_initial_snapshot_never_emits_payload_or_eose_after_output_wait(
         }
         ended(task).await;
         no_frame(&mut rx).await;
+        if change == 2 {
+            let reopened = start_sync(&f, &conn, filter());
+            let response = frame(&mut rx).await;
+            assert_eq!(response[0], "CLOSED");
+            assert!(response[2].as_str().unwrap().starts_with("restricted:"));
+            ended(reopened).await;
+            no_frame(&mut rx).await;
+        }
     }
-}
-
-/// A fresh head read is insufficient: current admission must be rechecked
-/// after that read and before the live frame is queued.
-#[tokio::test]
-#[ignore = "requires Postgres and Redis"]
-async fn revoked_live_head_never_emits_after_committed_removal() {
-    let f = community_fixture().await;
-    let signals = artifact_sync::spawn_signals(Arc::clone(&f.state));
-    let keys = Keys::generate();
-    member(&f, &keys, "member").await;
-    let first = revision(&f, &keys, Uuid::new_v4(), None).await;
-    let d = first.tags.identifier().unwrap().parse().unwrap();
-    let (conn, mut rx) = connect(&f, &keys);
-    let token = close::admit("s", &conn).await.unwrap();
-    let pause = Arc::new(close::test_seam::Pause::default());
-    let task = tokio::spawn(
-        artifact_sync::test_seam::LIVE_SEND_PAUSE.scope(
-            Arc::clone(&pause),
-            artifact_sync::handle_sync(
-                "s".into(),
-                token,
-                buzz_core::artifact_sync::parse_sync(&filter()),
-                Arc::clone(&conn),
-                Arc::clone(&f.state),
-                f.state
-                    .handler_semaphore
-                    .clone()
-                    .try_acquire_owned()
-                    .unwrap(),
-            ),
-        ),
-    );
-    assert_eq!(initial_set(&mut rx).await, vec![first.id.to_hex()]);
-    revision(&f, &keys, d, Some(&first)).await;
-    tokio::time::timeout(Duration::from_secs(10), pause.reached.notified())
-        .await
-        .unwrap();
-    remove(&f, &keys).await;
-    pause.resume.notify_one();
-    assert_eq!(frame(&mut rx).await[0], "CLOSED");
-    ended(task).await;
-    no_frame(&mut rx).await;
-    signals.abort();
 }
 
 #[tokio::test]
@@ -431,7 +384,7 @@ async fn community_sync_rejects_unauthenticated_readless_and_channel_bound_crede
 
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
-async fn two_nodes_redact_and_invalidate_idle_syncs_with_lost_notification_backstop() {
+async fn two_nodes_resync_matching_community_artifacts_on_redaction() {
     let f = community_fixture().await;
     let local_fanout = artifact_sync::spawn_signals(Arc::clone(&f.state));
     let mut other = crate::api::bridge::postgres_tests::bridge_handler_test_state()
@@ -582,17 +535,6 @@ async fn two_nodes_redact_and_invalidate_idle_syncs_with_lost_notification_backs
             0
         );
     }
-    let at = start_sync(&f, &a, filter());
-    let bt = start_sync(&remote, &b, filter());
-    assert!(initial_set(&mut arx).await.is_empty());
-    assert!(initial_set(&mut brx).await.is_empty());
-    remove(&f, &reader).await; // Intentionally omit invalidation: exercise durable backstop.
-    artifact_sync::test_seam::revalidate(&f.state).await;
-    artifact_sync::test_seam::revalidate(&remote.state).await;
-    assert_eq!(frame(&mut arx).await[0], "CLOSED");
-    assert_eq!(frame(&mut brx).await[0], "CLOSED");
-    ended(at).await;
-    ended(bt).await;
     local_fanout.abort();
     remote_fanout.abort();
 }
@@ -663,6 +605,7 @@ async fn community_sync_retries_after_snapshot_capacity_is_exhausted() {
         verified_owner: None,
         owner_admission: false,
         require_membership: true,
+        reject_required_nip_fi: false,
     };
     let held = f
         .state
@@ -714,25 +657,6 @@ async fn unavailable_current_admission_has_no_snapshot_or_eose() {
         rx.try_recv().is_err(),
         "no EVENT or EOSE after failed admission"
     );
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres and Redis"]
-async fn idle_sync_credential_revocation_uses_node_wide_backstop() {
-    let f = community_fixture().await;
-    let keys = Keys::generate();
-    member(&f, &keys, "member").await;
-    let (conn, mut rx) = connect(&f, &keys);
-    let task = start_sync(&f, &conn, filter());
-    assert!(initial_set(&mut rx).await.is_empty());
-    if let AuthState::Authenticated(ctx) = &mut *conn.auth_state.lock().unwrap() {
-        ctx.scopes.clear();
-    }
-    artifact_sync::test_seam::revalidate(&f.state).await;
-    let response = frame(&mut rx).await;
-    assert_eq!(response[0], "CLOSED");
-    assert!(response[2].as_str().unwrap().starts_with("resync:"));
-    ended(task).await;
 }
 
 /// Direct AUTH may record an OA owner while OA admission is disabled. That
@@ -797,7 +721,7 @@ async fn owner_restrictions_and_roster_fallback_remain_separate_after_direct_aut
         let sync = start_sync(&f, &conn, filter());
         assert_eq!(initial_set(&mut rx).await, vec![first.id.to_hex()]);
         // The same key and OA proof on a second socket have no FI credential.
-        // Its idle admission must not be merged with the FI-backed socket.
+        // Its live admission must be checked independently of the FI-backed socket.
         let oa_only = if mode == 2 {
             let (other, mut other_rx) = connect(&f, &agent);
             *other.auth_state.lock().unwrap() = AuthState::Pending {
@@ -813,8 +737,15 @@ async fn owner_restrictions_and_roster_fallback_remain_separate_after_direct_aut
         } else {
             None
         };
-        remove(&f, &agent).await; // Deliberately drop both local and cross-pod disconnects.
-        artifact_sync::test_seam::revalidate(&f.state).await;
+        let signal = buzz_pubsub::artifact_signal::ArtifactSignal {
+            d: first.tags.identifier().unwrap().parse().unwrap(),
+            artifact_type: "example.settings".into(),
+            cause: buzz_pubsub::artifact_signal::ArtifactChange::Changed,
+        };
+        remove(&f, &agent).await; // Deliberately omit disconnects.
+        f.state
+            .artifact_syncs
+            .signal_community(f.tenant.community(), &signal);
         if let Some((other, mut other_rx, task)) = oa_only {
             assert_eq!(frame(&mut other_rx).await[0], "CLOSED");
             ended(task).await;
@@ -830,7 +761,9 @@ async fn owner_restrictions_and_roster_fallback_remain_separate_after_direct_aut
             assert_eq!(frame(&mut rx).await[0], "CLOSED");
             ended(sync).await;
         } else {
-            no_frame(&mut rx).await;
+            let live = frame(&mut rx).await;
+            assert_eq!(live[0], "EVENT");
+            assert_eq!(live[2]["id"], first.id.to_hex());
             close::handle_close("s".into(), Arc::clone(&conn), Arc::clone(&f.state)).await;
             assert_eq!(frame(&mut rx).await[0], "CLOSED");
             ended(sync).await;
@@ -872,7 +805,9 @@ async fn owner_restrictions_and_roster_fallback_remain_separate_after_direct_aut
             .execute(f.state.db.pool())
             .await
             .unwrap();
-        artifact_sync::test_seam::revalidate(&f.state).await;
+        f.state
+            .artifact_syncs
+            .signal_community(f.tenant.community(), &signal);
         assert_eq!(frame(&mut rx).await[0], "CLOSED");
         ended(sync).await;
         event_handler::handle_event(first, Arc::clone(&conn), Arc::clone(&f.state)).await;

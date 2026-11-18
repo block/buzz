@@ -4,9 +4,6 @@
 //! says that one `d` changed; the sync task then reads that artifact's current
 //! head and sends it (NIP-AR Sync rules 3 and 4). Any possible loss of a live
 //! entry ends the sync with `CLOSED "resync: ..."` (rule 5).
-mod community_access;
-pub use community_access::watch as watch_community_access;
-
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::Duration;
@@ -111,7 +108,6 @@ struct CommunityInterest {
     artifact_type: String,
     identities: Option<HashSet<Uuid>>,
     principal: CommunityArtifactPrincipal,
-    connection: std::sync::Weak<ConnectionState>,
 }
 
 /// One live sync's signal inbox. Fan-out and loss detection write to it; the
@@ -547,6 +543,19 @@ pub async fn handle_sync(
             .await;
             return;
         }
+        let mode = state.config.nip_fi.mode;
+        let has_fi = conn.nip_fi_assertion.is_some();
+        if mode.denies_unconditionally() || (mode.enforces() && !has_fi) {
+            close(
+                &sub_id,
+                owner,
+                "restricted: authorization denied",
+                &conn,
+                &state,
+            )
+            .await;
+            return;
+        }
         handle.community = Some(CommunityInterest {
             tenant: conn.tenant.community(),
             artifact_type: buzz_core::artifact::exact_type(&filter.tags)
@@ -557,7 +566,6 @@ pub async fn handle_sync(
                 .iter()
                 .find(|(name, _)| name == "d")
                 .map(|(_, values)| values.iter().filter_map(|v| v.parse().ok()).collect()),
-            connection: Arc::downgrade(&conn),
             principal: CommunityArtifactPrincipal {
                 owner_admission: super::community_artifact::owner_admission(
                     &state,
@@ -567,6 +575,7 @@ pub async fn handle_sync(
                 pubkey: reader.clone(),
                 verified_owner: delegated_owner.map(|p| p.to_bytes().to_vec()),
                 require_membership: state.config.require_relay_membership,
+                reject_required_nip_fi: mode.with_requirement(true).enforces() && !has_fi,
             },
         });
     }
@@ -879,9 +888,7 @@ async fn send_reserved(
         .map_err(|_| Stop::Close("error: connection closed"))?;
     #[cfg(test)]
     super::close::test_seam::pause_at(&test_seam::QUEUE_CHECK_PAUSE).await;
-    // Reserve output first, then recheck authoritative access outside the old
-    // snapshot. Keep its locks through enqueue, including after a slow reader.
-    let _guard = current_guard(unless_resync, state, conn).await?;
+    let _effect = community_queue_effect(unless_resync, state, conn).await?;
     let subs = conn.subscriptions.lock().await;
     if conn.cancel.is_cancelled() || !super::close::owns(&subs, sub_id, owner) {
         return Err(Stop::Retired);
@@ -913,7 +920,7 @@ async fn try_send_owned(
         .send_tx
         .try_reserve()
         .map_err(|_| Stop::Close("resync: send queue full"))?;
-    let _guard = current_guard(handle, state, conn).await?;
+    let _effect = community_queue_effect(handle, state, conn).await?;
     let subs = conn.subscriptions.lock().await;
     if conn.cancel.is_cancelled() || !super::close::owns(&subs, sub_id, owner) {
         return Err(Stop::Retired);
@@ -925,55 +932,30 @@ async fn try_send_owned(
     slot.send(WsMessage::Text(frame.into()));
     Ok(())
 }
-/// Current auth is held until the frame reaches the outbound queue. An empty
-/// channel set is never treated as community authorization.
-struct QueueGuard {
-    _database: buzz_db::community_artifact::CommunityArtifactReadGuard,
-    _effect: crate::nip_fi_gate::SessionEffectPermit,
-}
-async fn current_guard(
+/// Retain the socket credential gate through enqueue for community deliveries.
+async fn community_queue_effect(
     handle: Option<&SyncHandle>,
     state: Option<&AppState>,
     conn: &ConnectionState,
-) -> Result<Option<QueueGuard>, Stop> {
+) -> Result<Option<crate::nip_fi_gate::SessionEffectPermit>, Stop> {
     if conn.cancel.is_cancelled() || handle.is_some_and(|h| h.cancel.is_cancelled()) {
         return Err(Stop::Retired);
     }
     let Some(interest) = handle.and_then(|h| h.community.as_ref()) else {
         return Ok(None);
     };
-    let Some(state) = state else {
-        return Err(Stop::Close("resync: access check unavailable"));
-    };
-    if !community_credential_current(state, conn, &interest.principal) {
-        return Err(Stop::Close("resync: community access changed"));
-    }
+    let state = state.ok_or(Stop::Close("resync: access check unavailable"))?;
     let effect = conn
         .nip_fi_gate
         .acquire_effect()
         .await
         .map_err(|_| Stop::Close("resync: community credential changed"))?;
-    let guard = state
-        .db
-        .community_artifact_read_guard(conn.tenant.community(), &interest.principal)
-        .await
-        .map_err(|_| Stop::Close("resync: community access changed"))?;
-    if !community_credential_current(state, conn, &interest.principal)
-        || !community_policy_current(state, conn, guard.requires_nip_fi())
-    {
-        return Err(Stop::Close("resync: community authentication changed"));
+    if !community_credential_current(state, conn, &interest.principal) {
+        return Err(Stop::Close("resync: community access changed"));
     }
-    Ok(Some(QueueGuard {
-        _database: guard,
-        _effect: effect,
-    }))
+    Ok(Some(effect))
 }
-fn community_policy_current(state: &AppState, conn: &ConnectionState, required: bool) -> bool {
-    let mode = crate::nip_fi_policy::effective(state.config.nip_fi.mode, required);
-    !mode.denies_unconditionally() && (!mode.enforces() || conn.nip_fi_assertion.is_some())
-}
-/// Credentials are checked independently of database admission. The common
-/// node-wide backstop also uses this for idle syncs after a missed disconnect.
+
 fn community_credential_current(
     state: &AppState,
     conn: &ConnectionState,
@@ -1155,10 +1137,6 @@ pub(crate) mod test_seam {
         pub(crate) static LIVE_SEND_PAUSE: Arc<Pause>;
         /// After output reservation, before the current authorization guard.
         pub(crate) static QUEUE_CHECK_PAUSE: Arc<Pause>;
-    }
-
-    pub(crate) async fn revalidate(state: &crate::state::AppState) {
-        super::community_access::revalidate(state).await;
     }
 }
 

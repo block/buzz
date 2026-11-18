@@ -88,25 +88,23 @@ restriction identities. Direct roster membership is sufficient. Owner roster
 membership is a fallback only for a verified FI agent assertion or when the
 current OA policy permits the verified proof. A timeout blocks new content and
 redaction but permits reads and exact accepted-content retries; bans block both.
-The idle backstop groups the complete principal context, including fallback
-permission, so one session cannot admit another session of the same key.
 
 | State | Entry and exit fence |
 |---|---|
 | Subscribe | Claim the subscription generation under the existing lifecycle lock, retain the tenant artifact topic, and confirm Redis interest on one unbroken loss epoch before reading. |
-| DB snapshot | Read current heads in one repeatable-read transaction, keyset-paged by identity and indexed by tenant, scope and immutable type. Hold at most 256 heads per page and the advertised set bound overall. |
-| Enqueue | Reserve output first; acquire a fresh writer-backed admission guard outside the snapshot plus the existing FI effect permit. Recheck credential deadline, deny map and current community FI policy, then generation and pending invalidation, before enqueue. Shared community/member locks remain held through that point. |
-| Live | A bounded typed Redis signal carries only identity, immutable type and change cause. Reload the authorized current head; never forward a published payload. Current-head redaction resyncs that type; historical redaction does not retire its successor. |
-| Invalidation | Existing principal/owner disconnect fan-out handles revocation. A jittered 45–75 second node-wide batched DB backstop catches lost idle notifications. Every enqueue remains independently fenced. Unrelated restriction changes do not restart all tenant syncs. Decode loss, reconnect or receiver lag resync exact copies. |
+| DB snapshot | Check admission and read current heads in one writer-backed repeatable-read transaction, keyset-paged by identity and indexed by tenant, scope and immutable type. Hold at most 256 heads per page and the advertised set bound overall. |
+| Enqueue | Reserve output first. The socket credential gate, subscription generation and pending invalidation are checked before enqueue. |
+| Live | A bounded typed Redis signal carries only identity, immutable type and change cause. Check admission and reload the authorized current head on the writer. A denied admission ends the sync with resync. The signal carries no payload. Current-head redaction resyncs that type; historical redaction does not retire its successor. |
+| Invalidation | Existing principal/owner disconnect fan-out handles revocation. If an invalidation is missed, an idle sync can retain its set until the next relevant signal or socket revocation. The socket-level revalidator still handles archive, deletion and required-FI upgrades. Decode loss, reconnect or receiver lag resync exact copies. |
 | Close | CLOSE, replacement REQ, disconnect and refusal retire the generation, cancel the task and release exactly the topic retained by its scope through the existing teardown. |
 
 The relay writer pool defaults to 50 connections (`BUZZ_DB_POOL_SIZE`) with a
 3 second acquisition timeout.
 Community snapshots additionally cap themselves at `min(pool_size - 1, 8)`,
 wait at most 1 second for that permit, and refuse one-connection pools. This
-leaves writer capacity for enqueue rechecks even when every snapshot is paused
-on output. Snapshot and fresh-guard acquisition each have a 2 second deadline;
-statements and lock waits are capped at 2 seconds. The existing 30 second
+leaves a writer slot available when snapshots are paused on output. A
+community snapshot or live head read takes one writer checkout with a 2 second
+acquisition deadline and a 2 second statement timeout. The existing 30 second
 snapshot budget includes paging, enqueue waits and authorization. Other writer
 traffic may still saturate the pool; bounded refusal/resync preserves access
 control in that case. Ordinary channel sync and ordinary event wire shapes

@@ -829,6 +829,7 @@ mod community {
     use crate::community_artifact::{
         set_policy_in_transaction, CommunityArtifactPrincipal, PolicyOutcome,
     };
+    use crate::DbError;
     use serde_json::json;
 
     async fn contract(f: &Fixture) {
@@ -853,6 +854,7 @@ mod community {
             pubkey: keys.public_key().to_bytes().to_vec(),
             verified_owner: None,
             require_membership: roster,
+            reject_required_nip_fi: false,
         }
     }
     fn revision(f: &Fixture, d: Uuid, op: &str, prev: Option<&Event>, keys: &Keys) -> Event {
@@ -1215,15 +1217,10 @@ mod community {
             .is_err());
     }
 
-    /// The enqueue guard shares the restriction-writer lock and member row
-    /// locks: a revocation commits on one side of the guarded enqueue, never
-    /// between its admission check and queue point.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn read_guard_serializes_committed_revocation() {
+    async fn community_snapshot_capacity_and_new_reads_use_current_admission() {
         let f = Fixture::new().await;
-        // One snapshot in a two-slot pool must leave room for fresh admission.
-        // A second snapshot sheds instead of taking the last writer slot.
         let small = Db::from_pool(
             sqlx::postgres::PgPoolOptions::new()
                 .max_connections(2)
@@ -1236,85 +1233,49 @@ mod community {
             .open_community_artifact_snapshot(f.community, &open)
             .await
             .unwrap();
-        assert!(tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            small.open_community_artifact_snapshot(f.community, &open)
-        )
-        .await
-        .unwrap()
-        .is_err());
+        assert!(matches!(
+            small
+                .open_community_artifact_snapshot(f.community, &open)
+                .await,
+            Err(DbError::ArtifactSyncLimit)
+        ));
         small
-            .community_artifact_read_guard(f.community, &open)
-            .await
-            .unwrap()
-            .finish()
+            .community_artifact_policy(f.community, &open, "example.settings")
             .await
             .unwrap();
         snapshot.finish().await.unwrap();
-        let one = Db::from_pool(
-            sqlx::postgres::PgPoolOptions::new()
-                .max_connections(1)
-                .connect(&crate::test_support::database_url())
-                .await
-                .unwrap(),
-        );
-        assert!(one
-            .open_community_artifact_snapshot(f.community, &open)
-            .await
-            .is_err());
+
         role(&f, &f.peer, "member").await;
         let reader = principal(&f.peer, true);
-        let guard =
-            f.db.community_artifact_read_guard(f.community, &reader)
+        let snapshot =
+            f.db.open_community_artifact_snapshot(f.community, &reader)
                 .await
                 .unwrap();
-        let pool = f.db.pool.clone();
-        let community = f.community;
-        let key = f.peer.public_key().to_hex();
-        let removal = tokio::spawn(async move {
-            sqlx::query("DELETE FROM relay_members WHERE community_id=$1 AND pubkey=$2")
-                .bind(community.as_uuid())
-                .bind(key)
-                .execute(&pool)
-                .await
-                .unwrap();
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(!removal.is_finished());
-        guard.finish().await.unwrap();
-        removal.await.unwrap();
-        assert!(f
-            .db
-            .community_artifact_read_guard(f.community, &reader)
+        snapshot.finish().await.unwrap();
+        sqlx::query("DELETE FROM relay_members WHERE community_id=$1 AND pubkey=$2")
+            .bind(f.community.as_uuid())
+            .bind(f.peer.public_key().to_hex())
+            .execute(&f.db.pool)
             .await
-            .is_err());
-        role(&f, &f.peer, "member").await;
+            .unwrap();
+        assert!(matches!(
+            f.db.open_community_artifact_snapshot(f.community, &reader)
+                .await,
+            Err(DbError::AccessDenied(_))
+        ));
+
         role(&f, &f.owner, "owner").await;
-        let guard =
-            f.db.community_artifact_read_guard(f.community, &reader)
-                .await
-                .unwrap();
-        let pool = f.db.pool.clone();
-        let archive = tokio::spawn(async move {
-            sqlx::query("UPDATE communities SET archived_at=clock_timestamp() WHERE id=$1")
-                .bind(community.as_uuid())
-                .execute(&pool)
-                .await
-                .unwrap();
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(
-            !archive.is_finished(),
-            "archive cannot commit before guarded enqueue"
-        );
-        guard.finish().await.unwrap();
-        archive.await.unwrap();
-        let open_reader = principal(&f.peer, false);
-        assert!(f
-            .db
-            .community_artifact_read_guard(f.community, &open_reader)
+        sqlx::query("UPDATE communities SET archived_at=clock_timestamp() WHERE id=$1")
+            .bind(f.community.as_uuid())
+            .execute(&f.db.pool)
             .await
-            .is_err());
+            .unwrap();
+        let open_reader = principal(&f.peer, false);
+        assert!(matches!(
+            f.db.open_community_artifact_snapshot(f.community, &open_reader)
+                .await,
+            Err(DbError::AccessDenied(_))
+        ));
         let event = revision(&f, Uuid::new_v4(), "create", None, &f.peer);
         assert!(accept(&f, &event, &open_reader).await.is_err());
         let command = policy(&f, "example.settings", "admins", None);
@@ -1332,7 +1293,7 @@ mod community {
     }
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn cluster_global_artifact_admission_and_owner_transfer_both_finish() {
+    async fn cluster_global_community_artifact_snapshot_can_open_during_ownership_transfer() {
         use crate::relay_members::{transfer_ownership, TransferResult};
         use crate::test_support::{named_pool, wait_for_lock_wait};
 
@@ -1341,8 +1302,7 @@ mod community {
         role(&f, &f.peer, "member").await;
 
         // Pause the transfer after it takes the community row and before it
-        // promotes the transferee. Admission for that member must wait without
-        // holding a member lock the transfer needs.
+        // promotes the transferee. The reader can still take the committed cut.
         let mut blocker = f.db.pool.begin().await.unwrap();
         let owner = f.owner.public_key().to_hex();
         sqlx::query("SELECT 1 FROM relay_members WHERE community_id=$1 AND pubkey=$2 FOR UPDATE")
@@ -1354,8 +1314,6 @@ mod community {
 
         let transfer_name = format!("artifact-transfer-{}", Uuid::new_v4().simple());
         let transfer_pool = named_pool(&transfer_name).await;
-        let read_name = format!("artifact-admission-{}", Uuid::new_v4().simple());
-        let reader_db = Db::from_pool(named_pool(&read_name).await);
         let community = f.community;
         let peer = f.peer.public_key().to_hex();
         let relay = f.relay.clone();
@@ -1365,14 +1323,14 @@ mod community {
         wait_for_lock_wait(&f.db.pool, &transfer_name).await;
 
         let reader = principal(&f.peer, true);
-        let admission = tokio::spawn(async move {
-            reader_db
-                .community_artifact_read_guard(community, &reader)
-                .await?
-                .finish()
-                .await
-        });
-        wait_for_lock_wait(&f.db.pool, &read_name).await;
+        let snapshot = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            f.db.open_community_artifact_snapshot(community, &reader),
+        )
+        .await
+        .expect("snapshot admission must not wait for the transfer")
+        .unwrap();
+        snapshot.finish().await.unwrap();
         blocker.rollback().await.unwrap();
 
         let result = transfer
@@ -1380,10 +1338,6 @@ mod community {
             .unwrap()
             .expect("ownership transfer succeeds");
         assert!(matches!(result.outcome, TransferResult::Transferred { .. }));
-        admission
-            .await
-            .unwrap()
-            .expect("artifact admission succeeds");
     }
 
     /// A policy update's uncommitted state must fence new artifact admission,

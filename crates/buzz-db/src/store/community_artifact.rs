@@ -24,6 +24,9 @@ pub struct CommunityArtifactPrincipal {
     pub owner_admission: bool,
     /// Current effective relay admission mode.
     pub require_membership: bool,
+    /// A long-lived socket without FI evidence may read only while the tenant
+    /// policy permits it. HTTP requests use their own policy admission.
+    pub reject_required_nip_fi: bool,
 }
 
 fn denied() -> DbError {
@@ -95,25 +98,6 @@ async fn authorize_members(
 struct Authority {
     admin: bool,
     timed_out: bool,
-}
-
-/// A fresh authorization transaction held through a response's queue point.
-/// Its locks serialize that queue point with committed admission revocations.
-pub struct CommunityArtifactReadGuard {
-    tx: Transaction<'static, Postgres>,
-    requires_nip_fi: bool,
-}
-impl CommunityArtifactReadGuard {
-    /// Current stored authentication requirement, protected through enqueue.
-    pub fn requires_nip_fi(&self) -> bool {
-        self.requires_nip_fi
-    }
-
-    /// Release read-admission locks after the protected enqueue.
-    pub async fn finish(self) -> Result<()> {
-        self.tx.commit().await?;
-        Ok(())
-    }
 }
 
 // Take the community row before member rows, matching ownership transfer.
@@ -289,12 +273,12 @@ impl Db {
             )
         "#).fetch_one(&self.pool).await?)
     }
-    /// Fresh writer-backed audience admission held through the caller's enqueue.
-    pub async fn community_artifact_read_guard(
+    // Admission and content use the same repeatable-read cut on the writer.
+    async fn begin_community_artifact_read(
         &self,
         community: CommunityId,
         principal: &CommunityArtifactPrincipal,
-    ) -> Result<CommunityArtifactReadGuard> {
+    ) -> Result<Transaction<'static, Postgres>> {
         let connection = crate::observability::acquire_writer_until(
             &self.pool,
             crate::observability::WriterOperation::SubscriptionHistory,
@@ -302,15 +286,44 @@ impl Db {
         )
         .await?;
         let mut tx = Transaction::begin(connection, None).await?;
-        set_admission_timeouts(&mut tx).await?;
-        crate::deletion::guard_community_write(&mut tx, community).await?;
-        lock_restriction_writers(&mut tx, community).await?;
-        let requires_nip_fi = lock_active_community(&mut tx, community).await?;
-        authorize_members(&mut tx, community, principal).await?;
-        Ok(CommunityArtifactReadGuard {
-            tx,
-            requires_nip_fi,
-        })
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SET LOCAL statement_timeout='2s'")
+            .execute(&mut *tx)
+            .await?;
+        let admitted: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM communities c
+                WHERE c.id=$1 AND c.archived_at IS NULL AND c.deleted_at IS NULL
+                  AND c.deletion_state='active' AND (NOT $6 OR NOT c.requires_nip_fi)
+                  AND (NOT $4 OR EXISTS (
+                      SELECT 1 FROM relay_members m WHERE m.community_id=c.id
+                      AND (m.pubkey=encode($2,'hex') OR ($5 AND m.pubkey=encode($3,'hex')))
+                  ))
+                  AND NOT EXISTS (
+                      SELECT 1 FROM community_bans b WHERE b.community_id=c.id AND b.banned
+                      AND (b.ban_expires_at IS NULL OR b.ban_expires_at>clock_timestamp())
+                      AND b.pubkey IN (
+                          SELECT $2::bytea UNION ALL SELECT $3::bytea
+                          UNION ALL SELECT u.agent_owner_pubkey FROM users u
+                          WHERE u.community_id=c.id AND u.pubkey=$2
+                      )
+                  )
+             )",
+        )
+        .bind(community.as_uuid())
+        .bind(&principal.pubkey)
+        .bind(&principal.verified_owner)
+        .bind(principal.require_membership)
+        .bind(principal.owner_admission)
+        .bind(principal.reject_required_nip_fi)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !admitted {
+            return Err(denied());
+        }
+        Ok(tx)
     }
     /// Read policy with current admission. Unset types have no revision.
     pub async fn community_artifact_policy(
@@ -319,16 +332,16 @@ impl Db {
         principal: &CommunityArtifactPrincipal,
         artifact_type: &str,
     ) -> Result<ArtifactTypePolicy> {
-        let mut guard = self
-            .community_artifact_read_guard(community, principal)
+        let mut tx = self
+            .begin_community_artifact_read(community, principal)
             .await?;
         let state: Value =
             sqlx::query_scalar("SELECT artifact_type_policies FROM communities WHERE id=$1")
                 .bind(community.as_uuid())
-                .fetch_one(&mut *guard.tx)
+                .fetch_one(&mut *tx)
                 .await?;
         let policy = policy_value(&state, artifact_type)?;
-        guard.finish().await?;
+        tx.commit().await?;
         Ok(policy)
     }
     /// Exact accepted replay needs admission and tenant binding, never new edit
@@ -346,12 +359,12 @@ impl Db {
         {
             return Err(denied());
         }
-        let mut guard = self
-            .community_artifact_read_guard(community, principal)
+        let mut tx = self
+            .begin_community_artifact_read(community, principal)
             .await?;
         let accepted=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM artifact_revisions WHERE community_id=$1 AND scope='community' AND event_id=$2)")
-            .bind(community.as_uuid()).bind(event.id.as_bytes().as_slice()).fetch_one(&mut *guard.tx).await?;
-        guard.finish().await?;
+            .bind(community.as_uuid()).bind(event.id.as_bytes().as_slice()).fetch_one(&mut *tx).await?;
+        tx.commit().await?;
         Ok(accepted)
     }
     /// Community CAS: admission, policy scope, identity, head check, ledger and
@@ -547,27 +560,25 @@ impl Db {
         if query.scope != ArtifactScope::Community || query.view == ArtifactView::Policy {
             return Err(denied());
         }
-        let mut guard = self
-            .community_artifact_read_guard(community, principal)
+        let mut tx = self
+            .begin_community_artifact_read(community, principal)
             .await?;
         let mut qb = query_builder(community, query.view, &query.tags);
         qb.push(" ORDER BY r.modified_at DESC,r.event_id LIMIT ")
             .push_bind(query.limit)
             .push(" OFFSET ")
             .push_bind(query.offset);
-        let events = rows_to_events(qb.build().fetch_all(&mut *guard.tx).await?)?;
-        guard.finish().await?;
+        let events = rows_to_events(qb.build().fetch_all(&mut *tx).await?)?;
+        tx.commit().await?;
         Ok(events)
     }
     /// Open a community complete-set snapshot on the writer, after live interest.
-    /// Current admission is checked outside it before every enqueue.
     pub async fn open_community_artifact_snapshot(
         &self,
         community: CommunityId,
         principal: &CommunityArtifactPrincipal,
     ) -> Result<CommunityArtifactSnapshot> {
-        // Admission is bounded independently of the 30 s snapshot budget.
-        // A pool with one slot cannot hold a snapshot and recheck admission.
+        // Reserve capacity for other writer-pool operations.
         if self.pool.options().get_max_connections() < 2 {
             return Err(DbError::ArtifactSyncLimit);
         }
@@ -578,22 +589,8 @@ impl Db {
         .await
         .map_err(|_| DbError::ArtifactSyncLimit)?
         .map_err(|_| DbError::ArtifactSyncLimit)?;
-        self.community_artifact_read_guard(community, principal)
-            .await?
-            .finish()
-            .await?;
-        let connection = crate::observability::acquire_writer_until(
-            &self.pool,
-            crate::observability::WriterOperation::SubscriptionHistory,
-            tokio::time::Instant::now() + std::time::Duration::from_secs(2),
-        )
-        .await?;
-        let mut tx = Transaction::begin(connection, None).await?;
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("SET LOCAL statement_timeout='2s'")
-            .execute(&mut *tx)
+        let tx = self
+            .begin_community_artifact_read(community, principal)
             .await?;
         Ok(CommunityArtifactSnapshot {
             _permit: permit,
@@ -670,42 +667,6 @@ impl Db {
         };
         tx.commit().await?;
         Ok(retired)
-    }
-}
-
-impl Db {
-    /// Node-wide idle-sync backstop: check at most 256 distinct principals in
-    /// one writer query. This never reads content and never grants delivery;
-    /// every actual enqueue still takes a current authorization guard.
-    pub async fn community_artifact_admission_batch(
-        &self,
-        community: CommunityId,
-        principals: &[CommunityArtifactPrincipal],
-    ) -> Result<Vec<(bool, bool)>> {
-        if principals.len() > 256 {
-            return Err(DbError::InvalidData("admission batch too large".into()));
-        }
-        let keys: Vec<Vec<u8>> = principals.iter().map(|p| p.pubkey.clone()).collect();
-        let owners: Vec<Vec<u8>> = principals
-            .iter()
-            .map(|p| p.verified_owner.clone().unwrap_or_default())
-            .collect();
-        let require: Vec<bool> = principals.iter().map(|p| p.require_membership).collect();
-        let owner_admission: Vec<bool> = principals.iter().map(|p| p.owner_admission).collect();
-        let connection = crate::observability::acquire_writer_until(
-            &self.pool,
-            crate::observability::WriterOperation::SubscriptionHistory,
-            tokio::time::Instant::now() + std::time::Duration::from_secs(2),
-        )
-        .await?;
-        let mut tx = Transaction::begin(connection, None).await?;
-        sqlx::query("SET LOCAL statement_timeout='2s'")
-            .execute(&mut *tx)
-            .await?;
-        let allowed=sqlx::query_as("SELECT COALESCE((SELECT requires_nip_fi FROM communities WHERE id=$1),true), EXISTS(SELECT 1 FROM communities c WHERE c.id=$1 AND c.deletion_state='active' AND c.archived_at IS NULL) AND (NOT p.roster OR EXISTS(SELECT 1 FROM relay_members m WHERE m.community_id=$1 AND (m.pubkey=encode(p.key,'hex') OR (p.owner_admission AND m.pubkey=encode(p.owner,'hex'))))) AND NOT EXISTS(SELECT 1 FROM community_bans b WHERE b.community_id=$1 AND b.banned AND (b.ban_expires_at IS NULL OR b.ban_expires_at>clock_timestamp()) AND b.pubkey IN (SELECT p.key UNION ALL SELECT p.owner UNION ALL SELECT u.agent_owner_pubkey FROM users u WHERE u.community_id=$1 AND u.pubkey=p.key)) FROM unnest($2::bytea[],$3::bytea[],$4::boolean[],$5::boolean[]) WITH ORDINALITY p(key,owner,roster,owner_admission,ord) ORDER BY p.ord")
-            .bind(community.as_uuid()).bind(keys).bind(owners).bind(require).bind(owner_admission).fetch_all(&mut *tx).await?;
-        tx.commit().await?;
-        Ok(allowed)
     }
 }
 

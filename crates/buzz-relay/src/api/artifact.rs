@@ -100,6 +100,7 @@ async fn execute(
                 .or(caller.artifact_owner)
                 .map(|p| p.to_bytes().to_vec()),
             require_membership: state.config.require_relay_membership,
+            reject_required_nip_fi: false,
         };
         if query.view == buzz_core::artifact::ArtifactView::Policy {
             let artifact_type = buzz_core::artifact::exact_type(&query.tags)

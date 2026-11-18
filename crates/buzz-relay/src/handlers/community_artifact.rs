@@ -32,6 +32,7 @@ pub(crate) fn principal(state: &AppState, auth: &IngestAuth) -> CommunityArtifac
         verified_owner: auth.verified_owner().map(|p| p.to_bytes().to_vec()),
         owner_admission: auth.owner_admission(),
         require_membership: state.config.require_relay_membership,
+        reject_required_nip_fi: false,
     }
 }
 pub(crate) fn storage_error(error: buzz_db::DbError) -> IngestError {

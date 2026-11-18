@@ -1290,9 +1290,6 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     tokio::spawn(buzz_relay::handlers::artifact_sync::watch_link(Arc::clone(
         &state,
     )));
-    tokio::spawn(buzz_relay::handlers::artifact_sync::watch_community_access(
-        Arc::clone(&state),
-    ));
 
     // Multi-node fan-out: deliver events other relay instances published to
     // Redis to local WS subscribers (see `handlers::multinode_fanout`).

@@ -2277,6 +2277,7 @@ impl AppState {
     /// Drop the host's policy/routing snapshot locally and best-effort on peers.
     /// Lease expiry, not notification delivery, protects acceptance consistency.
     pub fn invalidate_community_host(&self, tenant: &TenantContext) {
+        self.artifact_syncs.resync_community(tenant.community());
         self.tenant_host_cache.invalidate(tenant.host());
         self.community_active.invalidate(&tenant.community());
         self.spawn_cache_invalidation(
