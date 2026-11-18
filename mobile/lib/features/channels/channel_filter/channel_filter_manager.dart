@@ -1,7 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
-import 'package:nostr/nostr.dart' as nostr;
+import '../../../shared/crypto/event_signing.dart';
 import '../../../shared/relay/relay.dart';
 import '../channel_sort/channel_sort_manager.dart';
 import 'channel_filter_store.dart';
@@ -20,6 +21,7 @@ class ChannelFilterManager extends ChangeNotifier {
   bool busy = false;
   String? error;
   bool _disposed = false;
+  bool _refreshQueued = false;
   int _createdAt = 0;
 
   ChannelFilterManager({
@@ -62,7 +64,7 @@ class ChannelFilterManager extends ChangeNotifier {
       return ChannelFilterStore.empty();
     }
     final event = candidates.first;
-    nostr.Event.fromJson(jsonEncode(event.toJson()));
+    verifiedNostrEventFromJson(jsonEncode(event.toJson()));
     final decoded = jsonDecode(crypto.decrypt(event.content));
     if (decoded is! Map<String, dynamic>) {
       throw const FormatException('Invalid filter preference');
@@ -77,8 +79,15 @@ class ChannelFilterManager extends ChangeNotifier {
     _notify();
   }
 
+  /// A refresh requested while another read or save is in flight runs after
+  /// it, so a read started on a socket that has since been replaced cannot
+  /// swallow the replacement's refresh.
   Future<void> refresh() async {
-    if (_disposed || busy) return;
+    if (_disposed) return;
+    if (busy) {
+      _refreshQueued = true;
+      return;
+    }
     busy = true;
     _notify();
     try {
@@ -90,8 +99,16 @@ class ChannelFilterManager extends ChangeNotifier {
       ready = false;
       error = 'Could not load filters. Retry to enable changes.';
     } finally {
-      busy = false;
-      _notify();
+      _settle();
+    }
+  }
+
+  void _settle() {
+    busy = false;
+    _notify();
+    if (_refreshQueued && !_disposed) {
+      _refreshQueued = false;
+      unawaited(refresh());
     }
   }
 
@@ -181,8 +198,7 @@ class ChannelFilterManager extends ChangeNotifier {
       error = 'Could not confirm the filter save.';
       rethrow;
     } finally {
-      busy = false;
-      _notify();
+      _settle();
     }
   }
 
