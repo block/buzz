@@ -108,6 +108,29 @@ void main() {
     };
   }
 
+  /// Peers' groups that overfill the unread record once merged.
+  Future<void> overfill() async {
+    for (var peer = 0; peer < 3; peer++) {
+      relay.retained['read-state-unread-v2:peer$peer'] = _readStateEvent(
+        unread: true,
+        keys: keys,
+        crypto: crypto,
+        clientId: 'peer$peer',
+        slot: 'peer$peer',
+        contexts: {
+          for (var index = 0; index < 160; index++)
+            for (final id in ['$peer-$index'.padLeft(36, '0')]) ...{
+              id: clock - 100,
+              'ov_s:$id': clock - 90,
+              'ov_c:$id': 0,
+              'ov_b:$id': clock - 100,
+            },
+        },
+        createdAt: clock - 50,
+      );
+    }
+  }
+
   test('whole-channel mark unread round-trips between devices', () async {
     final phone = await device('phone');
     final desktop = await device('desktop');
@@ -789,28 +812,6 @@ void main() {
       },
     );
 
-    Future<void> overfill() async {
-      for (var peer = 0; peer < 3; peer++) {
-        relay.retained['read-state-unread-v2:peer$peer'] = _readStateEvent(
-          unread: true,
-          keys: keys,
-          crypto: crypto,
-          clientId: 'peer$peer',
-          slot: 'peer$peer',
-          contexts: {
-            for (var index = 0; index < 160; index++)
-              for (final id in ['$peer-$index'.padLeft(36, '0')]) ...{
-                id: clock - 100,
-                'ov_s:$id': clock - 90,
-                'ov_c:$id': 0,
-                'ov_b:$id': clock - 100,
-              },
-          },
-          createdAt: clock - 50,
-        );
-      }
-    }
-
     test(
       'an overfull fallback publishes a dead own group as a tombstone',
       () async {
@@ -1169,6 +1170,174 @@ void main() {
       expect(phone.clearChannelOverride(channel), isFalse);
       expect(phone.failedClears, {channel});
       expect(phone.activeChannelOverrides, {channel});
+    });
+
+    group('a reading clear refused offline', () {
+      late int marked;
+
+      /// A phone restarted offline with [channel] marked: reading to the
+      /// bottom is refused and reported. The relay is back afterwards.
+      Future<ReadStateManager> refused({bool reading = true}) async {
+        final phone = await device('phone');
+        phone.markContextRead(channel, clock - 100);
+        marked = clock;
+        expect(phone.markChannelUnread(channel), isTrue);
+        await phone.flush();
+        relay.offline = true;
+        final restarted = await device('phone');
+        clock += 10;
+        expect(
+          restarted.clearChannelOverride(channel, reading: reading),
+          isFalse,
+        );
+        expect(restarted.failedClears, {channel});
+        expect(restarted.activeChannelOverrides, {channel});
+        relay.offline = false;
+        return restarted;
+      }
+
+      Future<void> expectCleared(ReadStateManager phone) async {
+        expect(phone.activeChannelOverrides, isEmpty);
+        expect(phone.failedClears, isEmpty);
+        expect(phone.syncError, isNull);
+        await phone.flush();
+        expect(ownGroup(phone), {
+          channel: marked - 100,
+          'ov_c:$channel': marked + 10,
+        });
+        final desktop = await device('desktop');
+        expect(desktop.activeChannelOverrides, isEmpty);
+      }
+
+      test('is retried after the next sync read', () async {
+        final phone = await refused();
+        await reconnect(phone);
+        await expectCleared(phone);
+      });
+
+      test('is retried after the next publish read', () async {
+        final phone = await refused();
+        await phone.flush();
+        await expectCleared(phone);
+      });
+
+      test('an explicit clear is not retried', () async {
+        final phone = await refused(reading: false);
+        await reconnect(phone);
+        expect(phone.activeChannelOverrides, {channel});
+      });
+
+      test('keeps a newer mark made elsewhere', () async {
+        final phone = await refused();
+        final desktop = await device('desktop');
+        clock += 10;
+        expect(desktop.markChannelUnread(channel), isTrue);
+        await desktop.flush();
+        await reconnect(phone);
+        expect(phone.activeChannelOverrides, {channel});
+        expect(phone.failedClears, {channel});
+      });
+
+      test('keeps a mark with the same stamp and another baseline', () async {
+        final phone = await refused();
+        relay.retained['${readStateUnreadDTagPrefix}peer'] = _readStateEvent(
+          unread: true,
+          keys: keys,
+          crypto: crypto,
+          clientId: 'peer',
+          slot: 'peer',
+          contexts: {
+            channel: marked - 50,
+            'ov_s:$channel': marked,
+            'ov_c:$channel': 0,
+            'ov_b:$channel': marked - 50,
+          },
+          createdAt: clock - 5,
+        );
+        await reconnect(phone);
+        expect(phone.activeChannelOverrides, {channel});
+        expect(phone.failedClears, {channel});
+      });
+
+      test('drops a mark already cleared elsewhere', () async {
+        final phone = await refused();
+        final desktop = await device('desktop');
+        clock += 10;
+        expect(desktop.clearChannelOverride(channel), isTrue);
+        await desktop.flush();
+        await reconnect(phone);
+        expect(phone.activeChannelOverrides, isEmpty);
+        await phone.flush();
+        // The desktop's clear, not a second one from the phone.
+        expect(ownUnread(phone)['ov_c:$channel'], isNot(greaterThan(clock)));
+        expect(phone.syncError, isNull);
+      });
+
+      test('stays failed when the recovered record is overfull', () async {
+        final phone = await refused();
+        await overfill();
+        await reconnect(phone);
+        expect(phone.activeChannelOverrides, contains(channel));
+        expect(phone.failedClears, {channel});
+        expect(phone.syncError, isNotNull);
+      });
+
+      test('waits for a held-back group to resolve', () async {
+        final phone = await refused();
+        final other = '${channel}b';
+        relay.retained['${readStateUnreadDTagPrefix}peer'] = _readStateEvent(
+          unread: true,
+          keys: keys,
+          crypto: crypto,
+          clientId: 'peer',
+          slot: 'peer',
+          contexts: {
+            other: clock - 100,
+            'ov_s:$other': clock + 700,
+            'ov_c:$other': 0,
+            'ov_b:$other': clock - 100,
+          },
+          createdAt: clock - 10,
+        );
+        await reconnect(phone);
+        expect(phone.activeChannelOverrides, {channel});
+        expect(phone.failedClears, {channel});
+
+        clock += 700;
+        await phone.flush();
+        expect(phone.activeChannelOverrides, {other});
+      });
+
+      test('waits when a newer read failed', () async {
+        final phone = await refused();
+        final gate = Completer<void>();
+        relay.hold = gate.future;
+        final older = phone.flush();
+        await pumpEventQueue();
+        relay.hold = null;
+        relay.offline = true;
+        await reconnect(phone);
+        relay.offline = false;
+        gate.complete();
+        await older;
+        expect(phone.activeChannelOverrides, {channel});
+        expect(phone.failedClears, {channel});
+
+        await reconnect(phone);
+        expect(phone.activeChannelOverrides, isEmpty);
+      });
+
+      test('is dropped with its manager', () async {
+        final phone = await refused();
+        phone.dispose(flushPending: false);
+        await reconnect(phone);
+        final rebuilt = await device('phone');
+        expect(rebuilt.activeChannelOverrides, {channel});
+        expect(
+          relay.retained.values.where(hasValidUnreadStateTags),
+          hasLength(1),
+        );
+      });
     });
 
     for (final (offset, kept) in [
@@ -1573,6 +1742,9 @@ class _MemoryRelay extends RelaySessionNotifier {
   void Function(NostrEvent event)? beforePublish;
   bool offline = false;
 
+  /// Holds each snapshot read started while set, until it completes.
+  Future<void>? hold;
+
   /// Delivers [event] to live subscribers without retaining it.
   void deliver(NostrEvent event) {
     for (final onEvent in List.of(_live)) {
@@ -1590,6 +1762,8 @@ class _MemoryRelay extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     if (offline) throw TimeoutException('offline');
+    final held = hold;
+    if (held != null) await held;
     return retained.values.toList();
   }
 

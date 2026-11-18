@@ -294,6 +294,8 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
   /// bottom of a channel the reader marked unread uses this: it ends the
   /// manual unread but must not read mentions or replies the reader has not
   /// seen.
+  /// A synced clear refused for an incomplete view is retried after the next
+  /// usable sync, if the mark is unchanged.
   /// Returns false when a synced clear failed; [ReadStateState.syncError]
   /// then says why.
   bool clearForcedUnread(String contextId) {
@@ -301,7 +303,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       _refreshForcedState();
       return true;
     }
-    return _manager?.clearChannelOverride(contextId) ?? true;
+    return _manager?.clearChannelOverride(contextId, reading: true) ?? true;
   }
 
   /// Record an explicit follow or unfollow; see [ReadStateManager]. Returns

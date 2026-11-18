@@ -3,6 +3,12 @@ part of 'read_state_manager.dart';
 /// Synced whole-channel override actions and the version-2 unread record
 /// that carries them (NIP-RS, Expiring unread state).
 extension ReadStateOverrides on ReadStateManager {
+  /// The channels whose synced manual unread is live.
+  Set<String> get activeChannelOverrides => {
+    for (final MapEntry(key: channelId, value: register) in _overrides.entries)
+      if (_isLive(channelId, register)) channelId,
+  };
+
   /// Channels whose synced clear failed and still stands.
   Set<String> get failedClears =>
       Set.unmodifiable(_failedClears.intersection(activeChannelOverrides));
@@ -62,10 +68,12 @@ extension ReadStateOverrides on ReadStateManager {
 
   /// Ends a live channel override without moving its frontier: reaching the
   /// bottom of a channel with nothing new to read. Returns false when the
-  /// clear failed and [syncError] says so.
-  bool clearChannelOverride(String channelId) {
+  /// clear failed and [syncError] says so. A [reading] clear refused only
+  /// because the view is incomplete is retried after the next usable
+  /// snapshot, if the register is still the one the reader saw.
+  bool clearChannelOverride(String channelId, {bool reading = false}) {
     if (_disposed) return false;
-    final cleared = _clearChannelOverride(channelId);
+    final cleared = _clearChannelOverride(channelId, reading: reading);
     if (cleared != true) return cleared == null;
     _persistLocalState();
     _onChanged();
@@ -77,11 +85,12 @@ extension ReadStateOverrides on ReadStateManager {
   /// frontier moved. Returns null when no live override needs a clear, and
   /// false, setting [syncError], when no stamp can be allocated or the
   /// record cannot carry the clear.
-  bool? _clearChannelOverride(String channelId) {
+  bool? _clearChannelOverride(String channelId, {bool reading = false}) {
     // Resolve held-back groups first: one may be this channel's.
     final complete = _hasFullState;
     final register = _overrides[channelId];
     if (register == null || !_isLive(channelId, register)) return null;
+    if (reading && !complete) _refusedReadingClears[channelId] = register;
     // An incomplete view refuses the clear, visibly.
     final stamp = complete ? _allocateStamp(register) : null;
     if (stamp != null) {
@@ -96,6 +105,26 @@ extension ReadStateOverrides on ReadStateManager {
     syncError = _standingError;
     _onChanged();
     return false;
+  }
+
+  /// Retries each refused reading clear once the view is complete, after a
+  /// whole snapshot merged. Only a register still live and exactly as the
+  /// reader saw it is cleared: a newer or different mark stays. A failure
+  /// here is reported as any clear's is, and not retried again.
+  void _retryRefusedReadingClears() {
+    if (_disposed || _refusedReadingClears.isEmpty || !_hasFullState) return;
+    final refused = Map.of(_refusedReadingClears);
+    _refusedReadingClears.clear();
+    var cleared = false;
+    for (final MapEntry(key: channelId, value: seen) in refused.entries) {
+      if (_overrides[channelId] != seen) continue;
+      if (_clearChannelOverride(channelId) == true) cleared = true;
+    }
+    if (!cleared) return;
+    syncError = _standingError;
+    _persistLocalState();
+    _onChanged();
+    _schedulePublish();
   }
 
   /// Merges received version-2 groups. An expired replay is dropped before

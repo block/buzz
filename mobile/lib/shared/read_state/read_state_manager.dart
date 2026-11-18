@@ -169,6 +169,10 @@ class ReadStateManager {
   // Channels whose synced clear failed. Their error outlives unrelated
   // successful syncs until the clear lands or the override ends.
   final Set<String> _failedClears = {};
+  // Reading clears refused for an incomplete view, each with the register
+  // the reader saw. Retried once after the next usable snapshot; never
+  // journaled, so a restart leaves the mark live and reported.
+  final Map<String, OverrideRegister> _refusedReadingClears = {};
 
   Object? get _standingError {
     _failedClears.retainAll(activeChannelOverrides);
@@ -339,12 +343,6 @@ class ReadStateManager {
     }
   }
 
-  /// The channels whose synced manual unread is live.
-  Set<String> get activeChannelOverrides => {
-    for (final MapEntry(key: channelId, value: register) in _overrides.entries)
-      if (_isLive(channelId, register)) channelId,
-  };
-
   /// Whether the last full-state load succeeded, as override actions need.
   /// Deferred future groups leave it incomplete until they resolve.
   bool get _hasFullState => _lastSnapshotSucceeded && _resolveDeferred();
@@ -496,6 +494,7 @@ class ReadStateManager {
       _mergeEvents(events);
       if (newest) _dropAbsentPeerFollows(heads, _capacitySnapshot = events);
       _followsLoaded = true;
+      _retryRefusedReadingClears();
       await _persistLocalState();
       _followsRecovered = true;
       _onChanged();
@@ -779,6 +778,7 @@ class ReadStateManager {
         _mergeEvents(events);
         if (newest) _dropAbsentPeerFollows(heads, _capacitySnapshot = events);
         _followsLoaded = recovered = true;
+        _retryRefusedReadingClears();
         // Unchanged slots publish nothing, so no echo would announce marks
         // this snapshot brought in.
         _onChanged();
