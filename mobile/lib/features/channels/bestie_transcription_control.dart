@@ -107,7 +107,11 @@ class BestieTranscriptionControl extends HookConsumerWidget {
         ?stopSpeech,
         if (levels.value != null) levels.value!.cancel(),
       ]);
-      if (current(cancellation) && phase.value != 'Sending') {
+      // A released recording still being saved keeps Home busy until its
+      // retention settles, so no new hold can race it for the slot.
+      if (current(cancellation) &&
+          phase.value != 'Sending' &&
+          phase.value != 'Saving') {
         phase.value = '';
       }
     }
@@ -166,13 +170,18 @@ class BestieTranscriptionControl extends HookConsumerWidget {
         // The slot is occupied even if a route push or backgrounding cancelled
         // this release, so keep it visible for Retry and block new captures.
         draft.value = saved;
-        if (!current(token)) return;
+        if (!current(token)) {
+          phase.value = '';
+          return;
+        }
         unawaited(HapticFeedback.mediumImpact());
         await process(saved, token);
       } catch (failure) {
-        if (current(token)) {
+        // Reconcile with the slot even after a cancel: a save that failed
+        // after journaling still left a draft to retry or discard.
+        if (alive.value && context.mounted) {
           await restore();
-          report(failure);
+          if (current(token)) report(failure);
         }
       } finally {
         await capture.dispose();

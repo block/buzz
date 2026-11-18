@@ -29,6 +29,7 @@ class _Store extends BestieTranscriptStore {
   _Store() : super('test', () async => Directory.systemTemp);
   BestieTranscriptDraft? saved;
   Completer<void>? retention;
+  Object? retentionFailure;
   @override
   Future<BestieTranscriptDraft?> read() async => saved;
   @override
@@ -38,11 +39,13 @@ class _Store extends BestieTranscriptStore {
   ) async {
     await recording;
     await retention?.future;
-    return saved = BestieTranscriptDraft(
+    saved = BestieTranscriptDraft(
       id: 'one',
       recipient: recipient,
       audioPath: '/saved.wav',
     );
+    if (retentionFailure case final failure?) throw failure;
+    return saved!;
   }
 
   @override
@@ -327,6 +330,7 @@ void main() {
     WidgetTester tester, {
     required Future<void> Function() interrupt,
     required Future<void> Function() resume,
+    bool failAfterJournal = false,
   }) async {
     reset();
     await mount(tester);
@@ -338,9 +342,26 @@ void main() {
     await interrupt();
     // Let cancellation's stream teardown settle outside the fake clock.
     await tester.runAsync(() => Future<void>(() {}));
-    store.retention!.complete();
-    await tester.pumpAndSettle();
     await resume();
+    await tester.pump();
+    // The slow save still owns the slot, so a second hold cannot start.
+    final second = await tester.startGesture(
+      tester.getCenter(find.byType(BestieTranscriptionSurface)),
+    );
+    await tester.pump(const Duration(milliseconds: 600));
+    await second.up();
+    await tester.pump();
+    expect(recorder.stops, 1);
+    expect(
+      tester
+          .widget<BestieTranscriptionSurface>(
+            find.byType(BestieTranscriptionSurface),
+          )
+          .finalizing,
+      isTrue,
+    );
+    if (failAfterJournal) store.retentionFailure = StateError('disk');
+    store.retention!.complete();
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
     final surface = tester.widget<BestieTranscriptionSurface>(
@@ -360,6 +381,24 @@ void main() {
     (tester) async {
       await expectRetainedAfterInterruption(
         tester,
+        interrupt: () async {
+          tester.binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.paused,
+          );
+          await tester.pump();
+        },
+        resume: () async => tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.resumed,
+        ),
+      );
+    },
+  );
+  testWidgets(
+    'a save that fails after journaling during a pause still offers Retry',
+    (tester) async {
+      await expectRetainedAfterInterruption(
+        tester,
+        failAfterJournal: true,
         interrupt: () async {
           tester.binding.handleAppLifecycleStateChanged(
             AppLifecycleState.paused,
