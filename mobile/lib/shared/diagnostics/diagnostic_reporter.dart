@@ -22,6 +22,24 @@ abstract interface class DiagnosticReporter {
 
   /// Attributes later reports and counts to [pubkey], or to no one.
   void setMember(String? pubkey);
+
+  /// Whether this build has a reporting destination. Only then does Settings
+  /// offer the checks below.
+  bool get reporting;
+
+  /// Sends a [DiagnosticTestError], to check a build's reporting end to end.
+  void sendTestReport();
+
+  /// Crashes the app in native code, to check native crash reports.
+  void crashForTest();
+}
+
+/// The error a test report carries, so it is easy to tell apart.
+class DiagnosticTestError implements Exception {
+  const DiagnosticTestError();
+
+  @override
+  String toString() => 'DiagnosticTestError';
 }
 
 /// Where an explicit error report comes from.
@@ -33,6 +51,7 @@ enum DiagnosticOperation {
   pushGatewayResponse,
   storedData,
   eventSubscriber,
+  testReport,
 }
 
 /// The operation a networking event belongs to.
@@ -99,6 +118,15 @@ class NoopDiagnosticReporter implements DiagnosticReporter {
 
   @override
   void setMember(String? pubkey) {}
+
+  @override
+  bool get reporting => false;
+
+  @override
+  void sendTestReport() {}
+
+  @override
+  void crashForTest() {}
 }
 
 /// The reporter chosen at startup. The root scope overrides it; tests

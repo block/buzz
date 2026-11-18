@@ -206,6 +206,17 @@ void main() {
       expect(transport.events.single['user']['id'], 'a' * 64);
     });
 
+    test('a test report is a test error from the test operation', () async {
+      SentryDiagnosticReporter(hub: hub).sendTestReport();
+      await transport.first();
+
+      final sent = transport.events.single;
+      final exception = (sent['exception']['values'] as List).last as Map;
+      expect(exception['type'], 'DiagnosticTestError');
+      expect(exception['stacktrace'], isNotNull);
+      expect(sent['tags']['operation'], 'testReport');
+    });
+
     testWidgets('sends only the allowed contexts', (tester) async {
       tester.platformDispatcher.accessibilityFeaturesTestValue =
           const FakeAccessibilityFeatures(accessibleNavigation: true);
