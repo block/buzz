@@ -1,18 +1,18 @@
 NIP-AR
 ======
 
-Channel Artifacts
------------------
+Channel and Community Artifacts
+-------------------------------
 
 `draft` `optional` `relay`
 
-Defines `kind:45010` for editable records called **artifacts**. Each artifact has one home channel and may be attached to a thread. Its home determines who can read it. Any number of artifacts, including of the same type, may share a channel or thread.
+Defines `kind:45010` for editable records called **artifacts**. A channel artifact has one home channel and may be attached to a thread. Its home determines who can read it. The optional [community scope](#community-scoped-artifacts-proposed-extension) has its own audience and no channel home. Any number of artifacts, including of the same type, may share a channel or thread.
 
 The relay manages identity, access, and revisions. Clients define the content types, such as `buzz.task` or `buzz.project`.
 
 ## Event format
 
-Each event contains a complete snapshot. For example, a task created directly in a channel (standard signing fields omitted):
+Each event contains a complete snapshot. This section defines the channel envelope. This task is created in a channel, with the standard signing fields omitted.
 
 ```json
 {
@@ -52,7 +52,7 @@ Clients place fields needed for filtering in client-defined tags. The relay matc
 
 ## Identity and edits
 
-An artifact is identified by `(community, d)`, independently of its author or home. `d` and `type` are immutable. Kind 45010 is a regular stored event, not a NIP-01 addressable event. It falls in Buzz's forum and social kind range (45000–45999) but is not a forum post and follows none of the forum rules.
+A channel artifact is identified by `(community, d)` within the channel identity space, independently of its author or home. `d` and `type` are immutable. Kind 45010 is a regular stored event, not a NIP-01 addressable event. It falls in Buzz's forum and social kind range (45000–45999) but is not a forum post and follows none of the forum rules.
 
 Creation requires an unused `d`, `op=create`, and no `prev`. Every later revision MUST name the current accepted event in `prev`. The relay checks authorization and advances the current revision atomically: two competing edits cannot both succeed. Timestamps do not choose the winner.
 
@@ -62,7 +62,7 @@ A `create` whose `d` is already in use fails. When the sender cannot read the ex
 
 On creation or when changed from the previous accepted revision, `root` MUST identify an existing, undeleted conversation anchor in `h`. Later loss of that anchor does not prevent edits. Replies belong to that conversation, not to an artifact revision.
 
-## Access
+## Channel access
 
 Channel read permission governs every artifact read, including lookups, history, search, previews, counts, and live updates. Threads inherit their channel's audience. Membership and visibility changes take effect on subsequent reads and deliveries.
 
@@ -236,6 +236,69 @@ Relays advertise `sync` and `head` only when every backend that can serve the co
 Clients validate content before interpreting it as a known type. Unknown types or malformed content render a safe fallback using the title, type, and home link. Editors MUST preserve unfamiliar fields and annotation tags or decline the edit. References may be unavailable or cyclic; clients must handle them safely without assuming relay validation.
 
 Artifact text is untrusted. A type name, relationship tag, or payload cannot authorize a privileged action. Moving, deleting, or revoking access cannot erase copies already downloaded.
+
+## Community-scoped artifacts (proposed extension)
+
+### Envelope and identity
+
+A relay advertising `artifacts.community_scope.version = 1` accepts a second form of kind 45010. A community artifact uses `["ar","1"]`, `["community","<community UUID>"]` and the usual `d`, `type`, `title`, `op` and `prev` tags. It MUST omit `h` and `root`. A channel artifact retains its existing envelope and MUST omit the new `community` tag. Reject a missing, mixed or repeated scope. The signed community UUID MUST equal the tenant resolved by the connection or HTTP request, including on retries. Clients obtain this stable UUID from the serving relay's `artifacts.community_scope.community_id` in NIP-11. Two hostnames that serve the same community advertise the same ID. The NIP-11 `artifacts` object advertises the scope:
+
+```json
+"community_scope": {"version": 1, "community_id": "<community UUID>", "max_policies": 256}
+```
+
+`max_policies` is the bound on stored type policies; the value shown is an example.
+
+Both scopes reuse the existing head and revision ledger. The identity in a community is `(community, scope class, d)`. Every channel remains in the same channel identity space, so moving a channel artifact preserves its identity. An artifact cannot move between scope classes. Reject `op=move` for a community artifact. In both scopes, `type` is immutable, and a revision naming an identity in the wrong scope answers like an unavailable head.
+
+For one record per canonical key in a community type, clients MAY derive:
+
+```
+d = UUIDv8(first 16 bytes of SHA-256(
+    "nip-ar-community-artifact\0" + community_uuid + "\0" + type + "\0" + key))
+```
+
+The inputs are UTF-8. The UUID is lowercase and hyphenated. The type's client contract defines the canonical key, including case and Unicode normalization. Apply the version and variant bits as in the channel derivation. The distinct prefix separates the two derivations. Channel authors can choose arbitrary UUIDs, so the relay MUST also separate the two identity spaces in storage. The same UUID may exist in each scope and cannot reserve a record in the other. Within a scope, the first accepted create reserves the identity. The relay does not interpret names or content, and does not require the key or verify its derivation.
+
+### Admission and authorization
+
+| Operation | Required permission |
+| --- | --- |
+| Read, count, policy lookup, history, head, or sync | Current effective community admission and `messages:read`. |
+| Create, update, delete, or restore | Current effective community admission, `messages:write` and the current write policy for the type. A community timeout blocks the write. |
+| Set a type's write policy | A direct community owner or admin acting under `admin:users`. Apply the relay's administrative ban and timeout rules. |
+
+Apply the same authenticated transport, event signer, expiry, size, quota and moderation rules on HTTP and WebSocket. A channel-restricted credential cannot use community scope, even if it covers every channel. Unauthenticated reads and generic channel permissions confer no community access. Treat lookup failure as denial or an error, with no artifact data. On an open relay, any authenticated principal admitted by current relay rules qualifies under `everyone`, even with no roster row. On a roster relay, the principal needs current effective membership, direct or through verified delegation admitted by the relay. Delegation does not transfer an owner's or admin's role. Apply the principal's and applicable owner's community restrictions. A ban blocks reads and writes, including replay. A timeout leaves reads available. Channel membership, archive, posting restrictions and channel admin roles do not grant or restrict these operations.
+
+### Type write policy
+
+The policy is tenant-scoped and keyed by the exact canonical artifact `type`. Missing means `everyone` with no prior policy revision. `admins` admits only an author who personally holds the community owner or admin role. The default on a rosterless open community is still `everyone`. Setting policy requires a configured community owner or admin.
+
+Use the signed relay-admin command `SET_ARTIFACT_TYPE_POLICY` (proposed kind 9034, pending allocation). Require `community`, `type`, `policy` (`everyone` or `admins`), and `prev` (the current policy command ID or `0` for no prior command). Omit `h` and use empty content. Apply the relay-admin freshness and signer checks. Return a conflict for stale `prev`; an exact retry of the current accepted command is a no-op if the requester is still authorized. A superseded policy command may conflict on retry. Read current policy before retrying a conflicted command. The relay records the accepted admin action in its audit trail. The command is neither a kind 45010 revision nor an event in an ordinary subscription. A client with artifact-signing access alone cannot sign this command through that capability.
+
+A signed HTTP `/query` policy lookup takes one exact type. For example, `{"artifact":"policy","scope":"community","#type":["example.settings"]}`. It returns `{"policy":"everyone","revision":null}` for an unset type, or the current policy and accepted command ID. The relay advertises and enforces a bound on stored policy entries. Switching a configured type back to `everyone` retains its revision.
+
+A committed policy change governs new revisions, including updates, deletes and restores of existing records. It neither rewrites records nor changes their audience. A write and a policy change MUST be serialized so their admission and commit order agree. Take the same policy lock before the artifact's identity lock, including if the type has never had a policy. Recheck the write policy in the transaction. An older pending write that still qualifies must still satisfy the head compare-and-set. An exact previously accepted artifact replay by the same signer, with current community read admission and an unrestricted `messages:write` credential, returns only acknowledgement. It does not re-evaluate the edit policy, timeout or freshness, and it does not write or publish again. A ban still refuses the replay. Check current community admission and the signed community before consulting receipts.
+
+### Reading and syncing
+
+Select the community scope explicitly on signed HTTP views `current`, `head` and `history`. For example:
+
+```json
+["REQ", "s1", {"artifact":"current","scope":"community","#type":["example.settings"]}]
+```
+
+This sync selects one exact type and can use the existing exact tag predicates. `#h` is forbidden, and `head` still requires `#d`. Apply admission and scope before any filtering, counting or paging. A legacy filter still sees only channel artifacts. Generic event reads, search, counts, direct ID fetches and ordinary live fan-out MUST exclude community artifact payloads. Route authorized reads through the explicit artifact views. HTTP incremental tokens and deltas remain channel-only in this version. Reject attempts to apply them to community scope.
+
+Use the same snapshot, buffer bounds, `EOSE` and head sequencing as channel sync. Confirm live interest in the authenticated tenant before opening the snapshot. Only pass change signals to sync, and re-read authorized heads before delivery. A tag or deletion transition follows the existing before-and-after match rule. There is no kind 45011 move removal for community scope. Recheck current access outside the old snapshot before sending pages, `EOSE` and live heads. An authorization change invalidating the sync MUST close it with `CLOSED "resync: ..."` or disconnect the session if that is how the relay revokes access. This includes changes in direct or delegated membership, community admission mode, bans, and credential revocation. End the sync on a failed recheck. A failed or revoked initial read cannot send `EOSE`. After loss of access, the client discards the active set for that community; after re-admission it starts with a fresh complete snapshot. Follow existing sync rules for loss of pub/sub, output and redaction signals. Changing an edit policy alone changes no content or read access.
+
+### Delete and moderation
+
+A community soft delete reserves its `d` under the same rules as a channel soft delete. The authorized way to recreate a canonical key is to read its deletion head and send `restore` with that ID in `prev`. A rename to a different key is a create and delete with separate commits. Existing references still address the old identity. A kind-5 deletion cannot target a community artifact revision.
+
+For community moderation, use a community-bound kind 9005 command with a single target revision `e` and no `h`. Verify that the target is a community-scoped kind 45010 revision in this tenant. Require the existing moderation write scope and direct owner or admin authority, independent of who can edit its type. Redact through the existing moderation path and retain the accepted revision ID. Redaction of a current head ends any affected sync with resync. This command does not emit a channel removal or update chat counters. Deleting the community itself purges both scopes, their acceptance ledgers and the type policies.
+
+A relay MUST enable community writes and advertise the capability only after all backends that can serve the community enforce the community audience on queries, lookups, moderation and delivery.
 
 ## Incremental reads
 
