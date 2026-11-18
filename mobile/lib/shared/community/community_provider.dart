@@ -13,6 +13,7 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../auth/auth_provider.dart';
 import '../channels/channel_list_snapshot.dart';
+import '../diagnostics/diagnostic_reporter.dart';
 import '../hosted/community_entry_requirements.dart';
 import '../profile/profile_snapshot.dart';
 import '../push/dev_push_lease.dart';
@@ -394,11 +395,13 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         final remaining = state.value ?? [];
         if (remaining.isNotEmpty) {
           await storage.saveActiveId(remaining.first.id);
+          _reportAs(remaining.first);
           // Reassign list state so activeCommunityProvider picks up the new ID.
           state = AsyncData([...remaining]);
           ref.invalidate(authProvider);
         } else {
           await storage.clearActiveId();
+          _reportAs(null);
           // Invalidate auth so it re-evaluates against the now-empty storage
           // and transitions to unauthenticated.
           ref.invalidate(authProvider);
@@ -509,6 +512,13 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     }
   }
 
+  /// Names [community]'s member on reports from now on. The providers that
+  /// derive the member from the active community settle a frame later, and a
+  /// report raised in between would name the previous member.
+  void _reportAs(Community? community) => ref
+      .read(diagnosticReporterProvider)
+      .setMember(pubkeyFromNsec(community?.nsec));
+
   Future<void> switchCommunity(String id) {
     return ref.read(communityTransitionProvider).runExclusive(() async {
       final storage = ref.read(communityStorageProvider);
@@ -516,6 +526,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       if (activeId == id) return;
       await ref.read(communityTransitionProvider).run();
       await storage.saveActiveId(id);
+      _reportAs(state.value?.where((c) => c.id == id).firstOrNull);
       // Reassign list state to trigger activeCommunityProvider (which watches
       // communityListProvider.future) to rebuild and pick up the new active ID.
       // We can't use ref.invalidate(activeCommunityProvider) here because that
