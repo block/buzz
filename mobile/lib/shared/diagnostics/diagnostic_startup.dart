@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 import 'package:uuid/uuid.dart';
@@ -48,10 +49,10 @@ const _installIdFile = 'diagnostics_install_id';
 /// A random identifier for this installation, so reports from one device can
 /// be matched up across sign-ins and sign-outs. Created on first use and kept
 /// in a file that device backups and transfers leave behind, so a phone
-/// restored from another gets its own: Android's files directory, excluded
-/// by the backup rules, and iOS's caches directory, which is never backed
-/// up. Null if storage fails, since reporting must never stop the app from
-/// starting.
+/// restored from another gets its own: on Android in the files directory,
+/// excluded by the backup rules, and on iOS in an Application Support folder
+/// the app marks as excluded from backup. Null if storage fails, since
+/// reporting must never stop the app from starting.
 Future<String?> diagnosticInstallId({
   Future<Directory> Function()? directory,
 }) async {
@@ -72,9 +73,14 @@ Future<String?> diagnosticInstallId({
   }
 }
 
-Future<Directory> _installIdDirectory() => Platform.isIOS
-    ? getApplicationCacheDirectory()
-    : getApplicationSupportDirectory();
+Future<Directory> _installIdDirectory() async {
+  if (!Platform.isIOS) return getApplicationSupportDirectory();
+  final path = await const MethodChannel(
+    'buzz/diagnostics',
+  ).invokeMethod<String>('installIdDirectory');
+  if (path == null) throw StateError('no install ID directory');
+  return Directory(path);
+}
 
 bool _isUsable(String destination) {
   if (destination.isEmpty) return false;
