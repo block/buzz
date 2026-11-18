@@ -91,10 +91,25 @@ class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
     );
   }
 
-  void createSection(String name) => _manager?.createSection(name);
+  /// Creates a section with an optional icon and initial channel.
+  void createSection(String name, {String? icon, String? channelId}) =>
+      _manager?.createSection(name, icon: icon, channelId: channelId);
 
   void renameSection(String sectionId, String newName) =>
       _manager?.renameSection(sectionId, newName);
+
+  /// Changes only the fields edited by the caller.
+  void updateSection(
+    String sectionId, {
+    String? name,
+    String? icon,
+    bool clearIcon = false,
+  }) => _manager?.updateSection(
+    sectionId,
+    name: name,
+    icon: icon,
+    clearIcon: clearIcon,
+  );
 
   void deleteSection(String sectionId) => _manager?.deleteSection(sectionId);
 

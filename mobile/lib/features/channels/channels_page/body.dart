@@ -415,19 +415,20 @@ class _SliverChannelsList extends HookConsumerWidget {
                 isLast: userSections.last.id == section.id,
                 onToggle: () => toggleSection(section.id),
                 onRename: () async {
-                  final name = await showBuzzDialog<String>(
-                    context: context,
-                    builder: (_) => _SectionNameDialog(
-                      title: 'Rename Section',
-                      confirmLabel: 'Rename',
-                      initialValue: section.name,
-                    ),
+                  final edit = await showChannelSectionDialog(
+                    context,
+                    section: section,
                   );
-                  if (name != null && name.isNotEmpty) {
-                    ref
-                        .read(channelSectionsProvider.notifier)
-                        .renameSection(section.id, name);
-                  }
+                  if (edit == null || !context.mounted) return;
+                  final iconChanged = edit.icon != section.icon;
+                  ref
+                      .read(channelSectionsProvider.notifier)
+                      .updateSection(
+                        section.id,
+                        name: edit.name == section.name ? null : edit.name,
+                        icon: iconChanged ? edit.icon : null,
+                        clearIcon: iconChanged && edit.icon == null,
+                      );
                 },
                 onDelete: () async {
                   final confirmed = await showBuzzDialog<bool>(

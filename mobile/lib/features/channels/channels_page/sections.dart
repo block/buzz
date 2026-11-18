@@ -135,6 +135,7 @@ class _CustomSectionHeader extends StatelessWidget {
             Expanded(
               child: _SectionLabel(
                 label: section.name,
+                icon: section.icon,
                 expanded: expanded,
                 color: sectionColor,
               ),
@@ -289,45 +290,6 @@ class _SectionMenuItemContent extends StatelessWidget {
             style: color == null ? null : TextStyle(color: color),
           ),
         ),
-      ],
-    );
-  }
-}
-
-class _SectionNameDialog extends HookWidget {
-  final String title;
-  final String confirmLabel;
-  final String initialValue;
-
-  const _SectionNameDialog({
-    required this.title,
-    required this.confirmLabel,
-    this.initialValue = '',
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final controller = useTextEditingController(text: initialValue);
-
-    void confirm() {
-      final name = controller.text.trim();
-      if (name.isNotEmpty) Navigator.of(context).pop(name);
-    }
-
-    return AlertDialog(
-      title: Text(title),
-      content: TextField(
-        controller: controller,
-        autofocus: true,
-        decoration: const InputDecoration(labelText: 'Name'),
-        onSubmitted: (_) => confirm(),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        TextButton(onPressed: confirm, child: Text(confirmLabel)),
       ],
     );
   }
@@ -585,11 +547,13 @@ class _SectionHeader extends StatelessWidget {
 class _SectionLabel extends StatelessWidget {
   const _SectionLabel({
     required this.label,
+    this.icon,
     required this.expanded,
     required this.color,
   });
 
   final String label;
+  final String? icon;
   final bool expanded;
   final Color color;
 
@@ -598,6 +562,11 @@ class _SectionLabel extends StatelessWidget {
     padding: const EdgeInsets.only(top: Grid.xxs),
     child: Row(
       children: [
+        if (icon != null)
+          ChannelSectionEmoji(
+            value: icon,
+            padding: const EdgeInsetsDirectional.only(end: Grid.half),
+          ),
         Flexible(
           child: Text(
             label,
