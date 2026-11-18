@@ -19,7 +19,6 @@ class _CustomChannelSection extends StatelessWidget {
   final ChannelSortMode sortMode;
   final ValueChanged<ChannelSortMode> onSortModeChange;
   final Future<void> Function(Channel channel) onSelectChannel;
-  final void Function(Channel channel) onMarkChannelRead;
 
   const _CustomChannelSection({
     super.key,
@@ -41,7 +40,6 @@ class _CustomChannelSection extends StatelessWidget {
     required this.sortMode,
     required this.onSortModeChange,
     required this.onSelectChannel,
-    required this.onMarkChannelRead,
   });
 
   @override
@@ -74,7 +72,6 @@ class _CustomChannelSection extends StatelessWidget {
           isMuted: mutedChannelIds.contains(channel.id),
           currentPubkey: currentPubkey,
           onTap: () => onSelectChannel(channel),
-          onMarkRead: () => onMarkChannelRead(channel),
           sectionId: section.id,
         ),
       ),
@@ -342,7 +339,6 @@ class _ChannelSection extends StatelessWidget {
           isMuted: mutedChannelIds.contains(channel.id),
           currentPubkey: currentPubkey,
           onTap: () => onSelectChannel(channel),
-          onMarkRead: null,
           sectionId: null,
         ),
       ),

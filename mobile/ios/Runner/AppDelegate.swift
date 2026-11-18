@@ -36,6 +36,7 @@ import os.log
   private var communityKeyboardObserver: NSObjectProtocol?
   private var hapticsChannel: FlutterMethodChannel?
   private var appGroupChannel: FlutterMethodChannel?
+  private var diagnosticsChannel: FlutterMethodChannel?
   private var shareSuggestions: ShareSuggestions?
   private var qrScannerChannel: FlutterMethodChannel?
   private var inlinePhotoPickerSupportChannel: FlutterMethodChannel?
@@ -172,6 +173,17 @@ import os.log
       default:
         result(FlutterMethodNotImplemented)
       }
+    }
+    diagnosticsChannel = FlutterMethodChannel(
+      name: "buzz/diagnostics",
+      binaryMessenger: messenger
+    )
+    diagnosticsChannel?.setMethodCallHandler { call, result in
+      guard call.method == "installIdDirectory" else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      result(Self.diagnosticsInstallIdDirectory())
     }
     hapticsChannel = FlutterMethodChannel(
       name: "buzz/haptics",
@@ -485,6 +497,27 @@ import os.log
     "status": "noSignal",
     "ageUpper": NSNull(),
   ]
+
+  /// Where diagnostic reporting keeps this installation's ID: Application
+  /// Support, which the system never purges, excluded from backups so a
+  /// phone restored from another gets its own ID. Nil if it can't be made.
+  private static func diagnosticsInstallIdDirectory() -> String? {
+    guard
+      var directory = FileManager.default.urls(
+        for: .applicationSupportDirectory, in: .userDomainMask
+      ).first?.appendingPathComponent("Diagnostics", isDirectory: true)
+    else { return nil }
+    do {
+      try FileManager.default.createDirectory(
+        at: directory, withIntermediateDirectories: true)
+      var values = URLResourceValues()
+      values.isExcludedFromBackup = true
+      try directory.setResourceValues(values)
+      return directory.path
+    } catch {
+      return nil
+    }
+  }
 
   private static func handleQrScannerMethodCall(
     _ call: FlutterMethodCall,
