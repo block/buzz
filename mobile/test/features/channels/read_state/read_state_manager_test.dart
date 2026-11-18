@@ -979,6 +979,102 @@ void main() {
     });
   });
 
+  ReadStateManager recoveryManager(
+    FakeAsync async,
+    _FakeRelaySession session,
+    SignedEventRelay relay,
+  ) {
+    SharedPreferences.setMockInitialValues({});
+    late SharedPreferences prefs;
+    SharedPreferences.getInstance().then((value) => prefs = value);
+    async.flushMicrotasks();
+    final keys = nostr.Keys.generate();
+    final manager = ReadStateManager(
+      pubkey: keys.public,
+      relayUrl: _relayUrl,
+      prefs: prefs,
+      crypto: ReadStateCrypto.tryCreate(nsec: keys.nsec, pubkey: keys.public)!,
+      relaySession: session,
+      signedEventRelay: relay,
+      remoteEnabled: true,
+      onChanged: () {},
+      now: () => 2000,
+    );
+    manager.initialize();
+    async.flushMicrotasks();
+    return manager;
+  }
+
+  test('a read that recovers on the same socket sends the marks the retry '
+      'would have', () {
+    fakeAsync((async) {
+      final session = _FakeRelaySession();
+      final relay = _FakeSignedEventRelay();
+      final manager = recoveryManager(async, session, relay);
+      manager.markContextRead('room', 1990);
+      session.failNextFetch = true;
+      async.elapse(const Duration(seconds: 5));
+      expect(manager.syncError, isNotNull);
+
+      // Before the backoff fires, the live subscription is ready again and
+      // its read succeeds: that read clears the notice and hands off the mark.
+      session.statusListeners.last(RelaySubscriptionStatus.ready);
+      async.flushMicrotasks();
+      expect(manager.syncError, isNull);
+      expect(relay.submitCount, 0);
+      async.elapse(const Duration(seconds: 5));
+      expect(relay.submitCount, 1);
+      expect(manager.syncError, isNull);
+      manager.dispose(flushPending: false);
+    });
+  });
+
+  test('a failed read has one recovery owner, even with a mark waiting', () {
+    fakeAsync((async) {
+      final session = _FakeRelaySession()..failNextFetch = true;
+      final relay = _FakeSignedEventRelay();
+      final manager = recoveryManager(async, session, relay);
+      expect(session.fetchCount, 1);
+      manager.markContextRead('room', 1990);
+      // The backoff's read and the mark's publish delay both end at 5 s.
+      final gate = Completer<void>();
+      session.fetchGate = gate.future;
+      async.elapse(const Duration(seconds: 5));
+      expect(session.fetchCount, 2);
+      async.elapse(const Duration(seconds: 4));
+      expect(session.fetchCount, 2);
+      gate.complete();
+      session.fetchGate = null;
+      async.flushMicrotasks();
+      expect(manager.syncError, isNull);
+      // Recovered: the mark's publish reads once more for its own write.
+      async.elapse(const Duration(seconds: 5));
+      expect(relay.submitCount, 1);
+      expect(session.fetchCount, 3);
+      manager.dispose(flushPending: false);
+    });
+  });
+
+  test('an older send cannot clear a newer read failure', () {
+    fakeAsync((async) {
+      final session = _FakeRelaySession();
+      final relay = _ParkedSignedEventRelay(failFirst: false);
+      final manager = recoveryManager(async, session, relay);
+      manager.markContextRead('room', 1990);
+      async.elapse(const Duration(seconds: 5));
+      expect(relay.contents, hasLength(1));
+      session.failNextFetch = true;
+      session.statusListeners.last(RelaySubscriptionStatus.ready);
+      async.flushMicrotasks();
+      final failure = manager.syncError;
+      expect(failure, isNotNull);
+      relay.release();
+      async.flushMicrotasks();
+      expect(manager.syncError, same(failure));
+      manager.dispose(flushPending: false);
+    });
+  });
+
   test('a failed snapshot retries on a backoff timer', () {
     fakeAsync((async) {
       SharedPreferences.setMockInitialValues({});
@@ -1611,7 +1707,7 @@ void main() {
   );
 
   test(
-    'an older sync snapshot finishing late keeps a newer failed publish read\'s retry',
+    'a publish waits for a slow sync snapshot, and its failed read keeps its retry',
     () async {
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
@@ -1644,7 +1740,7 @@ void main() {
         async.flushMicrotasks();
         expect(relay.fetchCount, 2);
 
-        // A mark's publish starts a newer snapshot, which fails.
+        // A mark's publish joins that read rather than starting another.
         relay.fetchGate = null;
         relay.failNextFetch = true;
         manager.markContextRead(
@@ -1652,17 +1748,18 @@ void main() {
           DateTime.now().millisecondsSinceEpoch ~/ 1000,
         );
         async.elapse(const Duration(seconds: 5));
-        expect(relay.fetchCount, 3);
+        expect(relay.fetchCount, 2);
+
+        // That read then fails. The publish leaves it to the backoff, which
+        // recovers and sends the mark.
+        slow.complete();
+        async.flushMicrotasks();
+        expect(relay.fetchCount, 2);
         expect(manager.syncError, isNotNull);
         expect(signed.submitCount, 0);
 
-        // The older snapshot then succeeds. It must not cancel the newer
-        // failure's backoff.
-        slow.complete();
-        async.flushMicrotasks();
-
         async.elapse(const Duration(minutes: 1));
-        expect(relay.fetchCount, greaterThan(3));
+        expect(relay.fetchCount, greaterThan(2));
         expect(signed.submitCount, 1);
         expect(manager.syncError, isNull);
         manager.dispose(flushPending: false);

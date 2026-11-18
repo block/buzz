@@ -174,6 +174,9 @@ class ReadStateManager {
   // Whether the newest snapshot read succeeded. A publish that skips its own
   // snapshot clears [syncError] only on this evidence.
   bool _lastSnapshotSucceeded = false;
+  // The error a failed snapshot read set: a later successful read clears
+  // only this one, not a publish or capacity error.
+  Object? _snapshotError;
   // Snapshot reads numbered in start order. Only a read newer than every
   // settled one decides [_lastSnapshotSucceeded], so an older read finishing
   // late cannot clear the retry a newer failure needs.
@@ -331,8 +334,8 @@ class ReadStateManager {
     if (!_lastSnapshotSucceeded) {
       _snapshotRetryTimer?.cancel();
       _snapshotRetryTimer = null;
+      // A successful read hands any unpublished marks to publication.
       await _requestSync();
-      _schedulePublish();
       return;
     }
     await flush();
@@ -386,10 +389,9 @@ class ReadStateManager {
           if (_disposed) return;
         }
         _snapshotWanted = false;
-        // A failed read waits for the next trigger: the publish scheduled
-        // here, which reads the snapshot in full after a failure, or a later
-        // ready, resume or reconnect.
-        if (!await _fetchAndMerge()) _schedulePublish();
+        // A failed read is retried by its backoff timer alone, or by a
+        // later ready, resume, reconnect or Retry.
+        await _fetchAndMerge();
       }
     } catch (e) {
       debugPrint('[ReadStateManager] sync failed: $e');
@@ -443,17 +445,27 @@ class ReadStateManager {
       final events = await _relaySession!.fetchReadStateSnapshot();
       if (_disposed || !_servesThisCommunity) return false;
       // An older success must not cancel a newer failure's retry.
-      if (_settleSnapshot(read, succeeded: true)) {
+      final recovered = _settleSnapshot(read, succeeded: true);
+      _mergeEvents(events);
+      await _persistLocalState();
+      if (recovered && !_disposed) {
+        // Hand outstanding marks to publication before the retry that would
+        // have sent them is cancelled, and retire the read error this
+        // success supersedes.
+        if (_hasUnpublishedState()) _schedulePublish();
         _snapshotRetryAttempt = 0;
         _snapshotRetryTimer?.cancel();
         _snapshotRetryTimer = null;
+        if (identical(syncError, _snapshotError)) syncError = null;
+        _snapshotError = null;
       }
-      _mergeEvents(events);
-      await _persistLocalState();
       _onChanged();
       return true;
     } catch (error) {
-      if (_settleSnapshot(read, succeeded: false)) syncError = error;
+      if (_settleSnapshot(read, succeeded: false)) {
+        syncError = error;
+        _snapshotError = error;
+      }
       debugPrint('[ReadStateManager] snapshot failed: $error');
       _scheduleSnapshotRetry();
       _onChanged();
@@ -625,11 +637,14 @@ class ReadStateManager {
     _debounceTimer?.cancel();
     _debounceTimer = Timer(const Duration(seconds: 5), () {
       _debounceTimer = null;
-      unawaited(_publish());
+      unawaited(_publish(automatic: true));
     });
   }
 
-  Future<void> _publish({bool allowDisposed = false}) async {
+  Future<void> _publish({
+    bool allowDisposed = false,
+    bool automatic = false,
+  }) async {
     if ((!allowDisposed && _disposed) ||
         !_remoteEnabled ||
         _remoteUnsupported ||
@@ -649,7 +664,11 @@ class ReadStateManager {
     try {
       do {
         _publishAgain = false;
-        await _publishOnce(_signedEventRelay, allowDisposed: allowDisposed);
+        await _publishOnce(
+          _signedEventRelay,
+          allowDisposed: allowDisposed,
+          automatic: automatic,
+        );
       } while (_publishAgain &&
           (allowDisposed || !_disposed) &&
           !_remoteUnsupported);
@@ -700,6 +719,7 @@ class ReadStateManager {
   Future<void> _publishOnce(
     SignedEventRelay signedEventRelay, {
     required bool allowDisposed,
+    bool automatic = false,
   }) async {
     try {
       if (!_servesThisCommunity || !_ownsJournal) return;
@@ -709,6 +729,13 @@ class ReadStateManager {
       // schedules a publish after its re-sync whether or not anything changed.
       // After a failed snapshot, run the full publish anyway: its own
       // snapshot is the retry, which the change notifications can't replace.
+      // Automatic failed-read recovery has one owner: the publish delay joins
+      // a read in flight, and leaves a failed one to its backoff timer, which
+      // hands the marks back here. An explicit flush still reads now.
+      if (automatic) {
+        if (_syncing case final syncing?) await syncing;
+        if (!_lastSnapshotSucceeded && _snapshotRetryTimer != null) return;
+      }
       if (_lastSnapshotSucceeded && !_hasUnpublishedState()) {
         // Nothing pending and every slot published, so this device is in
         // sync, as a full publish would have concluded.
@@ -722,10 +749,10 @@ class ReadStateManager {
         final List<NostrEvent> events;
         try {
           events = await _relaySession.fetchReadStateSnapshot();
-        } catch (_) {
+        } catch (error) {
           // Retry on the same backoff as a failed sync; the retry re-syncs
           // and publishes the journaled marks.
-          _settleSnapshot(read, succeeded: false);
+          if (_settleSnapshot(read, succeeded: false)) _snapshotError = error;
           _scheduleSnapshotRetry();
           rethrow;
         }
@@ -893,7 +920,8 @@ class ReadStateManager {
         _maxFetchedCreatedAt = event.createdAt;
         await _persistLocalState();
       }
-      syncError = null;
+      // An older send must not erase a newer read's failure.
+      if (_lastSnapshotSucceeded) syncError = null;
     } catch (error) {
       // The journal retains local advances, placements and exact pending
       // events. Reconnect/flush retries; never acknowledge the whole batch.
