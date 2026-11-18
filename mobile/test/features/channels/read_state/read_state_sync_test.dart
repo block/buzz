@@ -1634,6 +1634,7 @@ class _MemoryRelay extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    Future<bool> Function()? mayPublish,
   }) async {
     if (failNext) {
       failNext = false;

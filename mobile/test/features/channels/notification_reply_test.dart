@@ -440,6 +440,7 @@ class _ReadState extends ReadStateNotifier {
     String contextId,
     int unixTimestamp, {
     bool clearForcedMessages = false,
+    bool explicit = false,
   }) {
     state = state.copyWithContext(contextId, unixTimestamp);
   }

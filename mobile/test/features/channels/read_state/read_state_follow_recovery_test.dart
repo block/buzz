@@ -737,6 +737,7 @@ class _HoldingRelay extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    Future<bool> Function()? mayPublish,
   }) async {
     if (hold case final gate? when threadFollowsSlotOf(event) != null) {
       hold = null;
@@ -815,6 +816,7 @@ class _GatedSigner extends SignedEventRelay {
     required List<List<String>> tags,
     int? createdAt,
     FutureOr<void> Function(NostrEvent event)? onSigned,
+    Future<bool> Function()? mayPublish,
   }) async {
     if (tags.any((tag) => tag.first == 't' && tag[1] == threadFollowsTag)) {
       if (!signing.isCompleted) signing.complete();
@@ -826,6 +828,7 @@ class _GatedSigner extends SignedEventRelay {
       tags: tags,
       createdAt: createdAt,
       onSigned: onSigned,
+      mayPublish: mayPublish,
     );
   }
 }
