@@ -283,10 +283,15 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     final List<NostrEvent> events;
     try {
       events = await _queryDecoder(response);
-    } catch (_) {
+    } catch (error, stackTrace) {
       if (retired()) {
         throw StateError('Relay query belongs to a retired session');
       }
+      _diagnostics.reportError(
+        error,
+        stackTrace,
+        operation: DiagnosticOperation.relayQuery,
+      );
       rethrow;
     }
     if (retired()) {
@@ -637,6 +642,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         _handleDisconnected(generation, error, closeCode: socket.closeCode);
       },
     );
+    socket.diagnostics = _diagnostics;
     _socket = socket;
 
     try {
@@ -888,6 +894,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         ? data[2] as String
         : 'subscription closed by relay';
     final closedClass = classifyRelayClosed(message);
+    _reportInvalidRequest(message);
 
     final historySub = _historySubscriptions.remove(subId);
     if (historySub != null) {
@@ -992,6 +999,15 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     });
   }
 
+  void _reportInvalidRequest(String message) {
+    if (!isInvalidRequestRejection(message)) return;
+    _diagnostics.reportError(
+      const RelayInvalidRequest(),
+      StackTrace.current,
+      operation: DiagnosticOperation.relayRejection,
+    );
+  }
+
   void _handleOk(List<dynamic> data) {
     if (data.length < 3) return;
     final eventId = data[1] as String;
@@ -1003,6 +1019,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     final pending = _pendingEvents.remove(eventId);
     if (pending == null) return;
     pending.timeout.cancel();
+    if (!accepted) _reportInvalidRequest(message);
 
     if (accepted) {
       // We don't have the full event here; create a minimal placeholder.

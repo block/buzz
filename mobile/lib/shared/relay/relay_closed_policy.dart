@@ -45,6 +45,25 @@ bool isRelayDeadlineError(Object error) {
       message.startsWith(_queryTimedOutPrefix);
 }
 
+/// Reported when the relay says a request the app sent is invalid. It never
+/// reaches callers, and it carries no relay text: the reason is free text.
+class RelayInvalidRequest implements Exception {
+  const RelayInvalidRequest();
+
+  @override
+  String toString() => 'RelayInvalidRequest';
+}
+
+/// Whether [message], a relay `OK` or `CLOSED` reason, says the app sent
+/// something invalid. Refusals the app handles as expected outcomes, an
+/// archived channel or an open channel name that is taken, are not.
+bool isInvalidRequestRejection(String message) {
+  final normalized = message.trim().toLowerCase();
+  return normalized.startsWith('invalid:') &&
+      !normalized.startsWith('invalid: channel is archived') &&
+      !normalized.startsWith('invalid: an open channel named');
+}
+
 /// Recovery policy for a relay `CLOSED` subscription message.
 enum RelayClosedClass {
   /// A transient failure that may recover when the same REQ is retried.

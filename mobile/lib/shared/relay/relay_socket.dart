@@ -7,6 +7,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../diagnostics/diagnostic_reporter.dart';
 import 'nostr_models.dart';
 import 'relay_websocket.dart';
 import 'package:buzz/shared/crypto/event_signing.dart';
@@ -75,6 +76,9 @@ class RelaySocket {
 
   /// Scoped assertion supplied by the connection owner before connecting.
   Map<String, String> headers = const {};
+
+  /// Where frames the relay sent that this client can't parse are reported.
+  DiagnosticReporter diagnostics = const NoopDiagnosticReporter();
 
   RelaySocket({
     required String wsUrl,
@@ -209,8 +213,13 @@ class RelaySocket {
     final List<dynamic> data;
     try {
       data = jsonDecode(text) as List<dynamic>;
-    } catch (_) {
-      return; // Malformed JSON.
+    } catch (error, stackTrace) {
+      diagnostics.reportError(
+        error,
+        stackTrace,
+        operation: DiagnosticOperation.relayFrame,
+      );
+      return;
     }
 
     if (data.isEmpty) return;

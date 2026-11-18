@@ -28,6 +28,26 @@ void main() {
     }
   });
 
+  group('isInvalidRequestRejection', () {
+    const cases = {
+      'invalid: bad signature': true,
+      'INVALID: malformed filter': true,
+      'invalid: channel is archived': false,
+      'invalid: an open channel named "general" already exists': false,
+      'duplicate: channel already exists': false,
+      'restricted: access revoked': false,
+      'rate-limited: quota exceeded; retry in 4s': false,
+      'error: query timed out': false,
+      '': false,
+    };
+
+    for (final entry in cases.entries) {
+      test(entry.key.isEmpty ? '(empty)' : entry.key, () {
+        expect(isInvalidRequestRejection(entry.key), entry.value);
+      });
+    }
+  });
+
   test('parseRateLimitRetrySeconds handles canonical and absent hints', () {
     expect(
       parseRateLimitRetrySeconds('rate-limited: quota exceeded; retry in 17s'),

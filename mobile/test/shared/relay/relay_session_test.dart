@@ -679,6 +679,23 @@ void main() {
       );
     });
 
+    test('a body that fails to decode is reported', () async {
+      final reporter = _RecordingDiagnostics();
+      final harness = _queryHarness(
+        client: http_testing.MockClient((_) async => json('{"oops"')),
+        diagnostics: reporter,
+      );
+      addTearDown(harness.container.dispose);
+
+      await expectLater(
+        harness.session.queryRelay(const []),
+        throwsA(isA<FormatException>()),
+      );
+      expect(reporter.errors, [
+        (FormatException, DiagnosticOperation.relayQuery),
+      ]);
+    });
+
     test('an error status keeps its body and skips decoding', () async {
       var decodes = 0;
       const body = '{"error":"nope"}';
@@ -722,10 +739,12 @@ void main() {
     });
 
     test('a retired session reports retirement, not a decode error', () async {
+      final reporter = _RecordingDiagnostics();
       final decoder = _GatedDecoder();
       final harness = _queryHarness(
         client: http_testing.MockClient((_) async => json('{"oops"')),
         queryDecoder: decoder.call,
+        diagnostics: reporter,
       );
       addTearDown(harness.container.dispose);
 
@@ -736,6 +755,7 @@ void main() {
       decoder.gate.complete();
 
       await outcome;
+      expect(reporter.errors, isEmpty);
     });
 
     test('an age restriction during decoding discards the events', () async {
@@ -2311,6 +2331,42 @@ void main() {
       reason: 'only `rate-limited:` rejections signal back-pressure',
     );
   });
+
+  test('an invalid rejection is reported without the relay text', () async {
+    final reporter = _RecordingDiagnostics();
+    final harness = _queryHarness(
+      client: http_testing.MockClient((_) async => http.Response('[]', 200)),
+      diagnostics: reporter,
+    );
+    addTearDown(harness.container.dispose);
+    final session = harness.session;
+    session.debugAttachSocketForTest(_RecordingRelaySocket());
+
+    final archived = session.publish(_event(id: 'event-1'));
+    session.debugHandleMessage([
+      'OK',
+      'event-1',
+      false,
+      'invalid: channel is archived',
+    ]);
+    await expectLater(archived, throwsA(isA<Exception>()));
+    expect(reporter.errors, isEmpty);
+
+    final invalid = session.publish(_event(id: 'event-2'));
+    session.debugHandleMessage([
+      'OK',
+      'event-2',
+      false,
+      'invalid: bad signature',
+    ]);
+    await expectLater(invalid, throwsA(isA<Exception>()));
+    session.debugHandleMessage(['CLOSED', 'sub-1', 'invalid: bad filter']);
+
+    expect(reporter.errors, [
+      (RelayInvalidRequest, DiagnosticOperation.relayRejection),
+      (RelayInvalidRequest, DiagnosticOperation.relayRejection),
+    ]);
+  });
 }
 
 class _ControlledHttpClient extends http.BaseClient {
@@ -2393,6 +2449,7 @@ _QueryHarness _queryHarness({
   required http.Client client,
   RelayQueryDecoder? queryDecoder,
   AgeSignalNotifier? age,
+  DiagnosticReporter? diagnostics,
 }) {
   final session = RelaySessionNotifier(
     httpClient: client,
@@ -2402,6 +2459,8 @@ _QueryHarness _queryHarness({
   final container = ProviderContainer(
     overrides: [
       if (age != null) ageSignalProvider.overrideWith(() => age),
+      if (diagnostics != null)
+        diagnosticReporterProvider.overrideWithValue(diagnostics),
       authProvider.overrideWith(() => _PendingAuthNotifier()),
       relaySessionProvider.overrideWith(() => session),
       relayConfigProvider.overrideWith(
