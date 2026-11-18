@@ -16,6 +16,7 @@
 		BBAA00000000000000000001 /* HostedHpkeBackup.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBAA00000000000000000002 /* HostedHpkeBackup.swift */; };
 		DAAB00000000000000000001 /* NativeTabler.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAAB00000000000000000002; };
 		DAAC00000000000000000001 /* HomeScreenShortcuts.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAAC00000000000000000002 /* HomeScreenShortcuts.swift */; };
+		DAAC00000000000000000003 /* ShortcutLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAAC00000000000000000004 /* ShortcutLink.swift */; };
 		5AAE00000000000000000001 /* ShareSuggestions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AAE00000000000000000002 /* ShareSuggestions.swift */; };
 		DAAD00000000000000000001 /* QuickSend.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAAD00000000000000000002 /* QuickSend.swift */; };
 		C0AF00000000000000000001 /* NativeConfirmationDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0AF00000000000000000002 /* NativeConfirmationDialog.swift */; };
@@ -119,6 +120,7 @@
 		BBAA00000000000000000022 /* PhotoLibrarySaver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoLibrarySaver.swift; sourceTree = "<group>"; };
 		BBAA00000000000000000002 /* HostedHpkeBackup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostedHpkeBackup.swift; sourceTree = "<group>"; };
 		DAAC00000000000000000002 /* HomeScreenShortcuts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeScreenShortcuts.swift; sourceTree = "<group>"; };
+		DAAC00000000000000000004 /* ShortcutLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutLink.swift; sourceTree = "<group>"; };
 		5AAE00000000000000000002 /* ShareSuggestions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareSuggestions.swift; sourceTree = "<group>"; };
 		DAAD00000000000000000002 /* QuickSend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickSend.swift; sourceTree = "<group>"; };
 		DAAB00000000000000000002 /* NativeTabler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeTabler.swift; sourceTree = "<group>"; };
@@ -322,6 +324,7 @@
 				DCAF00000000000000000032 /* NavigationTopEdge.swift */,
 				DAAB00000000000000000002 /* NativeTabler.swift */,
 				DAAC00000000000000000002 /* HomeScreenShortcuts.swift */,
+				DAAC00000000000000000004 /* ShortcutLink.swift */,
 				5AAE00000000000000000002 /* ShareSuggestions.swift */,
 				DAAD00000000000000000002 /* QuickSend.swift */,
 				331C809A294A618700263BE5 /* MediaSanitizer.swift */,
@@ -678,6 +681,7 @@
 				DCAF00000000000000000031 /* NavigationTopEdge.swift in Sources */,
 				DAAB00000000000000000001 /* NativeTabler.swift in Sources */,
 				DAAC00000000000000000001 /* HomeScreenShortcuts.swift in Sources */,
+				DAAC00000000000000000003 /* ShortcutLink.swift in Sources */,
 				5AAE00000000000000000001 /* ShareSuggestions.swift in Sources */,
 				DAAD00000000000000000001 /* QuickSend.swift in Sources */,
 				331C809B294A63AB00263BE5 /* MediaSanitizer.swift in Sources */,
