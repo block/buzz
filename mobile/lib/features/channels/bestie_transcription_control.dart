@@ -162,8 +162,11 @@ class BestieTranscriptionControl extends HookConsumerWidget {
       phase.value = 'Saving';
       try {
         final saved = await store.retain(capture.stop(), destination);
-        if (!current(token)) return;
+        if (!alive.value || !context.mounted) return;
+        // The slot is occupied even if a route push or backgrounding cancelled
+        // this release, so keep it visible for Retry and block new captures.
         draft.value = saved;
+        if (!current(token)) return;
         unawaited(HapticFeedback.mediumImpact());
         await process(saved, token);
       } catch (failure) {

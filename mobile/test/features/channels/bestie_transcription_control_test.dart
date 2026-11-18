@@ -15,6 +15,8 @@ import 'package:buzz/features/channels/bestie_transcription_draft.dart';
 import 'package:buzz/features/channels/voice_note_recording.dart';
 import 'package:buzz/features/channels/voice_note_waveform.dart';
 import 'package:buzz/features/channels/bestie_transcription_status.dart';
+import 'package:buzz/features/channels/bestie_transcription_surface.dart';
+import 'package:buzz/shared/widgets/app_route_observer.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'package:buzz/shared/transcription/device_transcription.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -175,6 +177,7 @@ void main() {
         ],
         child: MaterialApp(
           theme: AppTheme.light(),
+          navigatorObservers: [appRouteObserver],
           home: Scaffold(
             body: Center(
               child: ConversationPaneScope(
@@ -318,6 +321,75 @@ void main() {
       expect(store.saved, isNotNull);
       expect(find.text('Retry'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
+    },
+  );
+  Future<void> expectRetainedAfterInterruption(
+    WidgetTester tester, {
+    required Future<void> Function() interrupt,
+    required Future<void> Function() resume,
+  }) async {
+    reset();
+    await mount(tester);
+    final gesture = await hold(tester);
+    store.retention = Completer<void>();
+    await gesture.up();
+    await tester.pump();
+    expect(recorder.stops, 1);
+    await interrupt();
+    // Let cancellation's stream teardown settle outside the fake clock.
+    await tester.runAsync(() => Future<void>(() {}));
+    store.retention!.complete();
+    await tester.pumpAndSettle();
+    await resume();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    final surface = tester.widget<BestieTranscriptionSurface>(
+      find.byType(BestieTranscriptionSurface),
+    );
+    expect(store.saved, isNotNull);
+    expect(speech.transcriptions, 0);
+    expect(surface.hasPending, isTrue);
+    expect(find.text('Retry transcript'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    if (!speech.result.isCompleted) speech.result.complete('');
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets(
+    'pausing during retention still exposes the saved utterance on resume',
+    (tester) async {
+      await expectRetainedAfterInterruption(
+        tester,
+        interrupt: () async {
+          tester.binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.paused,
+          );
+          await tester.pump();
+        },
+        resume: () async => tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.resumed,
+        ),
+      );
+    },
+  );
+  testWidgets(
+    'pushing a route during retention still exposes the saved utterance on return',
+    (tester) async {
+      await expectRetainedAfterInterruption(
+        tester,
+        interrupt: () async {
+          unawaited(
+            tester
+                .state<NavigatorState>(find.byType(Navigator))
+                .push(
+                  MaterialPageRoute<void>(builder: (_) => const SizedBox()),
+                ),
+          );
+          await tester.pump();
+        },
+        resume: () async =>
+            tester.state<NavigatorState>(find.byType(Navigator)).pop(),
+      );
     },
   );
   testWidgets(
