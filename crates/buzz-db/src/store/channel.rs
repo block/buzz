@@ -528,7 +528,7 @@ async fn get_channel_with_operation(
 }
 
 /// Read a live channel on `conn`.
-async fn select_channel(
+pub(crate) async fn select_channel(
     conn: &mut sqlx::PgConnection,
     community_id: CommunityId,
     channel_id: Uuid,
@@ -811,6 +811,66 @@ pub fn group_metadata_uses_members(channel: &ChannelRecord) -> bool {
 /// The roles a channel's relay-signed NIP-29 kind:39001 admins event lists.
 /// The locked snapshot that feeds it reads only these members.
 pub const GROUP_ADMIN_ROLES: [MemberRole; 2] = [MemberRole::Owner, MemberRole::Admin];
+
+/// The tags of a channel's relay-signed NIP-29 kind:39001 admins event.
+/// Shared by the relay, account cleanup and admin reconciliation. Only owners
+/// and admins are listed, even when the supplied roster contains other roles.
+pub fn group_admins_tags(
+    group_id: &str,
+    identity: &ChannelIdentity,
+    members: &[MemberRecord],
+) -> std::result::Result<Vec<nostr::Tag>, nostr::event::tag::Error> {
+    let mut tags = group_list_identity_tags(group_id, Some(identity))?;
+    for member in members.iter().filter(|member| {
+        GROUP_ADMIN_ROLES
+            .iter()
+            .any(|role| role.as_str() == member.role)
+    }) {
+        tags.push(nostr::Tag::parse([
+            "p",
+            &hex::encode(&member.pubkey),
+            &member.role,
+        ])?);
+    }
+    Ok(tags)
+}
+
+/// The tags of a channel's relay-signed NIP-29 kind:39002 members event.
+/// Shared by the relay, account cleanup and admin reconciliation. A missing
+/// channel identity still permits publishing the captured member roster.
+pub fn group_members_tags(
+    group_id: &str,
+    identity: Option<&ChannelIdentity>,
+    members: &[MemberRecord],
+) -> std::result::Result<Vec<nostr::Tag>, nostr::event::tag::Error> {
+    let mut tags = group_list_identity_tags(group_id, identity)?;
+    for member in members {
+        // NIP-29: ["p", pubkey, relay_url, role]. The canonical relay is
+        // implicit because it signs the event, so relay_url stays empty.
+        tags.push(nostr::Tag::parse([
+            "p",
+            &hex::encode(&member.pubkey),
+            "",
+            &member.role,
+        ])?);
+    }
+    Ok(tags)
+}
+
+fn group_list_identity_tags(
+    group_id: &str,
+    identity: Option<&ChannelIdentity>,
+) -> std::result::Result<Vec<nostr::Tag>, nostr::event::tag::Error> {
+    let mut tags = vec![nostr::Tag::identifier(group_id)];
+    if let Some(identity) = identity {
+        tags.extend(buzz_core::channel::group_state_identity_tags(
+            &identity.channel_type,
+            &identity.labels,
+            &identity.created_by,
+        )?);
+    }
+    Ok(tags)
+}
 
 /// The tags of a channel's relay-signed NIP-29 kind:39000 metadata event.
 ///
@@ -1102,11 +1162,15 @@ impl ChannelUpdate {
 ///
 /// At least one field must be provided; returns `InvalidData` otherwise.
 /// Returns the updated `ChannelRecord` on success.
+///
+/// `sender` must be the authenticated pubkey making the change. It decides
+/// the private-to-open rule, as for kind:9002 (see [`update_channel_on`]).
 pub async fn update_channel(
     pool: &PgPool,
     community_id: CommunityId,
     channel_id: Uuid,
     updates: ChannelUpdate,
+    sender: &[u8],
 ) -> Result<ChannelRecord> {
     if updates.is_empty() {
         return Err(DbError::InvalidData(
@@ -1121,7 +1185,7 @@ pub async fn update_channel(
     )
     .await?;
     let mut locked = lock_channel_for_settings_write(&mut tx, channel_id, &updates).await?;
-    update_channel_on(&mut locked, updates).await?;
+    update_channel_on(&mut locked, updates, sender).await?;
     tx.commit().await?;
 
     get_channel_with_operation(
@@ -1276,8 +1340,9 @@ async fn lock_channel_row(
     }
     lock_channel_ttl(tx, channel_id, ttl).await?;
     // `FOR NO KEY UPDATE`, like a huddle join: it orders this write against
-    // every other settings write and a huddle join, but not against the
-    // `KEY SHARE` lock that a membership INSERT takes for its foreign key.
+    // every other settings write and a huddle join, but not against a
+    // `KEY SHARE` lock on the channel (a membership INSERT's foreign key while
+    // it exists, `insert_auto_membership`'s channel check).
     let (previous_visibility, archived, listed): (String, bool, bool) =
         sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT visibility::text, archived_at IS NOT NULL, {LISTED_CHANNEL_SQL} FROM channels \
@@ -1301,11 +1366,25 @@ async fn lock_channel_row(
 
 /// Writes the set fields of `updates` to the locked channel row on `tx`.
 /// The caller owns the commit.
+///
+/// Opening a private channel publishes its existing history to new readers.
+/// So a private channel may be opened only when it has never held anyone but
+/// `sender` and `sender`'s own agents (NIP-OA), for example a Solo chat;
+/// removed members count, because their posts stay. A visibility change
+/// holds the membership lock (`lock_channel_for_settings_write`), so the
+/// member set read here stays the same until commit.
 async fn update_channel_on(
     w: &mut ChannelSettingsWriter<'_>,
     mut updates: ChannelUpdate,
+    sender: &[u8],
 ) -> Result<()> {
     w.check_covers(&updates)?;
+    if updates.visibility.as_deref() == Some(ChannelVisibility::Open.as_str())
+        && w.previous_visibility() == ChannelVisibility::Private.as_str()
+        && has_member_besides_sender_and_agents(w, sender).await?
+    {
+        return Err(DbError::AccessDenied(PRIVATE_TO_OPEN_REFUSAL.to_string()));
+    }
     let channel_id = w.channel_id;
     let tx = &mut *w.tx;
     let community_id = tx.community();
@@ -1417,7 +1496,8 @@ async fn update_channel_on(
     }
     if policy_changed {
         sqlx::query(
-            "UPDATE communities SET artifact_policy_modified_at=clock_timestamp() WHERE id=$1",
+            "UPDATE communities SET artifact_policy_modified_at=clock_timestamp() \
+             WHERE id=$1 AND deletion_state = 'active'",
         )
         .bind(community_id.as_uuid())
         .execute(tx.conn())
@@ -1636,6 +1716,34 @@ pub struct ChannelMetadataWrite {
     pub previous_visibility: String,
 }
 
+/// The refusal of a private-to-open change on a channel that holds, or once
+/// held, someone besides the sender and the sender's own agents.
+const PRIVATE_TO_OPEN_REFUSAL: &str =
+    "a private channel with other members cannot be made open; create a new open channel instead";
+
+/// Whether the locked channel has a member, current or removed, that is neither
+/// `sender` nor an agent whose NIP-OA owner is `sender`. Removed members count:
+/// their posts stay in the history that opening would publish.
+async fn has_member_besides_sender_and_agents(
+    w: &mut ChannelSettingsWriter<'_>,
+    sender: &[u8],
+) -> Result<bool> {
+    let channel_id = w.channel_id;
+    let tx = w.tx();
+    let community_id = tx.community();
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM channel_members m \
+         LEFT JOIN users u ON u.community_id = m.community_id AND u.pubkey = m.pubkey \
+         WHERE m.community_id = $1 AND m.channel_id = $2 \
+         AND m.pubkey <> $3 AND u.agent_owner_pubkey IS DISTINCT FROM $3)",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(sender)
+    .fetch_one(tx.conn())
+    .await?)
+}
+
 pub(crate) async fn apply_channel_metadata_event(
     pool: &PgPool,
     push_enqueue: Option<crate::runtime::push_enqueue::PushEnqueue>,
@@ -1728,7 +1836,7 @@ pub(crate) async fn apply_channel_metadata_event(
     } = edit;
     let actor = event.pubkey.to_bytes();
     if !columns.is_empty() {
-        update_channel_on(&mut locked, columns).await?;
+        update_channel_on(&mut locked, columns, &actor).await?;
     }
     if let Some(topic) = topic {
         set_topic_on(&mut locked, &topic, &actor).await?;
@@ -1838,10 +1946,13 @@ async fn soft_delete_on(w: &mut ChannelSettingsWriter<'_>) -> Result<()> {
         .bind(channel_id)
         .execute(w.tx.conn())
         .await?;
-    sqlx::query("UPDATE communities SET artifact_policy_modified_at=clock_timestamp() WHERE id=$1")
-        .bind(community_id.as_uuid())
-        .execute(w.tx.conn())
-        .await?;
+    sqlx::query(
+        "UPDATE communities SET artifact_policy_modified_at=clock_timestamp() \
+         WHERE id=$1 AND deletion_state = 'active'",
+    )
+    .bind(community_id.as_uuid())
+    .execute(w.tx.conn())
+    .await?;
     Ok(())
 }
 
@@ -2167,15 +2278,18 @@ impl Db {
         .await
     }
 
-    /// Updates a channel's name and/or description.
+    /// Applies every field set in `updates`, visibility included. `sender`
+    /// must be the authenticated pubkey making the change; it decides the
+    /// private-to-open rule.
     #[datastore_span(name = "update_channel", system = "postgresql")]
     pub async fn update_channel(
         &self,
         community_id: CommunityId,
         channel_id: Uuid,
         updates: ChannelUpdate,
+        sender: &[u8],
     ) -> Result<ChannelRecord> {
-        update_channel(&self.pool, community_id, channel_id, updates).await
+        update_channel(&self.pool, community_id, channel_id, updates, sender).await
     }
 
     /// Sets the topic for a channel.
@@ -2206,6 +2320,39 @@ impl Db {
     #[datastore_span(name = "archive_channel", system = "postgresql")]
     pub async fn archive_channel(&self, community_id: CommunityId, channel_id: Uuid) -> Result<()> {
         archive_channel(&self.pool, community_id, channel_id).await
+    }
+
+    /// Archive only while the caller still owns the lifecycle decision.
+    /// Recheck after acquiring channel locks and before commit, so a queued
+    /// write cannot act on authority retired while it waited. False means
+    /// nothing was written: authority was lost (rolled back), or the channel
+    /// was already archived. Admission uses the same row lock and cannot
+    /// interleave.
+    #[datastore_span(name = "archive_channel_if", system = "postgresql")]
+    pub async fn archive_channel_if<Fut>(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        authorized: impl Fn() -> Fut + Send,
+    ) -> Result<bool>
+    where
+        Fut: std::future::Future<Output = Result<bool>> + Send,
+    {
+        let mut tx = self.begin_event_write_transaction(community_id).await?;
+        let mut locked =
+            lock_channel_for_settings_write(&mut tx, channel_id, &ChannelUpdate::default()).await?;
+        if locked.archived {
+            return Ok(false);
+        }
+        if !authorized().await? {
+            return Ok(false);
+        }
+        set_archived_on(&mut locked, true).await?;
+        if !authorized().await? {
+            return Ok(false);
+        }
+        tx.commit().await?;
+        Ok(true)
     }
 
     /// Unarchives a channel.
@@ -2251,6 +2398,92 @@ impl Db {
 /// cannot drift.
 pub(crate) fn channel_ttl_lock_key(community: CommunityId, channel: Uuid) -> String {
     format!("buzz_channel_ttl:{}:{channel}", community.as_uuid())
+}
+
+#[cfg(test)]
+mod group_list_tag_tests {
+    use super::*;
+
+    #[test]
+    fn group_lists_preserve_identity_role_positions_and_roster_order() {
+        let identity = ChannelIdentity {
+            channel_type: "forum".into(),
+            labels: vec!["news".into(), "team".into()],
+            created_by: vec![0xab; 32],
+        };
+        let roles = ["member", "owner", "guest", "admin", "bot", "unknown"];
+        let members: Vec<_> = roles
+            .iter()
+            .enumerate()
+            .map(|(index, role)| MemberRecord {
+                channel_id: Uuid::nil(),
+                pubkey: vec![index as u8; 32],
+                role: (*role).into(),
+                joined_at: Utc::now(),
+                invited_by: None,
+                removed_at: None,
+            })
+            .collect();
+        let tag = |parts: &[&str]| {
+            parts
+                .iter()
+                .map(|part| (*part).to_string())
+                .collect::<Vec<_>>()
+        };
+        let prefix = vec![
+            tag(&["d", "group"]),
+            tag(&["t", "forum"]),
+            tag(&["t", "news"]),
+            tag(&["t", "team"]),
+            tag(&["P", &"ab".repeat(32)]),
+        ];
+        let raw = |tags: Vec<nostr::Tag>| {
+            tags.into_iter()
+                .map(|tag| tag.as_slice().to_vec())
+                .collect::<Vec<_>>()
+        };
+        let mut admins = prefix.clone();
+        admins.extend([
+            tag(&["p", &"01".repeat(32), "owner"]),
+            tag(&["p", &"03".repeat(32), "admin"]),
+        ]);
+        assert_eq!(
+            raw(group_admins_tags("group", &identity, &members).unwrap()),
+            admins
+        );
+        let mut roster = prefix.clone();
+        roster.extend([
+            tag(&["p", &"00".repeat(32), "", "member"]),
+            tag(&["p", &"01".repeat(32), "", "owner"]),
+            tag(&["p", &"02".repeat(32), "", "guest"]),
+            tag(&["p", &"03".repeat(32), "", "admin"]),
+            tag(&["p", &"04".repeat(32), "", "bot"]),
+            tag(&["p", &"05".repeat(32), "", "unknown"]),
+        ]);
+        assert_eq!(
+            raw(group_members_tags("group", Some(&identity), &members).unwrap()),
+            roster
+        );
+        assert_eq!(
+            raw(group_admins_tags("group", &identity, &[]).unwrap()),
+            prefix
+        );
+        assert_eq!(
+            raw(group_members_tags("group", Some(&identity), &[]).unwrap()),
+            prefix
+        );
+        let without_identity = std::iter::once(tag(&["d", "group"]))
+            .chain(roster.into_iter().skip(prefix.len()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            raw(group_members_tags("group", None, &members).unwrap()),
+            without_identity
+        );
+        assert_eq!(
+            raw(group_members_tags("group", None, &[]).unwrap()),
+            vec![tag(&["d", "group"])]
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2601,6 +2834,7 @@ mod postgres_tests {
                 join_role: Some("guest".into()),
                 ..Default::default()
             },
+            &owner_pk,
         )
         .await
         .expect("set join_role");
@@ -2622,9 +2856,187 @@ mod postgres_tests {
                 join_role: Some("admin".into()),
                 ..Default::default()
             },
+            &owner_pk,
         )
         .await
         .is_err());
+    }
+
+    /// `update_channel` applies the kind:9002 private-to-open rule to its
+    /// `sender`: opening fails while anyone else is, or was, a member, and the
+    /// channel stays private. A channel holding only the sender opens.
+    ///
+    /// Mutation: drop the check from `update_channel_on` → the shared
+    /// channel opens (RED).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn update_channel_refuses_opening_a_private_channel_with_other_members() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let (owner, other) = (random_pubkey(), random_pubkey());
+        let open = || ChannelUpdate {
+            visibility: Some("open".into()),
+            ..Default::default()
+        };
+        let add = |channel: Uuid, pubkey: Vec<u8>, removed: bool| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query(
+                    "INSERT INTO channel_members (community_id, channel_id, pubkey, removed_at) \
+                     VALUES ($1, $2, $3, CASE WHEN $4 THEN now() END)",
+                )
+                .bind(community_id)
+                .bind(channel)
+                .bind(pubkey)
+                .bind(removed)
+                .execute(&pool)
+                .await
+                .expect("insert member");
+            }
+        };
+
+        for removed in [false, true] {
+            let shared = create_test_channel(
+                &pool,
+                community_id,
+                "shared",
+                ChannelType::Stream,
+                ChannelVisibility::Private,
+                None,
+                &owner,
+                None,
+            )
+            .await
+            .expect("create shared channel");
+            add(shared.id, other.clone(), removed).await;
+            for sender in [&owner, &other] {
+                let err = update_channel(&pool, community, shared.id, open(), sender)
+                    .await
+                    .expect_err("opening a shared private channel must fail");
+                assert!(
+                    matches!(&err, DbError::AccessDenied(m) if m == PRIVATE_TO_OPEN_REFUSAL),
+                    "removed={removed}: {err:?}"
+                );
+            }
+            assert_eq!(
+                get_channel(&pool, community, shared.id)
+                    .await
+                    .expect("reload shared")
+                    .visibility,
+                "private",
+                "removed={removed}"
+            );
+        }
+
+        let solo = create_test_channel(
+            &pool,
+            community_id,
+            "solo",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .expect("create solo channel");
+        let opened = update_channel(&pool, community, solo.id, open(), &owner)
+            .await
+            .expect("the only member may open the channel");
+        assert_eq!(opened.visibility, "open");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn conditional_archive_rechecks_authority_before_committing() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let owner = random_pubkey();
+        ensure_user(&pool, community, &owner).await.unwrap();
+        let channel = create_test_channel(
+            &pool,
+            community_uuid,
+            "conditional-archive",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .unwrap();
+        let db = Db::from_pool(pool.clone());
+        // An old owner's archive queues behind a channel writer; ownership
+        // retires before the lock becomes available.
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query(
+            "SELECT id FROM channels WHERE community_id = $1 AND id = $2 FOR NO KEY UPDATE",
+        )
+        .bind(community.as_uuid())
+        .bind(channel.id)
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+        let authorized = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let authorization = authorized.clone();
+        let queued_db = Db::from_pool(pool.clone());
+        let queued = tokio::spawn(async move {
+            queued_db
+                .archive_channel_if(community, channel.id, || async {
+                    Ok(authorization.load(std::sync::atomic::Ordering::SeqCst))
+                })
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()",
+                ).fetch_one(&pool).await.unwrap();
+                if waiting > 0 { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        authorized.store(false, std::sync::atomic::Ordering::SeqCst);
+        blocker.rollback().await.unwrap();
+        assert!(!queued.await.unwrap().unwrap());
+        assert!(db
+            .get_channel(community, channel.id)
+            .await
+            .unwrap()
+            .archived_at
+            .is_none());
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        // Authority is lost after the update, before commit: it must roll back.
+        assert!(!db
+            .archive_channel_if(community, channel.id, || async {
+                Ok(checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0)
+            })
+            .await
+            .unwrap());
+        assert!(db
+            .get_channel(community, channel.id)
+            .await
+            .unwrap()
+            .archived_at
+            .is_none());
+        assert!(db
+            .archive_channel_if(community, channel.id, || async { Ok(true) })
+            .await
+            .unwrap());
+        assert!(db
+            .get_channel(community, channel.id)
+            .await
+            .unwrap()
+            .archived_at
+            .is_some());
+        // Already archived (the creator ended the Huddle first) is terminal:
+        // nothing to write, not an error.
+        assert!(!db
+            .archive_channel_if(community, channel.id, || async { Ok(true) })
+            .await
+            .unwrap());
     }
 
     #[tokio::test]

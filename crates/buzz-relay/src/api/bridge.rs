@@ -1237,6 +1237,7 @@ fn reject_code(msg: &str) -> &'static str {
 pub async fn submit_event(
     State(state): State<Arc<AppState>>,
     slot: AccessSlot,
+    event_type: Option<axum::Extension<crate::metrics::EventMetricType>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<axum::response::Response, axum::response::Response> {
@@ -1297,7 +1298,15 @@ pub async fn submit_event(
     // Everything after auth — admission, replay, membership, parse, ingest —
     // runs inside the helper; the caller's access line is the request's one
     // line, covering every outcome including a refused login.
-    let outcome = submit_event_authed(&state, &tenant, &headers, &body, &mut caller).await;
+    let outcome = submit_event_authed(
+        &state,
+        &tenant,
+        &headers,
+        &body,
+        &mut caller,
+        event_type.as_ref().map(|extension| &extension.0),
+    )
+    .await;
     caller.complete(outcome.fields());
     Ok(outcome.into_response().into_response())
 }
@@ -1398,6 +1407,7 @@ async fn submit_event_authed(
     headers: &HeaderMap,
     body: &[u8],
     caller: &mut ProvenCaller,
+    event_type: Option<&crate::metrics::EventMetricType>,
 ) -> SubmitOutcome {
     // Admission and replay checks fire before body parse — a 429 or replay
     // reject on a malformed body must still be attributed.
@@ -1413,6 +1423,9 @@ async fn submit_event_authed(
     let event: nostr::Event = match serde_json::from_slice(body) {
         Ok(ev) => ev,
         Err(e) => {
+            if let Some(event_type) = event_type {
+                event_type.invalid();
+            }
             // Never log `e`'s Display string: serde_json embeds the offending
             // input verbatim in its error message, so a malformed field of
             // arbitrary size (the router allows 1 MiB bodies) would otherwise
@@ -1435,6 +1448,9 @@ async fn submit_event_authed(
     };
 
     let kind_u32 = buzz_core::kind::event_kind_u32(&event);
+    if let Some(event_type) = event_type {
+        event_type.parsed(kind_u32);
+    }
     let is_typing = kind_u32 == buzz_core::kind::KIND_TYPING_INDICATOR;
 
     // Enforce relay membership (with NIP-OA fallback via x-auth-tag header).
@@ -1448,26 +1464,10 @@ async fn submit_event_authed(
         token_owner,
     )
     .await;
-    let nip_oa_owner = match caller.admit_member(membership) {
-        Ok(owner) => owner.or_else(|| {
-            if !state.config.require_relay_membership {
-                super::relay_members::extract_nip_oa_owner(
-                    &pubkey_bytes,
-                    auth_tag,
-                    signed_auth_created_at,
-                )
-            } else {
-                None
-            }
-        }),
-        Err(e) => {
-            return SubmitOutcome::Err {
-                response: e.into_response(),
-            };
-        }
-    };
-    if let Some(owner) = nip_oa_owner {
-        super::relay_members::materialize_nip_oa_owner(state, tenant, &pubkey, &owner).await;
+    if let Err(e) = caller.admit_member(membership) {
+        return SubmitOutcome::Err {
+            response: e.into_response(),
+        };
     }
 
     let auth = IngestAuth::Http {
@@ -5080,6 +5080,84 @@ pub(crate) mod postgres_tests {
         (status, String::from_utf8_lossy(&bytes).into_owned())
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres and Redis"]
+    async fn event_type_metrics_cover_real_bridge_success_and_rejections() {
+        let state = bridge_handler_test_state()
+            .await
+            .expect("local Postgres and Redis");
+        let host = with_community(&state).await;
+        let keys = Keys::generate();
+        let profile = EventBuilder::new(Kind::Metadata, r#"{"name":"Example"}"#)
+            .sign_with_keys(&keys)
+            .expect("sign profile");
+        let archive = EventBuilder::new(Kind::Custom(9035), "")
+            .sign_with_keys(&keys)
+            .expect("sign archive without required tags");
+        let contacts = EventBuilder::new(Kind::ContactList, "")
+            .sign_with_keys(&keys)
+            .expect("sign registered contact list");
+        let cases = [
+            (
+                serde_json::to_vec(&contacts).expect("contact list JSON"),
+                true,
+                StatusCode::OK,
+                "kind_3",
+            ),
+            (
+                serde_json::to_vec(&profile).expect("profile JSON"),
+                true,
+                StatusCode::OK,
+                "profile_update",
+            ),
+            (
+                serde_json::to_vec(&archive).expect("archive JSON"),
+                true,
+                StatusCode::BAD_REQUEST,
+                "identity_archive",
+            ),
+            (
+                b"not JSON".to_vec(),
+                true,
+                StatusCode::BAD_REQUEST,
+                "invalid",
+            ),
+            (
+                b"not JSON".to_vec(),
+                false,
+                StatusCode::UNAUTHORIZED,
+                "unknown",
+            ),
+        ];
+        let (recorder, handle) = crate::metrics::readiness_test_recorder();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        for (body, authenticated, status, event_type) in cases {
+            let mut headers = HeaderMap::new();
+            if authenticated {
+                headers.insert(
+                    "x-pubkey",
+                    keys.public_key().to_hex().parse().expect("pubkey header"),
+                );
+            }
+            assert_eq!(
+                oneshot_request(state.clone(), "POST", "/events", &host, headers, &body).await,
+                status,
+                "{event_type}"
+            );
+            let exported = handle.render();
+            for metric in ["http_requests_total{", "http_request_latency_ms_count{"] {
+                assert!(
+                    exported.lines().any(|line| line.starts_with(metric)
+                        && line.contains("action=\"/events\"")
+                        && line.contains(&format!("code=\"{}\"", status.as_u16()))
+                        && line.contains(&format!("event_type=\"{event_type}\""))
+                        && line.ends_with(" 1")),
+                    "{exported}"
+                );
+            }
+        }
+    }
+
     /// A workflow row without a channel has no readers, so even its owner
     /// reads its runs exactly like a workflow that does not exist. Ingest
     /// refuses channelless definitions, so the row is seeded directly.
@@ -6110,6 +6188,118 @@ pub(crate) mod postgres_tests {
             .filter(|line| line["event"] == "http")
             .collect();
         (status, lines)
+    }
+
+    /// Full NIP-98 sign-in on a closed relay with NIP-OA admission off: an
+    /// ownerless member agent's signed `/query` with a NIP-OA tag records its
+    /// owner; removing the owner removes the agent, whose next `/query` is
+    /// refused as a non-member. A tag naming another owner than the stored one
+    /// is refused as a mismatch, not as storage trouble.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres"]
+    async fn signed_query_records_owner_and_cascades_on_closed_relay() {
+        let mut state = (*nip_fi_off_test_state().await.expect("local Postgres")).clone();
+        {
+            let config = Arc::make_mut(&mut state.config);
+            config.require_relay_membership = true;
+            config.allow_nip_oa_auth = false;
+        }
+        let state = Arc::new(state);
+        let host = format!("owner-query-{}.local", uuid::Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community")
+            .id;
+        let (owner, agent, conflicted, other_owner) = (
+            Keys::generate(),
+            Keys::generate(),
+            Keys::generate(),
+            Keys::generate(),
+        );
+        for keys in [&owner, &agent, &conflicted] {
+            buzz_db::relay_members::add_relay_member(
+                state.db.pool(),
+                community,
+                &keys.public_key().to_hex(),
+                "member",
+                None,
+                &Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("add member");
+        }
+        let query = |keys: &Keys| {
+            let (state, host, keys) = (state.clone(), host.clone(), keys.clone());
+            let owner = owner.clone();
+            async move {
+                let mut headers =
+                    make_nip98_headers(&keys, &format!("https://{host}/query"), "POST", QUERY_BODY);
+                let tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &keys.public_key(), "")
+                    .expect("sign NIP-OA credential");
+                headers.insert("x-auth-tag", tag.parse().expect("header value"));
+                let (_guard, out) = crate::access::tests::capture_scoped();
+                let (status, _, body) =
+                    oneshot_request_full(state, "POST", "/query", &host, headers, QUERY_BODY).await;
+                let reason = out
+                    .lines()
+                    .into_iter()
+                    .find(|line| line["event"] == "http")
+                    .and_then(|line| line["reason"].as_str().map(str::to_owned));
+                (status, reason, String::from_utf8_lossy(&body).into_owned())
+            }
+        };
+
+        let (status, _, _) = query(&agent).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert!(state
+            .db
+            .is_agent_owner(
+                community,
+                agent.public_key().as_bytes(),
+                owner.public_key().as_bytes()
+            )
+            .await
+            .expect("owner lookup"));
+
+        buzz_db::relay_members::remove_relay_member(
+            state.db.pool(),
+            community,
+            &owner.public_key().to_hex(),
+            &Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("remove owner");
+        let (status, reason, _) = query(&agent).await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(reason.as_deref(), Some("not_relay_member"));
+
+        for keys in [&conflicted, &other_owner] {
+            state
+                .db
+                .ensure_user(community, keys.public_key().as_bytes())
+                .await
+                .expect("ensure user");
+        }
+        assert!(state
+            .db
+            .set_agent_owner(
+                community,
+                conflicted.public_key().as_bytes(),
+                other_owner.public_key().as_bytes(),
+            )
+            .await
+            .expect("seed other owner"));
+        let (status, reason, body) = query(&conflicted).await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(reason.as_deref(), Some("owner_mismatch"));
+        assert!(
+            body.contains(crate::api::relay_members::OWNER_MISMATCH),
+            "{body}"
+        );
     }
 
     fn assert_one_auth_line(
@@ -11055,6 +11245,133 @@ pub(crate) mod postgres_tests {
         assert_eq!(agent_rows().await, 0, "a known link writes nothing");
     }
 
+    /// On a closed relay with NIP-OA admission off, an ownerless member agent's
+    /// `POST /events` with a NIP-OA tag records its owner; removing the owner
+    /// then removes the agent, and its next request is refused. A tag naming
+    /// another owner than the stored one cannot be recorded, so that request
+    /// is refused and its event is not stored.
+    /// Mutation: drop the recording step from the shared HTTP admission →
+    /// the owner stays unrecorded → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn closed_relay_http_records_owner_and_refuses_on_link_failure() {
+        let mut state = bridge_handler_test_state()
+            .await
+            .expect("local Postgres and Redis");
+        {
+            let config = Arc::make_mut(&mut Arc::get_mut(&mut state).expect("unique").config);
+            config.require_relay_membership = true;
+            config.allow_nip_oa_auth = false;
+        }
+        let tenant = fresh_tenant("http-owner-record.test");
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(tenant.community().as_uuid())
+            .bind(format!(
+                "http-owner-{}.example",
+                tenant.community().as_uuid().simple()
+            ))
+            .execute(state.db.pool())
+            .await
+            .expect("insert community");
+        let (owner, agent, other_owner, conflicted) = (
+            Keys::generate(),
+            Keys::generate(),
+            Keys::generate(),
+            Keys::generate(),
+        );
+        for keys in [&owner, &agent, &conflicted] {
+            buzz_db::relay_members::add_relay_member(
+                state.db.pool(),
+                tenant.community(),
+                &keys.public_key().to_hex(),
+                "member",
+                None,
+                &Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("add member");
+        }
+        let submit = |keys: &Keys, tag_owner: &Keys| {
+            let state = state.clone();
+            let tenant = tenant.clone();
+            let (keys, tag_owner) = (keys.clone(), tag_owner.clone());
+            async move {
+                let tag = buzz_sdk::nip_oa::compute_auth_tag(&tag_owner, &keys.public_key(), "")
+                    .expect("sign NIP-OA credential");
+                let mut headers = HeaderMap::new();
+                headers.insert("x-auth-tag", tag.parse().expect("header value"));
+                let event = EventBuilder::new(Kind::TextNote, "owner-record")
+                    .sign_with_keys(&keys)
+                    .expect("sign event");
+                let outcome = submit_event_authed(
+                    &state,
+                    &tenant,
+                    &headers,
+                    serde_json::to_vec(&event).expect("event json").as_slice(),
+                    &mut ProvenCaller {
+                        pubkey: keys.public_key(),
+                        event_id_bytes: fresh_nip98_event_id_bytes(),
+                        signed_at: Some(nostr::Timestamp::now().as_secs()),
+                        token_owner: None,
+                        slot: AccessSlot::default(),
+                    },
+                    None,
+                )
+                .await;
+                matches!(outcome, SubmitOutcome::Ok { accepted: true, .. })
+            }
+        };
+        let owns = |agent: &Keys, owner: &Keys| {
+            let (state, community) = (state.clone(), tenant.community());
+            let (agent, owner) = (agent.public_key(), owner.public_key());
+            async move {
+                state
+                    .db
+                    .is_agent_owner(community, agent.as_bytes(), owner.as_bytes())
+                    .await
+                    .expect("owner lookup")
+            }
+        };
+
+        assert!(submit(&agent, &owner).await, "the member agent is admitted");
+        assert!(owns(&agent, &owner).await, "its owner is recorded");
+        buzz_db::relay_members::remove_relay_member(
+            state.db.pool(),
+            tenant.community(),
+            &owner.public_key().to_hex(),
+            &Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("remove owner");
+        assert!(
+            !submit(&agent, &owner).await,
+            "the agent is refused after removal"
+        );
+
+        for keys in [&conflicted, &other_owner] {
+            state
+                .db
+                .ensure_user(tenant.community(), keys.public_key().as_bytes())
+                .await
+                .expect("ensure user");
+        }
+        assert!(state
+            .db
+            .set_agent_owner(
+                tenant.community(),
+                conflicted.public_key().as_bytes(),
+                other_owner.public_key().as_bytes(),
+            )
+            .await
+            .expect("seed other owner"));
+        assert!(
+            !submit(&conflicted, &owner).await,
+            "a different stored owner refuses the request"
+        );
+    }
+
     /// An agent socket admitted with no owner, then linked to its owner by a
     /// later `POST /events` carrying NIP-OA, closes when the owner is banned
     /// or removed even though the owner-to-agent lookup fails: recording the
@@ -11075,9 +11392,9 @@ pub(crate) mod postgres_tests {
                 .expect("local Postgres and Redis");
             // A schema whose `users` table can be taken away after the link,
             // so only the owner-to-agent lookup fails at revoke time. It
-            // carries `communities` and the deletion lock key so writes pass
-            // community write admission, and `events` for the member list
-            // each membership change writes.
+            // carries `communities` so writes pass community write admission,
+            // and `events` and `event_mentions` for the member list each
+            // membership change writes and the superseded list it deletes.
             let db_url = crate::test_support::database_url();
             let schema = format!("late_owner_{}", uuid::Uuid::new_v4().simple());
             sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
@@ -11090,8 +11407,7 @@ pub(crate) mod postgres_tests {
                      (LIKE public.join_policy_acceptances INCLUDING ALL); \
                  CREATE TABLE {schema}.communities (LIKE public.communities INCLUDING ALL); \
                  CREATE TABLE {schema}.events (LIKE public.events INCLUDING ALL); \
-                 CREATE FUNCTION {schema}.community_deletion_lock_key(target UUID) RETURNS BIGINT \
-                 LANGUAGE SQL IMMUTABLE STRICT AS 'SELECT public.community_deletion_lock_key(target)';"
+                 CREATE TABLE {schema}.event_mentions (LIKE public.event_mentions INCLUDING ALL);"
             )))
             .execute(state.db.pool())
             .await
@@ -11179,6 +11495,7 @@ pub(crate) mod postgres_tests {
                     token_owner: None,
                     slot: AccessSlot::default(),
                 },
+                None,
             )
             .await;
             assert!(

@@ -105,12 +105,12 @@ void _useComposeDraftLifecycle({
         lastDraftIdentity.value != null && lastDraftIdentity.value != identity;
     lastDraftIdentity.value = identity;
     final saved = ref.read(composeDraftsProvider.notifier).draftFor(draftKey);
-    if (shouldHydrate) {
+    void restoreBindings(ComposeDraft? draft) {
       mentionMap.value
         ..clear()
         ..addAll({
           for (final entry
-              in (saved?.mentionKeys ?? <String, String>{}).entries)
+              in (draft?.mentionKeys ?? <String, String>{}).entries)
             entry.key: MentionCandidate(
               pubkey: entry.value,
               displayName: entry.key,
@@ -118,6 +118,8 @@ void _useComposeDraftLifecycle({
             ),
         });
     }
+
+    if (shouldHydrate) restoreBindings(saved);
     if (identityChanged) {
       prefillText.value = null;
       draftRevision.value += 1;
@@ -187,19 +189,23 @@ void _useComposeDraftLifecycle({
     // it with the next keystroke. Own saves match lastPersistedText.
     final external = ref.listenManual(
       composeDraftsProvider.select(
-        (drafts) => drafts.where((d) => d.key == draftKey).firstOrNull?.text,
+        (drafts) => drafts.where((d) => d.key == draftKey).firstOrNull,
       ),
-      (_, text) {
+      (_, saved) {
         if (!identical(currentOwner.value, owner)) return;
-        if (text == null ||
-            text == lastPersistedText ||
-            text == controller.text) {
+        if (saved == null ||
+            ((saved.text == lastPersistedText ||
+                    saved.text == controller.text) &&
+                mapEquals(saved.mentionKeys, lastBindings))) {
           return;
         }
         // A newer draft: an ordinary send that fails must not restore over it.
+        // Text and the keys its mentions are bound to change together.
         draftRevision.value += 1;
-        lastPersistedText = text;
-        controller.text = text;
+        lastPersistedText = saved.text;
+        lastBindings = Map.of(saved.mentionKeys);
+        restoreBindings(saved);
+        if (controller.text != saved.text) controller.text = saved.text;
       },
     );
     return () {

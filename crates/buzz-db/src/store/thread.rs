@@ -196,6 +196,10 @@ pub async fn insert_thread_metadata(
     )
     .await?;
 
+    // Every row written below names `channel_id`. A missing channel returns
+    // `DbError::NotFound` and writes nothing.
+    crate::store::reference_check::require_channel(tx.conn(), community_id, channel_id).await?;
+
     let result = sqlx::query(
         r#"
         INSERT INTO thread_metadata
@@ -637,10 +641,13 @@ pub(crate) async fn get_channel_window_on(
     if cursor.is_some() {
         // Composite keyset: with ORDER BY created_at DESC, id ASC, the page
         // after (ts, id) is created_at < ts OR (created_at = ts AND id > id).
+        // The redundant upper bound gives PostgreSQL an index range start
+        // instead of filtering every newer row at a deep cursor.
         let ts_idx = param_idx;
         let id_idx = param_idx + 1;
         sql.push_str(&format!(
-            " AND (e.created_at < ${ts_idx} OR (e.created_at = ${ts_idx} AND e.id > ${id_idx}))"
+            " AND e.created_at <= ${ts_idx} \
+             AND (e.created_at < ${ts_idx} OR (e.created_at = ${ts_idx} AND e.id > ${id_idx}))"
         ));
         param_idx += 2;
     }

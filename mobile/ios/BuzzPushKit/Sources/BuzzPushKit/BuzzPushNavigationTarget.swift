@@ -31,6 +31,17 @@ public struct BuzzPushNavigationTarget: Codable, Equatable, Sendable {
     return value
   }
 
+  /// The target as app method-channel arguments.
+  public var flutterArguments: [String: String] {
+    var arguments = [
+      "eventId": eventID,
+      "communityId": communityID,
+      "channelId": channelID,
+    ]
+    arguments["threadRootId"] = threadRootID
+    return arguments
+  }
+
   static func threadRootID(in tags: [[String]]) -> String? {
     // Inbox opens broadcast replies in the channel and other replies in their
     // direct parent's thread, even when the NIP-10 root names an outer thread.

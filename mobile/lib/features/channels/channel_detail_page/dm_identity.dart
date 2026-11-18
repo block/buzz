@@ -95,15 +95,16 @@ Future<void Function()> _subscribeToDmIdentityUpdates(
 }
 
 /// The time that opening [channel] reads it through, or null when opening it
-/// reads nothing. Forums read through their last activity. DMs read through
-/// the newest loaded message, including replies, or the last activity before
-/// messages load.
+/// reads nothing. Forums read through their last activity. DMs and Solo chats
+/// read through the newest loaded message, including replies, or the last
+/// activity before messages load.
 int? _openReadTimestamp({
   required Channel channel,
+  required bool personalChat,
   required AsyncValue<List<NostrEvent>> messagesState,
 }) {
   if (channel.isForum) return dateTimeToUnixSeconds(channel.lastMessageAt);
-  if (!channel.isDm) return null;
+  if (!channel.isDm && !personalChat) return null;
   var latest = 0;
   for (final event in messagesState.value ?? const <NostrEvent>[]) {
     if (event.createdAt > latest) latest = event.createdAt;
