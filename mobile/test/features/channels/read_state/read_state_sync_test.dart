@@ -221,6 +221,54 @@ void main() {
     expect(phone.activeChannelOverrides, isEmpty);
   });
 
+  test('an unread write superseded by a newer own head is rebuilt above it, '
+      'not acknowledged', () async {
+    final phone = await device('phone');
+    phone.markContextRead(channel, clock - 100);
+    await phone.flush();
+    final journal = ReadStateStorage(prefs).readJournal(
+      '${keys.public}:${Uri.encodeComponent(normalizeCommunityRelayUrl(phone.relayUrl))}',
+    )!;
+    final coordinate = '$readStateUnreadDTagPrefix${journal['unreadSlot']}';
+    // A restored copy of this installation already holds a newer head that
+    // lacks the mark, so the relay keeps it and the write is a no-op.
+    final ahead = clock + 1000;
+    relay.beforePublish = (event) {
+      if (event.tags.first[1] != coordinate) return;
+      relay.beforePublish = null;
+      final head = signedBy(
+        keys,
+        NostrEvent(
+          id: '',
+          pubkey: keys.public,
+          createdAt: ahead,
+          kind: EventKind.readState,
+          tags: event.tags,
+          content: crypto.encrypt(
+            jsonEncode(
+              ReadStateBlob(
+                clientId: journal['clientId'] as String,
+                contexts: const {},
+                version: 2,
+              ).toJson(),
+            ),
+          ),
+          sig: '',
+        ),
+      );
+      relay.retained[coordinate] = head;
+      relay.deliver(head);
+    };
+    expect(phone.markChannelUnread(channel), isTrue);
+    await phone.flush();
+    await phone.flush();
+
+    final head = relay.retained[coordinate]!;
+    expect(head.createdAt, greaterThan(ahead));
+    final desktop = await device('desktop');
+    expect(desktop.activeChannelOverrides, {channel});
+  });
+
   test('a follow that overflows the snapshot is refused, and reads still '
       'publish', () async {
     final phone = await device('phone');

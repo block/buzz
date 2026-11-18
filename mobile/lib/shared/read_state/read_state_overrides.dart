@@ -272,12 +272,16 @@ extension ReadStateOverrides on ReadStateManager {
   void _mergeUnreadRecord(String slot, ReadStateBlob blob, NostrEvent event) {
     if (slot == _unreadSlot) {
       if (blob.clientId == _clientId) {
-        _unreadPublished = Map.of(blob.contexts);
         // Our own head raises the reservation floor whatever its clock, so
         // the next version can replace it (the peer filter doesn't apply).
         _lastReserved = max(_lastReserved, event.createdAt);
         final head = _unreadHead;
-        if (head == null || !_outranks(head, event)) _unreadHead = event;
+        // A superseded own packet, such as a late echo, is not what the
+        // relay holds.
+        if (head == null || !_outranks(head, event)) {
+          _unreadHead = event;
+          _unreadPublished = Map.of(blob.contexts);
+        }
       } else {
         _pending.remove(_unreadCoordinate);
         _unreadSlot = generateReadStateSlotId();

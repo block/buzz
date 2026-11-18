@@ -9,6 +9,7 @@ import 'package:shared_preferences_platform_interface/shared_preferences_platfor
 import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/read_state/read_state_manager.dart';
 import 'package:buzz/shared/read_state/read_state_storage.dart';
+import 'package:buzz/shared/read_state/thread_follows_format.dart';
 import 'package:buzz/shared/relay/read_state_snapshot.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
@@ -860,8 +861,94 @@ void main() {
 
     Map<String, int> publishedContexts() => mergeReadStateContexts([
       for (final event in session.retained.values)
-        decodeReadStateBlob(crypto.decrypt(event.content))!.contexts,
+        if (event.tags.first[1].startsWith(readStateDTagPrefix))
+          decodeReadStateBlob(crypto.decrypt(event.content))!.contexts,
     ]);
+
+    /// Leaves one signed follow or unread packet pending, as [leavePending]
+    /// does for read positions.
+    /// Every retained packet in the journal, of any kind.
+    Map<Object?, Object?> retained() => {
+      for (final field in ['pending', 'unreadPending', 'followPending'])
+        ...?journal()[field] as Map?,
+    };
+
+    Future<NostrEvent> leaveRecordPending(
+      Future<void> Function(ReadStateManager manager) act,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
+      prefs = await SharedPreferences.getInstance();
+      keys = nostr.Keys.generate();
+      crypto = ReadStateCrypto.tryCreate(nsec: keys.nsec, pubkey: keys.public)!;
+      session = _RefusingRelaySession();
+      now = signedAt;
+      final manager = create();
+      await manager.initialize();
+      await act(manager);
+      await manager.flush();
+      expect(retained(), hasLength(1));
+      manager.dispose(flushPending: false);
+      session.timeOut = false;
+      return session.attempts.last;
+    }
+
+    test('an expired follow packet is renewed and does not block later '
+        'read positions', () async {
+      final key = threadFollowKey('room-a', 'a' * 64);
+      final pending = await leaveRecordPending((manager) async {
+        session.timeOut = true;
+        await manager.setThreadFollow('room-a', 'a' * 64, true);
+      });
+      final choice = decodeThreadFollowsBlob(
+        crypto.decrypt(pending.content),
+      )!.choices[key]!;
+      now = signedAt + 3600;
+      session.refuseCreatedAtBefore = now - 900;
+      final restarted = create();
+      await restarted.initialize();
+      restarted.markContextRead('room-b', now - 10);
+      await restarted.flush();
+
+      expect(restarted.syncError, isNull);
+      final successor = session.retained[pending.tags.first[1]]!;
+      expect(successor.createdAt, greaterThan(pending.createdAt));
+      // The original action stamp, not the renewal time.
+      expect(
+        decodeThreadFollowsBlob(
+          crypto.decrypt(successor.content),
+        )!.choices[key],
+        choice,
+      );
+      expect(publishedContexts()['room-b'], now - 10);
+      expect(retained(), isEmpty);
+      expect(journal()['followCaptured'] ?? const {}, isEmpty);
+      restarted.dispose(flushPending: false);
+    });
+
+    test('an expired unread packet is renewed and does not block later read '
+        'positions', () async {
+      final pending = await leaveRecordPending((manager) async {
+        manager.markContextRead('room-a', signedAt - 100);
+        await manager.flush();
+        session.timeOut = true;
+        expect(manager.markChannelUnread('room-a'), isTrue);
+      });
+      expect(pending.tags.first[1], startsWith(readStateUnreadDTagPrefix));
+      now = signedAt + 3600;
+      session.refuseCreatedAtBefore = now - 900;
+      final restarted = create();
+      await restarted.initialize();
+      restarted.markContextRead('room-b', now - 10);
+      await restarted.flush();
+
+      expect(restarted.syncError, isNull);
+      final successor = session.retained[pending.tags.first[1]]!;
+      expect(successor.createdAt, greaterThan(pending.createdAt));
+      expect(restarted.activeChannelOverrides, {'room-a'});
+      expect(publishedContexts()['room-b'], now - 10);
+      expect(retained(), isEmpty);
+      restarted.dispose(flushPending: false);
+    });
 
     test('an expired update with no covering copy is renewed', () async {
       final pending = await leavePending({
