@@ -82,7 +82,8 @@ const _markReadDeadline = Duration(seconds: 3);
 enum NotificationReplyOutcome {
   sent,
 
-  /// Never published, or refused by the relay; its text is kept as a draft.
+  /// Never published, or refused by the relay; its text is kept as a draft,
+  /// unless its community is gone.
   notSent,
 
   /// Published, but no answer came from the relay, so it may have gone out.

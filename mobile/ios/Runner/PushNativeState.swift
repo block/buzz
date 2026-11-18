@@ -248,7 +248,8 @@ final class BuzzNotificationReplyBridge {
         : arguments["unknown"] as? Bool == true
           ? .unknown
           : .notSent(draftThreadRootID: arguments["draftThreadRootId"] as? String)
-      // The app reports only after the reply is sent or its draft is saved.
+      // The app reports only after the reply is sent, its draft is saved, or its
+      // community is gone, so there's nowhere to keep one.
       let recorded = journal.recorded(id: id)
       if buffer.complete(id: id, outcome: outcome) {
         journal.settle(id: id)
@@ -294,7 +295,8 @@ final class BuzzNotificationReplyBridge {
         return
       }
     case .notSent:
-      // Its draft is saved, where its notice (if any) already points.
+      // Its draft is saved, where its notice (if any) already points, unless
+      // its community is gone.
       break
     }
     settle()

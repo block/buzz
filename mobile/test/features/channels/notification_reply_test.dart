@@ -252,6 +252,10 @@ void main() {
         elsewhere,
         contains('"key":"own","channel_id":"own","text":"reply 13"'),
       );
+      // The gone community's reply is kept nowhere.
+      expect([
+        for (final key in prefs.getKeys()) '${prefs.get(key)}',
+      ], everyElement(isNot(contains('reply 16'))));
       expect(
         drafts.textFor(composeDraftKey('broken', threadHeadId: _message)),
         'reply 5',
