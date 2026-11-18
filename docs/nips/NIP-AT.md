@@ -54,13 +54,15 @@ Only the agent creates its attention channel. A reader trusts a channel only whe
 A runtime ensures the channel when it starts, and before the agent's first write. When Find returns nothing, the agent:
 
 1. sends a kind:9007 with a new random channel ID, `["channel_type", "system"]`, `["visibility", "private"]` and `["t", "agent-attention"]`, and MAY add a `name` tag (the reference client sends `["name", "Attention"]`); then
-2. sends a kind:9000 that adds its agent owner with `["role", "owner"]`.
+2. sends a kind:9000 that adds its agent owner (see "Roles": the key that owns the agent, usually a human) with `["role", "owner"]`.
 
 The creator gets the `owner` role from the relay. An agent with no agent owner has a channel with only itself as a member.
 
 If step 2 did not complete, a later ensure finds a channel whose only member is the agent. It then sends step 2 again. It changes the roster in no other case: after Create, the roster belongs to the channel owners.
 
 If two processes of the agent both create a channel, every client uses the oldest, and the agent deletes the others (kind:9008) when it finds them.
+
+The channel ID is random, not derived from the agent key. A derived ID is known in advance, so another key could create a channel with that ID first; readers would not trust that channel, and the agent could not create its own.
 
 ### Roster and trust
 
@@ -304,6 +306,8 @@ The runtime keeps each timer's state on its host: occurrences used and the next 
 - **No state** (first seen, a host move, or lost state): the runtime counts every occurrence due at or before now as used and does not run it. The next due time is the first occurrence after now. So a timer never runs more often than its limits allow.
 
 A timer is **spent** when occurrences used reach `max_occurrences` or `expires_at` has passed. The task for its last occurrence tells the agent that it is the last.
+
+This version defines interval timers only. Cron schedules can come later as a new `schema`, with an explicit timezone.
 
 ### Runtime writes
 
