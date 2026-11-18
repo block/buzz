@@ -1,6 +1,6 @@
 # Mobile diagnostic reporting
 
-Status: step one agreed, not yet implemented.
+Status: step one in progress. Implemented: the reporting module and explicit error reports. Still to come: networking counts.
 
 Terminology is defined in [CONTEXT.md](../CONTEXT.md#mobile-builds). The decisions behind this spec are in [ADR 0007](adr/0007-diagnostic-reporting-follows-the-destination.md) and [ADR 0008](adr/0008-sentry-for-mobile-diagnostic-reporting.md).
 

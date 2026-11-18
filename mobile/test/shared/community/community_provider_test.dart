@@ -939,6 +939,29 @@ void main() {
     expect(reporter.member, isNull);
   });
 
+  test('switching names the member from storage, not a stale list', () async {
+    final reporter = _MemberRecorder();
+    container = createContainer(
+      overrides: [diagnosticReporterProvider.overrideWithValue(reporter)],
+    );
+    await container.read(communityListProvider.future);
+    final keys = nostr.Keys.generate();
+    final saved = Community.create(
+      name: 'Saved',
+      relayUrl: 'https://saved.example.com',
+      nsec: keys.nsec,
+    );
+    // Saved, but not yet in the provider's list, as while it reloads after
+    // sign-in.
+    await communityStorage.save(saved);
+
+    await container
+        .read(communityListProvider.notifier)
+        .switchCommunity(saved.id);
+
+    expect(reporter.member, keys.public);
+  });
+
   group('activeCommunityProvider', () {
     test('returns null when no communities', () async {
       container = createContainer();

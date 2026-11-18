@@ -526,7 +526,9 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       if (activeId == id) return;
       await ref.read(communityTransitionProvider).run();
       await storage.saveActiveId(id);
-      _reportAs(state.value?.where((c) => c.id == id).firstOrNull);
+      // From storage: while the list reloads (after sign-in, say), state can
+      // still hold the previous list.
+      _reportAs((await storage.loadAll()).where((c) => c.id == id).firstOrNull);
       // Reassign list state to trigger activeCommunityProvider (which watches
       // communityListProvider.future) to rebuild and pick up the new active ID.
       // We can't use ref.invalidate(activeCommunityProvider) here because that
