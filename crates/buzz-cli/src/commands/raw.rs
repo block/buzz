@@ -81,9 +81,12 @@ fn build_tags(raw: &[Vec<String>]) -> Result<Vec<Tag>, CliError> {
 pub async fn cmd_query(client: &BuzzClient, filter: &str) -> Result<(), CliError> {
     let filters = parse_filters(&read_or_stdin(filter)?)?;
     let resp = client.query_multi(&filters).await?;
-    let events: Vec<serde_json::Value> = serde_json::from_str(&resp)
+    // Print the relay's JSON in its own shape: most filters return an event
+    // array, but some (read-state snapshots, incremental artifacts) return an
+    // object.
+    let value: serde_json::Value = serde_json::from_str(&resp)
         .map_err(|e| CliError::Other(format!("failed to parse query response: {e}")))?;
-    println!("{}", serde_json::Value::Array(events));
+    println!("{value}");
     Ok(())
 }
 
@@ -363,7 +366,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_wraps_a_single_filter_and_rejects_non_array_responses() {
+    async fn query_wraps_a_single_filter_and_keeps_object_responses() {
         let (url, captured) = fake_relay("[]").await;
         cmd_query(&client(&url), r#"{"kinds":[1],"limit":5}"#)
             .await
@@ -373,7 +376,12 @@ mod tests {
             serde_json::json!([{"kinds":[1],"limit":5}])
         );
 
-        let (url, _) = fake_relay(r#"{"not":"an array"}"#).await;
+        let (url, _) = fake_relay(r#"{"snapshot":true}"#).await;
+        cmd_query(&client(&url), r#"{"kinds":[1]}"#)
+            .await
+            .expect("an object response is valid relay output");
+
+        let (url, _) = fake_relay("not json").await;
         let err = cmd_query(&client(&url), r#"{"kinds":[1]}"#)
             .await
             .unwrap_err();

@@ -296,7 +296,7 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `protect list` | List branch and tag protection rules |
 | | `protect set` | Create or replace a protection rule |
 | | `protect remove` | Remove a protection rule |
-| `raw` | `query` | Run one Nostr filter or an array of filters (POST /query); prints events as JSON |
+| `raw` | `query` | Run one Nostr filter or an array of filters (POST /query); prints the relay's JSON response |
 | | `publish` | Build, sign, and publish any event from `--kind`/`--tag`/`--content` or `--event-json` |
 | `upload` | `file` | Upload a file to the Blossom store |
 | `pack` | `validate` | Validate a persona pack (local, no relay) |
@@ -309,8 +309,9 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `rm` | Publish a tombstone to delete memory |
 
 `raw query` takes one filter object or an array of filters (`-` reads stdin) and
-prints the matching events, signatures included. Each response is bounded by the
-relay, so pass your own `limit`. `raw publish` signs with the CLI's identity and
+prints the relay's JSON response as-is: usually the matching events, signatures
+included, though some filters (read-state snapshots, for example) return an
+object. Each response is bounded by the relay, so pass your own `limit`. `raw publish` signs with the CLI's identity and
 attaches its NIP-OA auth tag. `--tag` is a JSON array of strings and may be
 repeated; `--event-json` takes an unsigned `{kind, content, tags, created_at}`
 template and rejects any other field. An `auth` tag in the input is refused.

@@ -367,8 +367,9 @@ enum Cmd {
 pub enum RawCmd {
     /// Query events with one Nostr filter or an array of filters (POST /query).
     ///
-    /// Prints the matching events as a JSON array, signatures included. The
-    /// relay bounds each response, so pass your own `limit`.
+    /// Prints the relay's JSON response as-is: usually an array of events,
+    /// signatures included, but some filters return an object. The relay
+    /// bounds each response, so pass your own `limit`.
     #[command(
         after_help = "Examples:\n  buzz raw query '{\"kinds\":[39002],\"#p\":[\"<hex pubkey>\"]}'\n  buzz raw query '[{\"kinds\":[0],\"authors\":[\"<hex>\"]},{\"kinds\":[3],\"limit\":1}]'\n  echo '{\"ids\":[\"<hex>\"]}' | buzz raw query -"
     )]
