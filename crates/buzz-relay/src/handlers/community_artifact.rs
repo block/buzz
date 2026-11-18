@@ -1,6 +1,8 @@
 //! Explicit community artifacts: transport authorization precedes receipts;
 //! edit policy is checked only for a new write, in its accepting transaction.
-use super::ingest::{IngestAuth, IngestError, IngestResult};
+use super::ingest::{
+    IngestAuth, IngestError, IngestResult, MAX_EVENT_CONTENT_BYTES, MAX_TIMESTAMP_DRIFT_SECS,
+};
 use crate::state::AppState;
 use buzz_auth::Scope;
 use buzz_core::{
@@ -166,10 +168,10 @@ async fn execute(
             return Ok(ack(event));
         }
         let now = chrono::Utc::now().timestamp();
-        if event.created_at.as_secs().abs_diff(now as u64) > 900 {
+        if event.created_at.as_secs().abs_diff(now as u64) > MAX_TIMESTAMP_DRIFT_SECS as u64 {
             return Err(invalid("event timestamp too far from server time"));
         }
-        if event.content.len() > 256 * 1024 {
+        if event.content.len() > MAX_EVENT_CONTENT_BYTES {
             return Err(invalid("event content too large"));
         }
         super::media_access::validate_media_references(tenant, state, event).await?;
@@ -177,16 +179,23 @@ async fn execute(
             crate::api::media::media_base_url_for_tenant(&state.config.relay_url, tenant.host());
         super::ingest::validate_event_imeta(tenant, state, event, &base).await?;
         super::artifact::verify_revision_auth(event)?;
-        outcome(
-            state,
-            tenant,
-            state
-                .db
-                .accept_community_artifact(community, &principal, event, &env)
-                .await
-                .map_err(storage_error)?,
-        )
-        .await?;
+        let outcome = state
+            .db
+            .accept_community_artifact(community, &principal, event, &env)
+            .await
+            .map_err(storage_error)?;
+        if !super::artifact::accepted_events(outcome)?.is_empty() {
+            signal(
+                state,
+                tenant,
+                buzz_pubsub::artifact_signal::ArtifactSignal {
+                    d: env.id,
+                    artifact_type: env.artifact_type,
+                    cause: buzz_pubsub::artifact_signal::ArtifactChange::Changed,
+                },
+            )
+            .await;
+        }
     } else if let Some(command) = command {
         super::ingest::enforce_write_restriction(
             state,
@@ -220,11 +229,11 @@ async fn execute(
             .await
             .map_err(|_| IngestError::Internal("error: policy commit unavailable".into()))?;
     } else if let Some(target) = target {
-        if event.content.len() > 256 * 1024 {
+        if event.content.len() > MAX_EVENT_CONTENT_BYTES {
             return Err(invalid("event content too large"));
         }
         let now = chrono::Utc::now().timestamp();
-        if event.created_at.as_secs().abs_diff(now as u64) > 900 {
+        if event.created_at.as_secs().abs_diff(now as u64) > MAX_TIMESTAMP_DRIFT_SECS as u64 {
             return Err(invalid("event timestamp too far from server time"));
         }
         if let Some((d, artifact_type)) = state
@@ -253,36 +262,6 @@ fn ack(event: &Event) -> IngestResult {
         accepted: true,
         message: String::new(),
     }
-}
-async fn outcome(
-    state: &Arc<AppState>,
-    tenant: &TenantContext,
-    outcome: buzz_db::artifact::ArtifactOutcome,
-) -> Result<(), IngestError> {
-    use buzz_db::artifact::ArtifactOutcome;
-    match outcome {
-        ArtifactOutcome::Accepted(events) => {
-            for stored in events {
-                let env = artifact::validate(&stored.event).map_err(invalid)?;
-                signal(
-                    state,
-                    tenant,
-                    buzz_pubsub::artifact_signal::ArtifactSignal {
-                        d: env.id,
-                        artifact_type: env.artifact_type,
-                        cause: buzz_pubsub::artifact_signal::ArtifactChange::Changed,
-                    },
-                )
-                .await;
-            }
-        }
-        ArtifactOutcome::Duplicate => {}
-        ArtifactOutcome::Conflict(reason) => {
-            return Err(IngestError::CanvasConflict(format!("conflict: {reason}")))
-        }
-        ArtifactOutcome::Rejected(reason) => return Err(invalid(reason)),
-    }
-    Ok(())
 }
 /// Community moderation is discriminated by the signed scope, never by an
 /// absent/nullable channel decoded from the target.

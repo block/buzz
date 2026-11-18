@@ -291,6 +291,9 @@ pub(crate) fn parse_canvas_expected_revision(
     Ok(Some(CanvasRevisionSpec::Head(bytes)))
 }
 
+pub(super) const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes
+pub(super) const MAX_EVENT_CONTENT_BYTES: usize = 256 * 1024;
+
 /// How the HTTP caller authenticated (for [`IngestAuth::Http`]).
 #[derive(Debug, Clone)]
 pub enum HttpAuthMethod {
@@ -2741,7 +2744,6 @@ async fn ingest_event_inner(
         });
     }
 
-    const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes
     let now = chrono::Utc::now().timestamp();
     let event_ts = event.created_at.as_secs() as i64;
     if (event_ts - now).abs() > MAX_TIMESTAMP_DRIFT_SECS {
@@ -2758,7 +2760,6 @@ async fn ingest_event_inner(
         }
     }
 
-    const MAX_EVENT_CONTENT_BYTES: usize = 256 * 1024; // 256 KB
     if event.content.len() > MAX_EVENT_CONTENT_BYTES {
         return Err(IngestError::Rejected(format!(
             "invalid: content exceeds maximum size of {} bytes (got {})",

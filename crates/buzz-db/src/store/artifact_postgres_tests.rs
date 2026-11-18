@@ -1340,14 +1340,44 @@ mod community {
         assert!(matches!(result.outcome, TransferResult::Transferred { .. }));
     }
 
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn direct_artifact_write_does_not_wait_for_delegated_roster_row() {
+        let f = Fixture::new().await;
+        contract(&f).await;
+        role(&f, &f.owner, "owner").await;
+        role(&f, &f.peer, "member").await;
+        let mut member = principal(&f.peer, true);
+        member.verified_owner = Some(f.owner.public_key().to_bytes().to_vec());
+        member.owner_admission = true;
+
+        let mut roster_edit = f.db.pool.begin().await.unwrap();
+        sqlx::query("SELECT 1 FROM relay_members WHERE community_id=$1 AND pubkey=$2 FOR UPDATE")
+            .bind(f.community.as_uuid())
+            .bind(f.owner.public_key().to_hex())
+            .fetch_one(&mut *roster_edit)
+            .await
+            .unwrap();
+        let event = revision(&f, Uuid::new_v4(), "create", None, &f.peer);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            accept(&f, &event, &member),
+        )
+        .await
+        .expect("a direct member write does not depend on the owner's roster lock");
+        assert!(matches!(result, Ok(ArtifactOutcome::Accepted(_))));
+        roster_edit.rollback().await.unwrap();
+    }
+
     /// A policy update's uncommitted state must fence new artifact admission,
     /// even when that type had no previous policy row.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn unset_policy_lock_serializes_artifact_admission() {
+    async fn cluster_global_member_write_waits_for_admins_policy_commit() {
         let f = Fixture::new().await;
         contract(&f).await;
         role(&f, &f.owner, "owner").await;
+        role(&f, &f.peer, "member").await;
         let command = policy(&f, "example.settings", "admins", None);
         let parsed = buzz_core::artifact::parse_policy_command(&command).unwrap();
         let mut tx = f.db.pool.begin().await.unwrap();
@@ -1365,21 +1395,18 @@ mod community {
         );
         let event = revision(&f, Uuid::new_v4(), "create", None, &f.peer);
         let env = buzz_core::artifact::validate(&event).unwrap();
-        let db = f.db.clone();
+        let writer_name = format!("artifact-policy-writer-{}", Uuid::new_v4().simple());
+        let db = Db::from_pool(crate::test_support::named_pool(&writer_name).await);
         let community = f.community;
-        let peer = principal(&f.peer, false);
+        let peer = principal(&f.peer, true);
         let pending = tokio::spawn(async move {
             db.accept_community_artifact(community, &peer, &event, &env)
                 .await
         });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(
-            !pending.is_finished(),
-            "artifact bypassed the type policy transaction"
-        );
+        crate::test_support::wait_for_lock_wait(&f.db.pool, &writer_name).await;
         tx.commit().await.unwrap();
         assert!(
-            pending.await.unwrap().is_err(),
+            matches!(pending.await.unwrap(), Err(DbError::AccessDenied(_))),
             "committed admins policy must reject member write"
         );
     }

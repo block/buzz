@@ -7,7 +7,7 @@ use crate::{Db, DbError, Result};
 use buzz_core::artifact::{ArtifactEnvelope, ArtifactOp, ArtifactScope};
 use buzz_core::{CommunityId, StoredEvent};
 use nostr::{Event, EventBuilder, Keys, Kind, Tag};
-use sqlx::Row;
+use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
 /// SQL predicate for an explicit `community` tag name in an event's tag column.
@@ -68,6 +68,42 @@ fn removal_marker(keys: &Keys, artifact: Uuid, source: Uuid, prev: &[u8]) -> Res
         .map_err(|e| invalid(&e.to_string()))
 }
 
+pub(super) fn check_artifact_head(
+    env: &ArtifactEnvelope,
+    head: Option<&sqlx::postgres::PgRow>,
+) -> Result<Option<ArtifactOutcome>> {
+    let outcome = match (head, env.op) {
+        (Some(_), ArtifactOp::Create) => ArtifactOutcome::Conflict("artifact identity is taken"),
+        (None, ArtifactOp::Create) => return Ok(None),
+        (None, _) => ArtifactOutcome::Conflict(HEAD_UNAVAILABLE),
+        (Some(head), op) => {
+            let current: Vec<u8> = head.try_get("event_id")?;
+            if env.prev.as_deref() != Some(current.as_slice()) {
+                ArtifactOutcome::Conflict("artifact head changed")
+            } else if env.artifact_type != head.try_get::<String, _>("artifact_type")? {
+                ArtifactOutcome::Rejected("artifact type is immutable")
+            } else if head.try_get::<bool, _>("deleted")? != (op == ArtifactOp::Restore) {
+                ArtifactOutcome::Rejected(
+                    "deleted artifacts require restore; live artifacts cannot restore",
+                )
+            } else {
+                return Ok(None);
+            }
+        }
+    };
+    Ok(Some(outcome))
+}
+
+pub(super) async fn artifact_receipt_exists(
+    conn: &mut PgConnection,
+    community: CommunityId,
+    event_id: &[u8],
+    scope: Option<&str>,
+) -> Result<bool> {
+    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM artifact_revisions WHERE community_id=$1 AND event_id=$2 AND ($3::text IS NULL OR scope=$3))")
+        .bind(community.as_uuid()).bind(event_id).bind(scope).fetch_one(conn).await?)
+}
+
 impl Db {
     /// Check the durable acceptance ledger, which survives redaction and retention.
     pub async fn artifact_accepted(&self, community: CommunityId, id: &[u8]) -> Result<bool> {
@@ -76,13 +112,7 @@ impl Db {
             crate::observability::WriterOperation::EventWrite,
         )
         .await?;
-        Ok(sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM artifact_revisions WHERE community_id=$1 AND event_id=$2)",
-        )
-        .bind(community.as_uuid())
-        .bind(id)
-        .fetch_one(&mut *conn)
-        .await?)
+        artifact_receipt_exists(&mut conn, community, id, None).await
     }
 
     /// Current home channel, read before authorizing a move's source.
@@ -132,14 +162,7 @@ impl Db {
             .bind(format!("artifact:{}:{}", community.as_uuid(), env.id))
             .execute(tx.conn())
             .await?;
-        let duplicate: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM artifact_revisions WHERE community_id=$1 AND event_id=$2)",
-        )
-        .bind(community.as_uuid())
-        .bind(event.id.as_bytes().as_slice())
-        .fetch_one(tx.conn())
-        .await?;
-        if duplicate {
+        if artifact_receipt_exists(tx.conn(), community, event.id.as_bytes(), None).await? {
             return Ok(ArtifactOutcome::Duplicate);
         }
         let head = sqlx::query(
@@ -153,45 +176,27 @@ impl Db {
         let old_root = head
             .as_ref()
             .and_then(|h| h.get::<Option<Vec<u8>>, _>("root"));
-        match (&head, env.op) {
-            (Some(_), ArtifactOp::Create) => {
-                return Ok(ArtifactOutcome::Conflict("artifact identity is taken"))
+        // The caller authorized writes only in its home, or in the source
+        // it read before a move. Refuse a different source before describing the head.
+        let expected_source = if env.op == ArtifactOp::Move {
+            authorized_source
+        } else {
+            Some(home)
+        };
+        if env.op != ArtifactOp::Create && source.is_some() && source != expected_source {
+            return Ok(ArtifactOutcome::Conflict(HEAD_UNAVAILABLE));
+        }
+        if let Some(outcome) = check_artifact_head(env, head.as_ref())? {
+            return Ok(outcome);
+        }
+        if head.is_some() {
+            if (env.op == ArtifactOp::Move) != (source != Some(home)) {
+                return Ok(ArtifactOutcome::Rejected(
+                    "only move changes home and move must change home",
+                ));
             }
-            (None, ArtifactOp::Create) => {}
-            (None, _) => return Ok(ArtifactOutcome::Conflict(HEAD_UNAVAILABLE)),
-            // The caller authorized writes only in `h`, or for a move in the
-            // source it read before this transaction. A head anywhere else
-            // answers like a missing one, before any check that describes it.
-            (Some(_), op)
-                if source
-                    != match op {
-                        ArtifactOp::Move => authorized_source,
-                        _ => Some(home),
-                    } =>
-            {
-                return Ok(ArtifactOutcome::Conflict(HEAD_UNAVAILABLE))
-            }
-            (Some(head), op) => {
-                let current: Vec<u8> = head.get("event_id");
-                if env.prev.as_deref() != Some(current.as_slice()) {
-                    return Ok(ArtifactOutcome::Conflict("artifact head changed"));
-                }
-                if env.artifact_type != head.get::<String, _>("artifact_type") {
-                    return Ok(ArtifactOutcome::Rejected("artifact type is immutable"));
-                }
-                if head.get::<bool, _>("deleted") != (op == ArtifactOp::Restore) {
-                    return Ok(ArtifactOutcome::Rejected(
-                        "deleted artifacts require restore; live artifacts cannot restore",
-                    ));
-                }
-                if (op == ArtifactOp::Move) != (source != Some(home)) {
-                    return Ok(ArtifactOutcome::Rejected(
-                        "only move changes home and move must change home",
-                    ));
-                }
-                if op == ArtifactOp::Delete && env.root != old_root {
-                    return Ok(ArtifactOutcome::Rejected("delete preserves root"));
-                }
+            if env.op == ArtifactOp::Delete && env.root != old_root {
+                return Ok(ArtifactOutcome::Rejected("delete preserves root"));
             }
         }
         if head.is_none() || env.root != old_root || source != Some(home) {

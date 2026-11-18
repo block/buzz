@@ -424,7 +424,7 @@ async fn channel_artifact_with_community_tag_value_remains_visible() {
         .unwrap();
     assert_eq!(
         req_event_ids(&f.state, &tenant, &f.owner, filter.clone()).await,
-        [id.clone()]
+        std::slice::from_ref(&id)
     );
     let (conn, mut rx) = test_conn(&tenant, &f.owner);
     let filter = serde_json::from_value(filter).unwrap();

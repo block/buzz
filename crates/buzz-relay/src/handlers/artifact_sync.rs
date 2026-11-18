@@ -778,7 +778,7 @@ async fn send_initial_set(
             .open_community_artifact_snapshot(conn.tenant.community(), &interest.principal)
             .await
         {
-            Ok(snapshot) => Snapshot::Community(snapshot),
+            Ok(snapshot) => snapshot,
             Err(buzz_db::DbError::AccessDenied(_)) => return Err(Stop::Close(RESTRICTED)),
             Err(e) => {
                 warn!(conn_id = %conn.conn_id, error_kind = %e.kind(), "artifact sync snapshot failed");
@@ -791,7 +791,7 @@ async fn send_initial_set(
             .open_artifact_snapshot(conn.tenant.community(), reader, &filter.channels)
             .await
         {
-            Ok(Ok(snapshot)) => Snapshot::Channel(snapshot),
+            Ok(Ok(snapshot)) => snapshot,
             Ok(Err(buzz_db::SnapshotDenied::Restricted)) => return Err(Stop::Close(RESTRICTED)),
             Err(e) => {
                 warn!(conn_id = %conn.conn_id, error_kind = %e.kind(), "artifact sync snapshot failed");
@@ -981,29 +981,6 @@ fn community_credential_current(
             })
         })
 }
-enum Snapshot {
-    Channel(buzz_db::ArtifactSnapshot),
-    Community(buzz_db::community_artifact::CommunityArtifactSnapshot),
-}
-impl Snapshot {
-    async fn next_page(
-        &mut self,
-        tags: &[(String, Vec<String>)],
-        page: i64,
-    ) -> buzz_db::Result<Vec<StoredEvent>> {
-        match self {
-            Self::Channel(s) => s.next_page(tags, page).await,
-            Self::Community(s) => s.next_page(tags, page).await,
-        }
-    }
-    async fn finish(self) -> buzz_db::Result<()> {
-        match self {
-            Self::Channel(s) => s.finish().await,
-            Self::Community(s) => s.finish().await,
-        }
-    }
-}
-
 /// Rules 3–5 after `EOSE`: read each changed head, one read at a time, and
 /// send it. A dropped frame or a resync request ends the sync. `in_set` is
 /// the client's copy as this sync sent it: the `d` of each artifact in scope.

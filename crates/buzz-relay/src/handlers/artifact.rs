@@ -47,25 +47,27 @@ pub(crate) async fn accept(
         )
         .await
         .map_err(|e| IngestError::Internal(format!("artifact storage: {e}")))?;
-    match outcome {
-        ArtifactOutcome::Accepted(events) => {
-            for stored in &events {
-                publish(state, tenant, stored).await;
-            }
-        }
-        ArtifactOutcome::Duplicate => {}
-        ArtifactOutcome::Conflict(message) => {
-            return Err(IngestError::CanvasConflict(format!("conflict: {message}")))
-        }
-        ArtifactOutcome::Rejected(message) => {
-            return Err(IngestError::Rejected(format!("invalid: {message}")))
-        }
+    for stored in accepted_events(outcome)? {
+        publish(state, tenant, &stored).await;
     }
     Ok(IngestResult {
         event_id: event.id.to_hex(),
         accepted: true,
         message: String::new(),
     })
+}
+
+pub(super) fn accepted_events(outcome: ArtifactOutcome) -> Result<Vec<StoredEvent>, IngestError> {
+    match outcome {
+        ArtifactOutcome::Accepted(events) => Ok(events),
+        ArtifactOutcome::Duplicate => Ok(Vec::new()),
+        ArtifactOutcome::Conflict(message) => {
+            Err(IngestError::CanvasConflict(format!("conflict: {message}")))
+        }
+        ArtifactOutcome::Rejected(message) => {
+            Err(IngestError::Rejected(format!("invalid: {message}")))
+        }
+    }
 }
 
 fn head_unavailable() -> IngestError {

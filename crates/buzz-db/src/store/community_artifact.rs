@@ -1,7 +1,7 @@
 //! Explicit NIP-AR community audience. Payloads live in the revision ledger,
 //! outside the event store, search index, mentions and conversation side effects.
-use super::artifact::{ArtifactOutcome, HEAD_UNAVAILABLE};
-use crate::{Db, DbError, Result};
+use super::artifact::{artifact_receipt_exists, check_artifact_head, ArtifactOutcome};
+use crate::{ArtifactSnapshot, Db, DbError, Result};
 use buzz_core::artifact::{
     canonical_uuid, ArtifactEnvelope, ArtifactOp, ArtifactQuery, ArtifactScope,
     ArtifactTypePolicyCommand, ArtifactView, MAX_COMMUNITY_POLICIES,
@@ -66,23 +66,27 @@ async fn lock_member_role(
     .await?)
 }
 
-/// Call with the restriction and active community locks held. Share-lock the
-/// owner's roster row before the agent's, matching cascading member removal.
+/// Call with the restriction and active community locks held. Only the
+/// roster row supplying admission needs a member lock.
 async fn authorize_members(
     conn: &mut PgConnection,
     community: CommunityId,
     principal: &CommunityArtifactPrincipal,
+    allow_owner_fallback: bool,
 ) -> Result<Authority> {
-    let delegated = if let Some(owner) = principal
-        .verified_owner
-        .as_ref()
-        .filter(|_| principal.owner_admission)
+    let direct = lock_member_role(conn, community, &principal.pubkey).await?;
+    let delegated = if principal.require_membership
+        && direct.is_none()
+        && allow_owner_fallback
+        && principal.owner_admission
     {
-        lock_member_role(conn, community, owner).await?.is_some()
+        match &principal.verified_owner {
+            Some(owner) => lock_member_role(conn, community, owner).await?.is_some(),
+            None => false,
+        }
     } else {
         false
     };
-    let direct = lock_member_role(conn, community, &principal.pubkey).await?;
     let row = sqlx::query("SELECT COALESCE(bool_or(banned AND (ban_expires_at IS NULL OR ban_expires_at > clock_timestamp())),false) AS banned, COALESCE(bool_or(muted_until > clock_timestamp()),false) AS timed_out FROM community_bans WHERE community_id=$1 AND pubkey IN (SELECT $2::bytea UNION ALL SELECT $3::bytea UNION ALL SELECT agent_owner_pubkey FROM users WHERE community_id=$1 AND pubkey=$2)")
         .bind(community.as_uuid()).bind(&principal.pubkey).bind(&principal.verified_owner).fetch_one(&mut *conn).await?;
     if row.try_get::<bool, _>("banned")?
@@ -109,18 +113,6 @@ async fn lock_active_community(conn: &mut PgConnection, community: CommunityId) 
         .fetch_optional(conn)
         .await?
         .ok_or_else(denied)
-}
-
-async fn policy_lock(
-    conn: &mut PgConnection,
-    community: CommunityId,
-    artifact_type: &str,
-) -> Result<()> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
-        .bind(format!("artifact-policy:{community}:{artifact_type}"))
-        .execute(conn)
-        .await?;
-    Ok(())
 }
 
 /// Policy lookup result. Explicit `everyone` entries keep their revision and slot.
@@ -194,7 +186,7 @@ pub async fn set_policy_in_transaction(
             .fetch_optional(&mut **tx)
             .await?
             .ok_or_else(denied)?;
-    let authority = authorize_members(tx, community, principal).await?;
+    let authority = authorize_members(tx, community, principal, false).await?;
     // Recheck the shared relay-admin write restriction under admission locks
     // before accepting either a new policy or an exact retry.
     if !authority.admin || authority.timed_out {
@@ -285,13 +277,7 @@ impl Db {
             tokio::time::Instant::now() + std::time::Duration::from_secs(2),
         )
         .await?;
-        let mut tx = Transaction::begin(connection, None).await?;
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("SET LOCAL statement_timeout='2s'")
-            .execute(&mut *tx)
-            .await?;
+        let mut tx = super::artifact_query::begin_snapshot(connection).await?;
         let admitted: bool = sqlx::query_scalar(
             "SELECT EXISTS (
                 SELECT 1 FROM communities c
@@ -344,26 +330,21 @@ impl Db {
         tx.commit().await?;
         Ok(policy)
     }
-    /// Exact accepted replay needs admission and tenant binding, never new edit
-    /// authority. The durable ledger survives redaction and deletion payloads.
+    /// Exact accepted replay needs admission and tenant binding, never edit authority.
     pub async fn community_artifact_accepted(
         &self,
         community: CommunityId,
         principal: &CommunityArtifactPrincipal,
         event: &Event,
     ) -> Result<bool> {
-        let envelope = buzz_core::artifact::validate(event).map_err(|_| denied())?;
-        if envelope.scope != ArtifactScope::Community
-            || envelope.community != Some(*community.as_uuid())
-            || event.pubkey.as_bytes().as_slice() != principal.pubkey
-        {
-            return Err(denied());
-        }
+        let env = buzz_core::artifact::validate(event).map_err(|_| denied())?;
+        check_revision_binding(community, principal, event, &env)?;
         let mut tx = self
             .begin_community_artifact_read(community, principal)
             .await?;
-        let accepted=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM artifact_revisions WHERE community_id=$1 AND scope='community' AND event_id=$2)")
-            .bind(community.as_uuid()).bind(event.id.as_bytes().as_slice()).fetch_one(&mut *tx).await?;
+        let accepted =
+            artifact_receipt_exists(&mut tx, community, event.id.as_bytes(), Some("community"))
+                .await?;
         tx.commit().await?;
         Ok(accepted)
     }
@@ -376,24 +357,21 @@ impl Db {
         event: &Event,
         env: &ArtifactEnvelope,
     ) -> Result<ArtifactOutcome> {
-        if env.scope != ArtifactScope::Community
-            || env.community != Some(*community.as_uuid())
-            || event.pubkey.as_bytes().as_slice() != principal.pubkey
-        {
-            return Err(denied());
-        }
+        check_revision_binding(community, principal, event, env)?;
         let mut tx = self.begin_event_write_transaction(community).await?;
         set_admission_timeouts(tx.conn()).await?;
         lock_restriction_writers(tx.conn(), community).await?;
         lock_active_community(tx.conn(), community).await?;
-        let authority = authorize_members(tx.conn(), community, principal).await?;
-        policy_lock(tx.conn(), community, &env.artifact_type).await?;
+        let authority = authorize_members(tx.conn(), community, principal, true).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
             .bind(format!("artifact:{community}:community:{}", env.id))
             .execute(tx.conn())
             .await?;
-        if sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM artifact_revisions WHERE community_id=$1 AND scope='community' AND event_id=$2)")
-            .bind(community.as_uuid()).bind(event.id.as_bytes().as_slice()).fetch_one(tx.conn()).await? {return Ok(ArtifactOutcome::Duplicate);}
+        if artifact_receipt_exists(tx.conn(), community, event.id.as_bytes(), Some("community"))
+            .await?
+        {
+            return Ok(ArtifactOutcome::Duplicate);
+        }
         if authority.timed_out {
             return Err(denied());
         }
@@ -407,25 +385,8 @@ impl Db {
         }
         let head=sqlx::query("SELECT event_id,artifact_type,deleted FROM artifact_heads WHERE community_id=$1 AND scope='community' AND artifact_id=$2 FOR UPDATE")
             .bind(community.as_uuid()).bind(env.id).fetch_optional(tx.conn()).await?;
-        match (&head, env.op) {
-            (Some(_), ArtifactOp::Create) => {
-                return Ok(ArtifactOutcome::Conflict("artifact identity is taken"))
-            }
-            (None, ArtifactOp::Create) => {}
-            (None, _) => return Ok(ArtifactOutcome::Conflict(HEAD_UNAVAILABLE)),
-            (Some(head), op) => {
-                if env.prev.as_deref() != Some(head.try_get::<Vec<u8>, _>("event_id")?.as_slice()) {
-                    return Ok(ArtifactOutcome::Conflict("artifact head changed"));
-                }
-                if head.try_get::<String, _>("artifact_type")? != env.artifact_type {
-                    return Ok(ArtifactOutcome::Rejected("artifact type is immutable"));
-                }
-                if head.try_get::<bool, _>("deleted")? != (op == ArtifactOp::Restore) {
-                    return Ok(ArtifactOutcome::Rejected(
-                        "deleted artifacts require restore; live artifacts cannot restore",
-                    ));
-                }
-            }
+        if let Some(outcome) = check_artifact_head(env, head.as_ref())? {
+            return Ok(outcome);
         }
         sqlx::query("INSERT INTO artifact_revisions(community_id,scope,event_id,artifact_id,community_event,modified_at) VALUES($1,'community',$2,$3,$4,clock_timestamp())")
             .bind(community.as_uuid()).bind(event.id.as_bytes().as_slice()).bind(env.id).bind(serde_json::to_value(event).map_err(|e|DbError::InvalidData(e.to_string()))?).execute(tx.conn()).await?;
@@ -439,12 +400,30 @@ impl Db {
     }
 }
 
-fn query_builder(
+fn check_revision_binding(
+    community: CommunityId,
+    principal: &CommunityArtifactPrincipal,
+    event: &Event,
+    env: &ArtifactEnvelope,
+) -> Result<()> {
+    if env.scope != ArtifactScope::Community
+        || env.community != Some(*community.as_uuid())
+        || event.pubkey.as_bytes().as_slice() != principal.pubkey
+    {
+        return Err(denied());
+    }
+    Ok(())
+}
+
+pub(super) fn query_builder(
     community: CommunityId,
     view: ArtifactView,
     tags: &[(String, Vec<String>)],
 ) -> QueryBuilder<Postgres> {
     let mut qb = QueryBuilder::new("SELECT r.artifact_id,r.community_event,r.modified_at ");
+    if view == ArtifactView::Head {
+        qb.push(",a.deleted ");
+    }
     if view == ArtifactView::History {
         qb.push("FROM artifact_revisions r WHERE r.community_id=")
             .push_bind(*community.as_uuid())
@@ -498,56 +477,18 @@ fn query_builder(
     }
     qb
 }
-fn rows_to_events(rows: Vec<sqlx::postgres::PgRow>) -> Result<Vec<StoredEvent>> {
-    rows.into_iter()
-        .map(|row| {
-            let event: Event = serde_json::from_value(row.try_get("community_event")?)
-                .map_err(|e| DbError::InvalidData(e.to_string()))?;
-            Ok(StoredEvent::with_received_at(
-                event,
-                row.try_get("modified_at")?,
-                None,
-                true,
-            ))
-        })
-        .collect()
+pub(super) fn rows_to_events(rows: Vec<sqlx::postgres::PgRow>) -> Result<Vec<StoredEvent>> {
+    rows.iter().map(row_to_event).collect()
 }
-/// One repeatable-read cut of community heads; the sync uses the same keyset
-/// paging, buffer bounds, budget and complete-set enqueue protocol as channels.
-pub struct CommunityArtifactSnapshot {
-    tx: Transaction<'static, Postgres>,
-    _permit: tokio::sync::OwnedSemaphorePermit,
-    community: CommunityId,
-    after: Option<Uuid>,
-    done: bool,
-}
-impl CommunityArtifactSnapshot {
-    /// Read one keyset page in this snapshot.
-    pub async fn next_page(
-        &mut self,
-        tags: &[(String, Vec<String>)],
-        page: i64,
-    ) -> Result<Vec<StoredEvent>> {
-        if self.done {
-            return Ok(vec![]);
-        }
-        let mut qb = query_builder(self.community, ArtifactView::Current, tags);
-        if let Some(after) = self.after {
-            qb.push(" AND a.artifact_id>").push_bind(after);
-        }
-        qb.push(" ORDER BY a.artifact_id LIMIT ").push_bind(page);
-        let rows = qb.build().fetch_all(&mut *self.tx).await?;
-        self.done = (rows.len() as i64) < page;
-        if let Some(last) = rows.last() {
-            self.after = Some(last.try_get("artifact_id")?);
-        }
-        rows_to_events(rows)
-    }
-    /// End the complete-set snapshot.
-    pub async fn finish(self) -> Result<()> {
-        self.tx.commit().await?;
-        Ok(())
-    }
+fn row_to_event(row: &sqlx::postgres::PgRow) -> Result<StoredEvent> {
+    let event: Event = serde_json::from_value(row.try_get("community_event")?)
+        .map_err(|e| DbError::InvalidData(e.to_string()))?;
+    Ok(StoredEvent::with_received_at(
+        event,
+        row.try_get("modified_at")?,
+        None,
+        true,
+    ))
 }
 impl Db {
     /// Explicit bounded community read; admission precedes filtering and paging.
@@ -577,7 +518,7 @@ impl Db {
         &self,
         community: CommunityId,
         principal: &CommunityArtifactPrincipal,
-    ) -> Result<CommunityArtifactSnapshot> {
+    ) -> Result<ArtifactSnapshot> {
         // Reserve capacity for other writer-pool operations.
         if self.pool.options().get_max_connections() < 2 {
             return Err(DbError::ArtifactSyncLimit);
@@ -592,13 +533,7 @@ impl Db {
         let tx = self
             .begin_community_artifact_read(community, principal)
             .await?;
-        Ok(CommunityArtifactSnapshot {
-            _permit: permit,
-            tx,
-            community,
-            after: None,
-            done: false,
-        })
+        Ok(ArtifactSnapshot::for_community(tx, community, permit))
     }
     /// Reload the current authorized head for a community change signal.
     pub async fn community_artifact_head(
@@ -607,26 +542,16 @@ impl Db {
         principal: &CommunityArtifactPrincipal,
         id: Uuid,
     ) -> Result<Option<(StoredEvent, bool)>> {
-        let query = ArtifactQuery {
-            scope: ArtifactScope::Community,
-            view: ArtifactView::Head,
-            tags: vec![("d".into(), vec![id.to_string()])],
-            limit: 1,
-            offset: 0,
-        };
-        Ok(self
-            .query_community_artifacts(community, principal, &query)
-            .await?
-            .into_iter()
-            .next()
-            .map(|head| {
-                let deleted = head
-                    .event
-                    .tags
-                    .iter()
-                    .any(|tag| tag.as_slice() == ["op", "delete"]);
-                (head, deleted)
-            }))
+        let mut tx = self
+            .begin_community_artifact_read(community, principal)
+            .await?;
+        let mut query = query_builder(community, ArtifactView::Head, &[]);
+        query.push(" AND a.artifact_id=").push_bind(id);
+        let row = query.build().fetch_optional(&mut *tx).await?;
+        tx.commit().await?;
+        row.as_ref()
+            .map(|r| Ok((row_to_event(r)?, r.try_get("deleted")?)))
+            .transpose()
     }
     /// Redact only a community revision in this tenant. Keep its acceptance and
     /// head ID. The same transaction writes the existing moderation audit row.
@@ -640,7 +565,7 @@ impl Db {
         set_admission_timeouts(tx.conn()).await?;
         lock_restriction_writers(tx.conn(), community).await?;
         lock_active_community(tx.conn(), community).await?;
-        let authority = authorize_members(tx.conn(), community, principal).await?;
+        let authority = authorize_members(tx.conn(), community, principal, false).await?;
         if !authority.admin || authority.timed_out {
             return Err(denied());
         }
