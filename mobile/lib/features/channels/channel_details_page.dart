@@ -167,6 +167,10 @@ class ChannelDetailsPage extends HookConsumerWidget {
                 member.isBot == bot && isArchived(member) == archivedPart,
           ),
     ].take(_channelMemberPreviewLimit).toList();
+    final showAllMembers = memberCount > _channelMemberPreviewLimit;
+    final showMemberActions =
+        showAllMembers || previewMembers.any((member) => member.isBot);
+    final memberActionsLabel = showAllMembers ? 'See all' : 'Member actions';
     final userCache = ref.watch(userCacheProvider);
     final memberLabels = watchChannelIdentityLabels(
       ref,
@@ -389,8 +393,8 @@ class ChannelDetailsPage extends HookConsumerWidget {
                           userCache[member.pubkey.toLowerCase()]?.avatarUrl,
                       isArchived: isArchived(member),
                     ),
-                  if (memberCount > _channelMemberPreviewLimit)
-                    action('See all', BuzzIcons.users, openMembers),
+                  if (showMemberActions)
+                    action(memberActionsLabel, BuzzIcons.users, openMembers),
                 ],
               ],
             ),
@@ -661,11 +665,14 @@ class ChannelDetailsPage extends HookConsumerWidget {
                         userCache[member.pubkey.toLowerCase()]?.avatarUrl,
                     isArchived: isArchived(member),
                   ),
-                if (memberCount > _channelMemberPreviewLimit)
+                if (showMemberActions)
                   AppListRowRaw(
                     key: const ValueKey('channel-details-members-row'),
                     leading: const SizedBox.square(dimension: 40),
-                    title: Text('See all', style: context.textTheme.bodyLarge),
+                    title: Text(
+                      memberActionsLabel,
+                      style: context.textTheme.bodyLarge,
+                    ),
                     trailing: const _ChannelDetailsChevron(),
                     onTap: openMembers,
                     verticalPadding: Grid.xxs,
