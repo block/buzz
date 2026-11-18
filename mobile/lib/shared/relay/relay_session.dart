@@ -12,6 +12,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../features/age_gate/age_signal_provider.dart';
 import '../auth/auth.dart';
+import '../diagnostics/diagnostic_reporter.dart';
 import '../hosted/hosted_relay_auth.dart';
 import '../hosted/builderlab_account.dart';
 import 'nostr_filters.dart';
@@ -124,10 +125,13 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   @visibleForTesting
   set debugRelayUrl(String? value) => _relayUrl = value;
 
+  DiagnosticReporter _diagnostics = const NoopDiagnosticReporter();
+
   @override
   SessionState build() {
     final config = ref.watch(relayConfigProvider);
     _relayUrl = config.baseUrl;
+    _diagnostics = ref.read(diagnosticReporterProvider);
     final auth = ref.watch(authProvider.select(_sessionAuthKey));
     _ageRestricted = ref.watch(ageSignalProvider) == AgeSignalState.restricted;
 
@@ -1071,7 +1075,17 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       }
       _recentDeliveryKeys.add(deliveryKey);
 
-      sub.onEvent(buffered.event);
+      // A subscriber that throws must not cost the rest of the batch: its
+      // delivery keys are already recorded, so lost events never come back.
+      try {
+        sub.onEvent(buffered.event);
+      } catch (error, stackTrace) {
+        _diagnostics.reportError(
+          error,
+          stackTrace,
+          operation: DiagnosticOperation.eventSubscriber,
+        );
+      }
     }
   }
 
