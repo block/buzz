@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:clock/clock.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -125,12 +126,14 @@ Future<NotificationReplyResult> sendNotificationReply(
       draftThreadRootId: await _keepDraft(ref, reply),
     );
   }
-  // Sending ends early enough to mark read and report before the deadline.
-  final left =
-      reply.deadline.difference(DateTime.now()) -
-      _reportMargin -
-      _markReadDeadline;
-  final publishWindow = left - _publishTimeout;
+  // Publishing starts early enough to hear the OK, mark read and report
+  // before the deadline. The cutoff comes from the deadline itself, so a
+  // suspension between clock readings can't move it later.
+  final publishDeadline = reply.deadline.subtract(
+    _publishTimeout + _markReadDeadline + _reportMargin,
+  );
+  final publishWindow = publishDeadline.difference(clock.now());
+  final left = publishWindow + _publishTimeout;
   if (publishWindow <= Duration.zero) {
     return (
       outcome: NotificationReplyOutcome.notSent,
@@ -144,14 +147,17 @@ Future<NotificationReplyResult> sendNotificationReply(
   var tooLate = false;
   final publishBy = Timer(publishWindow, () => tooLate = true);
   // The clock too: after a suspension, the timer may not have run yet.
-  final publishDeadline = DateTime.now().add(publishWindow);
-  bool late() => tooLate || !DateTime.now().isBefore(publishDeadline);
+  bool late() => tooLate || !clock.now().isBefore(publishDeadline);
   var published = false;
   // Asked right before the event goes out. The reply is saved as maybe
-  // published first, so a relaunch never resends it.
+  // published first, so a relaunch never resends it; iOS refuses once it has
+  // already ended the reply as not sent.
   Future<bool> mayPublish() async {
     if (late()) return false;
-    await markBuzzNotificationReplyPublishing(reply.id);
+    if (!await markBuzzNotificationReplyPublishing(reply.id)) {
+      tooLate = true;
+      return false;
+    }
     if (late()) return false;
     published = true;
     return true;
@@ -263,8 +269,9 @@ String? _replyHead(BuzzNotificationReply reply, Channel channel) =>
 
 /// Keeps the reply's text as a draft, after any draft already there, in the
 /// reply's own community, and returns the thread it's in once it's saved, or
-/// throws: the reply then stays with iOS until a later launch saves it. When
-/// that community is gone, nothing is kept and this returns null. It
+/// throws: the reply then stays with iOS until a later launch saves it, as it
+/// does while this build hides that community. When that community is gone,
+/// nothing is kept and this returns null. It
 /// goes where the reply would have gone: the subthread under the notified
 /// message, or a Solo chat itself. Whether it's a Solo chat comes from the
 /// loaded channel, or else from the notification.
@@ -284,9 +291,17 @@ Future<String?> _keepDraft(Ref ref, BuzzNotificationReply reply) async {
   final community = communities
       .where((community) => community.id == link.communityId)
       .firstOrNull;
-  // Removed, or signed out: there's nowhere to keep it, and keeping it with
-  // iOS would retry it on every launch.
-  if (community == null) return null;
+  if (community == null) {
+    // Hidden by this build but still saved: kept with iOS for a build that
+    // shows it.
+    final id = link.communityId;
+    if (id != null && await ref.read(communityStorageProvider).keeps(id)) {
+      throw StateError('Reply community hidden in this build');
+    }
+    // Removed, or signed out: there's nowhere to keep it, and keeping it with
+    // iOS would retry it on every launch.
+    return null;
+  }
   await ref
       .read(composeDraftsProvider.notifier)
       .append(

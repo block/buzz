@@ -231,8 +231,14 @@ final class BuzzNotificationReplyBridge {
         result(FlutterError(code: "invalid_arguments", message: "Expected id.", details: nil))
         return true
       }
+      // Once expired, the reply was reported as not sent with its text, so
+      // it must not go out. Runs on the main queue, like expire.
+      guard buffer.holds(id: id) else {
+        result(false)
+        return true
+      }
       journal.markPublishing(id: id)
-      result(nil)
+      result(true)
     case "completeNotificationReply":
       guard let arguments = call.arguments as? [String: Any],
         let id = arguments["id"] as? String,
@@ -248,8 +254,8 @@ final class BuzzNotificationReplyBridge {
         : arguments["unknown"] as? Bool == true
           ? .unknown
           : .notSent(draftThreadRootID: arguments["draftThreadRootId"] as? String)
-      // The app reports only after the reply is sent, its draft is saved, or its
-      // community is gone, so there's nowhere to keep one.
+      // The app reports only after the reply is sent, may have been sent, has
+      // its draft saved, or has no community left to keep one in.
       let recorded = journal.recorded(id: id)
       if buffer.complete(id: id, outcome: outcome) {
         journal.settle(id: id)

@@ -248,6 +248,13 @@ public final class BuzzNotificationReplyBuffer: @unchecked Sendable {
     return taken
   }
 
+  /// Whether a request is still waiting for its outcome.
+  public func holds(id: String) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return entries.contains { $0.request.id == id }
+  }
+
   /// Finishes a request, returning false when the id is unknown or already
   /// finished.
   @discardableResult

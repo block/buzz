@@ -165,13 +165,19 @@ Future<List<BuzzNotificationReply>> takePendingBuzzNotificationReplies() async {
 }
 
 /// Tells iOS that a notification reply may be published from now on, so a
-/// relaunch never drafts or resends it. Returns once that is saved.
-Future<void> markBuzzNotificationReplyPublishing(String id) async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+/// relaunch never drafts or resends it. Returns once that is saved, false
+/// when iOS has already ended the reply, which then must not be published.
+Future<bool> markBuzzNotificationReplyPublishing(String id) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return true;
   try {
-    await _channel.invokeMethod<void>('markNotificationReplyPublishing', id);
+    return await _channel.invokeMethod<bool>(
+          'markNotificationReplyPublishing',
+          id,
+        ) ??
+        true;
   } on MissingPluginException {
     // Flutter tests and non-Runner embeddings do not install the native bridge.
+    return true;
   }
 }
 
