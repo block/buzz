@@ -17,14 +17,18 @@ use crate::{
     test_support::database_url,
 };
 
-async fn app_state(db: buzz_db::Db, pool: &PgPool) -> (Arc<AppState>, AuditShutdownHandle) {
+async fn app_state(
+    db: buzz_db::Db,
+    pool: &PgPool,
+    members_only: bool,
+) -> (Arc<AppState>, AuditShutdownHandle) {
     let mut config = Config::for_test();
     config.database_url = database_url();
     config.redis_url =
         std::env::var("REDIS_URL").expect("REDIS_URL must point to the isolated test Redis");
     config.relay_url = "wss://workflow-webhook-test.invalid".to_owned();
     config.require_auth_token = false;
-    config.require_relay_membership = false;
+    config.require_relay_membership = members_only;
 
     let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).expect("create Redis pool");
     let pubsub = Arc::new(
@@ -258,7 +262,7 @@ async fn webhook_admission_enforces_owner_ban_tenant_scope_and_lookup_failure() 
     )
     .await;
 
-    let (state, audit_shutdown) = app_state(db.clone(), &pool).await;
+    let (state, audit_shutdown) = app_state(db.clone(), &pool, false).await;
 
     let (status, body) = post_webhook(&state, workflow_id, &host_a, "wrong-secret").await;
     assert_eq!(
@@ -342,7 +346,7 @@ async fn webhook_admission_enforces_owner_ban_tenant_scope_and_lookup_failure() 
 
     let (failing_db, admin_pool, schema) =
         crate::test_support::restriction_lookup_failing_db().await;
-    let (failing_state, failing_audit_shutdown) = app_state(failing_db, &pool).await;
+    let (failing_state, failing_audit_shutdown) = app_state(failing_db, &pool, false).await;
     let (status, body) = post_webhook(&failing_state, workflow_id, &host_a, &secret).await;
     assert_eq!(
         status,
@@ -401,7 +405,47 @@ async fn webhook_dm_routes_local_recipient_without_author_spoofing() {
     )
     .await
     .expect("local handle");
-    let (state, audit_shutdown) = app_state(db.clone(), &pool).await;
+    let (state, audit_shutdown) = app_state(db.clone(), &pool, true).await;
+    let _ = db
+        .add_relay_member(
+            community,
+            &recipient.to_hex(),
+            "member",
+            None,
+            &state.relay_keypair,
+        )
+        .await
+        .expect("admit recipient");
+    let outsider = nostr::Keys::generate().public_key();
+    db.ensure_user(community, outsider.as_bytes())
+        .await
+        .unwrap();
+    let outsider_handle = format!("outsider@{host}");
+    db.update_user_profile(
+        community,
+        outsider.as_bytes(),
+        None,
+        None,
+        None,
+        Some(&outsider_handle),
+    )
+    .await
+    .unwrap();
+    let other_id = Uuid::new_v4();
+    let other = buzz_core::CommunityId::from_uuid(other_id);
+    let other_host = format!("other-{}.example.org", other_id.simple());
+    seed_community(&pool, other_id, &other_host).await;
+    let foreign = nostr::Keys::generate().public_key();
+    let foreign_alias = nostr::Keys::generate().public_key();
+    for (key, handle) in [
+        (foreign, format!("elsewhere@{host}")),
+        (foreign_alias, format!("elsewhere@{other_host}")),
+    ] {
+        db.ensure_user(other, key.as_bytes()).await.unwrap();
+        db.update_user_profile(other, key.as_bytes(), None, None, None, Some(&handle))
+            .await
+            .unwrap();
+    }
     state
         .workflow_engine
         .set_action_sink(Arc::new(crate::workflow_sink::RelayActionSink::new(&state)));
@@ -413,6 +457,11 @@ async fn webhook_dm_routes_local_recipient_without_author_spoofing() {
         (json!("bad-key"), RunStatus::Failed),
         (json!(format!("missing@{host}")), RunStatus::Failed),
         (json!("alice@other.example.org"), RunStatus::Failed),
+        (json!(outsider.to_hex()), RunStatus::Failed),
+        (json!(outsider_handle), RunStatus::Failed),
+        (json!(foreign.to_hex()), RunStatus::Failed),
+        (json!(format!("elsewhere@{host}")), RunStatus::Failed),
+        (json!(format!("elsewhere@{other_host}")), RunStatus::Failed),
     ] {
         let payload =
             json!({"recipient": address, "title": "Checkout", "author": recipient.to_hex()});
@@ -466,6 +515,14 @@ async fn webhook_dm_routes_local_recipient_without_author_spoofing() {
             }
             dm_id = Some(channel[0].channel_id);
         }
+        assert_eq!(
+            db.list_dms_for_user(community, owner.as_bytes(), 10, None)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "failed address must not create a conversation: {address}"
+        );
     }
     // Previously stored definitions and manual runs cannot bypass trigger restrictions.
     let def: buzz_workflow::WorkflowDef = serde_json::from_value(
@@ -511,52 +568,115 @@ async fn webhook_dm_routes_local_recipient_without_author_spoofing() {
     .await
     .expect_err("stored non-webhook definition must be revalidated");
     assert!(failure.0.to_string().contains("requires a webhook trigger"));
-    // A profile in a neighboring community is not a recipient in this one.
-    let foreign = nostr::Keys::generate().public_key();
-    let other_id = Uuid::new_v4();
-    seed_community(
-        &pool,
-        other_id,
-        &format!("other-{}.example.org", other_id.simple()),
-    )
-    .await;
-    db.ensure_user(
-        buzz_core::CommunityId::from_uuid(other_id),
-        &foreign.to_bytes(),
-    )
-    .await
-    .unwrap();
-    for address in [recipient.to_hex(), handle, foreign.to_hex()] {
-        db.ban_community_member(
-            community,
-            &recipient.to_bytes(),
-            &owner.to_bytes(),
-            None,
-            None,
-        )
+    use buzz_workflow::action_sink::ActionSink;
+    let sink = crate::workflow_sink::RelayActionSink::new(&state);
+    // Removal leaves the profile/handle intact but must revoke both address forms.
+    let _ = db
+        .remove_relay_member(community, &recipient.to_hex(), &state.relay_keypair)
         .await
-        .expect("ban recipient");
-        let sink = crate::workflow_sink::RelayActionSink::new(&state);
-        use buzz_workflow::action_sink::ActionSink;
-        assert!(sink
+        .unwrap();
+    for address in [recipient.to_hex(), handle.clone()] {
+        let error = sink
             .send_dm(
                 community,
                 &address,
                 "private",
                 "private",
                 false,
-                &owner.to_hex()
+                &owner.to_hex(),
             )
             .await
-            .is_err());
+            .expect_err("removed member must not receive a DM");
+        assert!(error.to_string().contains("current community member"));
+    }
+    let agent_owner = nostr::Keys::generate().public_key();
+    let agent = nostr::Keys::generate().public_key();
+    db.ensure_user(community, agent_owner.as_bytes())
+        .await
+        .unwrap();
+    db.ensure_user(community, agent.as_bytes()).await.unwrap();
+    db.set_agent_owner(community, agent.as_bytes(), agent_owner.as_bytes())
+        .await
+        .unwrap();
+    let _ = db
+        .add_relay_member(
+            community,
+            &agent_owner.to_hex(),
+            "member",
+            None,
+            &state.relay_keypair,
+        )
+        .await
+        .unwrap();
+    sink.send_dm(
+        community,
+        &agent.to_hex(),
+        "agent",
+        "agent",
+        false,
+        &owner.to_hex(),
+    )
+    .await
+    .expect("agent admitted through its member owner");
+    let _ = db
+        .remove_relay_member(community, &agent_owner.to_hex(), &state.relay_keypair)
+        .await
+        .unwrap();
+    let error = sink
+        .send_dm(
+            community,
+            &agent.to_hex(),
+            "private",
+            "private",
+            false,
+            &owner.to_hex(),
+        )
+        .await
+        .expect_err("owner removal revokes agent admission");
+    assert!(error.to_string().contains("current community member"));
+    // Ban checks are independent of the membership and tenant denial cases above.
+    db.ban_community_member(
+        community,
+        recipient.as_bytes(),
+        owner.as_bytes(),
+        None,
+        None,
+    )
+    .await
+    .expect("ban recipient");
+    for address in [recipient.to_hex(), handle] {
+        let error = sink
+            .send_dm(
+                community,
+                &address,
+                "private",
+                "private",
+                false,
+                &owner.to_hex(),
+            )
+            .await
+            .expect_err("banned recipient");
+        assert!(error.to_string().contains("unbanned community user"));
     }
     assert_eq!(
         db.list_dms_for_user(community, &owner.to_bytes(), 10, None)
             .await
             .unwrap()
             .len(),
-        1
+        2
     );
+    for (scope, key) in [
+        (community, outsider),
+        (community, foreign),
+        (other, foreign),
+        (other, foreign_alias),
+    ] {
+        assert!(db
+            .list_dms_for_user(scope, key.as_bytes(), 10, None)
+            .await
+            .unwrap()
+            .is_empty());
+    }
     audit_shutdown
         .drain(std::time::Duration::from_secs(1))
         .await;

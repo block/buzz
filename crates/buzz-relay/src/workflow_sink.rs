@@ -293,6 +293,33 @@ impl ActionSink for RelayActionSink {
                     "DM recipient must be an existing, unbanned community user".into(),
                 ));
             }
+            if state.config.require_relay_membership {
+                let mut admitted = state
+                    .db
+                    .is_relay_member_writer(community_id, &hex::encode(&recipient))
+                    .await
+                    .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+                if !admitted {
+                    // Agents inherit admission from their recorded owner, as at authentication.
+                    if let Some((_, Some(owner))) = state
+                        .db
+                        .get_agent_channel_policy(community_id, &recipient)
+                        .await
+                        .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                    {
+                        admitted = state
+                            .db
+                            .is_relay_member_writer(community_id, &hex::encode(owner))
+                            .await
+                            .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+                    }
+                }
+                if !admitted {
+                    return Err(ActionSinkError::InvalidInput(
+                        "DM recipient must be a current community member".into(),
+                    ));
+                }
+            }
             // Check attachment access before creating a conversation or notices.
             // Use the same relay signature and owner attribution as send_message;
             // the destination h-tag is not part of media publication authorization.

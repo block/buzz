@@ -14,7 +14,8 @@ steps:
     text: 'Review requested: {{trigger.title}} — {{trigger.url}}'
 ```
 
-POST JSON to `/hooks/<workflow-id>` with the workflow's `X-Webhook-Secret`:
+POST JSON to `/hooks/<workflow-id>` with the workflow's `X-Webhook-Secret` header.
+Never put the secret in a query parameter, where URLs may expose it in logs:
 
 ```json
 {
@@ -35,21 +36,27 @@ pinned public key when an integration needs a stable identity across handle chan
 
 The owner explicitly delegates recipient selection to holders of the webhook
 secret by choosing `{{trigger.recipient}}`. Protect the secret like a credential
-that can send DMs as the owner. A fixed public key or local handle in `to` keeps
-recipient selection under the workflow owner's control.
+that can send DMs as the owner. A fixed public key in `to` keeps recipient selection
+under the workflow owner's control. Literal handles in `to` are rejected because handles can be reassigned;
+only the explicit webhook recipient template accepts a handle at run time.
 
 Only webhook definitions and webhook-caused runs may use this recipient template.
 Other arbitrary templates, concatenation, and step-output recipients are rejected.
 `{{trigger.author}}` retains its event-author meaning; a webhook JSON field named
 `author` does not populate it. Payload values are not recursively templated.
 Missing, malformed, unknown, banned, off-community, and self recipients fail the
-run without creating a conversation. Existing private conversations are reused
-without changing their hidden state. Owner authority and agent-mention policy
+run without creating a conversation. On members-only communities, the recipient
+must also be a current relay member, or an agent whose recorded owner is a current
+member. Removing that membership revokes eligibility; a retained profile does not
+restore it. Open communities do not require relay membership. Existing private
+conversations are reused without changing their hidden state. Owner authority and agent-mention policy
 are checked as for other workflow DMs.
 
 HTTP 202 means the run was accepted, not that the message arrived. Check the run
 trace for completion and its message event ID. Retrying the webhook starts a new
-run and may send a duplicate; delivery is not exactly once.
+run and may send a duplicate; delivery is not exactly once. There is no per-secret
+run or recipient limit. Integrations should rate-limit and deduplicate before
+calling the webhook; use a pinned public key if a caller must have one destination.
 
 ## Manual verification
 

@@ -652,7 +652,7 @@ Note: Both `TriggerDef` and `ActionDef` use serde internally-tagged enums. Trigg
 | Action | Description |
 |--------|-------------|
 | `send_message` | Post to the workflow's channel (or override channel) |
-| `send_dm` | Direct message to a pubkey or local NIP-05 handle; event `{{trigger.author}}` or webhook `{{trigger.recipient}}` ([webhook setup](docs/workflow-webhook-dms.md)) |
+| `send_dm` | Direct message to a fixed pubkey, event `{{trigger.author}}`, or webhook `{{trigger.recipient}}` (pubkey or local NIP-05 handle) ([webhook setup](docs/workflow-webhook-dms.md)) |
 | `set_channel_topic` | Update channel topic |
 | `add_reaction` | React to the trigger message |
 | `call_webhook` | HTTP POST to external URL (SSRF-protected, redirects disabled, 1 MiB response cap) |

@@ -108,8 +108,8 @@ pub enum ActionDef {
     },
     /// Send a direct message to a user.
     SendDm {
-        /// Recipient: pubkey hex, community-local NIP-05 handle, or
-        /// `{{trigger.author}}`. Webhook workflows may use `{{trigger.recipient}}`.
+        /// Recipient: pubkey hex or `{{trigger.author}}`. Webhook workflows may
+        /// use `{{trigger.recipient}}`, resolving to a pubkey or local NIP-05 handle.
         to: String,
         /// Message text (supports template variables).
         text: String,
@@ -292,11 +292,13 @@ impl WorkflowDef {
 
 /// Enforce the recipient forms before trigger-controlled template resolution.
 pub(crate) fn validate_dm_recipient(to: &str) -> Result<(), WorkflowError> {
-    if matches!(to, "{{trigger.author}}" | "{{trigger.recipient}}") || valid_dm_address(to) {
+    if matches!(to, "{{trigger.author}}" | "{{trigger.recipient}}")
+        || nostr::PublicKey::from_hex(to).is_ok()
+    {
         Ok(())
     } else {
         Err(WorkflowError::InvalidDefinition(
-            "send_dm recipient must be a hex pubkey, local NIP-05 handle, {{trigger.author}}, or webhook {{trigger.recipient}}".into(),
+            "send_dm recipient must be a hex pubkey, {{trigger.author}}, or webhook {{trigger.recipient}}".into(),
         ))
     }
 }
@@ -361,7 +363,7 @@ mod tests {
         let key = nostr::Keys::generate().public_key().to_hex();
         for (to, webhook_only, valid) in [
             (key.as_str(), false, true),
-            ("alice@chat.example.org", false, true),
+            ("alice@chat.example.org", false, false),
             ("{{trigger.author}}", false, true),
             ("{{trigger.recipient}}", true, true),
             ("{{trigger.text}}", false, false),
