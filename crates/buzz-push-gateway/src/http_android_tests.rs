@@ -54,6 +54,10 @@ struct Gateway {
 }
 
 fn gateway(with_android: bool) -> Gateway {
+    gateway_limited(with_android, 1_000)
+}
+
+fn gateway_limited(with_android: bool, signed_calls_per_window: i64) -> Gateway {
     let fcm = Arc::new(FakeFcm::default());
     let grant_keyring =
         Arc::new(GrantKeyring::new(vec![GrantKey::new("test", &[1; 32]).unwrap()]).unwrap());
@@ -81,6 +85,10 @@ fn gateway(with_android: bool) -> Gateway {
         max_installation_lifetime_seconds: 600,
         endpoint_quota_window_seconds: 60,
         endpoint_quota_max_deliveries: 10,
+        signed_calls: Arc::new(crate::signed_call_limiter::SignedCallLimiter::new(
+            60,
+            signed_calls_per_window,
+        )),
         now: fixed_now,
         accepting: Arc::new(AtomicBool::new(true)),
     });
@@ -575,8 +583,8 @@ async fn android_enrollment_derives_platform_from_the_attestation_and_rejects_ba
         StatusCode::BAD_REQUEST
     );
 
-    // The attestation must bind this exact transcript, prove a P-256 point and
-    // stay within the chain bounds.
+    // The attestation must bind this exact transcript, prove an uncompressed
+    // P-256 point and stay within the chain bounds.
     let other_transcript = enroll_transcript(&ch, ROTATED_FCM_TOKEN);
     let mut wrong_binding = good.clone();
     wrong_binding["android_attestation"] = phone.chain(&other_transcript).into();
@@ -585,10 +593,17 @@ async fn android_enrollment_derives_platform_from_the_attestation_and_rejects_ba
         STANDARD.encode([4u8; 65]),
         STANDARD.encode(Sha256::digest(enroll_transcript(&ch, FCM_TOKEN).as_bytes())),
     ]);
+    // One key has one id: the same key as a compressed point would get a
+    // second id, and a second rate-limit bucket.
+    let mut compressed = good.clone();
+    compressed["android_attestation"] = json!([
+        STANDARD.encode(phone.key.verifying_key().to_sec1_point(true).as_ref()),
+        STANDARD.encode(Sha256::digest(enroll_transcript(&ch, FCM_TOKEN).as_bytes())),
+    ]);
     let mut long_chain = good.clone();
     long_chain["android_attestation"] =
         vec![STANDARD.encode(b"c"); MAX_ANDROID_CHAIN_CERTIFICATES + 1].into();
-    for body in [wrong_binding, not_a_point, long_chain] {
+    for body in [wrong_binding, not_a_point, compressed, long_chain] {
         assert_eq!(enroll_status(&g, body).await, StatusCode::UNAUTHORIZED);
     }
 
@@ -604,4 +619,52 @@ async fn android_enrollment_derives_platform_from_the_attestation_and_rejects_ba
         first.1["installation_handle"],
         replay.1["installation_handle"]
     );
+}
+
+#[tokio::test]
+async fn signed_installation_calls_are_limited_per_attested_key() {
+    let g = gateway_limited(true, 3);
+    let (phone, other, forger) = (Phone::new(7), Phone::new(8), Phone::new(9));
+    let relay = "aa".repeat(32);
+    let handle = enroll(&g, &phone).await;
+    let delegate = |generation| Call::Delegate {
+        relay: relay.clone(),
+        epoch: 1,
+        generation,
+    };
+    let revoke = Call::RevokeDelegation {
+        relay: relay.clone(),
+        generation: 1,
+    };
+    // Forged calls fail authentication before they are counted, so they
+    // cannot spend the installation's allowance.
+    for _ in 0..5 {
+        let (status, _) = send_call(&g, handle, &delegate(1), &delegate(1), &forger).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    call_ok(&g, handle, &delegate(1), &phone).await;
+    call_ok(&g, handle, &revoke, &phone).await;
+    call_ok(&g, handle, &delegate(2), &phone).await;
+    // The fourth authentic call in the window is refused, whichever kind.
+    for call in [Call::RevokeInstallation { epoch: 1 }, delegate(3)] {
+        let (status, body) = send_call(&g, handle, &call, &call, &phone).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    }
+    // Another installation has its own allowance.
+    let other_handle = {
+        let ch = challenge(&g.app).await;
+        let (status, body) = post(
+            &g.app,
+            "/v1/installations",
+            &enroll_body(&other, &ch, ROTATED_FCM_TOKEN),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        body["installation_handle"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    call_ok(&g, other_handle, &delegate(1), &other).await;
 }
