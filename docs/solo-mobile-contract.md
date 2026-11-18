@@ -47,6 +47,9 @@ A Solo chat owner changes an existing member's access with a signed Buzz
 kind:9050 event with `admin:channels` scope. The content is empty. Each
 required tag appears once.
 
+Relays advertise `buzz-solo-member-role` in NIP-11 `supported_extensions`.
+Clients offer role changes only when the relay advertises this extension.
+
 | Tag | Value |
 | --- | --- |
 | `h` | Solo channel UUID |
