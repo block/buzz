@@ -353,7 +353,7 @@ class _ComposeBarLayout extends HookWidget {
             padding: EdgeInsets.symmetric(
               horizontal: Grid.xxs + Grid.half * voiceNoteInsetProgress,
               vertical:
-                  (usesIosConcentricSurface ? 7 : Grid.xxs) +
+                  (usesIosConcentricSurface ? 5 : Grid.xxs) +
                   Grid.half * voiceNoteInsetProgress,
             ),
             child: child,

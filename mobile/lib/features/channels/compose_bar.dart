@@ -1,4 +1,5 @@
 import 'composer_geometry.dart';
+import 'composer_transcription.dart';
 
 import 'package:buzz/shared/widgets/buzz_toast.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';

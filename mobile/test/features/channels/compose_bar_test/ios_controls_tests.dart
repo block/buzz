@@ -9,8 +9,73 @@ class _TrayPickerService extends _FakeVoiceNoteUploadService {
   }
 }
 
+class _ComposerSpeechFiles extends ComposerTranscriptionFiles {
+  int nextId = 0;
+  final deleted = <String>[];
+  @override
+  Future<String> retain(String source) async => '$source.${nextId++}.saved';
+  @override
+  Future<void> delete(String path) async => deleted.add(path);
+}
+
+class _ComposerSpeechPrefs extends Fake implements SharedPreferences {
+  _ComposerSpeechPrefs(this.delegate);
+
+  final SharedPreferences delegate;
+  bool rejectDraftWrites = false;
+
+  @override
+  String? getString(String key) => delegate.getString(key);
+  @override
+  bool? getBool(String key) => delegate.getBool(key);
+  @override
+  List<String>? getStringList(String key) => delegate.getStringList(key);
+  @override
+  Set<String> getKeys() => delegate.getKeys();
+  @override
+  Future<bool> remove(String key) => delegate.remove(key);
+  @override
+  Future<bool> setString(String key, String value) async =>
+      rejectDraftWrites && key.startsWith('compose_drafts_v1:')
+      ? false
+      : delegate.setString(key, value);
+}
+
+class _ComposerSpeech implements DeviceTranscription {
+  Completer<String> result = Completer<String>();
+  Completer<void> started = Completer<void>();
+  Completer<void> cancelled = Completer<void>();
+  Completer<void>? finishCancelling;
+  bool available = true;
+  @override
+  Future<bool> isAvailable() async => available;
+  @override
+  Future<String> transcribe(String path) {
+    started.complete();
+    return result.future;
+  }
+
+  @override
+  Future<void> cancel() async {
+    if (!cancelled.isCompleted) cancelled.complete();
+    await finishCancelling?.future;
+  }
+
+  void reset() {
+    result = Completer<String>();
+    started = Completer<void>();
+    cancelled = Completer<void>();
+    finishCancelling = null;
+  }
+}
+
 void iosControlsTests() {
   setUp(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('buzz/transcription'),
+          (call) async => call.method == 'isAvailable' ? true : null,
+        );
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
           const MethodChannel('buzz/native_attachment_popover'),
@@ -20,10 +85,158 @@ void iosControlsTests() {
   tearDown(() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
+          const MethodChannel('buzz/transcription'),
+          null,
+        );
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
           const MethodChannel('buzz/native_attachment_popover'),
           null,
         );
   });
+  testWidgets(
+    'microphone keeps recording controls and inserts a retryable transcript',
+    (tester) async {
+      final speech = _ComposerSpeech()..available = false;
+      final files = _ComposerSpeechFiles();
+      final prefs = _ComposerSpeechPrefs(_testPrefs);
+      _testPrefs = prefs;
+      final upload = _FakeVoiceNoteUploadService();
+      var captures = 0;
+      var sends = 0;
+      Widget composer({String? thread}) => _buildComposeBar(
+        uploadService: upload,
+        threadHeadId: thread,
+        voiceNoteRecorderFactory: () {
+          captures++;
+          return _FakeVoiceNoteRecorder();
+        },
+        overrides: [
+          composerTranscriptionFilesProvider.overrideWithValue(files),
+          deviceTranscriptionProvider.overrideWithValue(() => speech),
+        ],
+        onSend: (_, _, {mediaTags = const []}) async {
+          sends++;
+        },
+      );
+      await tester.pumpWidget(composer());
+      await tester.pumpAndSettle();
+      await _tapComposerControl(tester, 'Dictate');
+      await tester.pumpAndSettle();
+      expect(captures, 0);
+      expect(
+        find.text('Dictation isn’t available on this device or language.'),
+        findsOneWidget,
+      );
+      speech.available = true;
+      await _tapComposerControl(tester, 'Dictate');
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('voice-note-recorder')), findsOneWidget);
+      expect(find.byTooltip('Stop recording'), findsOneWidget);
+      await tester.tap(find.byTooltip('Stop recording'));
+      await tester.pump();
+      expect(speech.started.isCompleted, isTrue);
+      await tester.pump();
+      expect(find.text('Transcribing…'), findsOneWidget);
+      speech.result.completeError(StateError('Speech service unavailable.'));
+      await tester.pump();
+      await tester.pumpAndSettle();
+      expect(find.text('Retry'), findsOneWidget);
+      expect(
+        _testPrefs.getKeys().where(
+          (key) => key.startsWith('composer_transcription:'),
+        ),
+        hasLength(1),
+      );
+      speech.reset();
+      await tester.tap(find.text('Retry'));
+      await tester.pump();
+      expect(speech.started.isCompleted, isTrue);
+      prefs.rejectDraftWrites = true;
+      speech.result.complete('Meet me at ten.');
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Could not save the draft. Your recording is saved.'),
+        findsOneWidget,
+      );
+      expect(files.deleted.where((path) => path.endsWith('.saved')), isEmpty);
+      prefs.rejectDraftWrites = false;
+      speech.reset();
+      await tester.tap(find.text('Retry'));
+      await tester.pump();
+      await tester.pumpAndSettle();
+      expect(speech.started.isCompleted, isFalse);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'Meet me at ten.',
+      );
+      expect(find.byTooltip('Remove attachment'), findsNothing);
+      expect(sends, 0);
+      expect(
+        _testPrefs.getKeys().where(
+          (key) => key.startsWith('composer_transcription:'),
+        ),
+        isEmpty,
+      );
+
+      // A late recognition belongs to its original conversation, never the new one.
+      await tester.enterText(find.byType(TextField), '');
+      await tester.pumpAndSettle();
+      speech.reset();
+      await _tapComposerControl(tester, 'Dictate');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Stop recording'));
+      await tester.pump();
+      expect(speech.started.isCompleted, isTrue);
+      await tester.pumpWidget(composer(thread: 'another-thread'));
+      await tester.pump();
+      speech.result.complete('Belongs to the previous draft.');
+      await tester.pump();
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Message'));
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        isEmpty,
+      );
+      await tester.pumpWidget(composer());
+      await tester.pumpAndSettle();
+      expect(find.text('Retry'), findsOneWidget);
+      final originalKey = prefs.getKeys().singleWhere(
+        (key) => key.startsWith('composer_transcription:'),
+      );
+      final originalPath = prefs.getString(originalKey)!;
+      final threadKey = '$originalKey:another-thread';
+      const threadPath = '/tmp/thread-recording.saved';
+      await prefs.setString(threadKey, threadPath);
+
+      speech.reset();
+      await tester.tap(find.text('Retry'));
+      await tester.pump();
+      expect(speech.started.isCompleted, isTrue);
+      final finishCancelling = speech.finishCancelling = Completer<void>();
+      await tester.tap(find.byTooltip('Discard recording'));
+      await tester.pump();
+      expect(speech.cancelled.isCompleted, isTrue);
+      await tester.pumpWidget(composer(thread: 'another-thread'));
+      await tester.pump();
+      finishCancelling.complete();
+      speech.result.complete('Discarded recording.');
+      await tester.pumpAndSettle();
+      expect(prefs.getString(originalKey), isNull);
+      expect(files.deleted, contains(originalPath));
+      expect(prefs.getString(threadKey), threadPath);
+      expect(files.deleted, isNot(contains(threadPath)));
+      expect(find.text('Retry'), findsOneWidget);
+      await tester.tap(find.byTooltip('Discard recording'));
+      await tester.pumpAndSettle();
+      expect(find.text('Retry'), findsNothing);
+      expect(sends, 0);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
+
   testWidgets('inactive and active empty iOS composer use a capsule', (
     tester,
   ) async {
@@ -64,7 +277,7 @@ void iosControlsTests() {
     expect(tester.getTopLeft(composer).dx - tester.getTopRight(plus).dx, 8);
     expect(find.byTooltip('Send'), findsNothing);
     expect(find.byTooltip('Emoji'), findsOneWidget);
-    expect(find.byTooltip('Voice note'), findsOneWidget);
+    expect(find.byTooltip('Dictate'), findsOneWidget);
     final emptyComposerSize = tester.getSize(composer);
     await tester.enterText(find.byType(TextField), 'A draft');
     await tester.pumpAndSettle();
@@ -72,13 +285,13 @@ void iosControlsTests() {
     expect(tester.getSize(composer).width, emptyComposerSize.width);
     expect(find.byTooltip('Send'), findsOneWidget);
     expect(find.byTooltip('Emoji'), findsOneWidget);
-    expect(find.byTooltip('Voice note'), findsNothing);
+    expect(find.byTooltip('Dictate'), findsNothing);
     await tester.enterText(find.byType(TextField), '');
     await tester.pumpAndSettle();
     expect(find.byTooltip('Send'), findsNothing);
     expect(find.byTooltip('Emoji'), findsOneWidget);
-    expect(find.byTooltip('Voice note'), findsOneWidget);
-    await _tapComposerControl(tester, 'Voice note');
+    expect(find.byTooltip('Dictate'), findsOneWidget);
+    await _tapComposerControl(tester, 'Dictate');
     await tester.pumpAndSettle();
     expect(recorder.started, isTrue);
     expect(find.byKey(const ValueKey('voice-note-recorder')), findsOneWidget);
@@ -253,7 +466,7 @@ void iosControlsTests() {
       expect(find.byTooltip('Add attachment'), findsOneWidget);
       await tester.tap(find.text('Message'));
       await tester.pumpAndSettle();
-      for (final label in ['Emoji', 'Voice note']) {
+      for (final label in ['Emoji', 'Dictate']) {
         expect(find.byTooltip(label), findsOneWidget);
       }
       expect(find.byKey(const ValueKey('standard-actions')), findsNothing);

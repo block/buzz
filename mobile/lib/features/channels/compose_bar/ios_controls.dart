@@ -27,7 +27,7 @@ class _IosComposerControls extends StatelessWidget {
       children: [
         _AttachmentTrigger(
           key: const ValueKey('ios-composer-plus'),
-          size: 44,
+          size: 40,
           enabled: enabled,
           surface: attachmentSurface,
           formattingOpen: false,
@@ -41,10 +41,10 @@ class _IosComposerControls extends StatelessWidget {
             icon: showSend
                 ? IosGlassNavigationIcon.send
                 : IosGlassNavigationIcon.microphone,
-            semanticLabel: showSend ? 'Send' : 'Voice note',
-            width: 44,
-            height: 44,
-            controlSize: 44,
+            semanticLabel: showSend ? 'Send' : 'Dictate',
+            width: 40,
+            height: 40,
+            controlSize: 40,
             iconSize: showSend ? 18 : 20,
             isBusy: isSending,
             backgroundColor: showSend ? context.colors.primary : null,

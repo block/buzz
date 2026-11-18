@@ -27,8 +27,10 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
     super.key,
     required this.onCancel,
     required this.onRecorded,
+    this.isDictation = false,
   });
 
+  final bool isDictation;
   final VoidCallback onCancel;
   final ValueChanged<VoiceNoteRecording> onRecorded;
 
@@ -226,8 +228,10 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
           key: const ValueKey('voice-note-recorder-stop'),
           tooltip: 'Stop recording',
           icon: BuzzIcons.square,
-          foreground: Colors.white,
-          background: context.colors.error,
+          foreground: isDictation ? context.colors.onPrimary : Colors.white,
+          background: isDictation
+              ? context.colors.primary
+              : context.colors.error,
           onPressed: error.value == null && isStarted.value && !isStopping.value
               ? finish
               : null,

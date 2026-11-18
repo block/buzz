@@ -1,3 +1,5 @@
+import 'package:buzz/features/channels/composer_transcription.dart';
+import 'package:buzz/shared/transcription/device_transcription.dart';
 import 'package:buzz/shared/emoji/emoji_picker.dart';
 import 'package:buzz/shared/widgets/concentric_sheet_surface.dart';
 import 'package:flutter/scheduler.dart';
@@ -822,10 +824,7 @@ void main() {
         matching: find.byType(MobileTabFooterBackdrop),
       );
       expect(composerBackdrop, findsOneWidget);
-      expect(
-        tester.getSize(composerBackdrop).height,
-        mobileTabFooterBackdropHeight(tester.element(composerBackdrop)),
-      );
+      expect(tester.getSize(composerBackdrop).height, 180);
       final compactDecoration =
           tester
                   .widget<Container>(
@@ -1181,6 +1180,18 @@ void main() {
       addTearDown(tester.view.reset);
       await tester.pump();
 
+      final backdrop = find.descendant(
+        of: find.byKey(const ValueKey('composer-footer-gradient')),
+        matching: find.byType(MobileTabFooterBackdrop),
+      );
+      expect(tester.getSize(backdrop).height, 100);
+      tester.view.viewInsets = const FakeViewPadding(bottom: 150);
+      await tester.pump();
+      expect(tester.getSize(backdrop).height, 140);
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      await tester.pump();
+      expect(tester.getSize(backdrop).height, 100);
+
       // iOS drops the inset while Control Center or the app switcher covers
       // the app, reports `resumed` with it still at zero, and restores the
       // keyboard natively a moment later. That is not a dismissal.
@@ -1209,6 +1220,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(TextField), findsNothing);
       expect(focusNode.hasFocus, isFalse);
+      expect(tester.getSize(backdrop).height, 180);
 
       await tester.tap(find.text('Message'));
       await tester.pumpAndSettle();

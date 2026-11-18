@@ -97,6 +97,7 @@ String composeDraftKey(String channelId, {String? threadHeadId}) =>
 /// identity's draft text.
 class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
   late String _prefsKey;
+  Future<bool> _pendingWrite = Future.value(true);
 
   @override
   List<ComposeDraft> build() {
@@ -105,6 +106,7 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
     final config = ref.watch(relayConfigProvider);
     final pubkey = ref.watch(myPubkeyProvider) ?? 'anon';
     _prefsKey = '$_draftsPrefsKey:${config.baseUrl}:$pubkey';
+    _pendingWrite = Future.value(true);
 
     final prefs = ref.read(savedPrefsProvider);
     final raw = readMigratedPref<String>(
@@ -170,13 +172,31 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
 
   String? textFor(String key) => draftFor(key)?.text;
 
+  /// Confirms the draft snapshot reached storage before dropping its source.
+  Future<bool> ensurePersisted() async {
+    final scope = _prefsKey;
+    final pending = _pendingWrite;
+    if (await pending) return true;
+    if (_prefsKey != scope) return false;
+    if (pending != _pendingWrite) return _pendingWrite;
+    return _pendingWrite = _writeDrafts(state);
+  }
+
   void _persist(List<ComposeDraft> drafts) {
     state = List.unmodifiable(drafts);
+    _pendingWrite = _writeDrafts(drafts);
+  }
+
+  Future<bool> _writeDrafts(List<ComposeDraft> drafts) async {
     final prefs = ref.read(savedPrefsProvider);
-    prefs.setString(
-      _prefsKey,
-      jsonEncode([for (final d in drafts) d.toJson()]),
-    );
+    try {
+      return await prefs.setString(
+        _prefsKey,
+        jsonEncode([for (final d in drafts) d.toJson()]),
+      );
+    } catch (_) {
+      return false;
+    }
   }
 }
 

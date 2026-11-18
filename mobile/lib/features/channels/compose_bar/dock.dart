@@ -43,7 +43,35 @@ class _ComposerDockFrame extends HookWidget {
           compactVerticalOffset,
     );
     final recordingGutterDelta = visibleBottomGutter - Grid.twelve;
-    final backdropHeight = mobileTabFooterBackdropHeight(context);
+    final appView = View.of(context);
+    final keyboardInset = useState(appView.viewInsets.bottom);
+    final fullKeyboardInset = useRef(appView.viewInsets.bottom);
+    useEffect(() {
+      final observer = _ComposerKeyboardMetricsObserver(
+        view: appView,
+        onKeyboardShown: () {},
+        onKeyboardHidden: () {},
+        onKeyboardInsetChanged: (inset) {
+          // Track the open height so the fade follows each closing frame.
+          fullKeyboardInset.value = inset == 0
+              ? 0
+              : math.max(fullKeyboardInset.value, inset);
+          keyboardInset.value = inset;
+        },
+      );
+      WidgetsBinding.instance.addObserver(observer);
+      return () {
+        WidgetsBinding.instance.removeObserver(observer);
+        observer.dispose();
+      };
+    }, [appView]);
+    final keyboardProgress = fullKeyboardInset.value > 0
+        ? (keyboardInset.value / fullKeyboardInset.value).clamp(0.0, 1.0)
+        : 0.0;
+    final restingBackdropHeight = mobileTabFooterBackdropHeight(context);
+    final backdropHeight =
+        restingBackdropHeight +
+        (100.0 - restingBackdropHeight) * keyboardProgress;
     return Stack(
       clipBehavior: Clip.none,
       children: [

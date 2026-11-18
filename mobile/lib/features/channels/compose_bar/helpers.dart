@@ -99,6 +99,7 @@ class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
   final FlutterView view;
   final VoidCallback onKeyboardShown;
   final VoidCallback onKeyboardHidden;
+  final ValueChanged<double>? onKeyboardInsetChanged;
   bool _wasVisible;
   Timer? _restoreGrace;
 
@@ -106,6 +107,7 @@ class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
     required this.view,
     required this.onKeyboardShown,
     required this.onKeyboardHidden,
+    this.onKeyboardInsetChanged,
   }) : _wasVisible = view.viewInsets.bottom > 0;
 
   // iOS drops the keyboard inset while the app is inactive (Control Center,
@@ -149,6 +151,7 @@ class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
   }
 
   void _reconcile() {
+    onKeyboardInsetChanged?.call(view.viewInsets.bottom);
     final isVisible = view.viewInsets.bottom > 0;
     if (!_wasVisible && isVisible) onKeyboardShown();
     if (_wasVisible && !isVisible) onKeyboardHidden();

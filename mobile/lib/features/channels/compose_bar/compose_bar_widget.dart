@@ -119,6 +119,9 @@ class ComposeBar extends HookConsumerWidget {
     final uploadGeneration = useRef(0);
     final activeUploadCancellation = useRef<UploadCancellationToken?>(null);
     final voiceNote = _useComposerVoiceNote(
+      controller: controller,
+      inputTool: inputTool,
+      scope: '$draftIdentity:$draftKey',
       context: context,
       ref: ref,
       focusNode: focusNode,
@@ -1175,10 +1178,7 @@ class ComposeBar extends HookConsumerWidget {
                     attachmentSurface.value = _AttachmentSurface.closed;
                     triggerChannel();
                   },
-                  onVoiceNote: () {
-                    inputTool.value = null;
-                    voiceNote.start();
-                  },
+                  onVoiceNote: voiceNote.startTranscription,
                   onEmoji: openEmoji,
                   onOpenFormatting: () {
                     attachmentSurface.value = _AttachmentSurface.closed;

@@ -1211,10 +1211,7 @@ class RunnerTests: XCTestCase {
     }
     for leadingTitle in [false, true] {
       let parent = UIViewController()
-      let window = UIWindow(frame: UIScreen.main.bounds)
-      window.windowScene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
-      window.rootViewController = parent
-      window.makeKeyAndVisible()
+      let window = try await keyWindow(showing: parent)
       defer { window.isHidden = true }
       let messenger = NavigationTestMessenger()
       let bar = IosNavigationBarFactory(messenger: messenger, parent: parent).create(
@@ -1222,7 +1219,10 @@ class RunnerTests: XCTestCase {
         viewIdentifier: 999992, arguments: ["title": "Home", "largeTitle": true, "alignCollapsedTitleToLeading": leadingTitle])
       parent.view.addSubview(bar.view())
       parent.view.layoutIfNeeded()
-      try await Task.sleep(nanoseconds: 200_000_000)
+      let metricsReady = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+        messenger.metrics != nil
+      }, object: nil)
+      await fulfillment(of: [metricsReady], timeout: 5)
       let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
       let metrics = try XCTUnwrap(messenger.metrics)
       let expanded = try XCTUnwrap(metrics["expandedHeight"] as? Double)
@@ -1278,20 +1278,29 @@ class RunnerTests: XCTestCase {
       }
       messenger.scroll(to: boundary * 0.7)
       XCTAssertNil(mask.animation(forKey: "titleFade"), "Reversing must cancel the fade")
-      try await Task.sleep(nanoseconds: 240_000_000)
-      XCTAssertEqual(visibleOpacity(of: centeredTitle), 0, accuracy: 0.01)
+
+      // Core Animation may still be rendering intermediate opacity when the
+      // nominal duration elapses, especially on a busy CI simulator.
+      func assertCompactTitleOpacity(_ expected: Float, file: StaticString = #filePath, line: UInt = #line) async {
+        let settled = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+          mask.animation(forKey: "titleFade") == nil &&
+            abs(visibleOpacity(of: centeredTitle) - expected) <= 0.01
+        }, object: nil)
+        await fulfillment(of: [settled], timeout: 5)
+        XCTAssertEqual(visibleOpacity(of: centeredTitle), expected, accuracy: 0.01, file: file, line: line)
+      }
+
+      await assertCompactTitleOpacity(0)
       XCTAssertGreaterThan(title.textColor.cgColor.alpha, 0.1)
       messenger.scroll(to: boundary)
-      try await Task.sleep(nanoseconds: 240_000_000)
-      XCTAssertEqual(visibleOpacity(of: centeredTitle), 1, accuracy: 0.01)
+      await assertCompactTitleOpacity(1)
       XCTAssertEqual(navigation.navigationBar.frame.height, compact, accuracy: 0.5)
       messenger.scroll(to: 0)
       bar.view().frame.size.height += boundary * 0.7
       bar.view().setNeedsLayout()
       bar.view().layoutIfNeeded()
-      try await Task.sleep(nanoseconds: 240_000_000)
+      await assertCompactTitleOpacity(0)
       XCTAssertEqual(title.textColor.cgColor.alpha, 1, accuracy: 0.01)
-      XCTAssertEqual(visibleOpacity(of: centeredTitle), 0, accuracy: 0.01)
       XCTAssertEqual(navigation.navigationBar.frame.height, expanded, accuracy: 0.5)
       XCTAssertEqual(title.convert(title.bounds, to: parent.view).minY, initialTitleY, accuracy: 0.5)
     }
