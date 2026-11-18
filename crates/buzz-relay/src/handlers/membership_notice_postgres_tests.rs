@@ -3,7 +3,7 @@
 //! live subscription, and a channel-list read made on receipt already shows
 //! the change. "On receipt" is enforced by `notice_barrier`, which parks the
 //! producer at the notice while the test reads. A new DM message resurfaces
-//! the DM for members who hid it.
+//! the DM for members who hid it, in the message's own commit.
 
 use std::sync::Arc;
 
@@ -64,6 +64,21 @@ fn subscribe_notices(
     tenant: &TenantContext,
     reader: &Keys,
 ) -> Receiver<axum::extract::ws::Message> {
+    let filter = json!({
+        "kinds": [KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION],
+        "#p": [reader.public_key().to_hex()],
+    });
+    subscribe(state, tenant, reader, filter)
+}
+
+/// Register `reader` as a connected client holding one live subscription to
+/// `filter`, and return its outbound frames.
+fn subscribe(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    reader: &Keys,
+    filter: Value,
+) -> Receiver<axum::extract::ws::Message> {
     let conn_id = Uuid::new_v4();
     let (tx, rx) = tokio::sync::mpsc::channel(32);
     state.conn_manager.register(
@@ -82,14 +97,10 @@ fn subscribe_notices(
     state
         .conn_manager
         .set_authenticated_pubkey(conn_id, reader.public_key().to_bytes().to_vec());
-    let filter = json!({
-        "kinds": [KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION],
-        "#p": [reader.public_key().to_hex()],
-    });
     state.sub_registry.register_scoped(
         tenant.community(),
         conn_id,
-        "notices".into(),
+        "live".into(),
         vec![serde_json::from_value(filter).expect("filter")],
         None,
     );
@@ -439,6 +450,9 @@ async fn moderation_dm_notifies_the_recipient_once_visible() {
 
 /// A new message from someone else resurfaces a DM its reader hid, in the
 /// reader's NIP-DV snapshot. The reader's own message leaves their hide alone.
+/// The message commits with the snapshot: when the snapshot does not land,
+/// neither is stored or delivered, and the resend is not taken as a
+/// duplicate. A read made when the message fans out sees the DM.
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
 async fn dm_message_from_someone_else_unhides_it() {
@@ -484,9 +498,81 @@ async fn dm_message_from_someone_else_unhides_it() {
         "the reader's own message keeps the DM hidden"
     );
 
-    publish(&state, &tenant, &sender, 9, &[&["h", &dm]]).await;
+    let mut live = subscribe(&state, &tenant, &reader, json!({"kinds": [9], "#h": [dm]}));
+    let message = EventBuilder::new(Kind::Custom(9), "")
+        .tags([Tag::parse(["h", dm.as_str()]).unwrap()])
+        .sign_with_keys(&sender)
+        .expect("sign");
+    let stored = async || {
+        let filter = json!({"kinds": [9], "#h": [dm], "ids": [message.id.to_hex()]});
+        read_tags(&state, &tenant, &reader, filter, "h").await
+    };
+    // The trigger skips the snapshot's insert, so the replacement reports it
+    // did not land, as a lost race would.
+    let refuse = format!("refuse_dm_snapshot_{}", Uuid::new_v4().simple());
+    let pool = state.db.pool();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE FUNCTION {refuse}() RETURNS trigger LANGUAGE plpgsql AS \
+         $$ BEGIN RETURN NULL; END $$; \
+         CREATE TRIGGER {refuse} BEFORE INSERT ON events FOR EACH ROW \
+         WHEN (NEW.kind = {KIND_DM_VISIBILITY} AND NEW.d_tag = '{}') \
+         EXECUTE FUNCTION {refuse}();",
+        reader.public_key().to_hex()
+    )))
+    .execute(pool)
+    .await
+    .expect("install snapshot refusal");
+    let refused = ingest_event(&state, &tenant, message.clone(), http_auth(&sender)).await;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "DROP TRIGGER {refuse} ON events; DROP FUNCTION {refuse}();"
+    )))
+    .execute(pool)
+    .await
+    .expect("remove snapshot refusal");
+    assert!(refused.is_err(), "message accepted without its snapshot");
     assert!(
-        hidden().await.is_empty(),
-        "someone else's message unhides the DM"
+        stored().await.is_empty(),
+        "message stored without its snapshot"
     );
+    assert_eq!(hidden().await, std::slice::from_ref(&dm));
+    assert!(
+        live_notices(&mut live).is_empty(),
+        "refused message delivered"
+    );
+
+    // Park the resend at its fan-out and read as a client does on receipt.
+    let mut barrier = notice_barrier::install(&sender.public_key().to_bytes());
+    let resend = tokio::spawn({
+        let (state, tenant, message) = (state.clone(), tenant.clone(), message.clone());
+        let auth = http_auth(&sender);
+        async move { ingest_event(&state, &tenant, message, auth).await }
+    });
+    let (_, hidden_on_receipt) = at_receipt(&mut barrier, async |_| hidden().await).await;
+    let resent = resend.await.expect("task").expect("resend");
+    assert!(
+        resent.accepted && !resent.message.starts_with("duplicate"),
+        "resend refused: {}",
+        resent.message
+    );
+    assert!(
+        hidden_on_receipt.is_empty(),
+        "someone else's message unhides the DM before it is delivered"
+    );
+    let delivered = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let delivered = live_notices(&mut live);
+            if !delivered.is_empty() {
+                return delivered;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("message not delivered");
+    assert_eq!(
+        delivered,
+        [(9, dm.clone(), message.id.to_hex())],
+        "the resend is delivered once"
+    );
+    assert_eq!(stored().await, std::slice::from_ref(&dm));
 }

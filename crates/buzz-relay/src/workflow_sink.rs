@@ -586,32 +586,39 @@ impl ActionSink for RelayActionSink {
                 },
             });
 
-            let (stored_event, was_inserted) = state
-                .db
-                .insert_event_with_thread_metadata(
-                    tenant.community(),
+            // As in ingest, a DM message commits with the hides it clears.
+            let (stored_event, was_inserted, dm_snapshots) = if channel.channel_type == "dm" {
+                crate::handlers::side_effects::persist_dm_message(
+                    &tenant,
+                    &state,
                     &event,
-                    Some(channel_uuid),
+                    channel_uuid,
                     thread_meta,
                 )
                 .await
-                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+            } else {
+                let (stored_event, inserted) = state
+                    .db
+                    .insert_event_with_thread_metadata(
+                        tenant.community(),
+                        &event,
+                        Some(channel_uuid),
+                        thread_meta,
+                    )
+                    .await
+                    .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+                (stored_event, inserted, Vec::new())
+            };
 
             // 5. Post-persist side effects (fan-out, search, audit)
             //    Only if actually inserted (idempotency guard).
             if was_inserted {
-                // As in ingest: resurface the DM before the message fans out.
-                if channel.channel_type == "dm" {
-                    if let Err(e) = crate::handlers::side_effects::unhide_dm_on_message(
-                        &tenant,
-                        &state,
-                        channel_uuid,
-                        &event,
+                for snapshot in &dm_snapshots {
+                    crate::handlers::side_effects::dispatch_dm_visibility_snapshot(
+                        &tenant, &state, snapshot,
                     )
-                    .await
-                    {
-                        tracing::error!(channel = %channel_uuid, "DM unhide on workflow message failed: {e}");
-                    }
+                    .await;
                 }
                 let _ = dispatch_persistent_event(
                     &tenant,

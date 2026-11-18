@@ -1230,7 +1230,8 @@ async fn publish_live_thread_summary(
 /// Test-only barrier at the point a membership notice is sent: a test parks
 /// the producer there, reads what a client would read on receipt, then lets
 /// it continue. It can also pin the notices' clock. Keyed by recipient so
-/// parallel tests do not interfere.
+/// parallel tests do not interfere. A DM message parks at its fan-out the
+/// same way, keyed by its signer.
 #[cfg(test)]
 pub(crate) mod notice_barrier {
     use std::collections::HashMap;
@@ -1297,7 +1298,7 @@ pub(crate) mod notice_barrier {
         pins().lock().unwrap().get(recipient).copied()
     }
 
-    pub(super) async fn reached(channel_id: Uuid, recipient: &[u8]) {
+    pub(crate) async fn reached(channel_id: Uuid, recipient: &[u8]) {
         let waiter = waiters().lock().unwrap().get(recipient).cloned();
         if let Some(waiter) = waiter {
             let (release, released) = oneshot::channel();
@@ -4708,31 +4709,40 @@ pub async fn publish_nipia_archival_list(
     )
 }
 
-/// Resurface DM `channel_id` for every member who hid it, except the author of
-/// its new message `event`, as a re-open does. The hides are cleared and each
-/// viewer's NIP-DV snapshot replaced in one transaction, so a failure leaves
-/// the DM hidden and the next message tries again.
-pub async fn unhide_dm_on_message(
+/// Store message `event` in DM `channel_id` and, when it is new, resurface the
+/// DM for every member who hid it except its author, as a re-open does. The
+/// message, the cleared hides and each viewer's replaced NIP-DV snapshot
+/// commit together, so a reader who sees the message also sees the DM, and a
+/// hide made after the message is left alone. Returns the stored message,
+/// whether it was new, and the snapshots to dispatch before the message.
+pub async fn persist_dm_message(
     tenant: &TenantContext,
     state: &Arc<AppState>,
-    channel_id: Uuid,
     event: &Event,
-) -> anyhow::Result<()> {
+    channel_id: Uuid,
+    thread_meta: Option<buzz_db::event::ThreadMetadataParams<'_>>,
+) -> anyhow::Result<(StoredEvent, bool, Vec<StoredEvent>)> {
     let author = effective_message_author(event, &state.relay_keypair.public_key());
     let mut tx = state
         .db
         .begin_event_write_transaction(tenant.community())
         .await?;
-    let viewers = buzz_db::dm::unhide_dm_for_recipients(&mut tx, channel_id, &author).await?;
-    let mut snapshots = Vec::with_capacity(viewers.len());
-    for viewer in &viewers {
-        snapshots.extend(write_dm_visibility_snapshot(&mut tx, state, viewer).await?);
+    let hidden = buzz_db::dm::lock_dm_for_unhide(&mut tx, channel_id, &author).await?;
+    let (stored, inserted) = buzz_db::event::insert_event_with_thread_metadata_in_transaction(
+        &mut tx,
+        event,
+        Some(channel_id),
+        thread_meta,
+    )
+    .await?;
+    let mut snapshots = Vec::new();
+    if hidden && inserted {
+        for viewer in buzz_db::dm::unhide_dm_for_recipients(&mut tx, channel_id, &author).await? {
+            snapshots.push(write_dm_visibility_snapshot(&mut tx, state, &viewer).await?);
+        }
     }
     tx.commit().await?;
-    for stored in &snapshots {
-        dispatch_dm_visibility_snapshot(tenant, state, stored).await;
-    }
-    Ok(())
+    Ok((stored, inserted, snapshots))
 }
 
 /// NIP-DV: publish the relay-signed, per-viewer DM visibility snapshot for
@@ -4750,20 +4760,19 @@ pub async fn publish_dm_visibility_snapshot(
         .await?;
     let stored = write_dm_visibility_snapshot(&mut tx, state, viewer).await?;
     tx.commit().await?;
-    if let Some(stored) = &stored {
-        dispatch_dm_visibility_snapshot(tenant, state, stored).await;
-    }
+    dispatch_dm_visibility_snapshot(tenant, state, &stored).await;
     Ok(())
 }
 
 /// In `tx`, replace `viewer`'s snapshot (`d` = viewer pubkey, one `h` tag per
 /// hidden DM) with one built from the state read under its replacement lock.
-/// Returns the stored snapshot, for dispatch once `tx` commits.
+/// Returns the stored snapshot, for dispatch once `tx` commits. The snapshot
+/// is dated past the last one under its lock, so it always replaces it.
 async fn write_dm_visibility_snapshot(
     tx: &mut buzz_db::AdmittedTx,
     state: &Arc<AppState>,
     viewer: &[u8],
-) -> anyhow::Result<Option<StoredEvent>> {
+) -> anyhow::Result<StoredEvent> {
     use buzz_db::replaceable::{ParameterizedReplacePrecondition, ParameterizedReplaceStatus};
 
     let viewer_hex = hex::encode(viewer);
@@ -4818,15 +4827,21 @@ async fn write_dm_visibility_snapshot(
         )
         .await
         .map_err(|e| anyhow::anyhow!("DM visibility write failed: {}", e.kind()))?;
+    // Anything else left the previous snapshot in place, which would still
+    // hide what this transaction unhid, so the caller must roll back.
+    if result.status != ParameterizedReplaceStatus::Inserted {
+        anyhow::bail!("DM visibility snapshot for {viewer_hex} was not inserted");
+    }
     info!(
         viewer = %viewer_hex,
         hidden_count = visibility.hidden.len(),
         "NIP-DV DM visibility snapshot written"
     );
-    Ok((result.status == ParameterizedReplaceStatus::Inserted).then_some(result.event))
+    Ok(result.event)
 }
 
-async fn dispatch_dm_visibility_snapshot(
+/// Fan out a snapshot from [`persist_dm_message`] once its transaction commits.
+pub async fn dispatch_dm_visibility_snapshot(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     stored: &StoredEvent,

@@ -1141,10 +1141,42 @@ pub async fn unhide_dm(
     Ok(())
 }
 
-/// In `tx`, unhide DM `channel_id` for every active member except `author`,
-/// and return whose hide was cleared, sorted so callers lock them in one order.
-/// A new message from someone else resurfaces a hidden DM, as a re-open does.
-/// The caller checks that the channel is a DM.
+/// In `tx`, before a message by `author` is stored in DM `channel_id`, take
+/// the DM's membership lock when another member has hid it, and return
+/// whether it did. A removal takes this lock before its thread-counter writes,
+/// and a reopen before the channel row, so the message takes it before both.
+/// When no one hid the DM, nothing is locked and nothing is unhidden.
+pub async fn lock_dm_for_unhide(
+    tx: &mut AdmittedTx,
+    channel_id: Uuid,
+    author: &[u8],
+) -> Result<bool> {
+    let community_id = tx.community();
+    let hidden: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM channel_members \
+         WHERE community_id = $1 AND channel_id = $2 AND pubkey <> $3 \
+           AND removed_at IS NULL AND hidden_at IS NOT NULL)",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(author)
+    .fetch_one(tx.conn())
+    .await?;
+    if hidden {
+        crate::channel_members::acquire_channel_membership_lock(
+            tx.conn(),
+            community_id,
+            channel_id,
+        )
+        .await?;
+    }
+    Ok(hidden)
+}
+
+/// In `tx`, which holds [`lock_dm_for_unhide`]'s lock, unhide DM `channel_id`
+/// for every active member except `author`, and return whose hide was
+/// cleared, sorted so callers lock them in one order. A new message from
+/// someone else resurfaces a hidden DM, as a re-open does.
 pub async fn unhide_dm_for_recipients(
     tx: &mut AdmittedTx,
     channel_id: Uuid,
@@ -1195,10 +1227,14 @@ pub async fn lock_dm_visibility(
         relay_pubkey,
         Some(d_tag.as_bytes()),
     );
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(lock_key)
-        .execute(tx.conn())
-        .await?;
+    crate::observability::observe_event_lock(
+        crate::observability::LockType::Replacement,
+        kind,
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(tx.conn()),
+    )
+    .await?;
     let hidden = sqlx::query_scalar(
         r#"
         SELECT cm.channel_id

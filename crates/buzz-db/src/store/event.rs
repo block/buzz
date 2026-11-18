@@ -2295,6 +2295,23 @@ pub async fn insert_event_with_thread_metadata(
     Ok(result)
 }
 
+/// The body of [`Db::insert_event_with_thread_metadata`] on a caller-owned
+/// transaction, for callers that commit related writes with the event. The
+/// caller owns commit or rollback.
+pub async fn insert_event_with_thread_metadata_in_transaction(
+    tx: &mut AdmittedTx,
+    event: &Event,
+    channel_id: Option<Uuid>,
+    thread_meta: Option<ThreadMetadataParams<'_>>,
+) -> Result<(StoredEvent, bool)> {
+    acquire_canvas_event_write_lock_if_needed(tx, event, channel_id).await?;
+    let result = insert_event_with_thread_metadata_tx(tx, event, channel_id, thread_meta).await?;
+    if result.1 {
+        crate::insert_mentions_in_transaction(tx, event, channel_id).await?;
+    }
+    Ok(result)
+}
+
 /// Outcome of a channel-head conditional canvas write.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChannelHeadWriteStatus {
@@ -2954,17 +2971,13 @@ impl Db {
         )
         .await?;
         tx.set_push_enqueue(self.push_enqueue.clone());
-        crate::event::acquire_canvas_event_write_lock_if_needed(&mut tx, event, channel_id).await?;
-        let result = crate::event::insert_event_with_thread_metadata_tx(
+        let result = crate::event::insert_event_with_thread_metadata_in_transaction(
             &mut tx,
             event,
             channel_id,
             thread_meta,
         )
         .await?;
-        if result.1 {
-            crate::insert_mentions_in_transaction(&mut tx, event, channel_id).await?;
-        }
         tx.commit().await?;
         Ok(result)
     }
