@@ -410,6 +410,11 @@ steps, carry them; a client MUST treat a missing field as an older relay whose
 policy is unknown. For Buzz's owner-only agent mentions, see
 [docs/operator-workflow-agent-mentions.md](docs/operator-workflow-agent-mentions.md).
 
+A relay's NIP-11 document MAY carry `plugin_recording_default`: `"on"` when the
+operator wants clients to record members' installed community plugins for
+members who haven't chosen, or `"off"`. A client MUST treat a missing field or
+any other value as `"off"`, and a member's own choice MUST win over it.
+
 ### Sending Messages
 
 ```bash
