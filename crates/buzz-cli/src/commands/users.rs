@@ -68,10 +68,25 @@ pub async fn cmd_get_users(
 /// kind:0 profiles for `pubkeys` (our own when empty), each with its verified
 /// profile where one exists, then any requested person who has a verified
 /// profile but no kind:0.
+///
+/// A failed verified-profile check never drops the kind:0 output; it is
+/// reported as a warning on stderr so it is never read as "not verified".
 async fn get_profiles(
     client: &BuzzClient,
     pubkeys: &[String],
 ) -> Result<Vec<serde_json::Value>, CliError> {
+    let (profiles, warning) = lookup_profiles(client, pubkeys).await?;
+    if let Some(warning) = warning {
+        eprintln!("{warning}");
+    }
+    Ok(profiles)
+}
+
+/// [`get_profiles`] with its warning returned instead of printed.
+async fn lookup_profiles(
+    client: &BuzzClient,
+    pubkeys: &[String],
+) -> Result<(Vec<serde_json::Value>, Option<serde_json::Value>), CliError> {
     let my_pk = client.public_key().to_hex();
     let authors: Vec<&str> = if pubkeys.is_empty() {
         vec![my_pk.as_str()]
@@ -102,20 +117,15 @@ async fn get_profiles(
         })
         .collect();
     let requested: Vec<String> = authors.iter().map(|a| a.to_string()).collect();
-    let verified = match verified_for(client, &requested).await {
-        Ok(verified) => verified,
-        Err(e) => {
-            // The kind:0 output stands on its own; flag the missing check on
-            // stderr so it is never read as "not verified".
-            eprintln!(
-                "{}",
-                serde_json::json!({
-                    "warning": "verified_profiles_unavailable",
-                    "message": e.to_string(),
-                })
-            );
-            HashMap::new()
-        }
+    let (verified, warning) = match verified_for(client, &requested).await {
+        Ok(verified) => (verified, None),
+        Err(e) => (
+            HashMap::new(),
+            Some(serde_json::json!({
+                "warning": "verified_profiles_unavailable",
+                "message": e.to_string(),
+            })),
+        ),
     };
     let mut profiles = with_verified(profiles, &verified);
     // A requested person with a verified profile but no kind:0 is still found,
@@ -131,7 +141,7 @@ async fn get_profiles(
             found.push(pubkey);
         }
     }
-    Ok(profiles)
+    Ok((profiles, warning))
 }
 
 /// Verified profiles for `pubkeys`; empty where the community advertises none.
@@ -954,9 +964,9 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_profile, get_profiles, owned_agent_pubkeys_from_events, owner_scoped_profiles,
-        owner_verification, parse_expiration_tag, parse_expiry, presence_subject, publish_status,
-        read_statuses, search_profiles,
+        compact_profile, get_profiles, lookup_profiles, owned_agent_pubkeys_from_events,
+        owner_scoped_profiles, owner_verification, parse_expiration_tag, parse_expiry,
+        presence_subject, publish_status, read_statuses, search_profiles,
     };
     use crate::client::BuzzClient;
     use crate::error::CliError;
@@ -975,6 +985,8 @@ mod tests {
         events: Vec<Value>,
         queries: Vec<Value>,
         raw_query_response: Option<String>,
+        /// Answer queries for this kind with invalid JSON.
+        broken_kind: Option<u64>,
         /// NIP-11 document served at `/`.
         info: Value,
         /// Body of `POST /profiles/search`; `None` answers 404 like an older relay.
@@ -999,6 +1011,11 @@ mod tests {
                     relay.queries.push(filter.clone());
                     if let Some(raw) = relay.raw_query_response.clone() {
                         return raw;
+                    }
+                    if relay.broken_kind.is_some()
+                        && filter["kinds"][0].as_u64() == relay.broken_kind
+                    {
+                        return "not json".to_string();
                     }
                     let kind = &filter["kinds"][0];
                     let matching: Vec<Value> = relay
@@ -1525,31 +1542,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_by_pubkey_keeps_profiles_when_the_verified_check_fails() {
-        let (client, relay) = setup().await;
-        relay.lock().unwrap().info = json!({"federated_identity": "malformed"});
+    async fn get_by_pubkey_keeps_profiles_and_warns_when_the_verified_check_fails() {
         let alice = Keys::generate();
-        seed_profile(&relay, &alice, r#"{"name":"al"}"#);
+        let pubkeys = vec![alice.public_key().to_hex()];
+        // Discovery fails (malformed NIP-11), or the kind:30382 query does.
+        for broken_lookup in [false, true] {
+            let (client, relay) = setup().await;
+            relay.lock().unwrap().info = if broken_lookup {
+                advertising(&Keys::generate())
+            } else {
+                json!({"federated_identity": "malformed"})
+            };
+            relay.lock().unwrap().broken_kind = broken_lookup.then_some(30382);
+            seed_profile(&relay, &alice, r#"{"name":"al"}"#);
 
-        let profiles = get_profiles(&client, &[alice.public_key().to_hex()])
-            .await
-            .unwrap();
-        assert_eq!(profiles.len(), 1);
-        assert_eq!(profiles[0]["name"], "al");
-        assert!(profiles[0].get("verified").is_none());
+            let (profiles, warning) = lookup_profiles(&client, &pubkeys).await.unwrap();
+            assert_eq!(profiles.len(), 1, "{broken_lookup}");
+            assert_eq!(profiles[0]["name"], "al");
+            assert!(profiles[0].get("verified").is_none());
+            let warning = warning.expect("a failed check is reported");
+            assert_eq!(warning["warning"], "verified_profiles_unavailable");
+            assert!(warning["message"].as_str().is_some_and(|m| !m.is_empty()));
+        }
+
+        // A working check reports nothing.
+        let (client, relay) = setup().await;
+        relay.lock().unwrap().info = advertising(&Keys::generate());
+        seed_profile(&relay, &alice, r#"{"name":"al"}"#);
+        let (_, warning) = lookup_profiles(&client, &pubkeys).await.unwrap();
+        assert!(warning.is_none());
     }
 
     #[tokio::test]
-    async fn name_search_longer_than_profile_search_accepts_uses_nip50() {
+    async fn name_search_uses_profile_search_up_to_its_character_limit() {
+        // Counted in characters after trimming, as the relay counts them.
+        let within = [
+            "a".repeat(100),
+            "é".repeat(100),
+            format!("  {}  ", "a".repeat(100)),
+        ];
+        for query in within {
+            let (client, relay) = setup().await;
+            relay.lock().unwrap().info = advertising(&Keys::generate());
+            relay.lock().unwrap().profile_search = Some(json!([]));
+            search_profiles(&client, &query).await.unwrap();
+            let searches = relay.lock().unwrap().profile_searches.clone();
+            assert_eq!(searches, vec![json!({"query": query.trim(), "limit": 100})]);
+        }
+
         let (client, relay) = setup().await;
         relay.lock().unwrap().info = advertising(&Keys::generate());
-        let long = "a".repeat(101);
+        let long = "é".repeat(101);
         seed_profile(
             &relay,
             &Keys::generate(),
             &json!({"name": long}).to_string(),
         );
-
         let found = search_profiles(&client, &long).await.unwrap();
         assert_eq!(found.len(), 1, "{found:?}");
         assert!(relay.lock().unwrap().profile_searches.is_empty());
