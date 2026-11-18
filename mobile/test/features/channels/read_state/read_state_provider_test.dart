@@ -380,6 +380,7 @@ void main() {
     await flushMicrotasks();
     expect(state().isForcedUnread(channelId), isFalse);
     expect(state().failedClears, isEmpty);
+    expect(state().syncError, isNull);
     await notifier.flush();
 
     final pubkey = state().pubkey!;
