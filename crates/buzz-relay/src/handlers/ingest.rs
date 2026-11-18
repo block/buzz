@@ -3862,7 +3862,12 @@ async fn ingest_event_inner(
                 KIND_STREAM_MESSAGE | KIND_STREAM_MESSAGE_V2 | KIND_STREAM_MESSAGE_DIFF
             )
         {
-            crate::handlers::side_effects::unhide_dm_on_message(tenant, state, ch_id, &event).await;
+            if let Err(e) =
+                crate::handlers::side_effects::unhide_dm_on_message(tenant, state, ch_id, &event)
+                    .await
+            {
+                error!(event_id = %event_id_hex, "DM unhide on new message failed: {e}");
+            }
         }
     }
 

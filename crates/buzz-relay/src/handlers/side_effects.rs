@@ -4709,49 +4709,68 @@ pub async fn publish_nipia_archival_list(
 }
 
 /// Resurface DM `channel_id` for every member who hid it, except the author of
-/// its new message `event`, and republish each one's NIP-DV snapshot, as a
-/// re-open does. Best effort: the message is already stored, and a failure
-/// leaves the DM hidden, as before this existed.
+/// its new message `event`, as a re-open does. The hides are cleared and each
+/// viewer's NIP-DV snapshot replaced in one transaction, so a failure leaves
+/// the DM hidden and the next message tries again.
 pub async fn unhide_dm_on_message(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     channel_id: Uuid,
     event: &Event,
-) {
+) -> anyhow::Result<()> {
     let author = effective_message_author(event, &state.relay_keypair.public_key());
-    let unhidden = match state
+    let mut tx = state
         .db
-        .unhide_dm_for_recipients(tenant.community(), channel_id, &author)
-        .await
-    {
-        Ok(unhidden) => unhidden,
-        Err(e) => {
-            error!(channel = %channel_id, "DM unhide on new message failed: {e}");
-            return;
-        }
-    };
-    for viewer in &unhidden {
-        if let Err(e) = publish_dm_visibility_snapshot(tenant, state, viewer).await {
-            error!(channel = %channel_id, "DM unhide on new message: visibility snapshot failed: {e}");
-        }
+        .begin_event_write_transaction(tenant.community())
+        .await?;
+    let viewers = buzz_db::dm::unhide_dm_for_recipients(&mut tx, channel_id, &author).await?;
+    let mut snapshots = Vec::with_capacity(viewers.len());
+    for viewer in &viewers {
+        snapshots.extend(write_dm_visibility_snapshot(&mut tx, state, viewer).await?);
     }
+    tx.commit().await?;
+    for stored in &snapshots {
+        dispatch_dm_visibility_snapshot(tenant, state, stored).await;
+    }
+    Ok(())
 }
 
 /// NIP-DV: publish the relay-signed, per-viewer DM visibility snapshot for
-/// `viewer`. The event is parameterized-replaceable (`d` = viewer pubkey) and
-/// carries one `h` tag per DM the viewer currently has hidden. Called after any
-/// hide (41012) or unhide (41010 that clears `hidden_at`); the latest event is
-/// always the authoritative hidden set, so no client-side delta merge is needed.
+/// `viewer`. Called after any hide (41012) or unhide (41010 that clears
+/// `hidden_at`); the latest event is always the authoritative hidden set, so
+/// no client-side delta merge is needed.
 pub async fn publish_dm_visibility_snapshot(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     viewer: &[u8],
 ) -> anyhow::Result<()> {
-    let viewer_hex = hex::encode(viewer);
-    let hidden = state.db.list_hidden_dms(tenant.community(), viewer).await?;
-    let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
+    let mut tx = state
+        .db
+        .begin_event_write_transaction(tenant.community())
+        .await?;
+    let stored = write_dm_visibility_snapshot(&mut tx, state, viewer).await?;
+    tx.commit().await?;
+    if let Some(stored) = &stored {
+        dispatch_dm_visibility_snapshot(tenant, state, stored).await;
+    }
+    Ok(())
+}
 
-    let mut tags: Vec<Tag> = Vec::with_capacity(hidden.len() + 2);
+/// In `tx`, replace `viewer`'s snapshot (`d` = viewer pubkey, one `h` tag per
+/// hidden DM) with one built from the state read under its replacement lock.
+/// Returns the stored snapshot, for dispatch once `tx` commits.
+async fn write_dm_visibility_snapshot(
+    tx: &mut buzz_db::AdmittedTx,
+    state: &Arc<AppState>,
+    viewer: &[u8],
+) -> anyhow::Result<Option<StoredEvent>> {
+    use buzz_db::replaceable::{ParameterizedReplacePrecondition, ParameterizedReplaceStatus};
+
+    let viewer_hex = hex::encode(viewer);
+    let relay_pubkey = state.relay_keypair.public_key();
+    let visibility = buzz_db::dm::lock_dm_visibility(tx, &relay_pubkey.to_bytes(), viewer).await?;
+
+    let mut tags: Vec<Tag> = Vec::with_capacity(visibility.hidden.len() + 2);
     tags.push(
         Tag::parse(["d", &viewer_hex])
             .map_err(|e| anyhow::anyhow!("failed to build d tag: {e}"))?,
@@ -4762,7 +4781,7 @@ pub async fn publish_dm_visibility_snapshot(
         Tag::parse(["p", &viewer_hex])
             .map_err(|e| anyhow::anyhow!("failed to build p tag: {e}"))?,
     );
-    for channel_id in &hidden {
+    for channel_id in &visibility.hidden {
         tags.push(
             Tag::parse(["h", &channel_id.to_string()])
                 .map_err(|e| anyhow::anyhow!("failed to build h tag: {e}"))?,
@@ -4777,23 +4796,10 @@ pub async fn publish_dm_visibility_snapshot(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let ts = {
-        let existing = state
-            .db
-            .query_events_for_event_write(&buzz_db::event::EventQuery {
-                kinds: Some(vec![KIND_DM_VISIBILITY as i32]),
-                pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
-                d_tag: Some(viewer_hex.clone()),
-                limit: Some(1),
-                ..buzz_db::event::EventQuery::for_community(tenant.community())
-            })
-            .await
-            .unwrap_or_default();
-        existing
-            .first()
-            .map(|e| (e.event.created_at.as_secs() + 1).max(now))
-            .unwrap_or(now)
-    };
+    let ts = visibility
+        .latest_snapshot_at
+        .map(|at| (u64::try_from(at).unwrap_or_default() + 1).max(now))
+        .unwrap_or(now);
 
     let event = EventBuilder::new(Kind::Custom(KIND_DM_VISIBILITY as u16), "")
         .tags(tags)
@@ -4801,29 +4807,40 @@ pub async fn publish_dm_visibility_snapshot(
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign kind:{KIND_DM_VISIBILITY}: {e}"))?;
 
-    let (stored, was_inserted) = state
+    let result = state
         .db
-        .replace_parameterized_event(tenant.community(), &event, &viewer_hex, None)
+        .replace_parameterized_event_in_transaction(
+            tx,
+            &event,
+            &viewer_hex,
+            None,
+            ParameterizedReplacePrecondition::Unconditional,
+        )
         .await
         .map_err(|e| anyhow::anyhow!("DM visibility write failed: {}", e.kind()))?;
-    if was_inserted {
-        dispatch_persistent_event(
-            tenant,
-            state,
-            &stored,
-            KIND_DM_VISIBILITY,
-            &relay_pubkey_hex,
-            None,
-        )
-        .await;
-    }
-
     info!(
         viewer = %viewer_hex,
-        hidden_count = hidden.len(),
-        "NIP-DV DM visibility snapshot published"
+        hidden_count = visibility.hidden.len(),
+        "NIP-DV DM visibility snapshot written"
     );
-    Ok(())
+    Ok((result.status == ParameterizedReplaceStatus::Inserted).then_some(result.event))
+}
+
+async fn dispatch_dm_visibility_snapshot(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    stored: &StoredEvent,
+) {
+    let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
+    dispatch_persistent_event(
+        tenant,
+        state,
+        stored,
+        KIND_DM_VISIBILITY,
+        &relay_pubkey_hex,
+        None,
+    )
+    .await;
 }
 
 #[allow(clippy::too_many_arguments)]

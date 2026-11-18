@@ -600,6 +600,19 @@ impl ActionSink for RelayActionSink {
             // 5. Post-persist side effects (fan-out, search, audit)
             //    Only if actually inserted (idempotency guard).
             if was_inserted {
+                // As in ingest: resurface the DM before the message fans out.
+                if channel.channel_type == "dm" {
+                    if let Err(e) = crate::handlers::side_effects::unhide_dm_on_message(
+                        &tenant,
+                        &state,
+                        channel_uuid,
+                        &event,
+                    )
+                    .await
+                    {
+                        tracing::error!(channel = %channel_uuid, "DM unhide on workflow message failed: {e}");
+                    }
+                }
                 let _ = dispatch_persistent_event(
                     &tenant,
                     &state,

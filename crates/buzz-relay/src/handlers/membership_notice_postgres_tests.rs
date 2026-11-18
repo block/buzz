@@ -168,7 +168,8 @@ async fn read_tags(
         let message: Value = serde_json::from_str(&text).expect("relay frame");
         match message[0].as_str() {
             Some("EVENT") => values.extend(tag_values(&message[2], name)),
-            Some("EOSE") | Some("CLOSED") => return values,
+            Some("EOSE") => return values,
+            Some("CLOSED") => panic!("read refused: {message}"),
             _ => {}
         }
     }
@@ -436,9 +437,8 @@ async fn moderation_dm_notifies_the_recipient_once_visible() {
     assert_ne!(second_notice[0].2, first_notice[0].2);
 }
 
-/// A new message from someone else resurfaces a DM its reader hid, and the
-/// reader's NIP-DV snapshot shows it before the message fans out. The reader's
-/// own message leaves their hide alone.
+/// A new message from someone else resurfaces a DM its reader hid, in the
+/// reader's NIP-DV snapshot. The reader's own message leaves their hide alone.
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
 async fn dm_message_from_someone_else_unhides_it() {
@@ -460,6 +460,13 @@ async fn dm_message_from_someone_else_unhides_it() {
         .await
         .expect("open dm");
     let dm = dm.id.to_string();
+    // The `h` tags of the reader's snapshot, which must exist.
+    let hidden = async || {
+        let filter = json!({"kinds": [KIND_DM_VISIBILITY], "#p": [reader.public_key().to_hex()]});
+        let snapshot = read_tags(&state, &tenant, &reader, filter.clone(), "d").await;
+        assert_eq!(snapshot, [reader.public_key().to_hex()], "one snapshot");
+        read_tags(&state, &tenant, &reader, filter, "h").await
+    };
     publish(
         &state,
         &tenant,
@@ -468,17 +475,18 @@ async fn dm_message_from_someone_else_unhides_it() {
         &[&["h", &dm]],
     )
     .await;
-    assert!(hidden_dms(&state, &tenant, &reader).await.contains(&dm));
+    assert_eq!(hidden().await, std::slice::from_ref(&dm));
 
     publish(&state, &tenant, &reader, 9, &[&["h", &dm]]).await;
-    assert!(
-        hidden_dms(&state, &tenant, &reader).await.contains(&dm),
+    assert_eq!(
+        hidden().await,
+        std::slice::from_ref(&dm),
         "the reader's own message keeps the DM hidden"
     );
 
     publish(&state, &tenant, &sender, 9, &[&["h", &dm]]).await;
     assert!(
-        !hidden_dms(&state, &tenant, &reader).await.contains(&dm),
+        hidden().await.is_empty(),
         "someone else's message unhides the DM"
     );
 }

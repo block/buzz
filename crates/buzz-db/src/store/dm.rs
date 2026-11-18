@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::channel::ChannelRecord;
 use crate::error::{DbError, Result};
-use crate::Db;
+use crate::{AdmittedTx, Db};
 use buzz_core::CommunityId;
 use buzz_datastore_tracing::datastore_span;
 
@@ -1141,22 +1141,17 @@ pub async fn unhide_dm(
     Ok(())
 }
 
-/// Unhide DM `channel_id` for every active member except `author`, and return
-/// whose hide was cleared. A new message from someone else resurfaces a hidden
-/// DM, as a re-open does. The caller checks that the channel is a DM.
+/// In `tx`, unhide DM `channel_id` for every active member except `author`,
+/// and return whose hide was cleared, sorted so callers lock them in one order.
+/// A new message from someone else resurfaces a hidden DM, as a re-open does.
+/// The caller checks that the channel is a DM.
 pub async fn unhide_dm_for_recipients(
-    pool: &PgPool,
-    community_id: CommunityId,
+    tx: &mut AdmittedTx,
     channel_id: Uuid,
     author: &[u8],
 ) -> Result<Vec<Vec<u8>>> {
-    let mut tx = crate::begin_community_write_transaction(
-        pool,
-        community_id,
-        crate::observability::WriterOperation::EventWrite,
-    )
-    .await?;
-    let unhidden = sqlx::query_scalar(
+    let community_id = tx.community();
+    let mut unhidden: Vec<Vec<u8>> = sqlx::query_scalar(
         r#"
         UPDATE channel_members
         SET hidden_at = NULL
@@ -1170,8 +1165,75 @@ pub async fn unhide_dm_for_recipients(
     .bind(author)
     .fetch_all(tx.conn())
     .await?;
-    tx.commit().await?;
+    unhidden.sort();
     Ok(unhidden)
+}
+
+/// The state `viewer`'s next NIP-DV snapshot is built from.
+pub struct DmVisibilityState {
+    /// The DMs `viewer` has hidden now.
+    pub hidden: Vec<Uuid>,
+    /// The `created_at` of `viewer`'s latest snapshot, in Unix seconds.
+    pub latest_snapshot_at: Option<i64>,
+}
+
+/// In `tx`, take the replacement lock on `viewer`'s NIP-DV snapshot (signed by
+/// `relay_pubkey`), then read what the next snapshot is built from. Every
+/// snapshot writer takes this lock before it reads, so an older hidden set can
+/// never replace a newer one.
+pub async fn lock_dm_visibility(
+    tx: &mut AdmittedTx,
+    relay_pubkey: &[u8],
+    viewer: &[u8],
+) -> Result<DmVisibilityState> {
+    let community_id = tx.community();
+    let kind = buzz_core::kind::KIND_DM_VISIBILITY as i32;
+    let d_tag = hex::encode(viewer);
+    let lock_key = crate::replaceable::event_replacement_lock_key(
+        community_id,
+        kind,
+        relay_pubkey,
+        Some(d_tag.as_bytes()),
+    );
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(lock_key)
+        .execute(tx.conn())
+        .await?;
+    let hidden = sqlx::query_scalar(
+        r#"
+        SELECT cm.channel_id
+        FROM channel_members cm
+        JOIN channels c
+          ON c.community_id = cm.community_id
+         AND c.id = cm.channel_id
+        WHERE cm.community_id = $1
+          AND cm.pubkey = $2
+          AND cm.removed_at IS NULL
+          AND cm.hidden_at IS NOT NULL
+          AND c.channel_type = 'dm'
+          AND c.deleted_at IS NULL
+        ORDER BY cm.channel_id
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(viewer)
+    .fetch_all(tx.conn())
+    .await?;
+    let latest: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT max(created_at) FROM events \
+         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 \
+           AND deleted_at IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(kind)
+    .bind(relay_pubkey)
+    .bind(&d_tag)
+    .fetch_one(tx.conn())
+    .await?;
+    Ok(DmVisibilityState {
+        hidden,
+        latest_snapshot_at: latest.map(|at| at.timestamp()),
+    })
 }
 
 /// Return the channel IDs of all DMs the given user currently has hidden
@@ -1392,17 +1454,6 @@ impl Db {
         pubkey: &[u8],
     ) -> Result<()> {
         crate::dm::unhide_dm(&self.pool, community_id, channel_id, pubkey).await
-    }
-
-    /// Unhide a DM channel for every active member except its new message's author.
-    #[datastore_span(name = "unhide_dm_for_recipients", system = "postgresql")]
-    pub async fn unhide_dm_for_recipients(
-        &self,
-        community_id: CommunityId,
-        channel_id: Uuid,
-        author: &[u8],
-    ) -> Result<Vec<Vec<u8>>> {
-        crate::dm::unhide_dm_for_recipients(&self.pool, community_id, channel_id, author).await
     }
 
     /// List the channel IDs of all DMs the given user currently has hidden.
