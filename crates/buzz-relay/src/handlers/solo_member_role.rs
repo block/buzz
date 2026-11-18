@@ -2,15 +2,14 @@
 
 use std::sync::Arc;
 
-use buzz_core::{StoredEvent, TenantContext};
+use buzz_core::{kind::event_kind_u32, StoredEvent, TenantContext};
 use buzz_db::{channel::MemberRole, channel_members::SoloMemberRoleChange, DbError};
 use nostr::{Event, PublicKey, Tag};
-use tracing::warn;
 use uuid::Uuid;
 
 use crate::state::AppState;
 
-use super::{ingest::IngestError, side_effects::emit_group_discovery_events};
+use super::{event::dispatch_persistent_event, ingest::IngestError};
 
 fn required_tag<'a>(event: &'a Event, name: &str) -> Result<&'a str, IngestError> {
     let mut tags = event
@@ -50,9 +49,15 @@ pub(super) async fn persist(
         expected_role: parse_role("expected_role")?,
         role: parse_role("role")?,
     };
-    let (stored, inserted) = state
+    let (stored, group_state) = state
         .db
-        .change_solo_member_role_with_event(tenant.community(), channel_id, change, event)
+        .change_solo_member_role_with_event(
+            tenant.community(),
+            channel_id,
+            change,
+            event,
+            &state.relay_keypair,
+        )
         .await
         .map_err(|error| match error {
             DbError::AccessDenied(reason) => IngestError::Rejected(format!("invalid: {reason}")),
@@ -64,10 +69,20 @@ pub(super) async fn persist(
             }
         })?;
 
+    let inserted = !group_state.is_empty();
     if inserted {
         state.invalidate_membership(tenant, channel_id, &target.to_bytes());
-        if let Err(error) = emit_group_discovery_events(tenant, state, channel_id).await {
-            warn!(%channel_id, %error, "Solo member role discovery emission failed");
+        let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
+        for snapshot in group_state {
+            dispatch_persistent_event(
+                tenant,
+                state,
+                &snapshot,
+                event_kind_u32(&snapshot.event),
+                &relay_pubkey_hex,
+                None,
+            )
+            .await;
         }
     }
     Ok((stored, inserted))

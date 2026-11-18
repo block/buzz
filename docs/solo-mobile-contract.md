@@ -63,9 +63,9 @@ a verified agent. An Admin grant requires a verified agent owned by the
 signer. The relay stores Participating as `bot` for verified agents and
 `member` for people. Role changes bypass invitation policy.
 
-The relay checks the current chat and membership under the membership
-lock and commits the command and role together. It refreshes the signed
-roster and emits no admission notices.
+The relay requires a private Solo stream and checks the current chat and
+membership under the membership lock. It commits the command, role, signed
+admin list, and signed member roster together. It emits no admission notices.
 
 Refresh the roster after a role mismatch. Resending the same accepted event
 confirms its receipt without applying another change. Relays that lack

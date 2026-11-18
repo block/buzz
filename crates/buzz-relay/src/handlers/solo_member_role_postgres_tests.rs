@@ -2,8 +2,8 @@
 
 use buzz_core::{
     kind::{
-        KIND_MEMBER_ADDED_NOTIFICATION, KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_REMOVE_USER,
-        KIND_SOLO_MEMBER_ROLE, KIND_SYSTEM_MESSAGE,
+        KIND_MEMBER_ADDED_NOTIFICATION, KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS,
+        KIND_NIP29_REMOVE_USER, KIND_SOLO_MEMBER_ROLE, KIND_SYSTEM_MESSAGE,
     },
     TenantContext,
 };
@@ -290,4 +290,93 @@ async fn solo_role_change_is_refused_on_an_open_channel() {
         .await
         .expect("active role");
     assert_eq!(active_role.as_deref(), Some("member"));
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn solo_role_change_rolls_back_if_signed_roster_write_fails() {
+    let state = state().await;
+    let tenant = community(&state, "solo-role-roster-failure").await;
+    let [owner, agent] = std::array::from_fn(|_| Keys::generate());
+    record_agent_owner(&state, &tenant, &agent, &owner).await;
+    let channel_id = create_channel(
+        &state,
+        &tenant,
+        &owner,
+        &[
+            &["visibility", "private"],
+            &["t", "buzz.solo"],
+            &["p", &agent.public_key().to_hex()],
+        ],
+    )
+    .await;
+    let admins_kind = KIND_NIP29_GROUP_ADMINS as i32;
+    let members_kind = KIND_NIP29_GROUP_MEMBERS as i32;
+    let before_admins = group_state_tags(&state, &tenant, channel_id, admins_kind).await;
+    let before_members = group_state_tags(&state, &tenant, channel_id, members_kind).await;
+
+    // The PostgreSQL runner isolates this trigger to the test's database.
+    for statement in [
+        "CREATE FUNCTION solo_roster_fail() RETURNS trigger LANGUAGE plpgsql AS \
+         $$ BEGIN RAISE EXCEPTION 'injected roster write failure'; END $$",
+        "CREATE TRIGGER solo_roster_fail BEFORE INSERT ON events FOR EACH ROW \
+         WHEN (NEW.kind = 39002) EXECUTE FUNCTION solo_roster_fail()",
+    ] {
+        sqlx::query(statement)
+            .execute(state.db.pool())
+            .await
+            .expect("install roster failure trigger");
+    }
+
+    let command = role_change(&owner, channel_id, &agent, "member", "admin");
+    let command_id = command.id;
+    let error = ingest_event(&state, &tenant, command.clone(), http_auth(&owner))
+        .await
+        .err();
+    assert!(
+        matches!(error, Some(IngestError::Internal(ref message)) if message.contains("injected roster write failure")),
+        "{error:?}"
+    );
+    assert!(state
+        .db
+        .get_event_by_id(tenant.community(), command_id.as_bytes())
+        .await
+        .expect("query failed command")
+        .is_none());
+    let active_role = state
+        .db
+        .get_member_role(
+            tenant.community(),
+            channel_id,
+            &agent.public_key().to_bytes(),
+        )
+        .await
+        .expect("active role after rollback");
+    assert_eq!(active_role.as_deref(), Some("member"));
+    assert_eq!(
+        group_state_tags(&state, &tenant, channel_id, admins_kind).await,
+        before_admins
+    );
+    assert_eq!(
+        group_state_tags(&state, &tenant, channel_id, members_kind).await,
+        before_members
+    );
+
+    sqlx::query("DROP TRIGGER solo_roster_fail ON events")
+        .execute(state.db.pool())
+        .await
+        .expect("remove roster failure trigger");
+    let retry = ingest_event(&state, &tenant, command, http_auth(&owner))
+        .await
+        .expect("retry the same signed command");
+    assert!(
+        retry.accepted && retry.message != "duplicate:",
+        "{}",
+        retry.message
+    );
+    let agent_hex = agent.public_key().to_hex();
+    let admins = group_state_tags(&state, &tenant, channel_id, admins_kind).await;
+    assert!(admins.contains(&vec!["p".into(), agent_hex.clone(), "admin".into()]));
+    let members = group_state_tags(&state, &tenant, channel_id, members_kind).await;
+    assert!(members.contains(&vec!["p".into(), agent_hex, "".into(), "admin".into()]));
 }

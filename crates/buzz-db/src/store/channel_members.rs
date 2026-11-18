@@ -10,7 +10,10 @@ use uuid::Uuid;
 use crate::channel::{row_to_channel_record, ChannelRecord};
 use crate::error::{DbError, Result};
 use crate::{AdmittedTx, Db, ReadAt};
-use buzz_core::CommunityId;
+use buzz_core::{
+    kind::{KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS},
+    CommunityId, StoredEvent,
+};
 use buzz_datastore_tracing::datastore_span;
 
 pub use buzz_core::channel::MemberRole;
@@ -2447,8 +2450,9 @@ impl Db {
         .await
     }
 
-    /// Stores a signed Solo member role change together with the membership
-    /// update. Refusals leave neither an event nor a membership change.
+    /// Store a signed Solo role command, its membership change, and both
+    /// relay-signed membership lists in one transaction. A duplicate returns
+    /// the stored command with no new lists.
     #[datastore_span(name = "change_solo_member_role_with_event", system = "postgresql")]
     pub async fn change_solo_member_role_with_event(
         &self,
@@ -2456,7 +2460,8 @@ impl Db {
         channel_id: Uuid,
         change: SoloMemberRoleChange,
         event: &nostr::Event,
-    ) -> Result<(buzz_core::StoredEvent, bool)> {
+        relay_signer: &nostr::Keys,
+    ) -> Result<(StoredEvent, Vec<StoredEvent>)> {
         let actor = event.pubkey.to_bytes();
         let target = change.target.to_bytes();
         let denied = |reason: &str| DbError::AccessDenied(reason.to_owned());
@@ -2477,6 +2482,20 @@ impl Db {
         )
         .await?;
         tx.set_push_enqueue(self.push_enqueue.clone());
+        // Roster replacement takes its coordinate lock before the membership
+        // lock. Account cleanup takes both list locks in this same order.
+        let relay_pubkey = relay_signer.public_key().to_bytes();
+        let admins_kind = KIND_NIP29_GROUP_ADMINS as i32;
+        let members_kind = KIND_NIP29_GROUP_MEMBERS as i32;
+        for kind in [admins_kind, members_kind] {
+            crate::replaceable::take_replacement_lock(
+                &mut tx,
+                kind,
+                &relay_pubkey,
+                Some(channel_id),
+            )
+            .await?;
+        }
         lock_channel_for_member_put(&mut tx, channel_id).await?;
         let (stored, inserted) = crate::event::insert_event_with_thread_metadata_tx(
             &mut tx,
@@ -2487,7 +2506,7 @@ impl Db {
         .await?;
         if !inserted {
             tx.rollback().await?;
-            return Ok((stored, false));
+            return Ok((stored, Vec::new()));
         }
 
         let channel = get_channel_tx(tx.conn(), community, channel_id).await?;
@@ -2554,8 +2573,39 @@ impl Db {
             ));
         }
         crate::insert_mentions_in_transaction(&mut tx, event, Some(channel_id)).await?;
+
+        let members = select_active_members(tx.conn(), community, channel_id).await?;
+        let group_id = channel_id.to_string();
+        let identity = channel.identity();
+        let mut group_state = Vec::with_capacity(2);
+        for (kind, tags) in [
+            (
+                admins_kind,
+                crate::channel::group_admins_tags(&group_id, &identity, &members),
+            ),
+            (
+                members_kind,
+                crate::channel::group_members_tags(&group_id, Some(&identity), &members),
+            ),
+        ] {
+            let tags = tags.map_err(|error| DbError::InvalidData(error.to_string()))?;
+            let (snapshot, inserted) = crate::channel::replace_signed_group_state_under_lock(
+                &mut tx,
+                channel_id,
+                kind,
+                tags,
+                relay_signer,
+            )
+            .await?;
+            if !inserted {
+                return Err(DbError::InvalidData(
+                    "Solo group state replacement failed".into(),
+                ));
+            }
+            group_state.push(snapshot);
+        }
         tx.commit().await?;
-        Ok((stored, true))
+        Ok((stored, group_state))
     }
 
     /// Removes a member from a channel.
