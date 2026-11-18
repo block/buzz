@@ -2492,6 +2492,7 @@ impl Db {
 
         let channel = get_channel_tx(tx.conn(), community, channel_id).await?;
         if channel.channel_type != "stream"
+            || channel.visibility != "private"
             || !channel.labels.iter().any(|label| label == "buzz.solo")
         {
             return Err(denied("channel is not a Solo chat"));
