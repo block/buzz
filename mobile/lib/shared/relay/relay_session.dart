@@ -1158,7 +1158,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     for (final entry in _pendingEvents.values) {
       entry.timeout.cancel();
       if (!entry.completer.isCompleted) {
-        entry.completer.completeError(error ?? Exception('Connection lost'));
+        entry.completer.completeError(RelayAckLostError(error));
       }
     }
     _pendingEvents.clear();

@@ -35,3 +35,16 @@ class ActiveCommunityChangedError extends StateError {
 class RelayNotConnectedError extends StateError {
   RelayNotConnectedError() : super('Relay session is not connected');
 }
+
+/// The connection ended after an EVENT was sent but before the relay
+/// acknowledged it, so the relay may or may not have accepted it.
+class RelayAckLostError implements Exception {
+  RelayAckLostError([this.cause]);
+
+  final Object? cause;
+
+  @override
+  String toString() =>
+      'Connection lost before the relay acknowledged the event'
+      '${cause == null ? '' : ': $cause'}';
+}

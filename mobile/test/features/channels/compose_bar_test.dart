@@ -1,9 +1,6 @@
 import 'package:flutter/scheduler.dart';
-
 import 'dart:async';
-
 import 'package:buzz/features/channels/composer_send_origin.dart';
-
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
@@ -1443,7 +1440,12 @@ void main() {
           (
             'an unacknowledged publish',
             (_) => Future.error(TimeoutException('not acknowledged')),
-            "Not sent. The relay didn't respond.",
+            "Not confirmed. The relay didn't respond.",
+          ),
+          (
+            'a connection lost before acknowledgement',
+            (_) => Future.error(RelayAckLostError(Exception('socket closed'))),
+            'Not confirmed. Connection lost.',
           ),
           (
             'a relay rejection',

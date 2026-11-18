@@ -487,10 +487,12 @@ String _composeSendErrorMessage(Object error) {
 }
 
 /// Describes why a text send failed. A community switch is reported
-/// separately by [_reportSendCancelledByCommunitySwitch].
+/// separately by [_reportSendCancelledByCommunitySwitch]. Failures after the
+/// EVENT went out say "Not confirmed": the relay may have accepted it.
 String _sendFailureMessage(Object error) => switch (error) {
   RelayNotConnectedError() => 'Not sent. No connection.',
-  TimeoutException() => "Not sent. The relay didn't respond.",
+  TimeoutException() => "Not confirmed. The relay didn't respond.",
+  RelayAckLostError() => 'Not confirmed. Connection lost.',
   StateError(:final message) => 'Not sent: $message',
   _ => 'Not sent: ${_composeSendErrorMessage(error)}',
 };
