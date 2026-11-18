@@ -196,7 +196,8 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
     assert!(soft_delete_discovery.contains("execute(tx.conn())"));
 
     let side_effects = include_str!("../../buzz-relay/src/handlers/side_effects.rs");
-    assert!(side_effects.contains("query_events_for_event_write"));
+    // The DM visibility snapshot reads its prior version in its write transaction.
+    assert!(side_effects.contains("begin_event_write_transaction(tenant.community())"));
     assert!(side_effects.contains("query_events_for_bootstrap"));
     assert!(side_effects.contains(".list_channels_for_bootstrap("));
 
