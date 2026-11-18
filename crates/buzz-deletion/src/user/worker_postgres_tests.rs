@@ -41,6 +41,8 @@ fn options() -> RunOptions {
         next_step: false,
         db: None,
         media: None,
+        identity: None,
+        cleanup_verified: false,
         delete: false,
         relay_pubkey: None,
         batch_size: 100,

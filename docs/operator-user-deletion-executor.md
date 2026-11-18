@@ -1,8 +1,10 @@
 # Run and recover a user-deletion workflow
 
 The workflow orders account gating, media cleanup, and per-community content
-cleanup. Real requests stop at the unimplemented account gate; they cannot
-complete through placeholder handlers. Demo requests simulate all stages and
+cleanup. Real requests can block an external login through the account gate,
+then wait for access-enforcement and writer-drain evidence. That readiness
+integration is still unimplemented, so real requests cannot advance to cleanup.
+Demo requests simulate all stages and
 never delete media or content.
 
 Direct `media-batches` and `content-batches` commands remain available for
@@ -11,6 +13,72 @@ gate. Protection against concurrent writes by the target or their agents remains
 unimplemented; neither command proves full account erasure. Use a disposable
 database and versioned storage bucket when testing. Owned-community workflow
 execution is unsupported.
+
+## External identity gate
+
+The request-wide `gate_user` handler runs once before any community cleanup.
+Configure the executor with these settings (all URLs belong to the operator's
+identity service):
+
+| Setting | Purpose |
+| --- | --- |
+| `BUZZ_USER_DELETION_IDENTITY_BLOCK_URL` | POST endpoint that blocks login and revokes existing access |
+| `BUZZ_USER_DELETION_IDENTITY_DELETE_LOGIN_URL` | POST endpoint ending in `/api/goose/v1/identity/delete-user-auth-login` |
+| `BUZZ_USER_DELETION_IDENTITY_DELETE_ACCOUNT_URL` | Full POST URL ending in `/api/goose/v1/identity/delete-builderlab-account` on the same origin as the block endpoint |
+| `BUZZ_USER_DELETION_IDENTITY_TOKEN_FILE` | File containing the service bearer token; reread for each call to allow rotation |
+| `BUZZ_USER_DELETION_IDENTITY_TIMEOUT_SECS` | HTTP deadline, default 30 seconds, range 1–120 |
+
+Endpoints require HTTPS; numeric loopback HTTP addresses are accepted for local
+testing. Redirects and automatic HTTP retries are disabled. Requests/responses
+are limited to 64 KiB and token files to 16 KiB. Service credentials, URLs and
+arbitrary response/error bodies are not included in recorded transport errors.
+The operator provisions the service token and its permissions outside Buzz.
+
+The block endpoint receives `{"request_id":"<UUID>","pubkey":"<hex>"}`.
+The executor sends the approved canonical hex public key; the identity service
+resolves its account/login internally and rejects ambiguous or out-of-scope
+identities. No separate resolution request or caller-supplied target is needed.
+
+The response must contain the same `request_id` and canonical hex `pubkey`,
+plus `identity_blocked: true`, `identity_revoked: true` and an RFC3339 `revoked_at` timestamp. The endpoint
+must return HTTP 200 with valid JSON; 202 is not completion. Additional fields,
+such as a human-readable `message` and
+`blocked_login: {"provider":"example","subject":"example-login"}`, are preserved
+in the receipt but do not determine success.
+
+A validated receipt is saved as `metadata_json.waiting.identity_receipt`.
+Subsequent invocations validate and reuse it without another HTTP call. If a
+response is lost before a receipt is saved, the executor retries the same
+request ID and public key. Each repeated block call executes again and may return a newer revocation time. HTTP errors use the workflow's existing retry deadline. An operator or
+external runner must invoke the command again: this change adds no polling API
+or automatic retry daemon.
+
+**A revocation receipt does not complete the gate.** The handler leaves it
+running/current with reason `awaiting_access_enforcement_and_writer_drain`,
+releases the lease and exits 1. No media or per-community cleanup starts. The
+identity service cannot establish that Buzz's uploads/jobs are drained or that
+all relevant relays enforce access revocation; a separate readiness integration
+must provide that evidence. Do not manually mark the gate completed to bypass
+this boundary.
+
+## Final account deletion
+
+After media and all approved communities have finished, a real request enters
+`purge_builderlab` once. The stage waits until an operator independently verifies
+Buzz cleanup for that request and runs `user-deletions run <UUID> --delete
+--cleanup-verified`. Use this flag only after inspecting the final stage. Earlier
+stages reject the attestation. The worker sends the original request ID and
+public key with `cleanup_verified: true`. The worker first deletes the external login while the account
+mapping still exists. It requires a matching HTTP 200 receipt with
+`auth0_deleted: true`. Only then does it call the account endpoint and require
+a matching receipt with `account_deleted: true`. Both responses must identify
+the approved request and public key.
+
+Request IDs correlate calls. After an error, lost response, or interruption,
+inspect the stage's waiting reason and the original login and account before
+taking further action. Re-running the worker leaves an uncertain delete on hold.
+A 409 for a missing account cannot establish which operation removed it.
+The existing stage inspection shows the login receipt if the account call began.
 
 ## Content batches
 
@@ -148,9 +216,10 @@ stage-name comparisons or two-community requirement.
 
 The handler gets the whole row. `metadata_json.inputs` holds the target and
 community input. The handler marks the row running and either saves success
-under `metadata_json.result` or records a failure and retry deadline. Returning
-success from the handler means its outcome was saved, including a retryable
-failure. Failure to save propagates out of the worker.
+under `metadata_json.result`, records a failure and retry deadline, or saves an
+external observation under `metadata_json.waiting`. A waiting outcome stops the
+worker and releases the lease without completing the stage. Failure to save
+propagates out of the worker.
 
 ### Durable state
 
@@ -193,7 +262,7 @@ The version-1 workflow rules are:
 
 | Stage | Allowed outcome | Runtime choice |
 | --- | --- | --- |
-| `gate_user` | `purge_media` | Enter media only after saved gate success; real gate is not implemented |
+| `gate_user` | `purge_media` | Enter media only after saved gate success; identity receipt alone leaves the real gate waiting |
 | `purge_media` | Enter communities | After saved success, select the first uncovered community |
 | `purge_content` | `purge_agents` or community complete | Real cleanup continues to agent cleanup; demos read saved `result.has_agents` |
 | `purge_agents` | Community complete | Mark this community covered |
@@ -266,10 +335,11 @@ INVENTORY_DIGEST=$(printf '%s\n' "$REQUEST_JSON" | jq -r '.inventory_digest')
 ./target/debug/buzz-admin user-deletions run "$REQUEST_ID" --delete
 ```
 
-Approval creates no stages. A real run requires `--delete`, then refuses the
-unimplemented `gate_user` handler and leaves it pending. Repeating the run does
-not fabricate progress. Use `--target demo:example` instead of `--pubkey` at
-submission to exercise the full synthetic workflow without deletion.
+Approval creates no stages. A real run requires `--delete` and the identity
+configuration above. Without configuration the gate remains pending. With a
+validated receipt it remains running/current while waiting for readiness
+evidence. Repeating the run reuses the saved receipt, or retries the same request
+if none was saved. Use `--target demo:example` instead of `--pubkey` at submission to exercise the full synthetic workflow without deletion.
 
 The routing requires saved gate success before media, and saved media success
 before community cleanup. A media failure keeps the same stage current; resume

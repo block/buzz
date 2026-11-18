@@ -61,6 +61,9 @@ pub enum Command {
         /// Execute implemented real handlers; stop relay and external writers first.
         #[arg(long)]
         delete: bool,
+        /// Attest that Buzz cleanup for this request has been independently verified.
+        #[arg(long, requires = "delete")]
+        cleanup_verified: bool,
         /// Trusted relay signer for historical content attribution.
         #[arg(long, value_parser=content_batches::parse_pubkey)]
         relay_pubkey: Option<String>,
@@ -195,6 +198,7 @@ pub async fn run(command: Command) -> Result<i32> {
         }
         Command::Run {
             id,
+            cleanup_verified,
             delete,
             relay_pubkey,
             batch_size,
@@ -214,6 +218,17 @@ pub async fn run(command: Command) -> Result<i32> {
                     "dummy controls cannot be used for real deletion"
                 );
             }
+            if cleanup_verified {
+                let inspection = store.inspect(id).await?;
+                anyhow::ensure!(
+                    real && inspection
+                        .stage_history
+                        .iter()
+                        .any(|row| row.stage == "purge_builderlab"
+                            && (row.is_current || inspection.request.status == "completed")),
+                    "verify cleanup only after the request reaches purge_builderlab"
+                );
+            }
             let code = worker::run(
                 &store,
                 id,
@@ -221,7 +236,13 @@ pub async fn run(command: Command) -> Result<i32> {
                 &worker::RunOptions {
                     db: real.then(|| buzz_db::Db::from_pool(db.pool().clone())),
                     media: None,
+                    identity: if real {
+                        gate::IdentityGateConfig::from_env()?
+                    } else {
+                        None
+                    },
                     delete,
+                    cleanup_verified,
                     relay_pubkey,
                     batch_size,
                     max_items,
@@ -244,6 +265,7 @@ pub async fn run(command: Command) -> Result<i32> {
 
 mod account_batches;
 mod content_batches;
+mod gate;
 mod handlers;
 mod inventory;
 /// Direct upload-only media cleanup and its workflow handler.
@@ -251,6 +273,7 @@ pub mod media;
 /// Standalone delegation of an owned community to community deletion.
 pub mod owned_community;
 mod profile_batches;
+mod purge_builderlab;
 /// Read-only summaries of locally saved request progress and external waits.
 pub mod summary;
 mod transition;

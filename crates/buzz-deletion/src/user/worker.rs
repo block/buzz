@@ -8,13 +8,22 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::{handlers, transition::UserDeletionTransition};
-use crate::{StageOutcome, DEFAULT_LEASE_DURATION, HEARTBEAT_INTERVAL};
+use crate::{DEFAULT_LEASE_DURATION, HEARTBEAT_INTERVAL};
+
+enum StageOutcome {
+    Completed,
+    Waiting,
+    Shutdown,
+    Failed(anyhow::Error),
+}
 
 /// Real execution controls and demo-only failure/delay options.
 pub(super) struct RunOptions {
     pub db: Option<buzz_db::Db>,
     pub media: Option<std::sync::Arc<buzz_media::MediaStorage>>,
+    pub identity: Option<super::gate::IdentityGateConfig>,
     pub delete: bool,
+    pub cleanup_verified: bool,
     pub relay_pubkey: Option<String>,
     pub batch_size: u16,
     pub max_items: u32,
@@ -105,6 +114,7 @@ async fn execute_claim(
                 .await
                 {
                     StageOutcome::Completed => {}
+                    StageOutcome::Waiting => return Ok(1),
                     StageOutcome::Shutdown => return Ok(0),
                     StageOutcome::Failed(error) => return Err(error),
                 }
@@ -144,7 +154,8 @@ async fn run_stage_with_heartbeat(
         biased;
         _ = shutdown.cancelled() => StageOutcome::Shutdown,
         result = &mut handler => match result {
-            Ok(()) => StageOutcome::Completed,
+            Ok(handlers::DispatchOutcome::Completed) => StageOutcome::Completed,
+            Ok(handlers::DispatchOutcome::Waiting) => StageOutcome::Waiting,
             Err(error) => StageOutcome::Failed(error),
         },
         error = renewal => StageOutcome::Failed(error.into()),

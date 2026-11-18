@@ -19,10 +19,11 @@ clap = { version = "4", features = ["derive"] }
 hex = { workspace = true }
 nostr = { workspace = true }
 redis = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["fs"] }
 tokio-util = { workspace = true }
 uuid = { workspace = true }
 
