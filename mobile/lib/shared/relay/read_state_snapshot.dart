@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../crypto/event_signing.dart';
 import 'nostr_models.dart';
 import 'relay_query_response.dart';
 
@@ -118,9 +119,10 @@ bool isAuthenticReadStateEvent(NostrEvent event, {required String viewer}) {
   try {
     return nostr.Event.fromMap(event.toJson(), verify: false).getEventId() ==
             event.id &&
-        nostr.Schnorr.verify(
+        // Native libsecp256k1: the live path runs this on the UI isolate.
+        verifySchnorrHex(
           publicKey: event.pubkey,
-          message: event.id,
+          messageHex: event.id,
           signature: event.sig,
         );
   } catch (_) {
