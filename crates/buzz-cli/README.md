@@ -170,6 +170,10 @@ buzz repos protect list --id my-repo
 buzz repos protect set --id my-repo --ref refs/heads/main --push admin --no-force-push --no-delete
 buzz repos protect remove --id my-repo --ref refs/heads/main
 
+# Raw escape hatch: any filter or event, signed with the CLI's own credentials
+buzz raw query '{"kinds":[39002],"#p":["<hex pubkey>"]}'
+buzz raw publish --kind 1 --tag '["t","example"]' --content 'hello'
+
 # Pipe to jq
 buzz channels list | jq '.[].name'
 ```
@@ -292,6 +296,8 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `protect list` | List branch and tag protection rules |
 | | `protect set` | Create or replace a protection rule |
 | | `protect remove` | Remove a protection rule |
+| `raw` | `query` | Run one Nostr filter or an array of filters (POST /query); prints events as JSON |
+| | `publish` | Build, sign, and publish any event from `--kind`/`--tag`/`--content` or `--event-json` |
 | `upload` | `file` | Upload a file to the Blossom store |
 | `pack` | `validate` | Validate a persona pack (local, no relay) |
 | | `inspect` | Inspect a persona pack (local, no relay) |
@@ -301,6 +307,14 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `set` | Write a memory value (use `-` for stdin) |
 | | `patch` | Apply unified diff to memory value |
 | | `rm` | Publish a tombstone to delete memory |
+
+`raw query` takes one filter object or an array of filters (`-` reads stdin) and
+prints the matching events, signatures included. Each response is bounded by the
+relay, so pass your own `limit`. `raw publish` signs with the CLI's identity and
+attaches its NIP-OA auth tag. `--tag` is a JSON array of strings and may be
+repeated; `--event-json` takes an unsigned `{kind, content, tags, created_at}`
+template and rejects any other field. An `auth` tag in the input is refused.
+Kinds 20000 to 29999 are sent over the WebSocket, as the relay requires.
 
 ## Huddles
 
