@@ -23,6 +23,9 @@ class ComposeDraft {
   final String? threadHeadId;
   final String text;
 
+  /// Recording whose transcript is included in this same persisted snapshot.
+  final String? transcriptionId;
+
   /// Literal picker labels bound to exact keys, never authorization metadata.
   /// An empty key/value is a malformed-record tombstone; send must refuse it.
   final Map<String, String> mentionKeys;
@@ -35,6 +38,7 @@ class ComposeDraft {
     required this.text,
     required this.updatedAt,
     this.mentionKeys = const {},
+    this.transcriptionId,
   });
 
   Map<String, dynamic> toJson() => {
@@ -42,6 +46,7 @@ class ComposeDraft {
     'channel_id': channelId,
     if (threadHeadId != null) 'thread_head_id': threadHeadId,
     'text': text,
+    if (transcriptionId != null) 'transcription_id': transcriptionId,
     'mention_keys': mentionKeys,
     'updated_at': updatedAt,
   };
@@ -81,6 +86,9 @@ class ComposeDraft {
           : null,
       mentionKeys: Map.unmodifiable(mentionKeys),
       text: text,
+      transcriptionId: raw['transcription_id'] is String
+          ? raw['transcription_id'] as String
+          : null,
       updatedAt: updatedAt is int ? updatedAt : 0,
     );
   }
@@ -159,6 +167,7 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
       threadHeadId: threadHeadId,
       text: existingText.isEmpty ? text : '$existingText\n\n$text',
       mentionKeys: existing?.mentionKeys ?? const {},
+      transcriptionId: existing?.transcriptionId,
       updatedAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
     );
     final next = [draft, ...drafts.where((d) => d.key != key)];
@@ -176,13 +185,16 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
     String? threadHeadId,
     required String text,
     Map<String, String> mentionKeys = const {},
+    String? transcriptionId,
   }) {
     if (text.trim().isEmpty) {
       remove(key);
       return;
     }
     final existing = state.where((d) => d.key == key).firstOrNull;
+    final insertion = transcriptionId ?? existing?.transcriptionId;
     if (existing?.text == text &&
+        existing?.transcriptionId == insertion &&
         mapEquals(existing?.mentionKeys, mentionKeys)) {
       return;
     }
@@ -192,6 +204,7 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
       threadHeadId: threadHeadId,
       text: text,
       mentionKeys: Map.unmodifiable(mentionKeys),
+      transcriptionId: insertion,
       updatedAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
     );
     final next = [draft, ...state.where((d) => d.key != key)];
@@ -212,10 +225,10 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
   /// Confirms the draft snapshot reached storage before dropping its source.
   Future<bool> ensurePersisted() async {
     final scope = _prefsKey;
-    final pending = _pendingWrite;
-    if (await pending) return true;
+    await _pendingWrite;
     if (_prefsKey != scope) return false;
-    if (pending != _pendingWrite) return _pendingWrite;
+    // A rebuilt provider may have read a cache entry from a failed platform
+    // write. Confirm the current snapshot durably before releasing its audio.
     return _pendingWrite = _writeDrafts(state);
   }
 

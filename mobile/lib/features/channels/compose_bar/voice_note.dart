@@ -52,6 +52,9 @@ _ComposerVoiceNote _useComposerVoiceNote({
   required WidgetRef ref,
   required TextEditingController controller,
   required String scope,
+  required String draftKey,
+  required String channelId,
+  required String? threadHeadId,
   required ValueNotifier<_InputTool?> inputTool,
   required FocusNode focusNode,
   required ValueNotifier<bool> isComposerExpanded,
@@ -69,13 +72,24 @@ _ComposerVoiceNote _useComposerVoiceNote({
     context: context,
     ref: ref,
     scope: scope,
-    onText: (text) {
+    draftKey: draftKey,
+    onText: (text, recordingId) {
       final existing = controller.text;
       final separator =
           existing.isEmpty || existing.endsWith(' ') || existing.endsWith('\n')
           ? ''
           : ' ';
       final result = '$existing$separator$text';
+      final drafts = ref.read(composeDraftsProvider.notifier);
+      // Save text and its insertion identity atomically, before editor listeners.
+      drafts.save(
+        key: draftKey,
+        channelId: channelId,
+        threadHeadId: threadHeadId,
+        text: result,
+        mentionKeys: drafts.draftFor(draftKey)?.mentionKeys ?? const {},
+        transcriptionId: recordingId,
+      );
       controller.value = TextEditingValue(
         text: result,
         selection: TextSelection.collapsed(offset: result.length),

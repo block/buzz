@@ -52,10 +52,7 @@ class ComposeBar extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final sendSurfaceKey = useMemoized(GlobalKey.new);
     final controller = useMemoized(_MarkdownEditingController.new);
-    final composerText = useListenableSelector(
-      controller,
-      () => controller.text,
-    );
+    final draftText = useListenableSelector(controller, () => controller.text);
     useEffect(() => controller.dispose, [controller]);
     final draftKey = composeDraftKey(channelId, threadHeadId: threadHeadId);
     final draftRevision = useRef(0);
@@ -122,6 +119,9 @@ class ComposeBar extends HookConsumerWidget {
       controller: controller,
       inputTool: inputTool,
       scope: '$draftIdentity:$draftKey',
+      draftKey: draftKey,
+      channelId: channelId,
+      threadHeadId: threadHeadId,
       context: context,
       ref: ref,
       focusNode: focusNode,
@@ -1185,7 +1185,7 @@ class ComposeBar extends HookConsumerWidget {
                     showFormatting.value = true;
                   },
                   hasPendingUploads: uploadingCount.value > 0,
-                  canSend: composerText.trim().isNotEmpty || hasAttachments,
+                  canSend: draftText.trim().isNotEmpty || hasAttachments,
                   isSending:
                       isSending.value || (draftMembers != null && sending),
                   readOnly: readOnly,

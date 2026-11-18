@@ -620,10 +620,9 @@ void main() {
       expect(await cache.write(newToken, snapshot), isFalse);
       expect(await eventuallyExists(newMedia), isFalse);
       expect(
-        await MediaDiskCache.communityDirectory(
-          mediaRoot,
-          community.id,
-        ).exists(),
+        await eventuallyExists(
+          MediaDiskCache.communityDirectory(mediaRoot, community.id),
+        ),
         isFalse,
       );
 
