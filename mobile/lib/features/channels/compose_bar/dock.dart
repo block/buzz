@@ -1,5 +1,8 @@
 part of '../compose_bar.dart';
 
+/// Height of the conversation fade behind the composer with the keyboard up.
+const _keyboardUpBackdropHeight = 100.0;
+
 class _ComposerDockFrame extends HookWidget {
   final Animation<double> expansionAnimation;
   final bool forceFullWidth;
@@ -44,34 +47,31 @@ class _ComposerDockFrame extends HookWidget {
     );
     final recordingGutterDelta = visibleBottomGutter - Grid.twelve;
     final appView = View.of(context);
-    final keyboardInset = useState(appView.viewInsets.bottom);
-    final fullKeyboardInset = useRef(appView.viewInsets.bottom);
+    final restingBackdropHeight = mobileTabFooterBackdropHeight(context);
+    // The fade gives up one point per point of keyboard travel until it
+    // reaches its keyboard-up height, so it is continuous while the keyboard
+    // opens, closes or changes height. Clamping here also means the dock only
+    // rebuilds while the fade is actually changing.
+    final fadeTravel = restingBackdropHeight - _keyboardUpBackdropHeight;
+    double fadeInset(double physicalInset) =>
+        math.min(physicalInset / appView.devicePixelRatio, fadeTravel);
+    final keyboardFadeInset = useState(fadeInset(appView.viewInsets.bottom));
     useEffect(() {
       final observer = _ComposerKeyboardMetricsObserver(
         view: appView,
         onKeyboardShown: () {},
         onKeyboardHidden: () {},
-        onKeyboardInsetChanged: (inset) {
-          // Track the open height so the fade follows each closing frame.
-          fullKeyboardInset.value = inset == 0
-              ? 0
-              : math.max(fullKeyboardInset.value, inset);
-          keyboardInset.value = inset;
-        },
+        // View insets are physical pixels; the fade is logical.
+        onKeyboardInsetChanged: (inset) =>
+            keyboardFadeInset.value = fadeInset(inset),
       );
       WidgetsBinding.instance.addObserver(observer);
       return () {
         WidgetsBinding.instance.removeObserver(observer);
         observer.dispose();
       };
-    }, [appView]);
-    final keyboardProgress = fullKeyboardInset.value > 0
-        ? (keyboardInset.value / fullKeyboardInset.value).clamp(0.0, 1.0)
-        : 0.0;
-    final restingBackdropHeight = mobileTabFooterBackdropHeight(context);
-    final backdropHeight =
-        restingBackdropHeight +
-        (100.0 - restingBackdropHeight) * keyboardProgress;
+    }, [appView, fadeTravel]);
+    final backdropHeight = restingBackdropHeight - keyboardFadeInset.value;
     return Stack(
       clipBehavior: Clip.none,
       children: [
