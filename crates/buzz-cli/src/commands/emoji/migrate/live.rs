@@ -265,6 +265,7 @@ impl BuzzPorts<'_> {
         let event = self
             .client
             .sign_event(builder)
+            .await
             .map_err(|e| PortError::Permanent(e.to_string()))?;
         let id = event.id.to_hex();
         let raw = self
@@ -279,7 +280,7 @@ impl BuzzPorts<'_> {
 
 impl Relay for BuzzPorts<'_> {
     fn pubkey(&self) -> String {
-        self.client.keys().public_key().to_hex()
+        self.client.public_key().to_hex()
     }
 
     async fn publish(&self, name: &str, url: &str) -> Result<String, PortError> {

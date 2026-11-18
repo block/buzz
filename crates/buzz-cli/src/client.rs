@@ -1612,9 +1612,9 @@ impl BuzzClient {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| CliError::Other(format!("http client init failed: {e}")))?;
-        let auth_header = sign_blossom_get(&self.keys, &url)?;
         let resp = self
-            .with_auth_tag(client.head(&url).header("Authorization", auth_header))
+            .authorize(client.head(&url), Proof::BlossomGet { url: &url })
+            .await?
             .send()
             .await?;
         let status = resp.status();
