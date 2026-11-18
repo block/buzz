@@ -37,7 +37,7 @@ class SignedEventRelay {
     required List<List<String>> tags,
     int? createdAt,
     FutureOr<void> Function(NostrEvent event)? onSigned,
-    bool Function()? mayPublish,
+    Future<bool> Function()? mayPublish,
   }) async {
     final nsec = _nsec;
     if (nsec == null || nsec.isEmpty) {

@@ -434,17 +434,17 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
-    bool Function()? mayPublish,
+    Future<bool> Function()? mayPublish,
   }) async {
     final generation = _connectionGeneration;
     if (_rateLimitGate.isActive) await _rateLimitGate.wait();
-    if (!_isActiveConnection(generation) || !_socketConnected) {
-      throw StateError('Relay session is not connected');
+    bool connected() => _isActiveConnection(generation) && _socketConnected;
+    if (!connected()) throw StateError('Relay session is not connected');
+    if ((mayPublish != null && !await mayPublish()) || !connected()) {
+      throw StateError('Event no longer wanted');
     }
-    if (mayPublish?.call() == false) throw StateError('Event no longer wanted');
 
     final completer = Completer<NostrEvent>();
-
     final timer = Timer(timeout, () {
       final pending = _pendingEvents.remove(event.id);
       if (pending != null && !pending.completer.isCompleted) {

@@ -114,7 +114,7 @@ class _Relay extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
-    bool Function()? mayPublish,
+    Future<bool> Function()? mayPublish,
   }) async {
     if (event.kind == 9 && rateLimitNextMessage) {
       rateLimitNextMessage = false;

@@ -63,7 +63,7 @@ class SendMessage {
     List<String>? mentionPubkeys,
     Channel? channel,
     List<List<String>> mediaTags = const [],
-    bool Function()? mayPublish,
+    Future<bool> Function()? mayPublish,
   }) async {
     _ensureDeliveryValid();
     // Use explicitly passed pubkeys, or resolve @mentions against

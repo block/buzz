@@ -478,9 +478,11 @@ class _RecordingSender implements SendMessage {
     List<String>? mentionPubkeys,
     Channel? channel,
     List<List<String>> mediaTags = const [],
-    bool Function()? mayPublish,
+    Future<bool> Function()? mayPublish,
   }) async {
-    if (mayPublish?.call() == false) throw StateError('no longer wanted');
+    if (mayPublish != null && !await mayPublish()) {
+      throw StateError('no longer wanted');
+    }
     calls.add((
       channelId,
       content,

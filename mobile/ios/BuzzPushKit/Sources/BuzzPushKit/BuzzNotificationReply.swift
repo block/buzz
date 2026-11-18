@@ -159,6 +159,41 @@ public struct BuzzNotificationReplyRequest: Equatable, Sendable {
     return context.threadRootID == nil || notified.threadRootID == context.threadRootID
   }
 
+  /// The app arguments the journal keeps for this reply.
+  public var journalArguments: [String: String] {
+    var arguments = target.flutterArguments
+    arguments["id"] = id
+    arguments["text"] = text
+    arguments["senderPubkey"] = context.senderPubkey
+    arguments["replyRootId"] = context.threadRootID
+    arguments["messageCreatedAt"] = String(context.messageCreatedAt)
+    arguments["deadline"] = String(Int64(deadline.timeIntervalSince1970 * 1000))
+    arguments["inSolo"] = context.inSolo == true ? "true" : nil
+    return arguments
+  }
+
+  /// Rebuilds a reply an earlier launch journaled, enough to tell the user
+  /// about it; the notification it came from is gone.
+  public init?(journalArguments arguments: [String: String]) {
+    guard let id = arguments["id"], let text = arguments["text"],
+      let eventID = arguments["eventId"], let communityID = arguments["communityId"],
+      let channelID = arguments["channelId"], let sender = arguments["senderPubkey"],
+      let createdAt = arguments["messageCreatedAt"].flatMap(Int.init)
+    else { return nil }
+    self.init(
+      id: id, text: text,
+      target: BuzzPushNavigationTarget(
+        eventID: eventID, communityID: communityID, channelID: channelID,
+        threadRootID: arguments["threadRootId"]),
+      context: BuzzNotificationReplyContext(
+        senderPubkey: sender, threadRootID: arguments["replyRootId"],
+        messageCreatedAt: createdAt, inSolo: arguments["inSolo"] == "true" ? true : nil),
+      threadIdentifier: "",
+      deadline: arguments["deadline"].flatMap(Double.init).map {
+        Date(timeIntervalSince1970: $0 / 1000)
+      } ?? .distantFuture)
+  }
+
   /// Where an expired reply's draft is kept: the subthread under the notified
   /// message, or a Solo chat itself (nil).
   var expiredDraftThreadRootID: String? {
@@ -213,16 +248,23 @@ public final class BuzzNotificationReplyBuffer: @unchecked Sendable {
     return taken
   }
 
-  /// Finishes a request. Unknown or already finished ids are ignored.
-  public func complete(id: String, outcome: BuzzNotificationReplyOutcome) {
-    remove(id: id)?.finish(outcome)
+  /// Finishes a request, returning false when the id is unknown or already
+  /// finished.
+  @discardableResult
+  public func complete(id: String, outcome: BuzzNotificationReplyOutcome) -> Bool {
+    guard let entry = remove(id: id) else { return false }
+    entry.finish(outcome)
+    return true
   }
 
-  /// Finishes a request as not sent at its deadline, pointing at where the
-  /// app will keep its draft.
-  public func expire(id: String) {
+  /// Finishes a request at its deadline: as unknown when the app may already
+  /// have published it, else as not sent, pointing at where the app will keep
+  /// its draft.
+  public func expire(id: String, mayHavePublished: Bool) {
     guard let entry = remove(id: id) else { return }
-    entry.finish(.notSent(draftThreadRootID: entry.request.expiredDraftThreadRootID))
+    entry.finish(
+      mayHavePublished
+        ? .unknown : .notSent(draftThreadRootID: entry.request.expiredDraftThreadRootID))
   }
 
   private func remove(id: String) -> Entry? {
@@ -236,7 +278,7 @@ public final class BuzzNotificationReplyBuffer: @unchecked Sendable {
 /// disk from the moment they arrive. If the app is stopped before reporting
 /// one, the next launch hands it over again marked `recovered`, which the app
 /// never sends: it keeps the text as a draft, or, when the reply was marked
-/// `publishing`, only settles it, since it may have gone out.
+/// `publishing`, reports it unknown, since it may have gone out.
 public final class BuzzNotificationReplyJournal: @unchecked Sendable {
   public static let defaultsKey = "buzz.notification_reply.pending"
 
@@ -282,6 +324,18 @@ public final class BuzzNotificationReplyJournal: @unchecked Sendable {
     defaults.set(
       pending().map { $0["id"] == id ? $0.merging(["publishing": "true"]) { _, new in new } : $0 },
       forKey: Self.defaultsKey)
+  }
+
+  /// What is kept for a reply not yet settled.
+  public func recorded(id: String) -> [String: String]? {
+    lock.lock()
+    defer { lock.unlock() }
+    return pending().first { $0["id"] == id }
+  }
+
+  /// Whether the app noted that the reply may go out.
+  public func isPublishing(id: String) -> Bool {
+    recorded(id: id)?["publishing"] == "true"
   }
 
   /// Forgets a reply once the app has reported it sent, or kept its draft.

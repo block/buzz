@@ -363,7 +363,7 @@ class _MessageRelay extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
-    bool Function()? mayPublish,
+    Future<bool> Function()? mayPublish,
   }) async {
     attempts.add(event.id);
     messages[event.id] = event;

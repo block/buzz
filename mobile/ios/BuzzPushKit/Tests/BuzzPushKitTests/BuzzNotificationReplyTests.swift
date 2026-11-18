@@ -126,14 +126,18 @@ func `Forum posts and other kinds offer no reply`(kind: Int) {
       threadIdentifier: "t")
   ) { outcomes["5", default: []].append($0) }
 
-  buffer.complete(id: "1", outcome: .sent)
+  #expect(buffer.complete(id: "1", outcome: .sent))
   // A deadline after the app reported the outcome changes nothing.
-  buffer.expire(id: "1")
+  buffer.expire(id: "1", mayHavePublished: false)
+  #expect(!buffer.complete(id: "1", outcome: .sent))
   buffer.complete(id: "2", outcome: .notSent(draftThreadRootID: "head"))
   buffer.complete(id: "3", outcome: .unknown)
-  buffer.expire(id: "4")
-  buffer.expire(id: "5")
-  buffer.complete(id: "unknown", outcome: .sent)
+  buffer.expire(id: "4", mayHavePublished: false)
+  buffer.expire(id: "5", mayHavePublished: false)
+  // One the app may already have published can't be called not sent.
+  buffer.add(request("6")) { outcomes["6", default: []].append($0) }
+  buffer.expire(id: "6", mayHavePublished: true)
+  #expect(!buffer.complete(id: "unknown", outcome: .sent))
 
   #expect(
     outcomes == [
@@ -141,6 +145,7 @@ func `Forum posts and other kinds offer no reply`(kind: Int) {
       // Expired, it opens the subthread under the notified message, where the
       // app keeps its draft.
       "4": [.notSent(draftThreadRootID: parent)], "5": [.notSent(draftThreadRootID: nil)],
+      "6": [.unknown],
     ])
 }
 
@@ -159,8 +164,11 @@ func `Forum posts and other kinds offer no reply`(kind: Int) {
   journal.record(["id": "3", "text": "three"])
   #expect(journal.take().map { $0["id"] } == ["3"])
 
-  // The app got as far as maybe publishing 3.
+  // The app got as far as maybe publishing 3, so expiry reports it unknown.
+  #expect(!journal.isPublishing(id: "3"))
   journal.markPublishing(id: "3")
+  #expect(journal.isPublishing(id: "3"))
+  #expect(!journal.isPublishing(id: "2"))
 
   // The app was stopped before reporting 2 and 3, so a relaunch hands them
   // over again, marked so the app never sends them; one recorded after the
@@ -173,8 +181,32 @@ func `Forum posts and other kinds offer no reply`(kind: Int) {
       ["id": "3", "text": "three", "publishing": "true", "recovered": "true"],
       ["id": "4", "text": "four"],
     ])
+  // The relaunch can still say that 3 may not have sent, then settle it.
+  #expect(relaunched.recorded(id: "3") == ["id": "3", "text": "three", "publishing": "true"])
+  #expect(relaunched.isPublishing(id: "3"))
   for id in ["2", "3", "4"] { relaunched.settle(id: id) }
+  #expect(relaunched.recorded(id: "3") == nil)
   #expect(BuzzNotificationReplyJournal(defaults: defaults).take().isEmpty)
+}
+
+@Test func `A journaled reply rebuilds the request it came from`() {
+  let request = BuzzNotificationReplyRequest(
+    id: "1", text: "hi",
+    target: BuzzPushNavigationTarget(
+      eventID: parent, communityID: "c", channelID: "ch", threadRootID: "root"),
+    context: BuzzNotificationReplyContext(
+      senderPubkey: "pk", threadRootID: "root", messageCreatedAt: 7, inSolo: true),
+    threadIdentifier: "t",
+    deadline: Date(timeIntervalSince1970: 1_700_000_000.5))
+  let rebuilt = BuzzNotificationReplyRequest(
+    journalArguments: request.journalArguments.merging(["recovered": "true"]) { _, new in new })
+  // The notification it came from, and its thread, are gone.
+  #expect(
+    rebuilt
+      == BuzzNotificationReplyRequest(
+        id: request.id, text: request.text, target: request.target, context: request.context,
+        threadIdentifier: "", deadline: request.deadline))
+  #expect(BuzzNotificationReplyRequest(journalArguments: ["id": "1", "text": "hi"]) == nil)
 }
 
 @Test func `Reply context carries whether the chat is Solo`() throws {

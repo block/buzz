@@ -202,7 +202,7 @@ final class BuzzNotificationReplyBridge {
       self?.expire(request.id)
       endBackgroundTask()
     }
-    journal.record(Self.flutterArguments(request))
+    journal.record(request.journalArguments)
     buffer.add(request) { outcome in
       Self.finish(request, outcome: outcome, notificationID: notificationID, center: center) {
         DispatchQueue.main.async {
@@ -249,8 +249,14 @@ final class BuzzNotificationReplyBridge {
           ? .unknown
           : .notSent(draftThreadRootID: arguments["draftThreadRootId"] as? String)
       // The app reports only after the reply is sent or its draft is saved.
-      journal.settle(id: id)
-      buffer.complete(id: id, outcome: outcome)
+      let recorded = journal.recorded(id: id)
+      if buffer.complete(id: id, outcome: outcome) {
+        journal.settle(id: id)
+      } else {
+        finishUnbuffered(id: id, outcome: outcome, recorded: recorded) { [journal] in
+          journal.settle(id: id)
+        }
+      }
       result(nil)
     case "setSelectedCommunity":
       BuzzSelectedCommunity.set(call.arguments as? String, in: selectedCommunityDefaults)
@@ -262,21 +268,40 @@ final class BuzzNotificationReplyBridge {
   }
 
   /// Ends a reply at its deadline. It stays in the journal until the app
-  /// reports on it, so its text still becomes a draft.
+  /// reports on it, so its text still becomes a draft, unless the app may
+  /// already have published it.
   private func expire(_ id: String) {
-    buffer.expire(id: id)
+    buffer.expire(id: id, mayHavePublished: journal.isPublishing(id: id))
   }
 
-  private static func flutterArguments(_ request: BuzzNotificationReplyRequest) -> [String: String] {
-    var arguments = request.target.flutterArguments
-    arguments["id"] = request.id
-    arguments["text"] = request.text
-    arguments["senderPubkey"] = request.context.senderPubkey
-    arguments["replyRootId"] = request.context.threadRootID
-    arguments["messageCreatedAt"] = String(request.context.messageCreatedAt)
-    arguments["deadline"] = String(Int64(request.deadline.timeIntervalSince1970 * 1000))
-    arguments["inSolo"] = request.context.inSolo == true ? "true" : nil
-    return arguments
+  /// Reports a reply this process no longer holds: one an earlier launch was
+  /// given, or one that expired first. One that may have gone out gets its
+  /// "Reply may not have sent" notification, which an earlier launch never
+  /// posted; one that went out after all clears the notice its expiry posted.
+  /// Settles it once its notice is posted.
+  private func finishUnbuffered(
+    id: String, outcome: BuzzNotificationReplyOutcome, recorded: [String: String]?,
+    settle: @escaping () -> Void
+  ) {
+    switch outcome {
+    case .sent:
+      UNUserNotificationCenter.current().removeDeliveredNotifications(
+        withIdentifiers: [Self.replyNotSentIdentifier(id)])
+    case .unknown:
+      if let request = recorded.flatMap(BuzzNotificationReplyRequest.init(journalArguments:)) {
+        Self.finish(
+          request, outcome: .unknown, notificationID: "", center: .current(), done: settle)
+        return
+      }
+    case .notSent:
+      // Its draft is saved, where its notice (if any) already points.
+      break
+    }
+    settle()
+  }
+
+  private static func replyNotSentIdentifier(_ id: String) -> String {
+    "buzz.reply-not-sent.\(id)"
   }
 
   /// A sent reply clears the notifications it marked read: the notified one
@@ -310,7 +335,7 @@ final class BuzzNotificationReplyBridge {
       content.userInfo = [BuzzPushNavigationTarget.userInfoKey: target.userInfoValue]
       center.add(
         UNNotificationRequest(
-          identifier: "buzz.reply-not-sent.\(request.id)", content: content, trigger: nil)
+          identifier: Self.replyNotSentIdentifier(request.id), content: content, trigger: nil)
       ) { _ in done() }
       return
     }

@@ -725,7 +725,7 @@ class _ProfileRelaySession extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
-    bool Function()? mayPublish,
+    Future<bool> Function()? mayPublish,
   }) async {
     published.add(event);
     return event;
@@ -761,7 +761,7 @@ class _ControlledProfileRelaySession extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
-    bool Function()? mayPublish,
+    Future<bool> Function()? mayPublish,
   }) async {
     published.add(event);
     return event;
@@ -788,7 +788,7 @@ class _LosingProfileRelaySession extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
-    bool Function()? mayPublish,
+    Future<bool> Function()? mayPublish,
   }) async {
     published.add(event);
     competing = NostrEvent(

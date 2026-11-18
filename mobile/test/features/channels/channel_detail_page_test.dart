@@ -21066,7 +21066,7 @@ class _VoiceDmRelaySession extends _IdentityUpdateRelaySession {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
-    bool Function()? mayPublish,
+    Future<bool> Function()? mayPublish,
   }) async {
     publishedKinds.add(event.kind);
     return event;
@@ -21102,7 +21102,7 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
-    bool Function()? mayPublish,
+    Future<bool> Function()? mayPublish,
   }) async {
     publishedKinds.add(event.kind);
     if (event.kind == 9007) {
@@ -21286,7 +21286,7 @@ class _ProfileSubscriptionRelaySession extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
-    bool Function()? mayPublish,
+    Future<bool> Function()? mayPublish,
   }) async => event;
 
   @override
@@ -21318,7 +21318,7 @@ class _HuddleReactionRelaySession extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
-    bool Function()? mayPublish,
+    Future<bool> Function()? mayPublish,
   }) async => event;
 
   @override
@@ -22059,7 +22059,7 @@ class _RecordingOrdinarySender implements SendMessage {
     List<String>? mentionPubkeys,
     Channel? channel,
     List<List<String>> mediaTags = const [],
-    bool Function()? mayPublish,
+    Future<bool> Function()? mayPublish,
   }) async {
     sent.add(content);
     channels.add(channel);

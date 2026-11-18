@@ -143,7 +143,11 @@ Future<NotificationReplyResult> sendNotificationReply(
   var tooLate = false;
   final publishBy = Timer(publishWindow, () => tooLate = true);
   var published = false;
-  bool mayPublish() {
+  // Asked right before the event goes out. The reply is saved as maybe
+  // published first, so a relaunch never resends it.
+  Future<bool> mayPublish() async {
+    if (tooLate) return false;
+    await markBuzzNotificationReplyPublishing(reply.id);
     if (tooLate) return false;
     published = true;
     return true;
@@ -201,7 +205,7 @@ Future<void> _send(
   Ref ref,
   BuzzNotificationReply reply, {
   required Duration connectTimeout,
-  required bool Function() mayPublish,
+  required Future<bool> Function() mayPublish,
 }) async {
   final link = reply.link;
   final auth = await ref.read(authProvider.future);
@@ -237,8 +241,6 @@ Future<void> _send(
     (member) => member.pubkey.toLowerCase() == sender,
   );
   final head = _replyHead(reply, channel);
-  // Saved before anything can go out, so a relaunch never resends it.
-  await markBuzzNotificationReplyPublishing(reply.id);
   await send(
     channelId: link.channelId,
     content: reply.text,

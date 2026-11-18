@@ -1513,7 +1513,7 @@ class _FakeSignedEventRelay implements SignedEventRelay {
     required List<List<String>> tags,
     int? createdAt,
     FutureOr<void> Function(NostrEvent event)? onSigned,
-    bool Function()? mayPublish,
+    Future<bool> Function()? mayPublish,
   }) async {
     submitCount++;
     contents.add(content);
@@ -1544,7 +1544,7 @@ class _ParkedSignedEventRelay implements SignedEventRelay {
     required List<List<String>> tags,
     int? createdAt,
     FutureOr<void> Function(NostrEvent event)? onSigned,
-    bool Function()? mayPublish,
+    Future<bool> Function()? mayPublish,
   }) async {
     contents.add(content);
     if (contents.length == 1) {
@@ -1568,7 +1568,7 @@ class _UnsupportedKindSignedEventRelay implements SignedEventRelay {
     required List<List<String>> tags,
     int? createdAt,
     FutureOr<void> Function(NostrEvent event)? onSigned,
-    bool Function()? mayPublish,
+    Future<bool> Function()? mayPublish,
   }) async {
     submitCount++;
     throw Exception('restricted: unknown event kind');
@@ -1588,7 +1588,7 @@ class _MissingScopeSignedEventRelay implements SignedEventRelay {
     required List<List<String>> tags,
     int? createdAt,
     FutureOr<void> Function(NostrEvent event)? onSigned,
-    bool Function()? mayPublish,
+    Future<bool> Function()? mayPublish,
   }) async {
     submitCount++;
     throw Exception('missing users:write');
@@ -1712,7 +1712,7 @@ class _JournalRelaySession extends _FakeRelaySession {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
-    bool Function()? mayPublish,
+    Future<bool> Function()? mayPublish,
   }) async {
     attempts.add(event);
     final slot = event.tags.firstWhere((tag) => tag.first == 'd')[1];
