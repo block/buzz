@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::client::{normalize_events, normalize_write_response, BuzzClient};
 use crate::commands::event_output::{format_events, thread_markers};
 use crate::commands::sent_from_thread;
+use crate::commands::verified_profiles;
 use crate::error::CliError;
 use crate::validate::{
     infer_language, parse_event_id, parse_uuid, read_or_stdin, truncate_diff,
@@ -217,6 +218,21 @@ async fn resolve_content_mentions(
             .or_default()
             .push(pubkey.to_string());
         display_names.push(name.to_string());
+    }
+
+    // Where the community advertises verified profiles, a member is also
+    // reachable by their verified username, e.g. `@alice`.
+    if let Some(authority) = verified_profiles::discover_authority(client).await? {
+        let verified =
+            verified_profiles::fetch_verified_profiles(client, &authority, &member_pubkeys).await?;
+        for (pubkey, profile) in verified {
+            let pubkeys = name_to_pubkeys.entry(profile.username.clone()).or_default();
+            // A username equal to the member's own profile name is still one person.
+            if !pubkeys.contains(&pubkey) {
+                pubkeys.push(pubkey);
+            }
+            display_names.push(profile.username);
+        }
     }
 
     let known_refs: Vec<&str> = display_names.iter().map(String::as_str).collect();
@@ -2310,5 +2326,134 @@ mod tests {
                 .any(|t| matches!(t[0].as_str(), Some("e" | "broadcast"))),
             "must be top-level: {tags:?}"
         );
+    }
+
+    // ── @mention resolution by verified username ──────────────────────────
+
+    /// Fake relay for mention resolution: `/query` answers by event kind from
+    /// `events`; `/` serves `info` (NIP-11).
+    async fn fake_mention_relay(events: Vec<serde_json::Value>, info: serde_json::Value) -> String {
+        let state = (events, info);
+        let app = AxumRouter::new()
+            .route(
+                "/query",
+                axum_post(
+                    |AxumState((events, _)): AxumState<(
+                        Vec<serde_json::Value>,
+                        serde_json::Value,
+                    )>,
+                     body: AxumBytes| async move {
+                        let filters: Vec<serde_json::Value> =
+                            serde_json::from_slice(&body).unwrap();
+                        let kind = &filters[0]["kinds"][0];
+                        let found: Vec<_> = events.iter().filter(|e| &e["kind"] == kind).collect();
+                        (
+                            AxumStatusCode::OK,
+                            [("content-type", "application/json")],
+                            serde_json::to_string(&found).unwrap(),
+                        )
+                    },
+                ),
+            )
+            .route(
+                "/",
+                axum::routing::get(
+                    |AxumState((_, info)): AxumState<(
+                        Vec<serde_json::Value>,
+                        serde_json::Value,
+                    )>| async move { axum::Json(info) },
+                ),
+            )
+            .with_state(state);
+        let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: StdSocketAddr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    fn signed(keys: &Keys, kind: u16, content: &str, tags: Vec<Vec<String>>) -> serde_json::Value {
+        let tags: Vec<nostr::Tag> = tags
+            .into_iter()
+            .map(|t| nostr::Tag::parse(t).unwrap())
+            .collect();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(kind), content)
+            .tags(tags)
+            .sign_with_keys(keys)
+            .unwrap();
+        serde_json::to_value(event).unwrap()
+    }
+
+    fn verified_event(relay: &Keys, subject: &Keys, username: &str) -> serde_json::Value {
+        let pk = subject.public_key().to_hex();
+        let pair = |k: &str, v: &str| vec![k.to_string(), v.to_string()];
+        signed(
+            relay,
+            30382,
+            "",
+            vec![
+                pair("d", &pk),
+                pair("p", &pk),
+                pair("active", "true"),
+                pair("display_name", "Alice"),
+                pair("username", username),
+                pair("issuer_label", "Example"),
+                pair("verified_at", "100"),
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn mentions_resolve_a_members_verified_username() {
+        let relay = Keys::generate();
+        let impostor = Keys::generate();
+        let alice = Keys::generate();
+        let mallory = Keys::generate();
+        let members = signed(
+            &relay,
+            39002,
+            "",
+            [&alice, &mallory]
+                .iter()
+                .map(|k| vec!["p".to_string(), k.public_key().to_hex()])
+                .collect(),
+        );
+        let events = vec![
+            members,
+            signed(&alice, 0, r#"{"display_name":"Al"}"#, vec![]),
+            signed(&mallory, 0, r#"{"display_name":"Mal"}"#, vec![]),
+            verified_event(&relay, &alice, "alice"),
+            // Signed by someone other than the advertised key: not a name.
+            verified_event(&impostor, &mallory, "carol"),
+        ];
+        let info = serde_json::json!({
+            "self": relay.public_key().to_hex(),
+            "federated_identity": {
+                "public_profile": {"kind": 30382, "multiple_issuers": false}
+            },
+        });
+        let url = fake_mention_relay(events, info).await;
+        let client = BuzzClient::new(
+            url,
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap();
+
+        let (_, resolved) =
+            super::resolve_content_mentions(&client, SEND_TEST_CHANNEL, "hi @alice", false)
+                .await
+                .unwrap();
+        assert_eq!(resolved, vec![alice.public_key().to_hex()]);
+
+        let err = super::resolve_content_mentions(&client, SEND_TEST_CHANNEL, "hi @carol", false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)), "{err:?}");
+
+        // Profile names still resolve as before.
+        let (_, resolved) =
+            super::resolve_content_mentions(&client, SEND_TEST_CHANNEL, "hi @Mal", false)
+                .await
+                .unwrap();
+        assert_eq!(resolved, vec![mallory.public_key().to_hex()]);
     }
 }

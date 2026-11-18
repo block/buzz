@@ -84,6 +84,10 @@ buzz-ws-client = { path = "../buzz-ws-client" }
 # auto-select a provider. See crates/buzz-acp/Cargo.toml for the same dependency.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
+# NFC and general-category checks for verified profile names, as in buzz-auth
+unicode-normalization = "0.1.25"
+unicode-properties = { version = "0.1.4", default-features = false, features = ["general-category"] }
+
 # Random number generation — full jitter for exponential backoff in with_retry
 rand = { workspace = true }
 

@@ -5,13 +5,22 @@ use crate::client::{extract_d_tag, normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::validate_hex64;
 
+use super::verified_profiles::{
+    discover_authority, fetch_verified_profiles, verified_profiles_from_events, VerifiedProfile,
+};
+use std::collections::HashMap;
+
 // TODO(phase-4): Replace raw nostr::EventBuilder usage in cmd_set_presence with buzz-sdk builder
 
 /// Get user profiles (kind:0 metadata events).
 ///
 /// - 0 pubkeys, no name → query our own profile
 /// - 1+ pubkeys → query those users' profiles
-/// - --name "foo" → NIP-50 search on kind:0, then client-side filter
+/// - --name "foo" → relay profile search over profile names and, where the
+///   community advertises them, verified names
+///
+/// Where the community advertises NIP-FI verified profiles, each person with a
+/// valid relay-signed kind:30382 also carries a `verified` object.
 pub async fn cmd_get_users(
     client: &BuzzClient,
     pubkeys: &[String],
@@ -39,6 +48,27 @@ pub async fn cmd_get_users(
         return Err(CliError::Usage("--pubkey: maximum 200 pubkeys".into()));
     }
 
+    let profiles = get_profiles(client, pubkeys).await?;
+    let output = match format {
+        crate::OutputFormat::Compact => {
+            let compact: Vec<serde_json::Value> =
+                profiles.iter().map(|p| compact_profile(p, &[])).collect();
+            serde_json::to_string(&compact).unwrap_or_default()
+        }
+        crate::OutputFormat::Json | crate::OutputFormat::Agent => {
+            serde_json::to_string(&profiles).unwrap_or_default()
+        }
+    };
+    println!("{output}");
+    Ok(())
+}
+
+/// kind:0 profiles for `pubkeys` (our own when empty), each with its verified
+/// profile where one exists.
+async fn get_profiles(
+    client: &BuzzClient,
+    pubkeys: &[String],
+) -> Result<Vec<serde_json::Value>, CliError> {
     let my_pk = client.public_key().to_hex();
     let authors: Vec<&str> = if pubkeys.is_empty() {
         vec![my_pk.as_str()]
@@ -67,23 +97,137 @@ pub async fn cmd_get_users(
             Some(profile)
         })
         .collect();
-    let output = match format {
-        crate::OutputFormat::Compact => {
-            let compact: Vec<serde_json::Value> = profiles
-                .iter()
-                .map(|p| serde_json::json!({
-                    "pubkey": p.get("pubkey").cloned().unwrap_or_default(),
-                    "display_name": p.get("display_name").or_else(|| p.get("name")).cloned().unwrap_or_default(),
-                }))
-                .collect();
-            serde_json::to_string(&compact).unwrap_or_default()
+    let verified = match discover_authority(client).await? {
+        Some(authority) => {
+            let requested: Vec<String> = authors.iter().map(|a| a.to_string()).collect();
+            fetch_verified_profiles(client, &authority, &requested).await?
         }
-        crate::OutputFormat::Json | crate::OutputFormat::Agent => {
-            serde_json::to_string(&profiles).unwrap_or_default()
-        }
+        None => HashMap::new(),
     };
-    println!("{output}");
-    Ok(())
+    Ok(with_verified(profiles, &verified, &authors))
+}
+
+/// Attach each profile's `verified` object, then append a minimal entry for
+/// every `requested` pubkey that is verified but has no kind:0 profile.
+fn with_verified(
+    mut profiles: Vec<serde_json::Value>,
+    verified: &HashMap<String, VerifiedProfile>,
+    requested: &[&str],
+) -> Vec<serde_json::Value> {
+    for profile in &mut profiles {
+        let pubkey = profile
+            .get("pubkey")
+            .and_then(|v| v.as_str())
+            .map(str::to_ascii_lowercase);
+        if let (Some(found), Some(obj)) = (
+            pubkey.as_deref().and_then(|p| verified.get(p)),
+            profile.as_object_mut(),
+        ) {
+            obj.insert("verified".to_string(), found.to_json());
+        }
+    }
+    for pubkey in requested {
+        let pubkey = pubkey.to_ascii_lowercase();
+        let listed = profiles.iter().any(|p| {
+            p.get("pubkey")
+                .and_then(|v| v.as_str())
+                .is_some_and(|listed| listed.eq_ignore_ascii_case(&pubkey))
+        });
+        if let (false, Some(found)) = (listed, verified.get(&pubkey)) {
+            profiles.push(verified_only_profile(&pubkey, found));
+        }
+    }
+    profiles
+}
+
+/// A person with a verified profile but no kind:0.
+fn verified_only_profile(pubkey: &str, verified: &VerifiedProfile) -> serde_json::Value {
+    serde_json::json!({
+        "pubkey": pubkey,
+        "display_name": verified.display_name,
+        "verified": verified.to_json(),
+    })
+}
+
+/// People from a `/profiles/search` page: each person's newest kind:0 and, when
+/// `authority` signed one, their verified profile, in the relay's order. A
+/// person who matched only by verified name has no kind:0.
+fn search_page_profiles(
+    events: &[serde_json::Value],
+    authority: Option<&str>,
+) -> Vec<serde_json::Value> {
+    let verified = authority
+        .map(|authority| verified_profiles_from_events(events, authority))
+        .unwrap_or_default();
+    let mut order: Vec<String> = Vec::new();
+    let mut profiles: HashMap<String, (u64, serde_json::Map<String, serde_json::Value>)> =
+        HashMap::new();
+    for event in events {
+        let kind = event.get("kind").and_then(|v| v.as_u64());
+        let pubkey = if kind == Some(0) {
+            event
+                .get("pubkey")
+                .and_then(|v| v.as_str())
+                .map(str::to_ascii_lowercase)
+        } else if kind == Some(u64::from(buzz_core::kind::KIND_VERIFIED_PROFILE)) {
+            // Only a valid projection by the advertised key finds anybody.
+            Some(extract_d_tag(event)).filter(|subject| verified.contains_key(subject))
+        } else {
+            None
+        };
+        let Some(pubkey) = pubkey else {
+            continue;
+        };
+        if !order.contains(&pubkey) {
+            order.push(pubkey.clone());
+        }
+        if kind == Some(0) {
+            let created_at = event
+                .get("created_at")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if profiles.get(&pubkey).is_none_or(|(at, _)| created_at > *at) {
+                profiles.insert(pubkey, (created_at, profile_content(event)));
+            }
+        }
+    }
+    order
+        .into_iter()
+        .filter_map(|pubkey| {
+            let found = verified.get(&pubkey);
+            match profiles.remove(&pubkey) {
+                Some((_, mut content)) => {
+                    content.insert("pubkey".to_string(), serde_json::json!(pubkey));
+                    if let Some(found) = found {
+                        content.insert("verified".to_string(), found.to_json());
+                    }
+                    Some(serde_json::Value::Object(content))
+                }
+                None => found.map(|found| verified_only_profile(&pubkey, found)),
+            }
+        })
+        .collect()
+}
+
+/// The compact form of a profile: pubkey, name, any `verified` object, and the
+/// listed `extra` fields when present.
+fn compact_profile(profile: &serde_json::Value, extra: &[&str]) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "pubkey": profile.get("pubkey").cloned().unwrap_or_default(),
+        "display_name": profile
+            .get("display_name")
+            .or_else(|| profile.get("name"))
+            .cloned()
+            .unwrap_or_default(),
+    });
+    if let Some(obj) = value.as_object_mut() {
+        for field in extra.iter().chain(&["verified"]) {
+            if let Some(field_value) = profile.get(*field) {
+                obj.insert(field.to_string(), field_value.clone());
+            }
+        }
+    }
+    value
 }
 
 fn effective_owner(client: &BuzzClient) -> String {
@@ -284,8 +428,49 @@ fn owner_scoped_profiles(
         .collect()
 }
 
-/// Search for users by display name. Owner-scoped searches resolve managed-agent records
-/// and verify their profiles; unscoped searches use NIP-50 and return [] if unsupported.
+/// Unscoped name search. `POST /profiles/search` matches profile names and,
+/// where the community advertises them, verified names, so a person is found
+/// by their verified username too. Relays without the endpoint (404) fall back
+/// to NIP-50 search over kind:0, filtered to name matches, with verified
+/// profiles read for whoever it finds.
+async fn search_profiles(
+    client: &BuzzClient,
+    query: &str,
+) -> Result<Vec<serde_json::Value>, CliError> {
+    let authority = discover_authority(client).await?;
+    let body = serde_json::json!({"query": query.trim(), "limit": 100});
+    match client.post_json_authed("/profiles/search", &body).await {
+        Ok(raw) => {
+            let events: Vec<serde_json::Value> = serde_json::from_str(&raw)
+                .map_err(|e| CliError::Other(format!("failed to parse response: {e}")))?;
+            Ok(search_page_profiles(&events, authority.as_deref()))
+        }
+        Err(CliError::Relay { status: 404, .. }) => {
+            let filter = serde_json::json!({
+                "kinds": [0],
+                "search": query,
+                "limit": 100
+            });
+            let raw = client.query(&filter).await?;
+            let events: Vec<serde_json::Value> = serde_json::from_str(&raw)
+                .map_err(|e| CliError::Other(format!("failed to parse response: {e}")))?;
+            let profiles = name_search_profiles(&events, query);
+            let Some(authority) = authority else {
+                return Ok(profiles);
+            };
+            let pubkeys: Vec<String> = profiles
+                .iter()
+                .filter_map(|p| p.get("pubkey")?.as_str().map(str::to_owned))
+                .collect();
+            let verified = fetch_verified_profiles(client, &authority, &pubkeys).await?;
+            Ok(with_verified(profiles, &verified, &[]))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Search for users by name. Owner-scoped searches resolve managed-agent records
+/// and verify their profiles; unscoped searches go through [`search_profiles`].
 async fn search_by_name(
     client: &BuzzClient,
     query: &str,
@@ -321,34 +506,13 @@ async fn search_by_name(
         };
         owner_scoped_profiles(&events, &pubkeys, &owner, &effective_owner(client))
     } else {
-        let filter = serde_json::json!({
-            "kinds": [0],
-            "search": query,
-            "limit": 100
-        });
-        let raw = client.query(&filter).await?;
-        let events: Vec<serde_json::Value> = serde_json::from_str(&raw)
-            .map_err(|e| CliError::Other(format!("failed to parse response: {e}")))?;
-        name_search_profiles(&events, query)
+        search_profiles(client, query).await?
     };
     let output = match format {
         crate::OutputFormat::Compact => {
             let compact: Vec<serde_json::Value> = profiles
                 .iter()
-                .map(|p| {
-                    let mut value = serde_json::json!({
-                        "pubkey": p.get("pubkey").cloned().unwrap_or_default(),
-                        "display_name": p.get("display_name").or_else(|| p.get("name")).cloned().unwrap_or_default(),
-                    });
-                    if let Some(obj) = value.as_object_mut() {
-                        for field in ["owner_pubkey", "owned_by_me", "verification"] {
-                            if let Some(field_value) = p.get(field) {
-                                obj.insert(field.to_string(), field_value.clone());
-                            }
-                        }
-                    }
-                    value
-                })
+                .map(|p| compact_profile(p, &["owner_pubkey", "owned_by_me", "verification"]))
                 .collect();
             serde_json::to_string(&compact).unwrap_or_default()
         }
@@ -775,12 +939,15 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        owned_agent_pubkeys_from_events, owner_scoped_profiles, owner_verification,
-        parse_expiration_tag, parse_expiry, presence_subject, publish_status, read_statuses,
+        compact_profile, get_profiles, owned_agent_pubkeys_from_events, owner_scoped_profiles,
+        owner_verification, parse_expiration_tag, parse_expiry, presence_subject, publish_status,
+        read_statuses, search_profiles,
     };
     use crate::client::BuzzClient;
     use crate::error::CliError;
-    use axum::{body::Bytes, extract::State, routing::post, Json, Router};
+    use axum::{
+        body::Bytes, extract::State, http::StatusCode, routing::get, routing::post, Json, Router,
+    };
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::{json, Value};
     use std::sync::{Arc, Mutex};
@@ -793,6 +960,11 @@ mod tests {
         events: Vec<Value>,
         queries: Vec<Value>,
         raw_query_response: Option<String>,
+        /// NIP-11 document served at `/`.
+        info: Value,
+        /// Body of `POST /profiles/search`; `None` answers 404 like an older relay.
+        profile_search: Option<Value>,
+        profile_searches: Vec<Value>,
     }
     type Shared = Arc<Mutex<Relay>>;
 
@@ -822,6 +994,13 @@ mod tests {
                             Some(authors) => authors.as_array().unwrap().contains(&e["pubkey"]),
                             None => true,
                         })
+                        .filter(|e| match filter.get("#d") {
+                            Some(d) => d
+                                .as_array()
+                                .unwrap()
+                                .contains(&json!(e["tags"][0][1].as_str().unwrap_or_default())),
+                            None => true,
+                        })
                         .filter(|e| match filter.get("search").and_then(|s| s.as_str()) {
                             Some(q) => e["content"]
                                 .as_str()
@@ -833,6 +1012,25 @@ mod tests {
                         .cloned()
                         .collect();
                     serde_json::to_string(&matching).unwrap()
+                }),
+            )
+            .route(
+                "/",
+                get(|State(relay): State<Shared>| async move {
+                    Json(relay.lock().unwrap().info.clone())
+                }),
+            )
+            .route(
+                "/profiles/search",
+                post(|State(relay): State<Shared>, body: Bytes| async move {
+                    let mut relay = relay.lock().unwrap();
+                    relay
+                        .profile_searches
+                        .push(serde_json::from_slice(&body).unwrap());
+                    match relay.profile_search.clone() {
+                        Some(events) => (StatusCode::OK, Json(events)),
+                        None => (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))),
+                    }
                 }),
             )
             .route(
@@ -1158,6 +1356,223 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    /// A NIP-11 document advertising verified profiles signed by `relay`.
+    fn advertising(relay: &Keys) -> Value {
+        json!({
+            "self": relay.public_key().to_hex(),
+            "federated_identity": {
+                "public_profile": {"kind": 30382, "multiple_issuers": false, "searchable": true}
+            },
+        })
+    }
+
+    /// Seed a relay-signed verified profile for `subject`.
+    fn seed_verified(relay: &Shared, signer: &Keys, subject: &Keys, username: &str, at: u64) {
+        let subject = subject.public_key().to_hex();
+        seed(
+            relay,
+            signer,
+            30382,
+            "",
+            vec![
+                vec!["d", &subject],
+                vec!["p", &subject],
+                vec!["active", "true"],
+                vec!["display_name", "Alice"],
+                vec!["username", username],
+                vec!["full_name", "Alice Example"],
+                vec!["issuer_label", "Example"],
+                vec!["verified_at", "100"],
+            ],
+            at,
+        );
+    }
+
+    fn seed_profile(relay: &Shared, keys: &Keys, content: &str) {
+        seed(relay, keys, 0, content, vec![], 50);
+    }
+
+    fn verified_json(username: &str) -> Value {
+        json!({
+            "username": username,
+            "display_name": "Alice",
+            "full_name": "Alice Example",
+            "issuer_label": "Example",
+            "verified_at": 100,
+        })
+    }
+
+    #[tokio::test]
+    async fn get_by_pubkey_shows_the_verified_identity_the_relay_signed() {
+        let (client, relay) = setup().await;
+        let authority = Keys::generate();
+        relay.lock().unwrap().info = advertising(&authority);
+        let alice = Keys::generate();
+        let plain = Keys::generate();
+        seed_profile(&relay, &alice, r#"{"name":"al"}"#);
+        seed_profile(&relay, &plain, r#"{"name":"plain"}"#);
+        seed_verified(&relay, &authority, &alice, "alice", 100);
+
+        let pubkeys = vec![alice.public_key().to_hex(), plain.public_key().to_hex()];
+        let profiles = get_profiles(&client, &pubkeys).await.unwrap();
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles[0]["name"], "al");
+        assert_eq!(profiles[0]["verified"], verified_json("alice"));
+        assert!(profiles[1].get("verified").is_none());
+
+        let filter = relay.lock().unwrap().queries.last().cloned().unwrap();
+        assert_eq!(filter["kinds"], json!([30382]));
+        assert_eq!(filter["authors"], json!([authority.public_key().to_hex()]));
+
+        // Compact output keeps the verified object.
+        let compact = compact_profile(&profiles[0], &[]);
+        assert_eq!(compact["verified"]["username"], "alice");
+    }
+
+    #[tokio::test]
+    async fn get_by_pubkey_trusts_only_the_advertised_relay_key() {
+        let (client, relay) = setup().await;
+        let authority = Keys::generate();
+        let impostor = Keys::generate();
+        relay.lock().unwrap().info = advertising(&authority);
+        let alice = Keys::generate();
+        seed_profile(&relay, &alice, r#"{"name":"al"}"#);
+        seed_verified(&relay, &impostor, &alice, "alice", 100);
+
+        let profiles = get_profiles(&client, &[alice.public_key().to_hex()])
+            .await
+            .unwrap();
+        assert!(profiles[0].get("verified").is_none());
+    }
+
+    #[tokio::test]
+    async fn get_by_pubkey_ignores_verified_profiles_the_community_does_not_advertise() {
+        let (client, relay) = setup().await;
+        let signer = Keys::generate();
+        relay.lock().unwrap().info = json!({"self": signer.public_key().to_hex()});
+        let alice = Keys::generate();
+        seed_profile(&relay, &alice, r#"{"name":"al"}"#);
+        seed_verified(&relay, &signer, &alice, "alice", 100);
+
+        let profiles = get_profiles(&client, &[alice.public_key().to_hex()])
+            .await
+            .unwrap();
+        assert!(profiles[0].get("verified").is_none());
+        assert!(relay
+            .lock()
+            .unwrap()
+            .queries
+            .iter()
+            .all(|q| q["kinds"] != json!([30382])));
+    }
+
+    #[tokio::test]
+    async fn get_by_pubkey_lists_a_verified_person_who_has_no_profile() {
+        let (client, relay) = setup().await;
+        let authority = Keys::generate();
+        relay.lock().unwrap().info = advertising(&authority);
+        let alice = Keys::generate();
+        seed_verified(&relay, &authority, &alice, "alice", 100);
+
+        let profiles = get_profiles(&client, &[alice.public_key().to_hex()])
+            .await
+            .unwrap();
+        assert_eq!(
+            profiles,
+            vec![json!({
+                "pubkey": alice.public_key().to_hex(),
+                "display_name": "Alice",
+                "verified": verified_json("alice"),
+            })]
+        );
+    }
+
+    #[tokio::test]
+    async fn get_fails_rather_than_hide_a_malformed_advertisement() {
+        let (client, relay) = setup().await;
+        relay.lock().unwrap().info = json!({
+            "self": "00".repeat(32),
+            "federated_identity": {"public_profile": {"kind": 7}},
+        });
+        let err = get_profiles(&client, &[]).await.unwrap_err();
+        assert!(matches!(err, CliError::Other(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn name_search_finds_a_person_by_verified_username() {
+        let (client, relay) = setup().await;
+        let authority = Keys::generate();
+        relay.lock().unwrap().info = advertising(&authority);
+        let alice = Keys::generate();
+        let bob = Keys::generate();
+        // The kind:0 name does not contain the username; the relay matched the
+        // verified one and returned both events, plus an impostor's.
+        seed_profile(&relay, &alice, r#"{"name":"al","display_name":"Al"}"#);
+        seed_verified(&relay, &authority, &alice, "alice", 100);
+        seed_verified(&relay, &Keys::generate(), &bob, "alice", 100);
+        let events = relay.lock().unwrap().events.clone();
+        relay.lock().unwrap().profile_search = Some(json!(events));
+
+        let found = search_profiles(&client, " alice ").await.unwrap();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0]["pubkey"], alice.public_key().to_hex());
+        assert_eq!(found[0]["name"], "al");
+        assert_eq!(found[0]["verified"], verified_json("alice"));
+        assert_eq!(
+            relay.lock().unwrap().profile_searches,
+            vec![json!({"query": "alice", "limit": 100})]
+        );
+    }
+
+    #[tokio::test]
+    async fn name_search_returns_a_person_matched_only_by_verified_name() {
+        let (client, relay) = setup().await;
+        let authority = Keys::generate();
+        relay.lock().unwrap().info = advertising(&authority);
+        let alice = Keys::generate();
+        seed_verified(&relay, &authority, &alice, "alice", 100);
+        let events = relay.lock().unwrap().events.clone();
+        relay.lock().unwrap().profile_search = Some(json!(events));
+
+        let found = search_profiles(&client, "alice").await.unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0]["pubkey"], alice.public_key().to_hex());
+        assert_eq!(found[0]["verified"]["username"], "alice");
+    }
+
+    #[tokio::test]
+    async fn name_search_without_verified_profiles_trusts_the_relay_page_as_is() {
+        let (client, relay) = setup().await;
+        let alice = Keys::generate();
+        seed_profile(&relay, &alice, r#"{"name":"alice"}"#);
+        // A 30382 from an unadvertised community finds nobody.
+        seed_verified(&relay, &Keys::generate(), &Keys::generate(), "zed", 100);
+        let events = relay.lock().unwrap().events.clone();
+        relay.lock().unwrap().profile_search = Some(json!(events));
+
+        let found = search_profiles(&client, "alice").await.unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].get("verified").is_none());
+    }
+
+    #[tokio::test]
+    async fn name_search_falls_back_to_nip50_on_a_relay_without_profile_search() {
+        let (client, relay) = setup().await;
+        let authority = Keys::generate();
+        relay.lock().unwrap().info = advertising(&authority);
+        let alice = Keys::generate();
+        seed_profile(&relay, &alice, r#"{"name":"alice"}"#);
+        seed_profile(&relay, &Keys::generate(), r#"{"name":"bob"}"#);
+        seed_verified(&relay, &authority, &alice, "alice", 100);
+
+        let found = search_profiles(&client, "alice").await.unwrap();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0]["pubkey"], alice.public_key().to_hex());
+        assert_eq!(found[0]["verified"]["username"], "alice");
+        let queries = relay.lock().unwrap().queries.clone();
+        assert_eq!(queries[0]["search"], "alice");
     }
 
     #[test]

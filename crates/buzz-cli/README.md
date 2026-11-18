@@ -117,6 +117,11 @@ buzz users get                          # your own profile
 buzz users get --pubkey <hex>           # single user
 buzz users get --pubkey <hex> --pubkey <hex>  # batch (max 200)
 buzz users get --name Honey --owner me  # exact-name lookup in your managed agents
+buzz users get --name alice             # profile name or verified username (word prefix)
+# Where the community advertises verified profiles, a person with a relay-signed
+# kind:30382 also has "verified": {username, display_name, full_name?, issuer_label, verified_at}.
+# Only a profile signed by the relay's NIP-11 `self` key counts. messages send also
+# resolves @alice by a channel member's verified username.
 buzz users set-presence --status online
 buzz users set-status --text "heads down on the CLI" --emoji "🚀"
 buzz users set-status --text "lunch" --emoji "🥪" --expires 1h  # clears itself; also a unix time
