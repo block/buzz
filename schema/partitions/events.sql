@@ -1,3 +1,7 @@
+-- The static layout migrations/0001 creates. The relay's partition manager
+-- (crates/buzz-db/src/store/partition/) adds later monthlies at runtime;
+-- .pgschemaignore hides those from pgschema and must exempt every dated
+-- monthly declared here.
 CREATE TABLE events_p_past PARTITION OF events
     FOR VALUES FROM (MINVALUE) TO ('2026-01-01');
 CREATE TABLE events_p2026_01 PARTITION OF events

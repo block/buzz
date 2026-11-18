@@ -1,11 +1,17 @@
 use buzz_push_gateway::{
+    android_attestation::{
+        run_refresh_loop, HttpStatusListSource, KeyAttestationPolicy, KeyAttestationVerifier,
+        RevocationList, GOOGLE_ROOTS_PEM,
+    },
     apns::ApnsTransport,
     app_attest::AppAttestVerifier,
     authority::AuthorityStore,
     config::Config,
+    fcm::FcmTransport,
     grant::{GrantKey, GrantKeyring},
     postgres::PostgresAuthorityStore,
     router_with_metrics,
+    signed_call_limiter::SignedCallLimiter,
     token::{TokenKey, TokenKeyring},
     AppState,
 };
@@ -17,11 +23,19 @@ use std::{
     },
 };
 use tracing_subscriber::EnvFilter;
+
+/// Without `RUST_LOG`, keep the gateway's own warnings, such as App Attest
+/// rejection reasons, alongside `EnvFilter`'s error-level default for all
+/// other targets.
+fn log_env_filter(rust_log: Option<&str>) -> EnvFilter {
+    EnvFilter::new(rust_log.unwrap_or("error,buzz_push_gateway=warn"))
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .json()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(log_env_filter(std::env::var("RUST_LOG").ok().as_deref()))
         .init();
     if std::env::args().nth(1).as_deref() == Some("--migrate-only") {
         let database_url = std::env::var("DATABASE_URL")?;
@@ -37,6 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metrics_handle = buzz_push_gateway::metrics::install()?;
     let app_attest_root = fs::read(&c.app_attest_root_cert_path)?;
     let configured = &c.application;
+    let mut refresh_tasks = Vec::new();
     let application = {
         let apple = AppAttestVerifier::with_environment(
             configured.app_attest_app_id.clone(),
@@ -49,9 +64,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             configured.apns_topic.clone(),
             configured.apns_environment,
         )?);
+        let android = c
+            .android
+            .as_ref()
+            .map(|android| -> Result<_, Box<dyn std::error::Error>> {
+                let fcm = FcmTransport::service_account(
+                    &android.fcm_project_id,
+                    &fs::read(&android.fcm_service_account_path)?,
+                )?;
+                let roots = match &android.attestation_roots_path {
+                    Some(path) => fs::read_to_string(path)?,
+                    None => GOOGLE_ROOTS_PEM.to_owned(),
+                };
+                let revocations = Arc::new(RevocationList::new(android.revocation_grace_seconds));
+                // Enrollment fails closed until the first refresh succeeds.
+                refresh_tasks.push(tokio::spawn(run_refresh_loop(
+                    revocations.clone(),
+                    Arc::new(HttpStatusListSource::google()?),
+                    || chrono::Utc::now().timestamp(),
+                )));
+                let verifier = KeyAttestationVerifier::new(
+                    &roots,
+                    KeyAttestationPolicy {
+                        package_name: android.package_name.clone(),
+                        signing_cert_digests: android.signing_cert_digests.clone(),
+                        boot_key_digests: android.boot_key_digests.clone(),
+                    },
+                    revocations,
+                    || chrono::Utc::now().timestamp(),
+                )?;
+                tracing::info!(
+                    package = %android.package_name,
+                    boot_keys = android.boot_key_digests.len(),
+                    "Android Key Attestation verifier configured"
+                );
+                Ok(buzz_push_gateway::http::AndroidRuntime {
+                    attestation: Arc::new(verifier),
+                    transport: Arc::new(fcm),
+                })
+            })
+            .transpose()?;
         buzz_push_gateway::http::ApplicationRuntime {
             app_attest: Arc::new(apple),
             transport,
+            android,
         }
     };
     let grant_keyring = GrantKeyring::new(
@@ -101,6 +157,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_installation_lifetime_seconds: c.max_installation_lifetime_seconds,
             endpoint_quota_window_seconds: c.endpoint_quota_window_seconds,
             endpoint_quota_max_deliveries: c.endpoint_quota_max_deliveries,
+            signed_calls: Arc::new(SignedCallLimiter::new(
+                c.signed_call_window_seconds,
+                c.signed_call_max_calls,
+            )),
             now: || chrono::Utc::now().timestamp(),
             accepting: accepting.clone(),
         },
@@ -133,6 +193,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = htx.send(true);
     let _ = h.await;
     reaper.abort();
+    for task in refresh_tasks {
+        task.abort();
+    }
     Ok(())
 }
 async fn shutdown_signal() -> std::io::Result<()> {
@@ -145,5 +208,55 @@ async fn shutdown_signal() -> std::io::Result<()> {
     #[cfg(not(unix))]
     {
         tokio::signal::ctrl_c().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::log_env_filter;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn emitted(rust_log: Option<&str>) -> String {
+        let capture = Capture::default();
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(log_env_filter(rust_log))
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "buzz_push_gateway", "gateway-info");
+            tracing::warn!(target: "buzz_push_gateway", "gateway-warn");
+            tracing::warn!(target: "sqlx", "dependency-warn");
+            tracing::error!(target: "sqlx", "dependency-error");
+        });
+        let bytes = capture.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    // The only test in this binary, so no other thread races tracing's
+    // global callsite-interest cache.
+    #[test]
+    fn default_log_filter_keeps_gateway_warnings_and_dependency_errors() {
+        let logs = emitted(None);
+        assert!(logs.contains("gateway-warn"), "{logs}");
+        assert!(logs.contains("dependency-error"), "{logs}");
+        assert!(!logs.contains("gateway-info"), "{logs}");
+        assert!(!logs.contains("dependency-warn"), "{logs}");
+
+        let logs = emitted(Some("info"));
+        assert!(logs.contains("gateway-info"), "{logs}");
+        assert!(logs.contains("dependency-warn"), "{logs}");
     }
 }

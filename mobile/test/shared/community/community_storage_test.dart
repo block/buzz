@@ -12,6 +12,7 @@ import 'package:buzz/shared/push/push_subscription.dart';
 class FakeSecureStorage extends Fake implements FlutterSecureStorage {
   final Map<String, String> _data = {};
   final Map<String, int> _writeCounts = {};
+  bool failPendingInviteDeletes = false;
 
   @override
   Future<String?> read({
@@ -52,7 +53,12 @@ class FakeSecureStorage extends Fake implements FlutterSecureStorage {
     WebOptions? webOptions,
     AppleOptions? mOptions,
     WindowsOptions? wOptions,
-  }) async => _data.remove(key);
+  }) async {
+    if (failPendingInviteDeletes && key.startsWith('buzz_pending_invite_')) {
+      throw StateError('Secure storage deletion unavailable');
+    }
+    _data.remove(key);
+  }
 
   @override
   Future<Map<String, String>> readAll({

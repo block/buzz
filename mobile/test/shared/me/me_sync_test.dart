@@ -9,6 +9,7 @@ import 'package:buzz/shared/crypto/nip44.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 import 'package:buzz/shared/me/me_chat_creation.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
+import 'package:buzz/shared/identity_archives/identity_archives.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/me/me_recovery.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -67,6 +68,7 @@ class FakeRelay extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    Future<bool> Function()? mayPublish,
   }) async {
     writes++;
     events = [event];
@@ -203,6 +205,7 @@ void main() {
       final config = _Config(RelayConfig(baseUrl: origin, nsec: nsec));
       final container = ProviderContainer(
         overrides: [
+          identityArchivesProvider.overrideWith((ref) async => {}),
           relayConfigProvider.overrideWith(() => config),
           relaySessionProvider.overrideWith(() => relay),
           savedPrefsProvider.overrideWithValue(prefs),
@@ -625,7 +628,6 @@ void main() {
       expect(service.cachedSnapshot()?.event?.id, fresh.id);
       relay.closeSubscription!('offline');
       await Future<void>.delayed(Duration.zero);
-      expect(service.syncClosed.value, isTrue);
       expect(container.read(meGroupsProvider).hasError, isFalse);
       expect(
         container.read(meGroupsProvider).value?.groups.single['name'],

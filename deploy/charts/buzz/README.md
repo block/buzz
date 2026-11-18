@@ -327,7 +327,7 @@ maximum gauges when diagnosing total capacity pressure.
 Outcomes are `success`, `timeout`, `error`, and `cancelled`. Operations are
 `bootstrap`, `readiness`, `tenant_resolution`, `authentication`,
 `authorization`, `subscription_history`, `event_write`, and `maintenance`.
-Only the following twelve pairs are valid:
+Only the following eleven pairs are valid:
 
 ```text
 writer/bootstrap                 reader/bootstrap
@@ -337,12 +337,12 @@ writer/authentication
 writer/authorization             reader/authorization
 writer/subscription_history      reader/subscription_history
 writer/event_write
-writer/maintenance               reader/maintenance
+writer/maintenance
 ```
 
 Nine finite checkout buckets plus `+Inf`, sum, and count yield 12 histogram
-series per valid pair. The new contract therefore has a hard ceiling of 216
-raw Prometheus series per pod: `12 × (1 + 12 + 4 + 1)`. The two legacy acquisition
+series per valid pair. The new contract therefore has a hard ceiling of 198
+raw Prometheus series per pod: `11 × (1 + 12 + 4 + 1)`. The two legacy acquisition
 families remain temporarily for dashboard compatibility and are not part of
 that new-family budget. No `other` operation or request-controlled/sensitive
 label is valid.
@@ -362,7 +362,7 @@ can give it to a caller.
 | `buzz_db_connection_step_duration_seconds` | histogram | `pool_role`, `step` |
 | `buzz_db_connection_step_attempts_total` | counter | `pool_role`, `step`, `outcome` |
 
-The fixed steps are `writer_pool`, `physical_connect`, `created_at_floor`,
+The fixed steps are `writer_pool`, `physical_connect`,
 `session_timeouts`, `isolation`, and `ready`. Measurable phases emit start,
 duration, and terminal evidence. `physical_connect` and `ready` are success
 milestones: SQLx 0.9 exposes `after_connect` only after DNS, network, TLS, and
@@ -376,8 +376,8 @@ start counter to derive the number of attempts currently in progress. The
 session phases run in order, so a later phase start also proves the earlier
 phases succeeded for that attempt.
 
-Four start counters, four 13-series histograms, and fifteen terminal counters
-create a hard ceiling of 71 raw Prometheus series per pod. Connection ordinals,
+Three start counters, three 13-series histograms, and twelve terminal counters
+create a hard ceiling of 54 raw Prometheus series per pod. Connection ordinals,
 database URLs, hosts, usernames, SQL, and raw errors are forbidden as metric
 labels.
 
@@ -416,6 +416,38 @@ reader family remains absent when no read replica is configured; use
 Pool sizing and the aggregate connection budget across all four roles remain
 deployment configuration concerns. The relay does not enforce a combined
 connection ceiling.
+
+The reader pool keeps a warm floor of one fifth of its maximum (at least one)
+established connections per relay pod, so standing reader connections are
+that floor times the pod count; size the replica's `max_connections` for it.
+Each routed read proves the replica is caught up before serving from it. A
+proof that does not answer within 1s falls back to the writer, counted as
+`buzz_db_route_decision{decision="writer",reason="reader_proof_timeout"}`.
+A sustained rise in that series means the replica is reachable but not
+answering, for example during a failover. Every connection returned to the
+reader pool passes a release check first. A connection is closed instead of
+returned, and the pool dials a replacement, when the check does not answer
+within 5s (`reason="timeout"`), fails (`error`), or finds a transaction still
+open (`open_transaction`). Each close increments
+`buzz_db_reader_release_closed_total{reason}`, a counter with those three
+series. A rise in `timeout` means reader sockets stopped answering.
+
+Subscription-history reads are the exception to the writer fallback when the
+reader is merely busy. Each pod admits at most its reader pool size less one
+fifth (16 at the default pool size of 20) history reads to the reader at
+once, which normally leaves authorization reads a free reader connection
+(connections still finishing their release can briefly take it). A history read
+that waits more than 1s for admission, or misses the reader's 150ms acquire
+budget while every reader connection is busy, is rejected with the retryable
+`CLOSED` `error: database error` instead of moving to the writer, where it
+would compete with authentication and tenant lookups. Each rejection
+increments `buzz_db_route_decision{decision="rejected"}`, with
+`reason="history_read_cap"` or `"reader_acquire_timeout"`. A history read
+the reader cannot serve for other reasons (unreachable, validation failure,
+proof timeout, stale replica) still falls back to the writer. The
+compatibility families `buzz_db_pool_acquire_wait_seconds` and
+`buzz_db_pool_acquisitions_total` carry `operation` as well as `pool_role`
+and `outcome`.
 
 ## Relay Pod extensions
 
@@ -599,9 +631,11 @@ default so long-lived WebSocket connections have time to drain.
 
 ## Upgrades
 
-Schema migrations are embedded in the relay binary via `sqlx::migrate!` and run at startup, gated by `BUZZ_AUTO_MIGRATE` (default `true`). Multiple replicas race-safely behind a Postgres advisory lock. `helm upgrade` is the entire upgrade procedure.
+Schema migrations are embedded in the relay binary via `sqlx::migrate!` and run at startup, gated by `BUZZ_AUTO_MIGRATE` (default `true`). Multiple replicas race-safely behind a Postgres advisory lock. Outside the required stop below, `helm upgrade` is the entire upgrade procedure.
 
-Migration 0032 is a hard compatibility boundary for relay versions that publish repaired channel rosters. The relay verifies the roster-fence trigger catalog and behavior before opening listeners and refuses to start if 0032 is missing or inert. Apply migrations before rolling the relay; for large installations, prefer a controlled `buzz-admin migrate` job with PostgreSQL lock monitoring before the code rollout.
+**Required stop before migrations 0089–0091, 0095 and 0096.** These migrations drop database triggers whose work the relay now does in application code. Before you upgrade to a build that contains any of them, every relay pod, job and rollback target must run a stop build. An older relay that keeps serving after they run can write data the dropped triggers used to refuse, and some older builds refuse to start without the 0032 roster trigger or the community tombstone trigger. [`docs/trigger-retirement-deployment.md`](../../../docs/trigger-retirement-deployment.md) names the stop build and gives the procedure and rollback.
+
+Apply migrations before rolling the relay; for large installations, prefer a controlled `buzz-admin migrate` job with PostgreSQL lock monitoring before the code rollout.
 
 If you prefer decoupling migrations from serving, set `migrate.autoMigrate=false`. **In that mode the chart does not run migrations for you** — you own running `buzz-admin migrate` (separate Pod / one-shot Job) against the database before every `helm install` / `helm upgrade`. Readiness probes only verify DB connectivity, not schema freshness, so a pod will appear healthy against an unmigrated schema and fail under load. A pre-upgrade Helm Job for this is on the chart roadmap; the values knob `migrate.preUpgradeJob.enabled` is reserved.
 

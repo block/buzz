@@ -41,7 +41,9 @@ extension _OnboardingActionStyles on BuildContext {
 
   ButtonStyle get _onboardingGhostButtonStyle =>
       _onboardingSecondaryButtonStyle.copyWith(
-        backgroundColor: const WidgetStatePropertyAll(Colors.transparent),
+        backgroundColor:
+            Theme.of(this).textButtonTheme.style?.backgroundColor ??
+            const WidgetStatePropertyAll(Colors.transparent),
         side: WidgetStateProperty.resolveWith(
           (states) => states.contains(WidgetState.focused)
               ? BorderSide(color: _onboardingInk, width: 2)

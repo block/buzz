@@ -2,9 +2,9 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:http/http.dart' as http;
 import 'package:nostr/nostr.dart' as nostr;
-import 'package:pointycastle/digests/sha256.dart';
 import 'package:uuid/uuid.dart';
 
 import 'package:flutter/foundation.dart';
@@ -20,60 +20,22 @@ import 'relay_client.dart';
 import 'relay_closed_policy.dart';
 import 'relay_http_query_client.dart';
 import 'relay_provider.dart';
+import 'relay_query_response.dart';
 import 'relay_rate_limit_gate.dart';
+import 'relay_reconnect_policy.dart';
+import 'read_state_snapshot.dart';
+import '../verified_profiles/verified_profile.dart';
 import 'relay_session_types.dart';
 import 'relay_socket.dart';
+import 'package:buzz/shared/crypto/event_signing.dart';
 
 export 'relay_session_types.dart';
 
 part 'relay_session_auth.dart';
-
-class _HistorySubscription {
-  final List<NostrEvent> events = [];
-  final Completer<List<NostrEvent>> completer;
-  final Timer timeout;
-
-  _HistorySubscription({required this.completer, required this.timeout});
-}
-
-class _LiveSubscription {
-  final NostrFilter filter;
-  final void Function(NostrEvent) onEvent;
-  final void Function(String message)? onClosed;
-  final void Function(RelaySubscriptionStatus status)? onStatusChanged;
-  Completer<void>? readyCompleter;
-  int? lastSeenCreatedAt;
-  int closedRetryAttempt = 0;
-  Timer? closedRetryTimer;
-
-  _LiveSubscription({
-    required this.filter,
-    required this.onEvent,
-    this.onClosed,
-    this.onStatusChanged,
-    this.readyCompleter,
-  });
-}
-
-class _ClosedRetry {
-  final _LiveSubscription subscription;
-  final int generation;
-  _ClosedRetry({required this.subscription, required this.generation});
-}
-
-class _PendingEvent {
-  final Completer<NostrEvent> completer;
-  final Timer timeout;
-
-  _PendingEvent({required this.completer, required this.timeout});
-}
-
-class _BufferedEvent {
-  final String subId;
-  final NostrEvent event;
-
-  _BufferedEvent(this.subId, this.event);
-}
+part 'relay_session_background.dart';
+part 'relay_session_test_hooks.dart';
+part 'relay_session_subscriptions.dart';
+part 'relay_session_snapshot.dart';
 
 class RelaySessionNotifier extends Notifier<SessionState> {
   RelaySessionNotifier({
@@ -84,6 +46,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     RelayRateLimitGate? rateLimitGate,
     RelayTimerFactory retryTimerFactory = Timer.new,
     Future<void> Function(Duration) replayDelay = Future.delayed,
+    RelayTimerFactory reconnectTimerFactory = Timer.new,
+    Random? random,
+    RelayQueryDecoder queryDecoder = decodeRelayQueryResponse,
+    ReadStateSnapshotDecoder snapshotDecoder = decodeReadStateSnapshot,
   }) : _httpQueryClient = RelayHttpQueryClient(
          client: httpClient,
          clientFactory: httpClientFactory,
@@ -92,7 +58,11 @@ class RelaySessionNotifier extends Notifier<SessionState> {
        _now = now ?? DateTime.now,
        _rateLimitGate = rateLimitGate ?? RelayRateLimitGate(),
        _retryTimerFactory = retryTimerFactory,
-       _replayDelay = replayDelay;
+       _replayDelay = replayDelay,
+       _reconnectTimerFactory = reconnectTimerFactory,
+       _random = random ?? Random(),
+       _queryDecoder = queryDecoder,
+       _snapshotDecoder = snapshotDecoder;
 
   final RelayHttpQueryClient _httpQueryClient;
   final RelaySocketFactory _socketFactory;
@@ -100,11 +70,14 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   final RelayRateLimitGate _rateLimitGate;
   final RelayTimerFactory _retryTimerFactory;
   final Future<void> Function(Duration) _replayDelay;
+  final RelayTimerFactory _reconnectTimerFactory;
+  final Random _random;
+  final RelayQueryDecoder _queryDecoder;
+  final ReadStateSnapshotDecoder _snapshotDecoder;
 
-  static const _baseReconnectDelayMs = 1000;
-  static const _maxReconnectDelayMs = 30000;
+  static const _baseReconnectDelayMs = relayReconnectBaseDelayMs;
+  static const _maxReconnectDelayMs = relayReconnectMaxDelayMs;
   static const _eventBatchMs = 16;
-  static const _reconnectReplaySkewSeconds = 5;
   static const _replayBatchSize = 8;
   static const _replayInterBatchDelay = Duration(milliseconds: 50);
   static const _maxRecentDeliveryKeys = 5000;
@@ -121,6 +94,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   Timer? _flushTimer;
   Timer? _backgroundGraceTimer;
   DateTime? _backgroundedAt;
+  DateTime? _connectedAt;
+  DateTime? _lastInboundAt;
   int _reconnectDelayMs = _baseReconnectDelayMs;
   int _subIdCounter = 0;
   bool _disposed = false;
@@ -129,8 +104,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   bool _hasConnectedOnce = false;
   int _connectionGeneration = 0;
   int _contextGeneration = 0;
+  Object _liveSubscriptionOwner = Object();
   final Map<Object, String> _visibleChannelsByOwner = {};
   final Map<Object, Future<void> Function()> _beforePauseCallbacks = {};
+  int _backgroundWorkHolds = 0;
   bool _socketConnected = false;
   bool _closedRetryReplayScheduled = false;
   String? _relayUrl;
@@ -140,6 +117,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// before reading from or publishing through it.
   String? get relayUrl => _relayUrl;
 
+  /// Changes when a rebuild (e.g. auth completing) drops every live
+  /// subscription without a CLOSED, so a holder can tell its own is gone.
+  Object get liveSubscriptionOwner => _liveSubscriptionOwner;
+
   @visibleForTesting
   set debugRelayUrl(String? value) => _relayUrl = value;
 
@@ -147,7 +128,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   SessionState build() {
     final config = ref.watch(relayConfigProvider);
     _relayUrl = config.baseUrl;
-    final authState = ref.watch(authProvider);
+    final auth = ref.watch(authProvider.select(_sessionAuthKey));
     _ageRestricted = ref.watch(ageSignalProvider) == AgeSignalState.restricted;
 
     // Reset disposed flag — build() may re-run on the same Notifier instance
@@ -157,7 +138,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     ref.onDispose(_dispose);
 
     // Auto-connect when authenticated and we have a signing key (NIP-42 AUTH).
-    final isAuthenticated = authState.value?.status == AuthStatus.authenticated;
+    final isAuthenticated = auth.status == AuthStatus.authenticated;
     if (!_ageRestricted && isAuthenticated && config.nsec != null) {
       // Schedule connection after build completes.
       Future.microtask(() => _connect(config));
@@ -176,6 +157,15 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     timeout: timeout,
   );
 
+  RelayConfig get _snapshotConfig => ref.read(relayConfigProvider);
+  HostedRelayAuth get _snapshotAuth => ref.read(hostedRelayAuthProvider);
+
+  /// Fetches a complete, validated own-author kind-30078 snapshot.
+  /// Throws if discovery, completeness, scope or event validation fails.
+  Future<List<NostrEvent>> fetchReadStateSnapshot({
+    Duration timeout = const Duration(seconds: 8),
+  }) => _fetchReadStateSnapshot(timeout: timeout);
+
   /// Finds people by profile name, for typeahead surfaces.
   ///
   /// NIP-50 search over kind:0 matches the whole profile JSON, so text in
@@ -187,7 +177,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// A relay without that endpoint answers 404 or 405. The search then uses
   /// NIP-50 ([NostrFilters.searchUsers]), and so do later searches on that
   /// relay for [profileSearchRetry]; after that the endpoint is tried again.
-  /// A query or limit the endpoint does not accept also uses NIP-50.
+  /// A query or limit the endpoint does not accept also uses NIP-50. The
+  /// endpoint's verified heads (kind:30382) are kept: [searchedPeople] finds
+  /// people with no kind:0 by them.
   Future<List<NostrEvent>> searchProfiles(
     String query, {
     int limit = 50,
@@ -210,7 +202,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         }, timeout: timeout);
         return [
           for (final event in events)
-            if (event.kind == 0) event,
+            if (event.kind == 0 || event.kind == verifiedProfileKind) event,
         ];
       } on RelayException catch (error) {
         if (error.statusCode != 404 && error.statusCode != 405) rethrow;
@@ -269,29 +261,34 @@ class RelaySessionNotifier extends Notifier<SessionState> {
             active() && !_disposed && generation == _contextGeneration,
       ),
     );
-    if (_disposed || _ageRestricted || generation != _contextGeneration) {
+    bool retired() =>
+        _disposed || _ageRestricted || generation != _contextGeneration;
+    if (retired()) {
       throw StateError('Relay query belongs to a retired session');
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      _activateRateLimitGateFromHttpError(response.body);
-      throw RelayException(response.statusCode, response.body);
+      final body = relayResponseText(
+        response.bodyBytes,
+        response.headers['content-type'],
+      );
+      _activateRateLimitGateFromHttpError(body);
+      throw RelayException(response.statusCode, body);
     }
-    final decoded = jsonDecode(response.body);
-    if (decoded is! List) {
-      throw const FormatException('relay returned malformed query response');
-    }
+    // Decoding runs off the UI isolate, so the session can retire meanwhile.
+    // A retired session reports that, not whatever its bytes decoded to.
+    final List<NostrEvent> events;
     try {
-      return [
-        for (final eventJson in decoded)
-          if (eventJson is Map<String, dynamic>)
-            NostrEvent.fromJson(eventJson)
-          else
-            throw const FormatException('relay returned malformed query event'),
-      ];
-    } catch (error) {
-      if (error is FormatException) rethrow;
-      throw FormatException('relay returned malformed query event: $error');
+      events = await _queryDecoder(response);
+    } catch (_) {
+      if (retired()) {
+        throw StateError('Relay query belongs to a retired session');
+      }
+      rethrow;
     }
+    if (retired()) {
+      throw StateError('Relay query belongs to a retired session');
+    }
+    return events;
   }
 
   void _activateRateLimitGateFromHttpError(String body) {
@@ -328,15 +325,22 @@ class RelaySessionNotifier extends Notifier<SessionState> {
           TimeoutException('Relay history request timed out after $timeout'),
         );
       }
-      _sendClose(subId);
+      if (sub?.heldFilter == null) _sendClose(subId);
     });
 
-    _historySubscriptions[subId] = _HistorySubscription(
+    final subscription = _HistorySubscription(
       completer: completer,
       timeout: timer,
     );
+    _historySubscriptions[subId] = subscription;
 
-    _sendReq(subId, filter);
+    // The relay rejects a REQ sent before NIP-42 AUTH completes. Hold it for
+    // the authenticated connection instead of paying a rejection and retry.
+    if (_socketConnected) {
+      _sendReq(subId, filter);
+    } else {
+      subscription.heldFilter = filter;
+    }
     return completer.future;
   }
 
@@ -355,16 +359,21 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// when a retryable or rate-limited CLOSED begins backoff. Terminal CLOSED
   /// invokes [onClosed] and removes the subscription instead of retrying it.
   /// Calling the cleanup callback cancels pending retries and sends CLOSE.
+  /// Turn off [resumeSince] for a `limit: 0` stream whose events can carry
+  /// older timestamps: the relay matches live events against a replay's
+  /// `since`, so the resume bound would drop them.
   Future<void Function()> subscribeWithStatus(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
     required void Function(RelaySubscriptionStatus status) onStatusChanged,
+    bool resumeSince = true,
   }) => _subscribe(
     filter,
     onEvent,
     onClosed: onClosed,
     onStatusChanged: onStatusChanged,
+    resumeSince: resumeSince,
   );
 
   Future<void Function()> _subscribe(
@@ -372,20 +381,25 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
     void Function(RelaySubscriptionStatus status)? onStatusChanged,
+    bool resumeSince = true,
   }) async {
     if (_disposed) throw StateError('Relay session is disposed');
     final subId = _nextSubId('l');
     final readyCompleter = Completer<void>();
 
-    _liveSubscriptions[subId] = _LiveSubscription(
+    final subscription = _LiveSubscription(
       filter: filter,
       onEvent: onEvent,
       onClosed: onClosed,
       onStatusChanged: onStatusChanged,
+      resumeSince: resumeSince,
       readyCompleter: readyCompleter,
     );
+    _liveSubscriptions[subId] = subscription;
 
-    _sendReq(subId, filter);
+    // Before AUTH the relay closes it as auth-required, which is terminal.
+    // The replay on connect sends it instead.
+    if (_socketConnected) _sendLiveReq(subId, subscription);
 
     try {
       await readyCompleter.future.timeout(
@@ -405,18 +419,32 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     return () => _unsubscribe(subId);
   }
 
+  /// Capture a fence for work whose authority must not cross a reconnect.
+  /// Invoke it after awaited work and immediately before publication.
+  void Function() captureConnectionFence() {
+    final generation = _connectionGeneration;
+    final context = _contextGeneration;
+    return () {
+      if (!_isActiveConnection(generation) || context != _contextGeneration) {
+        throw StateError('Relay connection changed; fresh snapshot required');
+      }
+    };
+  }
+
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    Future<bool> Function()? mayPublish,
   }) async {
     final generation = _connectionGeneration;
     if (_rateLimitGate.isActive) await _rateLimitGate.wait();
-    if (!_isActiveConnection(generation) || !_socketConnected) {
-      throw StateError('Relay session is not connected');
+    bool connected() => _isActiveConnection(generation) && _socketConnected;
+    if (!connected()) throw StateError('Relay session is not connected');
+    if ((mayPublish != null && !await mayPublish()) || !connected()) {
+      throw StateError('Event no longer wanted');
     }
 
     final completer = Completer<NostrEvent>();
-
     final timer = Timer(timeout, () {
       final pending = _pendingEvents.remove(event.id);
       if (pending != null && !pending.completer.isCompleted) {
@@ -460,23 +488,6 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   @visibleForTesting
   void debugSupersedeConnection() => _connectionGeneration++;
-
-  @visibleForTesting
-  void debugHandleDisconnected([Object? error]) {
-    _socketConnected = false;
-    _handleDisconnected(_connectionGeneration, error);
-  }
-
-  @visibleForTesting
-  void debugResetClosedRetriesForDisconnect() {
-    _socketConnected = false;
-    _resetAllClosedRetries();
-  }
-
-  @visibleForTesting
-  void debugSetSessionStatus(SessionStatus status) {
-    _socketConnected = status == SessionStatus.connected;
-  }
 
   @visibleForTesting
   void debugPauseNow() => _pauseNow();
@@ -532,7 +543,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     } catch (error) {
       debugPrint('Background cleanup failed: $error');
     }
-    if (_backgroundedAt != null) _pauseNow();
+    if (_backgroundedAt != null && _backgroundWorkHolds == 0) _pauseNow();
   }
 
   void _pauseNow() {
@@ -545,6 +556,14 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     state = const SessionState(status: SessionStatus.disconnected);
   }
 
+  /// See [_RelaySessionBackgroundWork._holdForBackgroundWork].
+  void Function() holdForBackgroundWork(Duration maxHold) =>
+      _holdForBackgroundWork(maxHold);
+
+  /// See [_RelaySessionBackgroundWork._connectForBackgroundWork].
+  Future<bool> connectForBackgroundWork({required Duration timeout}) =>
+      _connectForBackgroundWork(timeout, state.status, ref);
+
   /// Called by the app lifecycle provider when the app returns to foreground.
   void onAppResumed() {
     _paused = false;
@@ -556,7 +575,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     final backgroundedLongEnoughToRequireReconnect =
         backgroundedAt != null &&
         _now().difference(backgroundedAt) >= _backgroundGraceDuration;
-    if (!backgroundedLongEnoughToRequireReconnect &&
+    // Keep a socket held open for background work: an OK may still come.
+    final heldOpen = _backgroundWorkHolds > 0 && _socketConnected;
+    if ((heldOpen || !backgroundedLongEnoughToRequireReconnect) &&
         state.status == SessionStatus.connected) {
       return;
     }
@@ -572,7 +593,12 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   Future<void> _connect(RelayConfig config, {bool renewed = false}) async {
     if (_disposed || _ageRestricted) return;
 
+    // Whatever connection came before ends here, capped at its last frame.
+    _markLiveSubscriptionsClosed();
+    _connectedAt = null;
     final generation = ++_connectionGeneration;
+    // A replacement socket is unauthenticated until its AUTH completes.
+    _socketConnected = false;
     state = SessionState(
       status: _hasConnectedOnce
           ? SessionStatus.reconnecting
@@ -604,14 +630,16 @@ class RelaySessionNotifier extends Notifier<SessionState> {
           }
           error = AccountFailure.denied;
         }
-        _handleDisconnected(generation, error);
+        _handleDisconnected(generation, error, closeCode: socket.closeCode);
       },
     );
     _socket = socket;
 
     try {
       final auth = ref.read(hostedRelayAuthProvider);
-      if (auth.protects(config)) socket.headers = await auth.headers(config);
+      if (auth.protects(config)) {
+        socket.headers = await auth.headers(config, fresh: true);
+      }
       if (_disposed || generation != _connectionGeneration) return;
       await socket.connect();
     } on AccountFailure catch (error) {
@@ -624,14 +652,23 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _socketConnected = true;
     ref.read(hostedRelayAuthProvider).connected(ref.read(relayConfigProvider));
     _hasConnectedOnce = true;
-    _reconnectDelayMs = _baseReconnectDelayMs;
+    // The backoff is not reset here: a client bounced repeatedly must keep
+    // backing off. [_handleDisconnected] resets it after a stable connection.
+    _connectedAt = _now();
+    _lastInboundAt = _connectedAt;
     state = const SessionState(status: SessionStatus.connected);
     await _replayLiveSubscriptions(generation);
   }
 
-  void _handleDisconnected(int generation, Object? error) {
+  void _handleDisconnected(int generation, Object? error, {int? closeCode}) {
     if (_disposed || generation != _connectionGeneration) return;
     _socketConnected = false;
+    final connectedAt = _connectedAt;
+    _connectedAt = null;
+    if (connectedAt != null &&
+        isRelayConnectionStable(_now().difference(connectedAt))) {
+      _reconnectDelayMs = _baseReconnectDelayMs;
+    }
     _cancelAllHistory(error);
     _rejectAllPending(error);
     _resetAllClosedRetries();
@@ -644,10 +681,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       state = const SessionState(status: SessionStatus.disconnected);
       return;
     }
-    _scheduleReconnect();
+    _scheduleReconnect(closeCode);
   }
 
-  void _scheduleReconnect() {
+  void _scheduleReconnect(int? closeCode) {
     if (_disposed || _paused) return;
     final attempt = state.reconnectAttempt + 1;
     state = SessionState(
@@ -656,11 +693,35 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     );
 
     _reconnectTimer?.cancel();
-    _reconnectTimer = Timer(Duration(milliseconds: _reconnectDelayMs), () {
+    final delay = relayReconnectDelay(
+      backoffMs: _reconnectDelayMs,
+      closeCode: closeCode,
+      jitterUnit: _random.nextDouble(),
+      spreadUnit: _random.nextDouble(),
+    );
+    _reconnectTimer = _reconnectTimerFactory(delay, () {
       _reconnectDelayMs = min(_reconnectDelayMs * 2, _maxReconnectDelayMs);
       final config = ref.read(relayConfigProvider);
       _connect(config);
     });
+  }
+
+  /// Records when each subscription that was live on the closing connection
+  /// stopped being live, so the next replay can resume from there.
+  ///
+  /// Liveness ends at the last frame received, not at the close: after a
+  /// device sleep the loss is only noticed on wake, and nothing arrived in
+  /// between.
+  void _markLiveSubscriptionsClosed() {
+    final now = _now();
+    final inbound = _lastInboundAt;
+    final end = inbound == null || inbound.isAfter(now) ? now : inbound;
+    final closedAt = end.millisecondsSinceEpoch ~/ 1000;
+    for (final subscription in _liveSubscriptions.values) {
+      if (!subscription.liveOnConnection) continue;
+      subscription.liveOnConnection = false;
+      subscription.liveUntil = closedAt;
+    }
   }
 
   /// Replay all live subscriptions after a reconnect, with a time skew to
@@ -668,6 +729,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   Future<void> _replayLiveSubscriptions(int generation) async {
     if (_rateLimitGate.isActive) await _rateLimitGate.wait();
     if (!_isActiveConnection(generation)) return;
+    _sendHeldHistory();
 
     final entries = _liveSubscriptions.entries.toList();
     final visibleChannelId = _visibleChannelsByOwner.isEmpty
@@ -723,7 +785,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
           }
           _pendingClosedRetries.remove(entry.key);
         }
-        _sendReq(entry.key, _replayFilter(entry.value));
+        _sendLiveReq(entry.key, entry.value);
       }
       if (i + _replayBatchSize < entries.length) {
         await _replayDelay(_replayInterBatchDelay);
@@ -734,16 +796,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   bool _isActiveConnection(int generation) =>
       !_disposed && generation == _connectionGeneration;
 
-  NostrFilter _replayFilter(_LiveSubscription subscription) {
-    final since = subscription.lastSeenCreatedAt;
-    return since == null
-        ? subscription.filter
-        : subscription.filter.copyWithSince(
-            max(0, since - _reconnectReplaySkewSeconds),
-          );
-  }
-
   void _handleMessage(List<dynamic> data) {
+    _lastInboundAt = _now();
     if (data.isEmpty) return;
     final type = data[0] as String;
 
@@ -807,6 +861,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     // already been released.
     final liveSub = _liveSubscriptions[subId];
     if (liveSub != null) {
+      // A second REQ on this socket makes its EOSE ambiguous: it may belong
+      // to the REQ it replaced, so it cannot vouch for the replacement.
+      liveSub.liveOnConnection =
+          liveSub.ambiguousGeneration != _connectionGeneration;
       _resetClosedRetry(liveSub);
       _flushBufferedEventsNow();
       liveSub.onStatusChanged?.call(RelaySubscriptionStatus.ready);
@@ -842,6 +900,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     final liveSub = _liveSubscriptions[subId];
     if (liveSub == null) return;
     final readyCompleter = liveSub.readyCompleter;
+    // The stream is interrupted until the retry's EOSE.
+    liveSub.liveOnConnection = false;
     // A deadline is terminal for one-shot history, but a live subscription
     // retries it: same filter under backoff, which can keep retrying at the
     // cap. `since` is not advanced, so events missed while closed aren't
@@ -967,7 +1027,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       }
       if (!pending.completer.isCompleted) {
         pending.completer.completeError(
-          Exception(message.isNotEmpty ? message : 'Event rejected'),
+          RelayEventRejectedException(
+            message.isNotEmpty ? message : 'Event rejected',
+          ),
         );
       }
     }
@@ -1018,8 +1080,26 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     return '$prefix-$_subIdCounter';
   }
 
+  void _sendLiveReq(String subId, _LiveSubscription subscription) {
+    if (subscription.reqGeneration == _connectionGeneration) {
+      subscription.ambiguousGeneration = _connectionGeneration;
+    }
+    subscription.reqGeneration = _connectionGeneration;
+    _sendReq(subId, subscription.replayFilter);
+  }
+
   void _sendReq(String subId, NostrFilter filter) {
     _socket?.send(['REQ', subId, filter.toJson()]);
+  }
+
+  void _sendHeldHistory() {
+    for (final MapEntry(key: subId, value: sub)
+        in _historySubscriptions.entries) {
+      final filter = sub.heldFilter;
+      if (filter == null) continue;
+      sub.heldFilter = null;
+      _sendReq(subId, filter);
+    }
   }
 
   void _sendClose(String subId) {
@@ -1101,6 +1181,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _rejectAllPending(null);
     final subscriptions = _liveSubscriptions.values.toList();
     _liveSubscriptions.clear();
+    _liveSubscriptionOwner = Object();
     for (final subscription in subscriptions) {
       subscription.closedRetryTimer?.cancel();
       subscription.closedRetryTimer = null;

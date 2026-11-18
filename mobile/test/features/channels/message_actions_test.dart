@@ -18,7 +18,10 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:photo_manager/photo_manager.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../helpers/thread_ids.dart';
@@ -46,10 +49,18 @@ TimelineMessage _message({
 
 class _RecordingReactionActions implements ChannelActions {
   final added = <String>[];
+  final targetAuthors = <String>[];
   final removed = <String>[];
   @override
-  Future<void> addReaction(String eventId, String emoji) async =>
-      added.add(emoji);
+  Future<void> addReaction(
+    String eventId,
+    String emoji, {
+    required String targetAuthor,
+  }) async {
+    added.add(emoji);
+    targetAuthors.add(targetAuthor);
+  }
+
   @override
   Future<void> removeReaction(String eventId, String emoji) async =>
       removed.add(eventId);
@@ -222,9 +233,14 @@ Future<void> _pumpImageSheet(
   WidgetTester tester, {
   required TimelineMessage message,
   bool canManageMessage = false,
+  http.Client? mediaClient,
 }) async {
   await tester.pumpWidget(
     ProviderScope(
+      overrides: [
+        if (mediaClient != null)
+          mediaHttpClientProvider.overrideWithValue(mediaClient),
+      ],
       child: MaterialApp(
         theme: AppTheme.light(),
         home: Scaffold(
@@ -457,6 +473,7 @@ void main() {
     await second.up();
     await tester.pumpAndSettle();
     expect(actions.added, ['👍']);
+    expect(actions.targetAuthors, ['alice']);
     expect(
       find.byKey(const ValueKey('message-actions-underlying-page')),
       findsOneWidget,
@@ -476,7 +493,7 @@ void main() {
   });
 
   testWidgets(
-    'message long press keeps taps and scrolling while repeated holds win',
+    'message long press keeps taps and delayed scrolling while repeated holds win',
     (tester) async {
       var parentTaps = 0;
       var nestedTaps = 0;
@@ -536,6 +553,8 @@ void main() {
       final drag = await tester.startGesture(
         tester.getCenter(find.byKey(const ValueKey('parent-gesture-target'))),
       );
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(longPresses, 5);
       await drag.moveBy(const Offset(0, -30));
       await tester.pump();
       await drag.moveBy(const Offset(0, -70));
@@ -547,9 +566,13 @@ void main() {
       expect(longPresses, 5);
       expect(scrollController.offset, greaterThan(0));
     },
+    variant: TargetPlatformVariant({
+      TargetPlatform.iOS,
+      TargetPlatform.android,
+    }),
   );
 
-  testWidgets('iOS message long press recognizes at 200 ms', (tester) async {
+  testWidgets('iOS message long press recognizes at 500 ms', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     try {
       var longPresses = 0;
@@ -571,7 +594,7 @@ void main() {
       final gesture = await tester.startGesture(
         tester.getCenter(find.byKey(const ValueKey('ios-long-press-target'))),
       );
-      await tester.pump(const Duration(milliseconds: 199));
+      await tester.pump(const Duration(milliseconds: 499));
       expect(longPresses, 0);
       await tester.pump(const Duration(milliseconds: 2));
       expect(longPresses, 1);
@@ -1189,6 +1212,79 @@ void main() {
         ),
         findsNWidgets(4),
       );
+    });
+
+    testWidgets('saving on iOS reports the result of the add-only write', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        final messenger =
+            TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+        final permissionRequests = <Object?>[];
+        // Only the permission request is answered: add-only access cannot read
+        // the library, so any other photo_manager call fails as it would there.
+        const photoManager = MethodChannel('com.fluttercandies/photo_manager');
+        const saver = MethodChannel('buzz/photo_library_saver');
+        addTearDown(() {
+          messenger.setMockMethodCallHandler(photoManager, null);
+          messenger.setMockMethodCallHandler(saver, null);
+        });
+        messenger.setMockMethodCallHandler(photoManager, (call) async {
+          if (call.method != 'requestPermissionExtend') {
+            throw PlatformException(code: 'add_only_cannot_read');
+          }
+          permissionRequests.add(call.arguments);
+          return PermissionState.authorized.index;
+        });
+        final saves = <Map<Object?, Object?>>[];
+        PlatformException? saveFailure;
+        messenger.setMockMethodCallHandler(saver, (call) async {
+          expect(call.method, 'saveImage');
+          saves.add(call.arguments as Map<Object?, Object?>);
+          if (saveFailure case final failure?) throw failure;
+          return null;
+        });
+
+        await _pumpImageSheet(
+          tester,
+          message: _message(),
+          mediaClient: MockClient(
+            (_) async => http.Response.bytes(
+              [1, 2, 3],
+              200,
+              headers: {'content-type': 'image/png'},
+            ),
+          ),
+        );
+        await tester.tap(find.text('Save image'));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Saved to Photos'), findsOneWidget);
+        expect(saves.single, {
+          'bytes': Uint8List.fromList([1, 2, 3]),
+          'filename': 'photo.png',
+        });
+        expect(
+          (permissionRequests.single
+              as Map<Object?, Object?>)['iosAccessLevel'],
+          IosAccessLevel.addOnly.index + 1,
+        );
+
+        saveFailure = PlatformException(code: 'save_failed');
+        tester
+            .state<ScaffoldMessengerState>(find.byType(ScaffoldMessenger))
+            .removeCurrentSnackBar();
+        await tester.tap(find.text('open image actions'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Save image'));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Could not save image'), findsOneWidget);
+        expect(saves, hasLength(2));
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
     });
   });
 

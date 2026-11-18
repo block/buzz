@@ -63,6 +63,28 @@ pub(crate) async fn localize_avatar(
     avatar: Option<&str>,
     auth_tag: Option<&str>,
 ) -> Result<Option<String>, String> {
+    if let Some((poster, animation)) = avatar.and_then(buzz_core_pkg::media::animated_avatar_urls) {
+        let poster = localize_avatar_url(state, relay, keys, Some(&poster), auth_tag)
+            .await?
+            .ok_or("missing avatar poster")?;
+        let animation = localize_avatar_url(state, relay, keys, Some(&animation), auth_tag)
+            .await?
+            .ok_or("missing avatar animation")?;
+        return Ok(Some(format!(
+            "{poster}#buzz-anim={}",
+            percent_encoding::utf8_percent_encode(&animation, percent_encoding::NON_ALPHANUMERIC)
+        )));
+    }
+    localize_avatar_url(state, relay, keys, avatar, auth_tag).await
+}
+
+async fn localize_avatar_url(
+    state: &AppState,
+    relay: &str,
+    keys: &Keys,
+    avatar: Option<&str>,
+    auth_tag: Option<&str>,
+) -> Result<Option<String>, String> {
     let Some(avatar) = avatar else {
         return Ok(None);
     };
@@ -158,6 +180,74 @@ pub(crate) async fn localize_avatar(
     if !mime.starts_with("image/") {
         return Err("agent avatar must be an image".into());
     }
+    upload_avatar_bytes(state, &target, keys, hash, bytes, &mime, auth_tag).await
+}
+
+/// Explicit creation-time byte transfer. Only the chosen target-local image is
+/// fetched as the creating owner; actual bytes are then uploaded as the new
+/// agent. Reconciliation never inherits this owner capability.
+pub(crate) async fn transfer_created_avatar(
+    state: &AppState,
+    relay: &str,
+    owner: &Keys,
+    agent: &Keys,
+    avatar: Option<&str>,
+    auth_tag: Option<&str>,
+) -> Result<(), String> {
+    if let Some((poster, animation)) = avatar.and_then(buzz_core_pkg::media::animated_avatar_urls) {
+        transfer_created_avatar_url(state, relay, owner, agent, Some(&poster), auth_tag).await?;
+        transfer_created_avatar_url(state, relay, owner, agent, Some(&animation), auth_tag).await
+    } else {
+        transfer_created_avatar_url(state, relay, owner, agent, avatar, auth_tag).await
+    }
+}
+
+async fn transfer_created_avatar_url(
+    state: &AppState,
+    relay: &str,
+    owner: &Keys,
+    agent: &Keys,
+    avatar: Option<&str>,
+    auth_tag: Option<&str>,
+) -> Result<(), String> {
+    let Some(source) = avatar.and_then(|value| url::Url::parse(value).ok()) else {
+        return Ok(());
+    };
+    let target = community_base(relay)?;
+    if source.origin() != target.origin() || !source.path().starts_with("/media/") {
+        return Ok(());
+    }
+    let hash = media_hash(&source)?;
+    let auth = sign_blossom_get_auth_header(owner, target.as_str(), 60)?;
+    let response = state
+        .media_fetch_client
+        .get(source.clone())
+        .timeout(TIMEOUT)
+        .header("Authorization", auth)
+        .send()
+        .await
+        .map_err(|e| classify_request_error(&e))?;
+    let bytes = read_bounded(response, MAX_AVATAR_BYTES).await?;
+    if hex::encode(Sha256::digest(&bytes)) != hash {
+        return Err("agent avatar content hash does not match its URL".into());
+    }
+    let mime = detect_and_validate_mime(&bytes)?;
+    if !mime.starts_with("image/") {
+        return Err("agent avatar must be an image".into());
+    }
+    upload_avatar_bytes(state, &target, agent, hash, bytes, &mime, auth_tag).await?;
+    Ok(())
+}
+
+async fn upload_avatar_bytes(
+    state: &AppState,
+    target: &url::Url,
+    keys: &Keys,
+    hash: &str,
+    bytes: Vec<u8>,
+    mime: &str,
+    auth_tag: Option<&str>,
+) -> Result<Option<String>, String> {
     // Preserve the already-uploaded bytes (including animation). Re-encoding
     // changes the content hash and needlessly destroys the portable identity.
     let upload_auth = sign_blossom_upload_auth(keys, hash, 60, target.as_str())?;
@@ -174,7 +264,7 @@ pub(crate) async fn localize_avatar(
             .put(url)
             .timeout(TIMEOUT)
             .header("Authorization", &auth)
-            .header("Content-Type", &mime)
+            .header("Content-Type", mime)
             .header("X-SHA-256", hash)
             .body(body.clone());
         if let Some(tag) = auth_tag {
@@ -247,15 +337,21 @@ async fn existing_projection(
     }
     let profile: serde_json::Value =
         serde_json::from_str(&event.content).map_err(|e| e.to_string())?;
-    let Some(picture) = profile["picture"]
-        .as_str()
-        .and_then(|p| url::Url::parse(p).ok())
-    else {
+    let Some(picture) = profile["picture"].as_str() else {
         return Ok(None);
     };
-    Ok((picture.origin() == target.origin()
-        && media_hash(&picture).ok() == Some(media_hash(source)?))
-    .then(|| picture.into()))
+    let candidates = match buzz_core_pkg::media::animated_avatar_urls(picture) {
+        Some((poster, animation)) => vec![poster, animation],
+        None => vec![picture.to_owned()],
+    };
+    let source_hash = media_hash(source)?;
+    Ok(candidates
+        .into_iter()
+        .filter_map(|value| url::Url::parse(&value).ok())
+        .find(|picture| {
+            picture.origin() == target.origin() && media_hash(picture).ok() == Some(source_hash)
+        })
+        .map(Into::into))
 }
 
 async fn read_bounded(response: reqwest::Response, cap: usize) -> Result<Vec<u8>, String> {

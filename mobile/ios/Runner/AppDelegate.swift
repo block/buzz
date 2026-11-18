@@ -19,6 +19,8 @@ import os.log
     accessGroup: Bundle.main.object(forInfoDictionaryKey: "BuzzKeychainAccessGroup") as? String
   )
   private var enrollmentTask: Task<Void, Never>?
+  private lazy var notificationReplyBridge = BuzzNotificationReplyBridge(
+    appGroupIdentifier: appGroupIdentifier)
   var appGroupIdentifier: String? {
     Bundle.main.object(forInfoDictionaryKey: "BuzzAppGroupIdentifier") as? String
   }
@@ -30,7 +32,11 @@ import os.log
     endpointGrantStore: endpointGrantStore,
     keychainAccessGroup: pushKeychainAccessGroup
   )
+  private var communityKeyboardChannel: FlutterMethodChannel?
+  private var communityKeyboardObserver: NSObjectProtocol?
   private var hapticsChannel: FlutterMethodChannel?
+  private var appGroupChannel: FlutterMethodChannel?
+  private var shareSuggestions: ShareSuggestions?
   private var qrScannerChannel: FlutterMethodChannel?
   private var inlinePhotoPickerSupportChannel: FlutterMethodChannel?
   private var ageSignalChannel: FlutterMethodChannel?
@@ -40,13 +46,18 @@ import os.log
   private var ageSignalRequestID: UUID?
   private var ageSignalResult: FlutterResult?
   private var concentricSheetSurfaceChannel: FlutterMethodChannel?
+  private var nativePhotoZoomCoordinator: NativePhotoZoomCoordinator?
   private var nativeAttachmentPopoverCoordinator: NativeAttachmentPopoverCoordinator?
   private var nativeEmojiPickerCoordinator: NativeEmojiPickerCoordinator?
+  private var nativeCreateChannelSheetCoordinator: NativeCreateChannelSheetCoordinator?
+  private var nativeChannelActionsSheetCoordinator: NativeChannelActionsSheetCoordinator?
   private var nativeAddMembersSheetCoordinator: NativeAddMembersSheetCoordinator?
   private var nativeConfirmationDialogCoordinator: NativeConfirmationDialogCoordinator?
+  private var nativeProfileSetupCoordinator: NativeProfileSetupCoordinator?
+  private var nativeCommunityEntryCoordinator: NativeCommunityEntryCoordinator?
   private var nativeProfileTextEditorCoordinator: NativeProfileTextEditorCoordinator?
-  private var nativeMessageActionSurfaceSupportChannel: FlutterMethodChannel?
   private var identityFilePlugin: IdentityFilePlugin?
+  private var photoLibrarySaver: PhotoLibrarySaver?
   private var hostedHpkeChannel: FlutterMethodChannel?
   private var browserAuthBridge: BuzzBrowserAuthBridge?
   private var huddleMediaPlugin: HuddleMediaPlugin?
@@ -58,20 +69,50 @@ import os.log
     // Age checking and notification restoration run asynchronously from
     // Flutter. No age-related storage or platform request may delay launch.
     UNUserNotificationCenter.current().delegate = self
+    BuzzNotificationReplyBridge.registerCategory()
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    engineBridge.pluginRegistry.registrar(forPlugin: "BuzzToastLayer")?.register(
+      ToastLayerFactory(), withId: "buzz/toast_layer")
     if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "BuzzIosMediaCarousel") {
       registrar.register(IosMediaCarouselFactory(messenger: registrar.messenger()), withId: "buzz/ios_media_carousel")
     }
 
     let messenger = engineBridge.applicationRegistrar.messenger()
+    let keyboardChannel = FlutterMethodChannel(
+      name: "buzz/community_keyboard", binaryMessenger: messenger)
+    communityKeyboardChannel = keyboardChannel
+    if let observer = communityKeyboardObserver {
+      NotificationCenter.default.removeObserver(observer)
+    }
+    communityKeyboardObserver = NotificationCenter.default.addObserver(
+      forName: UIResponder.keyboardWillShowNotification, object: nil, queue: .main
+    ) { _ in
+      // Deliver after UIKit finishes preparing the keyboard in this run-loop turn.
+      DispatchQueue.main.async {
+        keyboardChannel.invokeMethod("willShow", arguments: nil)
+      }
+    }
     identityFilePlugin = IdentityFilePlugin(messenger: messenger)
+    photoLibrarySaver = PhotoLibrarySaver(messenger: messenger)
+    HomeScreenShortcuts.shared.attach(messenger: messenger)
+    shareSuggestions = ShareSuggestions { [weak self] in
+      self?.appGroupIdentifier.flatMap {
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0)
+      }
+    }
+    shareSuggestions?.attach(messenger: messenger)
+    QuickSendBridge.shared.attach(messenger: messenger)
     browserAuthBridge = BuzzBrowserAuthBridge(messenger: messenger)
     hostedHpkeChannel = FlutterMethodChannel(name: "buzz/hosted_hpke", binaryMessenger: messenger)
     hostedHpkeChannel?.setMethodCallHandler { call, result in
+      if call.method == "isSupported" {
+        if #available(iOS 17.0, *) { result(true) } else { result(false) }
+        return
+      }
       guard call.method == "seal" else { result(FlutterMethodNotImplemented); return }
       guard #available(iOS 17.0, *) else {
         result(FlutterError(code: "unsupported", message: "Backup requires iOS 17 or later", details: nil)); return
@@ -109,6 +150,28 @@ import os.log
     }
     apnsRegistrationBuffer.attach { [weak self] update in
       self?.pushChannel?.invokeMethod(update.method, arguments: update.arguments)
+    }
+    notificationReplyBridge.notifyFlutter = { [weak self] in
+      self?.pushChannel?.invokeMethod("notificationReplyAvailable", arguments: nil)
+    }
+    appGroupChannel = FlutterMethodChannel(
+      name: "buzz/app_group",
+      binaryMessenger: messenger
+    )
+    appGroupChannel?.setMethodCallHandler { [weak self] call, result in
+      let container = self?.appGroupIdentifier.flatMap {
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0)
+      }
+      switch call.method {
+      case "cachesDirectory":
+        // Caches the app's extensions can read too. The OS may purge it.
+        result(container?.appendingPathComponent("Library/Caches", isDirectory: true).path)
+      case "pendingSharesDirectory":
+        // Where the share extension leaves items for the app to pick up.
+        result(container?.appendingPathComponent("PendingShares", isDirectory: true).path)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
     }
     hapticsChannel = FlutterMethodChannel(
       name: "buzz/haptics",
@@ -258,6 +321,13 @@ import os.log
       )?.viewController
     )
 
+    nativePhotoZoomCoordinator = NativePhotoZoomCoordinator(
+      messenger: messenger,
+      parentViewController: engineBridge.pluginRegistry.registrar(
+        forPlugin: "BuzzNativePhotoZoom"
+      )?.viewController
+    )
+
     let nativeAttachmentRegistrar = engineBridge.pluginRegistry.registrar(
       forPlugin: "BuzzNativeAttachmentPopover"
     )
@@ -278,6 +348,18 @@ import os.log
       NativePresenceMenuFactory(messenger: messenger), withId: "buzz/presence_menu"
     )
 
+    nativeCreateChannelSheetCoordinator = NativeCreateChannelSheetCoordinator(
+      messenger: messenger,
+      parentViewController: engineBridge.pluginRegistry.registrar(
+        forPlugin: "BuzzNativeCreateChannelSheet"
+      )?.viewController
+    )
+
+    nativeChannelActionsSheetCoordinator = NativeChannelActionsSheetCoordinator(
+      messenger: messenger,
+      parentViewController: engineBridge.pluginRegistry.registrar(forPlugin: "BuzzNativeChannelActionsSheet")?.viewController
+    )
+
     nativeAddMembersSheetCoordinator = NativeAddMembersSheetCoordinator(
       messenger: messenger,
       parentViewController: engineBridge.pluginRegistry.registrar(
@@ -292,6 +374,12 @@ import os.log
       )?.viewController
     )
 
+    nativeProfileSetupCoordinator = NativeProfileSetupCoordinator(messenger: messenger) { [weak self] engine in
+      let channel = FlutterMethodChannel(name: "buzz/media_upload", binaryMessenger: engine.binaryMessenger)
+      channel.setMethodCallHandler { [weak self] call, result in self?.handleMediaUploadMethodCall(call, result: result) }
+    }
+    nativeCommunityEntryCoordinator = NativeCommunityEntryCoordinator(messenger: messenger)
+
     let nativeProfileTextEditorRegistrar = engineBridge.pluginRegistry.registrar(
       forPlugin: "BuzzNativeProfileTextEditor"
     )
@@ -299,27 +387,6 @@ import os.log
       messenger: messenger,
       parentViewController: nativeProfileTextEditorRegistrar?.viewController
     )
-    if #available(iOS 16.0, *),
-      let nativeMessageActionsRegistrar = engineBridge.pluginRegistry.registrar(
-        forPlugin: "BuzzNativeMessageActionSurface"
-      )
-    {
-      nativeMessageActionsRegistrar.register(
-        NativeMessageActionSurfaceFactory(messenger: messenger),
-        withId: "buzz/native_message_action_surface"
-      )
-      nativeMessageActionSurfaceSupportChannel = FlutterMethodChannel(
-        name: "buzz/native_message_action_surface",
-        binaryMessenger: messenger
-      )
-      nativeMessageActionSurfaceSupportChannel?.setMethodCallHandler { call, result in
-        guard call.method == "isSupported" else {
-          result(FlutterMethodNotImplemented)
-          return
-        }
-        result(true)
-      }
-    }
   }
 
   func handleAgeSignalMethodCall(
@@ -424,7 +491,75 @@ import os.log
     result: @escaping FlutterResult
   ) {
     switch call.method {
+    case "cameraCutoutFrame":
+      #if canImport(UIKit, _version: 9127.0.85)
+      if #available(iOS 27.1, *),
+         let scene = UIApplication.shared.connectedScenes
+           .compactMap({ $0 as? UIWindowScene })
+           .first(where: { $0.activationState == .foregroundActive }),
+         let window = scene.windows.first(where: { $0.isKeyWindow }) {
+        if window.reservedRegions(kind: .division).contains(where: { $0.isActive }) {
+          result(nil)
+          return
+        }
+        let bounds = window.bounds
+        // Closed Duo displays may omit Flutter display features. UIKit still
+        // owns the physical occlusion; remove its interactive clearance.
+        for region in window.reservedRegions(kind: .occlusion) where region.isActive {
+          let rect = region.frame.inset(by: region.margins)
+          let isCamera = abs(rect.width - rect.height) < 1
+            && rect.minX > 0 && rect.minY > 0
+            && rect.maxX < bounds.width && rect.maxY < bounds.height
+            && rect.width < bounds.width / 4
+          guard rect.width > 0, rect.height > 0, isCamera else { continue }
+          let values: [Double] = [
+            Double(rect.minX), Double(rect.minY), Double(rect.width),
+            Double(rect.height), Double(bounds.width), Double(bounds.height)
+          ]
+          result(values)
+          return
+        }
+      }
+      #endif
+      result(nil)
+    case "previewRotationQuarterTurns":
+      // The plugin reads connectedScenes.first, which can be the inactive
+      // cover scene on Duo. Resolve the angle against the visible preview host.
+      if #available(iOS 17.0, *),
+         let scene = UIApplication.shared.connectedScenes
+           .compactMap({ $0 as? UIWindowScene })
+           .first(where: { $0.activationState == .foregroundActive }),
+         let window = scene.windows.first(where: { $0.isKeyWindow }),
+         let camera = AVCaptureDevice.DiscoverySession(
+           deviceTypes: [.builtInTripleCamera, .builtInDualCamera, .builtInWideAngleCamera],
+           mediaType: .video, position: .back
+         ).devices.first {
+        let coordinator = AVCaptureDevice.RotationCoordinator(device: camera, previewLayer: window.layer)
+        let angle = coordinator.videoRotationAngleForHorizonLevelPreview
+        let orientation = call.arguments as? String
+        let legacyAngle: CGFloat
+        switch orientation {
+        case "landscapeLeft": legacyAngle = 180
+        case "landscapeRight": legacyAngle = 0
+        case "portraitDown": legacyAngle = 270
+        default: legacyAngle = 90
+        }
+        result(Int(((angle - legacyAngle) / 90).rounded()))
+        return
+      }
+      result(0)
     case "usesDynamicIslandQrScannerPortal":
+      #if canImport(UIKit, _version: 9127.0.85)
+      if #available(iOS 27.1, *),
+         let scene = UIApplication.shared.connectedScenes
+           .compactMap({ $0 as? UIWindowScene })
+           .first(where: { $0.activationState == .foregroundActive }),
+         let window = scene.windows.first(where: { $0.isKeyWindow }),
+         window.reservedRegions(kind: .division).contains(where: { $0.isActive }) {
+        result(false)
+        return
+      }
+      #endif
       result(
         UIDevice.current.userInterfaceIdiom == .phone
           && usesDynamicIslandQrScannerPortal(
@@ -442,7 +577,12 @@ import os.log
         )
         return
       }
-      UIApplication.shared.setStatusBarHidden(hidden, with: .fade)
+      let controller = UIApplication.shared.connectedScenes
+        .compactMap { $0 as? UIWindowScene }
+        .flatMap(\.windows)
+        .compactMap { $0.rootViewController as? BuzzFlutterViewController }
+        .first
+      controller?.setScannerStatusBarHidden(hidden)
       result(nil)
     case "performDynamicIslandQrScanSuccessHaptic":
       let generator = UINotificationFeedbackGenerator()
@@ -491,6 +631,9 @@ import os.log
     didReceive response: UNNotificationResponse,
     withCompletionHandler completionHandler: @escaping () -> Void
   ) {
+    if notificationReplyBridge.handle(response, center: center, completion: completionHandler) {
+      return
+    }
     BuzzPushNotificationResponseCoordinator.handle(
       actionIdentifier: response.actionIdentifier,
       userInfo: response.notification.request.content.userInfo,
@@ -535,7 +678,9 @@ import os.log
     _ call: FlutterMethodCall,
     result: @escaping FlutterResult
   ) {
-    if pushSnapshotBridge.handle(call, result: result) {
+    if pushSnapshotBridge.handle(call, result: result)
+      || notificationReplyBridge.handle(call, result: result)
+    {
       return
     }
     switch call.method {
@@ -543,14 +688,6 @@ import os.log
       startPushRegistration(result: result)
     case "takePendingNotificationResponse":
       result(pushNavigationBuffer.take()?.flutterArguments)
-    case "notificationAuthorizationStatus":
-      UNUserNotificationCenter.current().getNotificationSettings { settings in
-        DispatchQueue.main.async {
-          result(Self.pushAuthorizationStatusName(settings.authorizationStatus))
-        }
-      }
-    case "openNotificationSettings":
-      openNotificationSettings(result: result)
     case "endpointGrants":
       do {
         guard let arguments = call.arguments as? [String: Any],
@@ -576,41 +713,6 @@ import os.log
       handleDevPushEnrollment(call, result: result)
     default:
       result(FlutterMethodNotImplemented)
-    }
-  }
-
-  static func pushAuthorizationStatusName(_ status: UNAuthorizationStatus) -> String {
-    switch status {
-    case .notDetermined:
-      return "notDetermined"
-    case .denied:
-      return "denied"
-    case .authorized:
-      return "authorized"
-    case .provisional:
-      return "provisional"
-    case .ephemeral:
-      return "ephemeral"
-    @unknown default:
-      return "unknown"
-    }
-  }
-
-  private func openNotificationSettings(result: @escaping FlutterResult) {
-    let settingsURLString: String
-    if #available(iOS 16.0, *) {
-      settingsURLString = UIApplication.openNotificationSettingsURLString
-    } else {
-      settingsURLString = UIApplication.openSettingsURLString
-    }
-    guard let url = URL(string: settingsURLString) else {
-      result(false)
-      return
-    }
-    UIApplication.shared.open(url, options: [:]) { opened in
-      DispatchQueue.main.async {
-        result(opened)
-      }
     }
   }
 
@@ -1098,80 +1200,5 @@ import os.log
         }
       }
     }
-  }
-}
-
-extension BuzzPushNavigationTarget {
-  var flutterArguments: [String: String] {
-    var arguments = [
-      "eventId": eventID,
-      "communityId": communityID,
-      "channelId": channelID,
-    ]
-    arguments["threadRootId"] = threadRootID
-    return arguments
-  }
-}
-
-
-/// Keeps the authentication callback scoped to the system browser session.
-private final class BuzzBrowserAuthBridge: NSObject, ASWebAuthenticationPresentationContextProviding {
-  private let channel: FlutterMethodChannel
-  private var session: ASWebAuthenticationSession?
-  private var pending: FlutterResult?
-  private var attemptID: UUID?
-
-  init(messenger: FlutterBinaryMessenger) {
-    channel = FlutterMethodChannel(name: "buzz/browser_auth", binaryMessenger: messenger)
-    super.init()
-    channel.setMethodCallHandler { [weak self] call, result in
-      guard let self else { return }
-      if call.method == "cancel" {
-        self.session?.cancel()
-        self.finish(nil, code: "cancelled")
-        result(nil)
-        return
-      }
-      guard call.method == "start" else { result(FlutterMethodNotImplemented); return }
-      guard self.session == nil,
-        let args = call.arguments as? [String: String],
-        let raw = args["url"], let url = URL(string: raw),
-        url.scheme == "https",
-        ["app.builderlab.xyz", "app.builderlabstaging.xyz"].contains(url.host ?? ""),
-        url.path == "/api/goose/v1/auth/login", url.user == nil, url.password == nil,
-        url.port == nil, url.fragment == nil
-      else { result(FlutterError(code: "unavailable", message: nil, details: nil)); return }
-      self.pending = result
-      let attemptID = UUID()
-      self.attemptID = attemptID
-      let session = ASWebAuthenticationSession(url: url, callbackURLScheme: "xyz.block.buzz.mobile") { [weak self] callback, error in
-        DispatchQueue.main.async {
-          guard self?.attemptID == attemptID else { return }
-          let cancelled = (error as? ASWebAuthenticationSessionError)?.code == .canceledLogin
-          self?.finish(callback?.absoluteString, code: cancelled ? "cancelled" : "unavailable")
-        }
-      }
-      session.presentationContextProvider = self
-      session.prefersEphemeralWebBrowserSession = false
-      #if DEBUG
-      session.prefersEphemeralWebBrowserSession = args["ephemeral"] == "true"
-      #endif
-      self.session = session
-      if !session.start() { self.finish(nil, code: "unavailable") }
-    }
-  }
-
-  private func finish(_ callback: String?, code: String) {
-    let result = pending
-    attemptID = nil
-    pending = nil
-    session = nil
-    if let callback { result?(callback) }
-    else { result?(FlutterError(code: code, message: nil, details: nil)) }
-  }
-
-  func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-    UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-      .flatMap { $0.windows }.first(where: { $0.isKeyWindow }) ?? ASPresentationAnchor()
   }
 }

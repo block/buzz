@@ -107,11 +107,18 @@ export function didPrependVirtualizedTimeline(
   previousKeys: readonly string[],
   keys: readonly string[],
 ): boolean {
-  const prependedCount = keys.length - previousKeys.length;
+  const delta = keys.length - previousKeys.length;
   // Virtua shifts its positional size cache by the length delta, so enable
   // `shift` only when every previous slot is the exact suffix it expects.
+  if (delta > 0) {
+    return previousKeys.every((key, index) => key === keys[index + delta]);
+  }
+  // A channel-window refresh drops older pages from the start of the list.
+  // Without `shift` the rows above the reader vanish uncompensated and carry
+  // the reading position away, so a pure head trim shifts too.
   return (
-    prependedCount > 0 &&
-    previousKeys.every((key, index) => key === keys[index + prependedCount])
+    delta < 0 &&
+    keys.length > 0 &&
+    keys.every((key, index) => key === previousKeys[index - delta])
   );
 }

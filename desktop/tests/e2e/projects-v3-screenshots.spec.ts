@@ -890,6 +890,9 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
   ).toBeVisible();
   await repositoryPanelTab.click();
   await expect(repositoryActionsPanel).toBeVisible();
+  // The context rail animates from the chat width to the narrower repository
+  // width, and the workspace widens with it. Measure once it stops.
+  await waitForAnimations(page);
   await expectInsetSection();
   await page.getByRole("tab", { name: "Commits" }).click();
   await expect(repositoryActionsPanel).toBeVisible();

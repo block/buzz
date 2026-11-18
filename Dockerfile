@@ -2,7 +2,7 @@
 #
 # Public Buzz relay image — published as ghcr.io/block/buzz:<tag>.
 #
-# Builds the `buzz-relay` binary (Rust 1.95) and the `buzz-web` static bundle
+# Builds the `buzz-relay` binary (Rust 1.98) and the `buzz-web` static bundle
 # (pnpm + vite), then assembles them into a small debian-slim runtime with
 # `git` available (the relay shells out to git for repo hydrate / receive-pack
 # / upload-pack — see crates/buzz-relay/src/api/git).
@@ -11,7 +11,7 @@
 # native arm64 runners (see .github/workflows/docker.yml). The Dockerfile
 # itself is platform-agnostic; do not add --platform pins.
 
-ARG RUST_VERSION=1.95
+ARG RUST_VERSION=1.98
 ARG NODE_VERSION=24
 ARG DEBIAN_VERSION=bookworm
 
@@ -124,6 +124,7 @@ COPY web/package.json web/
 COPY admin-web/package.json admin-web/
 RUN pnpm install --frozen-lockfile --filter buzz-web --filter buzz-admin-web
 COPY web/ web/
+COPY previews/invite-video/buzz-invite-loop.mp4 previews/invite-video/buzz-invite-poster.png previews/invite-video/
 COPY admin-web/ admin-web/
 RUN pnpm -C web build && pnpm -C admin-web build
 

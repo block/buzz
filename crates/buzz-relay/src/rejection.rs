@@ -26,7 +26,9 @@ pub(crate) enum RejectionTarget<'a> {
 /// Picks the acknowledgement channel a rejection of `msg` must travel on.
 pub(crate) fn rejection_target_for(msg: &ClientMessage) -> RejectionTarget<'_> {
     match msg {
-        ClientMessage::Req { sub_id, .. } | ClientMessage::Count { sub_id, .. } => {
+        ClientMessage::Req { sub_id, .. }
+        | ClientMessage::Count { sub_id, .. }
+        | ClientMessage::ArtifactSync { sub_id, .. } => {
             RejectionTarget::Subscription(sub_id.as_str())
         }
         ClientMessage::Event(event) => RejectionTarget::Event(event.id),
@@ -44,22 +46,30 @@ pub(crate) fn request_rejection_message(target: RejectionTarget<'_>, reason: &st
     }
 }
 
-/// Applies the WebSocket admission quotas to `msg`, returning whether it may be
-/// handled. A rejection is addressed to the frame's own acknowledgement channel.
+/// Applies the WebSocket admission quotas to `msg`. A rejection is addressed
+/// to the frame's own acknowledgement channel, and its fixed access-log reason
+/// is returned.
 pub(crate) async fn enforce_ws_admission(
     msg: &ClientMessage,
     conn: &ConnectionState,
     state: &AppState,
-) -> bool {
+) -> Result<(), &'static str> {
     let is_event = matches!(msg, ClientMessage::Event(_));
-    if !is_event && !matches!(msg, ClientMessage::Req { .. } | ClientMessage::Count { .. }) {
-        return true;
+    if !is_event
+        && !matches!(
+            msg,
+            ClientMessage::Req { .. }
+                | ClientMessage::Count { .. }
+                | ClientMessage::ArtifactSync { .. }
+        )
+    {
+        return Ok(());
     }
 
     let (pubkey, is_agent) = {
         match conn.auth_state_snapshot() {
             AuthState::Authenticated(ctx) => (ctx.pubkey, ctx.agent_owner_pubkey.is_some()),
-            _ => return true,
+            _ => return Ok(()),
         }
     };
 
@@ -75,9 +85,7 @@ pub(crate) async fn enforce_ws_admission(
         ws_limit,
     )
     .await;
-    if !send_admission_result(conn, ws_result, msg, "ws_operations") {
-        return false;
-    }
+    send_admission_result(conn, state, ws_result, msg, "ws_operations").await?;
 
     if matches!(msg, ClientMessage::Event(event) if !buzz_core::kind::is_ephemeral(event.kind.as_u16() as u32))
     {
@@ -97,47 +105,56 @@ pub(crate) async fn enforce_ws_admission(
         .await;
         // Only persistable EVENT attempts consume the minute quota. Ephemeral activity
         // still passes the shared WS flood limit above and normal event auth.
-        if !send_admission_result(conn, message_result, msg, "messages") {
-            return false;
-        }
+        send_admission_result(conn, state, message_result, msg, "messages").await?;
     }
 
-    true
+    Ok(())
 }
 
-/// Forwards an admission verdict to the client, returning whether the frame was
-/// admitted.
+/// Forwards an admission verdict to the client, returning the access-log
+/// reason when the frame was refused.
 ///
 /// The rejection target is derived from `msg` here rather than supplied by the
 /// caller: every quota check in this module must address its rejection to the
 /// rejected frame's own acknowledgement channel, so there is deliberately no way
 /// for a call site to name a different one.
-fn send_admission_result(
+async fn send_admission_result(
     conn: &ConnectionState,
+    state: &AppState,
     result: Result<(), AdmissionError>,
     msg: &ClientMessage,
     bucket: &'static str,
-) -> bool {
-    let target = rejection_target_for(msg);
-    match result {
-        Ok(()) => true,
-        Err(AdmissionError::Exceeded { reset_in_secs }) => {
-            metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "quota", "bucket" => bucket).increment(1);
-            conn.send(request_rejection_message(
-                target,
-                &format!("rate-limited: quota exceeded; retry in {reset_in_secs}s"),
-            ));
-            false
+) -> Result<(), &'static str> {
+    let (reason, label, logged) = match result {
+        Ok(()) => return Ok(()),
+        Err(AdmissionError::Exceeded { reset_in_secs }) => (
+            format!("rate-limited: quota exceeded; retry in {reset_in_secs}s"),
+            "quota",
+            "quota_exceeded",
+        ),
+        Err(AdmissionError::Unavailable) => (
+            "rate-limited: shared admission unavailable".to_owned(),
+            "unavailable",
+            "admission_unavailable",
+        ),
+    };
+    metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => label, "bucket" => bucket).increment(1);
+    match msg {
+        // A refused REQ or sync retires whatever held its ID before `CLOSED`.
+        ClientMessage::Req { sub_id, .. } | ClientMessage::ArtifactSync { sub_id, .. } => {
+            crate::handlers::close::refuse(sub_id, &reason, conn, state).await;
         }
-        Err(AdmissionError::Unavailable) => {
-            metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "unavailable", "bucket" => bucket).increment(1);
-            conn.send(request_rejection_message(
-                target,
-                "rate-limited: shared admission unavailable",
+        _ => {
+            let queued = conn.send(request_rejection_message(
+                rejection_target_for(msg),
+                &reason,
             ));
-            false
+            if let ClientMessage::Event(event) = msg {
+                crate::access::WriteLog::refused(conn, event, logged, queued);
+            }
         }
     }
+    Err(logged)
 }
 
 #[cfg(test)]
@@ -191,19 +208,22 @@ mod tests {
     /// The regression: an over-quota EVENT must be rejected with
     /// `OK(event_id, false, reason)` so the client can settle the exact pending
     /// publish it belongs to. A NOTICE here reintroduces the 25s send stall.
-    #[test]
-    fn over_quota_event_is_rejected_with_a_correlated_ok() {
+    #[tokio::test]
+    async fn over_quota_event_is_rejected_with_a_correlated_ok() {
+        let state = crate::state::tests::test_state().await;
         let (conn, mut rx) = test_conn();
         let (msg, event_id) = parsed_event_message();
 
         let admitted = send_admission_result(
             &conn,
+            &state,
             Err(AdmissionError::Exceeded { reset_in_secs: 7 }),
             &msg,
             "ws_operations",
-        );
+        )
+        .await;
 
-        assert!(!admitted, "an over-quota frame is not admitted");
+        assert!(admitted.is_err(), "an over-quota frame is not admitted");
         let frame = sent_frame(&mut rx);
         assert_eq!(
             frame[0], "OK",
@@ -225,17 +245,20 @@ mod tests {
 
     /// The same correlation is required when admission is unavailable rather
     /// than exceeded — both branches strand a send if they emit a NOTICE.
-    #[test]
-    fn event_rejected_for_unavailable_admission_is_also_correlated() {
+    #[tokio::test]
+    async fn event_rejected_for_unavailable_admission_is_also_correlated() {
+        let state = crate::state::tests::test_state().await;
         let (conn, mut rx) = test_conn();
         let (msg, event_id) = parsed_event_message();
 
-        send_admission_result(
+        let _ = send_admission_result(
             &conn,
+            &state,
             Err(AdmissionError::Unavailable),
             &msg,
             "ws_operations",
-        );
+        )
+        .await;
 
         let frame = sent_frame(&mut rx);
         assert_eq!(frame[0], "OK");
@@ -243,20 +266,75 @@ mod tests {
         assert_eq!(frame[2], false);
     }
 
+    /// The write line's `ok_queued` for an over-quota EVENT, with the outbound
+    /// channel `open`, full or closed: absent when the OK was queued, `false`
+    /// when it was not. Mutation: pass `true` instead of the send result at
+    /// the refusal site → RED.
+    #[tokio::test]
+    async fn admission_write_line_records_whether_its_ok_was_queued() {
+        let state = crate::state::tests::test_state().await;
+        let mut got = Vec::new();
+        for channel in ["open", "full", "closed"] {
+            let (conn, rx) = test_conn();
+            let _rx = match channel {
+                "full" => {
+                    while conn.send(String::new()) {}
+                    Some(rx)
+                }
+                "closed" => {
+                    drop(rx);
+                    None
+                }
+                _ => Some(rx),
+            };
+            let (msg, _) = parsed_event_message();
+            let (guard, out) = crate::access::tests::capture_access_only(tracing::Level::INFO);
+            let _ = send_admission_result(
+                &conn,
+                &state,
+                Err(AdmissionError::Unavailable),
+                &msg,
+                "ws_operations",
+            )
+            .await;
+            drop(guard);
+            let line = out
+                .lines()
+                .into_iter()
+                .find(|l| l["event"] == "write")
+                .expect("write line");
+            got.push(format!(
+                "{channel}:{}/{}",
+                line["outcome"], line["ok_queued"]
+            ));
+        }
+        assert_eq!(
+            got,
+            [
+                r#"open:"rejected"/null"#,
+                r#"full:"rejected"/false"#,
+                r#"closed:"rejected"/false"#
+            ]
+        );
+    }
+
     /// A REQ still settles on CLOSED, which carries the subscription id. This
     /// pins the pre-existing behavior the fix must not disturb.
-    #[test]
-    fn over_quota_req_still_closes_the_subscription() {
+    #[tokio::test]
+    async fn over_quota_req_still_closes_the_subscription() {
+        let state = crate::state::tests::test_state().await;
         let (conn, mut rx) = test_conn();
         let raw = serde_json::json!(["REQ", "history-abc", {"kinds": [1]}]).to_string();
         let msg = ClientMessage::parse(&raw).expect("parse REQ");
 
-        send_admission_result(
+        let _ = send_admission_result(
             &conn,
+            &state,
             Err(AdmissionError::Exceeded { reset_in_secs: 7 }),
             &msg,
             "ws_operations",
-        );
+        )
+        .await;
 
         let frame = sent_frame(&mut rx);
         assert_eq!(frame[0], "CLOSED");
@@ -268,18 +346,21 @@ mod tests {
     }
 
     /// NIP-45 uses `CLOSED(query_id, reason)` when a relay refuses a COUNT.
-    #[test]
-    fn over_quota_count_closes_the_query() {
+    #[tokio::test]
+    async fn over_quota_count_closes_the_query() {
+        let state = crate::state::tests::test_state().await;
         let (conn, mut rx) = test_conn();
         let raw = serde_json::json!(["COUNT", "count-abc", {"kinds": [1]}]).to_string();
         let msg = ClientMessage::parse(&raw).expect("parse COUNT");
 
-        send_admission_result(
+        let _ = send_admission_result(
             &conn,
+            &state,
             Err(AdmissionError::Exceeded { reset_in_secs: 7 }),
             &msg,
             "ws_operations",
-        );
+        )
+        .await;
 
         let frame = sent_frame(&mut rx);
         assert_eq!(frame[0], "CLOSED");
@@ -299,7 +380,7 @@ mod tests {
         let (conn, mut rx) = test_conn_with_auth(authenticated_state());
         let msg = ClientMessage::parse(raw).expect("parse client frame");
 
-        let admitted = enforce_ws_admission(&msg, &conn, &state).await;
+        let admitted = enforce_ws_admission(&msg, &conn, &state).await.is_ok();
         assert!(!admitted, "an unadmitted frame must not be handled");
         sent_frame(&mut rx)
     }

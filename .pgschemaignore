@@ -1,0 +1,25 @@
+# pgschema reads this file from its working directory; every caller runs it
+# from the repository root.
+#
+# The relay's partition manager creates dated `events` / `delivery_log`
+# monthlies at runtime (see crates/buzz-db/src/store/partition/). They are not
+# declared in schema/partitions/, so without this file re-applying pgschema to a
+# database a relay has used drops them, and their rows, with
+# `DROP TABLE IF EXISTS ... CASCADE`. Only the monthlies schema/partitions/
+# declares stay managed by pgschema; keep the `!` exemptions below in sync with
+# them.
+[tables]
+patterns = [
+    "events_p2*",
+    "!events_p2026_01",
+    "!events_p2026_02",
+    "!events_p2026_03",
+    "!events_p2026_04",
+    "!events_p2026_05",
+    "!events_p2026_06",
+    "delivery_log_p2*",
+    "!delivery_log_p2026_03",
+    "!delivery_log_p2026_04",
+    "!delivery_log_p2026_05",
+    "!delivery_log_p2026_06",
+]

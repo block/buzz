@@ -13,6 +13,9 @@ abstract final class BuzzIcons {
 
   static const edit = IconData(0xea98, fontFamily: 'BuzzTabler');
 
+  /// Tabler `qrcode`.
+  static const qrcode = IconData(0xeb11, fontFamily: 'BuzzTabler');
+
   /// Tabler `text-size`.
   static const aLargeSmall = IconData(0xf2b1, fontFamily: 'BuzzTabler');
 
@@ -153,6 +156,9 @@ abstract final class BuzzIcons {
 
   /// Tabler `flag`.
   static const flag = IconData(0xeaa6, fontFamily: 'BuzzTabler');
+
+  /// Tabler `cube-3d-sphere`, matching the desktop workspace control.
+  static const workspace = IconData(0xecd7, fontFamily: 'BuzzTabler');
 
   /// Tabler `folder`.
   static const folder = IconData(0xeaad, fontFamily: 'BuzzTabler');

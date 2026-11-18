@@ -33,46 +33,39 @@ void _terminalSubscriptionTests() {
           final logsAfterClose = logs.length;
 
           // Virtual time permits many immediate retries on the broken path.
+          // A refusal that cannot clear is never retried on this connection,
+          // and it reads nothing.
           for (var i = 0; i < 20; i++) {
             clock.elapse(const Duration(milliseconds: 10));
           }
+          clock.elapse(const Duration(minutes: 10));
           expect(session.rejectionCount, 1);
+          expect(session.totalSubscribeCount, 1);
           expect(session.membershipRequestCount, initialMemberships);
           expect(session.historyFilters.length, historyAfterClose);
           expect(session.queryBatches.length, batchesAfterClose);
-          expect(session.totalSubscribeCount, 1);
+          expect(session.activeSubscriptionCount, 0);
           expect(logs.length, logsAfterClose);
-          expect(clock.periodicTimerCount, 1);
+          expect(clock.periodicTimerCount, 0);
           expect(clock.nonPeriodicTimerCount, 0);
-
-          // Ordinary polling may refresh memberships, but never re-admits an
-          // unchanged terminal filter, creates retry timers, or repeats logs.
-          final pollStart = session.membershipRequestCount;
-          for (var i = 0; i < 3; i++) {
-            clock.elapse(const Duration(seconds: 60));
-            expect(session.totalSubscribeCount, 1);
-            expect(session.activeSubscriptionCount, 0);
-            expect(logs.length, logsAfterClose);
-            expect(clock.periodicTimerCount, 1);
-            expect(clock.nonPeriodicTimerCount, 0);
-            expect(
-              container.read(channelsProvider).requireValue.single.id,
-              _channelA,
-            );
-          }
-          expect(session.membershipRequestCount - pollStart, 6);
+          expect(
+            container.read(channelsProvider).requireValue.single.id,
+            _channelA,
+          );
+          final retries = session.totalSubscribeCount;
+          final logsBeforeRefresh = logs.length;
 
           // A pull-to-refresh still isn't evidence that admission changed.
           unawaited(container.read(channelsProvider.notifier).refresh());
           clock.flushMicrotasks();
           clock.elapse(const Duration(milliseconds: 2));
-          expect(session.totalSubscribeCount, 1);
-          expect(logs.length, logsAfterClose);
+          expect(session.totalSubscribeCount, retries);
+          expect(logs.length, logsBeforeRefresh);
         } finally {
           container.dispose();
           debugPrint = originalDebugPrint;
         }
-        clock.elapse(const Duration(seconds: 60));
+        clock.elapse(const Duration(minutes: 10));
         expect(clock.pendingTimers, isEmpty);
         expect(session.totalSubscribeCount, 1);
       },
@@ -98,7 +91,7 @@ void _terminalSubscriptionTests() {
     );
   }
 
-  _testWithClock('terminal rejection retries only after a new connection', (
+  _testWithClock('a new connection retries a terminal rejection at once', (
     clock,
   ) {
     final session = _TerminalRelaySession();
@@ -228,7 +221,7 @@ class _TerminalRelaySession extends _FakeRelaySession {
       onEvent,
       onClosed: onClosed,
     );
-    if (!reject) return unsubscribe;
+    if (!reject || listNoticeFilters.contains(filter)) return unsubscribe;
     final key = _subscriptions.keys.last;
     final closed = Completer<void>();
     final timer = Timer(const Duration(milliseconds: 1), () {

@@ -5,12 +5,15 @@ import 'package:buzz/features/channels/add_members_sheet.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
+import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+
+import '../../helpers/recipient_directory_session.dart';
 
 final _alice = 'a' * 64;
 final _bob = 'b' * 64;
@@ -24,6 +27,11 @@ class _Cache extends UserCacheNotifier {
   Map<String, UserProfile> build() => const {};
   @override
   Future<bool> preload(List<String> pubkeys) async => true;
+}
+
+class _Lifecycle extends AppLifecycleNotifier {
+  @override
+  AppLifecycleState build() => AppLifecycleState.resumed;
 }
 
 class _Actions extends Fake implements ChannelActions {
@@ -43,7 +51,8 @@ class _Actions extends Fake implements ChannelActions {
 Future<void> _pump(
   WidgetTester tester,
   _Actions actions, {
-  List<DirectoryUser>? directory,
+  Map<String, String>? people,
+  Set<String>? agents,
 }) async {
   await tester.pumpWidget(
     ProviderScope(
@@ -51,29 +60,13 @@ Future<void> _pump(
         userCacheProvider.overrideWith(_Cache.new),
         channelActionsProvider.overrideWithValue(actions),
         channelMembersProvider('channel').overrideWith((ref) async => []),
-        relayDirectoryUsersProvider.overrideWith(
-          (ref) async =>
-              directory ??
-              [
-                DirectoryUser(pubkey: _alice, displayName: 'Alice'),
-                DirectoryUser(
-                  pubkey: _bob,
-                  displayName: 'Bob',
-                  isAgent: true,
-                  avatarUrl: _avatar,
-                ),
-                DirectoryUser(pubkey: _existing, displayName: 'Existing'),
-              ],
-        ),
-        relayDirectorySearchProvider('bob').overrideWith(
-          (ref) async => [
-            DirectoryUser(
-              pubkey: _bob,
-              displayName: 'Bob',
-              isAgent: true,
-              avatarUrl: _avatar,
-            ),
-          ],
+        appLifecycleProvider.overrideWith(_Lifecycle.new),
+        relaySessionProvider.overrideWith(
+          () => RecipientDirectorySession(
+            people ?? {_alice: 'Alice', _bob: 'Bob', _existing: 'Existing'},
+            agents: agents ?? {_bob},
+            pictures: {_bob: _avatar},
+          ),
         ),
       ],
       child: MaterialApp(
@@ -95,6 +88,11 @@ Future<void> _pump(
   );
   await tester.tap(find.text('Open picker'));
   await tester.pumpAndSettle();
+}
+
+/// Lets a debounced picker search finish.
+Future<void> _settleSearch(WidgetTester tester) async {
+  await tester.pump();
   await tester.pump(const Duration(milliseconds: 300));
   await tester.pumpAndSettle();
 }
@@ -136,12 +134,14 @@ void main() {
           await _pump(
             tester,
             actions,
-            directory: [
-              for (final key in [_alice, _bob])
-                DirectoryUser(pubkey: key, displayName: 'Scout', isAgent: true),
-            ],
+            people: {_alice: 'Scout', _bob: 'Scout'},
+            agents: {_alice, _bob},
           );
           if (platform == TargetPlatform.iOS) {
+            await _event(tester, states.last['session'] as String, 'query', {
+              'value': 'Scout',
+            });
+            await _settleSearch(tester);
             final rows = states.last['users'] as List;
             expect(rows.map((row) => row['name']).toSet(), hasLength(2));
             for (final row in rows) {
@@ -154,6 +154,11 @@ void main() {
             expect(selected['name'], (rows.last as Map)['name']);
             await _event(tester, session, 'submit');
           } else {
+            await tester.enterText(
+              find.byKey(const ValueKey('add-channel-members-search')),
+              'Scout',
+            );
+            await _settleSearch(tester);
             final labels = tester
                 .widgetList<Text>(find.byType(Text))
                 .map((text) => text.data)
@@ -204,25 +209,32 @@ void main() {
         await _pump(tester, actions);
         expect(methods.first, 'present');
         expect(find.byType(TextField), findsNothing);
-        expect((states.last['users'] as List).map((row) => row['pubkey']), [
-          _alice,
-          _bob,
-        ]);
+        // No directory dump: people are found by name, as with `@`.
+        expect(states.last['users'], isEmpty);
+        expect(
+          states.last['emptyQueryHint'],
+          'Type a name to find people or agents.',
+        );
+        expect(states.last['clearQueryOnPick'], isNull);
         final session = states.last['session'] as String;
+        await _event(tester, session, 'query', {'value': 'Al'});
+        await _settleSearch(tester);
         await _event(tester, 'stale-session', 'toggle', {'pubkey': _alice});
         expect(states.last['selected'], isEmpty);
         await _event(tester, session, 'toggle', {'pubkey': _alice});
-        await _event(tester, session, 'toggle', {'pubkey': _bob});
-        expect(states.last['selected'] as List, hasLength(2));
-        await _event(tester, session, 'query', {'value': 'bob'});
+        await _event(tester, session, 'query', {'value': 'Bo'});
         expect(states.last['loading'], isTrue);
-        await tester.pump(const Duration(milliseconds: 300));
-        await tester.pumpAndSettle();
+        await _settleSearch(tester);
         expect(states.last['loading'], isFalse);
         expect((states.last['users'] as List).map((row) => row['pubkey']), [
           _bob,
         ]);
+        await _event(tester, session, 'toggle', {'pubkey': _bob});
         expect(states.last['selected'] as List, hasLength(2));
+        // A member already in the channel is never offered.
+        await _event(tester, session, 'query', {'value': 'Existing'});
+        await _settleSearch(tester);
+        expect(states.last['users'], isEmpty);
         await _event(tester, session, 'submit');
         expect(actions.calls, [
           [_alice, _bob],
@@ -231,12 +243,10 @@ void main() {
           _bob,
         ]);
         expect(states.last['error'], isNotNull);
-        await _event(tester, session, 'query', {'value': ''});
-        await tester.pump(const Duration(milliseconds: 300));
-        await tester.pumpAndSettle();
-        expect((states.last['users'] as List).map((row) => row['pubkey']), [
-          _bob,
-        ]);
+        // The member just added is not offered again.
+        await _event(tester, session, 'query', {'value': 'Al'});
+        await _settleSearch(tester);
+        expect(states.last['users'], isEmpty);
         actions.failBob = false;
         await _event(tester, session, 'submit');
         expect(actions.calls, [
@@ -269,7 +279,9 @@ void main() {
       try {
         await _pump(tester, _Actions());
         final session = states.last['session'] as String;
-        final row = (states.last['users'] as List).last as Map;
+        await _event(tester, session, 'query', {'value': 'Bo'});
+        await _settleSearch(tester);
+        final row = (states.last['users'] as List).single as Map;
         Future<Object?> request(String key, {String? requestSession}) async {
           final response = Completer<Object?>();
           await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
@@ -310,13 +322,6 @@ void main() {
           ((states.last['selected'] as List).single as Map)['avatarKey'],
           key,
         );
-        await _event(tester, session, 'query', {'value': 'bob'});
-        await tester.pump(const Duration(milliseconds: 300));
-        await tester.pumpAndSettle();
-        expect(
-          ((states.last['users'] as List).single as Map)['avatarKey'],
-          key,
-        );
         await _event(tester, session, 'closed');
       } finally {
         await tester.pumpWidget(const SizedBox());
@@ -338,6 +343,8 @@ void main() {
     try {
       final actions = _Actions();
       await _pump(tester, actions);
+      await _event(tester, session!, 'query', {'value': 'Al'});
+      await _settleSearch(tester);
       await _event(tester, session!, 'toggle', {'pubkey': _alice});
       await _event(tester, session!, 'closed');
       expect(actions.calls, isEmpty);
@@ -361,7 +368,25 @@ void main() {
         find.byKey(const ValueKey('add-channel-members-search')),
         findsOneWidget,
       );
+      expect(
+        find.text('Type a name to find people or agents.'),
+        findsOneWidget,
+      );
+      await tester.enterText(
+        find.byKey(const ValueKey('add-channel-members-search')),
+        'Al',
+      );
+      await _settleSearch(tester);
       expect(find.text('Alice'), findsOneWidget);
+      // Picks show as chips, and the query stays for the next match.
+      await tester.tap(find.text('Alice'));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(ValueKey('add-channel-member-selected-$_alice')),
+        findsOneWidget,
+      );
+      expect(find.byKey(ValueKey('add-channel-member-$_alice')), findsNothing);
+      expect(find.text('Al'), findsOneWidget);
     } finally {
       await tester.pumpWidget(const SizedBox());
       debugDefaultTargetPlatformOverride = null;

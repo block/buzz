@@ -108,7 +108,12 @@ void main() {
   // Wire limits stay focused; consent/claim ordering is covered by the journey.
   for (final (name, response, status, failure) in [
     ('redirect', '{}', 302, AccountFailure.denied),
-    ('oversized policy', ' ' * 65537, 200, AccountFailure.invalidResponse),
+    (
+      'oversized policy',
+      '{}${' ' * (4 * 1024 * 1024)}',
+      200,
+      AccountFailure.invalidResponse,
+    ),
     ('invalid JSON', 'not JSON', 200, AccountFailure.invalidResponse),
     ('wrong shape', '[]', 200, AccountFailure.invalidResponse),
   ]) {

@@ -9,9 +9,14 @@ final class BuzzPushSnapshotBridge {
   private let endpointGrantStore: BuzzPushEndpointGrantKeychainStore
   private let interactionDeletionDeadline: BuzzInteractionDeletionDeadline
   private let keychainAccessGroup: String?
+  // Flutter awaits every call here, and the age-gate restore runs during app
+  // launch, when this process is busiest. At utility QoS these replies were the
+  // lowest-priority work in the process and stalled for over 10 s on saturated
+  // CI hosts while main-thread work kept moving; user-initiated is the class
+  // for work a caller is waiting on.
   private let queue = DispatchQueue(
     label: "xyz.block.buzz.push-snapshot",
-    qos: .utility
+    qos: .userInitiated
   )
   private lazy var store: BuzzPushPresentationCacheStore? = {
     guard let container = containerURL() else { return nil }
@@ -31,7 +36,7 @@ final class BuzzPushSnapshotBridge {
           INInteraction.deleteAll(completion: completion)
         },
         scheduleTimeout: { delay, action in
-          DispatchQueue.global(qos: .utility).asyncAfter(
+          DispatchQueue.global(qos: .userInitiated).asyncAfter(
             deadline: .now() + delay,
             execute: action
           )
@@ -69,8 +74,7 @@ final class BuzzPushSnapshotBridge {
       purgeAgeRestrictedNotifications(result: result)
       return true
     }
-    let strictAgeGateWrite = call.method == "syncAgeGatePushSnapshot"
-    guard strictAgeGateWrite || call.method == "syncPushSnapshot",
+    guard call.method == "syncPushSnapshot",
       let arguments = call.arguments as? [String: Any],
       let section = arguments["section"] as? String
     else {
@@ -78,11 +82,11 @@ final class BuzzPushSnapshotBridge {
     }
     switch section {
     case "communities":
-      syncCommunities(
-        arguments,
-        requiresStore: strictAgeGateWrite,
-        result: result
-      )
+      syncCommunities(arguments, result: result)
+    case "organizationSession":
+      syncOrganizationSession(arguments, result: result)
+    case "hostedSession":
+      syncHostedSession(arguments, result: result)
     default: return false
     }
     return true
@@ -133,15 +137,104 @@ final class BuzzPushSnapshotBridge {
     }
   }
 
+  /// Shares the organization account session with the notification extension, or removes it
+  /// when the app has none, so the extension can mint NIP-FI assertions for organization relays.
+  private func syncOrganizationSession(
+    _ arguments: [String: Any],
+    result: @escaping FlutterResult
+  ) {
+    let session: BuzzOrganizationSession?
+    if arguments["credential"] is NSNull || arguments["credential"] == nil {
+      session = nil
+    } else if let origin = arguments["origin"] as? String,
+      let credential = arguments["credential"] as? String, !credential.isEmpty,
+      credential.utf8.count <= 512,
+      let relayHosts = arguments["relayHosts"] as? [String], !relayHosts.isEmpty
+    {
+      session = BuzzOrganizationSession(
+        origin: origin, credential: credential, relayHosts: relayHosts)
+    } else {
+      result(
+        FlutterError(
+          code: "invalid_arguments",
+          message: "Expected an organization origin, credential and relay hosts.",
+          details: nil
+        )
+      )
+      return
+    }
+    queue.async { [weak self] in
+      do {
+        try BuzzPushKeychain.replace(
+          organizationSession: session, accessGroup: self?.keychainAccessGroup)
+        Self.complete(result, value: nil)
+      } catch {
+        Self.complete(
+          result,
+          value: FlutterError(
+            code: "snapshot_sync_failed",
+            message: "Unable to share the organization session.",
+            details: error.localizedDescription
+          )
+        )
+      }
+    }
+  }
+
+  /// Shares the hosted account session with the notification extension, or removes it, so the
+  /// extension can mint NIP-FI assertions for hosted communities that enforce it.
+  private func syncHostedSession(
+    _ arguments: [String: Any],
+    result: @escaping FlutterResult
+  ) {
+    let session: BuzzOrganizationSession?
+    if arguments["credential"] is NSNull || arguments["credential"] == nil {
+      session = nil
+    } else if let origin = arguments["origin"] as? String,
+      let credential = arguments["credential"] as? String, !credential.isEmpty,
+      credential.utf8.count <= 512,
+      let relayDomains = arguments["relayDomains"] as? [String], !relayDomains.isEmpty,
+      let communityDomain = arguments["communityDomain"] as? String, !communityDomain.isEmpty
+    {
+      session = BuzzOrganizationSession(
+        origin: origin, credential: credential, relayHosts: [], relayDomains: relayDomains,
+        communityDomain: communityDomain)
+    } else {
+      result(
+        FlutterError(
+          code: "invalid_arguments",
+          message: "Expected a hosted origin, credential, relay domains and community domain.",
+          details: nil
+        )
+      )
+      return
+    }
+    queue.async { [weak self] in
+      do {
+        try BuzzPushKeychain.replace(
+          organizationSession: session, accessGroup: self?.keychainAccessGroup,
+          account: BuzzOrganizationSession.hostedKeychainAccount)
+        Self.complete(result, value: nil)
+      } catch {
+        Self.complete(
+          result,
+          value: FlutterError(
+            code: "snapshot_sync_failed",
+            message: "Unable to share the hosted session.",
+            details: error.localizedDescription
+          )
+        )
+      }
+    }
+  }
+
   private func syncCommunities(
     _ arguments: [String: Any],
-    requiresStore: Bool,
     result: @escaping FlutterResult
   ) {
     guard let communities = arguments["communities"] as? [[String: Any]],
       let signingKeys = arguments["signingKeys"] as? [String: String],
-      communities.count <= BuzzPushPresentationCacheStore.maximumCommunities,
-      !requiresStore || arguments["settleFence"] is Bool
+      communities.count <= BuzzPushPresentationCacheStore.maximumCommunities
     else {
       result(
         FlutterError(
@@ -155,29 +248,11 @@ final class BuzzPushSnapshotBridge {
     queue.async { [weak self] in
       do {
         guard let self else {
-          Self.complete(
-            result,
-            value: requiresStore
-              ? FlutterError(
-                code: "snapshot_sync_unavailable",
-                message: "The push snapshot bridge is unavailable.",
-                details: nil
-              )
-              : nil
-          )
+          Self.complete(result, value: nil)
           return
         }
         guard let store else {
-          Self.complete(
-            result,
-            value: requiresStore
-              ? FlutterError(
-                code: "snapshot_sync_unavailable",
-                message: "The push snapshot store is unavailable.",
-                details: nil
-              )
-              : nil
-          )
+          Self.complete(result, value: nil)
           return
         }
         // Relay-metadata enrichment is optional presentation state. A damaged

@@ -8,8 +8,8 @@ import 'inbox_item.dart';
 /// `thread-activity:<root>`. Returns null for an event with no channel.
 ///
 /// `activity:<channel>` never counts here. Activity rows hold only mentions,
-/// needs-action and agent events addressed to the reader, and DM messages,
-/// and that catch-up mark reads none of those.
+/// needs-action and agent events addressed to the reader, eligible thread
+/// replies, and DM messages. That catch-up mark reads none of those.
 int? inboxEventReadAt(
   FeedItem event, {
   required int? Function(String contextId) markerOf,

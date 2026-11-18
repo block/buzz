@@ -35,15 +35,17 @@ async function emit(
   page: import("@playwright/test").Page,
   content: string,
   parentEventId: string | null = null,
+  createdAt?: number,
 ) {
   const event = await page.evaluate(
     (payload) =>
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: payload.channel,
         content: payload.content,
+        createdAt: payload.createdAt,
         parentEventId: payload.parentEventId,
       }),
-    { channel: CHANNEL, content, parentEventId },
+    { channel: CHANNEL, content, createdAt, parentEventId },
   );
   if (!event) throw new Error("mock message emitter is not installed");
   return event as { created_at: number; id: string };
@@ -221,9 +223,14 @@ test.describe("composer overlays mask scrolled content", () => {
     await expect(page.getByTestId("message-timeline")).toBeVisible();
     await waitForMockLiveSubscription(page, CHANNEL);
 
+    // Give each message its own second. Same-second messages order by id, so
+    // the last one emitted is not necessarily the bottom row.
+    const base = Math.floor(Date.now() / 1000);
     let newestMessageId = "";
     for (let i = 0; i < 20; i++) {
-      newestMessageId = (await emit(page, `Bottom-clearance message ${i}`)).id;
+      newestMessageId = (
+        await emit(page, `Bottom-clearance message ${i}`, null, base + i)
+      ).id;
     }
     await page.waitForTimeout(300);
     await page.evaluate(() => {
@@ -241,40 +248,27 @@ test.describe("composer overlays mask scrolled content", () => {
       );
     await waitForAnimations(page);
 
-    const clearsComposer = await page.evaluate((messageId) => {
-      const composer = document.querySelector<HTMLElement>(
-        '[data-testid="channel-composer-overlay"] [data-testid="message-composer"]',
-      );
-      const newestRow = document.querySelector<HTMLElement>(
-        `[data-message-id="${CSS.escape(messageId)}"]`,
-      );
-      if (!composer || !newestRow) return false;
-      return (
-        newestRow.getBoundingClientRect().bottom <=
-        composer.getBoundingClientRect().top
-      );
-    }, newestMessageId);
-    expect(clearsComposer).toBe(true);
+    // The timeline re-pins to the bottom on the composer's resize, which can
+    // land after the animations settle, so poll rather than measure once.
+    const newestClearsComposer = () =>
+      page.evaluate((messageId) => {
+        const composer = document.querySelector<HTMLElement>(
+          '[data-testid="channel-composer-overlay"] [data-testid="message-composer"]',
+        );
+        const newestRow = document.querySelector<HTMLElement>(
+          `[data-message-id="${CSS.escape(messageId)}"]`,
+        );
+        return Boolean(
+          composer &&
+            newestRow &&
+            newestRow.getBoundingClientRect().bottom <=
+              composer.getBoundingClientRect().top,
+        );
+      }, newestMessageId);
+    await expect.poll(newestClearsComposer).toBe(true);
 
     await page.setViewportSize({ width: 1280, height: 620 });
-    await expect
-      .poll(() =>
-        page.evaluate((messageId) => {
-          const composer = document.querySelector<HTMLElement>(
-            '[data-testid="channel-composer-overlay"] [data-testid="message-composer"]',
-          );
-          const newestRow = document.querySelector<HTMLElement>(
-            `[data-message-id="${CSS.escape(messageId)}"]`,
-          );
-          return Boolean(
-            composer &&
-              newestRow &&
-              newestRow.getBoundingClientRect().bottom <=
-                composer.getBoundingClientRect().top,
-          );
-        }, newestMessageId),
-      )
-      .toBe(true);
+    await expect.poll(newestClearsComposer).toBe(true);
   });
 
   test("thread panel replies fade out behind the reply composer", async ({

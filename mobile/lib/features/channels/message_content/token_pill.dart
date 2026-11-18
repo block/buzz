@@ -7,29 +7,28 @@ String? _channelNameForId(Map<String, String> channels, String channelId) {
   return null;
 }
 
-class _ChannelLinkMd extends InlineMd {
+class _ChannelLinkMd {
   final Map<String, String> channelNames;
   final void Function(String channelId)? onChannelTap;
-  late final RegExp _exp = _buildPrefixPattern(
-    prefix: '#',
-    knownNames: channelNames.keys,
-    genericTokenPattern: r'[A-Za-z0-9_][A-Za-z0-9_-]*',
-  );
+  late final RegExp _exp = channelTokenPattern(channelNames.keys);
 
   _ChannelLinkMd({required this.channelNames, this.onChannelTap});
 
-  @override
+  /// Excluded from link labels: this component renders a [WidgetSpan], and a
+  /// placeholder nested inside the link's own placeholder does not paint on
+  /// iOS — an authored `[#channel](url)` renders as nothing. Link resolution
+  /// wins over token detection inside a label.
+  late final InlinePattern pattern = InlinePattern(
+    pattern: _exp,
+    builder: (context, match, style) => span(context, match[0]!, style),
+  );
+
   RegExp get exp => _exp;
 
-  @override
-  InlineSpan span(
-    BuildContext context,
-    String text,
-    final GptMarkdownConfig config,
-  ) {
+  InlineSpan span(BuildContext context, String text, TextStyle style) {
     final raw = exp.firstMatch(text.trim())?.group(0);
     if (raw == null) {
-      return TextSpan(text: text, style: config.style);
+      return TextSpan(text: text, style: style);
     }
 
     final channelId = channelNames[raw.substring(1).toLowerCase()];
@@ -42,7 +41,7 @@ class _ChannelLinkMd extends InlineMd {
           ? 'Open channel $channelName'
           : 'Channel $channelName',
       text: channelName,
-      textStyle: config.style?.copyWith(fontWeight: FontWeight.w500),
+      textStyle: style.copyWith(fontWeight: FontWeight.w500),
     );
 
     return WidgetSpan(

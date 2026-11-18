@@ -31,10 +31,10 @@ final class ProfileUrlAvatarDraft extends ProfileAvatarDraft {
 
 /// A locally prepared still image awaiting upload on Save.
 final class ProfileImageAvatarDraft extends ProfileAvatarDraft {
-  /// Creates a still-image draft from JPEG [bytes].
+  /// Creates a still-image draft from JPEG or PNG [bytes].
   ProfileImageAvatarDraft(this.bytes);
 
-  /// The prepared JPEG payload.
+  /// The prepared JPEG or PNG payload.
   final Uint8List bytes;
   MediaUploadService? _uploadService;
   Future<String>? _uploadedUrl;
@@ -48,7 +48,7 @@ final class ProfileImageAvatarDraft extends ProfileAvatarDraft {
     final existing = _uploadedUrl;
     if (existing != null) return existing;
     final upload = service
-        .uploadBytes(bytes, mimeType: 'image/jpeg')
+        .uploadBytes(bytes, mimeType: detectImageMimeType(bytes))
         .then((descriptor) => descriptor.url);
     _uploadedUrl = upload;
     try {
@@ -130,3 +130,30 @@ final class ProfileAnimatedAvatarDraft extends ProfileAvatarDraft {
     }
   }
 }
+
+/// Transfers only local draft data between the app and its native sheet engine.
+Map<String, Object?>? encodeProfileAvatarDraft(ProfileAvatarDraft? draft) =>
+    switch (draft) {
+      ProfileImageAvatarDraft(:final bytes) => {
+        'type': 'image',
+        'bytes': bytes,
+      },
+      ProfileAnimatedAvatarDraft(:final animation, :final poster) => {
+        'type': 'animated',
+        'animation': animation,
+        'poster': poster,
+      },
+      ProfileUrlAvatarDraft(:final url) => {'type': 'url', 'url': url},
+      null => null,
+    };
+
+ProfileAvatarDraft? decodeProfileAvatarDraft(Map<dynamic, dynamic>? value) =>
+    switch (value?['type']) {
+      'image' => ProfileImageAvatarDraft(value!['bytes'] as Uint8List),
+      'animated' => ProfileAnimatedAvatarDraft(
+        animation: value!['animation'] as Uint8List,
+        poster: value['poster'] as Uint8List,
+      ),
+      'url' => ProfileUrlAvatarDraft(value!['url'] as String),
+      _ => null,
+    };

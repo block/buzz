@@ -48,10 +48,7 @@ fn verify(cbor: &[u8]) -> Result<VerifiedAssertion, AppAttestError> {
     verifier.verify_assertion(
         &STANDARD.encode(cbor),
         TRANSCRIPT,
-        signing_key()
-            .verifying_key()
-            .to_encoded_point(false)
-            .as_ref(),
+        signing_key().verifying_key().to_sec1_point(false).as_ref(),
         0,
         "challenge",
         "challenge",
@@ -117,10 +114,7 @@ mod conformance {
             cbor,
             TRANSCRIPT,
             APP_ID,
-            signing_key()
-                .verifying_key()
-                .to_encoded_point(false)
-                .as_ref(),
+            signing_key().verifying_key().to_sec1_point(false).as_ref(),
             0,
         )
     }
@@ -179,7 +173,7 @@ mod conformance {
     #[test]
     fn signed_bytes_identity_key_and_replay_preserved() {
         let cbor = signed_assertion(&auth_data(b"\xa1\x61x\x01"));
-        let key = signing_key().verifying_key().to_encoded_point(false);
+        let key = signing_key().verifying_key().to_sec1_point(false);
         assert!(verify_bytes(&cbor, b"changed", APP_ID, key.as_ref(), 0).is_err());
         assert!(verify_bytes(&cbor, TRANSCRIPT, "other.app", key.as_ref(), 0).is_err());
         assert!(verify_bytes(&cbor, TRANSCRIPT, APP_ID, key.as_ref(), 1).is_err());
@@ -189,7 +183,7 @@ mod conformance {
             &cbor,
             TRANSCRIPT,
             APP_ID,
-            other.verifying_key().to_encoded_point(false).as_ref(),
+            other.verifying_key().to_sec1_point(false).as_ref(),
             0
         )
         .is_err());
@@ -438,7 +432,7 @@ mod properties {
 
     #[test]
     fn maximum_counter_is_accepted_once_and_cannot_wrap() {
-        let key = signing_key().verifying_key().to_encoded_point(false);
+        let key = signing_key().verifying_key().to_sec1_point(false);
         let mut auth = auth_data(b"\xa0");
         auth[33..37].copy_from_slice(&u32::MAX.to_be_bytes());
         let signed = signed_assertion(&auth);

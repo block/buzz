@@ -52,7 +52,7 @@ pub(super) async fn dispatch(
         } => (id, owner, Some((branch, expected_manifest))),
     };
     crate::validate::validate_repo_id(&id)?;
-    let owner = owner.unwrap_or_else(|| client.keys().public_key().to_hex());
+    let owner = owner.unwrap_or_else(|| client.public_key().to_hex());
     crate::validate::validate_hex64(&owner)?;
     let path = format!("/git/{owner}/{id}/default-branch");
     let result = match update {
@@ -168,7 +168,8 @@ mod tests {
             });
             let app = Router::new().route(&path, route);
             let server = tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
-            let client = BuzzClient::new(url, keys, None, None).unwrap();
+            let client =
+                BuzzClient::new(url, crate::credentials::Credentials::from_keys(keys)).unwrap();
             let result = dispatch(
                 ReposDefaultBranchCmd::Get {
                     id: "demo".into(),
@@ -276,7 +277,8 @@ mod tests {
                 }),
             );
             let server = tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
-            let client = BuzzClient::new(url, keys, None, None).unwrap();
+            let client =
+                BuzzClient::new(url, crate::credentials::Credentials::from_keys(keys)).unwrap();
             let result = crate::commands::repos::dispatch(
                 crate::ReposCmd::DefaultBranch(ReposDefaultBranchCmd::Set {
                     id: "demo".into(),

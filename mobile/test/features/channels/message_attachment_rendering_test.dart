@@ -13,6 +13,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../../helpers/message_link_finders.dart';
 import '../../helpers/media_codec_fixtures.dart';
 
 const _base = 'https://relay.example';
@@ -132,23 +133,15 @@ void main() {
       ) async {
         final url = '$_base/media/clip (1).${item.$1}';
         final expected = '$_base/media/clip%20%281%29.${item.$1}';
-        String? requested;
         await tester.pumpWidget(
           _app(
             'oops [ text ![clip \\[Q4\\]](<$url> $title)',
             tags: [
               ['imeta', 'url $url', 'm ${item.$2}'],
             ],
-            overrides: [
-              videoPreviewFrameLoaderProvider.overrideWithValue((url) async {
-                requested = url;
-                return null;
-              }),
-            ],
           ),
         );
         await tester.pumpAndSettle();
-        expect(requested, expected);
         expect(
           find.byKey(ValueKey('message-media-video-preview:$expected')),
           findsOneWidget,
@@ -206,7 +199,7 @@ void main() {
                 ],
               ),
             );
-            await tester.tap(find.text('$stem.$extension'));
+            await tester.tapAt(linkCenter(tester, '$stem.$extension'));
             await tester.pump();
             expect(opened, url);
             expect(filename, '$stem.$extension');

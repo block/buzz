@@ -1,8 +1,7 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
-import 'package:nostr/nostr.dart' as nostr;
-import 'package:pointycastle/digests/sha256.dart';
+import 'package:buzz/shared/crypto/event_signing.dart';
+import 'package:crypto/crypto.dart' as crypto;
 import '../relay/nostr_models.dart';
 
 /// Verify the signed profile and all owner-attestation conditions against it.
@@ -13,7 +12,7 @@ String? verifiedProfileOaOwnerPubkey(NostrEvent event) {
       .toList();
   if (tags.length != 1 || tags.single.length != 4) return null;
   try {
-    nostr.Event.fromJson(jsonEncode(event.toJson()));
+    verifiedNostrEventFromJson(jsonEncode(event.toJson()));
   } catch (_) {
     return null;
   }
@@ -70,15 +69,12 @@ String? verifiedOaOwnerPubkey(List<List<String>> tags, String agentPubkey) {
     if (!_validConditions(conditions)) continue;
 
     final preimage = utf8.encode('nostr:agent-auth:$agent:$conditions');
-    final digest = SHA256Digest().process(Uint8List.fromList(preimage));
-    final message = digest
-        .map((b) => b.toRadixString(16).padLeft(2, '0'))
-        .join();
+    final message = crypto.sha256.convert(preimage).toString();
 
     try {
-      if (nostr.Schnorr.verify(
+      if (verifySchnorrHex(
         publicKey: owner,
-        message: message,
+        messageHex: message,
         signature: sig,
       )) {
         return owner;

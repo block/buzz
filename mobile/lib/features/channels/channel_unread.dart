@@ -4,24 +4,52 @@ import 'channels_provider.dart';
 import 'unread_badge/observed_unread_event.dart';
 
 /// Shared channel highlights, including reply and individual-message read marks.
+/// Every unread event highlights the channel, as Solo chats need.
 Set<String> computeUnreadChannelIds({
   required Iterable<Channel> channels,
   required ReadStateState readState,
   required ChannelsNotifier channelsNotifier,
+}) => _computeHighlights(
+  channels: channels,
+  readState: readState,
+  channelsNotifier: channelsNotifier,
+  separateAttention: false,
+).unread;
+
+/// Channel-list highlights, following the desktop sidebar (`buzz-app`'s
+/// `docs/unread.md`). Ordinary unread backlog bolds a channel ([unread]).
+/// Unread thread replies, mentions and broadcasts only add an attention dot
+/// ([attention]), so a channel the reader caught up on stays regular. An
+/// unread DM bolds and dots. Marking a channel unread bolds it without
+/// fabricating attention, but keeps any real attention's dot.
+({Set<String> unread, Set<String> attention}) computeChannelListHighlights({
+  required Iterable<Channel> channels,
+  required ReadStateState readState,
+  required ChannelsNotifier channelsNotifier,
+}) => _computeHighlights(
+  channels: channels,
+  readState: readState,
+  channelsNotifier: channelsNotifier,
+  separateAttention: true,
+);
+
+({Set<String> unread, Set<String> attention}) _computeHighlights({
+  required Iterable<Channel> channels,
+  required ReadStateState readState,
+  required ChannelsNotifier channelsNotifier,
+  required bool separateAttention,
 }) {
-  if (!readState.isReady) {
-    return const {};
-  }
+  final unread = <String>{};
+  final attention = <String>{};
+  if (!readState.isReady) return (unread: unread, attention: attention);
 
   final latestObservedByChannel = channelsNotifier.latestObservedByChannel;
   final observedEventsByChannel =
       channelsNotifier.observedUnreadEventsByChannel;
-  final ids = <String>{};
 
   for (final channel in channels) {
     if (readState.locallyForcedChannelIds.contains(channel.id)) {
-      ids.add(channel.id);
-      continue;
+      unread.add(channel.id);
     }
 
     final latestObserved = latestObservedByChannel[channel.id];
@@ -31,21 +59,22 @@ Set<String> computeUnreadChannelIds({
     if (channelReadAt != null && latestObserved <= channelReadAt) continue;
 
     final observedEvents = observedEventsByChannel[channel.id];
-    int? readAtForObservedEvent(ObservedUnreadEvent event) =>
-        observedUnreadEventReadAt(
-          event,
-          channel.id,
-          readState.effectiveTimestamp,
-        );
-
-    final unreadCount = countUnreadObservedEvents(
-      observedEvents,
-      readAtForObservedEvent,
-    );
-    if (unreadCount == 0) continue;
-
-    ids.add(channel.id);
+    if (observedEvents == null) continue;
+    for (final event in observedEvents.values) {
+      final readAt = observedUnreadEventReadAt(
+        event,
+        channel.id,
+        readState.effectiveTimestamp,
+      );
+      if (readAt != null && event.createdAt <= readAt) continue;
+      if (!separateAttention || channel.isDm || event.channelCatchUp) {
+        unread.add(channel.id);
+      }
+      if (separateAttention && (channel.isDm || !event.channelCatchUp)) {
+        attention.add(channel.id);
+      }
+    }
   }
 
-  return ids;
+  return (unread: unread, attention: attention);
 }

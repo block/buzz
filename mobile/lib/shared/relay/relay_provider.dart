@@ -1,3 +1,6 @@
+import 'package:buzz/shared/crypto/event_signing.dart';
+import 'package:buzz/shared/http/app_http_client.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -78,10 +81,21 @@ class Env {
   );
 
   /// Optional gateway origin. Without it this artifact has no push capability.
-  static const pushGatewayUrl = String.fromEnvironment('BUZZ_PUSH_GATEWAY_URL');
+  static String get pushGatewayUrl =>
+      debugPushGatewayUrlOverride ?? _compiledPushGatewayUrl;
+
+  static const _compiledPushGatewayUrl = String.fromEnvironment(
+    'BUZZ_PUSH_GATEWAY_URL',
+  );
+
+  /// Replaces the compiled gateway origin in tests, so a plain `flutter test`
+  /// covers both push-capable and push-less builds without a `--dart-define`.
+  /// `test/flutter_test_config.dart` sets it for every test file.
+  @visibleForTesting
+  static String? debugPushGatewayUrlOverride;
 
   /// Whether this artifact can offer push notification enrollment.
-  static const pushGatewayConfigured = pushGatewayUrl != '';
+  static bool get pushGatewayConfigured => pushGatewayUrl != '';
 }
 
 class RelayConfigNotifier extends Notifier<RelayConfig> {
@@ -118,7 +132,7 @@ String? pubkeyFromNsec(String? nsec) {
   try {
     final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
     if (privkeyHex.isEmpty) return null;
-    return nostr.Keys(privkeyHex).public;
+    return derivePublicKeyHex(privkeyHex);
   } catch (_) {
     return null;
   }
@@ -138,7 +152,9 @@ final relayClientProvider = Provider<RelayClient>((ref) {
   final config = ref.watch(relayConfigProvider);
   final client = RelayClient(
     baseUrl: config.baseUrl,
-    httpClient: ref.watch(hostedHttpClientFactoryProvider)(),
+    httpClient: ref.watch(hostedHttpClientFactoryProvider)(
+      traffic: HttpTraffic.media,
+    ),
   );
   ref.onDispose(client.dispose);
   return client;

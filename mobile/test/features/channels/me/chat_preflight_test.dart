@@ -1,4 +1,9 @@
+import 'package:buzz/features/channels/compose_bar.dart';
+import 'package:buzz/shared/mentions/agent_identity_provider.dart';
+import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
+import 'package:buzz/shared/me/default_agent.dart';
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/me/me_page.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
@@ -9,7 +14,6 @@ import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -23,6 +27,12 @@ class _Channels extends ChannelsNotifier {
 class _Relay extends RelaySessionNotifier {
   VoidCallback? beforeRead;
   int reads = 0;
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => [];
+
   @override
   Future<List<NostrEvent>> queryRelay(
     List<NostrFilter> filters, {
@@ -53,35 +63,35 @@ void main() {
         relay.beforeRead = () =>
             expectSync(MeChatCreation.pending(sync)?.name, 'Saved chat');
         late ProviderContainer container;
-        var forms = 0;
-        const bridge = MethodChannel('buzz/profile_text_editor');
-        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(bridge, (
-          call,
-        ) async {
-          forms++;
-          if (forms > 1) return null;
-          if (disconnect) {
-            sync.disposed = true;
-            sync = MeSync(relay, config, prefs: prefs, connected: false);
-            container.invalidate(meSyncProvider);
-          }
-          return {'name': 'Saved chat', 'assistant': 'agent'};
-        });
-        addTearDown(
-          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-            bridge,
-            null,
-          ),
-        );
         await tester.pumpWidget(
           ProviderScope(
             overrides: [
+              savedPrefsProvider.overrideWithValue(prefs),
+              agentDirectoryProvider.overrideWith((ref) async => []),
+              agentOwnersProvider.overrideWith((ref) async => {}),
+              customEmojiListProvider.overrideWithValue([]),
+              defaultAgentProvider.overrideWith((ref) => Stream.value('agent')),
               meSyncProvider.overrideWith((ref) => sync),
               meGroupsProvider.overrideWith(
                 (ref) => Stream.value(const MeGroups()),
               ),
-              meAssistantsProvider.overrideWith((ref) async => []),
+              meAssistantsProvider.overrideWith(
+                (ref) async => const [
+                  AgentDirectoryEntry(pubkey: 'agent', displayName: 'Agent'),
+                ],
+              ),
               channelsProvider.overrideWith(_Channels.new),
+              channelActionsProvider.overrideWith(
+                (ref) => ChannelActions(
+                  ref: ref,
+                  session: relay,
+                  signedEventRelay: SignedEventRelay(
+                    session: relay,
+                    nsec: config.nsec,
+                  ),
+                  currentPubkey: sync.pubkey,
+                ),
+              ),
             ],
             child: MaterialApp(theme: AppTheme.light(), home: const MePage()),
           ),
@@ -96,6 +106,19 @@ void main() {
             .firstWhere((a) => a.label == 'New chat')
             .onPressed!();
         await tester.pumpAndSettle();
+        if (disconnect) {
+          sync.disposed = true;
+          sync = MeSync(relay, config, prefs: prefs, connected: false);
+          container.invalidate(meSyncProvider);
+          await tester.pumpAndSettle();
+        }
+        await expectLater(
+          tester
+              .widget<ComposeBar>(find.byType(ComposeBar))
+              .onSend('Saved chat', const []),
+          throwsException,
+        );
+        await tester.pumpAndSettle();
         final saved = MeChatCreation.pending(
           MeSync(relay, config, prefs: prefs),
         );
@@ -106,6 +129,7 @@ void main() {
         );
         expect(saved!.name, 'Saved chat');
         expect(saved.agent, 'agent');
+        expect(saved.project, isNull);
         expect(
           prefs.getString(MeChatCreation.storageKey(sync)),
           isNot(contains('Saved chat')),

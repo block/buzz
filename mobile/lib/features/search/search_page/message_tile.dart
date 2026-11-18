@@ -126,7 +126,7 @@ class _MessageTile extends ConsumerWidget {
       ),
       onTap: () {
         onResultSelected();
-        _navigateToHit(context, ref, hit, channel);
+        unawaited(_navigateToHit(context, ref, hit, channel));
       },
     );
   }
@@ -170,7 +170,7 @@ class _MessageTile extends ConsumerWidget {
       agentMentionPubkeys: agentMentionPubkeys,
     );
 
-    return MessageContent(
+    return MessagePreview(
       key: ValueKey('search-message-body-${hit.eventId}'),
       content: hit.content,
       mentionNames: mentionNames,
@@ -184,28 +184,34 @@ class _MessageTile extends ConsumerWidget {
     );
   }
 
-  void _navigateToHit(
+  Future<void> _navigateToHit(
     BuildContext context,
     WidgetRef ref,
     SearchHit hit,
-    Channel? channel,
-  ) {
-    if (channel == null) return;
+    Channel? listedChannel,
+  ) async {
+    final channelId = hit.channelId;
+    final channel =
+        listedChannel ??
+        (channelId == null
+            ? null
+            : await resolveChannelToOpen(context, ref, channelId));
+    if (channel == null || !context.mounted) return;
 
     if (hit.kind == 45001) {
-      Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => ForumThreadPage(
-            channelId: channel.id,
-            postEventId: hit.eventId,
-            currentPubkey: currentPubkey,
-            isMember: channel.isMember,
-            isArchived: channel.isArchived,
-          ),
+      openConversationPane(
+        context,
+        hit.eventId,
+        (_) => ForumThreadPage(
+          channelId: channel.id,
+          postEventId: hit.eventId,
+          currentPubkey: currentPubkey,
+          isMember: channel.isMember,
+          isArchived: channel.isArchived,
         ),
       );
     } else {
-      _openSearchChannel(context, channel);
+      unawaited(_openSearchChannel(context, channel));
     }
   }
 }

@@ -322,14 +322,17 @@ pub async fn search_users(
         .collect())
 }
 
-/// Set the owner pubkey for an agent user.
-/// The owner pubkey must already exist in the users table (FK constraint).
-/// Returns an error if the agent pubkey is not found (rows_affected == 0).
-/// Atomically set agent owner — only if no owner is currently assigned.
+/// Atomically set an agent user's owner, only if no owner is assigned yet.
+///
+/// The owner must already exist in the same community's users table; it is
+/// checked (and locked `FOR KEY SHARE`) in the writing transaction.
 ///
 /// Returns Ok(true) if ownership was set, Ok(false) if an owner already exists
-/// (caller should check whether the existing owner matches). Returns Err if the
-/// agent pubkey doesn't exist in the users table.
+/// (caller should check whether the existing owner matches). Returns
+/// `DbError::NotFound` if the agent pubkey doesn't exist in the users table, or
+/// if the agent has no owner yet and `owner_pubkey` doesn't exist there. An
+/// agent that already has an owner returns `Ok(false)` without looking at
+/// `owner_pubkey`.
 pub async fn set_agent_owner(
     pool: &PgPool,
     community_id: CommunityId,
@@ -353,10 +356,66 @@ async fn set_agent_owner_with_operation(
     owner_pubkey: &[u8],
     operation: crate::observability::WriterOperation,
 ) -> Result<bool> {
+    let mut connection = crate::observability::acquire_writer(pool, operation).await?;
+    // Ownership is first-write-wins and is never cleared by supported writers.
+    // Already-linked agents are the common authorization path: avoid queuing
+    // those read-only calls behind a community's claim/restriction transaction.
+    let recorded: Option<Option<Vec<u8>>> = sqlx::query_scalar(
+        "SELECT agent_owner_pubkey FROM users WHERE community_id = $1 AND pubkey = $2",
+    )
+    .bind(community_id.as_uuid())
+    .bind(agent_pubkey)
+    .fetch_optional(&mut *connection)
+    .await?;
+    match recorded {
+        None => {
+            return Err(crate::error::DbError::NotFound(
+                "agent pubkey not found in users table".into(),
+            ))
+        }
+        Some(Some(_)) => return Ok(false),
+        Some(None) => {}
+    }
+    drop(connection);
     let mut tx = crate::begin_community_write_transaction(pool, community_id, operation).await?;
-    // Conditional UPDATE: only set owner if currently NULL. This makes
-    // "first mint wins" atomic — no TOCTOU race between concurrent mints.
-    let result = sqlx::query(
+    crate::relay_invite::lock_admission(tx.conn(), community_id).await?;
+    // Lock order: admission, then the agent row, then the owner row. The agent
+    // row is read `FOR NO KEY UPDATE` (the lock the UPDATE below takes), so the
+    // outcomes below are decided on a row nothing else can change, and the
+    // owner is checked before the UPDATE: with the owner foreign key still
+    // installed the UPDATE itself would fail on a missing owner with a foreign
+    // key error instead of the `NotFound` this function promises.
+    let locked: Option<Option<Vec<u8>>> = sqlx::query_scalar(
+        "SELECT agent_owner_pubkey FROM users \
+         WHERE community_id = $1 AND pubkey = $2 FOR NO KEY UPDATE",
+    )
+    .bind(community_id.as_uuid())
+    .bind(agent_pubkey)
+    .fetch_optional(tx.conn())
+    .await?;
+    match locked {
+        None => {
+            return Err(crate::error::DbError::NotFound(
+                "agent pubkey not found in users table".into(),
+            ))
+        }
+        // Owner already set: not an error, and the proposed owner is not examined.
+        Some(Some(_)) => {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        Some(None) => {}
+    }
+    crate::store::reference_check::require_user(
+        tx.conn(),
+        community_id,
+        owner_pubkey,
+        "agent owner user",
+    )
+    .await?;
+    // First mint wins: the locked read above saw no owner, and the lock keeps
+    // it that way until this transaction ends.
+    sqlx::query(
         r#"UPDATE users SET agent_owner_pubkey = $1 WHERE community_id = $2 AND pubkey = $3 AND agent_owner_pubkey IS NULL"#,
     )
     .bind(owner_pubkey)
@@ -364,24 +423,13 @@ async fn set_agent_owner_with_operation(
     .bind(agent_pubkey)
     .execute(tx.conn())
     .await?;
-
-    if result.rows_affected() == 0 {
-        // Could be: (a) pubkey not found, or (b) owner already set.
-        // Check which case by querying the row.
-        let exists = sqlx::query(r#"SELECT 1 FROM users WHERE community_id = $1 AND pubkey = $2"#)
-            .bind(community_id.as_uuid())
-            .bind(agent_pubkey)
-            .fetch_optional(tx.conn())
-            .await?;
-        if exists.is_none() {
-            return Err(crate::error::DbError::NotFound(
-                "agent pubkey not found in users table".into(),
-            ));
-        }
-        // Row exists but owner already set — return false (not an error).
-        tx.commit().await?;
-        return Ok(false);
-    }
+    crate::relay_invite::revoke_restricted_agent_invites(
+        tx.conn(),
+        community_id,
+        agent_pubkey,
+        owner_pubkey,
+    )
+    .await?;
     tx.commit().await?;
     Ok(true)
 }
@@ -413,6 +461,42 @@ pub async fn get_agent_channel_policy(
         Ok((policy, owner))
     })
     .transpose()
+}
+
+/// A user's `channel_add_policy`, and their `agent_owner_pubkey` if any.
+pub type AgentChannelPolicy = (String, Option<Vec<u8>>);
+
+/// [`get_agent_channel_policy`] for several pubkeys in one query. A pubkey
+/// missing from the map is not in the users table.
+pub async fn get_agent_channel_policies(
+    pool: &PgPool,
+    community_id: CommunityId,
+    pubkeys: &[Vec<u8>],
+) -> Result<std::collections::HashMap<Vec<u8>, AgentChannelPolicy>> {
+    if pubkeys.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::Authorization,
+    )
+    .await?;
+    let rows = sqlx::query(
+        r#"SELECT pubkey, channel_add_policy::text AS channel_add_policy, agent_owner_pubkey FROM users WHERE community_id = $1 AND pubkey = ANY($2)"#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(pubkeys)
+    .fetch_all(&mut *connection)
+    .await?;
+
+    rows.into_iter()
+        .map(|r| -> Result<(Vec<u8>, AgentChannelPolicy)> {
+            let pubkey: Vec<u8> = r.try_get("pubkey")?;
+            let policy: String = r.try_get("channel_add_policy")?;
+            let owner: Option<Vec<u8>> = r.try_get("agent_owner_pubkey").unwrap_or(None);
+            Ok((pubkey, (policy, owner)))
+        })
+        .collect()
 }
 
 /// List the agents whose `agent_owner_pubkey` is `owner_pubkey` in one community.
@@ -632,6 +716,16 @@ impl Db {
         pubkey: &[u8],
     ) -> Result<Option<(String, Option<Vec<u8>>)>> {
         crate::user::get_agent_channel_policy(&self.pool, community_id, pubkey).await
+    }
+
+    /// [`Db::get_agent_channel_policy`] for several pubkeys in one query.
+    #[datastore_span(name = "get_agent_channel_policies", system = "postgresql")]
+    pub async fn get_agent_channel_policies(
+        &self,
+        community_id: CommunityId,
+        pubkeys: &[Vec<u8>],
+    ) -> Result<std::collections::HashMap<Vec<u8>, AgentChannelPolicy>> {
+        crate::user::get_agent_channel_policies(&self.pool, community_id, pubkeys).await
     }
 
     /// List the agents owned by `owner_pubkey` in one community.

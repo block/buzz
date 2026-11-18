@@ -16,7 +16,7 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   for (final stallBody in [false, true]) {
     testWidgets(
-      'stalled ${stallBody ? "bodies" : "headers"} abort before queued photo loads',
+      'previews scrolled past abort their downloads while ${stallBody ? "bodies" : "headers"} stall',
       (tester) async {
         final client = (await tester.runAsync(() async => _TrackingClient()))!;
         final server = await tester.runAsync(
@@ -39,7 +39,8 @@ void main() {
               request.response.add([0]);
               unawaited(request.response.flush());
             }
-            // The first four never finish: only client-side abort can release them.
+            // The first four never finish and never time out within the
+            // test: only the carousel's cancellation can release them.
           });
         });
         final harness = await _mount(
@@ -50,7 +51,7 @@ void main() {
               url: '$base/$index',
               auth: auth,
               client: client,
-              requestTimeout: const Duration(seconds: 1),
+              stallTimeout: const Duration(minutes: 1),
             ),
           ),
         );
@@ -62,15 +63,18 @@ void main() {
             });
             await harness.send('cancelImage', '$index');
           }
-          await harness.send('subscribeImage', {'id': 'latest', 'index': 4});
-          expect(client.started, 4);
-          await harness.waitForFrames(1);
           await client.retired.future.timeout(const Duration(seconds: 5));
+          await harness.send('subscribeImage', {'id': 'latest', 'index': 4});
+          await harness.waitForFrames(1);
+          // Scrolling back starts a fresh download: an abandoned load is not
+          // a failure, so it leaves no cooldown behind.
+          await harness.send('subscribeImage', {'id': 'back', 'index': 0});
+          for (var i = 0; i < 100 && client.started < 6; i++) {
+            await Future<void>.delayed(const Duration(milliseconds: 10));
+          }
         });
-        expect(client.started, 5);
-        expect(client.peak, 4);
         expect(client.aborted, 4);
-        expect(client.active, 0);
+        expect(client.started, 6);
         expect(harness.frames, [
           {'id': 'latest', 'bytes': null},
         ]);
@@ -79,6 +83,50 @@ void main() {
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
     );
   }
+
+  testWidgets('closing the carousel aborts its pending downloads', (
+    tester,
+  ) async {
+    final client = (await tester.runAsync(() async => _TrackingClient()))!;
+    final server = await tester.runAsync(
+      () => HttpServer.bind(InternetAddress.loopbackIPv4, 0),
+    );
+    addTearDown(() async {
+      client.close();
+      await server!.close(force: true);
+      MediaImageProvider.debugResetCooldowns();
+    });
+    final base = 'http://127.0.0.1:${server!.port}';
+    final auth = MediaGetAuthService(baseUrl: base, nsec: null);
+    // Requests never get a response: only disposal can release them.
+    await tester.runAsync(() async => server.listen((_) {}));
+    final harness = await _mount(
+      tester,
+      List.generate(
+        4,
+        (index) => MediaImageProvider(
+          url: '$base/$index',
+          auth: auth,
+          client: client,
+          stallTimeout: const Duration(minutes: 1),
+        ),
+      ),
+    );
+    await tester.runAsync(() async {
+      for (var index = 0; index < 4; index++) {
+        await harness.send('subscribeImage', {'id': '$index', 'index': index});
+      }
+      for (var i = 0; i < 100 && client.started < 4; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+    });
+    expect(client.started, 4);
+    await tester.pumpWidget(const SizedBox());
+    await tester.runAsync(
+      () => client.retired.future.timeout(const Duration(seconds: 5)),
+    );
+    expect(client.aborted, 4);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   testWidgets('native callbacks and disposal release subscribed images', (
     tester,
@@ -145,37 +193,32 @@ void main() {
     expect(still.completer.listeners, isEmpty);
   }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
-  testWidgets(
-    'rapid reuse bounds unresolved loads and drops cancelled queued requests',
-    (tester) async {
-      final providers = List.generate(20, (_) => _TestImage());
-      final harness = await _mount(tester, providers);
-      for (var index = 0; index < 20; index++) {
-        await harness.send('subscribeImage', {'id': '$index', 'index': index});
-        if (index < 19) await harness.send('cancelImage', '$index');
-      }
-      expect(providers.where((p) => p.resolutions > 0), hasLength(4));
-      expect(
-        providers.skip(4).take(15).every((p) => p.completer.listeners.isEmpty),
-        isTrue,
-      );
-      // Retired pending providers retain a bounded completion observer because
-      // transport termination must precede releasing that slot.
-      final image = await tester.runAsync(() => _frame(Colors.red));
-      providers[0].completer.emit(image!);
-      await tester.pump();
-      expect(providers[0].completer.listeners, isEmpty);
-      expect(providers[19].resolutions, 1);
-      expect(
-        harness.frames,
-        isEmpty,
-        reason: 'Cancelled loads must never reach UIKit',
-      );
-      await tester.pumpWidget(const SizedBox());
-      expect(providers.every((p) => p.completer.listeners.isEmpty), isTrue);
-    },
-    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
-  );
+  testWidgets('rapid reuse releases cancelled loads at once', (tester) async {
+    final providers = List.generate(20, (_) => _TestImage());
+    final harness = await _mount(tester, providers);
+    for (var index = 0; index < 20; index++) {
+      await harness.send('subscribeImage', {'id': '$index', 'index': index});
+      if (index < 19) await harness.send('cancelImage', '$index');
+    }
+    // A cancelled load stops listening, which lets MediaImageProvider abort
+    // its download, so it never holds a slot the visible cell needs.
+    expect(providers.every((p) => p.resolutions == 1), isTrue);
+    expect(
+      providers.take(19).every((p) => p.completer.listeners.isEmpty),
+      isTrue,
+    );
+    expect(providers[19].completer.listeners, hasLength(1));
+    final image = await tester.runAsync(() => _frame(Colors.red));
+    providers[0].completer.emit(image!);
+    await tester.pump();
+    expect(
+      harness.frames,
+      isEmpty,
+      reason: 'Cancelled loads must never reach UIKit',
+    );
+    await tester.pumpWidget(const SizedBox());
+    expect(providers.every((p) => p.completer.listeners.isEmpty), isTrue);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 }
 
 Future<ui.Image> _frame(Color color) async {

@@ -16,6 +16,12 @@ class MessageAuthorMeta extends StatelessWidget {
   /// Whether metadata includes the timestamp alongside the author.
   final bool showTimestamp;
 
+  /// Whether the name and username are visible.
+  final bool showIdentity;
+
+  /// Space before the timestamp when the author is visible.
+  final double timestampGap;
+
   /// Color applied to [displayName].
   final Color nameColor;
 
@@ -60,6 +66,8 @@ class MessageAuthorMeta extends StatelessWidget {
     this.alignment = MainAxisAlignment.start,
     this.reversed = false,
     this.showTimestamp = true,
+    this.showIdentity = true,
+    this.timestampGap = Grid.xxs,
     this.onAuthorTap,
     this.displayNameKey,
     this.usernameKey,
@@ -100,8 +108,8 @@ class MessageAuthorMeta extends StatelessWidget {
             : double.infinity;
 
         final children = <Widget>[
-          Flexible(child: authorName),
-          if (showUsername) ...[
+          if (showIdentity) Flexible(child: authorName),
+          if (showIdentity && showUsername) ...[
             const SizedBox(width: Grid.half),
             ConstrainedBox(
               constraints: BoxConstraints(maxWidth: metadataMaxWidth),
@@ -115,7 +123,7 @@ class MessageAuthorMeta extends StatelessWidget {
             ),
           ],
           if (showTimestamp) ...[
-            const SizedBox(width: Grid.xxs),
+            if (showIdentity) SizedBox(width: timestampGap),
             ConstrainedBox(
               constraints: BoxConstraints(maxWidth: metadataMaxWidth),
               child: Text(
@@ -128,10 +136,13 @@ class MessageAuthorMeta extends StatelessWidget {
             ),
           ],
         ];
-        return Row(
-          mainAxisAlignment: alignment,
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: reversed ? children.reversed.toList() : children,
+        return Semantics(
+          label: showIdentity ? null : displayName,
+          child: Row(
+            mainAxisAlignment: alignment,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: reversed ? children.reversed.toList() : children,
+          ),
         );
       },
     );

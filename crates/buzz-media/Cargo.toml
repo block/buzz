@@ -25,6 +25,7 @@ s3 = { version = "0.37", package = "rust-s3", default-features = false, features
 infer = "0.19"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 blurhash = "0.2"
+webp = { version = "0.3", default-features = false }
 imagesize = "0.14"
 bytes = "1"
 mp4 = "0.14"

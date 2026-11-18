@@ -133,7 +133,7 @@ void _filterFeedbackTests(
     expect(find.text('forced'), findsOneWidget);
     expect(
       tester.widget<Text>(find.text('forced')).style?.fontWeight,
-      FontWeight.w700,
+      FontWeight.w600,
     );
     await tester.pumpAndSettle();
     expect(find.text('history'), findsNothing);

@@ -11,6 +11,7 @@ CREATE TABLE channel_members (
     removed_at  TIMESTAMPTZ,
     removed_by  BYTEA,
     hidden_at   TIMESTAMPTZ,
+    sync_modified_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (community_id, channel_id, pubkey),
     FOREIGN KEY (community_id, channel_id)
         REFERENCES channels (community_id, id) ON DELETE CASCADE
@@ -18,3 +19,4 @@ CREATE TABLE channel_members (
 
 CREATE INDEX idx_channel_members_pubkey ON channel_members (community_id, pubkey)
     WHERE removed_at IS NULL;
+CREATE INDEX channel_members_sync ON channel_members (community_id, pubkey, sync_modified_at, channel_id);

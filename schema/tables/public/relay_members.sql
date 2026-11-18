@@ -7,6 +7,7 @@ CREATE TABLE relay_members (
     pubkey      TEXT NOT NULL,
     role        TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
     added_by    TEXT,
+    auto_join_pending UUID,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (community_id, pubkey)

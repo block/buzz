@@ -245,15 +245,22 @@ class _SectionViewSheet extends HookConsumerWidget {
                         if (custom) ...[
                           const Divider(),
                           for (final action in {
-                            'rename': 'Rename section',
-                            'move_up': 'Move up',
-                            'move_down': 'Move down',
-                            'delete': 'Delete section',
+                            'rename': ('Rename section', BuzzIcons.pencil),
+                            'move_up': ('Move up', BuzzIcons.arrowUp),
+                            'move_down': ('Move down', BuzzIcons.arrowDown),
+                            'delete': ('Delete section', BuzzIcons.trash2),
                           }.entries)
                             ListTile(
                               contentPadding: EdgeInsets.zero,
+                              leading: Icon(
+                                action.value.$2,
+                                size: 16,
+                                color: action.key == 'delete'
+                                    ? context.colors.error
+                                    : null,
+                              ),
                               title: Text(
-                                action.value,
+                                action.value.$1,
                                 style: action.key == 'delete'
                                     ? TextStyle(color: context.colors.error)
                                     : null,

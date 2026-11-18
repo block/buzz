@@ -4,10 +4,14 @@ import 'package:http/http.dart' as http;
 
 /// One deadline covers headers and the bounded body. Abort only this request,
 /// leaving the shared client usable for sign-out and subsequent attempts.
+/// [onHeaders] sees the response as soon as its headers arrive, before the
+/// body is read, even if reading the body then fails.
 Future<http.Response> boundedHttpResponse(
   http.Client client,
-  http.Request source,
-) async {
+  http.Request source, {
+  int maxBytes = 65536,
+  void Function(http.BaseResponse headers)? onHeaders,
+}) async {
   final abort = Completer<void>();
   final request =
       http.AbortableRequest(
@@ -21,6 +25,7 @@ Future<http.Response> boundedHttpResponse(
   StreamIterator<List<int>>? body;
   Future<http.Response> read() async {
     final response = await client.send(request);
+    onHeaders?.call(response);
     final iterator = body = StreamIterator(response.stream);
     if (abort.isCompleted) {
       await iterator.cancel();
@@ -28,7 +33,7 @@ Future<http.Response> boundedHttpResponse(
     }
     final bytes = <int>[];
     while (await iterator.moveNext()) {
-      if (bytes.length + iterator.current.length > 65536) {
+      if (bytes.length + iterator.current.length > maxBytes) {
         throw const FormatException('Response too large');
       }
       bytes.addAll(iterator.current);

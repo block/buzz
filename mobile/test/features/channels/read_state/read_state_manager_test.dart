@@ -8,7 +8,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/read_state/read_state_manager.dart';
 import 'package:buzz/shared/read_state/read_state_storage.dart';
-import 'package:buzz/shared/read_state/read_state_time.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 const _relayUrl = 'https://relay.example';
@@ -33,6 +32,7 @@ void main() {
       signedEventRelay: relay,
       remoteEnabled: true,
       onChanged: () {},
+      now: () => 2000,
     );
 
     manager.markContextRead('channel-1', 42);
@@ -69,6 +69,7 @@ void main() {
       signedEventRelay: relay,
       remoteEnabled: true,
       onChanged: () {},
+      now: () => 2000,
     );
 
     manager.markContextRead('channel-1', 42);
@@ -102,6 +103,7 @@ void main() {
         signedEventRelay: relay,
         remoteEnabled: true,
         onChanged: () {},
+        now: () => 2000,
       );
 
       manager.markContextRead('channel-1', 42);
@@ -115,7 +117,7 @@ void main() {
     },
   );
 
-  test('caps a large slot instead of disabling sync', () async {
+  test('overflows a large frontier set instead of evicting', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
     final keychain = nostr.Keys.generate();
@@ -133,34 +135,41 @@ void main() {
       signedEventRelay: relay,
       remoteEnabled: true,
       onChanged: () {},
+      now: () => 2000,
     );
 
     // About 100 KiB of message marks, more than NIP-44 can encrypt.
     for (var index = 0; index < 1400; index++) {
       manager.markContextRead(
-        'msg:${index.toString().padLeft(64, '0')}',
+        'thread:${index.toString().padLeft(64, '0')}',
         index + 1,
       );
     }
     manager.markContextRead('channel-1', 5);
     await manager.flush();
 
-    manager.markContextRead('msg:new', 2000);
+    manager.markContextRead('thread:new', 2000);
     await manager.flush();
 
-    expect(relay.submitCount, 2);
-    final plaintext = crypto.decrypt(relay.contents.last);
-    expect(utf8.encode(plaintext).length, lessThan(readStatePlaintextBytes));
-    final published = decodeReadStateBlob(plaintext)!.contexts;
-    // Broad marks come first, then the newest message marks.
+    expect(relay.submitCount, greaterThan(2));
+    final published = mergeReadStateContexts([
+      for (final content in relay.contents)
+        decodeReadStateBlob(crypto.decrypt(content))!.contexts,
+    ]);
+    for (final content in relay.contents) {
+      expect(
+        utf8.encode(crypto.decrypt(content)).length,
+        lessThanOrEqualTo(readStatePlaintextBytes),
+      );
+    }
     expect(published['channel-1'], 5);
-    expect(published['msg:new'], 2000);
-    expect(published, isNot(contains('msg:${'0' * 64}')));
-    // Marks left out of the slot stay in local state.
-    expect(manager.getEffectiveTimestamp('msg:${'0' * 64}'), 1);
+    expect(published['thread:new'], 2000);
+    expect(published['thread:${'0' * 64}'], 1);
+    expect(published.length, 1402);
+    manager.dispose(flushPending: false);
   });
 
-  test('republishes merged broad marks but not message marks', () async {
+  test('publishes locally advanced values, not merged peer maxima', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
     final keychain = nostr.Keys.generate();
@@ -179,6 +188,7 @@ void main() {
       signedEventRelay: relay,
       remoteEnabled: true,
       onChanged: () {},
+      now: () => 2000,
     );
     session.historyEvents = [
       _readStateEvent(
@@ -192,7 +202,7 @@ void main() {
     ];
 
     await manager.initialize();
-    manager.markContextRead('msg:mine', 130);
+    manager.markContextRead('channel-1', 10);
     await manager.flush();
 
     // The web app may prune `msg:a` once `activity:` reads it, so this
@@ -201,16 +211,115 @@ void main() {
     final published = decodeReadStateBlob(
       crypto.decrypt(relay.contents.last),
     )!.contexts;
-    expect(published, {
-      'channel-1': 100,
-      'activity:channel-1': 120,
-      'msg:mine': 130,
-    });
+    expect(published, {'channel-1': 10});
   });
 
+  for (final ownSlot in [false, true]) {
+    test(
+      'unknown version blocks publication only for own slot: $ownSlot',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        final keychain = nostr.Keys.generate();
+        final crypto = ReadStateCrypto.tryCreate(
+          nsec: keychain.nsec,
+          pubkey: keychain.public,
+        )!;
+        final slot = ReadStateStorage(
+          prefs,
+        ).getOrCreateSlotId(keychain.public, _relayUrl);
+        final session = _FakeRelaySession()
+          ..historyEvents = [
+            _readStateEvent(
+              pubkey: keychain.public,
+              crypto: crypto,
+              clientId: 'future-client',
+              slotId: ownSlot ? slot : 'f' * 32,
+              contexts: {'channel-1': 100},
+              createdAt: 100,
+              version: 2,
+            ),
+          ];
+        final relay = _FakeSignedEventRelay();
+        final manager = ReadStateManager(
+          pubkey: keychain.public,
+          relayUrl: _relayUrl,
+          prefs: prefs,
+          crypto: crypto,
+          relaySession: session,
+          signedEventRelay: relay,
+          remoteEnabled: true,
+          onChanged: () {},
+          now: () => 2000,
+        );
+        manager.markContextRead('channel-1', 10);
+        await manager.flush();
+        expect(manager.getEffectiveTimestamp('channel-1'), 10);
+        expect(relay.contents, ownSlot ? isEmpty : hasLength(1));
+        expect(manager.syncError, ownSlot ? isStateError : isNull);
+        if (!ownSlot) {
+          expect(
+            decodeReadStateBlob(
+              crypto.decrypt(relay.contents.single),
+            )!.contexts,
+            {'channel-1': 10},
+          );
+        }
+        manager.dispose(flushPending: false);
+      },
+    );
+  }
+
+  test(
+    'upgrade carries legacy publishable frontiers into the journal',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      ReadStateStorage(prefs).write(
+        keychain.public,
+        _relayUrl,
+        {'channel-1': 10, 'thread:root': 20, 'msg:a': 30, 'seeded': 40},
+        {'channel-1', 'thread:root', 'msg:a'},
+        {},
+      );
+      final relay = _FakeSignedEventRelay();
+      ReadStateManager create() => ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: null,
+        signedEventRelay: relay,
+        remoteEnabled: true,
+        onChanged: () {},
+        now: () => 2000,
+      );
+      final manager = create();
+      await manager.flush();
+      expect(
+        decodeReadStateBlob(crypto.decrypt(relay.contents.single))!.contexts,
+        {'channel-1': 10, 'thread:root': 20},
+      );
+      manager.dispose(flushPending: false);
+      final restarted = create();
+      expect(restarted.getEffectiveTimestamp('msg:a'), 30);
+      expect(restarted.getEffectiveTimestamp('seeded'), 40);
+      restarted.markContextRead('new-channel', 50);
+      await restarted.flush();
+      expect(
+        decodeReadStateBlob(crypto.decrypt(relay.contents.last))!.contexts,
+        {'channel-1': 10, 'thread:root': 20, 'new-channel': 50},
+      );
+      restarted.dispose(flushPending: false);
+    },
+  );
+
   test('publishes again when a debounce fires during a publish', () async {
-    SharedPreferences.setMockInitialValues({});
-    final prefs = await SharedPreferences.getInstance();
     final keychain = nostr.Keys.generate();
     final crypto = ReadStateCrypto.tryCreate(
       nsec: keychain.nsec,
@@ -218,6 +327,8 @@ void main() {
     )!;
 
     for (final failFirst in [false, true]) {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
       fakeAsync((async) {
         final relay = _ParkedSignedEventRelay(failFirst: failFirst);
         final manager = ReadStateManager(
@@ -229,6 +340,7 @@ void main() {
           signedEventRelay: relay,
           remoteEnabled: true,
           onChanged: () {},
+          now: () => 2000,
         );
 
         manager.markContextRead('a-$failFirst', 10);
@@ -254,7 +366,7 @@ void main() {
     }
   });
 
-  test('bounds saved marks across a restart', () async {
+  test('a publish with nothing new skips the snapshot', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
     final keychain = nostr.Keys.generate();
@@ -262,48 +374,131 @@ void main() {
       nsec: keychain.nsec,
       pubkey: keychain.public,
     )!;
-    ReadStateManager create() => ReadStateManager(
+    final relay = _FakeRelaySession();
+    final signer = _FakeSignedEventRelay();
+    final manager = ReadStateManager(
       pubkey: keychain.public,
       relayUrl: _relayUrl,
       prefs: prefs,
       crypto: crypto,
-      relaySession: null,
-      signedEventRelay: null,
-      remoteEnabled: false,
+      relaySession: relay,
+      signedEventRelay: signer,
+      remoteEnabled: true,
       onChanged: () {},
+      now: () => 2000,
     );
 
-    final now = currentUnixSeconds();
-    final first = create();
-    first.markContextRead('channel-1', now - 2 * readStateHorizonSeconds);
-    first.markContextRead('msg:stale', now - 2 * readStateHorizonSeconds);
-    for (var index = 0; index < localMaxPrunableContexts + 200; index++) {
-      first.markContextRead('msg:$index', now - 1000 + index % 900);
-    }
-    // This session still reads every mark.
-    expect(first.getEffectiveTimestamp('msg:stale'), isNotNull);
-    first.dispose();
+    manager.markContextRead('a', 10);
+    await manager.flush();
+    expect(relay.fetchCount, 1);
+    expect(signer.submitCount, 1);
 
-    final stored = ReadStateStorage(prefs).read(keychain.public, _relayUrl);
-    final messages = stored.contexts.keys.where((k) => k.startsWith('msg:'));
-    expect(messages.length, localMaxPrunableContexts);
-    expect(stored.contexts, isNot(contains('msg:stale')));
-    expect(stored.contexts['channel-1'], now - 2 * readStateHorizonSeconds);
-    // All three saved structures hold the same marks.
-    expect(stored.publishableContextIds, stored.contexts.keys.toSet());
-    expect(stored.sourceCreatedAt.keys.toSet(), stored.contexts.keys.toSet());
+    // Each resume schedules a publish after its re-sync. With nothing
+    // unpublished it must not download the whole read state again.
+    await manager.flush();
+    expect(relay.fetchCount, 1);
+    expect(signer.submitCount, 1);
 
-    final restarted = create();
-    expect(restarted.getEffectiveTimestamp('msg:stale'), isNull);
-    expect(
-      restarted.getEffectiveTimestamp('channel-1'),
-      now - 2 * readStateHorizonSeconds,
-    );
-    expect(
-      restarted.effectiveContexts.keys.where((k) => k.startsWith('msg:')),
-      hasLength(localMaxPrunableContexts),
-    );
+    manager.markContextRead('b', 20);
+    await manager.flush();
+    expect(relay.fetchCount, 2);
+    expect(signer.submitCount, 2);
+    final blob = decodeReadStateBlob(crypto.decrypt(signer.contents.last))!;
+    expect(blob.contexts, {'a': 10, 'b': 20});
+
+    manager.dispose(flushPending: false);
   });
+
+  test(
+    'a publish after a failed snapshot retries it, then skips again',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final relay = _FakeRelaySession()..failNextFetch = true;
+      var notifications = 0;
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () => notifications++,
+      );
+
+      await manager.initialize();
+      expect(manager.syncError, isNotNull);
+      expect(relay.fetchCount, 1);
+      relay.historyEvents = [
+        _readStateEvent(
+          pubkey: keychain.public,
+          crypto: crypto,
+          clientId: 'desktop',
+          slotId: 'desktop-slot',
+          contexts: {'channel-1': 100},
+          createdAt: 100,
+        ),
+      ];
+      final notified = notifications;
+      // Nothing to send, but the last snapshot failed, so the publish runs
+      // in full and its own snapshot is the retry. Readers hear about the
+      // marks it brought in, since nothing is published to echo them.
+      await manager.flush();
+      expect(manager.syncError, isNull);
+      expect(relay.fetchCount, 2);
+      expect(manager.getEffectiveTimestamp('channel-1'), 100);
+      expect(notifications, greaterThan(notified));
+
+      // In sync after a good snapshot: the next publish skips its snapshot.
+      await manager.flush();
+      expect(manager.syncError, isNull);
+      expect(relay.fetchCount, 2);
+
+      manager.dispose(flushPending: false);
+    },
+  );
+
+  test(
+    'retains recent frontiers without a count eviction across restart',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keys = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keys.nsec,
+        pubkey: keys.public,
+      )!;
+      const now = 1800000000;
+      ReadStateManager create() => ReadStateManager(
+        pubkey: keys.public,
+        relayUrl: 'https://relay.example',
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: null,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+        now: () => now,
+      );
+      final first = create();
+      first.markContextRead('old', now - readStateHorizonSeconds - 1);
+      for (var i = 0; i < 1200; i++) {
+        first.markContextRead('thread:$i', now - 10);
+      }
+      await first.flush();
+      first.dispose(flushPending: false);
+      final restarted = create();
+      expect(restarted.getEffectiveTimestamp('old'), isNull);
+      expect(restarted.effectiveContexts.length, 1200);
+      restarted.dispose(flushPending: false);
+    },
+  );
 
   test('each community keeps its own slot, seeded from the shared one, '
       'and none takes the shared marks', () async {
@@ -391,13 +586,16 @@ void main() {
       signedEventRelay: relay,
       remoteEnabled: true,
       onChanged: () {},
+      now: () => 2000,
     );
 
     await manager.initialize();
-    // About 100 KiB of message marks, so retention must leave some out.
+    // Local message feedback never schedules wire writes. A frontier advance
+    // triggers publication and must preserve complete own override groups.
     for (var index = 0; index < 1400; index++) {
       manager.markContextRead('msg:${index.toString().padLeft(64, '0')}', 200);
     }
+    manager.markContextRead('channel-3', 200);
     await manager.flush();
 
     final published = decodeReadStateBlob(
@@ -425,6 +623,7 @@ void main() {
       signedEventRelay: restartedRelay,
       remoteEnabled: true,
       onChanged: () {},
+      now: () => 2000,
     );
     restarted.markContextRead('channel-3', 300);
     await restarted.flush();
@@ -487,6 +686,7 @@ void main() {
       signedEventRelay: relay,
       remoteEnabled: true,
       onChanged: () {},
+      now: () => 2000,
     );
 
     await manager.initialize();
@@ -547,6 +747,7 @@ void main() {
       signedEventRelay: relay,
       remoteEnabled: true,
       onChanged: () {},
+      now: () => 2000,
     );
 
     await manager.initialize();
@@ -556,6 +757,648 @@ void main() {
     expect(relay.submitCount, 0);
     expect(manager.getEffectiveTimestamp('channel-1'), 300);
   });
+
+  test(
+    'partial publication survives restart and retries exact signed bytes',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keys = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keys.nsec,
+        pubkey: keys.public,
+      )!;
+      final session = _JournalRelaySession();
+      ReadStateManager create() => ReadStateManager(
+        pubkey: keys.public,
+        relayUrl: 'https://relay.example',
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: session,
+        signedEventRelay: SignedEventRelay(session: session, nsec: keys.nsec),
+        remoteEnabled: true,
+        onChanged: () {},
+        now: () => 1800000000,
+      );
+      final manager = create();
+      for (var i = 0; i < 1100; i++) {
+        manager.markContextRead(
+          'thread:${i.toRadixString(16).padLeft(64, '0')}',
+          1799999900,
+        );
+      }
+      await manager.flush();
+      expect(manager.syncError, isNotNull);
+      expect(session.attempts, hasLength(2));
+      final unknown = session.attempts.last;
+      final saved = ReadStateStorage(prefs).readJournal(
+        '${keys.public}:${Uri.encodeComponent('https://relay.example')}',
+      )!;
+      expect((saved['pending'] as Map).length, 1);
+      expect((saved['local'] as Map).length, 1100);
+      manager.dispose(flushPending: false);
+
+      session.failSecond = false;
+      final restarted = create();
+      await restarted.flush();
+      expect(restarted.syncError, isNull);
+      expect(session.attempts[2].toJson(), unknown.toJson());
+      expect(
+        (ReadStateStorage(prefs).readJournal(
+              '${keys.public}:${Uri.encodeComponent('https://relay.example')}',
+            )!['pending']
+            as Map),
+        isEmpty,
+      );
+      final published = mergeReadStateContexts([
+        for (final event in session.retained.values)
+          decodeReadStateBlob(crypto.decrypt(event.content))!.contexts,
+      ]);
+      expect(published.length, 1100);
+      final before = session.attempts.length;
+      await restarted.flush();
+      expect(session.attempts.length, before);
+      restarted.dispose(flushPending: false);
+    },
+  );
+
+  test('message feedback survives restart but is never published', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keys = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keys.nsec,
+      pubkey: keys.public,
+    )!;
+    final relay = _FakeSignedEventRelay();
+    ReadStateManager create() => ReadStateManager(
+      pubkey: keys.public,
+      relayUrl: 'https://relay.example',
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: null,
+      signedEventRelay: relay,
+      remoteEnabled: true,
+      onChanged: () {},
+      now: () => 2000,
+    );
+    final manager = create();
+    manager.markContextRead('msg:one', 100);
+    manager.markContextRead('room', 90);
+    await manager.flush();
+    manager.dispose(flushPending: false);
+    final restarted = create();
+    expect(restarted.getEffectiveTimestamp('msg:one'), 100);
+    for (final content in relay.contents) {
+      expect(decodeReadStateBlob(crypto.decrypt(content))!.contexts, {
+        'room': 90,
+      });
+    }
+    restarted.dispose(flushPending: false);
+  });
+
+  test('signing waits for durable journal callback before sending', () async {
+    final keys = nostr.Keys.generate();
+    final session = _JournalRelaySession()..failSecond = false;
+    final gate = Completer<void>();
+    final relay = SignedEventRelay(session: session, nsec: keys.nsec);
+    final send = relay.submit(
+      kind: EventKind.readState,
+      content: 'test',
+      tags: const [],
+      onSigned: (_) => gate.future,
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(session.attempts, isEmpty);
+    gate.completeError(StateError('disk failed'));
+    await expectLater(send, throwsStateError);
+    expect(session.attempts, isEmpty);
+  });
+
+  test('pending journal is scoped to its relay origin', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keys = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keys.nsec,
+      pubkey: keys.public,
+    )!;
+    ReadStateManager create(String origin) => ReadStateManager(
+      pubkey: keys.public,
+      relayUrl: origin,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: null,
+      signedEventRelay: _FakeSignedEventRelay(),
+      remoteEnabled: true,
+      onChanged: () {},
+      now: () => 2000,
+    );
+    final first = create('https://first.example');
+    first.markContextRead('first-only', 100);
+    await first.flush();
+    first.dispose(flushPending: false);
+    final second = create('https://second.example');
+    expect(second.getEffectiveTimestamp('first-only'), isNull);
+    second.dispose(flushPending: false);
+  });
+
+  test('readies during a held snapshot read share one more read', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    final relay = _FakeRelaySession();
+    final manager = ReadStateManager(
+      pubkey: keychain.public,
+      relayUrl: _relayUrl,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: relay,
+      signedEventRelay: _FakeSignedEventRelay(),
+      remoteEnabled: true,
+      onChanged: () {},
+    );
+    await manager.initialize();
+
+    // A ready starts a read and holds it; three more readies arrive.
+    final gate = Completer<void>();
+    relay.fetchGate = gate.future;
+    relay.statusListeners.last(RelaySubscriptionStatus.ready);
+    await Future<void>.delayed(Duration.zero);
+    for (var i = 0; i < 3; i++) {
+      relay.statusListeners.last(RelaySubscriptionStatus.ready);
+    }
+    relay.fetchGate = null;
+    gate.complete();
+    await pumpEventQueue();
+
+    // The initial read, the held read, and one shared read after it.
+    expect(relay.fetchCount, 3);
+    expect(relay.subscribeCount, 1);
+    expect(relay.liveSubscriptions, 1);
+
+    manager.dispose();
+    expect(relay.liveSubscriptions, 0);
+  });
+
+  test(
+    'live subscription replays nothing and opens before the snapshot',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final relay = _FakeRelaySession();
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+
+      await manager.initialize();
+
+      // The snapshot is the only read of stored blobs. A stored replay on the
+      // live subscription re-downloaded every slot (megabytes) on each resume.
+      expect(relay.subscribeFilters.single.limit, 0);
+      // Opened before its snapshot, so the snapshot covers the gap.
+      expect(relay.fetchCountAtSubscribe, [0]);
+      expect(relay.fetchCount, 1);
+
+      manager.dispose();
+    },
+  );
+
+  test(
+    'a mark published while the live subscription retries is read once it recovers',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final relay = _FakeRelaySession();
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+      await manager.initialize();
+      expect(relay.fetchCount, 1);
+
+      // The relay closes the REQ for a transient reason and the session
+      // reopens it on the same socket. Meanwhile another device marks a
+      // channel read; the reopened REQ (limit 0) never replays that mark.
+      relay.statusListeners.last(RelaySubscriptionStatus.retrying);
+      relay.historyEvents = [
+        _readStateEvent(
+          pubkey: keychain.public,
+          crypto: crypto,
+          clientId: 'desktop',
+          slotId: 'desktop-slot',
+          contexts: {'channel-1': 100},
+          createdAt: 100,
+        ),
+      ];
+      expect(manager.getEffectiveTimestamp('channel-1'), isNot(100));
+      relay.statusListeners.last(RelaySubscriptionStatus.ready);
+      await pumpEventQueue();
+
+      expect(relay.fetchCount, 2);
+      expect(manager.getEffectiveTimestamp('channel-1'), 100);
+
+      manager.dispose();
+    },
+  );
+
+  test(
+    'a mark published before a slow cold-start REQ goes live is read then',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      final relay = _FakeRelaySession();
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+      // Slow AUTH: subscribe returns on its fallback before the REQ is
+      // registered, so the snapshot reads old state.
+      await manager.initialize();
+      expect(relay.fetchCount, 1);
+
+      // Another device marks a channel read, then the REQ goes live. With
+      // limit 0 it replays nothing.
+      relay.historyEvents = [
+        _readStateEvent(
+          pubkey: keychain.public,
+          crypto: crypto,
+          clientId: 'desktop',
+          slotId: 'desktop-slot',
+          contexts: {'channel-1': 100},
+          createdAt: 100,
+        ),
+      ];
+      relay.statusListeners.last(RelaySubscriptionStatus.ready);
+      await pumpEventQueue();
+
+      expect(relay.fetchCount, 2);
+      expect(manager.getEffectiveTimestamp('channel-1'), 100);
+
+      manager.dispose();
+    },
+  );
+
+  test('a failed late-ready read is retried by the next publish', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    fakeAsync((async) {
+      final relay = _FakeRelaySession();
+      final manager = ReadStateManager(
+        pubkey: keychain.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: relay,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () {},
+      );
+      manager.initialize();
+      async.flushMicrotasks();
+      expect(relay.fetchCount, 1);
+
+      // The REQ goes live late and its catch-up read fails.
+      relay.historyEvents = [
+        _readStateEvent(
+          pubkey: keychain.public,
+          crypto: crypto,
+          clientId: 'desktop',
+          slotId: 'desktop-slot',
+          contexts: {'channel-1': 100},
+          createdAt: 100,
+        ),
+      ];
+      relay.failNextFetch = true;
+      relay.statusListeners.last(RelaySubscriptionStatus.ready);
+      async.flushMicrotasks();
+      expect(relay.fetchCount, 2);
+      expect(manager.getEffectiveTimestamp('channel-1'), isNot(100));
+
+      async.elapse(const Duration(seconds: 5));
+      expect(relay.fetchCount, 3);
+      expect(manager.getEffectiveTimestamp('channel-1'), 100);
+      manager.dispose(flushPending: false);
+    });
+  });
+
+  test('a reconnect while the first snapshot downloads is not swallowed by the '
+      'cold-start connect', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    final subscribed = Completer<void>();
+    final fetched = Completer<void>();
+    final relay = _FakeRelaySession()
+      ..readyOnSubscribe = true
+      ..subscribeGate = subscribed.future
+      ..fetchGate = fetched.future;
+    final manager = ReadStateManager(
+      pubkey: keychain.public,
+      relayUrl: _relayUrl,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: relay,
+      signedEventRelay: _FakeSignedEventRelay(),
+      remoteEnabled: true,
+      onChanged: () {},
+    );
+
+    // The cold-start connect lands while the REQ waits for the socket.
+    final initializing = manager.initialize();
+    final coldStart = manager.reinitializeRemote();
+    // The REQ goes live and the first snapshot starts downloading.
+    relay.subscribeGate = null;
+    subscribed.complete();
+    await pumpEventQueue();
+    final fetchesBefore = relay.fetchCount;
+    expect(fetchesBefore, greaterThan(0));
+
+    // The socket drops and reconnects during the download. Another device
+    // marks a channel read meanwhile; the replayed REQ (limit 0) and the
+    // snapshot already being downloaded both miss it.
+    final reconnect = manager.reinitializeRemote();
+    relay.statusListeners.last(RelaySubscriptionStatus.ready);
+    relay.historyEvents = [
+      _readStateEvent(
+        pubkey: keychain.public,
+        crypto: crypto,
+        clientId: 'desktop',
+        slotId: 'desktop-slot',
+        contexts: {'channel-1': 100},
+        createdAt: 100,
+      ),
+    ];
+    relay.fetchGate = null;
+    fetched.complete();
+    await Future.wait([initializing, coldStart, reconnect]);
+    await pumpEventQueue();
+
+    expect(manager.getEffectiveTimestamp('channel-1'), 100);
+    expect(relay.liveSubscriptions, 1);
+    manager.dispose(flushPending: false);
+  });
+
+  test('a clean reconnect through the real session replays one REQ and reads '
+      'the snapshot once, and a lost subscription is reopened', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    final socket = _RecordingRelaySocket();
+    final session = _SnapshotCountingSession()
+      ..debugAttachSocketForTest(socket);
+    List<String> reqIds() => [
+      for (final message in socket.messages)
+        if (message.first == 'REQ') message[1] as String,
+    ];
+    final manager = ReadStateManager(
+      pubkey: keychain.public,
+      relayUrl: _relayUrl,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: session,
+      signedEventRelay: _FakeSignedEventRelay(),
+      remoteEnabled: true,
+      onChanged: () {},
+    );
+
+    final initializing = manager.initialize();
+    await pumpEventQueue();
+    expect(reqIds(), ['l-1']);
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    await initializing;
+    expect(session.fetchCount, 1);
+
+    // A reconnect: the provider's connected listener runs before the session
+    // replays its live subscriptions on the new socket.
+    socket.messages.clear();
+    session.debugSupersedeConnection();
+    final held = Completer<void>();
+    session.fetchGate = held.future;
+    final reconnecting = manager.reinitializeRemote();
+    await pumpEventQueue();
+    await session.debugReplayLiveSubscriptions();
+    expect(reqIds(), ['l-1']);
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    await pumpEventQueue();
+    expect(session.fetchCount, 2);
+    session.fetchGate = null;
+    held.complete();
+    await reconnecting;
+    await pumpEventQueue();
+    expect(session.fetchCount, 2);
+
+    // A terminal CLOSED drops the subscription; the next reconnect opens a
+    // new one and reads the snapshot.
+    session.debugHandleMessage(['CLOSED', 'l-1', 'restricted: revoked']);
+    socket.messages.clear();
+    session.debugSupersedeConnection();
+    final reopening = manager.reinitializeRemote();
+    await pumpEventQueue();
+    expect(reqIds(), ['l-2']);
+    session.debugHandleMessage(['EOSE', 'l-2']);
+    await reopening;
+    expect(session.fetchCount, 3);
+    manager.dispose(flushPending: false);
+  });
+
+  test('a reconnect through the real session replays the live REQ without a '
+      'since bound, so an older-timestamp peer mark still arrives', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    )!;
+    final socket = _RecordingRelaySocket();
+    final session = _SnapshotCountingSession()
+      ..debugAttachSocketForTest(socket);
+    List<Map<String, dynamic>> reqFilters() => [
+      for (final message in socket.messages)
+        if (message.first == 'REQ') message[2] as Map<String, dynamic>,
+    ];
+    final manager = ReadStateManager(
+      pubkey: keychain.public,
+      relayUrl: _relayUrl,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: session,
+      signedEventRelay: _FakeSignedEventRelay(),
+      remoteEnabled: true,
+      onChanged: () {},
+    );
+
+    final initializing = manager.initialize();
+    await pumpEventQueue();
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    await initializing;
+
+    // A peer's mark arrives live, which would move a resume cursor.
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    session.debugHandleMessage([
+      'EVENT',
+      'l-1',
+      _readStateEvent(
+        pubkey: keychain.public,
+        crypto: crypto,
+        clientId: 'desktop',
+        slotId: 'desktop-slot',
+        contexts: {'channel-1': now},
+        createdAt: now,
+      ).toJson(),
+    ]);
+    session.debugFlushEventBuffer();
+    await pumpEventQueue();
+    expect(manager.getEffectiveTimestamp('channel-1'), now);
+
+    socket.messages.clear();
+    session.debugSupersedeConnection();
+    await session.debugReplayLiveSubscriptions();
+    expect(reqFilters(), hasLength(1));
+    expect(reqFilters().single['limit'], 0);
+    expect(reqFilters().single.containsKey('since'), isFalse);
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    await pumpEventQueue();
+
+    // Another device publishes a mark stamped well before the last one,
+    // which the relay accepts after the snapshot.
+    session.debugHandleMessage([
+      'EVENT',
+      'l-1',
+      _readStateEvent(
+        pubkey: keychain.public,
+        crypto: crypto,
+        clientId: 'phone',
+        slotId: 'phone-slot',
+        contexts: {'channel-2': now - 600},
+        createdAt: now - 600,
+      ).toJson(),
+    ]);
+    session.debugFlushEventBuffer();
+    await pumpEventQueue();
+    expect(manager.getEffectiveTimestamp('channel-2'), now - 600);
+    manager.dispose(flushPending: false);
+  });
+
+  test(
+    'an older snapshot finishing late keeps a newer failed read\'s retry',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      fakeAsync((async) {
+        final relay = _FakeRelaySession();
+        final manager = ReadStateManager(
+          pubkey: keychain.public,
+          relayUrl: _relayUrl,
+          prefs: prefs,
+          crypto: crypto,
+          relaySession: relay,
+          signedEventRelay: _FakeSignedEventRelay(),
+          remoteEnabled: true,
+          onChanged: () {},
+        );
+        manager.initialize();
+        async.flushMicrotasks();
+        expect(relay.fetchCount, 1);
+
+        // A publish starts its snapshot, which is slow to download.
+        final slow = Completer<void>();
+        relay.fetchGate = slow.future;
+        manager.markContextRead(
+          'channel-2',
+          DateTime.now().millisecondsSinceEpoch ~/ 1000,
+        );
+        async.elapse(const Duration(seconds: 5));
+        expect(relay.fetchCount, 2);
+
+        // Another device marks a channel read. The REQ goes live again and
+        // its newer read fails.
+        relay.fetchGate = null;
+        relay.historyEvents = [
+          _readStateEvent(
+            pubkey: keychain.public,
+            crypto: crypto,
+            clientId: 'desktop',
+            slotId: 'desktop-slot',
+            contexts: {'channel-1': 100},
+            createdAt: 100,
+          ),
+        ];
+        relay.failNextFetch = true;
+        relay.statusListeners.last(RelaySubscriptionStatus.ready);
+        async.flushMicrotasks();
+        expect(relay.fetchCount, 3);
+
+        // The older snapshot then succeeds. It predates the mark, so the
+        // newer failure still needs its retry.
+        slow.complete();
+        async.flushMicrotasks();
+        expect(manager.getEffectiveTimestamp('channel-1'), isNot(100));
+
+        async.elapse(const Duration(seconds: 5));
+        expect(relay.fetchCount, 4);
+        expect(manager.getEffectiveTimestamp('channel-1'), 100);
+        manager.dispose(flushPending: false);
+      });
+    },
+  );
 
   test('remote read-state rollback is ignored', () async {
     SharedPreferences.setMockInitialValues({});
@@ -575,6 +1418,7 @@ void main() {
       signedEventRelay: _FakeSignedEventRelay(),
       remoteEnabled: true,
       onChanged: () {},
+      now: () => 2000,
     );
 
     relay.historyEvents = [
@@ -620,6 +1464,40 @@ NostrEvent _stubAckEvent() => const NostrEvent(
   sig: '',
 );
 
+/// The real session, with the snapshot's HTTP read replaced by a counter.
+class _SnapshotCountingSession extends RelaySessionNotifier {
+  int fetchCount = 0;
+  Future<void>? fetchGate;
+
+  @override
+  Future<List<NostrEvent>> fetchReadStateSnapshot({
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    fetchCount++;
+    await fetchGate;
+    return [];
+  }
+}
+
+class _RecordingRelaySocket extends RelaySocket {
+  _RecordingRelaySocket()
+    : super(
+        wsUrl: 'wss://relay.example',
+        nsec: null,
+        onMessage: (_) {},
+        onConnected: () {},
+        onDisconnected: (_) {},
+      );
+
+  final List<List<dynamic>> messages = [];
+
+  @override
+  void send(List<dynamic> payload) => messages.add(payload);
+
+  @override
+  void dispose() {}
+}
+
 class _FakeSignedEventRelay implements SignedEventRelay {
   final Completer<_SubmittedEvent> submitted = Completer<_SubmittedEvent>();
   final List<String> contents = [];
@@ -634,7 +1512,8 @@ class _FakeSignedEventRelay implements SignedEventRelay {
     required String content,
     required List<List<String>> tags,
     int? createdAt,
-    void Function(NostrEvent event)? onSigned,
+    FutureOr<void> Function(NostrEvent event)? onSigned,
+    Future<bool> Function()? mayPublish,
   }) async {
     submitCount++;
     contents.add(content);
@@ -664,7 +1543,8 @@ class _ParkedSignedEventRelay implements SignedEventRelay {
     required String content,
     required List<List<String>> tags,
     int? createdAt,
-    void Function(NostrEvent event)? onSigned,
+    FutureOr<void> Function(NostrEvent event)? onSigned,
+    Future<bool> Function()? mayPublish,
   }) async {
     contents.add(content);
     if (contents.length == 1) {
@@ -687,7 +1567,8 @@ class _UnsupportedKindSignedEventRelay implements SignedEventRelay {
     required String content,
     required List<List<String>> tags,
     int? createdAt,
-    void Function(NostrEvent event)? onSigned,
+    FutureOr<void> Function(NostrEvent event)? onSigned,
+    Future<bool> Function()? mayPublish,
   }) async {
     submitCount++;
     throw Exception('restricted: unknown event kind');
@@ -706,7 +1587,8 @@ class _MissingScopeSignedEventRelay implements SignedEventRelay {
     required String content,
     required List<List<String>> tags,
     int? createdAt,
-    void Function(NostrEvent event)? onSigned,
+    FutureOr<void> Function(NostrEvent event)? onSigned,
+    Future<bool> Function()? mayPublish,
   }) async {
     submitCount++;
     throw Exception('missing users:write');
@@ -722,8 +1604,10 @@ NostrEvent _readStateEvent({
   required int createdAt,
   // Extra raw wire entries, such as values that are not valid timestamps.
   Map<String, Object?> rawContexts = const {},
+  int version = 1,
 }) {
   final blob = ReadStateBlob(clientId: clientId, contexts: contexts).toJson();
+  blob['v'] = version;
   blob['contexts'] = <String, Object?>{...contexts, ...rawContexts};
   return NostrEvent(
     id: 'event-$clientId-$createdAt',
@@ -741,17 +1625,101 @@ NostrEvent _readStateEvent({
 
 class _FakeRelaySession extends RelaySessionNotifier {
   List<NostrEvent> historyEvents = [];
+  Future<void>? fetchGate;
+  bool failNextFetch = false;
+  int fetchCount = 0;
+  int subscribeCount = 0;
+  int liveSubscriptions = 0;
+  final List<NostrFilter> fetchFilters = [];
+  final List<NostrFilter> subscribeFilters = [];
+  final List<int> fetchCountAtSubscribe = [];
+
+  @override
+  Future<List<NostrEvent>> fetchReadStateSnapshot({
+    Duration timeout = const Duration(seconds: 8),
+  }) => fetchHistory(const NostrFilter(kinds: [30078]));
 
   @override
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-  }) async => historyEvents;
+  }) async {
+    fetchCount++;
+    fetchFilters.add(filter);
+    // The snapshot is cut when requested; marks published while it
+    // downloads are not in it.
+    final events = historyEvents;
+    await fetchGate;
+    if (failNextFetch) {
+      failNextFetch = false;
+      throw TimeoutException('history timed out');
+    }
+    return events;
+  }
+
+  final List<void Function(RelaySubscriptionStatus)> statusListeners = [];
+
+  @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
+    bool resumeSince = true,
+  }) async {
+    statusListeners.add(onStatusChanged);
+    // Holds subscribe, as a REQ waits for the socket before it goes live.
+    await subscribeGate;
+    final unsubscribe = subscribe(filter, onEvent, onClosed: onClosed);
+    if (readyOnSubscribe) onStatusChanged(RelaySubscriptionStatus.ready);
+    return unsubscribe;
+  }
+
+  Future<void>? subscribeGate;
+
+  /// Reports ready before subscribe returns, as the relay's EOSE does.
+  bool readyOnSubscribe = false;
 
   @override
   Future<void Function()> subscribe(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
-  }) async => () {};
+  }) async {
+    subscribeCount++;
+    subscribeFilters.add(filter);
+    fetchCountAtSubscribe.add(fetchCount);
+    liveSubscriptions++;
+    var open = true;
+    return () {
+      if (open) liveSubscriptions--;
+      open = false;
+    };
+  }
+}
+
+class _JournalRelaySession extends _FakeRelaySession {
+  final attempts = <NostrEvent>[];
+  final retained = <String, NostrEvent>{};
+  bool failSecond = true;
+
+  @override
+  Future<List<NostrEvent>> fetchReadStateSnapshot({
+    Duration timeout = const Duration(seconds: 8),
+  }) async => retained.values.toList();
+
+  @override
+  Future<NostrEvent> publish(
+    NostrEvent event, {
+    Duration timeout = const Duration(seconds: 8),
+    Future<bool> Function()? mayPublish,
+  }) async {
+    attempts.add(event);
+    final slot = event.tags.firstWhere((tag) => tag.first == 'd')[1];
+    retained[slot] = event;
+    if (failSecond && attempts.length == 2) {
+      throw TimeoutException('Accepted but acknowledgement lost');
+    }
+    return event;
+  }
 }

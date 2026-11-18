@@ -17,6 +17,16 @@ class _Account extends BuilderlabAccountClient {
   _Account(this.pubkey);
   final String pubkey;
   var reads = 0;
+  final remembered = <String>[];
+  @override
+  Future<void> rememberCommunity(
+    String relay, {
+    required String expectedSubject,
+  }) async {
+    expect(expectedSubject, account.subject);
+    remembered.add(relay);
+  }
+
   @override
   BuilderlabAccount get account =>
       BuilderlabAccount(subject: 'owner', expiresAt: DateTime.utc(2100));
@@ -113,6 +123,7 @@ void main() {
       );
       expect(flow.stage, HostedFlowStage.complete);
       expect(entered, 1);
+      expect(account.remembered, ['wss://$matching']);
       expect(requests.map((request) => request.url.host), [matching, matching]);
       expect(requests.map((request) => request.method), ['GET', 'POST']);
       expect(requests.map((request) => request.url.path), [

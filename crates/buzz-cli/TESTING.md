@@ -104,6 +104,13 @@ cargo clippy -p buzz-cli -- -D warnings
 # Expected: zero warnings
 ```
 
+When `desktop/src/features/huddle/lib/huddlePresence.ts` changes, also replay the huddle fixtures
+through desktop's tracker (run `pnpm install --frozen-lockfile` in `desktop/` first):
+
+```bash
+node --import ./desktop/test-loader.mjs --experimental-strip-types crates/buzz-cli/tests/huddle_interop.mjs
+```
+
 ---
 
 ## 6. Live Testing — Command by Command
@@ -228,6 +235,9 @@ buzz messages search --query "CLI test" --limit 5 | jq .
 
 # messages edit
 buzz messages edit --event "$EVENT_ID" --content "Edited by CLI test" | jq .
+# Explicit removal stays removed in a subsequent text edit.
+buzz messages edit --event "$EVENT_ID" --content "Remove attached files" --clear-attachments | jq .
+buzz messages edit --event "$EVENT_ID" --content "Still no attachments" | jq .
 
 # messages delete
 buzz messages delete --event "$REPLY_ID" | jq .

@@ -36,6 +36,12 @@ CREATE TABLE channels (
     -- relay-signed group-state events. The relay validates their shape.
     labels          TEXT[] NOT NULL DEFAULT '{}'
         CONSTRAINT channels_labels_bounded CHECK (cardinality(labels) <= 8),
+    join_role       TEXT NOT NULL DEFAULT 'member'
+        CHECK (join_role IN ('member', 'guest')),
+    -- An unlisted open channel is readable and joinable by id but left out of
+    -- channel listings for non-members. Matters only while the channel is open.
+    unlisted        BOOLEAN NOT NULL DEFAULT FALSE,
+    auto_join       BOOLEAN NOT NULL DEFAULT false,
     PRIMARY KEY (community_id, id),
     CONSTRAINT chk_channels_id_not_nil CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid)
 );
@@ -56,3 +62,11 @@ CREATE INDEX idx_channels_ttl_expiry ON channels (ttl_deadline)
 -- Not UNIQUE — the same channel id may exist under more than one community.
 CREATE INDEX idx_channels_id_live ON channels (id) INCLUDE (community_id)
     WHERE deleted_at IS NULL;
+-- Two listed channels in a community never share a name, ignoring case. A
+-- listed channel is an open, not unlisted stream or forum that is not deleted;
+-- an archived one still counts. Created by migration 0083; the relay maps a
+-- refused write to ChannelNameTaken (LISTED_NAME_INDEX in
+-- crates/buzz-db/src/store/channel.rs).
+CREATE UNIQUE INDEX idx_channels_listed_name ON channels (community_id, lower(name))
+    WHERE visibility = 'open' AND NOT unlisted
+      AND channel_type IN ('stream', 'forum') AND deleted_at IS NULL;

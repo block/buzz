@@ -70,8 +70,10 @@ The assertion is a compact JWS carrying the following claims.
 
 Policy selects exactly one token class before parsing claims:
 
-- **`nip-fi+jwt`**: a dedicated assertion whose protected `typ` is exactly
-  `nip-fi+jwt`.
+- **Dedicated NIP-FI assertion**: a dedicated assertion whose protected `typ`
+  is exactly `nip-fi+jwt` (a human assertion) or exactly `nip-fi-agent+jwt`
+  (an agent assertion; see "Agent keys").  The `typ` value, not any claim,
+  determines which of the two an assertion is.
 - **`at+jwt` access token**: a resource access token whose protected `typ` is
   exactly `at+jwt`.  When this class is selected:
   - The assertion MUST contain a non-empty `client_id` claim.
@@ -84,10 +86,13 @@ Policy selects exactly one token class before parsing claims:
     client-subject `(iss, sub)` coordinates are disjoint.
   - Absent, unknown, or ambiguous classification always denies; no fallback to
     the other class is attempted.
+  - The access token MUST NOT carry `nostr_owner_pubkey`; its presence, with
+    any value, denies.
 
 OIDC ID tokens always deny, even when `iss`, `aud`, and `sub` match.  A
-generic or absent `typ` has no accepted class.  Failure under one class never
-triggers validation under another.  [FI-TRACE-TOKEN-CLASS]
+generic or absent `typ` has no accepted class.  `nip-fi-agent+jwt` is accepted
+only under the dedicated NIP-FI class.  Failure under one class never triggers
+validation under another.  [FI-TRACE-TOKEN-CLASS]
 
 ### Time bounds
 
@@ -129,16 +134,19 @@ audience; issuer policy selection by `iss` MUST NOT broaden either binding.
 
 ### Agent keys
 
-An issuer MAY issue an assertion whose `nostr_pubkey` names an agent key
-acting for an owner key.  Such an assertion MUST carry `nostr_owner_pubkey`:
-the lowercase hexadecimal encoding of one 32-byte public key, distinct from
-`nostr_pubkey`.  An issuer MUST NOT issue an assertion without
-`nostr_owner_pubkey` for a key it has issued an agent assertion for, and MUST
-NOT issue an agent assertion while the owner is not authorized by the issuer.
+An issuer MAY issue an agent assertion: an assertion whose `nostr_pubkey`
+names an agent key acting for an owner key.  An agent assertion MUST use the
+protected `typ` `nip-fi-agent+jwt` and MUST carry `nostr_owner_pubkey`: the
+lowercase hexadecimal encoding of one 32-byte public key, distinct from
+`nostr_pubkey`.  An issuer MUST NOT issue an assertion of any other type for a
+key it has issued an agent assertion for, and MUST NOT issue an agent assertion
+while the owner is not authorized by the issuer.
 
-A relay advertising `agent_assertions: true` MUST verify `nostr_owner_pubkey`
-as part of the assertion.  A malformed value, or one equal to `nostr_pubkey`,
-MUST deny `evidence_rejected`.  The relay MUST record the value as the
+A relay MUST verify `nostr_owner_pubkey` as part of every `nip-fi-agent+jwt`
+assertion.  An absent or malformed value, or one equal to `nostr_pubkey`, MUST
+deny `evidence_rejected`.  A `nip-fi+jwt` assertion carrying
+`nostr_owner_pubkey`, with any value, MUST deny `evidence_rejected`.  The relay
+MUST record the value as the
 owner of the session or request the assertion admits.  If the relay already
 associates a different owner with the asserted key in the resolved community,
 it MUST deny `authorization_denied`.
@@ -147,9 +155,14 @@ authorized in the community, the relay MUST deny when the community bans the
 asserted key or the owner, or when the issuer has denied either key.  Only
 then, when the asserted key is not itself authorized in the community, the
 relay MUST authorize it if and only if the issuer is trusted for the community
-and the owner is authorized in the community when access is decided.  A relay
-not advertising `agent_assertions: true` MUST deny an assertion carrying
-`nostr_owner_pubkey` `evidence_rejected`.
+and the owner is authorized in the community when access is decided.
+
+When the relay removes a key from a community's membership, it MUST, in the
+same change, remove every member of that community, other than the community
+owner, whose recorded owner is that key at the time of removal, and MUST close
+the live sessions of the removed key and of every agent whose recorded owner is
+that key.
+[FI-TRACE-AGENT-OWNER]
 
 ### Unverified claims
 
@@ -295,10 +308,11 @@ VerifyAssertion(token, community, D, R_t):
   AssertTimeBounds(claims, policy) or DENY(evidence_rejected)  // [FI-TRACE-ASSERTION-VALIDATION]
   k_claimed := ParseHexKey(claims.nostr_pubkey) or DENY(evidence_rejected)
   owner := absent
-  if claims.nostr_owner_pubkey is present:
-    AssertAgentAssertionsAdvertised(relay) or DENY(evidence_rejected)
+  if header.typ == "nip-fi-agent+jwt":
     owner := ParseHexKey(claims.nostr_owner_pubkey) or DENY(evidence_rejected)
     AssertNotEqual(owner, k_claimed) or DENY(evidence_rejected)
+  else:
+    AssertAbsent(claims.nostr_owner_pubkey) or DENY(evidence_rejected)
 
   return VerifiedAssertion(identity=(claims.iss, claims.sub), asserted_key=k_claimed,
                            owner=owner,
@@ -658,7 +672,7 @@ The following compensating controls are REQUIRED for this proof pattern:
 1. NIP-FI assertion verification MUST run on every request.
 2. The reused proof's signature and timestamp MUST be re-verified on every
    request.
-3. The proof timestamp MUST remain within a `±60s` window for every request.
+3. The proof timestamp MUST remain within a `±120s` window for every request.
 4. Production deployments MUST use TLS.
 5. The NIP-98 event MUST bind to the repository-root URL. This binding is
    repo-scoped, not endpoint-scoped or service-scoped.
@@ -714,8 +728,9 @@ If an `x` tag is present on a read proof: there MUST be exactly one, and it
 MUST match the requested parent blob hash.  A mismatched `x` tag MUST be
 rejected as `evidence_rejected`.
 
-> **Named residual:** within a window of at most 60 seconds from minting (plus
-> a bounded 5-second future-skew allowance), a captured full header set allows
+> **Named residual:** while a proof's `created_at` is within 120 seconds of
+> the server's clock in either direction, and less than 120 seconds past its
+> `expiration`, a captured full header set allows
 > reading any media blob on exactly one tenant host.  This access is read-only,
 > membership-checked, and revocable via assertion expiry or deny-map
 > enforcement.  It is not state-changing and does not cross tenant boundaries.
@@ -724,12 +739,13 @@ rejected as `evidence_rejected`.
 
 The following freshness rules apply to all kind-24242 proofs (upload and read):
 
-- `created_at <= now + 5s` — bounded future skew; a proof dated more than 5
-  seconds in the future MUST be rejected as `evidence_rejected`.
-- `now - created_at <= 60s` — a proof older than 60 seconds MUST be rejected
+- `created_at <= now + 120s` — bounded future skew; a proof dated more than
+  120 seconds in the future MUST be rejected as `evidence_rejected`.
+- `now - created_at <= 120s` — a proof older than 120 seconds MUST be rejected
   as `evidence_rejected`.
-- Exactly one `expiration` tag MUST be present, MUST be valid (strictly in the
-  future at admission time), and MUST satisfy `expiration <= created_at + 60s`.
+- Exactly one `expiration` tag MUST be present, MUST be valid
+  (`expiration > now - 120s` at admission time), and MUST satisfy
+  `expiration <= created_at + 60s`.
   An absent, duplicate, expired, or out-of-range `expiration` tag MUST be
   rejected as `evidence_rejected`.
 
@@ -871,8 +887,7 @@ normative behavior for them:
   primitive is pubkey-scoped and community-wide, keyed `(iss, target_pubkey)`
   (see Admin disconnect API).  If an issuer revokes an entire identity, it
   disconnects each key it has asserted for that identity.  A disconnect of an
-  owner key also covers that owner's agent keys at relays advertising
-  `agent_assertions: true`.
+  owner key also covers that owner's agent keys.
   Individual session/device logout is handled by assertion expiry within the
   configured TTL window.
 - Revocation signaling to the issuer/IdP: issuer-side; the issuer stops
@@ -898,6 +913,15 @@ A relay SHOULD advertise core support in NIP-11 as:
 }
 ```
 
+A multi-community relay MAY additionally publish a host-specific top-level
+`requires_nip_fi` boolean. This expresses mandatory admission evidence, separately
+from support for the protocol. In Buzz it is the stored community requirement OR
+global enforce; capability is advertised when global mode evaluates OR that
+requirement is true. Required hosts therefore retain both existing capability
+fields and the descriptor above. Optional shadow hosts still advertise capability.
+Root NIP-11 and `/info` MUST agree and use `Cache-Control: no-store`. An unknown or
+non-serving Host returns generic 404; unavailable host policy returns 503.
+
 `maximum_residual_upstream_revocation_seconds` is `null` for the
 `offline-jwt` class because this spec provides no unconditional finite
 upstream-revocation bound.  The deny-until-TTL mechanism closes the
@@ -911,11 +935,6 @@ issuer stops issuance after a successful deny, the residual ceiling is
 issuer-operational property, not a protocol invariant this field can
 advertise unconditionally.
 
-`agent_assertions` (boolean, optional).  `true` means the relay admits agent
-assertions as defined in "Agent keys".  Absent or `false` means it does not.
-An issuer MUST NOT issue an agent assertion for a community whose relay does
-not advertise `agent_assertions: true`.
-
 Discovery MUST NOT state issuer URLs, audiences, claim names, tenant IDs, or
 deployment-local identifiers.  [FI-TRACE-DISCOVERY-PRIVATE]
 
@@ -925,14 +944,15 @@ deployment-local identifiers.  [FI-TRACE-DISCOVERY-PRIVATE]
 |---|---|
 | `FI-TRACE-TRANSPORT-CLOSED` | Exact one-header input succeeds; missing, repeated, combined, malformed, and fallback variants deny. |
 | `FI-TRACE-ASSERTION-VALIDATION` | Valid boundary input passes; each signature, key-selection, issuer, audience, time, size, and missing-configuration negative denies; a missing or unavailable community configuration denies `authorization_unavailable`; a known-but-community-unauthorized issuer denies `evidence_rejected` without touching its key source, indistinguishably from an unknown issuer, including when that issuer's snapshot is unavailable; an issuer authorized only for community A cannot authorize community B merely by signing an assertion with community B's audience; an assertion for community A presented on a `Host` resolved to community B denies on the community binding; an unknown, ambiguous, or unresolvable `Host` denies `authorization_unavailable`. |
-| `FI-TRACE-TOKEN-CLASS` | `at+jwt` and `nip-fi+jwt` pass only their selected class; ID tokens, wrong or generic types, and cross-class fallback deny. |
+| `FI-TRACE-TOKEN-CLASS` | `at+jwt`, `nip-fi+jwt`, and `nip-fi-agent+jwt` pass only their selected class; ID tokens, wrong or generic types, `nip-fi-agent+jwt` under an `at+jwt` policy, and cross-class fallback deny. |
+| `FI-TRACE-AGENT-OWNER` | A `nip-fi-agent+jwt` with a valid `nostr_owner_pubkey` distinct from `nostr_pubkey` passes verification and records that owner; a `nip-fi-agent+jwt` whose `nostr_owner_pubkey` is absent, malformed, or equal to `nostr_pubkey` denies `evidence_rejected`; a `nip-fi+jwt` or `at+jwt` carrying `nostr_owner_pubkey` with any value denies `evidence_rejected`; an agent assertion denies when the community bans the asserted key or the owner, or the issuer has denied either key, even when the asserted key is itself authorized; an asserted key already associated with a different owner in the community denies `authorization_denied`; an agent whose key is not itself authorized is admitted only while its owner is authorized in the community. |
 | `FI-TRACE-ASSERTION-KEY-MISMATCH` | Mismatch between `nostr_pubkey` and the NIP-42 proven key denies with the private-state response. |
 | `FI-TRACE-JWKS-ADD` | A key added to the JWKS is accepted after the next snapshot refresh. |
 | `FI-TRACE-JWKS-REMOVE` | Connections verified under a removed key deny on next revalidation or reconnect. |
 | `FI-TRACE-DEPENDENCY-FAIL-CLOSED` | An unreadable JWKS snapshot denies `authorization_unavailable`; no degraded Nostr-only access. |
 | `FI-TRACE-LEASE-BOUND` | A session closes at its earliest deadline; equality at any deadline is expired. |
 | `FI-TRACE-DENY-SET` | A pubkey in the deny set is denied `authorization_denied` on admission until `now >= until`; an expired or absent entry does not deny; a past-`until` command closes sessions — absent an active same-key entry it creates no future denial, while an active entry remains unchanged under the merge rule; a deny-set-full command is rejected `503` without closing sessions and without removing any existing entry; capacity is evaluated per issuer — one issuer's capacity exhaustion MUST NOT reject another issuer's command; a connection that passes the deny-set check before a concurrent deny-entry insertion but completes admission after MUST still be terminated (the session's proven `k` and admitting issuer are registered before the deny-set check, ensuring the close scan catches it); a registered-but-not-admitted connection caught by the close scan MUST be cancelled terminally and MUST NOT later be admitted; a disconnect command from one issuer MUST NOT close a same-key connection registered under a different issuer, whether or not admission has completed; two overlapping commands for the same `(iss, pubkey)` in either delivery order result in `until = max(until_A, until_B)` — delivery order does not shorten the longer deny; a past-`until` command arriving over an active entry leaves the active entry's `until` unchanged; a successful disconnect responds `{"disconnected": true}` regardless of how many sessions were closed; the deny entry applies across all communities served by the relay under that issuer. |
-| `FI-TRACE-HTTP-INGRESS` | A protected HTTP request with both valid headers and matching pubkeys is admitted; absent, mismatched, or invalid assertion or NIP-98 event denies; a request presenting only one of the two denies; an active deny-set entry denies; a route that cannot be classified as exempt is treated as protected; repeated, comma-combined, wrong-scheme, or alternative-credential `Authorization` fields deny `evidence_rejected`; a missing `Authorization` field denies `missing_evidence`; an authorization-relevant body without exactly one matching `payload` tag denies; the NIP-FI administrative API is not a protected surface.  For kind-24242 (Blossom) proofs on media routes: a `t=upload` proof with valid `x`, `server`, `expiration`, and freshness is admitted on `PUT /upload`; a `t=get` proof with valid `server`, `expiration`, and freshness is admitted on `GET\|HEAD /media/{hash…}`; a kind-24242 proof on any other route denies; an upload proof with absent or mismatched `server` tag denies; a read proof with absent or mismatched `server` tag denies; a proof with a duplicate, missing, or out-of-range `expiration` tag denies; a proof dated more than 5 seconds in the future denies; a proof older than 60 seconds denies; key mismatch between assertion `nostr_pubkey` and the kind-24242 event pubkey denies; an active deny-set entry denies. |
+| `FI-TRACE-HTTP-INGRESS` | A protected HTTP request with both valid headers and matching pubkeys is admitted; absent, mismatched, or invalid assertion or NIP-98 event denies; a request presenting only one of the two denies; an active deny-set entry denies; a route that cannot be classified as exempt is treated as protected; repeated, comma-combined, wrong-scheme, or alternative-credential `Authorization` fields deny `evidence_rejected`; a missing `Authorization` field denies `missing_evidence`; an authorization-relevant body without exactly one matching `payload` tag denies; the NIP-FI administrative API is not a protected surface.  For kind-24242 (Blossom) proofs on media routes: a `t=upload` proof with valid `x`, `server`, `expiration`, and freshness is admitted on `PUT /upload`; a `t=get` proof with valid `server`, `expiration`, and freshness is admitted on `GET\|HEAD /media/{hash…}`; a kind-24242 proof on any other route denies; an upload proof with absent or mismatched `server` tag denies; a read proof with absent or mismatched `server` tag denies; a proof with a duplicate, missing, or out-of-range `expiration` tag denies; a proof dated more than 120 seconds in the future denies; a proof older than 120 seconds denies; key mismatch between assertion `nostr_pubkey` and the kind-24242 event pubkey denies; an active deny-set entry denies. |
 | `FI-TRACE-DENIAL-ORACLE` | Each public-class row produces its exact fixed bytes; all private-state rows compare byte-identical. |
 | `FI-TRACE-DISCOVERY-PRIVATE` | Complete discovery bytes do not expose issuer, audience, or deployment-private state. |
 | `FI-TRACE-CROSS-DOMAIN-COLLISION` | Equal `sub` values under different `iss` values remain distinct identities. |

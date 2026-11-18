@@ -1,6 +1,49 @@
 import '../deeplink/deep_link.dart';
 import 'builderlab_account.dart';
 import 'hosted_environment.dart';
+import 'known_community_address.dart';
+
+/// Account-saved destinations this client can enter. These are saved addresses,
+/// not evidence of membership; hosted and external entry retain admission checks.
+Future<List<AddCommunityDeepLink>> loadKnownAccountCommunities(
+  BuilderlabAccountClient account,
+) async {
+  final subject = account.account?.subject;
+  final response = await account.post(
+    '/v1/buzz/known-communities/list',
+    {},
+    expectedSubject: subject,
+  );
+  final rows = response['communities'] ?? <dynamic>[];
+  if (response['error'] != null || rows is! List) {
+    throw AccountFailure.invalidResponse;
+  }
+  final communities = <String, AddCommunityDeepLink>{};
+  for (final row in rows) {
+    if (row is! Map<String, dynamic> || row['community_url'] is! String) {
+      throw AccountFailure.invalidResponse;
+    }
+    final raw = row['community_url'] as String;
+    if (Uri.tryParse(raw)?.scheme != 'wss') continue;
+    final relay = knownCommunityAddress(raw);
+    if (relay == null) continue;
+    final uri = Uri.parse(relay);
+    // Hosted domains require their configured HTTPS origin. They cannot use
+    // self-hosted entry to bypass the build's account/admission boundary.
+    if (HostedEnvironment.requiresAuth(uri.host) &&
+        !HostedEnvironment.supportsRelay(uri)) {
+      continue;
+    }
+    communities.putIfAbsent(
+      relay,
+      () => AddCommunityDeepLink(
+        relayUrl: relay,
+        name: uri.hasPort ? uri.authority : uri.host,
+      ),
+    );
+  }
+  return List.unmodifiable(communities.values);
+}
 
 /// Validated, active communities joined by the signed-in Builderlab identity.
 /// Discovery never grants admission; each target still goes through HostedAdmission.

@@ -25,11 +25,13 @@ import 'forum_thread_page.dart';
 class ForumPostsView extends HookConsumerWidget {
   final Channel channel;
   final String? currentPubkey;
+  final double titleContentHeight;
 
   const ForumPostsView({
     super.key,
     required this.channel,
     required this.currentPubkey,
+    this.titleContentHeight = 0,
   });
 
   @override
@@ -82,7 +84,12 @@ class ForumPostsView extends HookConsumerWidget {
               // A retry from an error shows loading, not the stale error and its Retry.
               skipLoadingOnRefresh: !postsAsync.hasError,
               loading: () => Padding(
-                padding: EdgeInsets.only(top: frostedAppBarHeight(context)),
+                padding: EdgeInsets.only(
+                  top: frostedAppBarHeight(
+                    context,
+                    titleContentHeight: titleContentHeight,
+                  ),
+                ),
                 child: const Center(
                   child: BuzzLoadingIndicator(
                     size: 44,
@@ -91,7 +98,12 @@ class ForumPostsView extends HookConsumerWidget {
                 ),
               ),
               error: (e, _) => Padding(
-                padding: EdgeInsets.only(top: frostedAppBarHeight(context)),
+                padding: EdgeInsets.only(
+                  top: frostedAppBarHeight(
+                    context,
+                    titleContentHeight: titleContentHeight,
+                  ),
+                ),
                 child: LoadErrorView(
                   message: 'Failed to load posts',
                   onRetry: () => ref.invalidate(forumPostsProvider(channel.id)),
@@ -112,7 +124,10 @@ class ForumPostsView extends HookConsumerWidget {
                   },
                   child: ListView.separated(
                     padding: EdgeInsets.only(
-                      top: frostedAppBarHeight(context),
+                      top: frostedAppBarHeight(
+                        context,
+                        titleContentHeight: titleContentHeight,
+                      ),
                       left: Grid.gutter,
                       right: Grid.gutter,
                       bottom: Grid.xs,

@@ -1,10 +1,28 @@
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:nostr/nostr.dart' as nostr;
 
 /// Neutral label rendered when an identity string cannot be read as a Nostr
 /// public key — malformed identities never leak truncated raw hex into the UI.
 const String unknownIdentityLabel = 'Unknown identity';
 
-final RegExp _hexPubkeyPattern = RegExp(r'^[0-9a-fA-F]{64}$');
+/// Whether [value] is a 64-character hex public key (any case).
+///
+/// A character loop rather than a regular expression: AOT builds on iOS run
+/// regular expressions in an interpreter, and identity views check every key
+/// of a large roster on each rebuild.
+bool isHexPubkey(String value) {
+  if (value.length != 64) return false;
+  for (var i = 0; i < 64; i++) {
+    final c = value.codeUnitAt(i);
+    if (!((c >= 0x30 && c <= 0x39) || // 0-9
+        (c >= 0x61 && c <= 0x66) || // a-f
+        (c >= 0x41 && c <= 0x46))) {
+      // A-F
+      return false;
+    }
+  }
+  return true;
+}
 
 /// The canonical full NIP-19 npub for [identity], or null when [identity] is
 /// not a valid public key.
@@ -18,12 +36,12 @@ final RegExp _hexPubkeyPattern = RegExp(r'^[0-9a-fA-F]{64}$');
 String? fullNpub(String identity) {
   final trimmed = identity.trim();
   try {
-    if (_hexPubkeyPattern.hasMatch(trimmed)) {
+    if (isHexPubkey(trimmed)) {
       return _encodeNpub(trimmed.toLowerCase());
     }
     final decoded = nostr.Nip19.decode(payload: trimmed);
     if (decoded.prefix != nostr.Nip19Prefix.npub ||
-        !_hexPubkeyPattern.hasMatch(decoded.data)) {
+        !isHexPubkey(decoded.data)) {
       return null;
     }
     return _encodeNpub(decoded.data.toLowerCase());
@@ -32,8 +50,24 @@ String? fullNpub(String identity) {
   }
 }
 
-String _encodeNpub(String hexPubkey) =>
-    nostr.Nip19.encode(prefix: nostr.Nip19Prefix.npub, data: hexPubkey);
+/// Encoded npubs by lowercase hex key. Identity views label every roster
+/// member without a profile name by npub on each rebuild, and bech32 encoding
+/// dominated those rebuilds on large channels. Bounded: once full it keeps
+/// what it has, so a roster larger than the limit still reuses most keys.
+final _npubs = <String, String>{};
+@visibleForTesting
+const npubCacheLimit = 8192;
+
+String _encodeNpub(String hexPubkey) {
+  final cached = _npubs[hexPubkey];
+  if (cached != null) return cached;
+  final npub = nostr.Nip19.encode(
+    prefix: nostr.Nip19Prefix.npub,
+    data: hexPubkey,
+  );
+  if (_npubs.length < npubCacheLimit) _npubs[hexPubkey] = npub;
+  return npub;
+}
 
 /// The canonical compact public-key label: the first 8 and last 4 characters
 /// of the full npub joined by an ellipsis — the same truncation desktop uses

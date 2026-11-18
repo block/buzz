@@ -19,11 +19,7 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde_json::{json, Value};
 
 // A fixed P-256 test key (PKCS#8 PEM) and its public JWK coordinates.
-const TEST_EC_PKCS8_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
-MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n\
-WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n\
-zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n\
------END PRIVATE KEY-----\n";
+const TEST_EC_PKCS8_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\nWZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\nzhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n-----END PRIVATE KEY-----\n"; // sadscan:disable np.pem.1 kingfisher.privkey.2 -- unchanged public ES256 test fixture
 const TEST_JWK_X: &str = "RW-mZ7H5Kjjl8hIY9ygUKYRiheL02s4Xm22r22dWaJI";
 const TEST_JWK_Y: &str = "WqQXVwaD6NM7us40BUTNe9dRa1XoJ0NX6vJuJWYU_bA";
 const TEST_KID: &str = "test-key-1";
@@ -46,11 +42,7 @@ fn test_jwks_contract() -> crate::nip_fi::jwks::JwksSourceContract {
 
 // A second, independent P-256 key: issuer B's real signing key, used to prove
 // that a token signed by B and claiming `iss=A` cannot mint an A identity.
-const TEST_EC_PKCS8_PEM_B: &str = "-----BEGIN PRIVATE KEY-----\n\
-MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgKcmDf3+zDWyC96/X\n\
-Gv8aYK552uF5aE6nXKzxAfl4fSWhRANCAATf0ccbp1c4mMd6WvSuliv5ZAS8iIWL\n\
-Ne2tqOfFa0hRpa41DANab1/EuDGi7PtIo8xSYwkaoib1MAJlfLvRMjQA\n\
------END PRIVATE KEY-----\n";
+const TEST_EC_PKCS8_PEM_B: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgKcmDf3+zDWyC96/X\nGv8aYK552uF5aE6nXKzxAfl4fSWhRANCAATf0ccbp1c4mMd6WvSuliv5ZAS8iIWL\nNe2tqOfFa0hRpa41DANab1/EuDGi7PtIo8xSYwkaoib1MAJlfLvRMjQA\n-----END PRIVATE KEY-----\n"; // sadscan:disable np.pem.1 kingfisher.privkey.2 -- unchanged public ES256 test fixture
 const TEST_JWK_X_B: &str = "39HHG6dXOJjHelr0rpYr-WQEvIiFizXtrajnxWtIUaU";
 const TEST_JWK_Y_B: &str = "rjUMA1pvX8S4MaLs-0ijzFJjCRqiJvUwAmV8u9EyNAA";
 
@@ -743,6 +735,131 @@ fn absent_nostr_pubkey_claim_denies() {
         verifier.verify_for_aud(&token, AUDIENCE).unwrap_err(),
         VerifierError::ClaimRejected
     );
+}
+
+// ---- Agent assertions (`nip-fi-agent+jwt`, `nostr_owner_pubkey`) -----------
+
+const AGENT_TYP: &str = "nip-fi-agent+jwt";
+
+fn dedicated_token(typ: &str, owner: Option<Value>) -> String {
+    let mut claims = json!({ "sub": "u" });
+    if let Some(owner) = owner {
+        claims[NOSTR_OWNER_PUBKEY_CLAIM] = owner;
+    }
+    mint(Some(typ), TEST_KID, claims)
+}
+
+fn assert_evidence_rejected(err: VerifierError, case: &str) {
+    assert_eq!(err, VerifierError::ClaimRejected, "{case}");
+    assert_eq!(err.denial_class(), DenialClass::EvidenceRejected, "{case}");
+}
+
+#[test]
+fn agent_type_with_valid_owner_seals_the_owner() {
+    let verifier = verifier_with(dedicated_policy(ISSUER));
+    let owner = nostr::Keys::generate().public_key();
+    let assertion = verifier
+        .verify_for_aud(
+            &dedicated_token(AGENT_TYP, Some(json!(owner.to_hex()))),
+            AUDIENCE,
+        )
+        .expect("verifies");
+    assert_eq!(assertion.owner(), Some(owner));
+}
+
+#[test]
+fn agent_type_without_owner_denies() {
+    let verifier = verifier_with(dedicated_policy(ISSUER));
+    let err = verifier
+        .verify_for_aud(&dedicated_token(AGENT_TYP, None), AUDIENCE)
+        .unwrap_err();
+    assert_evidence_rejected(err, "absent owner");
+}
+
+#[test]
+fn agent_type_with_malformed_or_self_equal_owner_denies() {
+    let verifier = verifier_with(dedicated_policy(ISSUER));
+    let upper = nostr::Keys::generate().public_key().to_hex().to_uppercase();
+    for owner in [
+        json!(upper),
+        json!(""),
+        json!("not-hex"),
+        json!(null),
+        json!(TEST_NOSTR_PUBKEY),
+    ] {
+        let err = verifier
+            .verify_for_aud(&dedicated_token(AGENT_TYP, Some(owner.clone())), AUDIENCE)
+            .unwrap_err();
+        assert_evidence_rejected(err, &format!("owner {owner}"));
+    }
+}
+
+#[test]
+fn human_type_has_no_owner_and_denies_any_owner_claim() {
+    let verifier = verifier_with(dedicated_policy(ISSUER));
+    let assertion = verifier
+        .verify_for_aud(&dedicated_token("nip-fi+jwt", None), AUDIENCE)
+        .expect("verifies");
+    assert_eq!(assertion.owner(), None);
+    let valid = nostr::Keys::generate().public_key().to_hex();
+    for owner in [json!(valid), json!(null), json!("not-hex")] {
+        let err = verifier
+            .verify_for_aud(
+                &dedicated_token("nip-fi+jwt", Some(owner.clone())),
+                AUDIENCE,
+            )
+            .unwrap_err();
+        assert_evidence_rejected(err, &format!("owner {owner}"));
+    }
+}
+
+#[test]
+fn access_token_denies_any_owner_claim() {
+    let verifier = verifier_with(access_token_policy());
+    let valid = nostr::Keys::generate().public_key().to_hex();
+    for owner in [json!(valid), json!(null)] {
+        let mut claims = resource_owner_claims();
+        claims[NOSTR_OWNER_PUBKEY_CLAIM] = owner.clone();
+        let err = verifier
+            .verify_for_aud(&mint(Some("at+jwt"), TEST_KID, claims), AUDIENCE)
+            .unwrap_err();
+        assert_evidence_rejected(err, &format!("owner {owner}"));
+    }
+}
+
+#[test]
+fn agent_type_under_access_token_policy_denies() {
+    let verifier = verifier_with(access_token_policy());
+    let mut claims = resource_owner_claims();
+    claims[NOSTR_OWNER_PUBKEY_CLAIM] = json!(nostr::Keys::generate().public_key().to_hex());
+    assert_eq!(
+        verifier
+            .verify_for_aud(&mint(Some(AGENT_TYP), TEST_KID, claims), AUDIENCE)
+            .unwrap_err(),
+        VerifierError::TokenTypeRejected
+    );
+}
+
+#[test]
+fn unknown_type_denies_under_both_classes() {
+    let owner = nostr::Keys::generate().public_key().to_hex();
+    for policy in [dedicated_policy(ISSUER), access_token_policy()] {
+        let verifier = verifier_with(policy);
+        for typ in [
+            "nip-fi-agent",
+            "nip-fi-agent+JWT",
+            "application/nip-fi-agent+jwt",
+            "agent+jwt",
+        ] {
+            assert_eq!(
+                verifier
+                    .verify_for_aud(&dedicated_token(typ, Some(json!(owner))), AUDIENCE)
+                    .unwrap_err(),
+                VerifierError::TokenTypeRejected,
+                "{typ}"
+            );
+        }
+    }
 }
 
 // ---- Time bounds ----------------------------------------------------------
@@ -1997,4 +2114,45 @@ fn community_binding_rejects_empty_parts() {
         CommunityBinding::new(AUDIENCE.to_owned(), [String::new()]).unwrap_err(),
         CommunityBindingError::EmptyIssuers
     );
+}
+
+#[test]
+fn public_profile_is_output_only_and_malformed_claims_do_not_deny() {
+    // FI-TRACE-PUBLIC-PROFILE-MALFORMED and FI-TRACE-PUBLIC-PROFILE-SCOPE.
+    let verifier = verifier_with(dedicated_policy(ISSUER));
+    let community = CommunityBinding::new(AUDIENCE.into(), vec![ISSUER.into()]).unwrap();
+    for profile in [
+        json!(null),
+        json!("Alice"),
+        json!({"display_name":"Alice"}),
+        json!({"display_name":"Alice","username":"Alice"}),
+        json!({"display_name":"Alice","username":"alice","email":"private"}),
+    ] {
+        let token = mint(
+            Some("nip-fi+jwt"),
+            TEST_KID,
+            json!({"sub":"user", "nostr_public_profile": profile}),
+        );
+        let verified = verifier.verify(&token, &community).unwrap();
+        assert!(verified.profile_assertion().unwrap().profile.is_none());
+        assert!(verified.capabilities().is_empty());
+    }
+    let token = mint(
+        Some("nip-fi+jwt"),
+        TEST_KID,
+        json!({"sub":"user", "nostr_public_profile":{"display_name":"Alice","username":"alice"}}),
+    );
+    let verified = verifier.verify(&token, &community).unwrap();
+    assert_eq!(
+        verified
+            .profile_assertion()
+            .unwrap()
+            .profile
+            .as_ref()
+            .unwrap()
+            .display_name,
+        "Alice"
+    );
+    assert!(verified.capabilities().is_empty());
+    assert!(!format!("{verified:?}").contains("Alice"));
 }

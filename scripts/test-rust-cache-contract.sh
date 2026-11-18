@@ -104,9 +104,30 @@ cache_steps = steps.select do |step|
 end
 abort "Unit Tests must contain exactly one rust-cache action step" unless cache_steps.length == 1
 
+# With shared-key set, rust-cache ignores `key`, so the cache-bust suffix
+# lives in the shared key; the advisory flake lane restores the same cache
+# and must name it identically.
+shared_key = "unit-tests-sherpa-cache-v1"
 cache_with = cache_steps.first["with"]
-unless cache_with.is_a?(Hash) && cache_with["key"] == "sherpa-cache-v1"
-  abort "Unit Tests rust-cache action must keep with.key set to sherpa-cache-v1"
+unless cache_with.is_a?(Hash) && cache_with["shared-key"] == shared_key && !cache_with.key?("key")
+  abort "Unit Tests rust-cache action must keep with.shared-key set to #{shared_key} and no with.key"
+end
+
+flake_ci_path = root / ".github" / "workflows" / "_ci-flake.yml"
+flake_ci = workflows.fetch(flake_ci_path) { load_workflow.call(flake_ci_path) }
+flake_jobs = flake_ci["jobs"]
+flake_rust = flake_jobs.is_a?(Hash) ? flake_jobs["flake-rust"] : nil
+abort "flake-rust job missing" unless flake_rust.is_a?(Hash)
+flake_steps = flake_rust["steps"]
+abort "flake-rust steps missing" unless flake_steps.is_a?(Array)
+flake_cache_steps = flake_steps.select do |step|
+  step.is_a?(Hash) && step["uses"].is_a?(String) &&
+    step["uses"].match?(/\ASwatinem\/rust-cache@/i)
+end
+abort "flake-rust must contain exactly one rust-cache action step" unless flake_cache_steps.length == 1
+flake_with = flake_cache_steps.first["with"]
+unless flake_with.is_a?(Hash) && flake_with["shared-key"] == shared_key && flake_with["save-if"] == false
+  abort "flake-rust rust-cache action must restore with.shared-key #{shared_key} with save-if false"
 end
 
 renovate = JSON.parse(Pathname(renovate_name).binread.force_encoding("UTF-8"))

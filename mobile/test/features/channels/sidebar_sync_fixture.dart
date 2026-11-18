@@ -3,6 +3,9 @@ import 'dart:convert';
 
 import 'package:buzz/shared/crypto/nip44.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/relay/read_state_snapshot.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -17,7 +20,9 @@ class SidebarRelay {
   }
 
   final keys = nostr.Keys.generate();
-  final session = ConnectedRelaySession();
+  late final session = ConnectedRelaySession(
+    httpClient: MockClient(_handleHttp),
+  );
   late final signer = SignedEventRelay(session: session, nsec: keys.nsec);
   final _storedByRelay = <String?, List<NostrEvent>>{};
 
@@ -30,6 +35,7 @@ class SidebarRelay {
   /// The relay [session] served when each [published] event was sent.
   final publishedTo = <String?>[];
   final reqs = <List<dynamic>>[];
+  final snapshotHosts = <String>[];
   final _liveSubIds = <String?, String>{};
   int historyFailures = 0;
   Completer<void>? holdHistory;
@@ -45,18 +51,35 @@ class SidebarRelay {
     int createdAt, {
     String? id,
     List<List<String>> tags = const [],
-  }) => NostrEvent(
-    id: id ?? 'e$createdAt'.padRight(64, 'f'),
-    pubkey: pubkey,
-    createdAt: createdAt,
-    kind: EventKind.readState,
-    tags: [
-      ['d', dTag],
-      ...tags,
-    ],
-    content: nip44Encrypt(_key, jsonEncode(payload)),
-    sig: 'sig',
-  );
+  }) {
+    // Snapshot transport verifies signatures; do not substitute a decoder.
+    if (id == null) {
+      return NostrEvent.fromJson(
+        nostr.Event.from(
+          kind: EventKind.readState,
+          tags: [
+            ['d', dTag],
+            ...tags,
+          ],
+          content: nip44Encrypt(_key, jsonEncode(payload)),
+          createdAt: createdAt,
+          secretKey: keys.secret,
+        ).toMap(),
+      );
+    }
+    return NostrEvent(
+      id: id,
+      pubkey: pubkey,
+      createdAt: createdAt,
+      kind: EventKind.readState,
+      tags: [
+        ['d', dTag],
+        ...tags,
+      ],
+      content: nip44Encrypt(_key, jsonEncode(payload)),
+      sig: 'sig',
+    );
+  }
 
   Object? decrypt(NostrEvent event) =>
       jsonDecode(nip44Decrypt(_key, event.content));
@@ -134,6 +157,64 @@ class SidebarRelay {
     _reply(['EOSE', subId]);
   }
 
+  Future<http.Response> _handleHttp(http.Request request) async {
+    // Bind discovery to the requested host, not whichever community is active
+    // when a held request completes.
+    final community = request.url.host == 'second.example'
+        ? 'bbbbbbbb-eeee-abcd-abcd-abcdefabcdef'
+        : 'aaaaaaaa-eeee-abcd-abcd-abcdefabcdef';
+    if (request.method == 'GET' && request.url.path == '/') {
+      return http.Response(
+        jsonEncode({
+          'read_state_snapshot': {'version': 1, 'community_id': community},
+        }),
+        200,
+      );
+    }
+    expect(request.method, 'POST');
+    expect(request.url.path, '/query');
+    expect(request.headers['Authorization'], isNotNull);
+    expect(jsonDecode(request.body), [
+      {
+        'kinds': [30078],
+        'authors': [pubkey],
+        'read_state_snapshot': 1,
+      },
+    ]);
+    snapshotHosts.add(request.url.host);
+    final source = _storedByRelay.putIfAbsent(
+      request.url.origin,
+      () => <NostrEvent>[],
+    );
+    await holdHistory?.future;
+    if (historyFailures > 0) {
+      historyFailures--;
+      return http.Response('error: overloaded', 503);
+    }
+    final heads = <String, NostrEvent>{};
+    final own =
+        source.where((e) => e.kind == 30078 && e.pubkey == pubkey).toList()
+          ..sort(
+            (a, b) => a.createdAt != b.createdAt
+                ? b.createdAt.compareTo(a.createdAt)
+                : a.id.compareTo(b.id),
+          );
+    for (final event in own) {
+      heads.putIfAbsent(event.getTagValue('d') ?? '', () => event);
+    }
+    return http.Response(
+      jsonEncode({
+        'read_state_snapshot': 1,
+        'complete': true,
+        'community_id': community,
+        'pubkey': pubkey,
+        'snapshot_id': 'a' * 64,
+        'events': [for (final e in heads.values) e.toJson()],
+      }),
+      200,
+    );
+  }
+
   void _reply(List<dynamic> message) => session.debugHandleMessage(message);
 
   /// Null for a filter by `#t` alone, such as read state's slot discovery.
@@ -142,6 +223,9 @@ class SidebarRelay {
 }
 
 class ConnectedRelaySession extends RelaySessionNotifier {
+  ConnectedRelaySession({super.httpClient})
+    : super(snapshotDecoder: (input) async => validateReadStateSnapshot(input));
+
   @override
   SessionState build() {
     // Follows the active community, as the production session does.

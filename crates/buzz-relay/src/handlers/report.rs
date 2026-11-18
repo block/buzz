@@ -80,11 +80,36 @@ pub async fn handle_report_event(
             // Known Phase-1 limitation: the media sidecar API does not expose a
             // cheap typed not-found vs transient-storage distinction here, so
             // all lookup failures surface as a missing blob to the reporter.
-            state
+            let meta = state
                 .media_storage
                 .get_sidecar(tenant, &sha_hex)
                 .await
                 .map_err(|_| "invalid: report target blob not found".to_string())?;
+            if state.config.media_read_mode == crate::api::media_access::MediaReadMode::Enforce {
+                let base = crate::api::media::media_base_url_for_tenant(
+                    &state.config.relay_url,
+                    tenant.host(),
+                );
+                let access = state
+                    .db
+                    .media_access(
+                        tenant.community(),
+                        &sha_hex,
+                        &meta.ext,
+                        &base,
+                        &reporter_pubkey,
+                        false,
+                        super::req::event_visible_to_reader,
+                    )
+                    .await;
+                if !matches!(
+                    access,
+                    Ok(buzz_db::media::MediaAccess::Allowed
+                        | buzz_db::media::MediaAccess::UploaderPreview)
+                ) {
+                    return Err("invalid: report target blob not found".to_owned());
+                }
+            }
             (ReportTarget::Blob(sha256), None)
         }
         ParsedReportTarget::Pubkey { pubkey } => (ReportTarget::Pubkey(pubkey), None),
@@ -128,7 +153,18 @@ async fn reporter_can_read(
     if token_channels.is_some_and(|allowed| !allowed.contains(&channel_id)) {
         return Ok(false);
     }
-    match super::ingest::check_channel_membership(tenant, state, channel_id, reporter, None).await {
+    // Reading is enough to report: the role-table write rule does not
+    // apply, so a guest may report what it can read.
+    match super::ingest::check_channel_membership(
+        tenant.community(),
+        state,
+        channel_id,
+        reporter,
+        None,
+        super::ingest::ChannelWrite::Membership,
+    )
+    .await
+    {
         Ok(()) => Ok(true),
         Err(reason) if reason.starts_with("error:") => Err(reason),
         Err(_) => Ok(false),

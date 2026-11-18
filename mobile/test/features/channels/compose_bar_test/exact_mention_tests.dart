@@ -17,6 +17,8 @@ void exactMentionTests() {
     List<ChannelMember> roster,
     ComposeBarOnSend onSend, {
     nostr.Keys? signer,
+    List<OwnedAgentDirectoryEntry>? ownedAgents,
+    bool ownedAgentsUnknown = false,
   }) async {
     await tester.pumpWidget(
       _buildComposeBar(
@@ -35,6 +37,8 @@ void exactMentionTests() {
                 ),
               ),
         onSend: onSend,
+        ownedAgents: ownedAgents,
+        ownedAgentsUnknown: ownedAgentsUnknown,
       ),
     );
     if (find.byType(TextField).evaluate().isEmpty &&
@@ -48,7 +52,7 @@ void exactMentionTests() {
   }
 
   // Same-name members get contextual picker labels (`Scout · <npub suffix>`);
-  // the inserted mention text still uses the plain name.
+  // namesake mentions are all inserted qualified with their pubkey.
   Finder scoutRows() => find.descendant(
     of: find.byKey(const ValueKey('mention-suggestions-popover')),
     matching: find.textContaining('Scout'),
@@ -78,6 +82,9 @@ void exactMentionTests() {
     'tainted',
     'non-member human',
     'non-member denied agent',
+    'non-member unlisted own agent',
+    'non-member listed own agent',
+    'non-member own agent, list unknown',
   ]) {
     testWidgets('persisted selection restore to signed send: $scenario', (
       tester,
@@ -96,6 +103,16 @@ void exactMentionTests() {
             mediaTags: mediaTags,
           ),
           signer: signer,
+          // The Agents page lists the owned agent only in its own scenario.
+          ownedAgents: switch (scenario) {
+            'non-member unlisted own agent' => const [],
+            'non-member listed own agent' => [
+              OwnedAgentDirectoryEntry(pubkey: first),
+            ],
+            _ => null,
+          },
+          // Still loading (or offline): nothing is known to be unlisted.
+          ownedAgentsUnknown: scenario == 'non-member own agent, list unknown',
         );
         final container = ProviderScope.containerOf(
           tester.element(find.byType(ComposeBar)),
@@ -146,6 +163,9 @@ void exactMentionTests() {
           'removed',
           'non-member human',
           'non-member denied agent',
+          'non-member unlisted own agent',
+          'non-member listed own agent',
+          'non-member own agent, list unknown',
         ].contains(scenario))
           ChannelMember(
             pubkey: first,
@@ -162,9 +182,15 @@ void exactMentionTests() {
               UserProfile(
                 pubkey: first,
                 displayName: 'Renamed',
-                ownerPubkey: scenario == 'non-member denied agent'
-                    ? second
-                    : null,
+                // The viewer's own agent. An earlier Buzz's agent is not on
+                // the Agents page; a listed one is.
+                ownerPubkey: switch (scenario) {
+                  'non-member denied agent' => second,
+                  'non-member unlisted own agent' ||
+                  'non-member listed own agent' ||
+                  'non-member own agent, list unknown' => signer.public,
+                  _ => null,
+                },
               ),
             );
         await tester.pumpAndSettle();
@@ -195,9 +221,15 @@ void exactMentionTests() {
           }
         }
       }
+      // Admitted people and agents outside the channel are asked about.
+      final outsider = [
+        'non-member human',
+        'non-member listed own agent',
+        'non-member own agent, list unknown',
+      ].contains(scenario);
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
-      if (scenario == 'non-member human') {
+      if (outsider) {
         expect(
           find.textContaining('Renamed is not in this channel'),
           findsOneWidget,
@@ -212,6 +244,8 @@ void exactMentionTests() {
         'rename',
         'legacy',
         'non-member human',
+        'non-member listed own agent',
+        'non-member own agent, list unknown',
         'map reset',
         'map plain',
         'map reselected',
@@ -219,13 +253,13 @@ void exactMentionTests() {
         final event = messages.single;
         expect(event['content'], expectedText.trim());
         expect((event['tags'] as List).where((t) => t[0] == 'p').toList(), [
-          if (scenario != 'non-member human' && scenario != 'map plain')
+          if (!outsider && scenario != 'map plain')
             [
               'p',
               ['legacy', 'map reselected'].contains(scenario) ? second : first,
             ],
         ]);
-        if (scenario == 'non-member human') {
+        if (outsider) {
           expect(
             (event['tags'] as List).where((t) => t[0] == 'mention').toList(),
             [
@@ -275,7 +309,7 @@ void exactMentionTests() {
           .controller!;
       expect(controller.text, '@Scout ');
       await pick(tester, '@Scout @', last: true);
-      expect(controller.text, '@Scout @Scout ($second) ');
+      expect(controller.text, '@Scout ($first) @Scout ($second) ');
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
       expect(sent, [first, second]);
@@ -286,6 +320,175 @@ void exactMentionTests() {
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
       expect(sent, [second]);
+    },
+  );
+
+  testWidgets(
+    'qualifying a namesake keeps code and authored spelling as typed',
+    (tester) async {
+      List<String>? sent;
+      await mountComposer(
+        tester,
+        members(),
+        (_, keys, {mediaTags = const []}) async => sent = keys,
+      );
+      final controller = tester
+          .widget<TextField>(find.byType(TextField))
+          .controller!;
+      // Prose is qualified in its own spelling; code stays as typed.
+      await pick(tester, '@');
+      await pick(tester, '`ping @Scout now` @SCOUT @', last: true);
+      expect(
+        controller.text,
+        '`ping @Scout now` @SCOUT ($first) @Scout ($second) ',
+      );
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pumpAndSettle();
+      expect(sent, [first, second]);
+    },
+  );
+
+  // Code the composer styles stays as typed; prose after it is still
+  // qualified, and both recipients send.
+  for (final (form, code, prose) in [
+    ('a fence', '```\nping @Scout now\n```\n', true),
+    ('a list fence', '- run:\n  ```\n  ping @Scout now\n  ```\n\n', true),
+    ('a list-marker fence', '- ```\n  ping @Scout now\n  ```\n\n', true),
+    ('a span in a list item', 'no ` here\n- run `ping @Scout now` x\n\n', true),
+    // Bold and italics consume a backtick inside them before code pairs.
+    ('a span after bold', '**use ` carefully** then `ping @Scout now` ', true),
+    ('a span after italics', '_a ` b_ `ping @Scout now` ', true),
+  ]) {
+    testWidgets('qualifying a namesake leaves $form as typed', (tester) async {
+      List<String>? sent;
+      await mountComposer(
+        tester,
+        members(),
+        (_, keys, {mediaTags = const []}) async => sent = keys,
+      );
+      final controller = tester
+          .widget<TextField>(find.byType(TextField))
+          .controller!;
+      await pick(tester, '@');
+      await pick(tester, '$code${prose ? 'hi @Scout\n' : ''}@', last: true);
+      expect(
+        controller.text,
+        '$code${prose ? 'hi @Scout ($first)\n' : ''}@Scout ($second) ',
+      );
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pumpAndSettle();
+      expect(sent, [first, second]);
+    });
+  }
+
+  // Prose that looks like code to a line-by-line reading is still qualified.
+  for (final (form, before, after) in [
+    ('list continuation', '- item\n\n    ask ', '\n\n'),
+    ('lazy list continuation', '- item\nlazy\n\n    ask ', '\n\n'),
+    ('an unmatched backtick in an earlier item', '- a `x\n- b ask ', ' y`\n\n'),
+    ('quote-tab', '>\t ask ', '\n\n'),
+    ('a backtick consumed by bold', '**a `b** ask ', ' `\n\n'),
+  ]) {
+    testWidgets('$form prose is qualified, not taken for code', (tester) async {
+      List<String>? sent;
+      await mountComposer(
+        tester,
+        members(),
+        (_, keys, {mediaTags = const []}) async => sent = keys,
+      );
+      final controller = tester
+          .widget<TextField>(find.byType(TextField))
+          .controller!;
+      await pick(tester, '@');
+      await pick(tester, '$before@Scout$after@', last: true);
+      expect(controller.text, '$before@Scout ($first)$after@Scout ($second) ');
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pumpAndSettle();
+      expect(sent, [first, second]);
+    });
+  }
+
+  testWidgets(
+    'a namesake selection left only in code keeps its label and recipient',
+    (tester) async {
+      List<String>? sent;
+      await mountComposer(
+        tester,
+        members(),
+        (_, keys, {mediaTags = const []}) async => sent = keys,
+      );
+      final controller = tester
+          .widget<TextField>(find.byType(TextField))
+          .controller!;
+      await pick(tester, '@');
+      await pick(tester, '`ping @Scout now` @', last: true);
+      expect(controller.text, '`ping @Scout now` @Scout ($second) ');
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pumpAndSettle();
+      expect(sent, [first, second]);
+    },
+  );
+
+  testWidgets(
+    'a namesake selection touching code backticks stays bound after unformatting',
+    (tester) async {
+      List<String>? sent;
+      await mountComposer(
+        tester,
+        members(),
+        (_, keys, {mediaTags = const []}) async => sent = keys,
+      );
+      final controller = tester
+          .widget<TextField>(find.byType(TextField))
+          .controller!;
+      await pick(tester, '@');
+      await pick(tester, '`@Scout` and @Scout @', last: true);
+      expect(controller.text, '`@Scout` and @Scout ($first) @Scout ($second) ');
+      // Delete the qualified prose mention and remove the code formatting.
+      await tester.enterText(
+        find.byType(TextField),
+        '@Scout and @Scout ($second) ',
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pumpAndSettle();
+      expect(sent, [first, second]);
+    },
+  );
+
+  testWidgets(
+    'qualifying a namesake leaves a longer typed member name intact',
+    (tester) async {
+      final third = 'c' * 64;
+      List<String>? sent;
+      await mountComposer(tester, [
+        ...members(),
+        ChannelMember(
+          pubkey: third,
+          displayName: 'Scout Leader',
+          role: 'member',
+          joinedAt: DateTime(2025),
+        ),
+      ], (_, keys, {mediaTags = const []}) async => sent = keys);
+      final controller = tester
+          .widget<TextField>(find.byType(TextField))
+          .controller!;
+      await pick(tester, '@');
+      await tester.enterText(
+        find.byType(TextField),
+        '@Scout and @Scout Leader @',
+      );
+      await tester.pumpAndSettle();
+      // Rows: the earlier pick, its namesake, then Scout Leader.
+      await tester.tap(scoutRows().at(1));
+      await tester.pumpAndSettle();
+      expect(
+        controller.text,
+        '@Scout ($first) and @Scout Leader @Scout ($second) ',
+      );
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pumpAndSettle();
+      expect(sent, [first, third, second]);
     },
   );
 

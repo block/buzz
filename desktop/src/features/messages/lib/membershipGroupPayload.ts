@@ -91,8 +91,9 @@ export function buildGroupedMembershipPayload(
  * Mirrors `membershipChangesCanGroup`: a departure only groups with self-arrivals
  * of the departing member, and the builder absorbs *every* contiguous one, not
  * just the nearest. Duplicate `member_joined` events are a real relay artifact —
- * `handle_put_user` re-emits one on each PUT_USER — so pinning this to a 2-event
- * pair dropped the departure from the timeline entirely.
+ * relays before batch PUT_USER re-emitted one on each PUT_USER, even a no-op
+ * re-add — so pinning this to a 2-event pair dropped the departure from the
+ * timeline entirely.
  */
 function buildJoinedThenLeftPayload(
   payloads: readonly (SystemMessagePayload | null)[],

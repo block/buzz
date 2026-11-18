@@ -158,6 +158,48 @@ void main() {
     },
   );
 
+  test(
+    'profile draft retries without completing and skip does not prepare media',
+    () async {
+      var prepares = 0;
+      var attempts = 0;
+      final pending = f.flow.requestProfile(
+        (_) async {},
+        saveDraft: (name, prepare) async {
+          await prepare?.call();
+          if (++attempts == 1) throw StateError('offline');
+          writes.add(name);
+        },
+      );
+      final save = f.flow.saveProfileDraft!;
+      Future<String> prepare() async {
+        prepares++;
+        return 'https://media.example/photo';
+      }
+
+      await expectLater(save('Name', prepare), throwsStateError);
+      expect(f.flow.stage, HostedFlowStage.profile);
+      await save('Name', prepare);
+      await pending;
+      expect(writes, ['Name']);
+      expect(prepares, 2);
+      final skipped = f.flow.requestProfile(
+        (_) async {},
+        saveDraft: (_, prepare) async {
+          await prepare?.call();
+        },
+      );
+      final stale = f.flow.saveProfileDraft!;
+      f.flow.finishProfile();
+      await skipped;
+      await expectLater(
+        stale('Old', prepare),
+        throwsA(AccountFailure.unavailable),
+      );
+      expect(prepares, 2);
+    },
+  );
+
   for (final cancelAdmission in [false, true]) {
     test(
       'leave rejects captured save (cancel admission: $cancelAdmission)',

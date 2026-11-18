@@ -37,21 +37,18 @@ return {count, ttl}
 /// from a prior crash), the key is repaired with a fresh EXPIRE and a warning
 /// is logged.
 async fn run_rate_limit(
-    pool: &deadpool_redis::Pool,
+    pool: &crate::RedisConnection,
     key: &str,
     window_secs: u64,
     limit: u64,
 ) -> Result<RateLimitResult, AuthError> {
-    let mut conn = pool
-        .get()
-        .await
-        .map_err(|e| AuthError::Internal(format!("Redis pool: {e}")))?;
+    let mut conn = pool.clone();
 
     let script = Script::new(RATE_LIMIT_SCRIPT);
     let (count, ttl): (u64, i64) = script
         .key(key)
         .arg(window_secs as i64)
-        .invoke_async(&mut *conn)
+        .invoke_async(&mut conn)
         .await
         .map_err(|e| AuthError::Internal(format!("Redis rate limit script: {e}")))?;
 
@@ -62,7 +59,7 @@ async fn run_rate_limit(
         let _: () = redis::cmd("EXPIRE")
             .arg(key)
             .arg(window_secs as i64)
-            .query_async(&mut *conn)
+            .query_async(&mut conn)
             .await
             .map_err(|e| AuthError::Internal(format!("Redis EXPIRE repair: {e}")))?;
         // After repair, the window resets to the full duration.
@@ -86,12 +83,12 @@ async fn run_rate_limit(
 /// managed atomically via a Lua script to prevent keys from persisting without
 /// expiry.
 pub struct RedisRateLimiter {
-    pool: deadpool_redis::Pool,
+    pool: crate::RedisConnection,
 }
 
 impl RedisRateLimiter {
     /// Create a new `RedisRateLimiter` backed by the given connection pool.
-    pub fn new(pool: deadpool_redis::Pool) -> Self {
+    pub fn new(pool: crate::RedisConnection) -> Self {
         Self { pool }
     }
 }
