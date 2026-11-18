@@ -106,10 +106,23 @@ for job in push-gateway-build push-gateway-personal-dev; do
 done
 inputs_job=$(awk '/^  push-gateway-inputs:/{f=1} f&&/^  [a-z][a-z_-]*:$/&&!/^  push-gateway-inputs:/{exit} f' "$workflow")
 grep -Fxq "          MAIN_PUSH: \${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}" <<<"$inputs_job" &&
-  grep -Fxq '        run: echo "build=$(scripts/push-gateway-image-inputs-changed.sh "$GITHUB_SHA")" >> "$GITHUB_OUTPUT"' <<<"$inputs_job" || {
+  grep -Fxq '        run: scripts/push-gateway-image-inputs-changed.sh "$GITHUB_SHA" >> "$GITHUB_OUTPUT"' <<<"$inputs_job" || {
   echo "push-gateway-inputs must decide with scripts/push-gateway-image-inputs-changed.sh on main pushes" >&2
   exit 1
 }
+# The step's exit status must be the script's, so a failing check fails the
+# run instead of writing an empty decision that skips both gateway builds.
+decision_run=$(grep -F 'run: scripts/push-gateway-image-inputs-changed.sh' <<<"$inputs_job" | sed 's/^ *run: //')
+decision_dir=$(mktemp -d)
+mkdir "$decision_dir/scripts"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$decision_dir/scripts/push-gateway-image-inputs-changed.sh"
+chmod +x "$decision_dir/scripts/push-gateway-image-inputs-changed.sh"
+if (cd "$decision_dir" && GITHUB_SHA=HEAD GITHUB_OUTPUT="$decision_dir/out" bash -e -c "$decision_run"); then
+  rm -rf "$decision_dir"
+  echo "push-gateway-inputs must fail when the decision script fails" >&2
+  exit 1
+fi
+rm -rf "$decision_dir"
 # The check trusts the source label of :main, so :main must move only after
 # the image's provenance is attested: the first publication leaves it out, and
 # a later step adds it.
@@ -162,7 +175,7 @@ chmod +x "$fixture/bin/docker"
   expect() {
     local want=$1 main_push=$2 image=$3 why=$4 got
     got=$(MAIN_PUSH=$main_push STUB_IMAGE_JSON=$image "$inputs_changed" HEAD 2>/dev/null)
-    [[ "$got" == "$want" ]] || {
+    [[ "$got" == "build=$want" ]] || {
       echo "push gateway inputs check: $why: want $want, got $got" >&2
       exit 1
     }

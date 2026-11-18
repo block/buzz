@@ -546,7 +546,7 @@ jobs:
         id: check
         env:
           MAIN_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        run: echo "build=$(scripts/push-gateway-image-inputs-changed.sh "$GITHUB_SHA")" >> "$GITHUB_OUTPUT"
+        run: scripts/push-gateway-image-inputs-changed.sh "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
 
   push-gateway-build:
     name: Build public push gateway (${{ matrix.platform }})

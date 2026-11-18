@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Print `true` when the push gateway image must be built for HEAD_REV, and
-# `false` when its build inputs match the source of the current :main gateway
-# image.
+# Print `build=true` when the push gateway image must be built for HEAD_REV,
+# and `build=false` when its build inputs match the source of the current :main
+# gateway image. docker.yml appends the line to $GITHUB_OUTPUT, so a failure
+# here fails the step instead of leaving the decision empty.
 #
 # Usage: MAIN_PUSH=true|false scripts/push-gateway-image-inputs-changed.sh HEAD_REV
 #
@@ -22,7 +23,7 @@ fi
 head_rev=$1
 
 if [[ "${MAIN_PUSH:-}" != "true" ]]; then
-  echo true
+  echo build=true
   exit 0
 fi
 
@@ -49,12 +50,12 @@ echo "Published :main gateway source: ${published_rev:-unknown}" >&2
 if [[ ! "$published_rev" =~ ^[0-9a-f]{40}$ ]] ||
   ! git cat-file -e "${published_rev}^{commit}" 2>/dev/null ||
   ! git merge-base --is-ancestor "$published_rev" "$head_rev" 2>/dev/null; then
-  echo true
+  echo build=true
   exit 0
 fi
 
 if git diff --quiet "$published_rev" "$head_rev" -- "${inputs[@]}"; then
-  echo false
+  echo build=false
 else
-  echo true
+  echo build=true
 fi
