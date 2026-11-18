@@ -323,33 +323,16 @@ async fn mint_invite_checked(
         caller.token_owner,
     )
     .await;
+    // The shared gate records the verified owner; a different stored owner
+    // keeps this route's own refusal code.
     if let Err(e) = caller.check(
         membership,
         super::relay_members::MembershipRefusal::auth_result,
     ) {
-        return e.into_response();
-    }
-
-    if let Some(owner) = super::relay_members::extract_nip_oa_owner(
-        pubkey.as_bytes(),
-        super::relay_members::extract_auth_tag_header(&headers),
-        caller.signed_at,
-    ) {
-        match super::relay_members::link_agent_owner(&state, &tenant, &pubkey, &owner).await {
-            super::relay_members::OwnerLink::Linked => {}
-            super::relay_members::OwnerLink::Conflict => {
-                slot.finish(AuthResult::Denied(AuthReason::OwnerMismatch));
-                return api_error(StatusCode::FORBIDDEN, "invite_owner_mismatch").into_response();
-            }
-            super::relay_members::OwnerLink::Unavailable => {
-                slot.finish(AuthResult::Denied(AuthReason::NipOaOwnerUnlinked));
-                return api_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    crate::handlers::auth::OWNER_LINK_ERROR,
-                )
-                .into_response();
-            }
+        if let super::relay_members::MembershipRefusal::Api(AuthReason::OwnerMismatch, _) = e {
+            return api_error(StatusCode::FORBIDDEN, "invite_owner_mismatch").into_response();
         }
+        return e.into_response();
     }
 
     // The request's access line carries the minted invite.

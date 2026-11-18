@@ -156,6 +156,12 @@ asserted key or the owner, or when the issuer has denied either key.  Only
 then, when the asserted key is not itself authorized in the community, the
 relay MUST authorize it if and only if the issuer is trusted for the community
 and the owner is authorized in the community when access is decided.
+
+When the relay removes a key from a community's membership, it MUST, in the
+same change, remove every member of that community, other than the community
+owner, whose recorded owner is that key at the time of removal, and MUST close
+the live sessions of the removed key and of every agent whose recorded owner is
+that key.
 [FI-TRACE-AGENT-OWNER]
 
 ### Unverified claims

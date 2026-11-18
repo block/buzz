@@ -403,6 +403,8 @@ String downloadedImageFilename(String imageUrl, String? contentType) {
   return 'buzz-${DateTime.now().millisecondsSinceEpoch}$extension';
 }
 
+const _photoLibrarySaver = MethodChannel('buzz/photo_library_saver');
+
 Future<void> _saveImageToPhotos(WidgetRef ref, String imageUrl) async {
   final needsPhotoLibraryPermission =
       defaultTargetPlatform == TargetPlatform.iOS ||
@@ -424,7 +426,17 @@ Future<void> _saveImageToPhotos(WidgetRef ref, String imageUrl) async {
     }
   }
   final image = await _downloadImage(ref, imageUrl);
-  await PhotoManager.editor.saveImage(image.bytes, filename: image.filename);
+  if (defaultTargetPlatform == TargetPlatform.iOS) {
+    // photo_manager reads the new asset back after writing it. Add-only access
+    // forbids that read, so iOS asks for full access and a completed save is
+    // reported as a failure. The native saver only writes.
+    await _photoLibrarySaver.invokeMethod<void>('saveImage', {
+      'bytes': image.bytes,
+      'filename': image.filename,
+    });
+  } else {
+    await PhotoManager.editor.saveImage(image.bytes, filename: image.filename);
+  }
 }
 
 Future<void> _saveImage(

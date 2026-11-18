@@ -334,6 +334,7 @@ class _Connected extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    Future<bool> Function()? mayPublish,
   }) async {
     expect(event.kind, buzzPushLeaseKind);
     final plaintext = nip44Decrypt(
