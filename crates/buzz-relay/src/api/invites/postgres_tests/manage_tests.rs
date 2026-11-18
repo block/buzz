@@ -159,7 +159,7 @@ mod postgres_tests {
         assert_eq!(claim.status(), StatusCode::OK, "the other link still works");
 
         let page = get_signed(
-            state,
+            state.clone(),
             &host,
             "/api/invites?limit=1",
             "/api/invites?limit=1",
@@ -168,7 +168,12 @@ mod postgres_tests {
         .await;
         let page = read_json(page).await;
         assert_eq!(page["invites"][0]["id"], second_id);
-        assert_eq!(page["next_before"], second_id);
+        let cursor = page["next_before"]
+            .as_str()
+            .expect("a full page has a cursor");
+        let path = format!("/api/invites?before={cursor}");
+        let older = read_json(get_signed(state, &host, &path, &path, &owner).await).await;
+        assert_eq!(older["invites"][0]["id"], first["invite_id"]);
     }
 
     #[tokio::test]
@@ -291,5 +296,114 @@ mod postgres_tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Malformed list and revoke requests get fixed errors: neither the
+    /// response nor the access line echoes a code they carried.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres"]
+    async fn malformed_requests_never_echo_a_code() {
+        let (state, host, _, owner) = fixture().await;
+        let code = mint(&state, &host, &owner).await["code"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (_guard, out) = crate::access::tests::capture_scoped();
+        for body in [
+            serde_json::json!({ "code": 7, "id": code }),
+            serde_json::json!({ code.clone(): true }),
+            serde_json::json!([code]),
+        ] {
+            let (status, json) = revoke(&state, &host, &owner, body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_no_secret(&json, &code);
+        }
+        for path in [
+            format!("/api/invites?{code}=1"),
+            format!("/api/invites?limit={code}"),
+            format!("/api/invites?before={code}"),
+        ] {
+            let response = get_signed(state.clone(), &host, &path, &path, &owner).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+            assert_no_secret(&read_json(response).await, &code);
+        }
+        assert!(!out.raw().contains(&code), "code logged: {}", out.raw());
+    }
+
+    /// A revoke the database refuses logs a denial with its reason.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres"]
+    async fn refused_revoke_logs_denied() {
+        let (state, host, community, owner) = fixture().await;
+        let member = Keys::generate();
+        add_member(&state, community, &member, "member").await;
+        let invite = mint(&state, &host, &owner).await;
+        let (_guard, out) = crate::access::tests::capture_scoped();
+        let (status, _) = revoke(
+            &state,
+            &host,
+            &member,
+            serde_json::json!({ "id": invite["invite_id"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let lines = out.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["route"], "/api/invites/revoke", "{}", lines[0]);
+        assert_eq!(lines[0]["outcome"], "denied", "{}", lines[0]);
+        assert_eq!(lines[0]["reason"], "not_relay_admin", "{}", lines[0]);
+    }
+
+    /// Replaying a signed list or revoke request is refused.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn replayed_list_and_revoke_are_refused() {
+        let (state, host, _, owner) = fixture().await;
+        let invite = mint(&state, &host, &owner).await;
+        let mut replaying = Arc::try_unwrap(state).unwrap_or_else(|_| panic!("sole state owner"));
+        replaying.nip98_replay = Arc::new(SeenOnceReplayGuard::new());
+        let state = Arc::new(replaying);
+
+        let auth = nip98_get_header(&owner, &format!("https://{host}/api/invites"));
+        let body = serde_json::json!({ "id": invite["invite_id"] }).to_string();
+        let revoke_auth = nip98_auth_header(
+            &owner,
+            &format!("https://{host}/api/invites/revoke"),
+            body.as_bytes(),
+        );
+        for attempt in 0..2 {
+            let list = build_router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri("/api/invites")
+                        .header(header::HOST, &host)
+                        .header(header::AUTHORIZATION, &auth)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let revoke = build_router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/invites/revoke")
+                        .header(header::HOST, &host)
+                        .header(header::AUTHORIZATION, &revoke_auth)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body.clone()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if attempt == 0 {
+                assert_eq!(list.status(), StatusCode::OK);
+                assert_eq!(revoke.status(), StatusCode::OK);
+            } else {
+                assert_ne!(list.status(), StatusCode::OK, "replayed list");
+                assert_ne!(revoke.status(), StatusCode::OK, "replayed revoke");
+            }
+        }
     }
 }

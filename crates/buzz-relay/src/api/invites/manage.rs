@@ -1,6 +1,7 @@
 //! `GET /api/invites` and `POST /api/invites/revoke`.
 //!
-//! Neither response nor access line carries an invite code or its hash.
+//! Neither response nor access line carries an invite code or its hash, and
+//! request errors are fixed strings that never echo input.
 
 use std::sync::Arc;
 
@@ -16,7 +17,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::{admit_invite_caller, api_error, internal_error, InviteGate};
-use crate::access::AccessSlot;
+use crate::access::{AccessSlot, AuthReason, AuthResult};
 use crate::state::AppState;
 
 const DEFAULT_LIST_LIMIT: i64 = 50;
@@ -25,7 +26,22 @@ const DEFAULT_LIST_LIMIT: i64 = 50;
 #[serde(deny_unknown_fields)]
 struct ListQuery {
     limit: Option<i64>,
-    before: Option<Uuid>,
+    before: Option<String>,
+}
+
+/// The list cursor: the last row's `created_at` in Unix microseconds (the
+/// column's precision) and its id, so a page never depends on that row
+/// still existing.
+fn encode_cursor(invite: &InviteSummary) -> String {
+    format!("{}_{}", invite.created_at.timestamp_micros(), invite.id)
+}
+
+fn decode_cursor(cursor: &str) -> Option<(chrono::DateTime<chrono::Utc>, Uuid)> {
+    let (micros, id) = cursor.split_once('_')?;
+    Some((
+        chrono::DateTime::from_timestamp_micros(micros.parse().ok()?)?,
+        id.parse().ok()?,
+    ))
 }
 
 /// Body for `POST /api/invites/revoke`: exactly one of `id` or `code`.
@@ -38,7 +54,7 @@ struct RevokeInviteRequest {
 
 /// List invites — `GET /api/invites?limit=&before=`, NIP-98 signed by an
 /// owner/admin over the full URL, query included. Newest first; when a page
-/// is full, `next_before` is the id to pass as `before` for the next one.
+/// is full, `next_before` is the opaque cursor to pass as `before`.
 pub async fn list_invites(
     State(state): State<Arc<AppState>>,
     slot: AccessSlot,
@@ -59,10 +75,12 @@ pub async fn list_invites(
 
     let query: ListQuery = match serde_urlencoded::from_str(query.as_deref().unwrap_or("")) {
         Ok(query) => query,
-        Err(e) => {
-            return api_error(StatusCode::BAD_REQUEST, &format!("invalid query: {e}"))
-                .into_response()
-        }
+        Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid query").into_response(),
+    };
+    let before = match query.before.as_deref().map(decode_cursor) {
+        None => None,
+        Some(Some(cursor)) => Some(cursor),
+        Some(None) => return api_error(StatusCode::BAD_REQUEST, "invalid before").into_response(),
     };
     let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
     if !(1..=buzz_db::relay_invite::MAX_INVITE_LIST_LIMIT).contains(&limit) {
@@ -78,14 +96,14 @@ pub async fn list_invites(
 
     let invites = match state
         .db
-        .list_relay_invites(tenant.community(), limit, query.before)
+        .list_relay_invites(tenant.community(), limit, before)
         .await
     {
         Ok(invites) => invites,
         Err(e) => return internal_error(&format!("invite list: {e}")).into_response(),
     };
     let next_before = (invites.len() as i64 == limit)
-        .then(|| invites.last().map(|invite| invite.id))
+        .then(|| invites.last().map(encode_cursor))
         .flatten();
     let now = chrono::Utc::now();
     Json(serde_json::json!({
@@ -135,12 +153,8 @@ pub async fn revoke_invite(
 
     let request: RevokeInviteRequest = match serde_json::from_slice(&body) {
         Ok(request) => request,
-        Err(e) => {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                &format!("invalid revoke JSON: {e}"),
-            )
-            .into_response()
+        Err(_) => {
+            return api_error(StatusCode::BAD_REQUEST, "invalid revoke request").into_response()
         }
     };
     let token_hash;
@@ -180,12 +194,17 @@ pub async fn revoke_invite(
             .into_response()
         }
         Ok(None) => api_error(StatusCode::NOT_FOUND, "invite_not_found").into_response(),
-        Err(buzz_db::DbError::InviteRevokeForbidden) => api_error(
-            StatusCode::FORBIDDEN,
-            "only relay owners, admins or the invite's creator can revoke it",
-        )
-        .into_response(),
+        // The database made the final role decision; log its refusal.
+        Err(buzz_db::DbError::InviteRevokeForbidden) => {
+            slot.finish(AuthResult::Denied(AuthReason::NotRelayAdmin));
+            api_error(
+                StatusCode::FORBIDDEN,
+                "only relay owners, admins or the invite's creator can revoke it",
+            )
+            .into_response()
+        }
         Err(buzz_db::DbError::InviteRestricted) => {
+            slot.finish(AuthResult::Denied(AuthReason::Restricted));
             api_error(StatusCode::FORBIDDEN, "invite_restricted").into_response()
         }
         Err(buzz_db::DbError::AccessDenied(_)) => api_error(

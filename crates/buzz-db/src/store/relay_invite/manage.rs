@@ -116,25 +116,26 @@ pub(super) fn is_admin(role: Option<String>) -> bool {
     matches!(role.as_deref(), Some("owner" | "admin"))
 }
 
-/// List `community`'s v2 invites, newest first. `before` is the id of the
-/// last invite on the previous page; an id not in `community` yields an
-/// empty page. `limit` is clamped to `1..=MAX_INVITE_LIST_LIMIT`.
+/// List `community`'s v2 invites, newest first. `before` is the
+/// `(created_at, id)` of the last invite on the previous page; it need not
+/// still exist. `limit` is clamped to `1..=MAX_INVITE_LIST_LIMIT`.
 pub async fn list_relay_invites(
     pool: &PgPool,
     community: CommunityId,
     limit: i64,
-    before: Option<Uuid>,
+    before: Option<(DateTime<Utc>, Uuid)>,
 ) -> Result<Vec<InviteSummary>> {
+    let (before_at, before_id) = before.unzip();
     let rows = sqlx::query(
         "SELECT id, created_by, created_at, expires_at, max_uses, use_count, revoked_at \
          FROM relay_invites \
-         WHERE community_id = $1 AND ($2::uuid IS NULL OR (created_at, id) < (\
-             SELECT created_at, id FROM relay_invites WHERE community_id = $1 AND id = $2\
-         )) \
-         ORDER BY created_at DESC, id DESC LIMIT $3",
+         WHERE community_id = $1 \
+           AND ($2::timestamptz IS NULL OR (created_at, id) < ($2, $3::uuid)) \
+         ORDER BY created_at DESC, id DESC LIMIT $4",
     )
     .bind(community.as_uuid())
-    .bind(before)
+    .bind(before_at)
+    .bind(before_id)
     .bind(limit.clamp(1, MAX_INVITE_LIST_LIMIT))
     .fetch_all(pool)
     .await?;
@@ -236,7 +237,7 @@ impl Db {
         &self,
         community: CommunityId,
         limit: i64,
-        before: Option<Uuid>,
+        before: Option<(DateTime<Utc>, Uuid)>,
     ) -> Result<Vec<InviteSummary>> {
         list_relay_invites(&self.pool, community, limit, before).await
     }

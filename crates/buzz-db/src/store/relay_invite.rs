@@ -959,30 +959,12 @@ mod postgres_tests {
         }
     }
 
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn mint_after_quiescing_returns_typed_fence_without_persisting() {
-        let scratch =
-            ScratchDb::create(&crate::test_support::database_url(), "relay_invite_fence").await;
-        let db = crate::Db::new(&crate::DbConfig {
-            database_url: scratch.url().to_owned(),
-            max_connections: 5,
-            min_connections: 0,
-            ..crate::DbConfig::default()
-        })
-        .await
-        .expect("connect invite deletion test DB");
-        db.migrate().await.expect("migrate invite deletion test DB");
-        let pool = db.pool.clone();
+    /// Move `community` on `host` into deletion quiescing, where every
+    /// community write is fenced.
+    pub(super) async fn quiesce(db: &crate::Db, host: &str, community: CommunityId) {
         let store = db.deletion_store();
-        let host = format!("relay-invite-fence-{}.example", Uuid::new_v4().simple());
-        let community = db
-            .ensure_configured_community(&host)
-            .await
-            .expect("create fenced invite community")
-            .id;
         let request = store
-            .submit(Some(&host), "owner", None, None)
+            .submit(Some(host), "owner", None, None)
             .await
             .expect("submit deletion request");
         let empty_digest = hex::encode(sha2::Sha256::digest([]));
@@ -1029,6 +1011,30 @@ mod postgres_tests {
             .begin_quiescing(&claim.lease)
             .await
             .expect("begin quiescing");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn mint_after_quiescing_returns_typed_fence_without_persisting() {
+        let scratch =
+            ScratchDb::create(&crate::test_support::database_url(), "relay_invite_fence").await;
+        let db = crate::Db::new(&crate::DbConfig {
+            database_url: scratch.url().to_owned(),
+            max_connections: 5,
+            min_connections: 0,
+            ..crate::DbConfig::default()
+        })
+        .await
+        .expect("connect invite deletion test DB");
+        db.migrate().await.expect("migrate invite deletion test DB");
+        let pool = db.pool.clone();
+        let host = format!("relay-invite-fence-{}.example", Uuid::new_v4().simple());
+        let community = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("create fenced invite community")
+            .id;
+        quiesce(&db, &host, community).await;
 
         let error = mint_relay_invite(&pool, community, &test_pubkey(), 3600, Some(1))
             .await
