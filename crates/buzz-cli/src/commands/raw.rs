@@ -120,7 +120,10 @@ pub async fn cmd_publish(
     };
 
     let mut builder = EventBuilder::new(Kind::Custom(template.kind), template.content)
-        .tags(build_tags(&template.tags)?);
+        .tags(build_tags(&template.tags)?)
+        // Keep a `p` tag naming the signer: nostr drops them by default, and
+        // `raw publish` must send the tags it was given.
+        .allow_self_tagging();
     if let Some(created_at) = template.created_at {
         builder = builder.custom_created_at(Timestamp::from(created_at));
     }
@@ -410,6 +413,27 @@ mod tests {
             captured.auth_tags.lock().unwrap()[0].as_deref(),
             Some(auth_json.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn publish_keeps_a_p_tag_naming_the_signer() {
+        let (url, captured) = fake_relay("[]").await;
+        let client = client(&url);
+        let me = client.public_key().to_hex();
+
+        cmd_publish(&client, Some(1), &[format!(r#"["p","{me}"]"#)], None, None)
+            .await
+            .unwrap();
+        let template = format!(r#"{{"kind":1,"tags":[["p","{me}"]]}}"#);
+        cmd_publish(&client, None, &[], None, Some(&template))
+            .await
+            .unwrap();
+
+        let events = captured.events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        for event in events.iter() {
+            assert_eq!(tags_of(event), vec![vec!["p".to_string(), me.clone()]]);
+        }
     }
 
     #[tokio::test]
