@@ -39,7 +39,7 @@ This tag is the same tag that Buzz canvas writes (`kind:40100`) and workflow def
 A relay that supports this NIP MUST apply these rules to a replaceable or addressable event that carries the tag.
 
 1. The relay MUST read the head, check the tag, and store the event in one atomic step. No other write to the same coordinate can happen between the check and the write.
-2. If the event ID is already the head, the relay MUST accept the event and report `duplicate:`. This makes a retry safe.
+2. If the event ID is already the head, the relay MUST accept the event and report `duplicate:`. This makes a retry safe while the event is still the head.
 3. If `<value>` is an event ID and the head has a different ID, the relay MUST reject the event.
 4. If `<value>` is an event ID and the coordinate has no head, the relay MUST reject the event.
 5. If `<value>` is `none` and the coordinate has a head, the relay MUST reject the event.
@@ -48,6 +48,8 @@ A relay that supports this NIP MUST apply these rules to a replaceable or addres
 8. A rejected event MUST NOT be stored, and the head MUST NOT change.
 
 A relay MUST NOT change how it handles an event that has no `expected-revision` tag.
+
+These rules add a condition to an event the relay would otherwise accept. They do not replace the acceptance rules of a kind that has its own specification. The relay applies those rules first and answers as they require. For example, a [NIP-PL](NIP-PL.md) push lease (`kind:30350`) that carries the tag is rejected with `invalid:`, because NIP-PL allows only its own public tags.
 
 ### Rejection
 
@@ -60,6 +62,8 @@ The relay answers with `["OK", <event-id>, false, "conflict: <reason>"]`. The me
 3. Set `created_at` to the larger of the current time and the head's `created_at` plus one. This makes the event sort ahead of the head, so it cannot lose the `id` tie-break.
 4. Add the `expected-revision` tag and publish.
 5. On `conflict:`, read the head again, apply the change again, and publish again. A client MUST NOT retry with the same expected head.
+
+A `conflict:` answer to an event the client already sent without receiving an `OK` does not show that the first send was rejected. The relay may have stored it and another writer may have replaced it since. In that case the client MUST read the head again and MUST NOT apply the change again unless applying it twice gives the same result as applying it once, or the client has confirmed that the head does not already include it.
 
 ## Security considerations
 
