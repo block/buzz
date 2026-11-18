@@ -181,7 +181,7 @@ async fn publish_member_commands(
     let mut applied = Vec::new();
     for pubkey in pubkeys {
         let outcome = async {
-            let event = client.sign_event(build(pubkey).map_err(sdk_err)?)?;
+            let event = client.sign_event(build(pubkey).map_err(sdk_err)?).await?;
             client
                 .submit_event(event)
                 .await
@@ -317,6 +317,7 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::credentials::Credentials;
     use axum::{
         body::Bytes,
         extract::State,
@@ -450,7 +451,7 @@ mod tests {
     async fn setup() -> (BuzzClient, Shared) {
         let relay = Shared::default();
         let url = fake_relay(relay.clone()).await;
-        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+        let client = BuzzClient::new(url, Credentials::from_keys(Keys::generate())).unwrap();
         (client, relay)
     }
 

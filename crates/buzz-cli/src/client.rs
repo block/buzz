@@ -2130,7 +2130,7 @@ mod retry_policy_tests {
         let (url, attempts) =
             test_server(|_n| (StatusCode::BAD_GATEWAY, "bad gateway".to_string())).await;
         let client = test_client(&url);
-        let event = make_moderation_event(client.keys(), 9031);
+        let event = make_moderation_event(&client_keys(&client), 9031);
         let err = client.submit_event(event).await.unwrap_err();
         assert!(matches!(err, CliError::DeliveryUnknown(_)), "{err:?}");
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
