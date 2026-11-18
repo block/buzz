@@ -166,8 +166,7 @@ class ReadStateManager {
   Future<Map<String, int>> _savedFollows = Future.value(const {});
   bool _saveScheduled = false;
   Object? syncError;
-  // Channels whose synced clear failed. Their error outlives unrelated
-  // successful syncs until the clear lands or the override ends.
+  // Failed synced clears: each error stands until it lands or the mark ends.
   final Set<String> _failedClears = {};
 
   Object? get _standingError {
@@ -189,7 +188,7 @@ class ReadStateManager {
   // Merged whole-channel override registers, from this installation and its
   // peers. The primary carries all of them (NIP-RS, Buzz profile).
   final Map<String, OverrideRegister> _overrides = {};
-  // Received groups stamped too far ahead, held until the clock reaches them.
+  final Map<String, int> _pendingClears = {}; // See _settlePendingClears.
   /// Groups stamped too far ahead, each contribution kept apart with where
   /// it came from, so each meets its own admission rule once due.
   final List<({String channelId, OverrideRegister register, bool local})>
@@ -580,6 +579,7 @@ class ReadStateManager {
         }
       }
     }
+    _settlePendingClears();
   }
 
   /// Whether the live subscription is open on the session's current build.

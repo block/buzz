@@ -26,6 +26,7 @@ extension ReadStateJournal on ReadStateManager {
             ...contexts(journal['overrides']),
           }),
         );
+        _pendingClears.addAll(contexts(journal['pendingClears'] ?? const {}));
         for (final held
             in (journal['deferredOverrides'] as List?) ?? const []) {
           final [String id, int s, int c, int b, int local] = held as List;
@@ -138,6 +139,7 @@ extension ReadStateJournal on ReadStateManager {
         throw StateError('Read-state journal writer retired');
       }
       _discardOverrides();
+      _pendingClears.removeWhere((id, _) => !_overrides.containsKey(id));
       final observed = pruneStaleContexts(
         _effectiveState,
         nowUnixSeconds: _now(),
@@ -162,6 +164,7 @@ extension ReadStateJournal on ReadStateManager {
         ),
         'unreadSlot': _unreadSlot,
         'unreadPublished': _unreadPublished,
+        'pendingClears': _pendingClears,
         'expiryWatermark': watermark,
         'deferredOverrides': [
           for (final (:channelId, register: r, :local) in _deferredOverrides)

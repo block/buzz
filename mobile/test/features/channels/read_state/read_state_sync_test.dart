@@ -1200,6 +1200,59 @@ void main() {
       },
     );
 
+    test('an offline clear survives a restart before reconnecting', () async {
+      final phone = await device('phone');
+      phone.markContextRead(channel, clock - 100);
+      expect(phone.markChannelUnread(channel), isTrue);
+      await phone.flush();
+
+      relay.offline = true;
+      final restarted = await device('phone');
+      clock += 10;
+      expect(restarted.clearChannelOverride(channel), isTrue);
+      await pumpEventQueue();
+      final again = await device('phone');
+      expect(again.activeChannelOverrides, isEmpty);
+
+      relay.offline = false;
+      await reconnect(again);
+      await again.flush();
+      final desktop = await device('desktop');
+      expect(desktop.activeChannelOverrides, isEmpty);
+    });
+
+    test('an offline clear keeps a newer mark it never merged', () async {
+      final phone = await device('phone');
+      phone.markContextRead(channel, clock - 100);
+      expect(phone.markChannelUnread(channel), isTrue);
+      await phone.flush();
+
+      relay.offline = true;
+      final restarted = await device('phone');
+      relay.offline = false;
+
+      // Another device reads the channel, then marks it unread again.
+      clock += 10;
+      final desktop = await device('desktop');
+      expect(desktop.clearChannelOverride(channel), isTrue);
+      clock += 10;
+      expect(desktop.markChannelUnread(channel), isTrue);
+      await desktop.flush();
+
+      // Still offline, the phone reads to the bottom of its cached view.
+      relay.offline = true;
+      clock += 10;
+      expect(restarted.clearChannelOverride(channel), isTrue);
+      expect(restarted.activeChannelOverrides, isEmpty);
+
+      relay.offline = false;
+      await reconnect(restarted);
+      await restarted.flush();
+      expect(restarted.activeChannelOverrides, {channel});
+      final laptop = await device('laptop');
+      expect(laptop.activeChannelOverrides, {channel});
+    });
+
     for (final (offset, kept) in [
       (lifetime + 1, true),
       (lifetime + 600, true),

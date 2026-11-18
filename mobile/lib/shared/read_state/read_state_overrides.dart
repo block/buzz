@@ -21,7 +21,8 @@ extension ReadStateOverrides on ReadStateManager {
         isOverrideActive(register, frontier, now: _savedExpiryWatermark)) {
       _persistLocalState();
     }
-    return live;
+    // A pending clear reads only the mark it saw; a newer one shows.
+    return live && _pendingClears[channelId] != register.s;
   }
 
   /// A fresh action stamp above [register], or null when it would pass
@@ -81,14 +82,23 @@ extension ReadStateOverrides on ReadStateManager {
   /// Ends a live channel override with a fresh clear stamp, even when no
   /// frontier moved. Returns null when no live override needs a clear, and
   /// false, setting [syncError], when a held-back group remains, no stamp
-  /// can be allocated or the record cannot carry the clear. A clear made
-  /// offline or after a failed snapshot is journaled; the next publish pass
-  /// reads and merges the snapshot before sending it.
+  /// can be allocated or the record cannot carry the clear.
+  ///
+  /// Without a complete snapshot the view may miss a newer mark from another
+  /// installation, which a fresh stamp would also clear (NIP-RS Clearing,
+  /// Concurrency limitation). The channel then reads as read here at once,
+  /// and the synced clear waits for the next full snapshot
+  /// ([_settlePendingClears]).
   bool? _clearChannelOverride(String channelId) {
     // Resolve held-back groups first: one may be this channel's.
     final resolved = _resolveDeferred();
     final register = _overrides[channelId];
     if (register == null || !_isLive(channelId, register)) return null;
+    if (resolved && !_lastSnapshotSucceeded) {
+      _pendingClears[channelId] = register.s;
+      _failedClears.remove(channelId);
+      return true;
+    }
     final stamp = resolved ? _allocateStamp(register) : null;
     if (stamp != null) {
       _overrides[channelId] = (s: register.s, c: stamp, b: register.b);
@@ -102,6 +112,23 @@ extension ReadStateOverrides on ReadStateManager {
     syncError = _standingError;
     _onChanged();
     return false;
+  }
+
+  /// Issues the clears made without a complete view ([_pendingClears]:
+  /// channel to the set stamp each read), once a full snapshot has merged:
+  /// each one whose mark is unchanged gets its fresh stamp now; one whose
+  /// mark moved yields to the newer mark.
+  void _settlePendingClears() {
+    if (_pendingClears.isEmpty || !_hasFullState) return;
+    final pending = Map.of(_pendingClears);
+    _pendingClears.clear();
+    var cleared = false;
+    for (final MapEntry(key: channelId, value: s) in pending.entries) {
+      if (_overrides[channelId]?.s != s) continue;
+      if (_clearChannelOverride(channelId) == true) cleared = true;
+    }
+    _onChanged();
+    if (cleared) _schedulePublish();
   }
 
   /// Merges received version-2 groups. An expired replay is dropped before
