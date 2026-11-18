@@ -107,24 +107,27 @@ Future<Channel> _createMeChat(
 }) async {
   sync = _currentMeSync(ref, sync);
   final pending = MeChatCreation.pending(sync);
-  final stamp = ClientStamp.now();
-  final initialMessage = initialContent == null
-      ? null
-      : pending?.initialMessage ??
-            NostrEvent.fromJson(
-              signNostrEvent(
-                kind: EventKind.streamMessage,
-                content: initialContent,
-                tags: [
-                  ['h', channelId],
-                  ['p', assistant],
-                  ...initialMediaTags,
-                  ...stamp.tags,
-                ],
-                secretKey: sync.privateHex,
-                createdAt: stamp.createdAt,
-              ).toMap(),
-            );
+  NostrEvent? initialMessage;
+  if (initialContent != null) {
+    initialMessage = pending?.initialMessage;
+    if (initialMessage == null) {
+      final stamp = ClientStamp.now();
+      initialMessage = NostrEvent.fromJson(
+        signNostrEvent(
+          kind: EventKind.streamMessage,
+          content: initialContent,
+          tags: [
+            ['h', channelId],
+            ['p', assistant],
+            ...initialMediaTags,
+            ...stamp.tags,
+          ],
+          secretKey: sync.privateHex,
+          createdAt: stamp.createdAt,
+        ).toMap(),
+      );
+    }
+  }
   // Desktop's unified record can arrive mid-creation and owns filings then.
   String? filing() =>
       ref.read(channelSectionsProvider).editable ? project : null;
