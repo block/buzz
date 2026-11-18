@@ -498,7 +498,7 @@ pub async fn cmd_issue_comment(
     }
     let mentions = crate::commands::messages::normalize_explicit_mentions(mentions)?;
     let root = fetch_root(client, KIND_GIT_ISSUE as u16, issue, "issue").await?;
-    let signer = client.keys().public_key().to_hex();
+    let signer = client.public_key().to_hex();
     let notes = fetch_thread_notes(client, &root.event.id).await?;
     let meta = GitCommentMeta {
         recipients: root.comment_recipients(&mentions),
@@ -507,7 +507,7 @@ pub async fn cmd_issue_comment(
     let builder = buzz_sdk::build_git_comment(&root.repo, &root.event.id, &body, &meta)
         .map_err(sdk_err)?
         .custom_created_at(Timestamp::from_secs(next_created_at(&notes, &signer)?));
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{resp}");
     Ok(())

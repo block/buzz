@@ -152,7 +152,7 @@ fn trimmed_body(content: &str) -> Result<String, CliError> {
 }
 
 async fn publish(client: &BuzzClient, builder: nostr::EventBuilder) -> Result<(), CliError> {
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{resp}");
     Ok(())
@@ -204,7 +204,7 @@ pub async fn cmd_pr_review(
         .transpose()?
         .filter(|body| !body.is_empty());
     let root = fetch_root(client, KIND_GIT_PULL_REQUEST as u16, pr, WHAT).await?;
-    let signer = client.keys().public_key().to_hex();
+    let signer = client.public_key().to_hex();
 
     match action {
         ReviewAction::Request(reviewers) => {
@@ -387,7 +387,11 @@ mod tests {
         }
 
         fn client(&self, keys: &Keys) -> BuzzClient {
-            BuzzClient::new(self.url.clone(), keys.clone(), None, None).unwrap()
+            BuzzClient::new(
+                self.url.clone(),
+                crate::credentials::Credentials::from_keys(keys.clone()),
+            )
+            .unwrap()
         }
 
         fn seed(&self, keys: &Keys, builder: EventBuilder, created_at: u64) -> String {
