@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:clock/clock.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -116,14 +117,16 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
       final timer = Timer.periodic(const Duration(milliseconds: 200), (_) {
         final started = startedAt.value;
         if (!active || started == null) return;
-        elapsed.value = DateTime.now().difference(started);
-        if (elapsed.value >= voiceNoteMaxDuration) unawaited(finish());
+        elapsed.value = clock.now().difference(started);
+        if (!isDictation && elapsed.value >= voiceNoteMaxDuration) {
+          unawaited(finish());
+        }
       });
       unawaited(() async {
         try {
           await recorder.start();
           if (active) {
-            startedAt.value = DateTime.now();
+            startedAt.value = clock.now();
             isStarted.value = true;
           }
         } on StateError catch (recordingError) {
@@ -172,16 +175,18 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
             ),
           )
         else ...[
-          Text(
-            '${formatVoiceNoteDuration(elapsed.value)} / '
-            '${formatVoiceNoteDuration(voiceNoteMaxDuration)}',
-            key: const ValueKey('voice-note-recorder-duration'),
-            style: context.textTheme.labelSmall?.copyWith(
-              color: context.colors.onSurfaceVariant,
-              fontFeatures: const [FontFeature.tabularFigures()],
+          if (!isDictation) ...[
+            Text(
+              '${formatVoiceNoteDuration(elapsed.value)} / '
+              '${formatVoiceNoteDuration(voiceNoteMaxDuration)}',
+              key: const ValueKey('voice-note-recorder-duration'),
+              style: context.textTheme.labelSmall?.copyWith(
+                color: context.colors.onSurfaceVariant,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
             ),
-          ),
-          const SizedBox(width: Grid.half),
+            const SizedBox(width: Grid.half),
+          ],
           Expanded(
             child: LayoutBuilder(
               builder: (context, constraints) {

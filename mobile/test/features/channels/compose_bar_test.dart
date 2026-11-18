@@ -1,3 +1,5 @@
+import 'package:buzz/features/channels/voice_note_composer_recorder.dart';
+import 'package:clock/clock.dart';
 import 'package:buzz/features/channels/composer_transcription.dart';
 import 'package:buzz/shared/transcription/device_transcription.dart';
 import 'package:buzz/shared/emoji/emoji_picker.dart';
@@ -765,6 +767,61 @@ Widget _buildNativePopoverOwnershipHarness({
 }
 
 void main() {
+  for (final isDictation in [false, true]) {
+    testWidgets('recording duration limit: dictation=$isDictation', (
+      tester,
+    ) async {
+      var now = DateTime(2026);
+      await withClock(Clock(() => now), () async {
+        final recorder = _FakeVoiceNoteRecorder();
+        var completed = 0;
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              voiceNoteRecorderFactoryProvider.overrideWithValue(
+                () => recorder,
+              ),
+            ],
+            child: MaterialApp(
+              home: Scaffold(
+                body: VoiceNoteComposerRecorder(
+                  isDictation: isDictation,
+                  onCancel: () {},
+                  onRecorded: (_) => completed++,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        now = now.add(const Duration(minutes: 5));
+        await tester.pump(const Duration(milliseconds: 200));
+        expect(completed, isDictation ? 0 : 1);
+        expect(
+          find.byKey(const ValueKey('voice-note-recorder-duration')),
+          isDictation ? findsNothing : findsOneWidget,
+        );
+        if (!isDictation) expect(find.text('5:00 / 5:00'), findsOneWidget);
+        if (isDictation) {
+          now = now.add(const Duration(minutes: 5));
+          await tester.pump(const Duration(milliseconds: 200));
+          expect(completed, 0);
+          expect(
+            find.byKey(const ValueKey('voice-note-recorder-duration')),
+            findsNothing,
+          );
+          await tester.tap(
+            find.byKey(const ValueKey('voice-note-recorder-stop')),
+          );
+          await tester.pump();
+          expect(completed, 1);
+        }
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      });
+    });
+  }
+
   iosControlsTests();
   _mixedGalleryTests();
   soloDraftTests();
