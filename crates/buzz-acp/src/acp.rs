@@ -130,9 +130,24 @@ fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
     AcpError::AgentError { code, message }
 }
 
-fn build_initialize_params() -> serde_json::Value {
+/// Build the `initialize` params for one adapter.
+///
+/// Codex ACP 2.7.0 treats `protocolVersion: 2` as real ACP v2. That request
+/// requires an `info` object, and its `session/prompt` response has no
+/// `stopReason`. This client still ends a turn from `stopReason`, so Codex
+/// negotiates version 1. Codex 2.7.0 accepts this version-1 body and answers
+/// with `protocolVersion: 1` and `agentInfo`.
+///
+/// Other adapters keep the version-2 request. They answer with version 1, or
+/// with the older version-2 body this client already handles.
+fn build_initialize_params(adapter: Option<StandardAdapterKind>) -> serde_json::Value {
+    let protocol_version = if adapter == Some(StandardAdapterKind::Codex) {
+        1
+    } else {
+        2
+    };
     serde_json::json!({
-        "protocolVersion": 2,
+        "protocolVersion": protocol_version,
         "clientCapabilities": build_client_capabilities(),
         "clientInfo": {
             "name": "buzz-acp",
@@ -684,9 +699,7 @@ impl AcpClient {
     /// arm can choose [`ACP_STEER_METHOD`] for adapters that implement it.
     /// Parsed here rather than at each call site so no caller can forget it.
     pub async fn initialize(&mut self) -> Result<serde_json::Value, AcpError> {
-        // Requesting version 2 is an intentional temporary pin — we are squatting
-        // on ACP v2 ahead of the upstream ACP RFD. Revisit when that RFD merges.
-        let params = build_initialize_params();
+        let params = build_initialize_params(self.standard_adapter);
         let result = self.send_request("initialize", params).await?;
         self.steering_supported = result
             .pointer("/_meta/steering/supported")
@@ -2669,32 +2682,34 @@ mod tests {
 
     #[test]
     fn initialize_request_format() {
-        let msg = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 0u64,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": 2,
-                "clientCapabilities": build_client_capabilities(),
-                "clientInfo": {
-                    "name": "buzz-acp",
-                    "version": "0.1.0"
-                }
-            }
-        });
-        assert_eq!(msg["params"]["protocolVersion"].as_u64(), Some(2));
+        for adapter in [None, Some(super::StandardAdapterKind::Claude)] {
+            let params = super::build_initialize_params(adapter);
+            assert_eq!(params["protocolVersion"].as_u64(), Some(2));
+            assert_shared_initialize_fields(&params);
+        }
+        let codex = super::build_initialize_params(Some(super::StandardAdapterKind::Codex));
         assert_eq!(
-            msg["params"]["clientInfo"]["name"].as_str(),
-            Some("buzz-acp")
+            codex["protocolVersion"].as_u64(),
+            Some(1),
+            "Codex must negotiate ACP v1; v2 prompt responses have no stopReason"
         );
-        assert!(msg["params"]["clientCapabilities"].is_object());
+        assert_shared_initialize_fields(&codex);
+    }
+
+    fn assert_shared_initialize_fields(params: &serde_json::Value) {
+        assert_eq!(params["clientInfo"]["name"].as_str(), Some("buzz-acp"));
         assert_eq!(
-            msg["params"]["clientCapabilities"]["auth"]["terminal"].as_bool(),
+            params["clientInfo"]["version"].as_str(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        assert!(params["clientCapabilities"].is_object());
+        assert_eq!(
+            params["clientCapabilities"]["auth"]["terminal"].as_bool(),
             Some(true),
             "terminal auth capability must be advertised so adapters can expose terminal login methods"
         );
         assert_eq!(
-            msg["params"]["clientCapabilities"]["_meta"]["goose"]["customNotifications"].as_bool(),
+            params["clientCapabilities"]["_meta"]["goose"]["customNotifications"].as_bool(),
             Some(true),
             "goose customNotifications capability must be advertised"
         );
