@@ -1,6 +1,6 @@
 # Buzz domain language
 
-Shared terminology for Buzz product behavior. This glossary currently covers mobile [push suppression](#push-suppression), the [notification body](#notification-body), [mobile builds](#mobile-builds), [diagnostic reporting](#diagnostic-reporting), [sharing](#sharing), [quick send](#quick-send) and the [open-channel directory](#open-channel-directory); it is not a complete model of Buzz.
+Shared terminology for Buzz product behavior. This glossary currently covers mobile [push suppression](#push-suppression), the [notification body](#notification-body), the [notification reply](#notification-reply), [mobile builds](#mobile-builds), [diagnostic reporting](#diagnostic-reporting), [sharing](#sharing), [quick send](#quick-send) and the [open-channel directory](#open-channel-directory); it is not a complete model of Buzz.
 
 ## Notifications
 
@@ -23,6 +23,10 @@ _Avoid_: Push server, APNs gateway
 ### Notification body
 
 The text a [mobile push notification](#mobile-push-notification) shows for a message: the message's text with its Markdown syntax removed, cut only where the platform would cut it. See [ADR 0002](docs/adr/0002-notification-message-text.md).
+
+### Notification reply
+
+A reply the user types into a [mobile push notification](#mobile-push-notification) for a message and sends without opening the app. It goes in a subthread under that message and mentions its sender. See [ADR 0004](docs/adr/0004-notification-reply.md).
 
 ### Push suppression
 
