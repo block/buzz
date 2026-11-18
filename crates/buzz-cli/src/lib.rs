@@ -3229,7 +3229,7 @@ mod tests {
         let expected: Vec<(&str, usize)> = vec![
             ("agents", 5),
             ("canvas", 4),
-            ("channels", 17),
+            ("channels", 18),
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),

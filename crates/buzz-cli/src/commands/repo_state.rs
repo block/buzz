@@ -102,7 +102,7 @@ async fn read_state(
             crate::validate::validate_hex64(owner)?;
             owner.to_ascii_lowercase()
         }
-        None => client.keys().public_key().to_hex(),
+        None => client.public_key().to_hex(),
     };
     let mut trusted = vec![owner.clone()];
     if let Some(relay_self) = fetch_relay_self(client).await? {
@@ -141,6 +141,7 @@ pub(super) async fn cmd_repo_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::credentials::Credentials;
     use axum::{body::Bytes, extract::State, routing::get, routing::post, Json, Router};
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use std::sync::{Arc, Mutex};
@@ -197,7 +198,7 @@ mod tests {
         relay.lock().unwrap().info = json!({"self": relay_keys.public_key().to_hex()});
         let url = fake_relay(relay.clone()).await;
         (
-            BuzzClient::new(url, Keys::generate(), None, None).unwrap(),
+            BuzzClient::new(url, Credentials::from_keys(Keys::generate())).unwrap(),
             relay,
         )
     }
@@ -233,7 +234,7 @@ mod tests {
     async fn reads_the_newest_trusted_state_in_desktop_shape() {
         let relay_keys = Keys::generate();
         let (client, relay) = setup(&relay_keys).await;
-        let me = client.keys().clone();
+        let me = client.credentials().test_keys();
         let owner = me.public_key().to_hex();
         seed(
             &relay,
@@ -345,7 +346,7 @@ mod tests {
             Err(CliError::Usage(_))
         ));
 
-        let me = client.keys().clone();
+        let me = client.credentials().test_keys();
         let me_hex = [me.public_key().to_hex()];
         let wrong_repo = state(&me, "other", &[("refs/heads/x", "1")], 5);
         assert!(select_head(&[wrong_repo], "demo", &me_hex).is_err());
@@ -370,7 +371,7 @@ mod tests {
     async fn relay_without_a_self_key_trusts_only_the_owner() {
         let (client, relay) = setup(&Keys::generate()).await;
         relay.lock().unwrap().info = json!({"self": "nothex"});
-        let me = client.keys().clone();
+        let me = client.credentials().test_keys();
         seed(&relay, &state(&me, "demo", OWNER_REFS, 5));
         read_state(&client, "demo", None).await.unwrap();
         let filter = relay.lock().unwrap().filters.last().cloned().unwrap();
