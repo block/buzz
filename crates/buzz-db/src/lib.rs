@@ -28,9 +28,13 @@
 /// discard: one per member for every kind:39002 roster republish. `$1` must
 /// bind the community.
 ///
-/// The three replacement paths that index mentions (NIP-33 parameterized,
-/// addressable, and the relay's member snapshot) go through this, so a head
-/// and its mention rows leave together on those paths.
+/// The addressable path, the relay's member snapshot, and the kind:13534
+/// list writer (whose `member` tags index no mentions) supersede through
+/// this, so a head and its mention rows leave together when a newer head
+/// replaces it. NIP-33 parameterized replacement drops its superseded rows'
+/// mentions itself (`remove_coordinate_versions_in_tx`). Channel deletion
+/// (`soft_delete_discovery_events`) retires live heads without a
+/// replacement and does not go through this.
 macro_rules! superseded_with_mentions_sql {
     ($retire:expr) => {
         concat!(
@@ -70,15 +74,15 @@ pub const DB_POOL_ACQUIRE_RAW_SERIES_PER_POD: usize =
     runtime::observability::POOL_ACQUIRE_RAW_SERIES_PER_POD;
 
 /// Valid database connection role/step pairs with a start counter.
-pub const DB_CONNECTION_STARTED_STEPS: [(DbPoolRole, DbConnectionStep); 4] =
+pub const DB_CONNECTION_STARTED_STEPS: [(DbPoolRole, DbConnectionStep); 3] =
     runtime::CONNECTION_STARTED_STEPS;
 
 /// Valid database connection role/step pairs with a duration histogram.
-pub const DB_CONNECTION_DURATION_STEPS: [(DbPoolRole, DbConnectionStep); 4] =
+pub const DB_CONNECTION_DURATION_STEPS: [(DbPoolRole, DbConnectionStep); 3] =
     runtime::CONNECTION_DURATION_STEPS;
 
 /// Valid database connection role/step/outcome terminal combinations.
-pub const DB_CONNECTION_TERMINALS: [(DbPoolRole, DbConnectionStep, DbConnectionOutcome); 15] =
+pub const DB_CONNECTION_TERMINALS: [(DbPoolRole, DbConnectionStep, DbConnectionOutcome); 12] =
     runtime::CONNECTION_TERMINALS;
 
 /// Raw Prometheus series ceiling per pod for connection-step telemetry.

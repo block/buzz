@@ -9,6 +9,7 @@ import 'features/profile/profile_setup_page.dart';
 import 'features/onboarding/hosted_connect_page.dart';
 import 'features/onboarding/self_hosted_entry_sheet.dart';
 import 'shared/auth/auth.dart';
+import 'shared/community/community_provider.dart';
 import 'shared/theme/grid.dart';
 import 'shared/theme/theme_extensions.dart';
 import 'shared/widgets/mobile_tab_footer_backdrop.dart';
@@ -22,6 +23,7 @@ import 'features/onboarding/hosted_reconnect_banner.dart';
 import 'features/onboarding/organization_sign_in_banner.dart';
 
 import 'shared/hosted/hosted_flow_provider.dart';
+import 'shared/hosted/known_community_sync_provider.dart';
 import 'shared/hosted/organization_sign_in.dart';
 
 /// Composition seam shared by signed-in and signed-out application states.
@@ -52,6 +54,27 @@ class HostedAppGate extends HookConsumerWidget {
       unawaited(flow.initialize());
       return () => flow.removeListener(onFlowChanged);
     }, [flow]);
+    final communitySync = ref.watch(knownCommunitySyncProvider);
+    ref.listen(communityListProvider, (_, next) {
+      if (next.hasValue && !next.isLoading && !next.hasError) {
+        communitySync?.trigger();
+      }
+    });
+    useEffect(() {
+      if (communitySync == null) return null;
+      final lifecycle = AppLifecycleListener(
+        onStateChange: (state) =>
+            communitySync.setActive(state == AppLifecycleState.resumed),
+      );
+      scheduleMicrotask(() {
+        communitySync.setActive(
+          WidgetsBinding.instance.lifecycleState == null ||
+              WidgetsBinding.instance.lifecycleState ==
+                  AppLifecycleState.resumed,
+        );
+      });
+      return lifecycle.dispose;
+    }, [communitySync]);
     final inlineEntry = ref.watch(hostedInlineEntryProvider);
     // Create the organization's browser owner before any callback is handled.
     ref.watch(organizationSignInProvider);

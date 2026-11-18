@@ -49,7 +49,7 @@ mod tests {
                 "--executor-id",
                 "demo-worker",
                 "--fail-stage",
-                "purge_db",
+                "purge_content",
                 "--stage-delay-ms",
                 "1000",
                 "--demo-no-agents-in",

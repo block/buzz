@@ -184,8 +184,9 @@ fn drop_cluster_object(admin_url: &str, object: &str, statement: String) {
     eprintln!("warning: failed to drop {object}: {error}");
 }
 
-/// One-session fixture that bypasses ordinary write-fence triggers while
-/// retaining application admission. Communities are active, quiescing, fenced.
+/// One-session fixture with ordinary triggers disabled, so application
+/// admission is the only community write fence it exercises (as it is in
+/// production after migration 0090). Communities are active, quiescing, fenced.
 pub(crate) async fn admission_fixture() -> (crate::Db, [buzz_core::CommunityId; 3]) {
     use buzz_core::CommunityId;
     use uuid::Uuid;
@@ -222,13 +223,6 @@ pub(crate) async fn admission_fixture() -> (crate::Db, [buzz_core::CommunityId; 
         .await
         .expect("read replication role");
     assert_eq!(role, "replica");
-    // A raw write to the fenced tenant proves the DB backstop is bypassed.
-    sqlx::query("INSERT INTO users (community_id, pubkey) VALUES ($1, $2)")
-        .bind(communities[2].as_uuid())
-        .bind(vec![0xfe_u8; 32])
-        .execute(pool)
-        .await
-        .expect("raw fenced insert succeeds with triggers disabled");
     (db, communities)
 }
 
@@ -400,9 +394,8 @@ pub(crate) async fn insert_historical_event_with_thread_metadata(
 }
 
 /// Move a community fixture into a deletion lifecycle state the way the
-/// executor does: the tombstone trigger only accepts lifecycle changes from a
-/// transaction carrying the executor GUCs for that community, including its
-/// current fence generation.
+/// executor does. Retain transaction-scoped executor GUCs for older catalogs
+/// with a tombstone guard and fixtures that also write through universal fences.
 pub(crate) async fn set_deletion_state(pool: &sqlx::PgPool, id: uuid::Uuid, state: &str) {
     let mut tx = pool.begin().await.expect("begin lifecycle fixture");
     set_deletion_state_in_transaction(&mut tx, id, state).await;
@@ -446,7 +439,7 @@ pub(crate) async fn quiesce_community_for_tests(
 }
 
 /// Whether `error` is the community-admission rejection taken at transaction
-/// entry, as opposed to a later commit-time trigger rejection.
+/// entry, as opposed to a later database constraint rejection.
 pub(crate) fn is_admission_rejection(error: &crate::DbError) -> bool {
     matches!(error, crate::DbError::AccessDenied(message) if message.contains("write-fenced (quiescing)"))
 }
@@ -494,20 +487,7 @@ pub(crate) fn desired_state_schema_dir() -> std::path::PathBuf {
 /// which excludes the run's `_desired` template. The name is the only check:
 /// a manually created database with that shape would pass.
 pub(crate) async fn retire_foreign_key_delete_actions(pool: &sqlx::PgPool) {
-    let database: String = sqlx::query_scalar("SELECT current_database()")
-        .fetch_one(pool)
-        .await
-        .expect("read current database");
-    assert!(
-        database
-            .strip_prefix("buzz_nt_")
-            .is_some_and(|hash| hash.len() == 24
-                && hash
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))),
-        "refusing to rewrite foreign keys in shared database {database}; \
-         run this test through scripts/postgres-test-run.sh"
-    );
+    assert_per_test_database(pool).await;
     sqlx::raw_sql(
         r#"DO $$
         DECLARE c record;
@@ -532,6 +512,74 @@ pub(crate) async fn retire_foreign_key_delete_actions(pool: &sqlx::PgPool) {
     .await
     .expect("count foreign-key delete actions");
     assert_eq!(remaining, 0, "every foreign-key delete action is retired");
+}
+
+/// Refuse to continue unless `pool` is this test process's own database (named
+/// `buzz_nt_` plus 24 hex digits by the per-test wrapper), so a schema rewrite
+/// cannot reach a shared database or the run's `_desired` template.
+async fn assert_per_test_database(pool: &sqlx::PgPool) {
+    let database: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(pool)
+        .await
+        .expect("read current database");
+    assert!(
+        database
+            .strip_prefix("buzz_nt_")
+            .is_some_and(|hash| hash.len() == 24
+                && hash
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))),
+        "refusing to rewrite foreign keys in shared database {database}; \
+         run this test through scripts/postgres-test-run.sh"
+    );
+}
+
+/// Drop every foreign key from `child` to `parent` in this test's database, for
+/// each `(child, parent)` pair: the schema a foreign-key retirement targets.
+/// A test that then expects the writer to reject a missing parent proves the
+/// application check, because the constraint can no longer do the work.
+///
+/// Refuses databases that are not the per-test wrapper's, like
+/// [`retire_foreign_key_delete_actions`]. Panics if a pair has no foreign key,
+/// so a renamed table cannot turn the test into a silent no-op.
+pub(crate) async fn drop_foreign_keys_between(pool: &sqlx::PgPool, pairs: &[(&str, &str)]) {
+    assert_per_test_database(pool).await;
+    for (child, parent) in pairs {
+        let constraints: Vec<String> = sqlx::query_scalar(
+            "SELECT conname FROM pg_constraint \
+             WHERE contype = 'f' AND conrelid = $1::text::regclass AND confrelid = $2::text::regclass",
+        )
+        .bind(child)
+        .bind(parent)
+        .fetch_all(pool)
+        .await
+        .expect("list foreign keys");
+        assert!(
+            !constraints.is_empty(),
+            "no foreign key from {child} to {parent} to drop"
+        );
+        for name in constraints {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "ALTER TABLE {child} DROP CONSTRAINT \"{name}\""
+            )))
+            .execute(pool)
+            .await
+            .expect("drop foreign key");
+        }
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_constraint \
+             WHERE contype = 'f' AND conrelid = $1::text::regclass AND confrelid = $2::text::regclass",
+        )
+        .bind(child)
+        .bind(parent)
+        .fetch_one(pool)
+        .await
+        .expect("recount foreign keys");
+        assert_eq!(
+            remaining, 0,
+            "foreign keys from {child} to {parent} dropped"
+        );
+    }
 }
 
 /// A single-connection pool whose session carries `application_name`, so

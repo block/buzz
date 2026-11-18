@@ -43,7 +43,7 @@ async fn acquire_operator_lock(tx: &mut Transaction<'_, Postgres>, pubkey: &[u8]
 /// Take the transaction-scoped roster-wide advisory lock. Serializes all
 /// operator-removing mutations against each other so the last-operator check
 /// sees a stable count.
-async fn acquire_roster_lock(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+pub(crate) async fn acquire_roster_lock(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(OPERATOR_ROSTER_LOCK)
         .execute(&mut **tx)
@@ -205,16 +205,28 @@ pub async fn remove(
     .await?;
     let mut tx = sqlx::Transaction::begin(connection, None).await?;
 
+    let removed = remove_in_transaction(&mut tx, pubkey, actor, config_operator_exists).await?;
+    tx.commit().await?;
+    Ok(removed)
+}
+
+/// Reuse the roster invariant and audit write inside offline cleanup's batch.
+pub(crate) async fn remove_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    pubkey: &[u8],
+    actor: &[u8],
+    config_operator_exists: bool,
+) -> Result<bool> {
     // Serialize against every other operator-removing mutation before the
     // delete so the post-delete count reflects a stable roster.
-    acquire_roster_lock(&mut tx).await?;
+    acquire_roster_lock(tx).await?;
 
     // Capture the pre-image role the delete removes; also gates the audit row
     // so a no-op delete of an absent pubkey writes nothing.
     let prev_role: Option<String> =
         sqlx::query_scalar("DELETE FROM relay_operators WHERE pubkey = $1 RETURNING role")
             .bind(pubkey)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?;
 
     let removed = prev_role.is_some();
@@ -229,17 +241,16 @@ pub async fn remove(
         .bind(actor)
         .bind(pubkey)
         .bind(prev_role.as_deref())
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
         // Deleting an operator can empty the roster. Dropping the tx here rolls
         // the delete and its audit row back.
-        if !config_operator_exists && db_operator_count(&mut tx).await? == 0 {
+        if !config_operator_exists && db_operator_count(tx).await? == 0 {
             return Err(DbError::LastOperator);
         }
     }
 
-    tx.commit().await?;
     Ok(removed)
 }
 

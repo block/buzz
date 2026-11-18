@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:buzz/features/activity/compose_drafts_provider.dart';
+import 'package:buzz/shared/drafts/compose_drafts_provider.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/quick_send_host.dart';
@@ -114,6 +114,7 @@ class _Relay extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    Future<bool> Function()? mayPublish,
   }) async {
     if (event.kind == 9 && rateLimitNextMessage) {
       rateLimitNextMessage = false;

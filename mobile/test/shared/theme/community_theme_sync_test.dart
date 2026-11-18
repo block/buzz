@@ -525,6 +525,7 @@ class _FakeSignedRelay implements SignedEventRelay {
     int? createdAt,
     void Function(NostrEvent)? onSigned,
     void Function()? validateDelivery,
+    Future<bool> Function()? mayPublish,
   }) async {
     attempts++;
     if (attempts == 1 && firstSubmissionGate != null) {

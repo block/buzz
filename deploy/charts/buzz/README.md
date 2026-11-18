@@ -362,7 +362,7 @@ can give it to a caller.
 | `buzz_db_connection_step_duration_seconds` | histogram | `pool_role`, `step` |
 | `buzz_db_connection_step_attempts_total` | counter | `pool_role`, `step`, `outcome` |
 
-The fixed steps are `writer_pool`, `physical_connect`, `created_at_floor`,
+The fixed steps are `writer_pool`, `physical_connect`,
 `session_timeouts`, `isolation`, and `ready`. Measurable phases emit start,
 duration, and terminal evidence. `physical_connect` and `ready` are success
 milestones: SQLx 0.9 exposes `after_connect` only after DNS, network, TLS, and
@@ -376,8 +376,8 @@ start counter to derive the number of attempts currently in progress. The
 session phases run in order, so a later phase start also proves the earlier
 phases succeeded for that attempt.
 
-Four start counters, four 13-series histograms, and fifteen terminal counters
-create a hard ceiling of 71 raw Prometheus series per pod. Connection ordinals,
+Three start counters, three 13-series histograms, and twelve terminal counters
+create a hard ceiling of 54 raw Prometheus series per pod. Connection ordinals,
 database URLs, hosts, usernames, SQL, and raw errors are forbidden as metric
 labels.
 
@@ -631,9 +631,11 @@ default so long-lived WebSocket connections have time to drain.
 
 ## Upgrades
 
-Schema migrations are embedded in the relay binary via `sqlx::migrate!` and run at startup, gated by `BUZZ_AUTO_MIGRATE` (default `true`). Multiple replicas race-safely behind a Postgres advisory lock. `helm upgrade` is the entire upgrade procedure.
+Schema migrations are embedded in the relay binary via `sqlx::migrate!` and run at startup, gated by `BUZZ_AUTO_MIGRATE` (default `true`). Multiple replicas race-safely behind a Postgres advisory lock. Outside the required stop below, `helm upgrade` is the entire upgrade procedure.
 
-Migration 0032 is a hard compatibility boundary for relay versions that publish repaired channel rosters. Older relays verify its roster-fence trigger before opening listeners and refuse to start if the trigger is missing or inert. Newer relays run the same check in every roster writer and do not require the trigger. A later release drops it, and that release requires every relay to run a version without the startup check first. Apply migrations before rolling the relay; for large installations, prefer a controlled `buzz-admin migrate` job with PostgreSQL lock monitoring before the code rollout.
+**Required stop before migrations 0089–0091, 0095 and 0096.** These migrations drop database triggers whose work the relay now does in application code. Before you upgrade to a build that contains any of them, every relay pod, job and rollback target must run a stop build. An older relay that keeps serving after they run can write data the dropped triggers used to refuse, and some older builds refuse to start without the 0032 roster trigger or the community tombstone trigger. [`docs/trigger-retirement-deployment.md`](../../../docs/trigger-retirement-deployment.md) names the stop build and gives the procedure and rollback.
+
+Apply migrations before rolling the relay; for large installations, prefer a controlled `buzz-admin migrate` job with PostgreSQL lock monitoring before the code rollout.
 
 If you prefer decoupling migrations from serving, set `migrate.autoMigrate=false`. **In that mode the chart does not run migrations for you** — you own running `buzz-admin migrate` (separate Pod / one-shot Job) against the database before every `helm install` / `helm upgrade`. Readiness probes only verify DB connectivity, not schema freshness, so a pod will appear healthy against an unmigrated schema and fail under load. A pre-upgrade Helm Job for this is on the chart roadmap; the values knob `migrate.preUpgradeJob.enabled` is reserved.
 

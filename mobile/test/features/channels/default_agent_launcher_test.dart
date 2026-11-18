@@ -615,7 +615,11 @@ class _VoiceRelay extends FakeRelay {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    Future<bool> Function()? mayPublish,
   }) async {
+    if (mayPublish != null && !await mayPublish()) {
+      throw StateError('Event no longer wanted');
+    }
     if (!started.isCompleted) started.complete();
     await acknowledged.future;
     return event;

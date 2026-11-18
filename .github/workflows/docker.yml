@@ -426,6 +426,7 @@ jobs:
           done
 
           annotations=(
+            --annotation "index:org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
             --annotation "index:org.opencontainers.image.revision=${SOURCE_SHA}"
             --annotation "index:xyz.block.buzz.build.id=github-actions:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
             --annotation "index:xyz.block.buzz.qualification.ci-run-id=${CI_RUN_ID}"

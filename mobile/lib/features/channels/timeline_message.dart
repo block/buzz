@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/mentions/mention_tags.dart';
+import 'channel_event_order.dart';
 import 'channel_window.dart';
 import 'message_media.dart';
 import 'message_content/bubble_segments.dart';
@@ -180,6 +181,11 @@ class TimelineMessage {
   final String id;
   final String pubkey;
   final int createdAt;
+
+  /// Effective send time in milliseconds of the original event (see
+  /// [channelEventMilliseconds]). [tags] may come from a later edit, so the
+  /// original's `ms` offset is kept here.
+  final int createdAtMs;
   final String content;
   final List<List<String>> tags;
   final bool isSystem;
@@ -202,6 +208,7 @@ class TimelineMessage {
     required this.id,
     required this.pubkey,
     required this.createdAt,
+    int? createdAtMs,
     required this.content,
     this.tags = const [],
     this.isSystem = false,
@@ -211,7 +218,7 @@ class TimelineMessage {
     this.reactions = const [],
     this.parentId,
     this.rootId,
-  });
+  }) : createdAtMs = createdAtMs ?? createdAt * 1000;
 
   /// Attachment messages stay visually distinct from surrounding messages,
   /// even when several are sent by the same author in quick succession.
@@ -369,9 +376,15 @@ List<TimelineMessage> formatTimeline(
     final targetId = _lastETag(event.tags);
     if (targetId == null || deletedIds.contains(targetId)) continue;
 
+    // Greatest (created_at, id) wins, as the relay resolves effective edits
+    // (docs/effective-message-edits.md), whatever order [events] is in.
     final existing = edits[targetId];
-    if (existing == null || event.createdAt > existing.createdAt) {
+    if (existing == null ||
+        event.createdAt > existing.createdAt ||
+        (event.createdAt == existing.createdAt &&
+            event.id.compareTo(existing.id) > 0)) {
       edits[targetId] = _Edit(
+        id: event.id,
         content: event.content,
         createdAt: event.createdAt,
         tags: event.tags,
@@ -448,6 +461,7 @@ List<TimelineMessage> formatTimeline(
             id: event.id,
             pubkey: event.pubkey,
             createdAt: event.createdAt,
+            createdAtMs: channelEventMilliseconds(event),
             content: event.content,
             tags: event.tags,
             isSystem: true,
@@ -468,6 +482,7 @@ List<TimelineMessage> formatTimeline(
             id: event.id,
             pubkey: event.pubkey,
             createdAt: event.createdAt,
+            createdAtMs: channelEventMilliseconds(event),
             content: event.content,
             tags: event.tags,
             isSystem: true,
@@ -496,6 +511,7 @@ List<TimelineMessage> formatTimeline(
           id: event.id,
           pubkey: event.pubkey,
           createdAt: event.createdAt,
+          createdAtMs: channelEventMilliseconds(event),
           content: edit?.content ?? event.content,
           tags: effectiveTags,
           edited: edit != null,
@@ -731,11 +747,13 @@ List<String> _mergeParticipants(
 }
 
 class _Edit {
+  final String id;
   final String content;
   final int createdAt;
   final List<List<String>> tags;
 
   const _Edit({
+    required this.id,
     required this.content,
     required this.createdAt,
     required this.tags,

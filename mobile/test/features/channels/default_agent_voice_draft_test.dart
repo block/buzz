@@ -308,7 +308,11 @@ class _ExpiredRelay extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    Future<bool> Function()? mayPublish,
   }) async {
+    if (mayPublish != null && !await mayPublish()) {
+      throw StateError('Event no longer wanted');
+    }
     if (event.id == original.id) {
       throw StateError('invalid: event timestamp too far from server time');
     }

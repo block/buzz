@@ -176,16 +176,17 @@ void main() {
         expect(find.byType(ReconnectCapsule), findsNothing);
       },
     );
-    for (final failure in [
-      AccountFailure.storage,
-      AccountFailure.unavailable,
+    for (final (failure, code) in [
+      (AccountFailure.storage, 'account-storage'),
+      (AccountFailure.unavailable, 'account-unavailable'),
+      (BrowserAuthFailure.restartLogin, 'browser-restartLogin'),
     ]) {
       testWidgets('$failure keeps sign-in recovery available at $scale', (
         tester,
       ) async {
         signIn.failure = failure;
         await mount(tester, scale: scale);
-        expect(find.text('Sign in failed. Try again.'), findsOneWidget);
+        expect(find.text('Sign in failed ($code). Try again.'), findsOneWidget);
         expectVisibleCard(tester);
         await tester.tap(find.text('Sign in'));
         await tester.pumpAndSettle();

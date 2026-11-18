@@ -926,6 +926,7 @@ pub const fn is_relay_only_kind(kind: u32) -> bool {
         KIND_VERIFIED_PROFILE
             | KIND_ARTIFACT_REMOVAL
             | KIND_NIP43_MEMBERSHIP_LIST
+            | KIND_IA_ARCHIVED_LIST
             | KIND_CHANNEL_SUMMARY
             | KIND_PRESENCE_SNAPSHOT
             | KIND_DM_VISIBILITY
@@ -1022,6 +1023,13 @@ mod tests {
     fn nip43_membership_snapshot_is_relay_only() {
         assert!(is_relay_only_kind(KIND_NIP43_MEMBERSHIP_LIST));
         assert!(!is_relay_only_kind(KIND_NIP43_LEAVE_REQUEST));
+    }
+
+    #[test]
+    fn nip_ia_archived_list_is_relay_only() {
+        assert!(is_relay_only_kind(KIND_IA_ARCHIVED_LIST));
+        assert!(!is_relay_only_kind(KIND_IA_ARCHIVE_REQUEST));
+        assert!(!is_relay_only_kind(KIND_IA_UNARCHIVE_REQUEST));
     }
 
     #[test]

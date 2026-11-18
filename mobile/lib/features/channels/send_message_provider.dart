@@ -56,6 +56,7 @@ class SendMessage {
   /// convention with `root` / `reply` markers. Pass [mediaTags] to append
   /// relay-validated `imeta` tags and NIP-30 `emoji` tags. [beforePublish]
   /// can durably retain the signed event; a failure prevents publication.
+  /// [mayPublish] is checked immediately before publication after any waits.
   Future<void> call({
     required String channelId,
     required String content,
@@ -65,6 +66,7 @@ class SendMessage {
     Channel? channel,
     List<List<String>> mediaTags = const [],
     FutureOr<void> Function(NostrEvent event)? beforePublish,
+    Future<bool> Function()? mayPublish,
   }) async {
     _ensureDeliveryValid();
     // Use explicitly passed pubkeys, or resolve @mentions against
@@ -132,6 +134,7 @@ class SendMessage {
           _markLocalMessageForAnimation(channelId, event.id);
           _addLocalMessage(channelId, event);
         },
+        mayPublish: mayPublish,
       );
       final event = localMessage;
       if (event != null) _completeLocalMessage(channelId, event.id);

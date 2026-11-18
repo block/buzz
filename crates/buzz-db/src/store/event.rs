@@ -844,7 +844,7 @@ fn push_event_filters(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q
     if let Some(ref e_tags) = q.e_tags {
         if !e_tags.is_empty() {
             qb.push(" AND ");
-            push_exact_tag_match(qb, col_prefix, "e", e_tags);
+            push_e_tag_match(qb, col_prefix, e_tags);
         }
     }
 
@@ -1312,28 +1312,64 @@ pub(crate) async fn fetch_with_read_deadline(
 /// `[["t","t"]]` is contained in `["t","other"]`, and `[["e",id]]` in
 /// `["x","e",id]`. Over-matching before `LIMIT` lets a non-matching newer row
 /// take the slot, so containment stays only as the GIN-indexed prefilter
-/// (one array-bound test, so planner cost does not scale with `values`) and
-/// the positional check makes the predicate exact.
+/// (one array bind, so the SQL text does not change with `values`) and the
+/// positional check makes the predicate exact.
 fn push_exact_tag_match(
     qb: &mut QueryBuilder<sqlx::Postgres>,
     col_prefix: &str,
     name: &str,
     values: &[String],
 ) {
+    push_tag_match(qb, col_prefix, name, values, false);
+}
+
+/// Above this many `#e` values, [`push_e_tag_match`] hides them from the
+/// planner's selectivity estimate. Hiding plans faster from one value up, but
+/// visible values keep a narrow read's per-value plan; at 8 they cost at most
+/// ~0.6 ms of extra planning.
+const E_TAG_ESTIMATED_VALUES_MAX: usize = 8;
+
+/// [`push_exact_tag_match`] for `#e`. Planning a bound array estimates GIN
+/// selectivity once per element in every partition, about 0.07 ms per value:
+/// a 201-id thread-page aux closure spent ~14 ms planning against ~1 ms
+/// executing, on every page, because its custom plan never yields to the
+/// cached generic one. Past [`E_TAG_ESTIMATED_VALUES_MAX`] values the arrays
+/// are read through a scalar subquery, which the planner estimates as one
+/// unknown value (the estimate a cached generic plan already uses for these
+/// reads) while the GIN index still serves the containment at run time.
+fn push_e_tag_match(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, values: &[String]) {
+    let opaque = values.len() > E_TAG_ESTIMATED_VALUES_MAX;
+    push_tag_match(qb, col_prefix, "e", values, opaque);
+}
+
+fn push_tag_match(
+    qb: &mut QueryBuilder<sqlx::Postgres>,
+    col_prefix: &str,
+    name: &str,
+    values: &[String],
+    opaque_values: bool,
+) {
+    // `ANY((SELECT $n)::T[])` is an array expression over an InitPlan, while
+    // `ANY((SELECT $n))` would compare against a subquery's rows instead.
+    let (open, close, text_cast) = if opaque_values {
+        ("(SELECT ", ")", "::text[]")
+    } else {
+        ("", "", "")
+    };
     let containments: Vec<serde_json::Value> = values
         .iter()
         .map(|value| serde_json::json!([[name, value]]))
         .collect();
-    qb.push(format!("({col_prefix}tags @> ANY("))
+    qb.push(format!("({col_prefix}tags @> ANY({open}"))
         .push_bind(containments)
         .push(format!(
-            "::jsonb[]) AND EXISTS (SELECT 1 FROM jsonb_array_elements({col_prefix}tags) AS tag \
+            "{close}::jsonb[]) AND EXISTS (SELECT 1 FROM jsonb_array_elements({col_prefix}tags) AS tag \
              WHERE tag->>0 = "
         ))
         .push_bind(name.to_owned())
-        .push(" AND tag->>1 = ANY(")
+        .push(format!(" AND tag->>1 = ANY({open}"))
         .push_bind(values.to_vec())
-        .push(")))");
+        .push(format!("{close}{text_cast})))"));
 }
 
 /// Whether `q` must run as an unnamed statement, so Postgres plans it with the
@@ -1483,6 +1519,11 @@ fn push_artifact_d_tag_predicate(
 pub(crate) fn row_to_stored_event(row: sqlx::postgres::PgRow) -> Result<Option<StoredEvent>> {
     let id_bytes: Vec<u8> = row.try_get("id")?;
     let pubkey_bytes: Vec<u8> = row.try_get("pubkey")?;
+    // Bulk erasure retains an unsigned, hidden structural row. Never reconstruct
+    // or expose it as a signed event, even through including-deleted lookups.
+    if pubkey_bytes.is_empty() {
+        return Ok(None);
+    }
     let created_at: DateTime<Utc> = row.try_get("created_at")?;
     let kind_i32: i32 = row.try_get("kind")?;
     let tags_json: serde_json::Value = row.try_get("tags")?;
@@ -1650,7 +1691,7 @@ fn count_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
     if let Some(ref e_tags) = q.e_tags {
         if !e_tags.is_empty() {
             qb.push(" AND ");
-            push_exact_tag_match(&mut qb, col_prefix, "e", e_tags);
+            push_e_tag_match(&mut qb, col_prefix, e_tags);
         }
     }
 
@@ -1687,7 +1728,10 @@ fn count_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
 }
 
 // Preserve the public event-store deletion API after the focused extraction.
-pub(crate) use super::event_deletion::soft_delete_event_and_update_thread_in_tx;
+pub(crate) use super::event_deletion::{
+    is_nip_rs_event, remove_coordinate_versions_in_tx, soft_delete_event_and_update_thread_in_tx,
+    CoordinateRemoval,
+};
 pub use super::event_deletion::{
     soft_delete_by_coordinate, soft_delete_event_and_update_thread, DeletionTarget,
 };
@@ -1998,6 +2042,25 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
     crate::channel_members::guard_channel_roster_event(tx, kind_i32, channel_id, &tags_json)
         .await?;
 
+    // The relay resolves ancestry before opening this transaction. A bulk
+    // deletion may commit while that write waits for community admission.
+    // Recheck the resolved parent under the shared deletion lock so a stale
+    // resolution cannot insert a reply after its parent was physically erased.
+    if let Some(meta) = &thread_meta {
+        if let (Some(parent), Some(created)) = (meta.parent_event_id, meta.parent_event_created_at)
+        {
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM events WHERE community_id=$1 AND id=$2 AND created_at=$3)")
+                .bind(community_id.as_uuid()).bind(parent).bind(created)
+                .fetch_one(tx.conn()).await?;
+            if !exists {
+                return Err(DbError::InvalidData(
+                    "reply parent disappeared before persistence".into(),
+                ));
+            }
+        }
+    }
+
     let result = sqlx::query(
         r#"
         INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before)
@@ -2034,6 +2097,15 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
         .await?;
 
         if let Some(ref meta) = thread_meta {
+            // The metadata rows below (the reply's and the parent and root
+            // stubs) all name this channel. The check runs first, so a missing
+            // channel fails the whole transaction, event insert included.
+            crate::store::reference_check::require_channel(
+                tx.conn(),
+                community_id,
+                meta.channel_id,
+            )
+            .await?;
             let broadcast_val: bool = meta.broadcast;
 
             let tm_result = sqlx::query(
@@ -2605,7 +2677,7 @@ impl Db {
     ///
     /// Counts route on the BOUNDED arm only, never covered: the covered
     /// arm bounds insert-completeness but not deletion visibility (soft
-    /// deletes are UPDATEs outside the floor guard), and a count has no
+    /// deletes are UPDATEs outside the floor check), and a count has no
     /// downstream per-row re-filter to absorb extra rows — a silently
     /// inflated number for up to `FENCE_STALENESS` is a different product
     /// statement than a page briefly showing a deleted row. `Bounded` ties
@@ -3017,6 +3089,19 @@ mod e_tag_filter_shape_tests {
         assert!(!sql[..fence_end].contains("ORDER BY"));
         assert!(!sql[..fence_end].contains("LIMIT"));
         assert!(sql[fence_end..].contains("ORDER BY created_at DESC, id ASC LIMIT "));
+        // A wide `#e` set reaches the planner as one unknown value, not 188
+        // estimated elements; a narrow one keeps its bound-value estimate.
+        assert!(sql.contains("tags @> ANY((SELECT $"));
+        assert!(sql.contains("tag->>1 = ANY((SELECT $"));
+        for (ids, opaque) in [
+            (1, false),
+            (E_TAG_ESTIMATED_VALUES_MAX, false),
+            (E_TAG_ESTIMATED_VALUES_MAX + 1, true),
+        ] {
+            q.e_tags = Some((0..ids).map(|i| format!("{i:064x}")).collect());
+            let qb = build_query_events_sql(&q, Range::All, page_limit(&q));
+            assert_eq!(qb.sql().as_str().contains("(SELECT $"), opaque, "{ids} ids");
+        }
     }
 
     /// Only a one-channel, one-root read of channel-message kinds without a

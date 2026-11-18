@@ -46,6 +46,23 @@ void main() {
       persisted.completeError(StateError('disk full'));
       await rejected;
       expect(didPublish, isFalse);
+
+      // A successful durable save must still respect the final send veto.
+      NostrEvent? saved;
+      await expectLater(
+        send(
+          channelId: _channelId,
+          content: 'retained voice note',
+          beforePublish: (event) => saved = event,
+          mayPublish: () async {
+            expect(saved?.content, 'retained voice note');
+            return false;
+          },
+        ),
+        throwsStateError,
+      );
+      expect(saved, isNotNull);
+      expect(didPublish, isFalse);
     },
   );
 
@@ -313,7 +330,11 @@ class _PendingPublishRelaySession extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
-  }) {
+    Future<bool> Function()? mayPublish,
+  }) async {
+    if (mayPublish != null && !await mayPublish()) {
+      throw StateError('Event no longer wanted');
+    }
     this.event = event;
     _published.complete();
     return _result.future;

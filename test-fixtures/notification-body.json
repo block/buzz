@@ -153,6 +153,21 @@
       "expected": "Run fetch() now and old()"
     },
     {
+      "name": "each bold run ends at its first closing marker",
+      "input": "option **A** or option **B**",
+      "expected": "option A or option B"
+    },
+    {
+      "name": "each strikethrough run ends at its first closing marker",
+      "input": "~~x~~ and ~~y~~",
+      "expected": "x and y"
+    },
+    {
+      "name": "a one-character bold run can be an emoji",
+      "input": "**😀** and **b**",
+      "expected": "😀 and b"
+    },
+    {
       "name": "markup inside code stays literal",
       "input": "Use `**[a](b)**` as is",
       "expected": "Use **[a](b)** as is"

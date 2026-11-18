@@ -63,6 +63,49 @@ void main() {
   });
 
   group('ChannelWindowStore', () {
+    test(
+      'renders ms order while paging and live admission keep relay order',
+      () {
+        final store = replaceNewestChannelWindow(
+          const ChannelWindowStore.empty(),
+          _page(
+            rows: [
+              _row('a', ms: '100'),
+              _row('m', ms: '900'),
+            ],
+            hasMore: true,
+          ),
+        );
+        final cursor = channelWindowNextCursor(store)!;
+        expect(cursor.eventId, 'm');
+        expect(channelWindowFloor(store)!.eventId, 'm');
+        final withLive = mergeLiveChannelWindowEvent(
+          store,
+          _row('b', ms: '800'),
+          isTimelineRow: true,
+        );
+        final outside = _row('z', ms: '500');
+        expect(
+          identical(
+            mergeLiveChannelWindowEvent(withLive, outside, isTimelineRow: true),
+            withLive,
+          ),
+          isTrue,
+        );
+        final complete = appendOlderChannelWindow(
+          withLive,
+          _page(startCursor: cursor, rows: [outside]),
+        );
+        expect(flattenChannelWindowEvents(complete).map((event) => event.id), [
+          'a',
+          'z',
+          'b',
+          'm',
+        ]);
+        expect(channelWindowHasMore(complete), isFalse);
+      },
+    );
+
     test('flattens equal-second rows in desktop channel order', () {
       final store = replaceNewestChannelWindow(
         const ChannelWindowStore.empty(),
@@ -492,12 +535,13 @@ ChannelWindowPage _page({
   );
 }
 
-NostrEvent _row(String id, {int createdAt = 10}) => _event(
+NostrEvent _row(String id, {int createdAt = 10, String? ms}) => _event(
   id: id,
   createdAt: createdAt,
   kind: EventKind.streamMessageV2,
-  tags: const [
+  tags: [
     ['h', _channelId],
+    if (ms != null) ['ms', ms],
   ],
 );
 

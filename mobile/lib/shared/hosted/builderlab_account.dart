@@ -13,6 +13,7 @@ import '../storage/secure_storage.dart';
 
 import 'hosted_environment.dart';
 import 'bounded_http_response.dart';
+import 'clock_hint.dart';
 import '../relay/relay_session.dart';
 import 'account_identity_store.dart';
 
@@ -63,7 +64,9 @@ class BuilderlabAccountClient {
     FlutterSecureStorage? storage,
     Uri? accountOrigin,
     this.onSessionChanged,
-  }) : _http = httpClient ?? newAppHttpClient(),
+    DateTime Function() now = DateTime.now,
+  }) : _now = now,
+       _http = httpClient ?? newAppHttpClient(),
        _storage = storage ?? defaultStorage,
        accountOrigin = accountOrigin ?? origin;
 
@@ -86,6 +89,24 @@ class BuilderlabAccountClient {
   /// Remote-agent registry routes, shared with desktop.
   /// Safe request diagnostics: no headers, credentials, bodies or user data.
   ({String path, int status})? lastRejectedRequest;
+
+  /// Runs [operation], giving it the clock hint of the last refusal (403) that
+  /// its own requests to any account client received: how many minutes the
+  /// local clock looked off from the server's `Date` when its headers arrived,
+  /// when far enough to explain it. See [clockHintMinutes]. Requests made
+  /// outside [operation] never supply it.
+  static Future<T> observingRefusals<T>(
+    Future<T> Function(int? Function() clockHint) operation,
+  ) {
+    final evidence = _RefusalEvidence();
+    return runZoned(
+      () => operation(() => evidence.clockHint),
+      zoneValues: {_RefusalEvidence: evidence},
+    );
+  }
+
+  // The local wall clock, compared with a refusal's `Date`.
+  final DateTime Function() _now;
 
   static const _beekeeperRoutes = {
     '/v3/beekeeper/get-model-catalog',
@@ -133,6 +154,11 @@ class BuilderlabAccountClient {
   ValueListenable<String?> get subjectChanges => _subject;
   final _subject = ValueNotifier<String?>(null);
 
+  /// Changes whenever a verified session is adopted, including the same subject.
+  /// Consumers can retry work refused before reauthentication or account setup.
+  ValueListenable<int> get sessionChanges => _sessionGeneration;
+  final _sessionGeneration = ValueNotifier<int>(0);
+
   /// Runs operations one at a time in call order, so a callback exchange that
   /// arrives during startup restore waits instead of failing.
   Future<T> _serial<T>(Future<T> Function() operation) {
@@ -141,6 +167,20 @@ class BuilderlabAccountClient {
       return operation();
     });
     return result;
+  }
+
+  /// Locally retained account for recording offline edits only. This does not
+  /// authorize network requests; those still require a verified session.
+  Future<String?> retainedSubject() async {
+    if (_disposed) throw AccountFailure.unavailable;
+    final current = account;
+    if (current != null) return current.subject;
+    // Local edits must not queue behind a network restore that may be offline.
+    final generation = _sessionGeneration.value;
+    final record = await _readRecord();
+    if (_disposed) throw AccountFailure.unavailable;
+    if (generation != _sessionGeneration.value) return retainedSubject();
+    return record?.subject;
   }
 
   /// Concurrent callers share one restore, so a second one cannot replace the
@@ -239,7 +279,7 @@ class BuilderlabAccountClient {
         } catch (_) {
           throw AccountFailure.storage;
         }
-        return _adopt(credential, verified);
+        return _adopt(credential, verified, reauthenticated: true);
       });
     });
   }
@@ -271,12 +311,21 @@ class BuilderlabAccountClient {
     throw AccountFailure.storage;
   }
 
-  BuilderlabAccount _adopt(String credential, BuilderlabAccount verified) {
+  BuilderlabAccount _adopt(
+    String credential,
+    BuilderlabAccount verified, {
+    bool reauthenticated = false,
+  }) {
     if (_disposed) throw AccountFailure.unavailable;
+    final changed =
+        reauthenticated ||
+        _credential != credential ||
+        _account?.needsAccountSetup != verified.needsAccountSetup;
     _credential = credential;
     // Assigned before notifying, so subject listeners see the new account.
     _account = verified;
     _subject.value = verified.subject;
+    if (changed) _sessionGeneration.value++;
     _unshared = credential;
     _share();
     return verified;
@@ -340,6 +389,21 @@ class BuilderlabAccountClient {
     final result = await _post('/v1/buzz/known-communities/add', {
       'community_url': relay,
     }, expectedSubject: expectedSubject);
+    if (result['error'] != null) throw AccountFailure.rejected;
+  }
+
+  /// Edits only the account's saved destination list; relay membership and
+  /// credentials are unchanged. Both operations are idempotent.
+  Future<void> updateKnownCommunity(
+    String relay, {
+    required bool removed,
+    required String expectedSubject,
+  }) async {
+    final result = await post(
+      '/v1/buzz/known-communities/${removed ? 'remove' : 'add'}',
+      {'community_url': relay},
+      expectedSubject: expectedSubject,
+    );
     if (result['error'] != null) throw AccountFailure.rejected;
   }
 
@@ -505,7 +569,10 @@ class BuilderlabAccountClient {
     _credential = null;
     _unshared = null;
     _account = null;
-    if (!_disposed) _subject.value = null;
+    if (!_disposed) {
+      _subject.value = null;
+      _sessionGeneration.value++;
+    }
   }
 
   Future<void> _unshare() async {
@@ -548,11 +615,30 @@ class BuilderlabAccountClient {
           );
         }
       }
-      final response = await boundedHttpResponse(
-        _http,
-        request,
-        maxBytes: _responseLimit(path),
-      );
+      var refused = false;
+      final http.Response response;
+      try {
+        response = await boundedHttpResponse(
+          _http,
+          request,
+          maxBytes: _responseLimit(path),
+          onHeaders: (headers) {
+            if (headers.statusCode != 403) return;
+            refused = true;
+            final evidence = Zone.current[_RefusalEvidence];
+            if (evidence is _RefusalEvidence) {
+              evidence.clockHint = clockHintMinutes(
+                headers.headers['date'],
+                _now(),
+              );
+            }
+          },
+        );
+      } catch (_) {
+        // The status is the answer; a lost or oversized body does not change it.
+        if (refused) throw AccountFailure.denied;
+        rethrow;
+      }
       if (kDebugMode && response.statusCode >= 400) {
         debugPrint(
           'Builderlab ${accountOrigin.host} ${request.method} $path: HTTP ${response.statusCode} contentType=${response.headers['content-type']?.split(';').first}',
@@ -585,6 +671,12 @@ class BuilderlabAccountClient {
     _signedOut = null;
     _account = null;
     _subject.dispose();
+    _sessionGeneration.dispose();
     _http.close();
   }
+}
+
+/// What [BuilderlabAccountClient.observingRefusals] collects for one operation.
+class _RefusalEvidence {
+  int? clockHint;
 }
