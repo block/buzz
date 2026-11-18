@@ -75,6 +75,7 @@ import 'ios_create_channel_sheet.dart';
 import 'ios_add_members_sheet.dart';
 import 'channel_actions_sheet.dart';
 import 'channel_detail_page.dart';
+import 'dm_destination.dart';
 import 'channel_management_provider.dart';
 import 'mentions/mention_candidates.dart';
 import 'mentions/mention_candidates_provider.dart';
@@ -582,7 +583,7 @@ class ChannelsPage extends HookConsumerWidget {
                   ),
             );
           } else {
-            channel = await showGeneralDialog<Channel>(
+            final destination = await showGeneralDialog<DmDestination>(
               context: context,
               barrierColor: Colors.transparent,
               transitionDuration: Duration.zero,
@@ -591,6 +592,9 @@ class ChannelsPage extends HookConsumerWidget {
                 nativePresentation: true,
               ),
             );
+            if (destination != null && context.mounted) {
+              await openDmDestination(context, destination);
+            }
           }
           if (channel != null && context.mounted) await openChannel(channel);
         } on PlatformException catch (error) {
@@ -605,20 +609,25 @@ class ChannelsPage extends HookConsumerWidget {
         }
         return;
       }
-      final channel = await showBuzzModalBottomSheet<Channel>(
+      Future<T?> showSheet<T>(Widget sheet) => showBuzzModalBottomSheet<T>(
         context: context,
         showCloseButton: false,
         constraints: _quickActionSheetConstraints(context),
         isScrollControlled: true,
         useSafeArea: true,
-        builder: (_) => SizedBox(
-          height: double.infinity,
-          child: action == _QuickAction.createChannel
-              ? const _CreateChannelSheet()
-              : _NewDirectMessageSheet(currentPubkey: currentPubkey),
-        ),
+        builder: (_) => SizedBox(height: double.infinity, child: sheet),
       );
-      if (channel != null && context.mounted) await openChannel(channel);
+      if (action == _QuickAction.createChannel) {
+        final channel = await showSheet<Channel>(const _CreateChannelSheet());
+        if (channel != null && context.mounted) await openChannel(channel);
+        return;
+      }
+      final destination = await showSheet<DmDestination>(
+        _NewDirectMessageSheet(currentPubkey: currentPubkey),
+      );
+      if (destination != null && context.mounted) {
+        await openDmDestination(context, destination);
+      }
     }
 
     Future<void> openCreateMenu() async {

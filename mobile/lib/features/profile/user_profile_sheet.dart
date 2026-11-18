@@ -29,6 +29,8 @@ import '../../shared/widgets/progressive_animated_avatar.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
 import '../channels/channel_management_provider.dart';
+import '../channels/dm_destination.dart';
+import '../channels/dm_draft_page.dart';
 import '../channels/message_content.dart';
 import 'presence_cache_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
@@ -47,7 +49,7 @@ Future<void> showUserProfileSheet(
   ProviderListenable<IdentityNames>? names,
   WidgetBuilder? contextualActions,
 }) async {
-  final channel = await showBuzzModalBottomSheet<Channel>(
+  final destination = await showBuzzModalBottomSheet<DmDestination>(
     context: context,
     isScrollControlled: true,
     showDragHandle: false,
@@ -57,13 +59,16 @@ Future<void> showUserProfileSheet(
       contextualActions: contextualActions,
     ),
   );
-  if (channel == null || !context.mounted) return;
+  if (destination == null || !context.mounted) return;
   await Navigator.of(context).push(
     MaterialPageRoute<void>(
-      builder: (_) => ChannelDetailPage(
-        channel: channel,
-        placement: ChannelRoutePlacement.ordinary,
-      ),
+      builder: (_) => switch (destination) {
+        ExistingDm(:final channel) => ChannelDetailPage(
+          channel: channel,
+          placement: ChannelRoutePlacement.ordinary,
+        ),
+        DmDraft(:final pubkeys) => DmDraftPage(pubkeys: pubkeys),
+      },
     ),
   );
 }
@@ -71,7 +76,8 @@ Future<void> showUserProfileSheet(
 class UserProfileSheet extends HookConsumerWidget {
   final String pubkey;
 
-  /// Opens a conversation from an embedded profile without popping its pane.
+  /// Opens an agent's conversation from an embedded profile without popping
+  /// its pane.
   final ValueChanged<Channel>? onOpenChannel;
 
   /// Uses the available pane height instead of the modal sheet height cap.
@@ -207,14 +213,20 @@ class UserProfileSheet extends HookConsumerWidget {
       if (isOpeningDirectMessage.value) return;
       isOpeningDirectMessage.value = true;
       try {
-        final channel = await ref
-            .read(channelActionsProvider)
-            .openDm(pubkeys: [pk], waitForChannelList: false);
+        // Agents' profiles open their DM now, ready for the first request.
+        // Anyone else's opens a draft, so their DM starts only with a send.
+        final destination = agentPresentation || onOpenChannel != null
+            ? ExistingDm(
+                await ref
+                    .read(channelActionsProvider)
+                    .openDm(pubkeys: [pk], waitForChannelList: false),
+              )
+            : dmDestination(ref, [pk]);
         if (!context.mounted) return;
-        if (onOpenChannel != null) {
-          onOpenChannel!(channel);
+        if (onOpenChannel != null && destination is ExistingDm) {
+          onOpenChannel!(destination.channel);
         } else {
-          Navigator.of(context).pop(channel);
+          Navigator.of(context).pop(destination);
         }
       } catch (_) {
         // Silently fail — user tapped but DM open failed.

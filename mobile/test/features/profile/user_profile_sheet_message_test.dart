@@ -4,7 +4,9 @@ import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_actions_sheet.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
+import 'package:buzz/features/channels/dm_draft_page.dart';
 import 'package:buzz/features/profile/user_profile_sheet.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
@@ -21,9 +23,15 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   final peer = 'a' * 64;
 
-  for (final nativeSheet in [false, true]) {
+  for (final (nativeSheet, hasDm) in [
+    (false, true),
+    (true, true),
+    (false, false),
+    (true, false),
+  ]) {
     testWidgets(
-      'Message opens the DM without waiting on Solo (native sheet: $nativeSheet)',
+      'Message opens ${hasDm ? 'the DM' : 'a draft'} without waiting on Solo '
+      '(native sheet: $nativeSheet)',
       (tester) async {
         final dm = Channel(
           id: 'dm-peer',
@@ -35,6 +43,7 @@ void main() {
           createdBy: 'self',
           createdAt: DateTime(2025),
           isMember: true,
+          participantPubkeys: ['self', peer],
         );
         final solo = Channel(
           id: 'solo-project',
@@ -94,6 +103,9 @@ void main() {
                 () => _UserCache({
                   peer: UserProfile(pubkey: peer, displayName: 'Peer'),
                 }),
+              ),
+              channelsProvider.overrideWith(
+                () => _Channels([if (hasDm) dm, solo]),
               ),
               channelActionsProvider.overrideWith(
                 (ref) => _FakeDmActions(dm, opened, waits),
@@ -157,25 +169,36 @@ void main() {
           await openProfile();
           expect(presentations, 2);
         }
+        // The app lists channels long before anyone opens a profile.
+        await ProviderScope.containerOf(
+          tester.element(find.byType(UserProfileSheet)),
+        ).read(channelsProvider.future);
         await tester.tap(find.text('Message'));
         await tester.pump();
         await tester.pump(const Duration(seconds: 1));
 
-        expect(opened, [
-          [peer],
-        ]);
-        // The page opens at once instead of waiting on the full channel list.
-        expect(waits, [false]);
-        expect(
-          tester
-              .widget<ChannelDetailPage>(find.byType(ChannelDetailPage))
-              .channel,
-          dm,
-        );
-        // The DM is usable at once, not a placement spinner.
+        // Messaging never creates a DM: only a send does.
+        expect(opened, isEmpty);
+        expect(waits, isEmpty);
+        final Type page;
+        if (hasDm) {
+          page = ChannelDetailPage;
+          expect(
+            tester
+                .widget<ChannelDetailPage>(find.byType(ChannelDetailPage))
+                .channel,
+            dm,
+          );
+        } else {
+          page = DmDraftPage;
+          expect(tester.widget<DmDraftPage>(find.byType(DmDraftPage)).pubkeys, [
+            peer,
+          ]);
+        }
+        // The conversation is usable at once, not a placement spinner.
         expect(find.byType(ComposeBar), findsOneWidget);
         if (nativeSheet) {
-          Navigator.of(tester.element(find.byType(ChannelDetailPage))).pop();
+          Navigator.of(tester.element(find.byType(page))).pop();
           await tester.pumpAndSettle();
           await openProfile();
           expect(presentations, 3);
@@ -197,6 +220,15 @@ class _UserCache extends UserCacheNotifier {
 
   @override
   Future<bool> preload(List<String> pubkeys) async => true;
+}
+
+class _Channels extends ChannelsNotifier {
+  _Channels(this._channels);
+
+  final List<Channel> _channels;
+
+  @override
+  Future<List<Channel>> build() async => _channels;
 }
 
 class _FakeDmActions implements ChannelActions {

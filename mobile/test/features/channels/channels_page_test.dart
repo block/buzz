@@ -5,6 +5,7 @@ import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/hosted/known_communities_provider.dart';
 import 'package:buzz/shared/hosted/organization_sign_in.dart';
+import 'package:buzz/features/channels/dm_draft_page.dart';
 import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/agents/agents_page.dart';
 
@@ -3456,9 +3457,12 @@ void main() {
         charlie: 'Charlie',
         danielle: 'Danielle',
       });
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
       await tester.pumpWidget(
         buildTestable(
           overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
             channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
             relaySessionProvider.overrideWith(() => session),
             channelActionsProvider.overrideWith(
@@ -3645,25 +3649,13 @@ void main() {
       expect(searchField.textInputAction, TextInputAction.done);
       expect(searchField.onSubmitted, isNotNull);
 
-      // The header action opens the DM without waiting on the full channel list.
+      // The header action opens a draft; only its first send creates a DM.
       await tester.tap(find.byKey(const Key('new-dm-submit')));
-      await tester.pump();
-      expect(waits, [false]);
+      await tester.pumpAndSettle();
+      expect(waits, isEmpty);
       expect(
-        tester
-            .widget<IconButton>(find.byKey(const Key('new-dm-submit')))
-            .onPressed,
-        isNull,
-      );
-      expect(
-        tester
-            .widget<IconButton>(
-              find.byWidgetPredicate(
-                (widget) => widget is IconButton && widget.tooltip == 'Close',
-              ),
-            )
-            .onPressed,
-        isNull,
+        tester.widget<DmDraftPage>(find.byType(DmDraftPage)).pubkeys.toSet(),
+        {alice, charlie, danielle},
       );
     },
   );

@@ -30,6 +30,7 @@ import '../../shared/me/me_sync.dart';
 import '../channels/bestie_welcome_storage.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
+import '../channels/dm_destination.dart';
 import '../channels/channel_management_provider.dart';
 import '../profile/user_profile_sheet.dart';
 import 'agent_creation_draft.dart';
@@ -292,17 +293,21 @@ class _AgentsNavigation extends HookConsumerWidget {
                         });
                         return;
                       }
-                      final channel = await showBuzzModalBottomSheet<Channel>(
-                        context: listContext,
-                        isScrollControlled: true,
-                        showDragHandle: false,
-                        showCloseButton: false,
-                        showRailCloseButton: true,
-                        padHorizontal: false,
-                        padBottom: false,
-                        builder: (_) => profile(),
-                      );
-                      if (channel != null && context.mounted) {
+                      final destination =
+                          await showBuzzModalBottomSheet<DmDestination>(
+                            context: listContext,
+                            isScrollControlled: true,
+                            showDragHandle: false,
+                            showCloseButton: false,
+                            showRailCloseButton: true,
+                            padHorizontal: false,
+                            padBottom: false,
+                            builder: (_) => profile(),
+                          );
+                      // Agent profiles always open their existing DM.
+                      if (destination case ExistingDm(
+                        :final channel,
+                      ) when context.mounted) {
                         Navigator.of(context).pop(channel);
                       }
                     },
