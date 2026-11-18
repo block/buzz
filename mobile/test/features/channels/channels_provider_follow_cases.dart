@@ -141,7 +141,10 @@ void _threadFollowCases() {
         // Never read: the followed thread's channel asks for its whole window
         // again; the other channel keeps its incremental cursor.
         expect(since[_channelA], {0});
-        expect(since[_channelB], everyElement(greaterThan(0)));
+        expect(
+          since[_channelB],
+          allOf(isNotEmpty, everyElement(greaterThan(0))),
+        );
       },
     );
 
@@ -164,7 +167,7 @@ void _threadFollowCases() {
         (follows) => follows.choose(),
       );
       expect(since[_channelA], {0});
-      expect(since[_channelB], everyElement(greaterThan(0)));
+      expect(since[_channelB], allOf(isNotEmpty, everyElement(greaterThan(0))));
     });
 
     test('an unfollow never mutes an ordinary DM reply', () async {
