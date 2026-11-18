@@ -21,6 +21,7 @@
 		DAAB00000000000000000001 /* NativeTabler.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAAB00000000000000000002; };
 		DAAC00000000000000000001 /* HomeScreenShortcuts.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAAC00000000000000000002 /* HomeScreenShortcuts.swift */; };
 		DAAC00000000000000000003 /* ShortcutLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAAC00000000000000000004 /* ShortcutLink.swift */; };
+		DAAC00000000000000000005 /* ShortcutLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAAC00000000000000000004 /* ShortcutLink.swift */; };
 		5AAE00000000000000000001 /* ShareSuggestions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AAE00000000000000000002 /* ShareSuggestions.swift */; };
 		DAAD00000000000000000001 /* QuickSend.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAAD00000000000000000002 /* QuickSend.swift */; };
 		C0AF00000000000000000001 /* NativeConfirmationDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0AF00000000000000000002 /* NativeConfirmationDialog.swift */; };
@@ -703,6 +704,7 @@
 			files = (
 				BZZ0000000000000000002D /* BuzzControls.swift in Sources */,
 				BZZ0000000000000000002E /* BuzzControlIntents.swift in Sources */,
+				DAAC00000000000000000005 /* ShortcutLink.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -846,7 +848,7 @@
 				DEVELOPMENT_TEAM = "$(BUZZ_DEVELOPMENT_TEAM)";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = BuzzControls/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -871,7 +873,7 @@
 				DEVELOPMENT_TEAM = "$(BUZZ_DEVELOPMENT_TEAM)";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = BuzzControls/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -896,7 +898,7 @@
 				DEVELOPMENT_TEAM = "$(BUZZ_DEVELOPMENT_TEAM)";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = BuzzControls/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
