@@ -1,12 +1,22 @@
-//! Android installation authentication: the Key Attestation seam used at
-//! enrollment, and verification of the installation calls the attested Keystore
-//! key signs afterward.
+//! Android installation authentication: Key Attestation verification at
+//! enrollment, and verification of the installation calls the attested
+//! Keystore key signs afterward.
 //!
 //! Enrollment hands a certificate chain to an [`AndroidAttestationVerifier`].
-//! The production verifier (Key Attestation chain validation) is a separate
-//! change; until it exists the gateway starts with [`PendingAttestationVerifier`],
-//! which rejects every chain. The test-only verifier below is compiled only
-//! into test builds, so no configuration can select it.
+//! Production uses [`KeyAttestationVerifier`]; the test-only verifier below is
+//! compiled only into test builds, so no configuration can select it.
+
+mod key_attestation;
+mod key_description;
+mod revocation;
+
+pub use key_attestation::{
+    KeyAttestationPolicy, KeyAttestationVerifier, RootsError, GOOGLE_ROOTS_PEM,
+};
+pub use revocation::{
+    parse_status_list, refresh_once, run_refresh_loop, FetchError, HttpStatusListSource,
+    RevocationList, StatusDownload, StatusListSource, GOOGLE_STATUS_LIST_URL,
+};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
@@ -38,25 +48,6 @@ pub trait AndroidAttestationVerifier: Send + Sync {
         chain: &[Vec<u8>],
         client_data: &[u8],
     ) -> Result<VerifiedAndroidKey, AndroidAttestationError>;
-}
-
-/// Rejects every chain. It stands in for the real verifier so that a gateway
-/// configured for Android fails closed until Key Attestation verification ships.
-pub struct PendingAttestationVerifier;
-
-impl AndroidAttestationVerifier for PendingAttestationVerifier {
-    fn verify(
-        &self,
-        _: &[Vec<u8>],
-        _: &[u8],
-    ) -> Result<VerifiedAndroidKey, AndroidAttestationError> {
-        tracing::warn!(
-            operation = "attestation",
-            reason = "unavailable",
-            "Android Key Attestation verification is not implemented in this build"
-        );
-        Err(AndroidAttestationError::Invalid)
-    }
 }
 
 /// Verify an installation call signed by the attested Keystore key: a base64

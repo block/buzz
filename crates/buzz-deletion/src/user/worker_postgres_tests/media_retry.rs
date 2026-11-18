@@ -1,43 +1,12 @@
+use super::media_fixture::fixture;
 use super::*;
 use std::sync::atomic::Ordering;
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn gate_then_media_requires_delete_and_retries_storage_failure_before_communities() {
-    let fixture = media_fixture::fixture().await;
+    let fixture = fixture().await;
     let (store, id) = (&fixture.store, fixture.id);
-    // The real gate is not implemented. Refuse it before touching storage.
-    let error = run(
-        store,
-        id,
-        "gate-check",
-        &fixture.options(),
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("real handler gate_user is not implemented"));
-    assert_eq!(fixture.requests.load(Ordering::SeqCst), 0);
-    let lease = store
-        .claim(id, "gate-fixture", DEFAULT_LEASE_DURATION)
-        .await
-        .unwrap()
-        .unwrap();
-    let NextStage::Stage(gate) = UserDeletionTransition::new(store)
-        .get_next_stage(&lease, None)
-        .await
-        .unwrap()
-    else {
-        panic!("expected gate")
-    };
-    store.start_stage(&lease, gate.id).await.unwrap();
-    store
-        .save_stage_success(&lease, gate.id, serde_json::json!({"fixture": true}))
-        .await
-        .unwrap();
-    store.release(&lease).await.unwrap();
     let read_only = RunOptions {
         delete: false,
         ..fixture.options()
@@ -47,7 +16,7 @@ async fn gate_then_media_requires_delete_and_retries_storage_failure_before_comm
         .unwrap_err();
     assert!(error
         .to_string()
-        .contains("media deletion requires --delete"));
+        .contains("real workflow execution requires --delete"));
     let paused = store.inspect(id).await.unwrap();
     assert_eq!(paused.stage_history.len(), 2);
     let gate = serde_json::to_value(&paused.stage_history[0]).unwrap();

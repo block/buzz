@@ -383,14 +383,12 @@ async fn adding_an_agent_follows_its_add_policy() {
     make_agent(&state, &tenant, &agent, &b, "owner_only").await;
     let dm = open(&state, &tenant, &a, &[&b]).await.expect("open");
 
-    rejected(
-        add(&state, &tenant, &a, dm, &[&agent], true).await,
-        "policy:owner_only",
+    let named = format!(
+        "policy:owner_only — only the agent owner can add this agent (agent {})",
+        hex(&agent)
     );
-    rejected(
-        open(&state, &tenant, &a, &[&b, &agent]).await,
-        "policy:owner_only",
-    );
+    rejected(add(&state, &tenant, &a, dm, &[&agent], true).await, &named);
+    rejected(open(&state, &tenant, &a, &[&b, &agent]).await, &named);
     assert_eq!(members(&state, &tenant, dm).await, set_of(&[&a, &b]));
 
     let (target, _) = add(&state, &tenant, &b, dm, &[&agent], true)
@@ -785,8 +783,11 @@ async fn kicking_an_agent_keeps_a_group_dm_its_identity() {
 }
 
 /// Opening a DM that puts someone else's agent with anyone besides the caller
-/// follows its add policy, even when no other person is in it.
-/// Mutation: check policies only when people are named → the DM opens → RED.
+/// follows its add policy, even when no other person is in it. The refusal
+/// names the first agent refused, in the order named, so the caller knows
+/// whose setting blocked it.
+/// Mutation: check policies only when people are named → the DM opens → RED;
+/// leave the agent out of the refusal → RED.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn opening_with_several_agents_follows_their_add_policy() {
@@ -794,13 +795,24 @@ async fn opening_with_several_agents_follows_their_add_policy() {
     let tenant = community(&state, "dm-agents-policy").await;
     let (a, b) = (Keys::generate(), Keys::generate());
     let (theirs, mine) = (Keys::generate(), Keys::generate());
+    let strict = Keys::generate();
     make_agent(&state, &tenant, &theirs, &b, "nobody").await;
     make_agent(&state, &tenant, &mine, &a, "owner_only").await;
+    make_agent(&state, &tenant, &strict, &b, "owner_only").await;
 
     rejected(
         open(&state, &tenant, &a, &[&theirs, &mine]).await,
-        "policy:nobody",
+        &format!(
+            "policy:nobody — this agent has disabled external channel additions (agent {})",
+            hex(&theirs)
+        ),
     );
+    for (first, second) in [(&strict, &theirs), (&theirs, &strict)] {
+        rejected(
+            open(&state, &tenant, &a, &[&mine, first, second]).await,
+            &format!("(agent {})", hex(first)),
+        );
+    }
 }
 
 /// Adding an agent to a DM of one person and their agent moves its identity

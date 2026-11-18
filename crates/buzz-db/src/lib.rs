@@ -28,9 +28,13 @@
 /// discard: one per member for every kind:39002 roster republish. `$1` must
 /// bind the community.
 ///
-/// The three replacement paths that index mentions (NIP-33 parameterized,
-/// addressable, and the relay's member snapshot) go through this, so a head
-/// and its mention rows leave together on those paths.
+/// The addressable path, the relay's member snapshot, and the kind:13534
+/// list writer (whose `member` tags index no mentions) supersede through
+/// this, so a head and its mention rows leave together when a newer head
+/// replaces it. NIP-33 parameterized replacement drops its superseded rows'
+/// mentions itself (`remove_coordinate_versions_in_tx`). Channel deletion
+/// (`soft_delete_discovery_events`) retires live heads without a
+/// replacement and does not go through this.
 macro_rules! superseded_with_mentions_sql {
     ($retire:expr) => {
         concat!(

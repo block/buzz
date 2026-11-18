@@ -10,7 +10,7 @@ import 'package:uuid/uuid.dart';
 import '../../shared/theme/theme_provider.dart';
 import '../../shared/transcription/device_transcription.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
-import '../activity/compose_drafts_provider.dart';
+import '../../shared/drafts/compose_drafts_provider.dart';
 import 'voice_note_recording.dart';
 
 /// Local-file boundary for retaining an unsent recording across app restarts.

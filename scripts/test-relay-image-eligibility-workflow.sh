@@ -70,6 +70,15 @@ grep -Fq "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10" <<<"$merge_
   exit 1
 }
 
+for annotation in \
+  'index:org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}' \
+  'index:org.opencontainers.image.revision=${SOURCE_SHA}'; do
+  grep -Fxq "            --annotation \"$annotation\"" <<<"$merge_job" || {
+    echo "relay image index is missing its source annotation: $annotation" >&2
+    exit 1
+  }
+done
+
 # Staging auto-promotes the newest main-<ts>-<7> gateway image, so the gateway
 # must publish that tag and only from a source the relay CI qualified. Match
 # whole lines (-x) so a commented-out or otherwise inactive copy cannot satisfy
