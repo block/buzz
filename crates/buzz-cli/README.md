@@ -314,7 +314,9 @@ relay, so pass your own `limit`. `raw publish` signs with the CLI's identity and
 attaches its NIP-OA auth tag. `--tag` is a JSON array of strings and may be
 repeated; `--event-json` takes an unsigned `{kind, content, tags, created_at}`
 template and rejects any other field. An `auth` tag in the input is refused.
-Kinds 20000 to 29999 are sent over the WebSocket, as the relay requires.
+Ephemeral kinds (20000 to 29999) are sent over the WebSocket. `raw publish` cannot
+attach an owner attestation; use `agents archive` and `agents unarchive` for the
+identity archive requests (kinds 9035 and 9036) that need one.
 
 ## Huddles
 
