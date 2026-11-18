@@ -16,6 +16,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -203,11 +204,29 @@ Future<SharedPreferences> _prefs() {
   return SharedPreferences.getInstance();
 }
 
+class _EmptyCatalogSession extends RelaySessionNotifier {
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => const [];
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => const [];
+}
+
 Future<List<String>> _pumpPicker(
   WidgetTester tester, {
   required SharedPreferences prefs,
   List<CustomEmoji> customEmoji = _customEmoji,
   EmojiDataset? dataset,
+  List<Override> overrides = const [],
 }) async {
   final selected = <String>[];
   await tester.pumpWidget(
@@ -217,6 +236,7 @@ Future<List<String>> _pumpPicker(
         myPubkeyProvider.overrideWithValue('self'),
         emojiDatasetOrEmptyProvider.overrideWithValue(dataset ?? _dataset),
         customEmojiListProvider.overrideWithValue(customEmoji),
+        ...overrides,
       ],
       child: EmojiPickerSheet(onSelect: selected.add),
     ),
@@ -531,13 +551,21 @@ void main() {
     });
 
     testWidgets('reports no results rather than an empty grid', (tester) async {
-      await _pumpPicker(tester, prefs: await _prefs());
+      await _pumpPicker(
+        tester,
+        prefs: await _prefs(),
+        overrides: [
+          relaySessionProvider.overrideWith(_EmptyCatalogSession.new),
+        ],
+      );
 
       await tester.enterText(
         find.byKey(const ValueKey('emoji-picker-search')),
         'zzzzzz',
       );
-      await tester.pumpAndSettle();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pump();
 
       expect(find.text('No emoji found.'), findsOneWidget);
     });
