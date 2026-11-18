@@ -494,6 +494,102 @@ async fn two_nodes_redact_and_invalidate_idle_syncs_with_lost_notification_backs
 
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
+async fn community_sync_retries_after_snapshot_capacity_is_exhausted() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+    use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+
+    async fn read_frame(
+        client: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+    ) -> Value {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match client.next().await {
+                    Some(Ok(Message::Text(text))) => return serde_json::from_str(&text).unwrap(),
+                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                    other => panic!("expected a relay frame, got {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("relay frame in time")
+    }
+
+    let mut f = community_fixture().await;
+    let keys = Keys::generate();
+    member(&f, &keys, "member").await;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&crate::test_support::database_url())
+        .await
+        .unwrap();
+    // A two-connection writer leaves one connection available for admission.
+    Arc::get_mut(&mut f.state).unwrap().db = buzz_db::Db::from_pool(pool);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = crate::router::build_router(Arc::clone(&f.state));
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let mut request = format!("ws://{address}/").into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("host", f.tenant.host().parse().unwrap());
+    let (mut client, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let auth_challenge = read_frame(&mut client).await;
+    assert_eq!(auth_challenge[0], "AUTH");
+    let relay = crate::api::bridge::nip42_expected_relay_url(&f.state.config.relay_url, &f.tenant);
+    let auth = EventBuilder::new(Kind::Authentication, "")
+        .tags([
+            Tag::parse(["relay", &relay]).unwrap(),
+            Tag::parse(["challenge", auth_challenge[1].as_str().unwrap()]).unwrap(),
+        ])
+        .sign_with_keys(&keys)
+        .unwrap();
+    client
+        .send(Message::Text(json!(["AUTH", auth]).to_string().into()))
+        .await
+        .unwrap();
+    let auth_response = read_frame(&mut client).await;
+    assert_eq!(auth_response[0], "OK", "{auth_response}");
+    assert_eq!(auth_response[2], true, "{auth_response}");
+
+    let principal = buzz_db::community_artifact::CommunityArtifactPrincipal {
+        pubkey: keys.public_key().to_bytes().to_vec(),
+        verified_owner: None,
+        owner_admission: false,
+        require_membership: true,
+    };
+    let held = f
+        .state
+        .db
+        .open_community_artifact_snapshot(f.tenant.community(), &principal)
+        .await
+        .unwrap();
+    client
+        .send(Message::Text(
+            json!(["REQ", "busy", filter()]).to_string().into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        read_frame(&mut client).await,
+        json!(["CLOSED", "busy", "error: sync read failed"])
+    );
+
+    held.finish().await.unwrap();
+    client
+        .send(Message::Text(
+            json!(["REQ", "retry", filter()]).to_string().into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(read_frame(&mut client).await, json!(["EOSE", "retry"]));
+    client.close(None).await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
 async fn unavailable_current_admission_has_no_snapshot_or_eose() {
     let f = community_fixture().await;
     let keys = Keys::generate();

@@ -1,4 +1,6 @@
 -- NIP-AR current heads and acceptance ledger are independent of event retention.
+-- For an existing database, apply 0097 and complete the guarded contract in
+-- docs/community-artifact-rollout.md before converging this primary key.
 CREATE TABLE artifact_heads (
     community_id UUID NOT NULL REFERENCES communities(id),
     artifact_id UUID NOT NULL,
@@ -9,7 +11,7 @@ CREATE TABLE artifact_heads (
     root BYTEA,
     deleted BOOLEAN NOT NULL DEFAULT false,
     modified_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    PRIMARY KEY (community_id, artifact_id)
+    PRIMARY KEY (community_id, scope, artifact_id)
 );
 CREATE INDEX artifact_heads_event ON artifact_heads (community_id, event_id);
 CREATE INDEX artifact_heads_modified ON artifact_heads (community_id, modified_at, artifact_id);
@@ -18,8 +20,6 @@ CREATE INDEX artifact_heads_channel ON artifact_heads (community_id, channel_id,
 -- The relay does not expire events. Any future row retention or partition
 -- retirement must skip payloads referenced by `artifact_heads.event_id`
 -- (NIP-AR: expiring earlier revisions MUST NOT remove the current revision).
-
-CREATE UNIQUE INDEX artifact_heads_scoped_identity ON artifact_heads (community_id, scope, artifact_id);
 
 CREATE INDEX artifact_heads_live_type
     ON artifact_heads (community_id, scope, artifact_type, artifact_id) WHERE NOT deleted;

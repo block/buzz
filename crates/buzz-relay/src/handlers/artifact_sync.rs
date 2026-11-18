@@ -755,13 +755,18 @@ async fn send_initial_set(
     handle: &SyncHandle,
 ) -> Result<HashSet<Uuid>, Stop> {
     let mut snapshot = if let Some(interest) = &handle.community {
-        Snapshot::Community(
-            state
-                .db
-                .open_community_artifact_snapshot(conn.tenant.community(), &interest.principal)
-                .await
-                .map_err(|_| Stop::Close(RESTRICTED))?,
-        )
+        match state
+            .db
+            .open_community_artifact_snapshot(conn.tenant.community(), &interest.principal)
+            .await
+        {
+            Ok(snapshot) => Snapshot::Community(snapshot),
+            Err(buzz_db::DbError::AccessDenied(_)) => return Err(Stop::Close(RESTRICTED)),
+            Err(e) => {
+                warn!(conn_id = %conn.conn_id, error_kind = %e.kind(), "artifact sync snapshot failed");
+                return Err(Stop::Close(READ_FAILED));
+            }
+        }
     } else {
         match state
             .db

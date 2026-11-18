@@ -125,6 +125,18 @@ async fn signed_http_policy_replay_tenant_privacy_and_moderation() {
     let (status, body) = signed(&f, &f.peer, "/query", current.clone()).await;
     assert!(status.is_success(), "{status}: {body}");
     assert_eq!(body[0]["id"], event.id.to_hex());
+    for (ids, expected) in [
+        (vec![d.simple().to_string()], json!([])),
+        (
+            vec![Uuid::new_v4().to_string(), d.to_string()],
+            json!([event]),
+        ),
+    ] {
+        let filter = json!([{"artifact":"history","scope":"community","#d":ids}]);
+        let (status, body) = signed(&f, &f.peer, "/query", filter).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, expected);
+    }
     assert!(
         !f.request_as(&f.peer, "/query", current.clone())
             .await
@@ -268,26 +280,48 @@ async fn signed_http_policy_replay_tenant_privacy_and_moderation() {
 #[ignore = "requires Postgres and Redis"]
 async fn policy_command_preserves_relay_admin_timeout_and_ban_rules() {
     let f = fixture().await;
+    let command = policy(&f, "admins", None);
+    accepted(&f, &f.owner, &command).await;
+    let next = policy(&f, "everyone", Some(&command));
     sqlx::query("INSERT INTO community_bans(community_id,pubkey,actor_pubkey,muted_until) VALUES($1,$2,$2,clock_timestamp()+interval '5 minutes')")
         .bind(f.community.as_uuid())
         .bind(f.owner.public_key().as_bytes().as_slice())
         .execute(&f.pool)
         .await
         .unwrap();
-    let command = policy(&f, "admins", None);
-    accepted(&f, &f.owner, &command).await;
-    accepted(&f, &f.owner, &command).await;
+    f.state.invalidate_restrictions_local(f.community);
+    for event in [&next, &command] {
+        let (status, body) = signed(&f, &f.owner, "/events", json!(event)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("restricted: you are timed out"),
+            "{body}"
+        );
+    }
+    let read = json!([{"artifact":"policy","scope":"community","#type":["example.settings"]}]);
+    let (status, body) = signed(&f, &f.owner, "/query", read).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        json!({"policy":"admins","revision":command.id.to_hex()})
+    );
     let content = revision(&f, &f.owner, Uuid::new_v4(), "create", None);
     assert!(!signed(&f, &f.owner, "/events", json!(content))
         .await
         .0
         .is_success());
-    sqlx::query("UPDATE community_bans SET banned=true WHERE community_id=$1 AND pubkey=$2")
+    sqlx::query(
+        "UPDATE community_bans SET banned=true,muted_until=NULL WHERE community_id=$1 AND pubkey=$2",
+    )
         .bind(f.community.as_uuid())
         .bind(f.owner.public_key().as_bytes().as_slice())
         .execute(&f.pool)
         .await
         .unwrap();
+    f.state.invalidate_restrictions_local(f.community);
     assert!(!signed(&f, &f.owner, "/events", json!(command))
         .await
         .0

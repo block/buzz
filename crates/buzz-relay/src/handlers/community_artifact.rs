@@ -187,6 +187,13 @@ async fn execute(
         )
         .await?;
     } else if let Some(command) = command {
+        super::ingest::enforce_write_restriction(
+            state,
+            tenant,
+            buzz_core::kind::RELAY_ADMIN_SET_ARTIFACT_TYPE_POLICY,
+            auth.pubkey(),
+        )
+        .await?;
         let mut tx =
             state.db.pool().begin().await.map_err(|_| {
                 IngestError::Internal("error: policy transaction unavailable".into())

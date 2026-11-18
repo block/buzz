@@ -7,10 +7,16 @@ serves channel artifacts but neither accepts nor advertises community scope.
 
 ## Expand and deploy
 
-Apply migration 0097, or converge the matching desired-state files. It adds
-constant-default scope columns, nullable channel IDs, community revision JSON,
-redaction state and a bounded policy map on `communities`. It retains the old
-`(community_id, artifact_id)` primary key and adds a scoped unique index.
+For an existing database, apply migration 0097. Deployments that manage
+schema out of band can run the same reviewed SQL in a single transaction.
+Defer any desired-state plan that changes `artifact_heads` until the guarded
+contract below succeeds. The declarative schema specifies the final scoped
+primary key, which old channel writers cannot use.
+
+Migration 0097 adds constant-default scope columns, nullable channel IDs,
+community revision JSON, redaction state and a bounded policy map on
+`communities`. It retains the `(community_id, artifact_id)` primary key
+and adds a scoped unique index.
 There is no data backfill. Existing rows default to channel scope. Old channel
 writers retain their conflict target and the bridge retains their advisory
 lock `artifact:{tenant}:{d}`. All indexes have lock and statement budgets. If
@@ -51,11 +57,11 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
 The attestation is a human fleet check, not something a database catalog can
 prove. The script verifies the expanded unique index and atomically attaches
 it as the scoped primary key while removing the legacy primary key, within
-5-second lock and 30-second statement budgets. It is safe to rerun and writes
-no payload data. Schema management must preserve this operator-selected key;
-do not reconverge the expand-only desired-state primary key after contract.
-A future contract release should update the declarative primary key after its
-minimum compatible release has been established.
+5-second lock and 30-second statement budgets. The script is safe to rerun.
+After it succeeds, resume desired-state reconciliation for `artifact_heads`.
+The declarative schema now matches the scoped primary key. Fresh databases
+bootstrapped from `schema/schema.sql` start with that key and require compatible
+relay binaries, deletion executors and operator tools from the start.
 
 Restart compatible backends with `BUZZ_COMMUNITY_ARTIFACTS_ENABLED=true` only
 after the fleet check. Each process verifies the scoped primary key, absence

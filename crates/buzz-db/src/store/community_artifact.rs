@@ -3,8 +3,8 @@
 use super::artifact::{ArtifactOutcome, HEAD_UNAVAILABLE};
 use crate::{Db, DbError, Result};
 use buzz_core::artifact::{
-    ArtifactEnvelope, ArtifactOp, ArtifactQuery, ArtifactScope, ArtifactTypePolicyCommand,
-    ArtifactView, MAX_COMMUNITY_POLICIES,
+    canonical_uuid, ArtifactEnvelope, ArtifactOp, ArtifactQuery, ArtifactScope,
+    ArtifactTypePolicyCommand, ArtifactView, MAX_COMMUNITY_POLICIES,
 };
 use buzz_core::{CommunityId, StoredEvent};
 use nostr::Event;
@@ -194,10 +194,9 @@ pub async fn set_policy_in_transaction(
     }
     crate::deletion::guard_community_write(tx, community).await?;
     let authority = authorize(tx, community, principal).await?;
-    // Relay-admin commands retain administrative authority during a content
-    // timeout. authorize still refuses the principal's and applicable owner's
-    // bans; new artifact revisions separately enforce their content timeout.
-    if !authority.admin {
+    // Recheck the shared relay-admin write restriction under admission locks
+    // before accepting either a new policy or an exact retry.
+    if !authority.admin || authority.timed_out {
         return Err(denied());
     }
     policy_lock(tx, community, &command.artifact_type).await?;
@@ -208,8 +207,7 @@ pub async fn set_policy_in_transaction(
             .await?
             .ok_or_else(denied)?;
     let current = policy_value(&state, &command.artifact_type)?;
-    // Bans and current direct authority precede command receipts, matching
-    // the shared relay-admin gate (content timeouts do not block commands).
+    // An authorized retry of the current command bypasses the freshness check.
     if current.revision.as_deref() == Some(event.id.to_hex().as_str()) {
         return Ok(PolicyOutcome::Duplicate);
     }
@@ -449,9 +447,27 @@ fn query_builder(
             }
             continue;
         }
-        if view != ArtifactView::History && name == "d" {
-            let ids: Vec<Uuid> = values.iter().filter_map(|v| v.parse().ok()).collect();
-            qb.push(" AND a.artifact_id=ANY(").push_bind(ids).push(")");
+        if name == "d" {
+            let (predicate, ids) = if view == ArtifactView::History {
+                // History matched the signed tag exactly. Only the canonical
+                // UUID spelling can match an accepted revision.
+                (
+                    " AND r.artifact_id=ANY(",
+                    values
+                        .iter()
+                        .filter_map(|v| canonical_uuid(v).ok())
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                (
+                    " AND a.artifact_id=ANY(",
+                    values
+                        .iter()
+                        .filter_map(|v| v.parse().ok())
+                        .collect::<Vec<_>>(),
+                )
+            };
+            qb.push(predicate).push_bind(ids).push(")");
             continue;
         }
         qb.push(" AND EXISTS(SELECT 1 FROM jsonb_array_elements(r.community_event->'tags') tag WHERE tag->>0=").push_bind(name).push(" AND tag->>1=ANY(").push_bind(values).push("))");
@@ -677,5 +693,68 @@ impl Db {
             .bind(community.as_uuid()).bind(keys).bind(owners).bind(require).bind(owner_admission).fetch_all(&mut *tx).await?;
         tx.commit().await?;
         Ok(allowed)
+    }
+}
+
+#[cfg(test)]
+mod postgres_tests {
+    use super::*;
+    use sqlx::Execute;
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn community_artifact_history_can_seek_by_identity() {
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .unwrap();
+        if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
+            crate::migration::run_migrations(&pool).await.unwrap();
+        }
+        let mut tx = pool.begin().await.unwrap();
+        let community = CommunityId::from_uuid(Uuid::new_v4());
+        sqlx::query("INSERT INTO communities(id,host) VALUES($1,$2)")
+            .bind(community.as_uuid())
+            .bind(format!("history-plan-{community}.test"))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let ids = [Uuid::new_v4(), Uuid::new_v4()];
+        // Give the planner enough revisions in one community that locating a
+        // few identities through the index is cheaper than parsing every tag.
+        sqlx::query(
+            "INSERT INTO artifact_revisions(community_id,scope,event_id,artifact_id,community_event) \
+             SELECT $1,'community',sha256(n::text::bytea),d, \
+                    jsonb_build_object('tags',jsonb_build_array(jsonb_build_array('d',d))) \
+             FROM generate_series(1,2048) n \
+             CROSS JOIN LATERAL (SELECT coalesce(($2::uuid[])[n],md5(n::text)::uuid) AS d) identity",
+        )
+        .bind(community.as_uuid())
+        .bind(ids.as_slice())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE artifact_revisions")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let tags = [("d".into(), ids.iter().map(Uuid::to_string).collect())];
+        let mut builder = query_builder(community, ArtifactView::History, &tags);
+        builder.push(" ORDER BY r.modified_at DESC,r.event_id LIMIT 50");
+        let mut statement = builder.build();
+        let arguments = statement.take_arguments().unwrap().unwrap();
+        let explain = format!("EXPLAIN (FORMAT JSON) {}", statement.sql().as_str());
+        let plan: Value = sqlx::query_scalar_with(sqlx::AssertSqlSafe(explain), arguments)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        fn seeks_artifact(node: &Value) -> bool {
+            node["Index Cond"]
+                .as_str()
+                .is_some_and(|condition| condition.contains("artifact_id"))
+                || node["Plans"]
+                    .as_array()
+                    .is_some_and(|plans| plans.iter().any(seeks_artifact))
+        }
+        assert!(seeks_artifact(&plan[0]["Plan"]), "{plan:#}");
     }
 }

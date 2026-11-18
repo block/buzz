@@ -832,7 +832,6 @@ mod community {
     use serde_json::json;
 
     async fn contract(f: &Fixture) {
-        assert!(!f.db.community_artifact_schema_ready().await.unwrap());
         let mut connection = f.db.pool.acquire().await.unwrap();
         sqlx::query(
             "SET buzz.community_artifact_contract_ready='all-backends-enforce-community-audience'",
@@ -947,7 +946,7 @@ mod community {
     /// predicate aliases the legal identical d after the operator contract.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn expand_keeps_legacy_conflict_target_contract_separates_scopes() {
+    async fn migration_schema_expand_keeps_legacy_conflict_target_contract_separates_scopes() {
         let f = Fixture::new().await;
         let d = Uuid::new_v4();
         let channel = f.revision(d, "create", f.a, None, &f.owner, vec![]);
@@ -994,6 +993,7 @@ mod community {
             accept(&f, &community, &reader).await.unwrap(),
             ArtifactOutcome::Accepted(_)
         ));
+        contract(&f).await;
         let channel_update = f.revision(d, "update", f.a, Some(&channel), &f.owner, vec![]);
         assert!(matches!(
             f.accept(&channel_update, None).await,
@@ -1118,6 +1118,40 @@ mod community {
             .community_artifact_policy(f.community, &delegated, "example.settings")
             .await
             .is_ok());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn policy_transaction_rechecks_timeout_before_writes_and_replays() {
+        let f = Fixture::new().await;
+        contract(&f).await;
+        role(&f, &f.owner, "owner").await;
+        let current = policy(&f, "example.settings", "admins", None);
+        assert_eq!(set_policy(&f, &current).await, PolicyOutcome::Applied);
+        sqlx::query("INSERT INTO community_bans(community_id,pubkey,actor_pubkey,muted_until) VALUES($1,$2,$2,now()+interval '1 hour')")
+            .bind(f.community.as_uuid())
+            .bind(f.owner.public_key().as_bytes().as_slice())
+            .execute(&f.db.pool)
+            .await
+            .unwrap();
+        let next = policy(&f, "example.settings", "everyone", Some(&current));
+        for event in [&current, &next] {
+            let command = buzz_core::artifact::parse_policy_command(event).unwrap();
+            let mut tx = f.db.pool.begin().await.unwrap();
+            let result = set_policy_in_transaction(
+                &mut tx,
+                f.community,
+                &principal(&f.owner, false),
+                event,
+                &command,
+            )
+            .await;
+            assert!(
+                matches!(result, Err(crate::DbError::AccessDenied(_))),
+                "{result:?}"
+            );
+            tx.rollback().await.unwrap();
+        }
     }
 
     /// Admission must be authoritative even with a caller holding stale
