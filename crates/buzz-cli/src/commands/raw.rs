@@ -3,6 +3,7 @@
 //! client paths as every other command, so credentials, the NIP-OA auth tag
 //! and the NIP-FI assertion are handled identically.
 
+use buzz_core::kind::{KIND_GIFT_WRAP, KIND_NIP43_LEAVE_REQUEST};
 use nostr::{EventBuilder, Kind, Tag, Timestamp};
 use serde::Deserialize;
 
@@ -122,6 +123,14 @@ pub async fn cmd_publish(
         }
     };
 
+    if u32::from(template.kind) == KIND_GIFT_WRAP {
+        return Err(CliError::Usage(
+            "raw publish cannot send gift wraps (kind 1059): they need NIP-59 signing with \
+             a throwaway key, and the relay refuses them over HTTP"
+                .into(),
+        ));
+    }
+
     let mut builder = EventBuilder::new(Kind::Custom(template.kind), template.content)
         .tags(build_tags(&template.tags)?)
         // Keep a `p` tag naming the signer: nostr drops them by default, and
@@ -133,8 +142,12 @@ pub async fn cmd_publish(
     let event = client.sign_event(builder).await?;
 
     // The relay takes only typing (kind 20002) of the ephemeral range over
-    // HTTP; the rest of 20000-29999 must go over the WebSocket.
-    let resp = if (20000..30000).contains(&template.kind) {
+    // HTTP; the rest of 20000-29999 must go over the WebSocket. The NIP-43
+    // leave request is the exception: the relay revokes the submitting socket
+    // as it removes the membership, so over the WebSocket a successful leave
+    // reads as a failure.
+    let ephemeral = (20000..30000).contains(&template.kind);
+    let resp = if ephemeral && u32::from(template.kind) != KIND_NIP43_LEAVE_REQUEST {
         client.publish_ephemeral_event(event).await?
     } else {
         client.submit_event(event).await?
@@ -501,6 +514,24 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
+
+        let err = cmd_publish(&client(&url), Some(1059), &[], None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CliError::Usage(msg) if msg.contains("gift wrap")));
         assert!(captured.events.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn publish_sends_a_leave_request_over_http() {
+        // Other ephemeral kinds go over the WebSocket, which this fake relay
+        // does not serve; a leave must reach `/events`.
+        let (url, captured) = fake_relay("[]").await;
+        cmd_publish(&client(&url), Some(28936), &[], None, None)
+            .await
+            .unwrap();
+        let events = captured.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["kind"], 28936);
     }
 }

@@ -382,7 +382,7 @@ pub enum RawCmd {
     /// Give `--kind` with optional `--tag` and `--content`, or a full unsigned
     /// template with `--event-json` (fields: kind, content, tags, created_at).
     /// The CLI signs with its own identity and attaches its NIP-OA auth tag;
-    /// an `auth` tag in the input is rejected.
+    /// an `auth` tag in the input is rejected, and so are gift wraps (kind 1059).
     #[command(
         after_help = "Examples:\n  buzz raw publish --kind 1 --content 'hello'\n  buzz raw publish --kind 9 --tag '[\"h\",\"<channel uuid>\"]' --content 'hi'\n  buzz raw publish --event-json '{\"kind\":1,\"content\":\"hi\",\"tags\":[]}'"
     )]

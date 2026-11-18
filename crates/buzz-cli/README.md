@@ -315,7 +315,9 @@ object. Each response is bounded by the relay, so pass your own `limit`. `raw pu
 attaches its NIP-OA auth tag. `--tag` is a JSON array of strings and may be
 repeated; `--event-json` takes an unsigned `{kind, content, tags, created_at}`
 template and rejects any other field. An `auth` tag in the input is refused.
-Ephemeral kinds (20000 to 29999) are sent over the WebSocket. `raw publish` cannot
+Ephemeral kinds (20000 to 29999) are sent over the WebSocket, except the NIP-43
+leave request (28936), which goes over HTTP. Gift wraps (kind 1059) are refused:
+they need NIP-59 signing with a throwaway key. `raw publish` also cannot
 attach an owner attestation; use `agents archive` and `agents unarchive` for the
 identity archive requests (kinds 9035 and 9036) that need one.
 
