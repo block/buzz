@@ -9,7 +9,6 @@ use std::time::SystemTime;
 
 use buzz_core::kind::KIND_EVENT_REMINDER;
 use chrono::DateTime;
-use nostr::nips::nip44;
 use nostr::{Event, EventBuilder, EventId, Kind, Tag, Timestamp};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -149,13 +148,20 @@ fn d_tag(event: &Event) -> Option<&str> {
     }
 }
 
-fn decode(event: &Event, client: &BuzzClient) -> Result<Reminder, String> {
-    let d = d_tag(event).ok_or("it has no single non-empty d tag")?;
-    let keys = client.keys();
-    let plaintext = nip44::decrypt(keys.secret_key(), &keys.public_key(), &event.content)
-        .map_err(|e| format!("it cannot be decrypted: {e}"))?;
-    let content =
-        parse_content(&plaintext).ok_or("its content is not a desktop-format reminder")?;
+async fn decode(event: &Event, client: &BuzzClient) -> Result<Result<Reminder, String>, CliError> {
+    let Some(d) = d_tag(event) else {
+        return Ok(Err("it has no single non-empty d tag".into()));
+    };
+    let Some(plaintext) = client
+        .credentials()
+        .nip44_decrypt(&client.public_key(), &event.content)
+        .await?
+    else {
+        return Ok(Err("it cannot be decrypted".into()));
+    };
+    let Some(content) = parse_content(&plaintext) else {
+        return Ok(Err("its content is not a desktop-format reminder".into()));
+    };
     let not_before = event
         .tags
         .iter()
@@ -163,13 +169,13 @@ fn decode(event: &Event, client: &BuzzClient) -> Result<Reminder, String> {
         .find(|tag| tag.first().map(String::as_str) == Some("not_before"))
         .and_then(|tag| tag.get(1))
         .and_then(|raw| parse_not_before(raw));
-    Ok(Reminder {
+    Ok(Ok(Reminder {
         d: d.to_string(),
         not_before,
         content,
         created_at: event.created_at.as_secs(),
         event_id: event.id.to_hex(),
-    })
+    }))
 }
 
 /// NIP-01 replacement order: newest `created_at`, then the lower id.
@@ -179,7 +185,7 @@ fn dominates(a: &Event, b: &Event) -> bool {
 
 /// Events from the relay that are this identity's signed reminders.
 fn own_valid_events(raw: Vec<Value>, client: &BuzzClient) -> (Vec<Event>, usize) {
-    let me = client.keys().public_key();
+    let me = client.public_key();
     let mut invalid = 0;
     let events = raw
         .into_iter()
@@ -206,7 +212,7 @@ async fn fetch_head(client: &BuzzClient, d: &str) -> Result<(Event, Reminder), C
     }
     let filter = json!({
         "kinds": [KIND_EVENT_REMINDER],
-        "authors": [client.keys().public_key().to_hex()],
+        "authors": [client.public_key().to_hex()],
         "#d": [d],
         "limit": 1,
         "consistency": "strong",
@@ -239,7 +245,7 @@ async fn fetch_head(client: &BuzzClient, d: &str) -> Result<(Event, Reminder), C
         }
         return Err(CliError::NotFound(format!("no reminder with id {d}")));
     };
-    let reminder = decode(&head, client).map_err(|detail| {
+    let reminder = decode(&head, client).await?.map_err(|detail| {
         CliError::Other(format!(
             "reminder {d} is unreadable ({detail}); refusing to overwrite it"
         ))
@@ -247,7 +253,7 @@ async fn fetch_head(client: &BuzzClient, d: &str) -> Result<(Event, Reminder), C
     Ok((head, reminder))
 }
 
-fn encrypt(client: &BuzzClient, content: &Content) -> Result<String, CliError> {
+async fn encrypt(client: &BuzzClient, content: &Content) -> Result<String, CliError> {
     let plaintext = serde_json::to_string(content)
         .map_err(|e| CliError::Other(format!("failed to encode reminder: {e}")))?;
     let too_large = || CliError::Usage("reminder would exceed the relay's event size limit".into());
@@ -255,14 +261,10 @@ fn encrypt(client: &BuzzClient, content: &Content) -> Result<String, CliError> {
     if plaintext.len() > u16::MAX as usize {
         return Err(too_large());
     }
-    let keys = client.keys();
-    let ciphertext = nip44::encrypt(
-        keys.secret_key(),
-        &keys.public_key(),
-        plaintext,
-        nip44::Version::V2,
-    )
-    .map_err(|e| CliError::Other(format!("failed to encrypt reminder: {e}")))?;
+    let ciphertext = client
+        .credentials()
+        .nip44_encrypt(&client.public_key(), &plaintext)
+        .await?;
     if ciphertext.len() > MAX_CIPHERTEXT_BYTES {
         return Err(too_large());
     }
@@ -289,11 +291,13 @@ async fn publish(
     }
     let builder = EventBuilder::new(
         Kind::Custom(KIND_EVENT_REMINDER as u16),
-        encrypt(client, content)?,
+        encrypt(client, content).await?,
     )
     .tags(tags)
     .custom_created_at(Timestamp::from(created_at));
-    let raw = client.submit_event(client.sign_event(builder)?).await?;
+    let raw = client
+        .submit_event(client.sign_event(builder).await?)
+        .await?;
     let normalized = parse_write_response(
         &raw,
         "a newer version of this reminder exists; run `buzz reminders list` and retry",
@@ -450,7 +454,7 @@ async fn list(
 ) -> Result<Value, CliError> {
     let query = json!({
         "kinds": [KIND_EVENT_REMINDER],
-        "authors": [client.keys().public_key().to_hex()],
+        "authors": [client.public_key().to_hex()],
         "consistency": "strong",
     });
     let raw = client.query_all_bounded(query, max_events).await?;
@@ -472,7 +476,7 @@ async fn list(
 
     let mut reminders = Vec::new();
     for event in heads.values() {
-        match decode(event, client) {
+        match decode(event, client).await? {
             Ok(reminder) => reminders.push(reminder),
             Err(_) => skipped += 1,
         }
@@ -594,7 +598,9 @@ pub async fn dispatch(cmd: RemindersCmd, client: &BuzzClient) -> Result<(), CliE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::credentials::Credentials;
     use axum::{body::Bytes, extract::State, routing::get, routing::post, Json, Router};
+    use nostr::nips::nip44;
     use nostr::Keys;
     use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
@@ -712,7 +718,7 @@ mod tests {
             reject_as_duplicate: false,
         }));
         let url = fake_relay(relay.clone()).await;
-        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+        let client = BuzzClient::new(url, Credentials::from_keys(Keys::generate())).unwrap();
         (client, relay)
     }
 
@@ -728,7 +734,7 @@ mod tests {
     }
 
     fn plaintext(client: &BuzzClient, event: &Event) -> Value {
-        let keys = client.keys();
+        let keys = client.credentials().test_keys();
         let text = nip44::decrypt(keys.secret_key(), &keys.public_key(), &event.content).unwrap();
         serde_json::from_str(&text).unwrap()
     }
@@ -750,7 +756,7 @@ mod tests {
         extra_tags: Vec<Tag>,
         created_at: u64,
     ) -> Event {
-        let keys = client.keys();
+        let keys = client.credentials().test_keys();
         let content = nip44::encrypt(
             keys.secret_key(),
             &keys.public_key(),
@@ -761,7 +767,7 @@ mod tests {
         EventBuilder::new(Kind::Custom(KIND_EVENT_REMINDER as u16), content)
             .tags([vec![Tag::identifier(d)], extra_tags].concat())
             .custom_created_at(Timestamp::from(created_at))
-            .sign_with_keys(keys)
+            .sign_with_keys(&keys)
             .unwrap()
     }
 
@@ -855,7 +861,7 @@ mod tests {
         let events = reminders(&relay);
         assert_eq!(events.len(), 1, "one user action is one publish");
         let event = &events[0];
-        assert_eq!(event.pubkey, client.keys().public_key());
+        assert_eq!(event.pubkey, client.public_key());
         let d = tag_values(event, "d");
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].len(), 32);
@@ -881,8 +887,8 @@ mod tests {
             })
         );
         let text = nip44::decrypt(
-            client.keys().secret_key(),
-            &client.keys().public_key(),
+            client.credentials().test_keys().secret_key(),
+            &client.public_key(),
             &event.content,
         )
         .unwrap();
@@ -1635,8 +1641,8 @@ mod tests {
             .map(|e| serde_json::to_value(e).unwrap())
             .collect();
         let doc = json!({
-            "secret_key": client.keys().secret_key().to_secret_hex(),
-            "pubkey": client.keys().public_key().to_hex(),
+            "secret_key": client.credentials().test_keys().secret_key().to_secret_hex(),
+            "pubkey": client.public_key().to_hex(),
             "message": {"id": message.id.to_hex(), "pubkey": message.pubkey.to_hex()},
             "ids": {
                 "with_target": with_target, "note_only": note_only, "snoozed": snoozed,
@@ -1659,7 +1665,8 @@ mod tests {
                 .unwrap();
         let keys = Keys::parse(doc["secret_key"].as_str().unwrap()).unwrap();
         let (client, relay) = setup().await;
-        let client = BuzzClient::new(client.relay_url().to_string(), keys, None, None).unwrap();
+        let client =
+            BuzzClient::new(client.relay_url().to_string(), Credentials::from_keys(keys)).unwrap();
         for event in doc["events"].as_array().unwrap() {
             relay.lock().unwrap().events.push(event.clone());
         }
