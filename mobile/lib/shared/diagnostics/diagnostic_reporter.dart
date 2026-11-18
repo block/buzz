@@ -35,8 +35,11 @@ abstract interface class DiagnosticReporter {
 }
 
 /// The error a test report carries, so it is easy to tell apart.
+///
+/// Not const: each report needs its own instance, or the destination's
+/// deduplication drops every report after the first.
 class DiagnosticTestError implements Exception {
-  const DiagnosticTestError();
+  DiagnosticTestError();
 
   @override
   String toString() => 'DiagnosticTestError';

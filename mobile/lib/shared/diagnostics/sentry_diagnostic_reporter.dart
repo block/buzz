@@ -78,7 +78,7 @@ class SentryDiagnosticReporter implements DiagnosticReporter {
 
   @override
   void sendTestReport() => reportError(
-    const DiagnosticTestError(),
+    DiagnosticTestError(),
     StackTrace.current,
     operation: DiagnosticOperation.testReport,
   );

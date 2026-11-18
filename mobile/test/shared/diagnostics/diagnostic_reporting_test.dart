@@ -14,6 +14,8 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
+// ignore: depend_on_referenced_packages, implementation_imports
+import 'package:sentry/src/deduplication/deduplication_event_processor.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 // The SDK's own processors and integrations, so tests see what it really
 // sends rather than hand-built events.
@@ -154,10 +156,11 @@ void main() {
       transport = _MemoryTransport();
       options = SentryFlutterOptions();
       configureDiagnostics(options, 'https://key@example.org/1');
-      // The processors SentryFlutter.init installs, in its order.
+      // The processors Sentry.init and SentryFlutter.init install.
       options
         ..transport = transport
         ..sendClientReports = false
+        ..addEventProcessor(DeduplicationEventProcessor(options))
         ..addEventProcessor(FlutterExceptionEventProcessor())
         ..addEventProcessor(FlutterEnricherEventProcessor(options))
         ..addEventProcessor(WidgetEventProcessor())
@@ -215,6 +218,15 @@ void main() {
       expect(exception['type'], 'DiagnosticTestError');
       expect(exception['stacktrace'], isNotNull);
       expect(sent['tags']['operation'], 'testReport');
+    });
+
+    test('every test report is sent, not only the first', () async {
+      SentryDiagnosticReporter(hub: hub)
+        ..sendTestReport()
+        ..sendTestReport();
+      await transport.count(2);
+
+      expect(transport.events, hasLength(2));
     });
 
     testWidgets('sends only the allowed contexts', (tester) async {
@@ -458,8 +470,14 @@ class _ReleaseChecker extends RuntimeChecker {
 class _MemoryTransport implements Transport {
   final events = <Map<String, dynamic>>[];
   final _first = Completer<void>();
+  final _added = StreamController<void>.broadcast();
 
   Future<void> first() => _first.future;
+
+  Future<void> count(int n) async {
+    if (events.length >= n) return;
+    await _added.stream.firstWhere((_) => events.length >= n);
+  }
 
   @override
   Future<SentryId?> send(SentryEnvelope envelope) async {
@@ -468,6 +486,7 @@ class _MemoryTransport implements Transport {
       final bytes = await item.dataFactory();
       events.add(jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>);
       if (!_first.isCompleted) _first.complete();
+      _added.add(null);
     }
     return envelope.header.eventId;
   }
