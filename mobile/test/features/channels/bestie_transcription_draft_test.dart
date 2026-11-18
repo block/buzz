@@ -69,6 +69,26 @@ void main() {
     },
   );
   test(
+    'a failed audio promotion keeps the original recording recoverable',
+    () async {
+      final first = await store.retain(recording(), 'first');
+      await store.clear(id: first.id);
+      // Make promotion fail like a storage error without filling the disk.
+      await Directory(first.audioPath).create();
+      await expectLater(
+        store.retain(recording(), 'bestie'),
+        throwsA(isA<FileSystemException>()),
+      );
+      await Directory(first.audioPath).delete();
+      final reopened = (await store.read())!;
+      expect(reopened.audioPath, '${directory.path}/capture.wav');
+      expect(await File(reopened.audioPath).exists(), isTrue);
+      await store.clear(id: reopened.id);
+      expect(await File(reopened.audioPath).exists(), isFalse);
+      expect(await store.read(), isNull);
+    },
+  );
+  test(
     'native failure is observed while directory lookup is still pending',
     () async {
       final location = Completer<Directory>();

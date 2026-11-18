@@ -73,7 +73,8 @@ class BestieTranscriptStore {
       BestieTranscriptDraft(
         id: data['id'] as String,
         recipient: data['recipient'] as String,
-        audioPath: '${file.path}.wav',
+        // Until promotion finishes, the original recording is authoritative.
+        audioPath: data['source'] as String? ?? '${file.path}.wav',
         text: data['text'] as String?,
         event: data['event'] == null
             ? null
@@ -110,14 +111,21 @@ class BestieTranscriptStore {
       if (await file.exists()) {
         throw StateError('A previous transcript still needs delivery.');
       }
+      final source = note.file.path;
       final data = <String, dynamic>{
         'id': const Uuid().v4(),
         'recipient': recipient,
+        'source': source,
       };
-      // Journal first: a failed audio copy remains visible and discardable.
+      // Journal first, pointing at the original: a failed or interrupted
+      // promotion stays recoverable from it, and discard removes both copies.
       await _write(file, data);
-      await File(note.file.path).copy('${file.path}.wav');
-      await File(note.file.path).delete();
+      final promoted = File('${file.path}.wav.tmp');
+      await File(source).copy(promoted.path);
+      await promoted.rename('${file.path}.wav');
+      data.remove('source');
+      await _write(file, data);
+      await File(source).delete();
       return _decode(file, data);
     });
   }
@@ -140,8 +148,16 @@ class BestieTranscriptStore {
     if (id != null && await file.exists() && (await _data(file))['id'] != id) {
       return;
     }
-    final audio = File('${file.path}.wav');
-    if (await audio.exists()) await audio.delete();
+    final source = await file.exists()
+        ? (await _data(file))['source'] as String?
+        : null;
+    for (final audio in [
+      File('${file.path}.wav'),
+      File('${file.path}.wav.tmp'),
+      if (source != null) File(source),
+    ]) {
+      if (await audio.exists()) await audio.delete();
+    }
     if (await file.exists()) await file.delete();
   });
 }
