@@ -1233,21 +1233,34 @@ void main() {
           .widget<TextField>(find.byType(TextField))
           .focusNode!;
       expect(focusNode.hasFocus, isTrue);
-      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
       addTearDown(tester.view.reset);
-      await tester.pump();
 
       final backdrop = find.descendant(
         of: find.byKey(const ValueKey('composer-footer-gradient')),
         matching: find.byType(MobileTabFooterBackdrop),
       );
-      expect(tester.getSize(backdrop).height, 100);
-      tester.view.viewInsets = const FakeViewPadding(bottom: 150);
-      await tester.pump();
-      expect(tester.getSize(backdrop).height, 140);
-      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
-      await tester.pump();
-      expect(tester.getSize(backdrop).height, 100);
+      // The fade gives up one point per point of keyboard inset (logical)
+      // until it reaches 100, in both directions and at any keyboard height.
+      for (final (inset, height) in [
+        (0.0, 180.0),
+        (1.0, 179.0),
+        (30.0, 150.0),
+        (150.0, 100.0),
+        (336.0, 100.0),
+        (300.0, 100.0),
+        (40.0, 140.0),
+        (300.0, 100.0),
+      ]) {
+        tester.view.viewInsets = FakeViewPadding(
+          bottom: inset * tester.view.devicePixelRatio,
+        );
+        await tester.pump();
+        expect(
+          tester.getSize(backdrop).height,
+          height,
+          reason: 'keyboard inset $inset',
+        );
+      }
 
       // iOS drops the inset while Control Center or the app switcher covers
       // the app, reports `resumed` with it still at zero, and restores the
