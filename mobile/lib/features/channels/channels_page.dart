@@ -91,7 +91,6 @@ import 'channel_stars/channel_stars_provider.dart';
 import 'channels_provider.dart';
 import '../../shared/read_state/deferred_read_state_update.dart';
 import '../../shared/read_state/read_state_provider.dart';
-import '../activity/inbox_local_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
 
 part 'channels_page/body.dart';

@@ -1,5 +1,15 @@
 part of 'read_state_manager.dart';
 
+/// The failure shown for a follow or unfollow refused before
+/// [ReadStateFollows.threadFollowsReady].
+const threadFollowsNotReadyMessage =
+    'Follow choices are not ready. Connect and try again.';
+
+/// The failure shown when a follow choice would overfill the account's
+/// full read-state snapshot.
+const threadFollowsFullMessage =
+    'Follow choices are full for this account. Unfollow a thread and try again.';
+
 /// Synced thread follow choices on `thread-follows:<slot>` coordinates.
 extension ReadStateFollows on ReadStateManager {
   /// The merged follow choices of every slot, by `<channel>:<root>` key.

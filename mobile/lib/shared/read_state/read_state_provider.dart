@@ -18,6 +18,14 @@ class ReadStateState {
   final int version;
   final int retentionFloor;
 
+  /// Whether the last read-state sync failed: the snapshot did not load or
+  /// an update was not published. Retries continue in the background.
+  final bool syncFailed;
+
+  /// Whether the relay refused read state for the rest of this session.
+  /// Retrying cannot help; signing in again or restarting can.
+  final bool syncUnsupported;
+
   /// Forced-unread contexts, each mapped to the channel it belongs to so
   /// channel tiles and badges can surface message-level forces: channels
   /// with a live synced manual unread (keyed by the channel id), and this
@@ -48,6 +56,8 @@ class ReadStateState {
     this.threadFollowsIncomplete = true,
     this.syncError,
     this.failedClears = const {},
+    this.syncFailed = false,
+    this.syncUnsupported = false,
   });
 
   const ReadStateState.inert()
@@ -56,6 +66,8 @@ class ReadStateState {
       contexts = const {},
       version = 0,
       retentionFloor = 0,
+      syncFailed = false,
+      syncUnsupported = false,
       forcedUnreadContexts = const {},
       threadFollows = const {},
       threadFollowsIncomplete = true,
@@ -97,6 +109,8 @@ class ReadStateState {
       threadFollowsIncomplete: threadFollowsIncomplete,
       syncError: syncError,
       failedClears: failedClears,
+      syncFailed: syncFailed,
+      syncUnsupported: syncUnsupported,
     );
   }
 }
@@ -159,6 +173,8 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       signedEventRelay: signedRelay,
       remoteEnabled: true,
       onChanged: () => _emitManagerState(manager),
+      isConnected: () =>
+          ref.read(relaySessionProvider).status == SessionStatus.connected,
     );
     _manager = manager;
     // Expiry is semantic even on an idle screen with no incoming events.
@@ -183,6 +199,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
         unawaited(manager.flush());
       } else if (next == AppLifecycleState.resumed) {
         manager.maintainOverrideClock();
+        unawaited(manager.retrySync());
       }
     });
 
@@ -227,7 +244,11 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       );
       removed = removed || _forcedUnreadContexts.length != before;
     }
-    _manager?.markContextRead(contextId, unixTimestamp, explicit: explicit);
+    _currentManager?.markContextRead(
+      contextId,
+      unixTimestamp,
+      explicit: explicit,
+    );
     if (removed) _refreshForcedState();
     if (explicit) clearCovered(scope: contextId);
   }
@@ -271,7 +292,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
     String? threadRootId,
     bool channelCatchUp = false,
   }) {
-    final manager = _manager;
+    final manager = _currentManager;
     if (manager == null) return false;
     if (contextId == channelId) return manager.markChannelUnread(channelId);
     _forcedUnreadContexts[contextId] = (
@@ -303,13 +324,14 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       _refreshForcedState();
       return true;
     }
-    return _manager?.clearChannelOverride(contextId, reading: true) ?? true;
+    return _currentManager?.clearChannelOverride(contextId, reading: true) ??
+        true;
   }
 
   /// Record an explicit follow or unfollow; see [ReadStateManager]. Returns
   /// false when it could not be recorded.
   Future<bool> setThreadFollow(String channelId, String rootId, bool follow) =>
-      _manager?.setThreadFollow(channelId, rootId, follow) ??
+      _currentManager?.setThreadFollow(channelId, rootId, follow) ??
       Future.value(false);
 
   /// See [ReadStateFollows.threadFollowsReady].
@@ -317,7 +339,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
 
   /// See [ReadStateManager.importLegacyFollows].
   Future<Set<String>> importLegacyFollows(Map<String, bool> choices) =>
-      _manager?.importLegacyFollows(choices) ?? Future.value(const {});
+      _currentManager?.importLegacyFollows(choices) ?? Future.value(const {});
 
   /// The newest merged frontier covering a `msg:` context, without the
   /// retention floor: the floor moves with the clock, not with reading.
@@ -355,12 +377,25 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
   Future<void> flush() async => _manager?.flush();
 
   void seedContextRead(String contextId, int unixTimestamp) {
-    _manager?.seedContextRead(contextId, unixTimestamp);
+    _currentManager?.seedContextRead(contextId, unixTimestamp);
   }
 
   /// Seed the first channel-list landing once, durably across restarts.
   void seedContextsRead(Map<String, int> contexts) {
-    _manager?.seedInitialContextsRead(contexts);
+    _currentManager?.seedInitialContextsRead(contexts);
+  }
+
+  /// Retry a failed read-state sync now.
+  Future<void> retrySync() async => _currentManager?.retrySync();
+
+  /// The manager for the current identity and community. A dependency change
+  /// retires the old manager before the rebuild that creates the next one, so
+  /// an action in that gap first runs the pending rebuild instead of being
+  /// dropped.
+  ReadStateManager? get _currentManager {
+    // Reading state runs a pending rebuild.
+    if (_manager == null) state.pubkey;
+    return _manager;
   }
 
   void _emitManagerState(ReadStateManager manager) {
@@ -410,6 +445,8 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       threadFollows: Map.unmodifiable(manager.threadFollows),
       threadFollowsIncomplete: manager.threadFollowsIncomplete,
       syncError: manager.syncError,
+      syncFailed: manager.syncError != null,
+      syncUnsupported: manager.remoteUnsupported,
       failedClears: manager.failedClears,
     );
   }
