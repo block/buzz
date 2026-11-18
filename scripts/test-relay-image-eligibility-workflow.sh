@@ -105,16 +105,42 @@ for job in push-gateway-build push-gateway-personal-dev; do
   }
 done
 inputs_job=$(awk '/^  push-gateway-inputs:/{f=1} f&&/^  [a-z][a-z_-]*:$/&&!/^  push-gateway-inputs:/{exit} f' "$workflow")
-grep -Fq 'scripts/push-gateway-image-inputs-changed.sh "$published" "$GITHUB_SHA"' <<<"$inputs_job" || {
-  echo "push-gateway-inputs must compare HEAD with the published :main gateway source" >&2
+grep -Fxq "          MAIN_PUSH: \${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}" <<<"$inputs_job" &&
+  grep -Fxq '        run: echo "build=$(scripts/push-gateway-image-inputs-changed.sh "$GITHUB_SHA")" >> "$GITHUB_OUTPUT"' <<<"$inputs_job" || {
+  echo "push-gateway-inputs must decide with scripts/push-gateway-image-inputs-changed.sh on main pushes" >&2
+  exit 1
+}
+# The check trusts the source label of :main, so :main must move only after
+# the image's provenance is attested: the first publication leaves it out, and
+# a later step adds it.
+grep -Fxq '            if [ "$tag" = "ghcr.io/block/buzz-push-gateway:main" ]; then main=true; continue; fi' <<<"$gateway_merge_job" || {
+  echo "push gateway first publication must leave out :main" >&2
+  exit 1
+}
+attest_line=$(grep -nFx "      - name: Attest gateway image provenance" <<<"$gateway_merge_job" | cut -d: -f1)
+main_line=$(grep -nFx "      - name: Publish :main" <<<"$gateway_merge_job" | cut -d: -f1)
+[[ -n "$attest_line" && -n "$main_line" && "$main_line" -gt "$attest_line" ]] &&
+  grep -Fxq '        run: docker buildx imagetools create -t ghcr.io/block/buzz-push-gateway:main "ghcr.io/block/buzz-push-gateway@${GATEWAY_DIGEST}"' <<<"$gateway_merge_job" || {
+  echo "push gateway :main must move only after provenance is attested" >&2
   exit 1
 }
 
+# Run the decision script against a fixture repository, with `docker` stubbed
+# to report the :main image the registry would return.
 inputs_changed="$repo_root/scripts/push-gateway-image-inputs-changed.sh"
 fixture=$(mktemp -d)
 trap 'rm -rf "$fixture"' EXIT
+mkdir "$fixture/bin" "$fixture/repo"
+cat >"$fixture/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+[[ "$*" == "buildx imagetools inspect ghcr.io/block/buzz-push-gateway:main --format {{json .Image}}" ]] || exit 1
+[[ -n "${STUB_IMAGE_JSON:-}" ]] || exit 1
+printf '%s\n' "$STUB_IMAGE_JSON"
+STUB
+chmod +x "$fixture/bin/docker"
 (
-  cd "$fixture"
+  cd "$fixture/repo"
+  export PATH="$fixture/bin:$PATH"
   git init -q
   git config user.email ci@example.org
   git config user.name ci
@@ -124,31 +150,44 @@ trap 'rm -rf "$fixture"' EXIT
   echo 'fn main() {}' >crates/buzz-push-gateway/src/main.rs
   echo 'fn main() {}' >crates/buzz-relay/src/main.rs
   echo '[workspace]' >Cargo.toml
+  echo 'channel = "1.0.0"' >rust-toolchain.toml
   git add -A && git commit -qm base
   published=$(git rev-parse HEAD)
+  label() {
+    jq -cn --arg rev "$1" '{config: {Labels: {"org.opencontainers.image.revision": $rev}}}'
+  }
+  multi_arch() {
+    jq -cn --argjson image "$(label "$1")" '{"linux/amd64": $image, "linux/arm64": $image}'
+  }
   expect() {
-    local want=$1 got
-    got=$("$inputs_changed" "$2" HEAD)
+    local want=$1 main_push=$2 image=$3 why=$4 got
+    got=$(MAIN_PUSH=$main_push STUB_IMAGE_JSON=$image "$inputs_changed" HEAD 2>/dev/null)
     [[ "$got" == "$want" ]] || {
-      echo "push gateway inputs check: $3: want $want, got $got" >&2
+      echo "push gateway inputs check: $why: want $want, got $got" >&2
       exit 1
     }
   }
 
-  expect false "$published" "no commits since the published source"
+  expect false true "$(multi_arch "$published")" "a multi-platform :main at HEAD"
+  expect false true "$(label "$published")" "a single-platform :main at HEAD"
+  expect true false "$(multi_arch "$published")" "an event other than a main push"
+  expect true true "" "a :main lookup failure"
   echo '// relay only' >>crates/buzz-relay/src/main.rs
   git commit -qam relay
-  expect false "$published" "a relay-only change"
+  expect false true "$(multi_arch "$published")" "a relay-only change"
+  echo 'channel = "1.0.1"' >rust-toolchain.toml
+  git commit -qam toolchain
+  expect true true "$(multi_arch "$published")" "a toolchain-only change"
+  git reset -q --hard HEAD~1
   echo '// gateway' >>crates/buzz-push-gateway/src/main.rs
   git commit -qam gateway
   echo '// relay again' >>crates/buzz-relay/src/main.rs
   git commit -qam relay-again
-  expect true "$published" "a gateway change behind a later relay-only commit"
-  expect true "" "an unknown published source"
-  expect true 0000000000000000000000000000000000000000 "a published source missing from history"
+  expect true true "$(multi_arch "$published")" "a gateway change behind a later relay-only commit"
+  expect true true "$(multi_arch 0000000000000000000000000000000000000000)" "a source missing from history"
   git checkout -q --orphan unrelated "$published"
   git commit -qm unrelated
-  expect true "$published" "a published source that is not an ancestor"
+  expect true true "$(multi_arch "$published")" "a source that is not an ancestor"
 )
 
 select_run() {

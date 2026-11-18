@@ -538,7 +538,6 @@ jobs:
       build: ${{ steps.check.outputs.build }}
     steps:
       - name: Checkout
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
           fetch-depth: 0
@@ -547,19 +546,7 @@ jobs:
         id: check
         env:
           MAIN_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        run: |
-          set -euo pipefail
-          if [[ "$MAIN_PUSH" != "true" ]]; then
-            echo "build=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          published=$(docker buildx imagetools inspect ghcr.io/block/buzz-push-gateway:main \
-            --format '{{json .Image}}' 2>/dev/null |
-            jq -r '(if has("config") then . else .["linux/amd64"] end)
-              | .config.Labels["org.opencontainers.image.revision"] // empty' || true)
-          build=$(scripts/push-gateway-image-inputs-changed.sh "$published" "$GITHUB_SHA")
-          echo "Published :main source: ${published:-unknown}; build: $build"
-          echo "build=$build" >> "$GITHUB_OUTPUT"
+        run: echo "build=$(scripts/push-gateway-image-inputs-changed.sh "$GITHUB_SHA")" >> "$GITHUB_OUTPUT"
 
   push-gateway-build:
     name: Build public push gateway (${{ matrix.platform }})
@@ -719,12 +706,18 @@ jobs:
         working-directory: /tmp/gateway-digests
         env:
           META_TAGS: ${{ steps.meta.outputs.tags }}
+        # :main is held back until provenance is attested; see "Publish :main".
         run: |
           set -euo pipefail
-          tags=(); while IFS= read -r tag; do [ -n "$tag" ] && tags+=("-t" "$tag"); done <<< "$META_TAGS"
+          tags=(); first_tag=""; main=false
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            if [ "$tag" = "ghcr.io/block/buzz-push-gateway:main" ]; then main=true; continue; fi
+            tags+=("-t" "$tag"); first_tag=${first_tag:-$tag}
+          done <<< "$META_TAGS"
+          echo "main=${main}" >> "$GITHUB_OUTPUT"
           digests=(); for digest in *; do digests+=("ghcr.io/block/buzz-push-gateway@sha256:${digest}"); done
           docker buildx imagetools create "${tags[@]}" "${digests[@]}"
-          first_tag=$(echo "$META_TAGS" | head -n1)
           digest=$(docker buildx imagetools inspect "$first_tag" --format '{{json .Manifest}}' | jq -r '.digest')
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
       - name: Attest gateway image provenance
@@ -733,6 +726,13 @@ jobs:
           subject-name: ghcr.io/block/buzz-push-gateway
           subject-digest: ${{ steps.manifest.outputs.digest }}
           push-to-registry: true
+      # Main pushes compare with the source of :main to decide whether to build
+      # (push-gateway-inputs), so :main moves only once the image is attested.
+      - name: Publish :main
+        if: steps.manifest.outputs.main == 'true'
+        env:
+          GATEWAY_DIGEST: ${{ steps.manifest.outputs.digest }}
+        run: docker buildx imagetools create -t ghcr.io/block/buzz-push-gateway:main "ghcr.io/block/buzz-push-gateway@${GATEWAY_DIGEST}"
       - name: Gateway publication summary
         env:
           GATEWAY_DIGEST: ${{ steps.manifest.outputs.digest }}
