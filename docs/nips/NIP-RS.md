@@ -539,6 +539,10 @@ are unchanged.
   the thread's device-local override and those of its replies.
   A catch-up of a partial or nested thread view clears only the device-local
   overrides of messages it displayed, never the thread's override.
+  An installation MAY keep a thread's device-local override through a
+  catch-up of that thread during the full view of the thread in which the
+  user set it; clause (a) under Device-local overrides and an explicit
+  mark-read still remove it.
 - **Concurrency limitation (accepted).** An installation clears only
   channel overrides it had merged when the event occurred. A frontier
   advance on another installation that has not yet merged a mark-unread,
