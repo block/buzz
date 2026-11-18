@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		BZZ0000000000000000002D /* BuzzControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = BZZ00000000000000000031 /* BuzzControls.swift */; };
+		BZZ0000000000000000002E /* BuzzControlIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = BZZ00000000000000000032 /* BuzzControlIntents.swift */; };
+		BZZ0000000000000000002F /* BuzzControlIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = BZZ00000000000000000032 /* BuzzControlIntents.swift */; };
+		BZZ00000000000000000030 /* BuzzControls.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = BZZ00000000000000000034 /* BuzzControls.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		ACAF00000000000000000001 /* ToastLayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACAF00000000000000000002 /* ToastLayer.swift */; };
 		BC0010000000000000000003 /* BrowserAuthBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC0010000000000000000004 /* BrowserAuthBridgeTests.swift */; };
 		BC0010000000000000000001 /* BuzzBrowserAuthBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC0010000000000000000002 /* BuzzBrowserAuthBridge.swift */; };
@@ -95,6 +99,7 @@
 			dstSubfolderSpec = 13;
 			files = (
 				BZZ00000000000000000002 /* NotificationService.appex in Embed App Extensions */,
+				BZZ00000000000000000030 /* BuzzControls.appex in Embed App Extensions */,
 			);
 			name = "Embed App Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -112,6 +117,10 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		BZZ00000000000000000031 /* BuzzControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuzzControls.swift; sourceTree = "<group>"; };
+		BZZ00000000000000000032 /* BuzzControlIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuzzControlIntents.swift; sourceTree = "<group>"; };
+		BZZ00000000000000000033 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		BZZ00000000000000000034 /* BuzzControls.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = BuzzControls.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		ACAF00000000000000000002 /* ToastLayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToastLayer.swift; sourceTree = "<group>"; };
 		BC0010000000000000000004 /* BrowserAuthBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserAuthBridgeTests.swift; sourceTree = "<group>"; };
 		BC0010000000000000000002 /* BuzzBrowserAuthBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuzzBrowserAuthBridge.swift; sourceTree = "<group>"; };
@@ -198,6 +207,13 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		BZZ00000000000000000039 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		BZZ0000000000000000000C /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -227,6 +243,16 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		BZZ00000000000000000035 /* BuzzControls */ = {
+			isa = PBXGroup;
+			children = (
+				BZZ00000000000000000031 /* BuzzControls.swift */,
+				BZZ00000000000000000032 /* BuzzControlIntents.swift */,
+				BZZ00000000000000000033 /* Info.plist */,
+			);
+			path = BuzzControls;
+			sourceTree = "<group>";
+		};
 		331C8082294A63A400263BE5 /* RunnerTests */ = {
 			isa = PBXGroup;
 			children = (
@@ -280,6 +306,7 @@
 			isa = PBXGroup;
 			children = (
 				BZZ0000000000000000000B /* NotificationService */,
+				BZZ00000000000000000035 /* BuzzControls */,
 				9740EEB11CF90186004384FC /* Flutter */,
 				97C146F01CF9000F007C117D /* Runner */,
 				97C146EF1CF9000F007C117D /* Products */,
@@ -295,6 +322,7 @@
 				97C146EE1CF9000F007C117D /* Runner.app */,
 				331C8081294A63A400263BE5 /* RunnerTests.xctest */,
 				BZZ00000000000000000009 /* NotificationService.appex */,
+				BZZ00000000000000000034 /* BuzzControls.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -384,6 +412,23 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		BZZ00000000000000000036 /* BuzzControls */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BZZ00000000000000000037 /* Build configuration list for PBXNativeTarget "BuzzControls" */;
+			buildPhases = (
+				BZZ00000000000000000038 /* Sources */,
+				BZZ00000000000000000039 /* Frameworks */,
+				BZZ0000000000000000003A /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = BuzzControls;
+			productName = BuzzControls;
+			productReference = BZZ00000000000000000034 /* BuzzControls.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 		331C8080294A63A400263BE5 /* RunnerTests */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 331C8087294A63A400263BE5 /* Build configuration list for PBXNativeTarget "RunnerTests" */;
@@ -461,6 +506,9 @@
 				LastUpgradeCheck = 1510;
 				ORGANIZATIONNAME = "";
 				TargetAttributes = {
+					BZZ00000000000000000036 = {
+						CreatedOnToolsVersion = 27.0;
+					};
 					BZZ0000000000000000000E = {
 						CreatedOnToolsVersion = 15.0;
 					};
@@ -494,11 +542,19 @@
 				97C146ED1CF9000F007C117D /* Runner */,
 				331C8080294A63A400263BE5 /* RunnerTests */,
 				BZZ0000000000000000000E /* NotificationService */,
+				BZZ00000000000000000036 /* BuzzControls */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		BZZ0000000000000000003A /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		BZZ00000000000000000010 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -641,6 +697,15 @@
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		BZZ00000000000000000038 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BZZ0000000000000000002D /* BuzzControls.swift in Sources */,
+				BZZ0000000000000000002E /* BuzzControlIntents.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		BZZ0000000000000000000D /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -666,6 +731,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				BZZ0000000000000000002F /* BuzzControlIntents.swift in Sources */,
 				AB1200002F40400100A17E01 /* NativeMessagePresentationCoordinator.swift in Sources */,
 				AB1200022F40400100A17E01 /* NativeReactionDetails.swift in Sources */,
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
@@ -771,6 +837,81 @@
 /* End PBXVariantGroup section */
 
 /* Begin XCBuildConfiguration section */
+		BZZ0000000000000000003B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 9740EEB21CF90195004384FC /* Debug.xcconfig */;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
+				DEVELOPMENT_TEAM = "$(BUZZ_DEVELOPMENT_TEAM)";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = BuzzControls/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
+				OTHER_LDFLAGS = "";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).BuzzControls";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) BUZZ_CONTROLS_EXTENSION";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		BZZ0000000000000000003C /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 7AFA3C8E1D35360C0083082E /* Release.xcconfig */;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
+				DEVELOPMENT_TEAM = "$(BUZZ_DEVELOPMENT_TEAM)";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = BuzzControls/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
+				OTHER_LDFLAGS = "";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).BuzzControls";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) BUZZ_CONTROLS_EXTENSION";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		BZZ0000000000000000003D /* Profile */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 7AFA3C8E1D35360C0083082E /* Release.xcconfig */;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
+				DEVELOPMENT_TEAM = "$(BUZZ_DEVELOPMENT_TEAM)";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = BuzzControls/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
+				OTHER_LDFLAGS = "";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).BuzzControls";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) BUZZ_CONTROLS_EXTENSION";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Profile;
+		};
 		249021D3217E4FDB00AE95B9 /* Profile */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -1146,6 +1287,16 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		BZZ00000000000000000037 /* Build configuration list for PBXNativeTarget "BuzzControls" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BZZ0000000000000000003B /* Debug */,
+				BZZ0000000000000000003C /* Release */,
+				BZZ0000000000000000003D /* Profile */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		BZZ0000000000000000000F /* Build configuration list for PBXNativeTarget "NotificationService" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
