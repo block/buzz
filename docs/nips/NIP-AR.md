@@ -64,7 +64,9 @@ On creation or when changed from the previous accepted revision, `root` MUST ide
 
 ## Channel access
 
-Channel read permission governs every artifact read, including lookups, history, search, previews, counts, and live updates. Threads inherit their channel's audience. Membership and visibility changes take effect on subsequent reads and deliveries.
+This section applies to channel artifacts. Community artifacts follow [Admission and authorization](#admission-and-authorization) instead.
+
+Channel read permission governs every channel artifact read, including lookups, history, search, previews, counts, and live updates. Threads inherit their channel's audience. Membership and visibility changes take effect on subsequent reads and deliveries.
 
 Write permission means permission to post a kind-9 message in the channel, including authentication, token restrictions, moderation, and archive checks. Relays apply these checks the same way, and at the same point, as for a kind-9 message. This includes agents and, where channel policy permits, nonmembers of open channels. Artifact writes use `messages:write`, the scope that admits kind-9 posting.
 
@@ -132,7 +134,7 @@ sequenceDiagram
 ["REQ", "s1", {"artifact": "current", "#h": ["<channel>"], "#type": ["buzz.task"]}]
 ```
 
-The filter MUST include `#h` with 1 or more channels. It accepts the same `#name` predicates and limits as a NIP-AR current-state query, with the same AND/OR rules, and also `kinds: [45010]`. It accepts no `limit` or `offset`. A relay rejects a filter without `#h`, or with an unknown key, with `CLOSED`.
+A channel sync filter MUST include `#h` with 1 or more channels. It accepts the same `#name` predicates and limits as a NIP-AR current-state query, with the same AND/OR rules, and also `kinds: [45010]`. It accepts no `limit` or `offset`. A relay rejects a channel sync filter without `#h`, or any filter with an unknown key, with `CLOSED`. A community sync adds the `scope` key and forbids `#h` instead; see [Reading and syncing](#reading-and-syncing).
 
 **Scope.** The sync's scope is the set of artifacts that a NIP-AR current-state query with the same filter returns to this reader at that time. The rules below use this one definition for access, matching and system channels.
 
@@ -264,7 +266,7 @@ The inputs are UTF-8. The UUID is lowercase and hyphenated. The type's client co
 
 | Operation | Required permission |
 | --- | --- |
-| Read, count, policy lookup, history, head, or sync | Current effective community admission and `messages:read`. |
+| Read, policy lookup, history, head, or sync | Current effective community admission and `messages:read`. |
 | Create, update, delete, or restore | Current effective community admission, `messages:write` and the current write policy for the type. A community timeout blocks the write. |
 | Set a type's write policy | A direct community owner or admin acting under `admin:users`. Apply the relay's administrative ban and timeout rules. |
 
@@ -274,21 +276,21 @@ Apply the same authenticated transport, event signer, expiry, size, quota and mo
 
 The policy is tenant-scoped and keyed by the exact canonical artifact `type`. Missing means `everyone` with no prior policy revision. `admins` admits only an author who personally holds the community owner or admin role. The default on a rosterless open community is still `everyone`. Setting policy requires a configured community owner or admin.
 
-Use the signed relay-admin command `SET_ARTIFACT_TYPE_POLICY` (proposed kind 9034, pending allocation). Require `community`, `type`, `policy` (`everyone` or `admins`), and `prev` (the current policy command ID or `0` for no prior command). Omit `h` and use empty content. Apply the relay-admin freshness and signer checks. Return a conflict for stale `prev`; an exact retry of the current accepted command is a no-op if the requester is still authorized. A superseded policy command may conflict on retry. Read current policy before retrying a conflicted command. The relay records the accepted admin action in its audit trail. The command is neither a kind 45010 revision nor an event in an ordinary subscription. A client with artifact-signing access alone cannot sign this command through that capability.
+Use the signed relay-admin command `SET_ARTIFACT_TYPE_POLICY` (proposed kind 9034, pending allocation). Require `community`, `type`, `policy` (`everyone` or `admins`), and `prev` (the current policy command ID or `0` for no prior command). Omit `h` and use empty content. The signed `community` MUST equal the tenant resolved by the request. After verifying the signature, refuse a command signed for another community before consulting any accepted-command record, including on retry, so an admin of several communities cannot apply it to the wrong one. Apply the relay-admin freshness and signer checks. Return a conflict for stale `prev`; an exact retry of the current accepted command is a no-op if the requester is still authorized. A superseded policy command may conflict on retry. Read current policy before retrying a conflicted command. The relay records the accepted admin action in its audit trail. The command is neither a kind 45010 revision nor an event in an ordinary subscription. A client with artifact-signing access alone cannot sign this command through that capability.
 
-A signed HTTP `/query` policy lookup takes one exact type. For example, `{"artifact":"policy","scope":"community","#type":["example.settings"]}`. It returns `{"policy":"everyone","revision":null}` for an unset type, or the current policy and accepted command ID. The relay advertises and enforces a bound on stored policy entries. Switching a configured type back to `everyone` retains its revision.
+A signed HTTP `/query` policy lookup takes one exact type. For example, `{"artifact":"policy","scope":"community","#type":["example.settings"]}`. It returns `{"policy":"everyone","revision":null}` for an unset type, or the current policy and accepted command ID. The relay advertises and enforces a bound on stored policy entries. At the bound, it rejects a command for a type with no entry, whatever its `policy`, and still accepts changes to existing entries. Switching a configured type back to `everyone` retains its revision, and the entry still counts toward the bound.
 
 A committed policy change governs new revisions, including updates, deletes and restores of existing records. It neither rewrites records nor changes their audience. A write and a policy change MUST be serialized so their admission and commit order agree. Take the same policy lock before the artifact's identity lock, including if the type has never had a policy. Recheck the write policy in the transaction. An older pending write that still qualifies must still satisfy the head compare-and-set. An exact previously accepted artifact replay by the same signer, with current community read admission and an unrestricted `messages:write` credential, returns only acknowledgement. It does not re-evaluate the edit policy, timeout or freshness, and it does not write or publish again. A ban still refuses the replay. Check current community admission and the signed community before consulting receipts.
 
 ### Reading and syncing
 
-Select the community scope explicitly on signed HTTP views `current`, `head` and `history`. For example:
+Select the community scope explicitly with `"scope":"community"` on the signed HTTP views `current`, `head` and `history`. For WebSocket sync, use:
 
 ```json
 ["REQ", "s1", {"artifact":"current","scope":"community","#type":["example.settings"]}]
 ```
 
-This sync selects one exact type and can use the existing exact tag predicates. `#h` is forbidden, and `head` still requires `#d`. Apply admission and scope before any filtering, counting or paging. A legacy filter still sees only channel artifacts. Generic event reads, search, counts, direct ID fetches and ordinary live fan-out MUST exclude community artifact payloads. Route authorized reads through the explicit artifact views. HTTP incremental tokens and deltas remain channel-only in this version. Reject attempts to apply them to community scope.
+This sync selects one exact type and can use the existing exact tag predicates. `#h` is forbidden, and `head` still requires `#d`. Apply admission and scope before any filtering or paging. Reject community-scoped count requests in this version with an explicit error, never a zero or empty count. A legacy filter still sees only channel artifacts. Generic event reads, search, counts, direct ID fetches and ordinary live fan-out MUST exclude community artifact payloads. Route authorized reads through the explicit artifact views. HTTP incremental tokens and deltas remain channel-only in this version. Reject attempts to apply them to community scope.
 
 Use the same snapshot, buffer bounds, `EOSE` and head sequencing as channel sync. Confirm live interest in the authenticated tenant before opening the snapshot. Only pass change signals to sync, and re-read authorized heads before delivery. A tag or deletion transition follows the existing before-and-after match rule. There is no kind 45011 move removal for community scope. Recheck current access outside the old snapshot before sending pages, `EOSE` and live heads. An authorization change invalidating the sync MUST close it with `CLOSED "resync: ..."` or disconnect the session if that is how the relay revokes access. This includes changes in direct or delegated membership, community admission mode, bans, and credential revocation. End the sync on a failed recheck. A failed or revoked initial read cannot send `EOSE`. After loss of access, the client discards the active set for that community; after re-admission it starts with a fresh complete snapshot. Follow existing sync rules for loss of pub/sub, output and redaction signals. Changing an edit policy alone changes no content or read access.
 
