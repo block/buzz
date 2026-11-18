@@ -10,6 +10,9 @@ use super::verified_profiles::{
 };
 use std::collections::HashMap;
 
+/// Longest query `POST /profiles/search` accepts, in characters.
+const PROFILE_SEARCH_MAX_CHARS: usize = 100;
+
 // TODO(phase-4): Replace raw nostr::EventBuilder usage in cmd_set_presence with buzz-sdk builder
 
 /// Get user profiles (kind:0 metadata events).
@@ -97,14 +100,34 @@ async fn get_profiles(
             Some(profile)
         })
         .collect();
-    let verified = match discover_authority(client).await? {
-        Some(authority) => {
-            let requested: Vec<String> = authors.iter().map(|a| a.to_string()).collect();
-            fetch_verified_profiles(client, &authority, &requested).await?
+    let requested: Vec<String> = authors.iter().map(|a| a.to_string()).collect();
+    let verified = match verified_for(client, &requested).await {
+        Ok(verified) => verified,
+        Err(e) => {
+            // The kind:0 output stands on its own; flag the missing check on
+            // stderr so it is never read as "not verified".
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "warning": "verified_profiles_unavailable",
+                    "message": e.to_string(),
+                })
+            );
+            HashMap::new()
         }
-        None => HashMap::new(),
     };
     Ok(with_verified(profiles, &verified))
+}
+
+/// Verified profiles for `pubkeys`; empty where the community advertises none.
+async fn verified_for(
+    client: &BuzzClient,
+    pubkeys: &[String],
+) -> Result<HashMap<String, VerifiedProfile>, CliError> {
+    match discover_authority(client).await? {
+        Some(authority) => fetch_verified_profiles(client, &authority, pubkeys).await,
+        None => Ok(HashMap::new()),
+    }
 }
 
 /// Attach each profile's `verified` object where a relay-signed one exists.
@@ -409,9 +432,9 @@ fn owner_scoped_profiles(
 
 /// Unscoped name search. Where the community advertises verified profiles,
 /// `POST /profiles/search` matches profile names and verified names (word
-/// prefixes), so a person is found by their verified username too. Otherwise
-/// NIP-50 search over kind:0, filtered to name substring matches; returns []
-/// if unsupported.
+/// prefixes), so a person is found by their verified username too. Otherwise,
+/// or for a query longer than that endpoint accepts, NIP-50 search over
+/// kind:0, filtered to name substring matches; returns [] if unsupported.
 async fn search_profiles(
     client: &BuzzClient,
     query: &str,
@@ -420,7 +443,12 @@ async fn search_profiles(
         serde_json::from_str(&raw)
             .map_err(|e| CliError::Other(format!("failed to parse response: {e}")))
     };
-    if let Some(authority) = discover_authority(client).await? {
+    let authority = if query.trim().chars().count() <= PROFILE_SEARCH_MAX_CHARS {
+        discover_authority(client).await?
+    } else {
+        None
+    };
+    if let Some(authority) = authority {
         let body = serde_json::json!({"query": query.trim(), "limit": 100});
         let raw = client.post_json_authed("/profiles/search", &body).await?;
         return Ok(search_page_profiles(&parse(raw)?, &authority));
@@ -1470,6 +1498,37 @@ mod tests {
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0]["pubkey"], alice.public_key().to_hex());
         assert!(found[0].get("verified").is_none());
+        assert!(relay.lock().unwrap().profile_searches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_by_pubkey_keeps_profiles_when_the_verified_check_fails() {
+        let (client, relay) = setup().await;
+        relay.lock().unwrap().info = json!({"federated_identity": "malformed"});
+        let alice = Keys::generate();
+        seed_profile(&relay, &alice, r#"{"name":"al"}"#);
+
+        let profiles = get_profiles(&client, &[alice.public_key().to_hex()])
+            .await
+            .unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0]["name"], "al");
+        assert!(profiles[0].get("verified").is_none());
+    }
+
+    #[tokio::test]
+    async fn name_search_longer_than_profile_search_accepts_uses_nip50() {
+        let (client, relay) = setup().await;
+        relay.lock().unwrap().info = advertising(&Keys::generate());
+        let long = "a".repeat(101);
+        seed_profile(
+            &relay,
+            &Keys::generate(),
+            &json!({"name": long}).to_string(),
+        );
+
+        let found = search_profiles(&client, &long).await.unwrap();
+        assert_eq!(found.len(), 1, "{found:?}");
         assert!(relay.lock().unwrap().profile_searches.is_empty());
     }
 
