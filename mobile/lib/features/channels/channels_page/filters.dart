@@ -216,8 +216,9 @@ class _SectionViewSheet extends HookConsumerWidget {
                                 }
                               : null,
                         ),
-                        if (mode.value == ChannelFilterMode.active)
-                          choices<int>(
+                        CollapsibleSectionBody(
+                          expanded: mode.value == ChannelFilterMode.active,
+                          child: choices<int>(
                             'Active in the past',
                             {
                               for (final day in {1, 7, 30, 90, days.value})
@@ -231,6 +232,7 @@ class _SectionViewSheet extends HookConsumerWidget {
                                   }
                                 : null,
                           ),
+                        ),
                         if (manager?.ready != true)
                           const Text(
                             'Filters are read-only until preferences load from the community.',

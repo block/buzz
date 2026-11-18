@@ -270,6 +270,10 @@ void main() {
   testWidgets(
     'section view stages choices until Apply and reopens saved duration',
     (tester) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(402, 874);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetPhysicalSize);
       var publications = 0;
       final keys = nostr.Keys.generate();
       final crypto = ChannelSortCrypto(keys.nsec, keys.public);
@@ -327,8 +331,20 @@ void main() {
       expect(manager.store.modeFor('channels'), ChannelFilterMode.unreads);
       await tester.tap(find.byTooltip('Channels options'));
       await tester.pumpAndSettle();
+      final header = find.byType(BuzzSheetHeader);
+      final apply = find.widgetWithText(FilledButton, 'Apply');
+      final collapsedTop = tester.getTopLeft(header).dy;
+      final footerBottom = tester.getBottomRight(apply).dy;
       await tester.tap(find.text('Active'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 80));
+      final expandingTop = tester.getTopLeft(header).dy;
+      expect(expandingTop, lessThan(collapsedTop));
+      expect(tester.getBottomRight(apply).dy, closeTo(footerBottom, 0.1));
       await tester.pumpAndSettle();
+      final expandedTop = tester.getTopLeft(header).dy;
+      expect(expandedTop, lessThan(expandingTop));
+      expect(tester.getBottomRight(apply).dy, closeTo(footerBottom, 0.1));
       await tester.ensureVisible(find.text('7 days'));
       await tester.tap(find.text('7 days'));
       await tester.pumpAndSettle();
@@ -347,6 +363,14 @@ void main() {
       );
       expect(days.trailing, isA<Icon>());
       await tester.tap(find.text('All'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 80));
+      final collapsingTop = tester.getTopLeft(header).dy;
+      expect(collapsingTop, greaterThan(expandedTop));
+      expect(collapsingTop, lessThan(collapsedTop));
+      await tester.pumpAndSettle();
+      expect(tester.getTopLeft(header).dy, closeTo(collapsedTop, 0.1));
+      expect(find.text('Active in the past'), findsNothing);
       await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
       expect(manager.store.modeFor('channels'), ChannelFilterMode.active);
