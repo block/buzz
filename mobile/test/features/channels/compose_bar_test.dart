@@ -2947,15 +2947,26 @@ void main() {
       });
 
       testWidgets('Shift+Tab does not accept a mention', (tester) async {
-        final controller = await pumpComposer(tester);
+        final focus = FocusNode();
+        addTearDown(focus.dispose);
+        final controller = await pumpComposer(tester, focusNode: focus);
         await tester.enterText(find.byType(TextField), 'hi @a');
         await tester.pump();
+        expect(popover(), findsOneWidget);
 
         await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
         await tester.sendKeyEvent(LogicalKeyboardKey.tab);
         await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
-        await tester.pump();
+        await tester.pumpAndSettle();
 
+        // Shift+Tab traverses focus away from the field, so the chooser
+        // follows it; the query stays live and the chooser returns with it.
+        expect(controller.text, 'hi @a');
+        expect(focus.hasFocus, isFalse);
+        expect(popover(), findsNothing);
+        await tester.tap(find.text('hi @a'));
+        await tester.pumpAndSettle();
+        expect(focus.hasFocus, isTrue);
         expect(controller.text, 'hi @a');
         expect(popover(), findsOneWidget);
         await tester.pump(mentionSearchDebounce * 2);

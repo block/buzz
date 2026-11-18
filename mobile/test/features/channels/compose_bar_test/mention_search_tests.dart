@@ -4,6 +4,7 @@ part of '../compose_bar_test.dart';
 /// name someone (buzz-app `src/bundled/mentions/README.md`, sections 2 and
 /// 6; project recommendation 5). Prose typed after a picked chip, and a
 /// query a finished search has already refuted, never leave the device.
+/// The chooser itself follows the field's focus (recommendation 8).
 void mentionSearchTests() {
   final bob = 'b' * 64;
   final alice = 'a' * 64;
@@ -185,4 +186,89 @@ void mentionSearchTests() {
       expect(searched, ['z']);
     },
   );
+
+  testWidgets('the chooser follows the field\'s focus and keeps its rows', (
+    tester,
+  ) async {
+    final searched = <String>[];
+    final focusNode = FocusNode();
+    addTearDown(focusNode.dispose);
+    String? sentText;
+    List<String>? sent;
+    await tester.pumpWidget(
+      _buildComposeBar(
+        uploadService: _testUploadService(nostr.Keys.generate().nsec),
+        currentPubkey: nostr.Keys.generate().public,
+        members: members,
+        channels: [_makeCurrentChannel()],
+        focusNode: focusNode,
+        searchPeople: (query) async {
+          searched.add(query);
+          return fold(bobby.displayName!).startsWith(fold(query))
+              ? [bobby]
+              : const [];
+        },
+        onSend: (text, keys, {mediaTags = const <List<String>>[]}) async {
+          sentText = text;
+          sent = keys;
+        },
+      ),
+    );
+    await _expandComposer(tester);
+    final controller = tester.widget<TextField>(field).controller!;
+    final channelChooser = find.byKey(const ValueKey('channel-suggestions'));
+    void expectBobThenBobby() {
+      expect(row('Bob'), findsOneWidget);
+      expect(row('Bobby'), findsOneWidget);
+      expect(
+        tester.getTopLeft(row('Bob')).dy,
+        lessThan(tester.getTopLeft(row('Bobby')).dy),
+      );
+    }
+
+    // `@bo` lists the member Bob above the directory's Bobby.
+    await tester.enterText(field, 'hi @bo');
+    await pause(tester);
+    expect(searched, ['bo']);
+    expectBobThenBobby();
+
+    // The keyboard dismissed, or a tap elsewhere, takes the field's focus:
+    // the chooser closes while the draft and its live query stay.
+    focusNode.unfocus();
+    await tester.pumpAndSettle();
+    expect(popover, findsNothing);
+    expect(controller.text, 'hi @bo');
+    expect(controller.selection.baseOffset, 6);
+
+    // Focus returning shows the same rows again without a new search.
+    await tester.tap(find.text('hi @bo'));
+    await tester.pumpAndSettle();
+    expect(focusNode.hasFocus, isTrue);
+    expectBobThenBobby();
+    expect(searched, ['bo']);
+
+    // A tap on a row is not a tap away: it inserts the pick and keeps focus.
+    await tester.tap(row('Bob'));
+    await tester.pumpAndSettle();
+    expect(controller.text, 'hi @Bob ');
+    expect(focusNode.hasFocus, isTrue);
+    expect(popover, findsNothing);
+    await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+    await tester.pumpAndSettle();
+    expect(sentText, 'hi @Bob');
+    expect(sent, [bob]);
+
+    // The channel chooser follows focus the same way.
+    await _expandComposer(tester);
+    await tester.enterText(field, '#cur');
+    await tester.pumpAndSettle();
+    expect(channelChooser, findsOneWidget);
+    focusNode.unfocus();
+    await tester.pumpAndSettle();
+    expect(channelChooser, findsNothing);
+    await tester.tap(find.text('#cur'));
+    await tester.pumpAndSettle();
+    expect(channelChooser, findsOneWidget);
+    expect(controller.text, '#cur');
+  });
 }

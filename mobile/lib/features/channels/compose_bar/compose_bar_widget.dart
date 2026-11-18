@@ -187,64 +187,18 @@ class ComposeBar extends HookConsumerWidget {
     final resolvedHint =
         hintText ??
         (channelName.isNotEmpty ? 'Message #$channelName' : 'Message\u2026');
-    useEffect(
-      () {
-        final target =
-            isComposerExpanded.value && androidImeTransitionStarted.value
-            ? 1.0
-            : 0.0;
-        if (reducedMotion) {
-          composerExpansionController.value = target;
-        } else if ((composerExpansionController.value - target).abs() > 0.001) {
-          composerExpansionController.animateWith(
-            SpringSimulation(
-              SpringDescription.withDurationAndBounce(
-                duration: const Duration(milliseconds: 220),
-                bounce: 0.08,
-              ),
-              composerExpansionController.value,
-              target,
-              0,
-              snapToEnd: true,
-            ),
-          );
-        }
-        return null;
-      },
-      [
-        isComposerExpanded.value,
-        androidImeTransitionStarted.value,
-        reducedMotion,
-      ],
+    _useComposerExpansionMotion(
+      controller: composerExpansionController,
+      isExpanded: isComposerExpanded,
+      androidImeTransitionStarted: androidImeTransitionStarted,
+      reducedMotion: reducedMotion,
     );
-    useEffect(() {
-      if (defaultTargetPlatform != TargetPlatform.iOS) return null;
-
-      var disposed = false;
-      Future<void> refreshClipboardAvailability() async {
-        final hasImage = await ref
-            .read(mediaUploadServiceProvider)
-            .clipboardHasImage();
-        if (!disposed && context.mounted) {
-          clipboardHasImage.value = hasImage;
-        }
-      }
-
-      void refreshWhenFocused() {
-        if (focusNode.hasFocus) refreshClipboardAvailability();
-      }
-
-      final lifecycleListener = AppLifecycleListener(
-        onResume: refreshClipboardAvailability,
-      );
-      focusNode.addListener(refreshWhenFocused);
-      refreshClipboardAvailability();
-      return () {
-        disposed = true;
-        focusNode.removeListener(refreshWhenFocused);
-        lifecycleListener.dispose();
-      };
-    }, [focusNode]);
+    _useComposerClipboardImage(
+      context: context,
+      ref: ref,
+      focusNode: focusNode,
+      clipboardHasImage: clipboardHasImage,
+    );
 
     // Mention state --------------------------------------------------------
     final mentionQuery = useState<String?>(null);
@@ -1028,9 +982,16 @@ class ComposeBar extends HookConsumerWidget {
     );
 
     final readOnly = interactionLocked || (draftMembers != null && sending);
+    // The chooser belongs to the focused field (recommendation 8). It hides
+    // while the field has no focus, after the keyboard is dismissed or a tap
+    // lands elsewhere, and comes back unchanged when focus returns: the query,
+    // its rows and its search are kept, only the panel is withheld. A tap on
+    // a row is a touch outside the field, which never takes its focus.
+    final chooserOpen = useListenable(focusNode).hasFocus;
     // Matches what _composerSuggestionPanel renders, and only while the field
     // can be edited.
     final pickerVisible =
+        chooserOpen &&
         (channelSuggestions.isNotEmpty ||
             suggestions.isNotEmpty ||
             mentionRows.searchFailed) &&
@@ -1061,10 +1022,10 @@ class ComposeBar extends HookConsumerWidget {
         );
 
     final suggestionPanel = _composerSuggestionPanel(
-      channelSuggestions: channelSuggestions,
-      mentionSuggestions: suggestions,
+      channelSuggestions: chooserOpen ? channelSuggestions : const [],
+      mentionSuggestions: chooserOpen ? suggestions : const [],
       unavailableMentions: mentionRows.unavailable,
-      mentionSearchFailed: mentionRows.searchFailed,
+      mentionSearchFailed: chooserOpen && mentionRows.searchFailed,
       reserveMentionHeight: mentionRows.reserveHeight,
       mentionSearching: mentionRows.searching,
       onMentionSearchRetry: () {

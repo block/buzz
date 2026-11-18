@@ -51,6 +51,76 @@ void _useComposerChannelNames(
   }, [controller, channelNamesKey]);
 }
 
+// Springs the composer between its capsule and expanded shapes. On Android
+// the expansion waits for the IME transition to start.
+void _useComposerExpansionMotion({
+  required AnimationController controller,
+  required ValueNotifier<bool> isExpanded,
+  required ValueNotifier<bool> androidImeTransitionStarted,
+  required bool reducedMotion,
+}) {
+  useEffect(() {
+    final target = isExpanded.value && androidImeTransitionStarted.value
+        ? 1.0
+        : 0.0;
+    if (reducedMotion) {
+      controller.value = target;
+    } else if ((controller.value - target).abs() > 0.001) {
+      controller.animateWith(
+        SpringSimulation(
+          SpringDescription.withDurationAndBounce(
+            duration: const Duration(milliseconds: 220),
+            bounce: 0.08,
+          ),
+          controller.value,
+          target,
+          0,
+          snapToEnd: true,
+        ),
+      );
+    }
+    return null;
+  }, [isExpanded.value, androidImeTransitionStarted.value, reducedMotion]);
+}
+
+// iOS only: whether the clipboard holds an image, for the paste action.
+// Re-checked when the field takes focus and when the app resumes.
+void _useComposerClipboardImage({
+  required BuildContext context,
+  required WidgetRef ref,
+  required FocusNode focusNode,
+  required ValueNotifier<bool> clipboardHasImage,
+}) {
+  useEffect(() {
+    if (defaultTargetPlatform != TargetPlatform.iOS) return null;
+
+    var disposed = false;
+    Future<void> refreshClipboardAvailability() async {
+      final hasImage = await ref
+          .read(mediaUploadServiceProvider)
+          .clipboardHasImage();
+      if (!disposed && context.mounted) {
+        clipboardHasImage.value = hasImage;
+      }
+    }
+
+    void refreshWhenFocused() {
+      if (focusNode.hasFocus) refreshClipboardAvailability();
+    }
+
+    final lifecycleListener = AppLifecycleListener(
+      onResume: refreshClipboardAvailability,
+    );
+    focusNode.addListener(refreshWhenFocused);
+    refreshClipboardAvailability();
+    return () {
+      disposed = true;
+      focusNode.removeListener(refreshWhenFocused);
+      lifecycleListener.dispose();
+    };
+  }, [focusNode]);
+}
+
 const _typingThrottleMs = 3000;
 
 /// How long a keyboard that was up before an inactive spell may take to come
