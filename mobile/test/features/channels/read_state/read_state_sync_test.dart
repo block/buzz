@@ -268,6 +268,58 @@ void main() {
     expect(desktop.activeChannelOverrides, {channel});
   });
 
+  test('a journaled unread retry superseded by a newer own head and left '
+      'out of an overfull fallback stays pending and fails visibly', () async {
+    final phone = await device('phone');
+    phone.markContextRead(channel, clock - 100);
+    await phone.flush();
+    final journalKey =
+        '${keys.public}:${Uri.encodeComponent(normalizeCommunityRelayUrl(phone.relayUrl))}';
+    relay.failNext = true;
+    expect(phone.markChannelUnread(channel), isTrue);
+    await phone.flush();
+    final journal = ReadStateStorage(prefs).readJournal(journalKey)!;
+    expect(journal['unreadPending'] as Map, hasLength(1));
+    final coordinate = '$readStateUnreadDTagPrefix${journal['unreadSlot']}';
+    phone.dispose(flushPending: false);
+    // A newer own head without the mark lands while the packet is journaled.
+    final ahead = clock + 100;
+    relay.retained[coordinate] = signedBy(
+      keys,
+      NostrEvent(
+        id: '',
+        pubkey: keys.public,
+        createdAt: ahead,
+        kind: EventKind.readState,
+        tags: [
+          ['d', coordinate],
+          ['t', readStateUnreadTag],
+        ],
+        content: crypto.encrypt(
+          jsonEncode(
+            ReadStateBlob(
+              clientId: journal['clientId'] as String,
+              contexts: const {},
+              version: 2,
+            ).toJson(),
+          ),
+        ),
+        sig: '',
+      ),
+    );
+    await overfill();
+    final restarted = await device('phone');
+    await restarted.flush();
+    await restarted.flush();
+    expect(relay.retained[coordinate]!.createdAt, ahead);
+    expect(
+      ReadStateStorage(prefs).readJournal(journalKey)!['unreadPending'] as Map,
+      hasLength(1),
+    );
+    expect(restarted.syncError, isNotNull);
+    expect(restarted.activeChannelOverrides, contains(channel));
+  });
+
   test('an unread write superseded by a newer own head is rebuilt above it, '
       'not acknowledged', () async {
     final phone = await device('phone');

@@ -105,6 +105,15 @@ extension ReadStateRetry on ReadStateManager {
       if (slot == _unreadCoordinate &&
           (head == null || !_outranks(head, event))) {
         _unreadPublished = Map.of(blob.contexts);
+      } else if (!_primaryFits()) {
+        // The overfull fallback keeps the head's groups; keep the packet
+        // and fail visibly unless that successor still carries it.
+        final plan = _planUnread();
+        for (final MapEntry(:key, :value) in blob.contexts.entries) {
+          if ((plan[key] ?? -1) < value) {
+            throw StateError(readStateFullMessage);
+          }
+        }
       }
     } else {
       _published[slot] = Map.of(blob.contexts);
