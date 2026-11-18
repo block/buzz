@@ -225,21 +225,26 @@ void _filterFeedbackTests(
       expect(find.text(reopen), findsNothing);
       relay.releaseHeld();
       await tester.pumpAndSettle();
-      expect(find.text('Apply'), findsNothing);
+      expect(find.text('Cancel'), findsNothing);
       expect(manager.store.modeFor('channels'), ChannelFilterMode.unreads);
       expect(
         container.read(channelSortProvider).sortModeFor('channels'),
         ChannelSortMode.recent,
       );
 
-      // A reconnect keeps the open sheet, and a sort-only Apply does not wait
-      // for the refresh it starts.
+      // A resume read starts on the old socket, the replacement connects
+      // while it is in flight, then the old read fails. The sheet and manager
+      // survive, a sort-only Apply goes through after a reverted filter edit,
+      // and the replacement's queued refresh restores write access.
       await tester.tap(find.byTooltip('Channels options'));
       await tester.pumpAndSettle();
+      await tester.tap(find.text('All'));
+      await tester.tap(find.text('Unreads'));
       await tester.tap(find.text('A–Z'));
+      relay.holdNextFilterRead = true;
+      unawaited(manager.refresh());
       relay.setReconnecting();
       await tester.pumpAndSettle();
-      relay.holdNextFilterRead = true;
       relay.connect();
       await tester.pumpAndSettle();
       expect(container.read(channelFilterProvider), same(manager));
@@ -248,14 +253,41 @@ void _filterFeedbackTests(
       expect(applyButton().onPressed, isNotNull);
       await tester.tap(find.text('Apply'));
       await tester.pumpAndSettle();
-      expect(find.text('Apply'), findsNothing);
+      expect(find.text('Cancel'), findsNothing);
       expect(
         container.read(channelSortProvider).sortModeFor('channels'),
         ChannelSortMode.alpha,
       );
-      relay.releaseHeld();
+      relay.releaseHeld(fail: true);
       await tester.pumpAndSettle();
       expect(manager.busy, isFalse);
+      expect(manager.ready, isTrue);
+      expect(manager.store.modeFor('channels'), ChannelFilterMode.unreads);
+
+      // A failed load leaves a staged filter edit recoverable from the sheet.
+      await tester.tap(find.byTooltip('Channels options'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('All'));
+      relay.setReconnecting();
+      await tester.pumpAndSettle();
+      relay.holdNextFilterRead = true;
+      relay.connect();
+      await tester.pumpAndSettle();
+      relay.releaseHeld(fail: true);
+      await tester.pumpAndSettle();
+      expect(manager.ready, isFalse);
+      await tester.tap(find.text('Apply'));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Retry loading preferences'));
+      await tester.tap(find.text('Retry loading preferences'));
+      await tester.pumpAndSettle();
+      expect(manager.ready, isTrue);
+      await tester.tap(find.widgetWithText(FilledButton, 'Apply'));
+      await tester.pumpAndSettle();
+      relay.releaseHeld();
+      await tester.pumpAndSettle();
+      expect(find.text('Cancel'), findsNothing);
+      expect(manager.store.modeFor('channels'), ChannelFilterMode.all);
 
       // Switching community still abandons the sheet.
       await tester.tap(find.byTooltip('Channels options'));
@@ -295,10 +327,12 @@ class _FilterJourneyRelay extends _ReconnectingRelaySession {
   var holdNextFilterRead = false;
   Completer<void>? _held;
 
-  void releaseHeld() {
+  void releaseHeld({bool fail = false}) {
     final held = _held!;
     _held = null;
-    held.complete();
+    fail
+        ? held.completeError(TimeoutException('stale socket'))
+        : held.complete();
   }
 
   @override

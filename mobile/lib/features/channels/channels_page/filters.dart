@@ -96,16 +96,18 @@ class _SectionViewSheet extends HookConsumerWidget {
       if (!saving.value) Navigator.of(context).pop(action);
     }
 
+    bool filterChanged() =>
+        filterDirty.value &&
+        (mode.value !=
+                (manager?.store.modeFor(group) ?? ChannelFilterMode.all) ||
+            (mode.value == ChannelFilterMode.active &&
+                days.value * 86400 != manager?.store.windowFor(group)));
+
     Future<void> apply() async {
       saving.value = true;
       failed.value = false;
       try {
-        final filterChanged =
-            mode.value !=
-                (manager?.store.modeFor(group) ?? ChannelFilterMode.all) ||
-            (mode.value == ChannelFilterMode.active &&
-                days.value * 86400 != manager?.store.windowFor(group));
-        if (filterDirty.value && filterChanged) {
+        if (filterChanged()) {
           if (manager == null || !manager.ready || manager.busy) {
             throw StateError('Preferences are read-only');
           }
@@ -233,13 +235,14 @@ class _SectionViewSheet extends HookConsumerWidget {
                           const Text(
                             'Filters are read-only until preferences load from the community.',
                           ),
-                        if (manager?.ready != true &&
-                            manager?.error != null &&
-                            !failed.value)
+                        if (manager?.ready != true && manager?.error != null)
                           TextButton(
                             onPressed: manager?.busy == true
                                 ? null
-                                : manager?.refresh,
+                                : () {
+                                    failed.value = false;
+                                    manager?.refresh();
+                                  },
                             child: const Text('Retry loading preferences'),
                           ),
                         if (custom) ...[
@@ -313,7 +316,7 @@ class _SectionViewSheet extends HookConsumerWidget {
                           // sort applies locally, as it did before filters.
                           onPressed:
                               saving.value ||
-                                  (filterDirty.value && manager?.busy == true)
+                                  (filterChanged() && manager?.busy == true)
                               ? null
                               : apply,
                           child: Text(
