@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 /// The one interface app code uses for diagnostic reporting.
@@ -89,7 +91,14 @@ class NoopDiagnosticReporter implements DiagnosticReporter {
     Object error,
     StackTrace? stackTrace, {
     required DiagnosticOperation operation,
-  }) {}
+  }) {
+    // A throwing subscriber is a bug in the app, and the delivery guard
+    // catches it. With no destination, surface it the way an uncaught throw
+    // would: it fails the test that hit it and prints in development.
+    if (operation == DiagnosticOperation.eventSubscriber) {
+      Zone.current.handleUncaughtError(error, stackTrace ?? StackTrace.current);
+    }
+  }
 
   @override
   void countNetworkEvent(NetworkEvent event) {}

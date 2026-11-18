@@ -1334,73 +1334,33 @@ void main() {
   test(
     'a subscriber that throws is reported and the rest of its batch still arrives',
     () async {
-      final sockets = <_ControlledRelaySocket>[];
-      final keychain = nostr.Keys.generate();
-      final auth = _ReloadingAuthNotifier()..pubkey = keychain.public;
       final reporter = _RecordingDiagnostics();
-      final session = RelaySessionNotifier(
-        socketFactory:
-            ({
-              required wsUrl,
-              required nsec,
-              required onMessage,
-              required onConnected,
-              required onDisconnected,
-            }) {
-              final socket = _ControlledRelaySocket(
-                wsUrl: wsUrl,
-                nsec: nsec,
-                onMessage: onMessage,
-                onConnected: onConnected,
-                onDisconnected: onDisconnected,
-              );
-              sockets.add(socket);
-              return socket;
-            },
-      );
-      final container = ProviderContainer(
-        overrides: [
-          relaySessionProvider.overrideWith(() => session),
-          relayConfigProvider.overrideWith(
-            () => _FakeRelayConfigNotifier(
-              baseUrl: 'https://relay.example',
-              nsec: keychain.nsec,
-            ),
-          ),
-          authProvider.overrideWith(() => auth),
-          diagnosticReporterProvider.overrideWithValue(reporter),
-        ],
-      );
-      addTearDown(container.dispose);
-      await container.read(authProvider.future);
-      final listener = container.listen(relaySessionProvider, (_, _) {});
-      addTearDown(listener.close);
-      await Future<void>.delayed(Duration.zero);
-      sockets.single.connectSuccessfully();
-
       final delivered = <String>[];
-      final subscribed = session.subscribe(_channelFilter, (event) {
-        if (event.id == 'event-1') throw StateError('handler bug');
-        delivered.add(event.id);
-      });
-      await Future<void>.delayed(Duration.zero);
-      final subId = sockets.single.sent.single[1];
-      session.debugHandleSocketMessageForTest(['EOSE', subId]);
-      await subscribed;
+      final flush = await _batchWithThrowingSubscriber(reporter, delivered);
 
-      for (final id in ['event-1', 'event-2']) {
-        session.debugHandleSocketMessageForTest([
-          'EVENT',
-          subId,
-          _event(id: id).toJson(),
-        ]);
-      }
-      session.debugFlushEventBuffer();
+      flush();
 
       expect(delivered, ['event-2']);
       expect(reporter.errors, [
         (StateError, DiagnosticOperation.eventSubscriber),
       ]);
+    },
+  );
+
+  test(
+    'with no destination, a throwing subscriber surfaces as uncaught and the batch still arrives',
+    () async {
+      final delivered = <String>[];
+      final flush = await _batchWithThrowingSubscriber(
+        const NoopDiagnosticReporter(),
+        delivered,
+      );
+      final uncaught = <Object>[];
+
+      runZonedGuarded(flush, (error, _) => uncaught.add(error));
+
+      expect(delivered, ['event-2']);
+      expect(uncaught, [isA<StateError>()]);
     },
   );
 
@@ -2361,8 +2321,16 @@ void main() {
     ]);
     await expectLater(invalid, throwsA(isA<Exception>()));
     session.debugHandleMessage(['CLOSED', 'sub-1', 'invalid: bad filter']);
+    // No pending publish, as for a typing indicator or a reply after timeout.
+    session.debugHandleMessage([
+      'OK',
+      'event-3',
+      false,
+      'invalid: bad signature',
+    ]);
 
     expect(reporter.errors, [
+      (RelayInvalidRequest, DiagnosticOperation.relayRejection),
       (RelayInvalidRequest, DiagnosticOperation.relayRejection),
       (RelayInvalidRequest, DiagnosticOperation.relayRejection),
     ]);
@@ -2655,4 +2623,72 @@ class _RecordingDiagnostics extends NoopDiagnosticReporter {
     StackTrace? stackTrace, {
     required DiagnosticOperation operation,
   }) => errors.add((error.runtimeType, operation));
+}
+
+/// Subscribes a handler that throws on `event-1` and buffers `event-1` and
+/// `event-2`. Returns the flush that delivers them.
+Future<void Function()> _batchWithThrowingSubscriber(
+  DiagnosticReporter reporter,
+  List<String> delivered,
+) async {
+  final sockets = <_ControlledRelaySocket>[];
+  final keychain = nostr.Keys.generate();
+  final auth = _ReloadingAuthNotifier()..pubkey = keychain.public;
+  final session = RelaySessionNotifier(
+    socketFactory:
+        ({
+          required wsUrl,
+          required nsec,
+          required onMessage,
+          required onConnected,
+          required onDisconnected,
+        }) {
+          final socket = _ControlledRelaySocket(
+            wsUrl: wsUrl,
+            nsec: nsec,
+            onMessage: onMessage,
+            onConnected: onConnected,
+            onDisconnected: onDisconnected,
+          );
+          sockets.add(socket);
+          return socket;
+        },
+  );
+  final container = ProviderContainer(
+    overrides: [
+      relaySessionProvider.overrideWith(() => session),
+      relayConfigProvider.overrideWith(
+        () => _FakeRelayConfigNotifier(
+          baseUrl: 'https://relay.example',
+          nsec: keychain.nsec,
+        ),
+      ),
+      authProvider.overrideWith(() => auth),
+      diagnosticReporterProvider.overrideWithValue(reporter),
+    ],
+  );
+  addTearDown(container.dispose);
+  await container.read(authProvider.future);
+  final listener = container.listen(relaySessionProvider, (_, _) {});
+  addTearDown(listener.close);
+  await Future<void>.delayed(Duration.zero);
+  sockets.single.connectSuccessfully();
+
+  final subscribed = session.subscribe(_channelFilter, (event) {
+    if (event.id == 'event-1') throw StateError('handler bug');
+    delivered.add(event.id);
+  });
+  await Future<void>.delayed(Duration.zero);
+  final subId = sockets.single.sent.single[1];
+  session.debugHandleSocketMessageForTest(['EOSE', subId]);
+  await subscribed;
+
+  for (final id in ['event-1', 'event-2']) {
+    session.debugHandleSocketMessageForTest([
+      'EVENT',
+      subId,
+      _event(id: id).toJson(),
+    ]);
+  }
+  return session.debugFlushEventBuffer;
 }

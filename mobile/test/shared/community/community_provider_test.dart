@@ -962,6 +962,35 @@ void main() {
     expect(reporter.member, keys.public);
   });
 
+  test('a switch whose read fails changes nothing and can retry', () async {
+    final storage = _FailingLoadStorage(fakeSecure);
+    communityStorage = storage;
+    container = createContainer();
+    final notifier = container.read(communityListProvider.notifier);
+    final a = Community.create(
+      name: 'A',
+      relayUrl: 'https://a.example.com',
+      nsec: nostr.Keys.generate().nsec,
+    );
+    final b = Community.create(
+      name: 'B',
+      relayUrl: 'https://b.example.com',
+      nsec: nostr.Keys.generate().nsec,
+    );
+    await container.read(communityListProvider.future);
+    await notifier.addCommunity(a);
+    await notifier.addCommunity(b);
+    await notifier.switchCommunity(a.id);
+
+    storage.failNextLoad = true;
+    await expectLater(notifier.switchCommunity(b.id), throwsStateError);
+    expect(await storage.loadActiveId(), a.id);
+
+    await notifier.switchCommunity(b.id);
+    expect(await storage.loadActiveId(), b.id);
+    expect((await container.read(activeCommunityProvider.future))?.id, b.id);
+  });
+
   group('activeCommunityProvider', () {
     test('returns null when no communities', () async {
       container = createContainer();
@@ -1045,4 +1074,19 @@ class _MemberRecorder extends NoopDiagnosticReporter {
 
   @override
   void setMember(String? pubkey) => member = pubkey;
+}
+
+class _FailingLoadStorage extends CommunityStorage {
+  _FailingLoadStorage(FlutterSecureStorage secure) : super(secure: secure);
+
+  bool failNextLoad = false;
+
+  @override
+  Future<List<Community>> loadAll() {
+    if (failNextLoad) {
+      failNextLoad = false;
+      throw StateError('keychain read failed');
+    }
+    return super.loadAll();
+  }
 }

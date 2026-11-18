@@ -1008,10 +1008,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         ? data[3] as String
         : '';
 
+    if (!accepted) _reportInvalidRequest(message);
     final pending = _pendingEvents.remove(eventId);
     if (pending == null) return;
     pending.timeout.cancel();
-    if (!accepted) _reportInvalidRequest(message);
 
     if (accepted) {
       // We don't have the full event here; create a minimal placeholder.

@@ -663,7 +663,8 @@ class BuilderlabAccountClient {
       try {
         value = jsonDecode(utf8.decode(response.bodyBytes));
         if (value is! Map<String, dynamic>) {
-          throw const FormatException('account response is not an object');
+          // Not const: Sentry drops a repeat of the last error object.
+          throw FormatException('account response is not an object');
         }
       } on FormatException catch (error, stackTrace) {
         _diagnostics.reportError(

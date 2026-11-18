@@ -55,7 +55,7 @@ extension _RelaySessionDelivery on RelaySessionNotifier {
   void _reportInvalidRequest(String message) {
     if (!isInvalidRequestRejection(message)) return;
     _diagnostics.reportError(
-      const RelayInvalidRequest(),
+      RelayInvalidRequest(),
       StackTrace.current,
       operation: DiagnosticOperation.relayRejection,
     );

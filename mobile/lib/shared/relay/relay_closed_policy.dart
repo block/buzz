@@ -47,8 +47,9 @@ bool isRelayDeadlineError(Object error) {
 
 /// Reported when the relay says a request the app sent is invalid. It never
 /// reaches callers, and it carries no relay text: the reason is free text.
+/// Not const: Sentry drops a repeat of the last error object.
 class RelayInvalidRequest implements Exception {
-  const RelayInvalidRequest();
+  RelayInvalidRequest();
 
   @override
   String toString() => 'RelayInvalidRequest';
