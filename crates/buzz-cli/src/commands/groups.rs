@@ -41,7 +41,7 @@ fn handle_arg(raw: &str) -> Result<String, CliError> {
 fn pubkey_arg(client: &BuzzClient, raw: &str) -> Result<String, CliError> {
     let raw = raw.trim();
     if raw.eq_ignore_ascii_case("me") {
-        return Ok(client.keys().public_key().to_hex());
+        return Ok(client.public_key().to_hex());
     }
     PublicKey::parse(raw)
         .map(|pk| pk.to_hex())
@@ -145,7 +145,9 @@ async fn publish(
     let builder = buzz_sdk::build_user_group(group)
         .map_err(|e| CliError::Usage(e.to_string()))?
         .custom_created_at(Timestamp::from(now_secs().max(created_at)));
-    let raw = client.submit_event(client.sign_event(builder)?).await?;
+    let raw = client
+        .submit_event(client.sign_event(builder).await?)
+        .await?;
     let normalized = parse_write_response(
         &raw,
         "a newer change to this group won; run the command again",
@@ -232,7 +234,7 @@ async fn run(cmd: GroupsCmd, client: &BuzzClient) -> Result<Value, CliError> {
                 handle,
                 name: name.trim().to_string(),
                 description: description.unwrap_or_default(),
-                creator: client.keys().public_key().to_hex(),
+                creator: client.public_key().to_hex(),
                 admins: pubkeys_arg(client, &admins)?,
                 members: pubkeys_arg(client, &members)?,
                 policy: policy(edit_policy),
@@ -331,7 +333,7 @@ async fn run(cmd: GroupsCmd, client: &BuzzClient) -> Result<Value, CliError> {
         GroupsCmd::Delete { handle } => {
             let handle = handle_arg(&handle)?;
             let head = require_head(client, &handle).await?;
-            let me = client.keys().public_key();
+            let me = client.public_key();
             if head.event.pubkey != me {
                 return Err(CliError::Usage(format!(
                     "only the author of the current @{handle} head can delete it; \
@@ -340,7 +342,9 @@ async fn run(cmd: GroupsCmd, client: &BuzzClient) -> Result<Value, CliError> {
             }
             let builder = buzz_sdk::build_user_group_deletion(&me.to_hex(), &handle)
                 .map_err(|e| CliError::Usage(e.to_string()))?;
-            let raw = client.submit_event(client.sign_event(builder)?).await?;
+            let raw = client
+                .submit_event(client.sign_event(builder).await?)
+                .await?;
             let normalized = parse_write_response(&raw, "the deletion was already recorded")?;
             let mut response: Value = serde_json::from_str(&normalized)
                 .map_err(|e| CliError::Other(format!("relay response is not JSON: {e}")))?;
@@ -481,12 +485,20 @@ mod tests {
     async fn setup() -> (BuzzClient, Shared) {
         let relay = Shared::default();
         let url = fake_relay(relay.clone()).await;
-        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+        let client = BuzzClient::new(
+            url,
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap();
         (client, relay)
     }
 
     fn client_for(relay_url: &str) -> BuzzClient {
-        BuzzClient::new(relay_url.to_string(), Keys::generate(), None, None).unwrap()
+        BuzzClient::new(
+            relay_url.to_string(),
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap()
     }
 
     fn pk(n: u8) -> String {
@@ -538,10 +550,10 @@ mod tests {
         let events = published(&relay);
         assert_eq!(events.len(), 1);
         let event: Event = serde_json::from_value(events[0].clone()).unwrap();
-        assert_eq!(event.pubkey, client.keys().public_key());
+        assert_eq!(event.pubkey, client.public_key());
         let group = parse_user_group(&event).unwrap();
         assert_eq!(group.handle, "ios-team");
-        assert_eq!(group.creator, client.keys().public_key().to_hex());
+        assert_eq!(group.creator, client.public_key().to_hex());
         assert_eq!(group.members, vec![pk(1), pk(2)]);
         assert_eq!(group.description, "Ships the iOS app");
         assert!(!group.disabled);
@@ -644,8 +656,8 @@ mod tests {
         .await
         .unwrap();
         let head = fetch_head(&creator, "ios-team").await.unwrap().unwrap();
-        assert_eq!(head.group.creator, creator.keys().public_key().to_hex());
-        assert_eq!(head.event.pubkey, editor.keys().public_key());
+        assert_eq!(head.group.creator, creator.public_key().to_hex());
+        assert_eq!(head.event.pubkey, editor.public_key());
         assert_eq!(head.group.members, vec![pk(1), pk(3)]);
     }
 
@@ -686,7 +698,7 @@ mod tests {
         assert_eq!(got["status"], "disabled");
         assert_eq!(got["admins"], json!([pk(9)]));
         assert_eq!(got["members"], json!([pk(4), pk(5)]));
-        assert_eq!(got["creator"], client.keys().public_key().to_hex());
+        assert_eq!(got["creator"], client.public_key().to_hex());
 
         let mut cmd = update("ios-team");
         if let GroupsCmd::Update {

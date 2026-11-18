@@ -2072,7 +2072,11 @@ mod tests {
             .sign_with_keys(&author)
             .unwrap();
         let (url, _, captured_event) = fake_send_relay(serde_json::json!([head]).to_string()).await;
-        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+        let client = BuzzClient::new(
+            url,
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap();
 
         let mut params = send_params("deploy is out");
         params.mention_groups = vec!["@ios-team".into()];
