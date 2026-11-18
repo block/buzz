@@ -13,6 +13,7 @@ use crate::{
     },
     grant::GrantKeyring,
     model::*,
+    signed_call_limiter::SignedCallLimiter,
     token::TokenKeyring,
 };
 use axum::{
@@ -66,6 +67,8 @@ pub struct AppState {
     pub max_installation_lifetime_seconds: i64,
     pub endpoint_quota_window_seconds: i64,
     pub endpoint_quota_max_deliveries: i64,
+    /// Limits signed installation calls per attested key.
+    pub signed_calls: Arc<SignedCallLimiter>,
     pub now: fn() -> i64,
     pub accepting: Arc<AtomicBool>,
 }
@@ -513,6 +516,11 @@ async fn verify_installation_assertion<T: serde::Serialize>(
             None
         }
     };
+    // Counted only for authentic calls, so nobody can spend another
+    // installation's allowance with forged requests.
+    if !s.signed_calls.admit(&installation.app_attest_key_id, now) {
+        return Err(error(StatusCode::TOO_MANY_REQUESTS, "rate_limited"));
+    }
     s.authority
         .consume_challenge(challenge.id, challenge_bytes, now)
         .await
@@ -1109,6 +1117,9 @@ mod request_limit_tests {
             max_installation_lifetime_seconds: 86_400,
             endpoint_quota_window_seconds: 60,
             endpoint_quota_max_deliveries: 10,
+            signed_calls: Arc::new(crate::signed_call_limiter::SignedCallLimiter::new(
+                60, 1_000,
+            )),
             now: fixed_now,
             accepting: Arc::new(AtomicBool::new(true)),
         }

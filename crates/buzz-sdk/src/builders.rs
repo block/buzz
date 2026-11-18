@@ -258,6 +258,8 @@ fn nip30_emoji_tags(emoji_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(
 /// - `broadcast`: if true, adds `["broadcast", "1"]` tag
 /// - `media_tags`: raw imeta tag vectors
 /// - `emoji_tags`: NIP-30 `["emoji", shortcode, url]` tag vectors
+///
+/// Pins `created_at` and the canonical `ms` offset from one clock reading.
 pub fn build_message(
     channel_id: Uuid,
     content: &str,
@@ -278,8 +280,13 @@ pub fn build_message(
     }
     imeta_tags(media_tags, &mut tags)?;
     nip30_emoji_tags(emoji_tags, &mut tags)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    tags.push(tag(&["ms", &now.subsec_millis().to_string()])?);
     Ok(EventBuilder::new(Kind::Custom(9), content)
         .tags(tags)
+        .custom_created_at(nostr::Timestamp::from(now.as_secs()))
         .allow_self_tagging())
 }
 
@@ -2831,6 +2838,41 @@ mod tests {
         assert_eq!(ev.kind.as_u16(), 9);
         assert_eq!(ev.content, "hello");
         assert!(has_tag(&ev, "h", &cid.to_string()));
+    }
+
+    #[test]
+    fn message_timestamp_includes_milliseconds_before_signing() {
+        let root = event_id();
+        let direct = ThreadRef {
+            root_event_id: root,
+            parent_event_id: root,
+        };
+        let nested = ThreadRef {
+            root_event_id: root,
+            parent_event_id: event_id(),
+        };
+        for thread_ref in [None, Some(&direct), Some(&nested)] {
+            let before = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap();
+            let builder =
+                build_message(uuid(), "timestamp", thread_ref, &[], false, &[], &[]).unwrap();
+            let after = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap();
+            let created_at = builder
+                .custom_created_at
+                .expect("timestamp pinned before signing");
+            let event = sign(builder);
+            assert_eq!(event.created_at, created_at);
+            let offsets = tag_values(&event, "ms");
+            assert_eq!(offsets.len(), 1);
+            let offset: u32 = offsets[0].parse().unwrap();
+            assert!(offset < 1000);
+            assert_eq!(offsets[0], offset.to_string());
+            let milliseconds = u128::from(created_at.as_secs()) * 1000 + u128::from(offset);
+            assert!((before.as_millis()..=after.as_millis()).contains(&milliseconds));
+        }
     }
 
     #[test]

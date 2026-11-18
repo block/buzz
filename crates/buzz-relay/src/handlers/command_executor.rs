@@ -42,8 +42,11 @@ pub async fn handle_command(
     event: Event,
     auth: IngestAuth,
 ) -> Result<IngestResult, IngestError> {
-    // Ensure the authenticated user exists in the users table (foreign key requirement).
-    // The old REST handlers did this via extract_auth_context; command executor must do it explicitly.
+    // Create the authenticated user's row on first use, as the REST handlers
+    // did via extract_auth_context. Writers that reference this user (a
+    // workflow's owner, for example) check the row in their own transaction
+    // and fail with NotFound if it is missing, so a failure here is only
+    // logged.
     let pubkey_bytes = auth.pubkey().to_bytes().to_vec();
     match state
         .db

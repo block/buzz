@@ -34,7 +34,7 @@ See [Buzz push notes](buzz-push.md) for the current experimental contract.
 ## Android (optional)
 
 The same gateway serves the app's Android installations through Firebase Cloud
-Messaging (FCM HTTP v1). Android is off unless all four settings are present;
+Messaging (FCM HTTP v1). Android is off unless all four settings below are present;
 a partial set fails startup. The platform of an installation is recorded only in
 gateway state, derived from the attestation type at enrollment. The relay never
 sees it.
@@ -53,9 +53,55 @@ delegation, rotate the endpoint, revoke the installation) with its attested
 Keystore key: an ECDSA P-256 signature over the same transcript bytes iOS
 signs, whose single-use challenge is its replay protection.
 
-Android Key Attestation chain verification is not part of this build yet: a
-gateway configured for Android starts, logs a warning, and rejects every Android
-enrollment until it lands. Enable Android in production only after that.
+### Key Attestation
+
+Enrollment is public, so an Android installation proves it is your app on real
+hardware before it can enroll. The gateway verifies the Key Attestation chain
+offline and accepts it only when all of these hold:
+
+- The chain ends at a configured Google attestation root and no certificate in
+  it is on Google's [status list](https://android.googleapis.com/attestation/status).
+  Google's [published hardware attestation roots](https://developer.android.com/privacy-and-security/security-key-attestation#root_certificate)
+  are built in, pinned by public key. A root change is a reviewed rollout: set
+  `BUZZ_PUSH_ANDROID_ATTESTATION_ROOTS_PATH` to a PEM bundle to replace the
+  built-in list before upgrading.
+- The attestation challenge equals the SHA-256 of the enrollment transcript.
+- The hardware-enforced properties (never the software-enforced ones) report a
+  locked bootloader and either a Verified boot state, or SelfSigned with a
+  verified boot key on your `BUZZ_PUSH_ANDROID_BOOT_KEY_DIGESTS` list. Unverified,
+  Failed, and SelfSigned with any other key are rejected.
+- Both security levels are TrustedEnvironment or StrongBox, and the key is a
+  generated, sign-only P-256 key.
+- The attested application id names exactly one package, the configured one,
+  with a configured signing digest. The operating system writes this value, so
+  it is trusted only as far as the boot state and boot key vouch for that
+  operating system.
+
+| Variable | Purpose |
+|---|---|
+| `BUZZ_PUSH_ANDROID_BOOT_KEY_DIGESTS` | Optional comma-separated SHA-256 digests (64 hex characters each) of verified boot keys accepted with a SelfSigned boot state. Empty by default, which accepts stock Android only. Add the published per-device keys of a custom operating system to support it, and update the list when new devices ship. |
+| `BUZZ_PUSH_ANDROID_ATTESTATION_ROOTS_PATH` | Optional PEM bundle that replaces the built-in Google roots. |
+| `BUZZ_PUSH_ANDROID_REVOCATION_GRACE_SECONDS` | How long the status list may go without a successful refresh before Android enrollment fails closed. Default `604800` (7 days), minimum `3600`. |
+| `BUZZ_PUSH_SIGNED_CALL_WINDOW_SECONDS`, `BUZZ_PUSH_SIGNED_CALL_MAX_CALLS` | Per-attested-key rate limit on signed installation calls (all platforms). Defaults `60` and `30`. Counters are per replica. |
+
+The gateway fetches the status list once at startup and then on Google's cache
+lifetime (between 5 minutes and 1 day), with a 30 second timeout, an 8 MiB size
+limit, and capped exponential backoff after failures. Enrollment never waits on
+a fetch: until the first fetch succeeds, or after the grace period passes
+without a refresh, Android enrollment is rejected. Allow outbound HTTPS to
+`android.googleapis.com`. Every certificate listed as REVOKED or SUSPENDED is
+rejected. Phones without hardware-backed attestation, with an unlocked
+bootloader, or running an operating system whose boot key you have not listed
+get no push; there is no software fallback.
+
+With the Helm chart, set `android.enabled=true` together with
+`android.packageName`, `android.signingCertDigests`, `android.fcmProjectId` and
+the Secret holding the service account key. `android.bootKeyDigests` and
+`android.revocationGraceSeconds` map to the settings above. To replace the
+built-in roots, name a Secret holding the PEM bundle in
+`android.attestationRoots.secretName` (and its key in `secretKey`); the chart
+mounts it and sets `BUZZ_PUSH_ANDROID_ATTESTATION_ROOTS_PATH`. Android is
+disabled by default.
 
 Optional endpoint quota policy variables are `BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS` (default `10`, max `86400`) and `BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES` (default `10`, max `10000`). These are Buzz policy hypotheses, not Apple-published limits; tune under load while retaining a hard ceiling.
 

@@ -199,8 +199,8 @@ async fn reconnected_batch_still_bounds_lock_wait_and_loses_no_rows() {
     // The next batch must install its own limits on its replacement connection.
     session.acquire().await.unwrap().close().await.unwrap();
     let mut blocker = db.pool().begin().await.unwrap();
-    sqlx::query("SELECT pg_advisory_xact_lock(community_deletion_lock_key($1))")
-        .bind(c.as_uuid())
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(crate::deletion::community_deletion_lock_key(c))
         .execute(&mut *blocker)
         .await
         .unwrap();

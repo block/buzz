@@ -419,9 +419,9 @@ async fn assert_admission_column(pool: &PgPool) {
 
 async fn apply_pgschema_to_existing_database(pool: &PgPool) {
     // The pinned migration history has retired triggers on partitioned
-    // parents (events, delivery_log), including the floor trigger 0089
-    // drops, and auto-named deletion-request checks that the desired schema
-    // replaces. pgschema orders child-trigger drops
+    // parents (events, delivery_log), including the floor trigger 0089 and
+    // the roster trigger 0095 drop, and auto-named deletion-request checks
+    // that the desired schema replaces. pgschema orders child-trigger drops
     // before their parent (Postgres refuses with 2BP01) and schedules a
     // replacement check before dropping its same-named copy.
     // Remove only those stale objects in this disposable fixture; pgschema
@@ -434,6 +434,7 @@ async fn apply_pgschema_to_existing_database(pool: &PgPool) {
          DROP TRIGGER IF EXISTS trg_events_purge_soft_deleted_buzz_mesh_status ON events; \
          DROP TRIGGER IF EXISTS events_created_at_floor ON events; \
          DROP TRIGGER IF EXISTS community_write_fence_events ON events; \
+         DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events; \
          DROP TRIGGER IF EXISTS community_write_fence_delivery_log ON delivery_log; \
          ALTER TABLE community_deletion_requests \
              DROP CONSTRAINT IF EXISTS community_deletion_requests_check1; \

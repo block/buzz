@@ -14,7 +14,7 @@ use buzz_core::kind::{
     KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION, KIND_THREAD_SUMMARY, KIND_VERIFIED_PROFILE,
 };
 use buzz_core::StoredEvent;
-use buzz_db::channel::{MemberRecord, MemberRole};
+use buzz_db::channel::{group_members_tags, MemberRecord, MemberRole};
 
 use super::channel_authz::{self, ChannelAuthzError, PutUserDecision, RemoveOtherDecision};
 use super::event::dispatch_persistent_event;
@@ -1603,37 +1603,6 @@ async fn emit_addressable_discovery_event(
     Ok(())
 }
 
-/// Tags that identify the channel on every relay-signed group-state event:
-/// the channel type `t` first, then one `t` per label, then the creator `P`.
-fn group_state_identity_tags(
-    identity: &buzz_db::channel::ChannelIdentity,
-) -> anyhow::Result<Vec<Tag>> {
-    Ok(buzz_core::channel::group_state_identity_tags(
-        &identity.channel_type,
-        &identity.labels,
-        &identity.created_by,
-    )?)
-}
-
-fn group_members_tags(
-    group_id: &str,
-    identity: Option<&buzz_db::channel::ChannelIdentity>,
-    members: &[MemberRecord],
-) -> anyhow::Result<Vec<Tag>> {
-    let mut tags: Vec<Tag> = Vec::with_capacity(members.len() + 3);
-    tags.push(Tag::parse(["d", group_id])?);
-    if let Some(identity) = identity {
-        tags.extend(group_state_identity_tags(identity)?);
-    }
-    for member in members {
-        let pubkey_hex = hex::encode(&member.pubkey);
-        // NIP-29 convention: ["p", pubkey, relay_url, role]. Empty relay_url
-        // because the canonical relay is implicit (this event is signed by it).
-        tags.push(Tag::parse(["p", &pubkey_hex, "", &member.role])?);
-    }
-    Ok(tags)
-}
-
 async fn store_group_members_event(
     state: &Arc<AppState>,
     member_snapshot: &mut buzz_db::channel::LockedMemberSnapshot,
@@ -1658,7 +1627,7 @@ async fn store_group_members_event(
     // relay's moderation-DM key participates in the {relay, recipient} DM used
     // for moderation notices) MUST retain the relay's own `p` tag. nostr's
     // default `build_with_ctx` strips any `p` tag matching the signer, which
-    // would drop the relay from the snapshot and fail migration 0032's roster
+    // would drop the relay from the snapshot and fail the roster
     // fence against the canonical two-member DM. `allow_self_tagging` keeps the
     // snapshot faithful to `channel_members`.
     let event = EventBuilder::new(Kind::Custom(KIND_NIP29_GROUP_MEMBERS as u16), "")
@@ -1728,14 +1697,11 @@ pub async fn emit_group_discovery_events(
         KIND_NIP29_GROUP_ADMINS,
         &relay_pubkey_hex,
         |channel, members| {
-            let mut tags: Vec<Tag> = vec![Tag::parse(["d", &group_id])?];
-            tags.extend(group_state_identity_tags(&channel.identity())?);
-            // The snapshot already scoped `members` to `GROUP_ADMIN_ROLES`.
-            for m in members {
-                let pubkey_hex = hex::encode(&m.pubkey);
-                tags.push(Tag::parse(["p", &pubkey_hex, &m.role])?);
-            }
-            Ok(tags)
+            Ok(buzz_db::channel::group_admins_tags(
+                &group_id,
+                &channel.identity(),
+                members,
+            )?)
         },
     )
     .await?;

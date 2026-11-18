@@ -9,7 +9,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/me/default_agent.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/relay/relay.dart';
-import '../activity/compose_drafts_provider.dart';
+import '../../shared/drafts/compose_drafts_provider.dart';
 import 'bestie_conversation.dart';
 import 'channel.dart';
 import 'channel_management_provider.dart';
