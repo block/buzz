@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
-import 'package:nostr/nostr.dart' as nostr;
+import '../../../shared/crypto/event_signing.dart';
 import '../../../shared/relay/relay.dart';
 import '../channel_sort/channel_sort_manager.dart';
 import 'channel_filter_store.dart';
@@ -62,7 +62,7 @@ class ChannelFilterManager extends ChangeNotifier {
       return ChannelFilterStore.empty();
     }
     final event = candidates.first;
-    nostr.Event.fromJson(jsonEncode(event.toJson()));
+    verifiedNostrEventFromJson(jsonEncode(event.toJson()));
     final decoded = jsonDecode(crypto.decrypt(event.content));
     if (decoded is! Map<String, dynamic>) {
       throw const FormatException('Invalid filter preference');

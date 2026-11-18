@@ -47,6 +47,7 @@ import 'package:hooks_riverpod/misc.dart';
 import 'package:buzz/features/channels/channel_stars/channel_stars_provider.dart';
 import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart';
 import 'package:buzz/features/channels/channel_sort/channel_sort_provider.dart';
+import 'package:buzz/features/channels/channel_sort/channel_sort_storage.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
@@ -78,6 +79,8 @@ import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:buzz/shared/verified_profiles/verified_profile_directory.dart';
 
+import '../../shared/community/community_storage_test.dart'
+    show FakeSecureStorage;
 import '../../helpers/recipient_directory_session.dart';
 import '../../helpers/thread_ids.dart';
 

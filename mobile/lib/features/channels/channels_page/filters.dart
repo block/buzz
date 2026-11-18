@@ -309,7 +309,11 @@ class _SectionViewSheet extends HookConsumerWidget {
                             backgroundColor: context.colors.onSurface,
                             foregroundColor: context.colors.surface,
                           ),
-                          onPressed: saving.value || manager?.busy == true
+                          // Only a filter write waits on the filter read;
+                          // sort applies locally, as it did before filters.
+                          onPressed:
+                              saving.value ||
+                                  (filterDirty.value && manager?.busy == true)
                               ? null
                               : apply,
                           child: Text(
