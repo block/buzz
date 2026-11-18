@@ -87,7 +87,7 @@ final communityTransitionProvider = Provider<CommunityTransitionCoordinator>(
 );
 
 final communityStorageProvider = Provider<CommunityStorage>((ref) {
-  return CommunityStorage();
+  return CommunityStorage(diagnostics: ref.read(diagnosticReporterProvider));
 });
 
 typedef CommunitySnapshotWriter =

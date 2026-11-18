@@ -9,6 +9,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:buzz/shared/http/app_http_client.dart';
 
+import '../diagnostics/diagnostic_reporter.dart';
 import '../storage/secure_storage.dart';
 
 import 'hosted_environment.dart';
@@ -64,11 +65,16 @@ class BuilderlabAccountClient {
     FlutterSecureStorage? storage,
     Uri? accountOrigin,
     this.onSessionChanged,
+    DiagnosticReporter diagnostics = const NoopDiagnosticReporter(),
     DateTime Function() now = DateTime.now,
   }) : _now = now,
+       _diagnostics = diagnostics,
        _http = httpClient ?? newAppHttpClient(),
        _storage = storage ?? defaultStorage,
        accountOrigin = accountOrigin ?? origin;
+
+  /// Where a response body this client can't understand is reported.
+  final DiagnosticReporter _diagnostics;
 
   /// Device-only: the session never syncs or restores onto another device.
   @visibleForTesting
@@ -653,8 +659,20 @@ class BuilderlabAccountClient {
           _unavailable(path, 'http$status');
         },
       );
-      final value = jsonDecode(utf8.decode(response.bodyBytes));
-      if (value is! Map<String, dynamic>) throw AccountFailure.invalidResponse;
+      final Object? value;
+      try {
+        value = jsonDecode(utf8.decode(response.bodyBytes));
+        if (value is! Map<String, dynamic>) {
+          throw const FormatException('account response is not an object');
+        }
+      } on FormatException catch (error, stackTrace) {
+        _diagnostics.reportError(
+          error,
+          stackTrace,
+          operation: DiagnosticOperation.accountResponse,
+        );
+        throw AccountFailure.invalidResponse;
+      }
       return value;
     } on AccountFailure {
       rethrow;

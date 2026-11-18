@@ -55,7 +55,7 @@ class BuzzPushLeaseDescriptor {
       name: 'supported_extensions',
     );
     if (!extensions.contains('buzz-push-v1')) {
-      throw const FormatException('NIP-11 does not advertise buzz-push-v1');
+      throw const BuzzPushNotAdvertised();
     }
 
     final push = _stringMap(information['push'], name: 'push');
@@ -207,6 +207,12 @@ class BuzzPushLeaseDescriptor {
 }
 
 /// The desired lease requires channel IDs that this relay cannot accept yet.
+/// The relay does not offer Buzz push: an expected answer, not a fault.
+class BuzzPushNotAdvertised extends FormatException {
+  const BuzzPushNotAdvertised()
+    : super('NIP-11 does not advertise buzz-push-v1');
+}
+
 class BuzzPushChannelGrammarException implements Exception {
   const BuzzPushChannelGrammarException();
 

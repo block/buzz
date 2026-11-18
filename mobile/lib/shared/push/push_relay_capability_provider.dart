@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../community/community_provider.dart';
+import '../diagnostics/diagnostic_reporter.dart';
 import '../relay/relay_provider.dart';
 import '../relay/relay_session.dart';
 import 'dev_push_lease.dart';
@@ -45,16 +46,27 @@ final currentRelayPushDescriptorProvider =
       return discoverBuzzPushRelayCapability(
         config.baseUrl,
         fetchDescriptor: ref.read(buzzPushDescriptorFetcherProvider),
+        diagnostics: ref.read(diagnosticReporterProvider),
       );
     });
 
 Future<BuzzPushLeaseDescriptor?> discoverBuzzPushRelayCapability(
   String relayBaseUrl, {
   required BuzzPushDescriptorFetcher fetchDescriptor,
+  DiagnosticReporter diagnostics = const NoopDiagnosticReporter(),
 }) async {
   try {
     return await fetchDescriptor(relayBaseUrl);
   } catch (error, stackTrace) {
+    // A relay without Buzz push, or one that can't be reached, is expected; a
+    // descriptor that can't be read is not.
+    if (error is FormatException && error is! BuzzPushNotAdvertised) {
+      diagnostics.reportError(
+        error,
+        stackTrace,
+        operation: DiagnosticOperation.pushGatewayResponse,
+      );
+    }
     debugPrint('Current relay does not advertise valid push: $error');
     debugPrintStack(stackTrace: stackTrace);
     return null;
