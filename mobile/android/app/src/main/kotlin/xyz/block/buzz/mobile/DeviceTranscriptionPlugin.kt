@@ -74,9 +74,10 @@ class DeviceTranscriptionPlugin(private val context: Context, messenger: BinaryM
                     if (owner == id) fail("On-device transcription failed ($error). Check that your speech language is downloaded.")
                 }
                 override fun onResults(results: Bundle?) {
-                    if (owner != id) return
-                    // Non-segmented providers return the complete utterance here.
-                    complete(results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty())
+                    // A provider that answers here ignored the segmented
+                    // EXTRA_AUDIO_SOURCE session and may have listened to the
+                    // live microphone instead of the saved recording.
+                    if (owner == id) fail("On-device transcription of saved recordings is unavailable on this device.")
                 }
                 override fun onPartialResults(partialResults: Bundle?) {}
                 override fun onEvent(eventType: Int, params: Bundle?) {}
