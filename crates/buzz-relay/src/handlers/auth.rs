@@ -2,9 +2,9 @@
 //!
 //! Relay membership enforcement uses the shared
 //! [`crate::api::relay_members::enforce_relay_membership`] helper, which supports
-//! NIP-OA owner-delegation fallback on closed relays. On open relays, the auth
+//! NIP-OA owner-delegation fallback on closed relays. On any admitted AUTH, the
 //! handler calls [`crate::api::relay_members::extract_nip_oa_owner`] directly to
-//! extract the owner pubkey for agent→owner backfill (observer frame auth).
+//! record the agent→owner link (owner removal, bans, observer frame auth).
 //!
 //! For WebSocket auth, the NIP-OA `auth` tag is extracted from the signed AUTH
 //! event itself (the tag is integrity-protected by the event signature).
@@ -809,20 +809,15 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 }
             };
 
-            // Open relay NIP-OA backfill: extract owner for agent→owner DB mapping
-            // (needed for observer frame auth). Only runs on open relays — on closed
-            // relays, enforce_relay_membership already handles NIP-OA delegation.
-            // No feature flag needed: NIP-OA is cryptographically self-proving.
+            // Record any verified NIP-OA owner, whatever the relay mode or how
+            // this AUTH was admitted: removing or banning the owner reaches the
+            // agent only through that record. Refused attempts returned above.
             let nip_oa_owner = nip_oa_owner.or(token_owner).or_else(|| {
-                if !state.config.require_relay_membership && auth_tag_json.is_some() {
-                    crate::api::relay_members::extract_nip_oa_owner(
-                        pubkey.as_bytes(),
-                        auth_tag_json.as_deref(),
-                        Some(signed_auth_created_at),
-                    )
-                } else {
-                    None
-                }
+                crate::api::relay_members::extract_nip_oa_owner(
+                    pubkey.as_bytes(),
+                    auth_tag_json.as_deref(),
+                    Some(signed_auth_created_at),
+                )
             });
 
             // B2: acquire a session effect permit after the last policy read
@@ -2587,6 +2582,74 @@ mod tests {
             builder.sign_with_keys(keys).unwrap()
         }
 
+        /// An owner ban landing after AUTH's first checks but before its final
+        /// check refuses the agent's sign-in, yet the verified owner stays
+        /// recorded: the accepted late-refusal rule. Paused at the AUTH commit
+        /// hook, so no timing sleeps.
+        /// Mutation: skip the owner write on this path → the owner is not
+        /// recorded → RED; drop `final_admission_denial` → admitted → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn late_refused_auth_keeps_the_recorded_owner() {
+            use std::sync::Arc;
+            let state = auth_test_state_real_db_expect().await;
+            let community = seeded_community(&state).await;
+            let (owner, agent) = (Keys::generate(), Keys::generate());
+            let tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+                .expect("sign NIP-OA credential");
+            let tag: Vec<String> = serde_json::from_str(&tag).expect("tag JSON");
+            let (conn, _ctrl) = registered_pending_conn(&state, community, "late-refusal");
+            let (arrived, release) =
+                crate::nip_fi_test_hooks::auth_commit_hook::arm(conn.tenant.community());
+            let handle = tokio::spawn(handle_auth(
+                signed_auth(&agent, "late-refusal", Some(tag)),
+                Arc::clone(&conn),
+                Arc::clone(&state),
+            ));
+            tokio::time::timeout(std::time::Duration::from_secs(5), arrived)
+                .await
+                .expect("AUTH must pause after its first checks")
+                .expect("hook channel closed");
+            state
+                .db
+                .ensure_user(community, owner.public_key().as_bytes())
+                .await
+                .expect("ensure owner");
+            state
+                .db
+                .ban_community_member(
+                    community,
+                    &owner.public_key().to_bytes(),
+                    &Keys::generate().public_key().to_bytes(),
+                    None,
+                    None,
+                )
+                .await
+                .expect("ban owner");
+            release.notify_one();
+            tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+                .await
+                .expect("AUTH must finish")
+                .expect("AUTH must not panic");
+
+            assert!(
+                !matches!(conn.auth_state_snapshot(), AuthState::Authenticated(_)),
+                "the sign-in is refused and the agent is not authenticated"
+            );
+            assert!(
+                state
+                    .db
+                    .is_agent_owner(
+                        community,
+                        agent.public_key().as_bytes(),
+                        owner.public_key().as_bytes(),
+                    )
+                    .await
+                    .expect("owner lookup"),
+                "the verified owner stays recorded"
+            );
+        }
+
         /// A ban whose disconnect lands after AUTH's policy reads but before it
         /// binds the socket must still refuse admission: the final check runs
         /// after the bind. A user in another community, paused at the same
@@ -2881,6 +2944,119 @@ mod tests {
             assert!(
                 matches!(&refusal, WsMessage::Text(t) if t.contains(crate::handlers::auth::OWNER_LINK_ERROR)),
                 "refusal names the owner-link failure, got {refusal:?}"
+            );
+        }
+
+        /// On a closed relay with NIP-OA admission off, a member agent's
+        /// verified NIP-OA tag records its owner; a tag for another agent or
+        /// one that has expired records nothing; a refused AUTH (agent not a
+        /// member) records nothing. Removing the recorded owner then refuses
+        /// the agent's next AUTH.
+        /// Mutation: restore the `!require_relay_membership` guard on the
+        /// recording step → the member agent's owner stays NULL → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn closed_relay_auth_records_only_verified_admitted_owner() {
+            use std::sync::Arc;
+            let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                .await
+                .expect("PostgreSQL must be available");
+            let state = state_with_pool(pool, |c| {
+                c.require_relay_membership = true;
+                c.allow_nip_oa_auth = false;
+            })
+            .await;
+            let community = seeded_community(&state).await;
+            let owner = Keys::generate();
+            let (valid, wrong_agent, stale, refused) = (
+                Keys::generate(),
+                Keys::generate(),
+                Keys::generate(),
+                Keys::generate(),
+            );
+            for keys in [&owner, &valid, &wrong_agent, &stale] {
+                state
+                    .db
+                    .add_relay_member(
+                        community,
+                        &keys.public_key().to_hex(),
+                        "member",
+                        None,
+                        &nostr::Keys::generate(),
+                    )
+                    .await
+                    .map(|write| write.outcome)
+                    .expect("add agent");
+            }
+            let tag = |agent: &nostr::PublicKey, conditions: &str| -> Vec<String> {
+                let json = buzz_sdk::nip_oa::compute_auth_tag(&owner, agent, conditions)
+                    .expect("sign NIP-OA credential");
+                serde_json::from_str(&json).expect("tag JSON")
+            };
+            let cases = [
+                (&valid, tag(&valid.public_key(), ""), true, true),
+                (&wrong_agent, tag(&stale.public_key(), ""), true, false),
+                (
+                    &stale,
+                    tag(&stale.public_key(), "created_at<1"),
+                    true,
+                    false,
+                ),
+                (&refused, tag(&refused.public_key(), ""), false, false),
+            ];
+            for (i, (keys, auth_tag, admitted, recorded)) in cases.into_iter().enumerate() {
+                let challenge = format!("record-owner-{i}");
+                let (conn, _ctrl) = registered_pending_conn(&state, community, &challenge);
+                handle_auth(
+                    signed_auth(keys, &challenge, Some(auth_tag)),
+                    Arc::clone(&conn),
+                    Arc::clone(&state),
+                )
+                .await;
+                assert_eq!(
+                    matches!(conn.auth_state_snapshot(), AuthState::Authenticated(_)),
+                    admitted,
+                    "case {i} admission"
+                );
+                let stored: Option<Option<Vec<u8>>> = sqlx::query_scalar(
+                    "SELECT agent_owner_pubkey FROM users WHERE community_id = $1 AND pubkey = $2",
+                )
+                .bind(community.as_uuid())
+                .bind(keys.public_key().as_bytes().as_slice())
+                .fetch_optional(state.db.pool())
+                .await
+                .expect("read owner");
+                assert_eq!(
+                    stored.flatten(),
+                    recorded.then(|| owner.public_key().to_bytes().to_vec()),
+                    "case {i} owner record"
+                );
+            }
+
+            // The recorded owner's removal takes the agent with it.
+            buzz_db::relay_members::remove_relay_member(
+                state.db.pool(),
+                community,
+                &owner.public_key().to_hex(),
+                &nostr::Keys::generate(),
+            )
+            .await
+            .map(|write| write.outcome)
+            .expect("remove owner");
+            let (conn, _ctrl) = registered_pending_conn(&state, community, "record-owner-after");
+            handle_auth(
+                signed_auth(
+                    &valid,
+                    "record-owner-after",
+                    Some(tag(&valid.public_key(), "")),
+                ),
+                Arc::clone(&conn),
+                Arc::clone(&state),
+            )
+            .await;
+            assert!(
+                !matches!(conn.auth_state_snapshot(), AuthState::Authenticated(_)),
+                "the agent is refused after its owner's removal"
             );
         }
 
