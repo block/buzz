@@ -197,10 +197,11 @@ const PROJECTION_TAGS: [&str; 7] = [
     "verified_at",
 ];
 
-/// Read the NIP-FI projection as the spec and the mobile client do: empty
+/// Read the NIP-FI projection with the spec's structural checks: empty
 /// content; exactly the projection tags, each once with one value; `p` equal
-/// to `d`; `active` `true`; well-formed names; and a decimal `verified_at` no
-/// later than `created_at`. Anything else is not a verified profile.
+/// to `d`; `active` `true`; a decimal `verified_at` no later than
+/// `created_at`; and names that pass [`valid_name`]. Anything else is not a
+/// verified profile.
 fn parse_projection(event: &Event) -> Option<VerifiedProfile> {
     if !event.content.is_empty() {
         return None;
@@ -245,7 +246,12 @@ fn parse_projection(event: &Event) -> Option<VerifiedProfile> {
 }
 
 /// Display text: 1 to 64 characters, no surrounding whitespace, no control
-/// characters.
+/// characters (Cc).
+///
+/// Looser than the spec, the relay and the mobile client, which also require
+/// NFC and reject the Cf, Cs, Co, Cn, Zl and Zp categories. The relay applies
+/// those rules before it signs, so a name that passes here but fails there
+/// would need a relay-signed event that breaks its own rules.
 fn valid_name(value: &str) -> bool {
     (1..=64).contains(&value.chars().count())
         && value.trim() == value

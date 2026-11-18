@@ -119,13 +119,7 @@ async fn lookup_profiles(
     let requested: Vec<String> = authors.iter().map(|a| a.to_string()).collect();
     let (verified, warning) = match verified_for(client, &requested).await {
         Ok(verified) => (verified, None),
-        Err(e) => (
-            HashMap::new(),
-            Some(serde_json::json!({
-                "warning": "verified_profiles_unavailable",
-                "message": e.to_string(),
-            })),
-        ),
+        Err(e) => (HashMap::new(), Some(verified_unavailable(&e))),
     };
     let mut profiles = with_verified(profiles, &verified);
     // A requested person with a verified profile but no kind:0 is still found,
@@ -142,6 +136,14 @@ async fn lookup_profiles(
         }
     }
     Ok((profiles, warning))
+}
+
+/// The stderr warning for a verified-profile check that could not run.
+fn verified_unavailable(error: &CliError) -> serde_json::Value {
+    serde_json::json!({
+        "warning": "verified_profiles_unavailable",
+        "message": error.to_string(),
+    })
 }
 
 /// Verified profiles for `pubkeys`; empty where the community advertises none.
@@ -460,21 +462,37 @@ fn owner_scoped_profiles(
 /// (word prefixes), so a person is found by their verified username too.
 /// Otherwise, or for a query longer than that endpoint accepts, NIP-50 search
 /// over kind:0, filtered to name substring matches (returns [] if
-/// unsupported), with verified profiles attached where advertised.
+/// unsupported), with verified profiles attached where advertised. As for
+/// [`get_profiles`], a failed verified check is a stderr warning, not an error.
 async fn search_profiles(
     client: &BuzzClient,
     query: &str,
 ) -> Result<Vec<serde_json::Value>, CliError> {
+    let (profiles, warning) = find_profiles(client, query).await?;
+    if let Some(warning) = warning {
+        eprintln!("{warning}");
+    }
+    Ok(profiles)
+}
+
+/// [`search_profiles`] with its warning returned instead of printed.
+async fn find_profiles(
+    client: &BuzzClient,
+    query: &str,
+) -> Result<(Vec<serde_json::Value>, Option<serde_json::Value>), CliError> {
     let parse = |raw: String| -> Result<Vec<serde_json::Value>, CliError> {
         serde_json::from_str(&raw)
             .map_err(|e| CliError::Other(format!("failed to parse response: {e}")))
     };
-    let authority = discover_authority(client).await?;
+    let (authority, warning) = match discover_authority(client).await {
+        Ok(authority) => (authority, None),
+        Err(e) => (None, Some(verified_unavailable(&e))),
+    };
     let fits = query.trim().chars().count() <= PROFILE_SEARCH_MAX_CHARS;
     if let Some(authority) = authority.as_ref().filter(|a| a.searchable && fits) {
         let body = serde_json::json!({"query": query.trim(), "limit": 100});
         let raw = client.post_json_authed("/profiles/search", &body).await?;
-        return Ok(search_page_profiles(&parse(raw)?, &authority.pubkey));
+        return Ok((search_page_profiles(&parse(raw)?, &authority.pubkey), None));
     }
     let filter = serde_json::json!({
         "kinds": [0],
@@ -484,14 +502,16 @@ async fn search_profiles(
     let events = parse(client.query(&filter).await?)?;
     let profiles = name_search_profiles(&events, query);
     let Some(authority) = authority else {
-        return Ok(profiles);
+        return Ok((profiles, warning));
     };
     let pubkeys: Vec<String> = profiles
         .iter()
         .filter_map(|p| p.get("pubkey").and_then(|v| v.as_str()).map(str::to_owned))
         .collect();
-    let verified = fetch_verified_profiles(client, &authority.pubkey, &pubkeys).await?;
-    Ok(with_verified(profiles, &verified))
+    match fetch_verified_profiles(client, &authority.pubkey, &pubkeys).await {
+        Ok(verified) => Ok((with_verified(profiles, &verified), None)),
+        Err(e) => Ok((profiles, Some(verified_unavailable(&e)))),
+    }
 }
 
 /// Search for users by name. Owner-scoped searches resolve managed-agent records
@@ -964,9 +984,10 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_profile, get_profiles, lookup_profiles, owned_agent_pubkeys_from_events,
-        owner_scoped_profiles, owner_verification, parse_expiration_tag, parse_expiry,
-        presence_subject, publish_status, read_statuses, search_profiles,
+        compact_profile, find_profiles, get_profiles, lookup_profiles,
+        owned_agent_pubkeys_from_events, owner_scoped_profiles, owner_verification,
+        parse_expiration_tag, parse_expiry, presence_subject, publish_status, read_statuses,
+        search_profiles,
     };
     use crate::client::BuzzClient;
     use crate::error::CliError;
@@ -1570,6 +1591,39 @@ mod tests {
         relay.lock().unwrap().info = advertising(&Keys::generate());
         seed_profile(&relay, &alice, r#"{"name":"al"}"#);
         let (_, warning) = lookup_profiles(&client, &pubkeys).await.unwrap();
+        assert!(warning.is_none());
+    }
+
+    #[tokio::test]
+    async fn name_search_keeps_kind0_matches_and_warns_when_the_verified_check_fails() {
+        // Discovery fails (malformed NIP-11), or the kind:30382 query does on
+        // a relay whose profile search does not match verified names.
+        for broken_lookup in [false, true] {
+            let (client, relay) = setup().await;
+            relay.lock().unwrap().info = if broken_lookup {
+                let mut info = advertising(&Keys::generate());
+                info["federated_identity"]["public_profile"]["searchable"] = json!(false);
+                info
+            } else {
+                json!({"federated_identity": "malformed"})
+            };
+            relay.lock().unwrap().broken_kind = broken_lookup.then_some(30382);
+            let alice = Keys::generate();
+            seed_profile(&relay, &alice, r#"{"name":"alice"}"#);
+
+            let (found, warning) = find_profiles(&client, "alice").await.unwrap();
+            assert_eq!(found.len(), 1, "{broken_lookup}: {found:?}");
+            assert_eq!(found[0]["pubkey"], alice.public_key().to_hex());
+            assert!(found[0].get("verified").is_none());
+            let warning = warning.expect("a failed check is reported");
+            assert_eq!(warning["warning"], "verified_profiles_unavailable");
+            assert!(relay.lock().unwrap().profile_searches.is_empty());
+        }
+
+        // A working check reports nothing.
+        let (client, relay) = setup().await;
+        seed_profile(&relay, &Keys::generate(), r#"{"name":"alice"}"#);
+        let (_, warning) = find_profiles(&client, "alice").await.unwrap();
         assert!(warning.is_none());
     }
 
