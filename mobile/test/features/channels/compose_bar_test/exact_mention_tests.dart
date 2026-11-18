@@ -423,4 +423,29 @@ void exactMentionTests() {
     );
     expect(find.textContaining('is ambiguous'), findsOneWidget);
   });
+
+  testWidgets('closing punctuation never selects a shared name', (
+    tester,
+  ) async {
+    await mountComposer(
+      tester,
+      members(),
+      (_, _, {mediaTags = const []}) async {},
+    );
+    final field = find.byType(TextField);
+    await tester.enterText(field, '@scout');
+    await tester.pumpAndSettle();
+    expect(scoutRows(), findsNWidgets(2));
+    await tester.enterText(field, '@scout,');
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(field).controller!.text, '@scout,');
+    expect(
+      find.byKey(const ValueKey('composer-person-mention-chip')),
+      findsNothing,
+    );
+    // Dispose before draining the chooser's pending search debounce, as the
+    // restore scenarios above do.
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump(mentionSearchDebounce * 2);
+  });
 }

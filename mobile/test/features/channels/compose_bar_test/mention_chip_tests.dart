@@ -216,6 +216,52 @@ void mentionChipTests() {
       await tester.pumpAndSettle();
       expect(sent, [alice]);
 
+      // Closing punctuation typed straight after an exact, unique name
+      // selects it as Space does, and stays after the chip in place of the
+      // space (recommendation 7): `@bob,` is a bound Bob followed by `,`.
+      for (final mark in [
+        ',',
+        '.',
+        ';',
+        ':',
+        '!',
+        '?',
+        ')',
+        ']',
+        '}',
+        "'",
+        '’',
+        '"',
+        '”',
+      ]) {
+        sent = null;
+        await tester.enterText(find.byType(TextField), 'ping @bob');
+        await tester.pump();
+        await tester.enterText(find.byType(TextField), 'ping @bob$mark');
+        await tester.pumpAndSettle();
+        expect(controller.text, 'ping @Bob$mark', reason: mark);
+        expect(controller.selection.baseOffset, 'ping @Bob$mark'.length);
+        expect(personChip, findsOneWidget, reason: mark);
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+        await tester.pumpAndSettle();
+        expect(sentText, 'ping @Bob$mark');
+        expect(sent, [bob], reason: mark);
+      }
+
+      // An inexact name (`@bo,`) and a character that is not a terminator
+      // (`@bob-`) keep the chooser's query: nothing is selected.
+      for (final text in ['@bo,', '@bob-']) {
+        await tester.enterText(
+          find.byType(TextField),
+          text.substring(0, text.length - 1),
+        );
+        await tester.pump();
+        await tester.enterText(find.byType(TextField), text);
+        await tester.pumpAndSettle();
+        expect(controller.text, text);
+        expect(personChip, findsNothing, reason: text);
+      }
+
       // Typed, unpicked names keep their existing fallback: an exact unique
       // member name notifies, after a bracket as after a space.
       sent = null;

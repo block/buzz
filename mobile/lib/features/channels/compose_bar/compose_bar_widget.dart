@@ -341,8 +341,9 @@ class ComposeBar extends HookConsumerWidget {
     final isModifyingText = useRef(false);
     final lastObservedEditingValue = useRef(controller.value);
 
-    // Insert a selected mention into the text field as a chip bound to it.
-    void insertMention(MentionCandidate candidate) {
+    // Insert a selected mention into the text field as a chip bound to it,
+    // followed by a space or by the closing punctuation that selected it.
+    void insertMention(MentionCandidate candidate, {String separator = ' '}) {
       ref
           .read(mentionHistoryProvider.notifier)
           .remember(channelId, candidate.pubkey);
@@ -359,6 +360,7 @@ class ComposeBar extends HookConsumerWidget {
           start: start,
           end: cursor,
           candidate: candidate,
+          separator: separator,
         );
       } finally {
         isModifyingText.value = false;
@@ -422,24 +424,30 @@ class ComposeBar extends HookConsumerWidget {
           open = null;
         }
 
-        // Space after an exact, unique name selects it (section 5).
+        // Space or closing punctuation typed straight after an exact, unique
+        // name selects it (section 5); the typed character stays after the
+        // chip. Otherwise the character joins the query.
         final previousQuery = mentionQuery.value;
         if (open != null &&
             previousQuery != null &&
             previousQuery.trim().isNotEmpty &&
             open.start == mentionStartIdx.value &&
-            open.query == '$previousQuery ' &&
+            open.query.length == previousQuery.length + 1 &&
+            open.query.startsWith(previousQuery) &&
             text.length == previousValue.text.length + 1) {
-          final chosen = _spaceMention(
-            ref,
-            channelId: channelId,
-            query: previousQuery,
-            opening: mentionOpening.value,
-            shown: shownMentions.value,
-            viewer: currentPubkey,
-          );
+          final typed = open.query.substring(previousQuery.length);
+          final chosen = mentionTerminator(typed)
+              ? _spaceMention(
+                  ref,
+                  channelId: channelId,
+                  query: previousQuery,
+                  opening: mentionOpening.value,
+                  shown: shownMentions.value,
+                  viewer: currentPubkey,
+                )
+              : null;
           if (chosen != null) {
-            insertMention(chosen);
+            insertMention(chosen, separator: typed);
             return;
           }
         }

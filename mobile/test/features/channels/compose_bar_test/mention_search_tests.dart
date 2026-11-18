@@ -48,6 +48,8 @@ void mentionSearchTests() {
     'the directory is searched only while a query could still name someone',
     (tester) async {
       final searched = <String>[];
+      String? sentText;
+      List<List<String>>? sentTags;
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: _testUploadService(nostr.Keys.generate().nsec),
@@ -70,7 +72,10 @@ void mentionSearchTests() {
                   person,
             ];
           },
-          onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+          onSend: (text, _, {mediaTags = const <List<String>>[]}) async {
+            sentText = text;
+            sentTags = mediaTags;
+          },
         ),
       );
       await _expandComposer(tester);
@@ -105,6 +110,37 @@ void mentionSearchTests() {
       expect(searched.where((q) => q.isNotEmpty), ['q', 'qu']);
       expect(row('Quinn'), findsOneWidget);
       expect(row('not in channel'), findsOneWidget);
+
+      // Closing punctuation after a person the directory found selects them
+      // as Space does once the search has finished (recommendation 7), and
+      // the send meets the outside-channel prompt as after a tapped pick.
+      await type(tester, '@qu', 'inn');
+      expect(row('Quinn'), findsOneWidget);
+      await tester.enterText(field, '@quinn,');
+      await tester.pumpAndSettle();
+      expect(controller.text, '@Quinn,');
+      expect(
+        find.byKey(const ValueKey('composer-person-mention-chip')),
+        findsOneWidget,
+      );
+      expect(popover, findsNothing);
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pumpAndSettle();
+      expect(find.text('Mention people outside this channel?'), findsOneWidget);
+      // Send without inviting: Quinn is referenced, not notified.
+      await tester.tap(
+        find
+            .descendant(
+              of: find.byType(AlertDialog),
+              matching: find.byType(TextButton),
+            )
+            .first,
+      );
+      await tester.pumpAndSettle();
+      expect(sentText, '@Quinn,');
+      expect(sentTags, contains(orderedEquals(['mention', quinn.pubkey])));
+      // The prompt took focus; the composer is a capsule again.
+      await _expandComposer(tester);
 
       // Multi-word names are searched word by word: a second word that
       // continues no local name still goes to the directory, and one that

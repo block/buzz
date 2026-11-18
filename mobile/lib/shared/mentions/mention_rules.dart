@@ -246,6 +246,19 @@ String? exactMention(Iterable<MentionChoice> choices, String query) {
   return count == 1 ? found : null;
 }
 
+final _mentionTerminators = RegExp(r'''^[ .,!?;:)\]}'’"”]$''', unicode: true);
+
+/// Section 5: whether [character], typed straight after a query, selects
+/// its exact, unique name as Space does. Besides Space: closing punctuation,
+/// a closing bracket for the ones a query opens after, or a closing quote,
+/// so `@Bob,` and `@Bob's` mention Bob. The client keeps the character after
+/// the mention in place of the space. Where Space would not select, the
+/// character is typed into the query instead: `'` after `Pat O` while
+/// `Pat O'Brien` is known stays in the query. Any other character, such as
+/// a hyphen, is never a terminator.
+bool mentionTerminator(String character) =>
+    _mentionTerminators.hasMatch(character);
+
 /// An open `@` query: `[start, end)` covers `@` and the query text.
 typedef MentionQuery = ({int start, int end, String query});
 

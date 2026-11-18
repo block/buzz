@@ -134,16 +134,18 @@ class _MarkdownEditingController extends TextEditingController {
     if (unchanged) notifyListeners();
   }
 
-  /// Replaces the `@query` at `[start, end)` with `@Label ` bound to
-  /// [candidate], caret after the space. Mentions after it move with the
-  /// text in the same notification.
+  /// Replaces the `@query` at `[start, end)` with `@Label` and [separator]
+  /// (a space, or the closing punctuation that selected the name) bound to
+  /// [candidate], caret after the separator. Mentions after it move with
+  /// the text in the same notification.
   void insertMention({
     required int start,
     required int end,
     required MentionCandidate candidate,
+    String separator = ' ',
   }) {
     final label = candidate.label;
-    final replacement = '@$label ';
+    final replacement = '@$label$separator';
     final next = TextEditingValue(
       text: text.replaceRange(start, end, replacement),
       selection: TextSelection.collapsed(offset: start + replacement.length),
