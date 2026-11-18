@@ -4,11 +4,9 @@
 
 use std::collections::HashSet;
 
-use buzz_core::agent_turn_metric::AgentTurnMetricPayload;
+use buzz_core::agent_turn_metric::{parse_agent_turn_metric, AgentTurnMetricPayload};
 use buzz_core::kind::{KIND_AGENT_TURN_METRIC, KIND_MANAGED_AGENT};
-use buzz_core::observer::{
-    content_looks_like_nip44, ObserverPayloadError, OBSERVER_MAX_PLAINTEXT_LEN,
-};
+use buzz_core::observer::{content_looks_like_nip44, ObserverPayloadError};
 use nostr::Event;
 use serde_json::{json, Value};
 
@@ -78,21 +76,7 @@ async fn decrypt_metric(
     else {
         return Ok(Err("NIP-44 error: could not decrypt the payload".into()));
     };
-    if plaintext.len() > OBSERVER_MAX_PLAINTEXT_LEN {
-        return Ok(Err(ObserverPayloadError::PlaintextTooLarge {
-            max: OBSERVER_MAX_PLAINTEXT_LEN,
-            got: plaintext.len(),
-        }
-        .to_string()));
-    }
-    let payload = match serde_json::from_str::<AgentTurnMetricPayload>(&plaintext) {
-        Ok(payload) => payload,
-        Err(e) => return Ok(Err(ObserverPayloadError::Json(e).to_string())),
-    };
-    Ok(payload
-        .validate()
-        .map(|()| payload)
-        .map_err(|e| e.to_string()))
+    Ok(parse_agent_turn_metric(plaintext).map_err(|e| e.to_string()))
 }
 
 async fn read_metric(

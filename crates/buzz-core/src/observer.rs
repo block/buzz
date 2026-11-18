@@ -91,11 +91,19 @@ pub fn decrypt_observer_payload<T: DeserializeOwned>(
         ));
     }
 
-    let mut plaintext = nip44::decrypt(
+    let plaintext = nip44::decrypt(
         recipient_keys.secret_key(),
         &event.pubkey,
         event.content.as_str(),
     )?;
+    parse_observer_plaintext(plaintext)
+}
+
+/// Enforce the observer plaintext size limit on `plaintext` and deserialize
+/// it. The plaintext is zeroized before returning.
+pub fn parse_observer_plaintext<T: DeserializeOwned>(
+    mut plaintext: String,
+) -> Result<T, ObserverPayloadError> {
     if plaintext.len() > OBSERVER_MAX_PLAINTEXT_LEN {
         let got = plaintext.len();
         plaintext.zeroize();

@@ -9,7 +9,10 @@
 use nostr::{Event, Keys, PublicKey};
 use serde::{Deserialize, Serialize};
 
-use crate::observer::{decrypt_observer_payload, encrypt_observer_payload, ObserverPayloadError};
+use crate::observer::{
+    decrypt_observer_payload, encrypt_observer_payload, parse_observer_plaintext,
+    ObserverPayloadError,
+};
 
 // Re-export for callers that only need the error type.
 pub use crate::observer::ObserverPayloadError as AgentTurnMetricError;
@@ -223,6 +226,17 @@ pub fn decrypt_agent_turn_metric(
     Ok(payload)
 }
 
+/// Parse and validate a decrypted [`AgentTurnMetricPayload`] from its NIP-44
+/// plaintext, for callers that decrypt through a remote signer. Applies the
+/// same size limit and numeric validation as [`decrypt_agent_turn_metric`].
+pub fn parse_agent_turn_metric(
+    plaintext: String,
+) -> Result<AgentTurnMetricPayload, ObserverPayloadError> {
+    let payload: AgentTurnMetricPayload = parse_observer_plaintext(plaintext)?;
+    payload.validate()?;
+    Ok(payload)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,6 +294,28 @@ mod tests {
         let decoded = decrypt_agent_turn_metric(&owner_keys, &event).expect("decrypt");
 
         assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn parse_agent_turn_metric_applies_size_and_numeric_validation() {
+        let payload = sample_payload();
+        let parsed = parse_agent_turn_metric(serde_json::to_string(&payload).unwrap()).unwrap();
+        assert_eq!(parsed.harness, payload.harness);
+
+        let negative = make_payload_with_turn_cost(Some(-1.0));
+        assert!(matches!(
+            parse_agent_turn_metric(serde_json::to_string(&negative).unwrap()),
+            Err(ObserverPayloadError::InvalidPayload(_))
+        ));
+        let oversized = "x".repeat(crate::observer::OBSERVER_MAX_PLAINTEXT_LEN + 1);
+        assert!(matches!(
+            parse_agent_turn_metric(oversized),
+            Err(ObserverPayloadError::PlaintextTooLarge { .. })
+        ));
+        assert!(matches!(
+            parse_agent_turn_metric("not json".into()),
+            Err(ObserverPayloadError::Json(_))
+        ));
     }
 
     #[test]
