@@ -35,6 +35,16 @@ pub struct MemberRecord {
     pub removed_at: Option<DateTime<Utc>>,
 }
 
+/// A conditional role change for an existing Solo member.
+pub struct SoloMemberRoleChange {
+    /// The member whose role is being edited.
+    pub target: nostr::PublicKey,
+    /// The active role the signer saw when confirming.
+    pub expected_role: MemberRole,
+    /// The requested access (admin, participating, or viewing only).
+    pub role: MemberRole,
+}
+
 /// Namespace for the per-channel membership advisory lock. Serializes the
 /// role-authorization + last-owner-count + write sequences in [`add_member`]
 /// and [`remove_member`] against each other.
@@ -2435,6 +2445,116 @@ impl Db {
             thread_meta,
         )
         .await
+    }
+
+    /// Stores a signed Solo member role change together with the membership
+    /// update. Refusals leave neither an event nor a membership change.
+    #[datastore_span(name = "change_solo_member_role_with_event", system = "postgresql")]
+    pub async fn change_solo_member_role_with_event(
+        &self,
+        community: CommunityId,
+        channel_id: Uuid,
+        change: SoloMemberRoleChange,
+        event: &nostr::Event,
+    ) -> Result<(buzz_core::StoredEvent, bool)> {
+        let actor = event.pubkey.to_bytes();
+        let target = change.target.to_bytes();
+        let denied = |reason: &str| DbError::AccessDenied(reason.to_owned());
+        if actor == target || change.expected_role == MemberRole::Owner {
+            return Err(denied("cannot change a Solo owner's role"));
+        }
+        let read_agent_owner = match (change.expected_role, change.role) {
+            (MemberRole::Admin | MemberRole::Member | MemberRole::Bot, MemberRole::Guest) => false,
+            (MemberRole::Admin | MemberRole::Guest, MemberRole::Member)
+            | (MemberRole::Member | MemberRole::Bot | MemberRole::Guest, MemberRole::Admin) => true,
+            _ => return Err(denied("unsupported Solo member role transition")),
+        };
+
+        let mut tx = crate::begin_community_event_write_transaction(
+            &self.pool,
+            community,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        tx.set_push_enqueue(self.push_enqueue.clone());
+        lock_channel_for_member_put(&mut tx, channel_id).await?;
+        let (stored, inserted) = crate::event::insert_event_with_thread_metadata_tx(
+            &mut tx,
+            event,
+            Some(channel_id),
+            None,
+        )
+        .await?;
+        if !inserted {
+            tx.rollback().await?;
+            return Ok((stored, false));
+        }
+
+        let channel = get_channel_tx(tx.conn(), community, channel_id).await?;
+        if channel.channel_type != "stream"
+            || !channel.labels.iter().any(|label| label == "buzz.solo")
+        {
+            return Err(denied("channel is not a Solo chat"));
+        }
+        if channel.archived_at.is_some() {
+            return Err(denied("channel is archived"));
+        }
+        let actor_role = get_active_role_tx(tx.conn(), community, channel_id, &actor).await?;
+        if actor_role.as_deref() != Some(MemberRole::Owner.as_str()) {
+            return Err(denied("only a Solo chat owner may change member roles"));
+        }
+
+        // Only the relay's verified ownership record establishes agent identity.
+        let agent_owner: Option<Vec<u8>> = if read_agent_owner {
+            sqlx::query_scalar(
+                "SELECT agent_owner_pubkey FROM users \
+                 WHERE community_id = $1 AND pubkey = $2 AND agent_owner_pubkey IS NOT NULL",
+            )
+            .bind(community.as_uuid())
+            .bind(target.as_slice())
+            .fetch_optional(tx.conn())
+            .await?
+        } else {
+            None
+        };
+        let role = match change.role {
+            MemberRole::Admin if agent_owner.as_deref() != Some(actor.as_slice()) => {
+                return Err(denied(
+                    "only an agent's owner may grant it Admin in a Solo chat",
+                ))
+            }
+            MemberRole::Member if agent_owner.is_some() => MemberRole::Bot,
+            MemberRole::Member if change.expected_role == MemberRole::Guest => {
+                return Err(denied(
+                    "only a verified agent may move from Viewing only to Participating",
+                ))
+            }
+            role => role,
+        };
+
+        // Update the active row in place. The same channel lock serializes
+        // removal and role writes, and a mismatch never inserts a membership.
+        let affected = sqlx::query(
+            "UPDATE channel_members SET role = $4::member_role \
+             WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3 \
+               AND removed_at IS NULL AND role = $5::member_role",
+        )
+        .bind(community.as_uuid())
+        .bind(channel_id)
+        .bind(target.as_slice())
+        .bind(role.as_str())
+        .bind(change.expected_role.as_str())
+        .execute(tx.conn())
+        .await?
+        .rows_affected();
+        if affected != 1 {
+            return Err(denied(
+                "membership or role changed; refresh before trying again",
+            ));
+        }
+        crate::insert_mentions_in_transaction(&mut tx, event, Some(channel_id)).await?;
+        tx.commit().await?;
+        Ok((stored, true))
     }
 
     /// Removes a member from a channel.
