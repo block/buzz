@@ -19,6 +19,8 @@ import os.log
     accessGroup: Bundle.main.object(forInfoDictionaryKey: "BuzzKeychainAccessGroup") as? String
   )
   private var enrollmentTask: Task<Void, Never>?
+  private lazy var notificationReplyBridge = BuzzNotificationReplyBridge(
+    appGroupIdentifier: appGroupIdentifier)
   var appGroupIdentifier: String? {
     Bundle.main.object(forInfoDictionaryKey: "BuzzAppGroupIdentifier") as? String
   }
@@ -55,6 +57,7 @@ import os.log
   private var nativeCommunityEntryCoordinator: NativeCommunityEntryCoordinator?
   private var nativeProfileTextEditorCoordinator: NativeProfileTextEditorCoordinator?
   private var identityFilePlugin: IdentityFilePlugin?
+  private var photoLibrarySaver: PhotoLibrarySaver?
   private var hostedHpkeChannel: FlutterMethodChannel?
   private var browserAuthBridge: BuzzBrowserAuthBridge?
   private var huddleMediaPlugin: HuddleMediaPlugin?
@@ -66,6 +69,7 @@ import os.log
     // Age checking and notification restoration run asynchronously from
     // Flutter. No age-related storage or platform request may delay launch.
     UNUserNotificationCenter.current().delegate = self
+    BuzzNotificationReplyBridge.registerCategory()
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
@@ -93,6 +97,7 @@ import os.log
       }
     }
     identityFilePlugin = IdentityFilePlugin(messenger: messenger)
+    photoLibrarySaver = PhotoLibrarySaver(messenger: messenger)
     HomeScreenShortcuts.shared.attach(messenger: messenger)
     shareSuggestions = ShareSuggestions { [weak self] in
       self?.appGroupIdentifier.flatMap {
@@ -145,6 +150,9 @@ import os.log
     }
     apnsRegistrationBuffer.attach { [weak self] update in
       self?.pushChannel?.invokeMethod(update.method, arguments: update.arguments)
+    }
+    notificationReplyBridge.notifyFlutter = { [weak self] in
+      self?.pushChannel?.invokeMethod("notificationReplyAvailable", arguments: nil)
     }
     appGroupChannel = FlutterMethodChannel(
       name: "buzz/app_group",
@@ -623,6 +631,9 @@ import os.log
     didReceive response: UNNotificationResponse,
     withCompletionHandler completionHandler: @escaping () -> Void
   ) {
+    if notificationReplyBridge.handle(response, center: center, completion: completionHandler) {
+      return
+    }
     BuzzPushNotificationResponseCoordinator.handle(
       actionIdentifier: response.actionIdentifier,
       userInfo: response.notification.request.content.userInfo,
@@ -667,7 +678,9 @@ import os.log
     _ call: FlutterMethodCall,
     result: @escaping FlutterResult
   ) {
-    if pushSnapshotBridge.handle(call, result: result) {
+    if pushSnapshotBridge.handle(call, result: result)
+      || notificationReplyBridge.handle(call, result: result)
+    {
       return
     }
     switch call.method {
@@ -1187,17 +1200,5 @@ import os.log
         }
       }
     }
-  }
-}
-
-extension BuzzPushNavigationTarget {
-  var flutterArguments: [String: String] {
-    var arguments = [
-      "eventId": eventID,
-      "communityId": communityID,
-      "channelId": channelID,
-    ]
-    arguments["threadRootId"] = threadRootID
-    return arguments
   }
 }

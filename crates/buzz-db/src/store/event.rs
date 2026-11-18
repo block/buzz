@@ -877,6 +877,10 @@ fn push_event_filters(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q
             // Composite keyset cursor for stable pagination.
             // With ORDER BY created_at DESC, id ASC, "next page" means:
             //   created_at < cursor_ts OR (created_at = cursor_ts AND id > cursor_id)
+            // The redundant upper bound gives PostgreSQL an index range start
+            // instead of filtering every newer row at a deep cursor.
+            qb.push(format!(" AND {col_prefix}created_at <= "))
+                .push_bind(u);
             qb.push(format!(" AND ({col_prefix}created_at < "));
             qb.push_bind(u);
             qb.push(format!(" OR ({col_prefix}created_at = "));
@@ -5016,6 +5020,171 @@ mod postgres_tests {
             vec![newest[1].clone(), mid.clone(), oldest.clone()],
             "cursor page keeps the same-second sibling"
         );
+    }
+
+    /// A deep keyset page reads from the cursor, not from the channel head,
+    /// on both production history paths: `query_events_on` (`until` +
+    /// `before_id`) and the channel window. Paging the whole channel still
+    /// returns every row once, in order, across same-second ties.
+    ///
+    /// Without the redundant `created_at <= until` bound beside the keyset
+    /// `OR`, PostgreSQL walks the channel index from the newest row and
+    /// filters every row newer than the cursor, so the deep page reads about
+    /// as many rows as its depth.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn deep_keyset_pages_read_from_the_cursor() {
+        const ROWS: usize = 1_000;
+        const LIMIT: usize = 50;
+        const DEPTH: usize = 900;
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = make_test_channel(&pool, community_uuid, None).await;
+        let author = Keys::generate();
+        // Two rows per second, so pages break inside same-second ties.
+        let start = Utc::now().timestamp() as u64 - 3_600;
+        let mut expected = Vec::with_capacity(ROWS);
+        for i in 0..ROWS {
+            let event = EventBuilder::new(Kind::Custom(9), format!("history {i}"))
+                .custom_created_at(nostr::Timestamp::from(start + (i / 2) as u64))
+                .sign_with_keys(&author)
+                .expect("sign");
+            crate::test_support::insert_historical_event(&pool, community, &event, channel).await;
+            expected.push(event);
+        }
+        expected.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| a.id.as_bytes().cmp(b.id.as_bytes()))
+        });
+        let expected: Vec<_> = expected.into_iter().map(|e| (e.created_at, e.id)).collect();
+        let all: Vec<_> = expected.iter().map(|(_, id)| *id).collect();
+        sqlx::query("ANALYZE events")
+            .execute(&pool)
+            .await
+            .expect("analyze");
+        let at = |ts: nostr::Timestamp| {
+            DateTime::from_timestamp(ts.as_secs() as i64, 0).expect("timestamp")
+        };
+        let query = |cursor: Option<&(nostr::Timestamp, nostr::EventId)>| EventQuery {
+            channel_id: Some(channel),
+            kinds: Some(vec![9]),
+            limit: Some(LIMIT as i64),
+            until: cursor.map(|(ts, _)| at(*ts)),
+            before_id: cursor.map(|(_, id)| id.as_bytes().to_vec()),
+            ..EventQuery::for_community(community)
+        };
+        let ids = |rows: Vec<StoredEvent>| rows.into_iter().map(|r| r.event.id).collect::<Vec<_>>();
+        let want = &all[DEPTH..DEPTH + LIMIT];
+        let cursor = expected[DEPTH - 1];
+        let window_cursor = Some((at(cursor.0), cursor.1.as_bytes().to_vec()));
+
+        // Rows the `events` partitions served to this session's scans since
+        // the last call, flushed so the counters include the last statement.
+        async fn rows_read(conn: &mut sqlx::PgConnection) -> i64 {
+            sqlx::query("SELECT pg_stat_force_next_flush()")
+                .execute(&mut *conn)
+                .await
+                .expect("flush statistics");
+            sqlx::query("SELECT pg_stat_clear_snapshot()")
+                .execute(&mut *conn)
+                .await
+                .expect("clear statistics snapshot");
+            sqlx::query_scalar(
+                "SELECT COALESCE(sum(s.seq_tup_read + COALESCE(s.idx_tup_fetch, 0)), 0)::bigint \
+                 FROM pg_stat_user_tables s JOIN pg_inherits i ON i.inhrelid = s.relid \
+                 WHERE i.inhparent = 'events'::regclass",
+            )
+            .fetch_one(&mut *conn)
+            .await
+            .expect("events scan statistics")
+        }
+
+        // The deep page on a fresh session, so it runs with a custom plan.
+        // Sequential and bitmap scans are off so the planner takes the
+        // ordered index walk a large channel's LIMIT page uses; a small
+        // fixture otherwise reads the whole partition or a bitmap OR, which
+        // hides the missing range start.
+        let mut conn = pool.acquire().await.expect("acquire");
+        sqlx::Connection::clear_cached_statements(&mut *conn)
+            .await
+            .expect("clear prepared statements");
+        sqlx::raw_sql("SET enable_seqscan = off; SET enable_bitmapscan = off")
+            .execute(&mut *conn)
+            .await
+            .expect("pin the ordered index walk");
+        let before = rows_read(&mut conn).await;
+        let page = query_events_on(&mut conn, &query(Some(&cursor)), ReadDeadline::PerRead)
+            .await
+            .expect("deep events page");
+        let events_read = rows_read(&mut conn).await - before;
+        assert_eq!(ids(page), want, "deep events page");
+        let window = crate::thread::get_channel_window_on(
+            &mut conn,
+            community,
+            channel,
+            LIMIT as u32,
+            window_cursor,
+            Some(&[9]),
+            ReadDeadline::PerRead,
+        )
+        .await
+        .expect("deep window page");
+        let window_read = rows_read(&mut conn).await - before - events_read;
+        assert_eq!(
+            window
+                .rows
+                .into_iter()
+                .map(|r| r.stored_event.event.id)
+                .collect::<Vec<_>>(),
+            want,
+            "deep window page"
+        );
+        for (path, read) in [("events", events_read), ("window", window_read)] {
+            assert!(
+                read <= (3 * LIMIT) as i64,
+                "{path} page at depth {DEPTH} read {read} rows for {LIMIT}"
+            );
+        }
+        sqlx::raw_sql("RESET enable_seqscan; RESET enable_bitmapscan")
+            .execute(&mut *conn)
+            .await
+            .expect("reset planner settings");
+        drop(conn);
+
+        // Paging the whole channel returns every row once, in order.
+        let mut paged = Vec::new();
+        let mut cursor = None;
+        loop {
+            let rows = query_events(&pool, &query(cursor.as_ref()))
+                .await
+                .expect("events page");
+            let Some(last) = rows.last() else { break };
+            cursor = Some((last.event.created_at, last.event.id));
+            paged.extend(ids(rows));
+        }
+        assert_eq!(paged, all, "every row once, in order");
+        let mut paged = Vec::new();
+        let mut cursor = None;
+        loop {
+            let window = crate::thread::get_channel_window(
+                &pool,
+                community,
+                channel,
+                LIMIT as u32,
+                cursor,
+                Some(&[9]),
+            )
+            .await
+            .expect("window page");
+            paged.extend(window.rows.into_iter().map(|r| r.stored_event.event.id));
+            let Some(next) = window.next_cursor else {
+                break;
+            };
+            cursor = Some(next);
+        }
+        assert_eq!(paged, all, "every row once, in order");
     }
 
     #[tokio::test]
