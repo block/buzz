@@ -4,13 +4,17 @@
 
 use std::collections::HashSet;
 
-use buzz_core::agent_turn_metric::decrypt_agent_turn_metric;
+use buzz_core::agent_turn_metric::AgentTurnMetricPayload;
 use buzz_core::kind::{KIND_AGENT_TURN_METRIC, KIND_MANAGED_AGENT};
+use buzz_core::observer::{
+    content_looks_like_nip44, ObserverPayloadError, OBSERVER_MAX_PLAINTEXT_LEN,
+};
 use nostr::Event;
 use serde_json::{json, Value};
 
 use super::catalog::single_tag;
 use crate::client::{extract_d_tag, BuzzClient};
+use crate::credentials::Credentials;
 use crate::error::CliError;
 
 const DEFAULT_LIMIT: u32 = 50;
@@ -58,23 +62,64 @@ async fn resolve_agent(client: &BuzzClient, owner: &str, agent: &str) -> Result<
     }
 }
 
-fn read_metric(event: &Event, keys: &nostr::Keys) -> Result<Value, String> {
-    event.verify().map_err(|e| format!("bad signature: {e}"))?;
-    let owner = keys.public_key().to_hex();
+async fn decrypt_metric(
+    credentials: &Credentials,
+    event: &Event,
+) -> Result<Result<AgentTurnMetricPayload, String>, CliError> {
+    if !content_looks_like_nip44(&event.content) {
+        return Ok(Err(ObserverPayloadError::InvalidCiphertextLength(
+            event.content.len(),
+        )
+        .to_string()));
+    }
+    let Some(plaintext) = credentials
+        .nip44_decrypt(&event.pubkey, &event.content)
+        .await?
+    else {
+        return Ok(Err("NIP-44 error: could not decrypt the payload".into()));
+    };
+    if plaintext.len() > OBSERVER_MAX_PLAINTEXT_LEN {
+        return Ok(Err(ObserverPayloadError::PlaintextTooLarge {
+            max: OBSERVER_MAX_PLAINTEXT_LEN,
+            got: plaintext.len(),
+        }
+        .to_string()));
+    }
+    let payload = match serde_json::from_str::<AgentTurnMetricPayload>(&plaintext) {
+        Ok(payload) => payload,
+        Err(e) => return Ok(Err(ObserverPayloadError::Json(e).to_string())),
+    };
+    Ok(payload
+        .validate()
+        .map(|()| payload)
+        .map_err(|e| e.to_string()))
+}
+
+async fn read_metric(
+    event: &Event,
+    credentials: &Credentials,
+) -> Result<Result<Value, String>, CliError> {
+    if let Err(e) = event.verify() {
+        return Ok(Err(format!("bad signature: {e}")));
+    }
+    let owner = credentials.public_key().to_hex();
     if single_tag(event, "p").as_deref() != Some(owner.as_str()) {
-        return Err("p tag is not the reader".into());
+        return Ok(Err("p tag is not the reader".into()));
     }
     let pubkey = event.pubkey.to_hex();
     if single_tag(event, "agent").as_deref() != Some(pubkey.as_str()) {
-        return Err("agent tag is not the author".into());
+        return Ok(Err("agent tag is not the author".into()));
     }
-    let metric = decrypt_agent_turn_metric(keys, event).map_err(|e| e.to_string())?;
-    Ok(json!({
+    let metric = match decrypt_metric(credentials, event).await? {
+        Ok(metric) => metric,
+        Err(reason) => return Ok(Err(reason)),
+    };
+    Ok(Ok(json!({
         "event_id": event.id.to_hex(),
         "agent": pubkey,
         "created_at": event.created_at.as_secs(),
         "metric": metric,
-    }))
+    })))
 }
 
 /// Query, validate, and decrypt metrics. Events that fail any check are
@@ -102,7 +147,7 @@ pub(crate) async fn run(
             })
         })
         .transpose()?;
-    let me = client.keys().public_key().to_hex();
+    let me = client.public_key().to_hex();
     let mut filter = json!({ "kinds": [KIND_AGENT_TURN_METRIC], "#p": [me] });
     if let Some(agent) = agent {
         filter["authors"] = json!([resolve_agent(client, &me, agent).await?]);
@@ -117,17 +162,19 @@ pub(crate) async fn run(
     let mut failed = 0usize;
     let mut first_failure = None;
     for value in raw {
-        let result = serde_json::from_value::<Event>(value)
-            .map_err(|e| format!("unparsable event: {e}"))
-            .and_then(|event| {
-                if !seen.insert(event.id) {
-                    return Ok(None);
-                }
-                read_metric(&event, client.keys()).map(Some)
-            });
-        match result {
-            Ok(Some(metric)) => metrics.push(metric),
-            Ok(None) => {}
+        let event = match serde_json::from_value::<Event>(value) {
+            Ok(event) => event,
+            Err(e) => {
+                failed += 1;
+                first_failure.get_or_insert(format!("unparsable event: {e}"));
+                continue;
+            }
+        };
+        if !seen.insert(event.id) {
+            continue;
+        }
+        match read_metric(&event, client.credentials()).await? {
+            Ok(metric) => metrics.push(metric),
             Err(reason) => {
                 failed += 1;
                 first_failure.get_or_insert(reason);
@@ -198,7 +245,7 @@ mod tests {
     #[tokio::test]
     async fn reads_decrypted_metrics_filtered_by_agent_name_or_pubkey_and_time() {
         let (client, relay) = setup().await;
-        let owner = client.keys().clone();
+        let owner = client.credentials().test_keys();
         let (scout, rover) = (Keys::generate(), Keys::generate());
         seed(&relay, metric(&scout, &owner, 1, 100));
         seed(&relay, metric(&scout, &owner, 2, 200));
@@ -269,7 +316,7 @@ mod tests {
     #[tokio::test]
     async fn bad_events_are_reported_and_never_become_an_empty_success() {
         let (client, relay) = setup().await;
-        let owner = client.keys().clone();
+        let owner = client.credentials().test_keys();
         let agent = Keys::generate();
         let (agent_pk, owner_pk) = (agent.public_key().to_hex(), owner.public_key().to_hex());
 
@@ -297,7 +344,11 @@ mod tests {
             12,
         );
         let wrong_p: Event = serde_json::from_value(wrong_p).unwrap();
-        assert!(read_metric(&wrong_p, &owner).unwrap_err().contains("p tag"));
+        assert!(read_metric(&wrong_p, client.credentials())
+            .await
+            .unwrap()
+            .unwrap_err()
+            .contains("p tag"));
         let wrong_agent = event(
             &agent,
             44200,
@@ -306,7 +357,9 @@ mod tests {
             11,
         );
         let unchecked: Event = serde_json::from_value(wrong_agent.clone()).unwrap();
-        assert!(read_metric(&unchecked, &owner)
+        assert!(read_metric(&unchecked, client.credentials())
+            .await
+            .unwrap()
             .unwrap_err()
             .contains("agent tag"));
         for bad in [garbage, wrong_agent] {
@@ -330,13 +383,9 @@ mod tests {
         let tag_vec = ["auth", &"a".repeat(64), "conditions", &"b".repeat(128)].map(String::from);
         let tag = nostr::Tag::parse(tag_vec.clone()).unwrap();
         let json = serde_json::to_string(&tag_vec).unwrap();
-        let agent_client = BuzzClient::new(
-            "http://127.0.0.1:1".into(),
-            owner_client.keys().clone(),
-            Some(tag),
-            Some(json),
-        )
-        .unwrap();
+        let credentials =
+            Credentials::from_keys(owner_client.credentials().test_keys()).with_auth_tag(tag, json);
+        let agent_client = BuzzClient::new("http://127.0.0.1:1".into(), credentials).unwrap();
         let err = run(&agent_client, None, None, None).await.unwrap_err();
         assert!(matches!(err, CliError::Auth(_)), "{err:?}");
     }

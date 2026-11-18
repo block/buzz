@@ -127,7 +127,7 @@ pub(crate) fn project_catalog_heads(heads: &[Head]) -> Vec<Value> {
 async fn list(client: &BuzzClient) -> Result<Value, CliError> {
     let owner = client
         .auth_tag_owner_hex()
-        .unwrap_or_else(|| client.keys().public_key().to_hex());
+        .unwrap_or_else(|| client.public_key().to_hex());
     let heads = fetch_heads(client, KIND_TEAM, Some(&owner)).await?;
     Ok(Value::Array(project_team_heads(&heads)))
 }
@@ -155,7 +155,7 @@ mod tests {
     #[tokio::test]
     async fn lists_only_the_owners_teams_and_keeps_unknown_membership_unknown() {
         let (client, relay) = setup().await;
-        let me = client.keys().clone();
+        let me = client.credentials().test_keys();
         let other = Keys::generate();
         let team = |content: Value| content.to_string();
 

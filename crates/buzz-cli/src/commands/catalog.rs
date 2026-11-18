@@ -128,6 +128,7 @@ pub(crate) mod test_support {
     use tokio::net::TcpListener;
 
     use crate::client::BuzzClient;
+    use crate::credentials::Credentials;
 
     #[derive(Default)]
     pub struct Relay {
@@ -208,7 +209,7 @@ pub(crate) mod test_support {
     pub async fn setup() -> (BuzzClient, Shared) {
         let relay = Shared::default();
         let url = fake_relay(relay.clone()).await;
-        let client = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+        let client = BuzzClient::new(url, Credentials::from_keys(Keys::generate())).unwrap();
         (client, relay)
     }
 
