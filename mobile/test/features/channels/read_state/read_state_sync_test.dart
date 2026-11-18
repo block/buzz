@@ -314,9 +314,8 @@ void main() {
     restarted.markContextRead('chan-2', clock - 50);
     final follow = restarted.setThreadFollow(channel, root, true);
     await restarted.flush();
-    await restarted.flush();
     await follow;
-    expect(relay.retained[coordinate]!.createdAt, ahead);
+    // The first pass already published the rest beside the held packet.
     expect(
       readStateBlobs().any((blob) => blob['chan-2'] == clock - 50),
       isTrue,
@@ -326,11 +325,20 @@ void main() {
       desktop.threadFollows[threadFollowKey(channel, root)]?.follow,
       isTrue,
     );
+    await restarted.flush();
+    expect(relay.retained[coordinate]!.createdAt, ahead);
     expect(
       ReadStateStorage(prefs).readJournal(journalKey)!['unreadPending'] as Map,
       hasLength(1),
     );
-    expect(restarted.syncError, isNotNull);
+    expect(
+      restarted.syncError,
+      isA<StateError>().having(
+        (e) => e.message,
+        'message',
+        readStateFullMessage,
+      ),
+    );
     expect(restarted.activeChannelOverrides, contains(channel));
   });
 
