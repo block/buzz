@@ -24,6 +24,21 @@ void main() {
       ]);
     });
   }
+
+  test('a malformed descriptor that arrives after a switch began is not '
+      'reported', () async {
+    final reporter = _RecordingDiagnostics();
+    final descriptor = await discoverBuzzPushRelayCapability(
+      'https://relay.example',
+      fetchDescriptor: (_) async =>
+          throw const FormatException('malformed descriptor'),
+      diagnostics: reporter,
+      isCurrent: () => false,
+    );
+
+    expect(descriptor, isNull);
+    expect(reporter.operations, isEmpty);
+  });
 }
 
 class _RecordingDiagnostics extends NoopDiagnosticReporter {

@@ -254,7 +254,7 @@ class BuilderlabAccountClient {
       if (credential is! String ||
           credential.isEmpty ||
           credential.length > 512) {
-        throw AccountFailure.invalidResponse;
+        _invalidResponse('exchange response has no usable credential');
       }
       final verified = await _verify(credential);
       if (DateTime.tryParse(
@@ -263,7 +263,7 @@ class BuilderlabAccountClient {
                 : '',
           ) !=
           verified.expiresAt) {
-        throw AccountFailure.invalidResponse;
+        _invalidResponse('exchange and session expiry differ');
       }
       if (stored != null && stored.subject != verified.subject) {
         throw AccountFailure.differentAccount;
@@ -373,7 +373,7 @@ class BuilderlabAccountClient {
     final expiry = result['expires_at'];
     final parsed = expiry is String ? DateTime.tryParse(expiry) : null;
     if (subject is! String || subject.isEmpty || parsed == null) {
-      throw AccountFailure.invalidResponse;
+      _invalidResponse('session response lacks a subject or expiry');
     }
     if (!parsed.isAfter(DateTime.now().toUtc())) throw AccountFailure.signedOut;
     final needsSetup =
@@ -684,6 +684,17 @@ class BuilderlabAccountClient {
     } catch (error) {
       _unavailable(path, transportFailure(error)?.name ?? 'network');
     }
+  }
+
+  /// A 2xx response whose required fields are missing or unreadable: the
+  /// caller sees an invalid response, and it is reported.
+  Never _invalidResponse(String what) {
+    _diagnostics.reportError(
+      FormatException(what),
+      StackTrace.current,
+      operation: DiagnosticOperation.accountResponse,
+    );
+    throw AccountFailure.invalidResponse;
   }
 
   Never _unavailable(String path, String cause) {

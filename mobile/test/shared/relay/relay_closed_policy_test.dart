@@ -34,6 +34,7 @@ void main() {
       'INVALID: malformed filter': true,
       'invalid: channel is archived': false,
       'invalid: an open channel named "general" already exists': false,
+      'invalid: event timestamp too far from server time': false,
       'duplicate: channel already exists': false,
       'restricted: access revoked': false,
       'rate-limited: quota exceeded; retry in 4s': false,

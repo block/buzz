@@ -113,6 +113,7 @@ final communityPushLeaseDeactivatorProvider =
         community,
         generation: generation,
         relayAuth: ref.read(hostedRelayAuthProvider),
+        diagnostics: ref.read(diagnosticReporterProvider),
       );
     });
 
@@ -135,6 +136,7 @@ Future<void> _deactivateCommunityPushLease(
   Community community, {
   int? generation,
   required HostedRelayAuth relayAuth,
+  required DiagnosticReporter diagnostics,
 }) async {
   final state = community.pushSubscriptionState;
   final acceptedGeneration = state.acceptedGeneration;
@@ -197,6 +199,7 @@ Future<void> _deactivateCommunityPushLease(
               content: content,
               tags: tags,
               createdAt: createdAt,
+              diagnostics: diagnostics,
             ),
   );
   pushLeaseCleanupError.value = null;

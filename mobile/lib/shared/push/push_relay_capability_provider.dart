@@ -43,24 +43,42 @@ final currentRelayPushDescriptorProvider =
         return null;
       }
 
+      // A fetch can finish after a community switch has begun, when reports
+      // already name the next member. Its report would be misattributed.
+      var current = true;
+      final unregister = ref.read(communityTransitionProvider).register(
+        () async {
+          current = false;
+        },
+      );
+      ref.onDispose(() {
+        current = false;
+        unregister();
+      });
       return discoverBuzzPushRelayCapability(
         config.baseUrl,
         fetchDescriptor: ref.read(buzzPushDescriptorFetcherProvider),
         diagnostics: ref.read(diagnosticReporterProvider),
+        isCurrent: () => current,
       );
     });
+
+bool _alwaysCurrent() => true;
 
 Future<BuzzPushLeaseDescriptor?> discoverBuzzPushRelayCapability(
   String relayBaseUrl, {
   required BuzzPushDescriptorFetcher fetchDescriptor,
   DiagnosticReporter diagnostics = const NoopDiagnosticReporter(),
+  bool Function() isCurrent = _alwaysCurrent,
 }) async {
   try {
     return await fetchDescriptor(relayBaseUrl);
   } catch (error, stackTrace) {
     // A relay without Buzz push, or one that can't be reached, is expected; a
     // descriptor that can't be read is not.
-    if (error is FormatException && error is! BuzzPushNotAdvertised) {
+    if (error is FormatException &&
+        error is! BuzzPushNotAdvertised &&
+        isCurrent()) {
       diagnostics.reportError(
         error,
         stackTrace,

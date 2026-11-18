@@ -2,7 +2,9 @@ import 'dart:async';
 
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../diagnostics/diagnostic_reporter.dart';
 import 'nostr_models.dart';
+import 'relay_closed_policy.dart';
 import 'relay_session.dart';
 import 'relay_socket.dart';
 import 'package:buzz/shared/crypto/event_signing.dart';
@@ -78,6 +80,7 @@ Future<NostrEvent> submitSignedEventOnce({
   int? createdAt,
   Duration timeout = const Duration(seconds: 12),
   Map<String, String> headers = const {},
+  DiagnosticReporter diagnostics = const NoopDiagnosticReporter(),
 }) async {
   final privateKey = nostr.Nip19.decode(payload: nsec).data;
   if (privateKey.isEmpty) throw const FormatException('Invalid nsec');
@@ -115,6 +118,13 @@ Future<NostrEvent> submitSignedEventOnce({
             ),
           );
         } else {
+          if (isInvalidRequestRejection(detail)) {
+            diagnostics.reportError(
+              RelayInvalidRequest(),
+              StackTrace.current,
+              operation: DiagnosticOperation.relayRejection,
+            );
+          }
           result.completeError(Exception('Relay rejected event: $detail'));
         }
       }
@@ -127,6 +137,7 @@ Future<NostrEvent> submitSignedEventOnce({
     },
   );
   socket.headers = headers;
+  socket.diagnostics = diagnostics;
   final resultFuture = result.future.timeout(timeout);
   try {
     await socket.connect();

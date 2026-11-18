@@ -57,12 +57,14 @@ class RelayInvalidRequest implements Exception {
 
 /// Whether [message], a relay `OK` or `CLOSED` reason, says the app sent
 /// something invalid. Refusals the app handles as expected outcomes, an
-/// archived channel or an open channel name that is taken, are not.
+/// archived channel, an open channel name that is taken or a read-state
+/// update whose timestamp has fallen outside the relay's window, are not.
 bool isInvalidRequestRejection(String message) {
   final normalized = message.trim().toLowerCase();
   return normalized.startsWith('invalid:') &&
       !normalized.startsWith('invalid: channel is archived') &&
-      !normalized.startsWith('invalid: an open channel named');
+      !normalized.startsWith('invalid: an open channel named') &&
+      !normalized.contains('timestamp too far from server time');
 }
 
 /// Recovery policy for a relay `CLOSED` subscription message.

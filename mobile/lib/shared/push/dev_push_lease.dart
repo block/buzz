@@ -50,10 +50,12 @@ class BuzzPushLeaseDescriptor {
   factory BuzzPushLeaseDescriptor.fromRelayInformation(
     Map<String, dynamic> information,
   ) {
-    final extensions = _stringList(
-      information['supported_extensions'],
-      name: 'supported_extensions',
-    );
+    // NIP-11 makes the list optional: a relay may leave it out or send none.
+    final advertised = information['supported_extensions'];
+    if (advertised == null || (advertised is List && advertised.isEmpty)) {
+      throw const BuzzPushNotAdvertised();
+    }
+    final extensions = _stringList(advertised, name: 'supported_extensions');
     if (!extensions.contains('buzz-push-v1')) {
       throw const BuzzPushNotAdvertised();
     }

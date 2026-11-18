@@ -2310,6 +2310,16 @@ void main() {
       'invalid: channel is archived',
     ]);
     await expectLater(archived, throwsA(isA<Exception>()));
+    // A read-state retry past the relay's clock window, which the app
+    // recovers from.
+    final stale = session.publish(_event(id: 'event-stale'));
+    session.debugHandleMessage([
+      'OK',
+      'event-stale',
+      false,
+      'invalid: event timestamp too far from server time',
+    ]);
+    await expectLater(stale, throwsA(isA<Exception>()));
     expect(reporter.errors, isEmpty);
 
     final invalid = session.publish(_event(id: 'event-2'));
