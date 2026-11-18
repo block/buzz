@@ -6,6 +6,7 @@ import 'dart:math';
 import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:crypto/crypto.dart';
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -173,6 +174,103 @@ void main() {
       // Backoff was doubled to 2s when the previous attempt fired and the
       // connection did not stay up long enough to reset it.
       expect(h.reconnectDelays.last, const Duration(seconds: 2));
+    });
+  });
+
+  group('background work through RelaySessionNotifier', () {
+    test('reconnects a paused session and reports when it can publish, '
+        'or that it could not in time', () async {
+      final h = await _Harness.start();
+      h.sockets.last.connectSuccessfully();
+      h.session.onAppPaused();
+      h.session.debugPauseNow();
+      final socketsBefore = h.sockets.length;
+
+      final ready = h.session.connectForBackgroundWork(
+        timeout: const Duration(seconds: 5),
+      );
+      await h.settle();
+      expect(h.sockets.length, socketsBefore + 1);
+      h.sockets.last.connectSuccessfully();
+      expect(await ready, isTrue);
+
+      h.session.debugPauseNow();
+      expect(
+        await h.session.connectForBackgroundWork(
+          timeout: const Duration(milliseconds: 300),
+        ),
+        isFalse,
+      );
+    });
+
+    test('opening the app keeps a socket held for background work, so a '
+        'publish waiting for its OK still gets it', () async {
+      final h = await _Harness.start();
+      h.sockets.last.connectSuccessfully();
+      h.session.onAppPaused();
+      final release = h.session.holdForBackgroundWork(
+        const Duration(seconds: 30),
+      );
+      h.now = h.now.add(const Duration(seconds: 20));
+      final event = NostrEvent(
+        id: 'd' * 64,
+        pubkey: 'e' * 64,
+        createdAt: h.nowSeconds,
+        kind: 9,
+        tags: const [],
+        content: 'reply',
+        sig: 'f' * 128,
+      );
+      final published = h.session.publish(event);
+      final socketsBefore = h.sockets.length;
+
+      h.session.onAppResumed();
+      await h.settle();
+      expect(h.sockets.length, socketsBefore);
+      h.receive(['OK', event.id, true, '']);
+      expect((await published).id, event.id);
+      release();
+    });
+  });
+
+  group('background work hold', () {
+    test('keeps the grace period from disconnecting, even a disconnect '
+        'already waiting on cleanup, until released or its limit', () {
+      fakeAsync((async) {
+        late _Harness h;
+        unawaited(_Harness.start().then((started) => h = started));
+        async.elapse(Duration.zero);
+        h.sockets.last.connectSuccessfully();
+        final cleanup = Completer<void>();
+        h.session.registerBeforePause(() => cleanup.future);
+
+        // The grace disconnect starts and waits on cleanup; work starts then.
+        h.session.onAppPaused();
+        async.elapse(const Duration(seconds: 5));
+        final release = h.session.holdForBackgroundWork(
+          const Duration(seconds: 20),
+        );
+        cleanup.complete();
+        async.elapse(const Duration(seconds: 10));
+        expect(h.session.state.status, isNot(SessionStatus.disconnected));
+
+        // Ending the hold starts the usual grace period again.
+        release();
+        async.elapse(const Duration(seconds: 4));
+        expect(h.session.state.status, isNot(SessionStatus.disconnected));
+        async.elapse(const Duration(seconds: 1));
+        expect(h.session.state.status, SessionStatus.disconnected);
+
+        // A hold nobody releases ends at its limit.
+        h.session.connectForBackgroundWork(timeout: const Duration(seconds: 5));
+        async.elapse(Duration.zero);
+        h.sockets.last.connectSuccessfully();
+        h.session.holdForBackgroundWork(const Duration(seconds: 20));
+        async.elapse(const Duration(seconds: 20));
+        expect(h.session.state.status, isNot(SessionStatus.disconnected));
+        async.elapse(const Duration(seconds: 5));
+        expect(h.session.state.status, SessionStatus.disconnected);
+      });
     });
   });
 
