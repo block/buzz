@@ -180,7 +180,7 @@ async fn workflow_media_retry_refetches_agent_ownership_before_deleting() {
         after.stage_history[1].metadata_json["result"]["selected_files"],
         0
     );
-    assert_eq!(after.stage_history[2].stage, "purge_db");
+    assert_eq!(after.stage_history[2].stage, "purge_content");
     assert!(!fixture.deleted.load(Ordering::SeqCst));
     assert_eq!(fixture.uploader_count().await, 1);
 }
