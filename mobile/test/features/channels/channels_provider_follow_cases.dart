@@ -9,9 +9,11 @@ class _TestFollows extends ThreadFollowsNotifier {
   void choose({
     Set<String> followed = const {},
     Set<String> unfollowed = const {},
+    Map<String, String> channelByRoot = const {},
   }) => state = ThreadFollowsState(
     followedRootIds: followed,
     unfollowedRootIds: unfollowed,
+    channelByRoot: channelByRoot,
     incomplete: false,
   );
 }
@@ -83,6 +85,86 @@ void _threadFollowCases() {
       await _settle();
       await container.read(channelsProvider.notifier).waitForUnreadCatchUp();
       expect(observed(container), contains(reply.id));
+    });
+
+    /// Applies [before], then [widen], after a first catch-up and returns the `since` of the
+    /// next catch-up's filters, per channel.
+    Future<Map<String, Set<int?>>> sinceAfter(
+      void Function(_TestFollows follows) widen, {
+      void Function(_TestFollows follows)? before,
+    }) async {
+      final session = _FakeRelaySession(
+        memberships: [
+          _membership(_channelA, 'me'),
+          _membership(_channelB, 'me'),
+        ],
+        metadata: [
+          _meta(id: _channelA, name: 'general'),
+          _meta(id: _channelB, name: 'random'),
+        ],
+      );
+      final follows = _TestFollows();
+      final container = _buildContainer(session: session, follows: follows);
+      addTearDown(container.dispose);
+      bool isUnread(List<NostrFilter> batch) =>
+          batch.isNotEmpty && batch.every((filter) => filter.since != null);
+      await container.read(channelsProvider.future);
+      await _waitUntil(() => session.queryBatches.any(isUnread));
+      await _settle();
+      before?.call(follows);
+      await _settle();
+
+      final count = session.queryBatches.where(isUnread).length;
+      widen(follows);
+      await _waitUntil(
+        () => session.queryBatches.where(isUnread).length > count,
+      );
+      await _settle();
+      return {
+        for (final channelId in [_channelA, _channelB])
+          channelId: {
+            for (final filter in session.queryBatches.lastWhere(isUnread))
+              if (filter.tags['#h']?.contains(channelId) ?? false) filter.since,
+          },
+      };
+    }
+
+    test(
+      'a newly followed thread re-catches up only its own channel',
+      () async {
+        final since = await sinceAfter(
+          (follows) => follows.choose(
+            followed: {root},
+            channelByRoot: {root: _channelA},
+          ),
+        );
+        // Never read: the followed thread's channel asks for its whole window
+        // again; the other channel keeps its incremental cursor.
+        expect(since[_channelA], {0});
+        expect(since[_channelB], everyElement(greaterThan(0)));
+      },
+    );
+
+    test('a followed thread in an unknown channel re-catches up every '
+        'channel', () async {
+      final since = await sinceAfter(
+        (follows) => follows.choose(followed: {root}),
+      );
+      expect(since[_channelA], {0});
+      expect(since[_channelB], {0});
+    });
+
+    test('a removed unfollow re-catches up the channel it had', () async {
+      final since = await sinceAfter(
+        before: (follows) => follows.choose(
+          unfollowed: {root},
+          channelByRoot: {root: _channelA},
+        ),
+        // Back to automatic: the next state no longer names the channel.
+        (follows) => follows.choose(),
+      );
+      expect(since[_channelA], {0});
+      expect(since[_channelB], everyElement(greaterThan(0)));
     });
 
     test('an unfollow never mutes an ordinary DM reply', () async {

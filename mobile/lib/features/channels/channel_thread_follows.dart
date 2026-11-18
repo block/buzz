@@ -41,7 +41,8 @@ extension _ChannelThreadFollows on ChannelsNotifier {
   /// change, from this device or another. A newly unfollowed thread drops its
   /// ordinary replies; mentions, broadcasts and DMs still count. A thread
   /// newly followed, or back to automatic, can count replies that were never
-  /// retained, so those channels catch up again over their whole window.
+  /// retained, so those threads' channels catch up again over their whole
+  /// window.
   /// No read frontier moves either way.
   void _onThreadFollowsChanged(
     ThreadFollowsState? previous,
@@ -73,7 +74,17 @@ extension _ChannelThreadFollows on ChannelsNotifier {
       );
     }
     if (widened.isNotEmpty) {
-      _unreadCaughtUpByChannel.clear();
+      // Only the widened threads' channels catch up again; a root whose
+      // channel is unknown could be in any of them.
+      final widenedChannels = {
+        for (final rootId in widened)
+          next.channelByRoot[rootId] ?? previous?.channelByRoot[rootId],
+      };
+      if (widenedChannels.contains(null)) {
+        _unreadCaughtUpByChannel.clear();
+      } else {
+        widenedChannels.forEach(_unreadCaughtUpByChannel.remove);
+      }
       unawaited(_refreshInBackground(queueIfBusy: true));
     }
     state = state.whenData((channels) => List<Channel>.of(channels));

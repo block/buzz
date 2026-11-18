@@ -21,6 +21,10 @@ String threadFollowKey(String channelId, String rootId) => '$channelId:$rootId';
 /// The root event id of a [threadFollowKey].
 String threadFollowRoot(String key) => key.substring(key.lastIndexOf(':') + 1);
 
+/// The channel id of a [threadFollowKey].
+String threadFollowChannel(String key) =>
+    key.substring(0, key.lastIndexOf(':'));
+
 bool isValidThreadFollowKey(String key) => _threadKey.hasMatch(key);
 
 /// One explicit choice: follow or unfollow, at the time of the action.

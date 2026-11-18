@@ -1259,6 +1259,8 @@ void main() {
     }).read(threadFollowsProvider);
     expect(follows.followedRootIds, {legacyRoot});
     expect(follows.unfollowedRootIds, {syncedRoot});
+    // A synced choice names its channel; the pre-sync one has none known.
+    expect(follows.channelByRoot, {syncedRoot: _channelId});
   });
 
   group('showImageActions', () {

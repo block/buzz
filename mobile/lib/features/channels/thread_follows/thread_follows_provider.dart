@@ -15,6 +15,9 @@ class ThreadFollowsState {
   /// even in a thread the user started or replied in.
   final Set<String> unfollowedRootIds;
 
+  /// The channel of each thread root with a choice, where known.
+  final Map<String, String> channelByRoot;
+
   /// Whether some choices may be missing (see NIP-RS Buzz Thread Follow
   /// Choices).
   final bool incomplete;
@@ -22,6 +25,7 @@ class ThreadFollowsState {
   const ThreadFollowsState({
     this.followedRootIds = const {},
     this.unfollowedRootIds = const {},
+    this.channelByRoot = const {},
     this.incomplete = true,
   });
 
@@ -79,6 +83,12 @@ class ThreadFollowsNotifier extends Notifier<ThreadFollowsState> {
       unfollowedRootIds: {
         for (final MapEntry(:key, :value) in readState.threadFollows.entries)
           if (!value.follow) threadFollowRoot(key),
+      },
+      channelByRoot: {
+        for (final entry in _legacy)
+          entry.rootId: ?_channelByRoot[entry.rootId],
+        for (final key in readState.threadFollows.keys)
+          threadFollowRoot(key): threadFollowChannel(key),
       },
       incomplete: readState.threadFollowsIncomplete,
     );
