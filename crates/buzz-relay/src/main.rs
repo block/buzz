@@ -1284,10 +1284,15 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         });
     }
 
+    buzz_relay::handlers::artifact_sync::spawn_signals(Arc::clone(&state));
+
     // NIP-AR Sync: a possible loss on the Redis link resyncs every sync.
     tokio::spawn(buzz_relay::handlers::artifact_sync::watch_link(Arc::clone(
         &state,
     )));
+    tokio::spawn(buzz_relay::handlers::artifact_sync::watch_community_access(
+        Arc::clone(&state),
+    ));
 
     // Multi-node fan-out: deliver events other relay instances published to
     // Redis to local WS subscribers (see `handlers::multinode_fanout`).

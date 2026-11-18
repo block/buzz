@@ -88,7 +88,7 @@ async fn publish(state: &Arc<AppState>, tenant: &TenantContext, stored: &StoredE
     super::event::fan_out_event_to_local_subscribers(state, tenant.community(), stored).await;
 }
 
-fn verify_revision_auth(event: &Event) -> Result<(), IngestError> {
+pub(super) fn verify_revision_auth(event: &Event) -> Result<(), IngestError> {
     for tag in event.tags.iter().filter(|t| t.as_slice()[0] == "auth") {
         let json = serde_json::to_string(tag.as_slice())
             .map_err(|e| IngestError::Internal(e.to_string()))?;

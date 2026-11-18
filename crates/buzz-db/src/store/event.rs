@@ -746,6 +746,7 @@ fn build_query_events_sql(
 
     // Use unqualified column names when no join, qualified when joined.
     let col_prefix = if q.p_tag_hex.is_some() { "e." } else { "" };
+    push_community_artifact_exclusion(&mut qb, col_prefix);
     push_event_filters(&mut qb, col_prefix, q);
     // A per-channel read scopes each lateral to one channel of the set.
     if per_channel.is_some() {
@@ -783,11 +784,12 @@ fn build_query_events_sql(
 /// test, the channel scope (`push_channel_scope`) and the `#p` join, on
 /// columns qualified by `col_prefix` (`""` or `"e."`).
 fn push_event_filters(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q: &EventQuery) {
+    push_community_artifact_exclusion(qb, col_prefix);
     // Generic reads return only current artifact revisions, including delete
     // tombstones; explicit revision IDs also read earlier revisions.
     if q.ids.is_none() {
         let table = col_prefix.strip_suffix('.').unwrap_or("events");
-        qb.push(format!(" AND NOT ({table}.kind = 45010 AND NOT EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id={table}.community_id AND ah.event_id={table}.id))"));
+        qb.push(format!(" AND NOT ({table}.kind = 45010 AND NOT EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id={table}.community_id AND ah.event_id={table}.id AND ah.scope='channel'))"));
     }
     push_notice_visibility(qb, col_prefix, q);
 
@@ -1496,6 +1498,17 @@ pub(crate) fn row_to_stored_event(row: sqlx::postgres::PgRow) -> Result<Option<S
     let received_at: DateTime<Utc> = row.try_get("received_at")?;
 
     let channel_id: Option<Uuid> = row.try_get("channel_id")?;
+    // Defense in depth for every hydration caller. Explicit community reads
+    // reconstruct their ledger payload only after community admission.
+    if kind_i32 == 45010
+        && (channel_id.is_none()
+            || tags_json.as_array().is_none_or(|tags| {
+                tags.iter()
+                    .any(|tag| tag.get(0).and_then(serde_json::Value::as_str) == Some("community"))
+            }))
+    {
+        return Ok(None);
+    }
 
     // kind is stored as i32 (Postgres INT) but Nostr uses u16. Values > 65535 are corrupt.
     let kind_u16 = u16::try_from(kind_i32)
@@ -1599,11 +1612,12 @@ fn count_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
     };
 
     let col_prefix = if q.p_tag_hex.is_some() { "e." } else { "" };
+    push_community_artifact_exclusion(&mut qb, col_prefix);
     // Generic reads return only current artifact revisions, including delete
     // tombstones; explicit revision IDs also read earlier revisions.
     if q.ids.is_none() {
         let table = if q.p_tag_hex.is_some() { "e" } else { "events" };
-        qb.push(format!(" AND NOT ({table}.kind = 45010 AND NOT EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id={table}.community_id AND ah.event_id={table}.id))"));
+        qb.push(format!(" AND NOT ({table}.kind = 45010 AND NOT EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id={table}.community_id AND ah.event_id={table}.id AND ah.scope='channel'))"));
     }
     push_notice_visibility(&mut qb, col_prefix, q);
 
@@ -1796,7 +1810,7 @@ pub(crate) async fn get_event_by_id_with_operation(
     let mut connection = crate::observability::acquire_writer(pool, operation).await?;
     let row = sqlx::query(
         "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
-         FROM events WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
+         FROM events WHERE community_id = $1 AND id = $2 AND (kind <> 45010 OR (channel_id IS NOT NULL AND NOT tags @> '[[\"community\"]]'::jsonb)) AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
     )
     .bind(community_id.as_uuid())
     .bind(id_bytes)
@@ -1873,7 +1887,7 @@ pub(crate) async fn get_event_by_id_including_deleted_with_operation(
     let mut connection = crate::observability::acquire_writer(pool, operation).await?;
     let row = sqlx::query(
         "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
-         FROM events WHERE community_id = $1 AND id = $2 ORDER BY created_at DESC LIMIT 1",
+         FROM events WHERE community_id = $1 AND id = $2 AND (kind <> 45010 OR (channel_id IS NOT NULL AND NOT tags @> '[[\"community\"]]'::jsonb)) ORDER BY created_at DESC LIMIT 1",
     )
     .bind(community_id.as_uuid())
     .bind(id_bytes)
@@ -1933,6 +1947,7 @@ pub(crate) async fn get_events_by_ids_on(
          FROM events WHERE community_id = ",
     );
     qb.push_bind(community_id.as_uuid());
+    push_community_artifact_exclusion(&mut qb, "");
     qb.push(" AND deleted_at IS NULL AND id IN (");
     let mut sep = qb.separated(", ");
     for id in ids {
@@ -3047,7 +3062,10 @@ mod e_tag_filter_shape_tests {
 
         assert!(sql.starts_with("WITH m AS MATERIALIZED (SELECT "));
         assert_eq!(sql.matches("tags @> ANY(").count(), 1);
-        assert!(!sql.contains(" OR "));
+        // Audience predicates may contain OR; reference alternatives must
+        // remain one array-bound predicate inside the materialized fence.
+        assert!(!sql.contains(" OR tags @>"));
+        assert!(!sql.contains(" OR e.tags @>"));
         let fence_end = sql.find(") SELECT * FROM m ").expect("fence closes");
         assert!(sql.contains("::jsonb[])"));
         assert!(!sql[..fence_end].contains("ORDER BY"));
@@ -7195,4 +7213,11 @@ mod postgres_tests {
             "mention row must be committed atomically alongside the thread event"
         );
     }
+}
+
+/// Exclude the explicit community audience from every ordinary event surface,
+/// even on disabled/bridge relays. A missing home also fails closed. This only
+/// withholds data; it never derives or grants an audience from unsigned metadata.
+fn push_community_artifact_exclusion(qb: &mut QueryBuilder<sqlx::Postgres>, prefix: &str) {
+    qb.push(format!(" AND ({prefix}kind <> 45010 OR ({prefix}channel_id IS NOT NULL AND NOT {prefix}tags @> '[[\"community\"]]'::jsonb))"));
 }

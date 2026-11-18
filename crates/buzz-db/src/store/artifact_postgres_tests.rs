@@ -823,3 +823,520 @@ async fn sync_snapshot_pages_are_one_cut_and_head_includes_deletions() {
         .unwrap()
         .is_none());
 }
+
+mod community {
+    use super::*;
+    use crate::community_artifact::{
+        set_policy_in_transaction, CommunityArtifactPrincipal, PolicyOutcome,
+    };
+    use serde_json::json;
+
+    async fn contract(f: &Fixture) {
+        assert!(!f.db.community_artifact_schema_ready().await.unwrap());
+        let mut connection = f.db.pool.acquire().await.unwrap();
+        sqlx::query(
+            "SET buzz.community_artifact_contract_ready='all-backends-enforce-community-audience'",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../../../scripts/maintenance/community-artifact-contract.sql"
+        ))
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        assert!(f.db.community_artifact_schema_ready().await.unwrap());
+    }
+    fn principal(keys: &Keys, roster: bool) -> CommunityArtifactPrincipal {
+        CommunityArtifactPrincipal {
+            owner_admission: true,
+            pubkey: keys.public_key().to_bytes().to_vec(),
+            verified_owner: None,
+            require_membership: roster,
+        }
+    }
+    fn revision(f: &Fixture, d: Uuid, op: &str, prev: Option<&Event>, keys: &Keys) -> Event {
+        let mut tags = vec![
+            vec!["ar".into(), "1".into()],
+            vec!["d".into(), d.to_string()],
+            vec!["community".into(), f.community.to_string()],
+            vec!["type".into(), "example.settings".into()],
+            vec!["op".into(), op.into()],
+        ];
+        if op != "delete" {
+            tags.push(vec!["title".into(), "Settings".into()]);
+        }
+        if let Some(prev) = prev {
+            tags.push(vec!["prev".into(), prev.id.to_hex()]);
+        }
+        EventBuilder::new(
+            Kind::Custom(45010),
+            if op == "delete" {
+                ""
+            } else {
+                "community private needle"
+            },
+        )
+        .tags(tags.into_iter().map(|t| Tag::parse(t).unwrap()))
+        .sign_with_keys(keys)
+        .unwrap()
+    }
+    fn policy(f: &Fixture, ty: &str, value: &str, prev: Option<&Event>) -> Event {
+        EventBuilder::new(Kind::Custom(9034), "")
+            .tags([
+                Tag::parse(["community", &f.community.to_string()]).unwrap(),
+                Tag::parse(["type", ty]).unwrap(),
+                Tag::parse(["policy", value]).unwrap(),
+                Tag::parse([
+                    "prev",
+                    &prev.map(|e| e.id.to_hex()).unwrap_or_else(|| "0".into()),
+                ])
+                .unwrap(),
+            ])
+            .sign_with_keys(&f.owner)
+            .unwrap()
+    }
+    async fn set_policy(f: &Fixture, event: &Event) -> PolicyOutcome {
+        let mut tx = f.db.pool.begin().await.unwrap();
+        let out = set_policy_in_transaction(
+            &mut tx,
+            f.community,
+            &principal(&f.owner, false),
+            event,
+            &artifact::parse_policy_command(event).unwrap(),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        out
+    }
+    async fn role(f: &Fixture, keys: &Keys, value: &str) {
+        sqlx::query("INSERT INTO relay_members(community_id,pubkey,role) VALUES($1,$2,$3) ON CONFLICT(community_id,pubkey) DO UPDATE SET role=EXCLUDED.role")
+            .bind(f.community.as_uuid()).bind(keys.public_key().to_hex()).bind(value).execute(&f.db.pool).await.unwrap();
+    }
+    async fn accept(
+        f: &Fixture,
+        event: &Event,
+        reader: &CommunityArtifactPrincipal,
+    ) -> crate::Result<ArtifactOutcome> {
+        f.db.accept_community_artifact(
+            f.community,
+            reader,
+            event,
+            &artifact::validate(event).unwrap(),
+        )
+        .await
+    }
+    async fn read(
+        f: &Fixture,
+        reader: &CommunityArtifactPrincipal,
+        view: &str,
+        d: Uuid,
+    ) -> crate::Result<Vec<buzz_core::StoredEvent>> {
+        f.db.query_community_artifacts(
+            f.community,
+            reader,
+            &artifact::parse_query(&json!({"artifact":view,"scope":"community","#d":[d]})).unwrap(),
+        )
+        .await
+    }
+
+    /// Mutation: dropping the old primary key in expand makes the legacy
+    /// ON CONFLICT below fail. Mutation: omitting scope from a head/history
+    /// predicate aliases the legal identical d after the operator contract.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn expand_keeps_legacy_conflict_target_contract_separates_scopes() {
+        let f = Fixture::new().await;
+        let d = Uuid::new_v4();
+        let channel = f.revision(d, "create", f.a, None, &f.owner, vec![]);
+        assert!(matches!(
+            f.accept(&channel, None).await,
+            ArtifactOutcome::Accepted(_)
+        ));
+        // Exercise the documented pre-expansion/concurrent-prebuild procedure
+        // on populated tables, including recovery from rolled-back columns.
+        sqlx::raw_sql("ALTER TABLE artifact_heads DROP COLUMN scope; ALTER TABLE artifact_heads ALTER COLUMN channel_id SET NOT NULL; ALTER TABLE artifact_revisions DROP COLUMN scope, DROP COLUMN community_event, DROP COLUMN redacted; ALTER TABLE communities DROP COLUMN artifact_type_policies;")
+            .execute(&f.db.pool).await.unwrap();
+        let expand = include_str!("../../../../migrations/0097_community_artifact_expand.sql");
+        let additive = expand.split("-- Small deployments").next().unwrap();
+        let mut tx = f.db.pool.begin().await.unwrap();
+        sqlx::raw_sql(additive).execute(&mut *tx).await.unwrap();
+        tx.commit().await.unwrap();
+        for sql in [
+            "CREATE UNIQUE INDEX CONCURRENTLY artifact_heads_scoped_identity ON artifact_heads(community_id,scope,artifact_id)",
+            "CREATE INDEX CONCURRENTLY artifact_revisions_scoped_identity ON artifact_revisions(community_id,scope,artifact_id)",
+            "CREATE INDEX CONCURRENTLY artifact_heads_live_type ON artifact_heads(community_id,scope,artifact_type,artifact_id) WHERE NOT deleted",
+        ] { sqlx::query(sql).execute(&f.db.pool).await.unwrap(); }
+        let mut tx = f.db.pool.begin().await.unwrap();
+        sqlx::raw_sql(expand).execute(&mut *tx).await.unwrap();
+        tx.commit().await.unwrap();
+        // The exact legacy upsert target and output columns still work on the
+        // expanded catalog, even on a populated table.
+        let output:(Vec<u8>,Uuid)=sqlx::query_as("INSERT INTO artifact_heads(community_id,artifact_id,event_id,channel_id,artifact_type) VALUES($1,$2,$3,$4,'buzz.task') ON CONFLICT(community_id,artifact_id) DO UPDATE SET event_id=EXCLUDED.event_id RETURNING event_id,channel_id")
+            .bind(f.community.as_uuid()).bind(d).bind(channel.id.as_bytes().as_slice()).bind(f.a).fetch_one(&f.db.pool).await.unwrap();
+        assert_eq!(output, (channel.id.as_bytes().to_vec(), f.a));
+        assert!(!f.db.community_artifact_schema_ready().await.unwrap());
+        let mut conn = f.db.pool.acquire().await.unwrap();
+        assert!(sqlx::raw_sql(include_str!(
+            "../../../../scripts/maintenance/community-artifact-contract.sql"
+        ))
+        .execute(&mut *conn)
+        .await
+        .is_err());
+        sqlx::query("ROLLBACK").execute(&mut *conn).await.unwrap();
+        drop(conn);
+        contract(&f).await;
+        let community = revision(&f, d, "create", None, &f.owner);
+        let reader = principal(&f.owner, false);
+        assert!(matches!(
+            accept(&f, &community, &reader).await.unwrap(),
+            ArtifactOutcome::Accepted(_)
+        ));
+        let channel_update = f.revision(d, "update", f.a, Some(&channel), &f.owner, vec![]);
+        assert!(matches!(
+            f.accept(&channel_update, None).await,
+            ArtifactOutcome::Accepted(_)
+        ));
+        assert_eq!(
+            read(&f, &reader, "head", d).await.unwrap()[0].event.id,
+            community.id
+        );
+        assert_eq!(read(&f, &reader, "history", d).await.unwrap().len(), 1);
+        let (legacy, _) = f
+            .query(&f.owner, json!({"artifact":"history","#d":[d]}), false)
+            .await;
+        assert_eq!(legacy.len(), 2);
+        assert!(legacy.iter().all(|e| e.channel_id == Some(f.a)));
+        let deleted = revision(&f, d, "delete", Some(&community), &f.owner);
+        assert!(matches!(
+            accept(&f, &deleted, &reader).await.unwrap(),
+            ArtifactOutcome::Accepted(_)
+        ));
+        assert!(read(&f, &reader, "current", d).await.unwrap().is_empty());
+        assert_eq!(
+            read(&f, &reader, "head", d).await.unwrap()[0].event.id,
+            deleted.id
+        );
+        let restore = revision(&f, d, "restore", Some(&deleted), &f.owner);
+        assert!(matches!(
+            accept(&f, &restore, &reader).await.unwrap(),
+            ArtifactOutcome::Accepted(_)
+        ));
+        role(&f, &f.owner, "owner").await;
+        assert!(f
+            .db
+            .redact_community_artifact(f.community, &reader, restore.id.as_bytes())
+            .await
+            .unwrap()
+            .is_some());
+        assert!(read(&f, &reader, "head", d).await.unwrap().is_empty());
+        assert!(f
+            .db
+            .community_artifact_accepted(f.community, &reader, &restore)
+            .await
+            .unwrap());
+        assert_eq!(
+            f.count(&f.owner, json!({"artifact":"current","#d":[d]}))
+                .await,
+            1
+        );
+        f.db.validate_deletion_serving_catalog().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn policy_cas_race_replay_cap_and_retained_everyone() {
+        let f = Fixture::new().await;
+        contract(&f).await;
+        role(&f, &f.owner, "owner").await;
+        let reader = principal(&f.owner, false);
+        let unset =
+            f.db.community_artifact_policy(f.community, &reader, "example.settings")
+                .await
+                .unwrap();
+        assert_eq!(unset.policy, "everyone");
+        assert_eq!(unset.revision, None);
+        let a = policy(&f, "example.settings", "admins", None);
+        let b = policy(&f, "example.settings", "everyone", None);
+        let (ra, rb) = tokio::join!(set_policy(&f, &a), set_policy(&f, &b));
+        let winner = match (ra, rb) {
+            (PolicyOutcome::Applied, PolicyOutcome::Conflict(_)) => &a,
+            (PolicyOutcome::Conflict(_), PolicyOutcome::Applied) => &b,
+            x => panic!("one winner: {x:?}"),
+        };
+        assert_eq!(set_policy(&f, winner).await, PolicyOutcome::Duplicate);
+        let everyone = policy(&f, "example.settings", "everyone", Some(winner));
+        assert_eq!(set_policy(&f, &everyone).await, PolicyOutcome::Applied);
+        assert!(matches!(
+            set_policy(&f, winner).await,
+            PolicyOutcome::Conflict(_)
+        ));
+        let state =
+            f.db.community_artifact_policy(f.community, &reader, "example.settings")
+                .await
+                .unwrap();
+        assert_eq!(state.policy, "everyone");
+        assert_eq!(state.revision, Some(everyone.id.to_hex()));
+        // Fill the bounded map efficiently, then exercise the production CAS
+        // for both an existing slot and a new explicit everyone slot.
+        let entries: serde_json::Map<String, serde_json::Value> = (0..255)
+            .map(|i| {
+                (
+                    format!("example.slot{i}"),
+                    json!({"policy":"admins","revision":"a".repeat(64)}),
+                )
+            })
+            .chain(std::iter::once((
+                "example.settings".into(),
+                json!({"policy":"everyone","revision":everyone.id.to_hex()}),
+            )))
+            .collect();
+        sqlx::query("UPDATE communities SET artifact_type_policies=$2 WHERE id=$1")
+            .bind(f.community.as_uuid())
+            .bind(serde_json::Value::Object(entries))
+            .execute(&f.db.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            set_policy(&f, &policy(&f, "example.new", "everyone", None)).await,
+            PolicyOutcome::Conflict(_)
+        ));
+        let update = policy(&f, "example.settings", "admins", Some(&everyone));
+        assert_eq!(set_policy(&f, &update).await, PolicyOutcome::Applied);
+        let event = revision(&f, Uuid::new_v4(), "create", None, &f.peer);
+        assert!(accept(&f, &event, &principal(&f.peer, false))
+            .await
+            .is_err());
+        let mut delegated = principal(&f.peer, true);
+        delegated.verified_owner = Some(reader.pubkey.clone());
+        // Delegation gives admission, never the admin edit role.
+        assert!(accept(&f, &event, &delegated).await.is_err());
+        assert!(f
+            .db
+            .community_artifact_policy(f.community, &delegated, "example.settings")
+            .await
+            .is_ok());
+    }
+
+    /// Admission must be authoritative even with a caller holding stale
+    /// transport ownership/membership. Accepted replay ignores timeout and
+    /// policy, but never tenant or ban state.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn replay_and_reads_recheck_admission_and_applicable_owner() {
+        let f = Fixture::new().await;
+        contract(&f).await;
+        role(&f, &f.owner, "owner").await;
+        let reader = principal(&f.peer, false);
+        let d = Uuid::new_v4();
+        let event = revision(&f, d, "create", None, &f.peer);
+        assert!(matches!(
+            accept(&f, &event, &reader).await.unwrap(),
+            ArtifactOutcome::Accepted(_)
+        ));
+        let command = policy(&f, "example.settings", "admins", None);
+        assert_eq!(set_policy(&f, &command).await, PolicyOutcome::Applied);
+        sqlx::query("INSERT INTO community_bans(community_id,pubkey,actor_pubkey,muted_until) VALUES($1,$2,$3,now()+interval '1 hour')")
+            .bind(f.community.as_uuid()).bind(&reader.pubkey).bind(f.owner.public_key().as_bytes().as_slice()).execute(&f.db.pool).await.unwrap();
+        assert!(f
+            .db
+            .community_artifact_accepted(f.community, &reader, &event)
+            .await
+            .unwrap());
+        assert_eq!(read(&f, &reader, "current", d).await.unwrap().len(), 1);
+        let mut roster = reader.clone();
+        roster.require_membership = true;
+        assert!(read(&f, &roster, "current", d).await.is_err());
+        role(&f, &f.peer, "member").await;
+        assert_eq!(read(&f, &roster, "current", d).await.unwrap().len(), 1);
+        sqlx::query("DELETE FROM relay_members WHERE community_id=$1 AND pubkey=$2")
+            .bind(f.community.as_uuid())
+            .bind(f.peer.public_key().to_hex())
+            .execute(&f.db.pool)
+            .await
+            .unwrap();
+        assert!(read(&f, &roster, "current", d).await.is_err());
+        roster.verified_owner = Some(f.owner.public_key().to_bytes().to_vec());
+        assert_eq!(read(&f, &roster, "current", d).await.unwrap().len(), 1);
+        sqlx::query("INSERT INTO community_bans(community_id,pubkey,actor_pubkey,banned) VALUES($1,$2,$2,true)")
+            .bind(f.community.as_uuid()).bind(f.owner.public_key().as_bytes().as_slice()).execute(&f.db.pool).await.unwrap();
+        assert!(read(&f, &roster, "current", d).await.is_err());
+        sqlx::query("UPDATE community_bans SET banned=true WHERE community_id=$1")
+            .bind(f.community.as_uuid())
+            .execute(&f.db.pool)
+            .await
+            .unwrap();
+        assert!(f
+            .db
+            .community_artifact_accepted(f.community, &reader, &event)
+            .await
+            .is_err());
+        let wrong = CommunityId::from_uuid(Uuid::new_v4());
+        assert!(f
+            .db
+            .community_artifact_accepted(wrong, &reader, &event)
+            .await
+            .is_err());
+    }
+
+    /// The enqueue guard shares the restriction-writer lock and member row
+    /// locks: a revocation commits on one side of the guarded enqueue, never
+    /// between its admission check and queue point.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn read_guard_serializes_committed_revocation() {
+        let f = Fixture::new().await;
+        // One snapshot in a two-slot pool must leave room for fresh admission.
+        // A second snapshot sheds instead of taking the last writer slot.
+        let small = Db::from_pool(
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(2)
+                .connect(&crate::test_support::database_url())
+                .await
+                .unwrap(),
+        );
+        let open = principal(&f.peer, false);
+        let snapshot = small
+            .open_community_artifact_snapshot(f.community, &open)
+            .await
+            .unwrap();
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            small.open_community_artifact_snapshot(f.community, &open)
+        )
+        .await
+        .unwrap()
+        .is_err());
+        small
+            .community_artifact_read_guard(f.community, &open)
+            .await
+            .unwrap()
+            .finish()
+            .await
+            .unwrap();
+        snapshot.finish().await.unwrap();
+        let one = Db::from_pool(
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&crate::test_support::database_url())
+                .await
+                .unwrap(),
+        );
+        assert!(one
+            .open_community_artifact_snapshot(f.community, &open)
+            .await
+            .is_err());
+        role(&f, &f.peer, "member").await;
+        let reader = principal(&f.peer, true);
+        let guard =
+            f.db.community_artifact_read_guard(f.community, &reader)
+                .await
+                .unwrap();
+        let pool = f.db.pool.clone();
+        let community = f.community;
+        let key = f.peer.public_key().to_hex();
+        let removal = tokio::spawn(async move {
+            sqlx::query("DELETE FROM relay_members WHERE community_id=$1 AND pubkey=$2")
+                .bind(community.as_uuid())
+                .bind(key)
+                .execute(&pool)
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!removal.is_finished());
+        guard.finish().await.unwrap();
+        removal.await.unwrap();
+        assert!(f
+            .db
+            .community_artifact_read_guard(f.community, &reader)
+            .await
+            .is_err());
+        role(&f, &f.peer, "member").await;
+        role(&f, &f.owner, "owner").await;
+        let guard =
+            f.db.community_artifact_read_guard(f.community, &reader)
+                .await
+                .unwrap();
+        let pool = f.db.pool.clone();
+        let archive = tokio::spawn(async move {
+            sqlx::query("UPDATE communities SET archived_at=clock_timestamp() WHERE id=$1")
+                .bind(community.as_uuid())
+                .execute(&pool)
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !archive.is_finished(),
+            "archive cannot commit before guarded enqueue"
+        );
+        guard.finish().await.unwrap();
+        archive.await.unwrap();
+        let open_reader = principal(&f.peer, false);
+        assert!(f
+            .db
+            .community_artifact_read_guard(f.community, &open_reader)
+            .await
+            .is_err());
+        let event = revision(&f, Uuid::new_v4(), "create", None, &f.peer);
+        assert!(accept(&f, &event, &open_reader).await.is_err());
+        let command = policy(&f, "example.settings", "admins", None);
+        let parsed = buzz_core::artifact::parse_policy_command(&command).unwrap();
+        let mut tx = f.db.pool.begin().await.unwrap();
+        assert!(set_policy_in_transaction(
+            &mut tx,
+            f.community,
+            &principal(&f.owner, false),
+            &command,
+            &parsed
+        )
+        .await
+        .is_err());
+    }
+    /// A policy update's uncommitted state must fence new artifact admission,
+    /// even when that type had no previous policy row.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn unset_policy_lock_serializes_artifact_admission() {
+        let f = Fixture::new().await;
+        contract(&f).await;
+        role(&f, &f.owner, "owner").await;
+        let command = policy(&f, "example.settings", "admins", None);
+        let parsed = buzz_core::artifact::parse_policy_command(&command).unwrap();
+        let mut tx = f.db.pool.begin().await.unwrap();
+        assert_eq!(
+            set_policy_in_transaction(
+                &mut tx,
+                f.community,
+                &principal(&f.owner, false),
+                &command,
+                &parsed
+            )
+            .await
+            .unwrap(),
+            PolicyOutcome::Applied
+        );
+        let event = revision(&f, Uuid::new_v4(), "create", None, &f.peer);
+        let env = buzz_core::artifact::validate(&event).unwrap();
+        let db = f.db.clone();
+        let community = f.community;
+        let peer = principal(&f.peer, false);
+        let pending = tokio::spawn(async move {
+            db.accept_community_artifact(community, &peer, &event, &env)
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !pending.is_finished(),
+            "artifact bypassed the type policy transaction"
+        );
+        tx.commit().await.unwrap();
+        assert!(
+            pending.await.unwrap().is_err(),
+            "committed admins policy must reject member write"
+        );
+    }
+}

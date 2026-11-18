@@ -2,8 +2,9 @@
 CREATE TABLE artifact_heads (
     community_id UUID NOT NULL REFERENCES communities(id),
     artifact_id UUID NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'channel',
     event_id BYTEA NOT NULL CHECK (length(event_id) = 32),
-    channel_id UUID NOT NULL,
+    channel_id UUID,
     artifact_type TEXT NOT NULL,
     root BYTEA,
     deleted BOOLEAN NOT NULL DEFAULT false,
@@ -17,3 +18,8 @@ CREATE INDEX artifact_heads_channel ON artifact_heads (community_id, channel_id,
 -- The relay does not expire events. Any future row retention or partition
 -- retirement must skip payloads referenced by `artifact_heads.event_id`
 -- (NIP-AR: expiring earlier revisions MUST NOT remove the current revision).
+
+CREATE UNIQUE INDEX artifact_heads_scoped_identity ON artifact_heads (community_id, scope, artifact_id);
+
+CREATE INDEX artifact_heads_live_type
+    ON artifact_heads (community_id, scope, artifact_type, artifact_id) WHERE NOT deleted;

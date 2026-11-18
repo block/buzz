@@ -479,6 +479,14 @@ pub(crate) async fn nip11_document(
     info.workflow_agent_mentions = state.config.workflow_agent_mentions;
     info.artifacts["incremental"] = crate::api::artifact_sync::capability();
     if let Some(tenant) = tenant.as_ref() {
+        if crate::handlers::community_artifact::enabled(state)
+            .await
+            .unwrap_or(false)
+        {
+            info.artifacts["community_scope"] = serde_json::json!({"version":1,"community_id":tenant.community().as_uuid().to_string(),"max_policies":buzz_core::artifact::MAX_COMMUNITY_POLICIES});
+        }
+    }
+    if let Some(tenant) = tenant.as_ref() {
         if let Some(profile) = crate::verified_profiles::discovery(state, tenant).await {
             if let Some(fi) = info.federated_identity.as_mut() {
                 fi["public_profile"] = profile;

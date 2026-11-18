@@ -21,12 +21,12 @@ pub(super) fn predicates(
 ) {
     match query.view {
         ArtifactView::Current => {
-            qb.push("JOIN artifact_heads a ON a.community_id=e.community_id AND a.event_id=e.id AND NOT a.deleted ");
+            qb.push("JOIN artifact_heads a ON a.community_id=e.community_id AND a.event_id=e.id AND a.scope='channel' AND NOT a.deleted ");
         }
         ArtifactView::Head => {
-            qb.push("JOIN artifact_heads a ON a.community_id=e.community_id AND a.event_id=e.id ");
+            qb.push("JOIN artifact_heads a ON a.community_id=e.community_id AND a.event_id=e.id AND a.scope='channel' ");
         }
-        ArtifactView::History => {}
+        ArtifactView::History | ArtifactView::Policy => {}
     }
     push_scope(
         qb,
@@ -62,7 +62,7 @@ fn push_scope(
 ) {
     // The explicit kind lets the community/kind index exclude chat before
     // the join, even for an unfiltered current-state page.
-    qb.push("WHERE e.community_id=").push_bind(community.as_uuid()).push(" AND e.kind=45010 AND e.deleted_at IS NULL AND EXISTS (SELECT 1 FROM channels c WHERE c.community_id=e.community_id AND c.id=e.channel_id AND c.deleted_at IS NULL AND (")
+    qb.push("WHERE e.community_id=").push_bind(community.as_uuid()).push(" AND e.kind=45010 AND NOT e.tags @> '[[\"community\"]]'::jsonb AND e.deleted_at IS NULL AND EXISTS (SELECT 1 FROM channels c WHERE c.community_id=e.community_id AND c.id=e.channel_id AND c.deleted_at IS NULL AND (")
         .push(crate::store::channel::legacy_channel_type_sql("c.channel_type"))
         .push(" OR c.id=ANY(")
         .push_bind(named_channels.clone())
@@ -158,7 +158,7 @@ impl ArtifactSnapshot {
         let mut qb = QueryBuilder::<Postgres>::new(
             "SELECT e.id,e.pubkey,e.created_at,e.kind,e.tags,e.content,e.sig,e.received_at,e.channel_id,a.artifact_id FROM events e ",
         );
-        qb.push("JOIN artifact_heads a ON a.community_id=e.community_id AND a.event_id=e.id AND NOT a.deleted ");
+        qb.push("JOIN artifact_heads a ON a.community_id=e.community_id AND a.event_id=e.id AND a.scope='channel' AND NOT a.deleted ");
         push_scope(
             &mut qb,
             self.community,
@@ -196,6 +196,13 @@ impl Db {
         query: &ArtifactQuery,
         count: bool,
     ) -> Result<(Vec<StoredEvent>, i64)> {
+        if query.scope != buzz_core::artifact::ArtifactScope::Channel
+            || query.view == ArtifactView::Policy
+        {
+            return Err(crate::DbError::AccessDenied(
+                "explicit community admission required".into(),
+            ));
+        }
         let connection = read_connection(self).await?;
         let mut tx = sqlx::Transaction::begin(connection, None).await?;
         sqlx::query("SET LOCAL statement_timeout='2s'")
@@ -235,7 +242,7 @@ impl Db {
         let mut qb = QueryBuilder::<Postgres>::new(
             "SELECT e.id,e.pubkey,e.created_at,e.kind,e.tags,e.content,e.sig,e.received_at,e.channel_id,a.deleted FROM events e ",
         );
-        qb.push("JOIN artifact_heads a ON a.community_id=e.community_id AND a.event_id=e.id AND a.artifact_id=")
+        qb.push("JOIN artifact_heads a ON a.community_id=e.community_id AND a.event_id=e.id AND a.scope='channel' AND a.artifact_id=")
             .push_bind(artifact)
             .push(" ");
         push_scope(&mut qb, community, reader, &[], named_channels.to_vec());

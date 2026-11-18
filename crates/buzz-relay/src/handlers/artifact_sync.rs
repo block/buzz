@@ -4,6 +4,9 @@
 //! says that one `d` changed; the sync task then reads that artifact's current
 //! head and sends it (NIP-AR Sync rules 3 and 4). Any possible loss of a live
 //! entry ends the sync with `CLOSED "resync: ..."` (rule 5).
+mod community_access;
+pub use community_access::watch as watch_community_access;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::Duration;
@@ -11,7 +14,8 @@ use std::time::Duration;
 use axum::extract::ws::Message as WsMessage;
 use buzz_auth::Scope;
 use buzz_core::artifact_sync::{ArtifactSyncFilter, MAX_SYNC_EVENTS};
-use buzz_core::StoredEvent;
+use buzz_core::{artifact::ArtifactScope, CommunityId, StoredEvent};
+use buzz_db::community_artifact::CommunityArtifactPrincipal;
 use buzz_pubsub::EventTopic;
 use dashmap::DashMap;
 use nostr::{Alphabet, Event, Filter, JsonUtil, Kind, SingleLetterTag};
@@ -102,9 +106,18 @@ fn artifact_id(event: &Event) -> Option<Uuid> {
         .and_then(|tag| tag.as_slice().get(1)?.parse().ok())
 }
 
+struct CommunityInterest {
+    tenant: CommunityId,
+    artifact_type: String,
+    identities: Option<HashSet<Uuid>>,
+    principal: CommunityArtifactPrincipal,
+    connection: std::sync::Weak<ConnectionState>,
+}
+
 /// One live sync's signal inbox. Fan-out and loss detection write to it; the
 /// sync's own task is its only reader.
 pub struct SyncHandle {
+    community: Option<CommunityInterest>,
     pending: StdMutex<Pending>,
     notify: Notify,
     cancel: CancellationToken,
@@ -113,6 +126,7 @@ pub struct SyncHandle {
 impl SyncHandle {
     fn new() -> Self {
         Self {
+            community: None,
             pending: StdMutex::new(Pending::default()),
             notify: Notify::new(),
             cancel: CancellationToken::new(),
@@ -194,6 +208,46 @@ impl ArtifactSyncs {
         });
     }
 
+    /// Route metadata only to the same tenant and immutable type. Historical
+    /// redactions never produce a signal; current redactions retire exact copies.
+    pub(crate) fn signal_community(
+        &self,
+        community: CommunityId,
+        signal: &buzz_pubsub::artifact_signal::ArtifactSignal,
+    ) {
+        for entry in self.syncs.iter() {
+            let Some(interest) = &entry.community else {
+                continue;
+            };
+            if interest.tenant != community
+                || interest.artifact_type != signal.artifact_type
+                || interest
+                    .identities
+                    .as_ref()
+                    .is_some_and(|ids| !ids.contains(&signal.d))
+            {
+                continue;
+            }
+            if signal.cause == buzz_pubsub::artifact_signal::ArtifactChange::Redacted {
+                entry.resync("resync: redaction");
+            } else {
+                entry.update(|pending| pending.hold(signal.d, None));
+            }
+        }
+    }
+    /// Admission changes invalidate idle community syncs on every receiving pod.
+    pub(crate) fn resync_community(&self, community: CommunityId) {
+        for entry in self.syncs.iter() {
+            if entry
+                .community
+                .as_ref()
+                .is_some_and(|i| i.tenant == community)
+            {
+                entry.resync("resync: community access changed");
+            }
+        }
+    }
+
     /// End every sync on this node: a loss here can affect any of them.
     pub fn resync_all(&self, reason: &'static str) {
         for entry in self.syncs.iter() {
@@ -269,6 +323,27 @@ impl ArtifactSyncs {
             .unwrap_or_else(PoisonError::into_inner);
         pending.resync
     }
+}
+
+/// Consume typed metadata from the existing Redis subscriber. A lag is a
+/// possible gap and ends exact copies; ordinary ChannelEvent never carries it.
+pub fn spawn_signals(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
+    let mut rx = state.pubsub.subscribe_artifacts();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                () = state.community_revalidator_cancel.cancelled() => return,
+                result = rx.recv() => match result {
+                    Ok(scoped) => state.artifact_syncs.signal_community(scoped.community_id, &scoped.signal),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => state.artifact_syncs.resync_all("resync: live delivery lagged"),
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        state.artifact_syncs.resync_all("resync: live delivery interrupted");
+                        return;
+                    }
+                }
+            }
+        }
+    })
 }
 
 /// Resync every sync on this node whenever its Redis link may have lost a
@@ -382,9 +457,11 @@ pub async fn handle_sync(
     };
     // Written when the initial set ends, not when live delivery does.
     let mut access = ReadLog::sync(&conn, &sub_id, &filter.channels);
-    let (reader, bound) = match conn.auth_state_snapshot() {
+    let (reader, bound, delegated_owner) = match conn.auth_state_snapshot() {
         AuthState::Authenticated(ctx) => {
-            if !ctx.scopes.is_empty() && !ctx.scopes.contains(&Scope::MessagesRead) {
+            if (filter.scope == ArtifactScope::Community || !ctx.scopes.is_empty())
+                && !ctx.scopes.contains(&Scope::MessagesRead)
+            {
                 super::close::close_if_owner(
                     &sub_id,
                     owner,
@@ -399,14 +476,20 @@ pub async fn handle_sync(
             // A channel-scoped token reaches only its own channels; outside
             // them the answer matches an unreadable channel.
             if let Some(allowed) = ctx.channel_ids.as_deref() {
-                if filter.channels.iter().any(|id| !allowed.contains(id)) {
+                if filter.scope == ArtifactScope::Community
+                    || filter.channels.iter().any(|id| !allowed.contains(id))
+                {
                     super::close::close_if_owner(&sub_id, owner, Some(RESTRICTED), &conn, &state)
                         .await;
                     access.deny("not_channel_member");
                     return;
                 }
             }
-            (ctx.pubkey.to_bytes().to_vec(), ctx.channel_ids)
+            (
+                ctx.pubkey.to_bytes().to_vec(),
+                ctx.channel_ids,
+                ctx.agent_owner_pubkey,
+            )
         }
         _ => {
             super::close::close_if_owner(
@@ -439,11 +522,50 @@ pub async fn handle_sync(
 
     // Rule 1: live interest first, confirmed by Redis on an unbroken link.
     let start = *state.pubsub.link_state().borrow();
-    let handle = Arc::new(SyncHandle::new());
-    let Some(owner) = claim(&sub_id, owner, &filter.channels, &handle, &conn, &state).await else {
+    let mut handle = SyncHandle::new();
+    if filter.scope == ArtifactScope::Community {
+        if !super::community_artifact::enabled(&state)
+            .await
+            .unwrap_or(false)
+        {
+            close(
+                &sub_id,
+                owner,
+                "error: community artifacts unavailable",
+                &conn,
+                &state,
+            )
+            .await;
+            return;
+        }
+        handle.community = Some(CommunityInterest {
+            tenant: conn.tenant.community(),
+            artifact_type: buzz_core::artifact::exact_type(&filter.tags)
+                .unwrap_or_default()
+                .into(),
+            identities: filter
+                .tags
+                .iter()
+                .find(|(name, _)| name == "d")
+                .map(|(_, values)| values.iter().filter_map(|v| v.parse().ok()).collect()),
+            connection: Arc::downgrade(&conn),
+            principal: CommunityArtifactPrincipal {
+                owner_admission: super::community_artifact::owner_admission(
+                    &state,
+                    &conn,
+                    delegated_owner,
+                ),
+                pubkey: reader.clone(),
+                verified_owner: delegated_owner.map(|p| p.to_bytes().to_vec()),
+                require_membership: state.config.require_relay_membership,
+            },
+        });
+    }
+    let handle = Arc::new(handle);
+    let Some(owner) = claim(&sub_id, owner, &filter, &handle, &conn, &state).await else {
         return;
     };
-    if !start.up || !confirm(&filter.channels, start.epoch, &conn, &state).await {
+    if !start.up || !confirm(&filter, start.epoch, &conn, &state).await {
         close(
             &sub_id,
             owner,
@@ -460,10 +582,19 @@ pub async fn handle_sync(
     // time budget and the cancellation race, so a slow reader cannot hold
     // the handler slot past the budget or get EOSE after retirement.
     let initial = async {
-        let sent =
-            send_initial_set(&sub_id, owner, &filter, &reader, &mut access, &conn, &state).await?;
+        let sent = send_initial_set(
+            &sub_id,
+            owner,
+            &filter,
+            &reader,
+            &mut access,
+            &conn,
+            &state,
+            &handle,
+        )
+        .await?;
         // A resync requested before EOSE is queued ends the sync without it.
-        send_eose(&sub_id, owner, &handle, &conn).await?;
+        send_eose(&sub_id, owner, &handle, &conn, Some(&state)).await?;
         Ok::<_, Stop>(sent)
     };
     let outcome = tokio::select! {
@@ -535,7 +666,7 @@ enum Stop {
 async fn claim(
     sub_id: &str,
     owner: u64,
-    channels: &[Uuid],
+    filter: &ArtifactSyncFilter,
     handle: &Arc<SyncHandle>,
     conn: &ConnectionState,
     state: &AppState,
@@ -548,6 +679,23 @@ async fn claim(
     state
         .artifact_syncs
         .insert(conn.conn_id, sub_id, Arc::clone(handle));
+    let channels = &filter.channels;
+    if filter.scope == ArtifactScope::Community {
+        state.sub_registry.register_filters_scoped(
+            conn.tenant.community(),
+            conn.conn_id,
+            sub_id.to_owned(),
+            vec![(
+                Filter::new(),
+                crate::subscription::SubscriptionScope::community_artifacts(),
+            )],
+        );
+        state
+            .pubsub
+            .retain_topic(&conn.tenant, EventTopic::CommunityArtifact)
+            .await;
+        return Some(owner);
+    }
     state.sub_registry.register_channels_scoped(
         conn.tenant.community(),
         conn.conn_id,
@@ -566,9 +714,17 @@ async fn claim(
 
 /// Wait until Redis confirms every channel topic on link epoch `epoch`. A
 /// later change of the epoch resyncs this sync through `resync_all`.
-async fn confirm(channels: &[Uuid], epoch: u64, conn: &ConnectionState, state: &AppState) -> bool {
+async fn confirm(
+    filter: &ArtifactSyncFilter,
+    epoch: u64,
+    conn: &ConnectionState,
+    state: &AppState,
+) -> bool {
     let confirm_all = async {
-        for &channel in channels {
+        if filter.scope == ArtifactScope::Community {
+            return matches!(state.pubsub.confirm_topic(&conn.tenant,EventTopic::CommunityArtifact).await,Ok(confirmed) if confirmed==epoch);
+        }
+        for &channel in &filter.channels {
             match state
                 .pubsub
                 .confirm_topic(&conn.tenant, EventTopic::Channel(channel))
@@ -587,6 +743,7 @@ async fn confirm(channels: &[Uuid], epoch: u64, conn: &ConnectionState, state: &
 
 /// Read and send every head in scope from one snapshot, and return their
 /// `d`. After an `Err` nothing more is sent.
+#[allow(clippy::too_many_arguments)]
 async fn send_initial_set(
     sub_id: &str,
     owner: u64,
@@ -595,17 +752,28 @@ async fn send_initial_set(
     access: &mut ReadLog,
     conn: &ConnectionState,
     state: &AppState,
+    handle: &SyncHandle,
 ) -> Result<HashSet<Uuid>, Stop> {
-    let mut snapshot = match state
-        .db
-        .open_artifact_snapshot(conn.tenant.community(), reader, &filter.channels)
-        .await
-    {
-        Ok(Ok(snapshot)) => snapshot,
-        Ok(Err(buzz_db::SnapshotDenied::Restricted)) => return Err(Stop::Close(RESTRICTED)),
-        Err(e) => {
-            warn!(conn_id = %conn.conn_id, error_kind = %e.kind(), "artifact sync snapshot failed");
-            return Err(Stop::Close(READ_FAILED));
+    let mut snapshot = if let Some(interest) = &handle.community {
+        Snapshot::Community(
+            state
+                .db
+                .open_community_artifact_snapshot(conn.tenant.community(), &interest.principal)
+                .await
+                .map_err(|_| Stop::Close(RESTRICTED))?,
+        )
+    } else {
+        match state
+            .db
+            .open_artifact_snapshot(conn.tenant.community(), reader, &filter.channels)
+            .await
+        {
+            Ok(Ok(snapshot)) => Snapshot::Channel(snapshot),
+            Ok(Err(buzz_db::SnapshotDenied::Restricted)) => return Err(Stop::Close(RESTRICTED)),
+            Err(e) => {
+                warn!(conn_id = %conn.conn_id, error_kind = %e.kind(), "artifact sync snapshot failed");
+                return Err(Stop::Close(READ_FAILED));
+            }
         }
     };
     let mut sent = HashSet::new();
@@ -630,6 +798,8 @@ async fn send_initial_set(
                 owner,
                 RelayMessage::event(sub_id, &stored.event),
                 conn,
+                Some(handle),
+                Some(state),
             )
             .await?;
             access.queued_one();
@@ -652,8 +822,10 @@ async fn send_owned(
     owner: u64,
     frame: String,
     conn: &ConnectionState,
+    handle: Option<&SyncHandle>,
+    state: Option<&AppState>,
 ) -> Result<(), Stop> {
-    send_reserved(sub_id, owner, frame, None, conn).await
+    send_reserved(sub_id, owner, frame, handle, conn, state).await
 }
 
 /// Queue `EOSE` like `send_owned`, unless the sync must resync. The pending
@@ -665,6 +837,7 @@ async fn send_eose(
     owner: u64,
     handle: &SyncHandle,
     conn: &ConnectionState,
+    state: Option<&AppState>,
 ) -> Result<(), Stop> {
     send_reserved(
         sub_id,
@@ -672,6 +845,7 @@ async fn send_eose(
         RelayMessage::eose(sub_id),
         Some(handle),
         conn,
+        state,
     )
     .await
 }
@@ -682,14 +856,20 @@ async fn send_reserved(
     frame: String,
     unless_resync: Option<&SyncHandle>,
     conn: &ConnectionState,
+    state: Option<&AppState>,
 ) -> Result<(), Stop> {
     let slot = conn
         .send_tx
         .reserve()
         .await
         .map_err(|_| Stop::Close("error: connection closed"))?;
+    #[cfg(test)]
+    super::close::test_seam::pause_at(&test_seam::QUEUE_CHECK_PAUSE).await;
+    // Reserve output first, then recheck authoritative access outside the old
+    // snapshot. Keep its locks through enqueue, including after a slow reader.
+    let _guard = current_guard(unless_resync, state, conn).await?;
     let subs = conn.subscriptions.lock().await;
-    if !super::close::owns(&subs, sub_id, owner) {
+    if conn.cancel.is_cancelled() || !super::close::owns(&subs, sub_id, owner) {
         return Err(Stop::Retired);
     }
     let pending = unless_resync.map(|handle| {
@@ -712,14 +892,120 @@ async fn try_send_owned(
     owner: u64,
     frame: String,
     conn: &ConnectionState,
+    handle: Option<&SyncHandle>,
+    state: Option<&AppState>,
 ) -> Result<(), Stop> {
+    let slot = conn
+        .send_tx
+        .try_reserve()
+        .map_err(|_| Stop::Close("resync: send queue full"))?;
+    let _guard = current_guard(handle, state, conn).await?;
     let subs = conn.subscriptions.lock().await;
-    if !super::close::owns(&subs, sub_id, owner) {
+    if conn.cancel.is_cancelled() || !super::close::owns(&subs, sub_id, owner) {
         return Err(Stop::Retired);
     }
-    conn.send_tx
-        .try_send(WsMessage::Text(frame.into()))
-        .map_err(|_| Stop::Close("resync: send queue full"))
+    let pending = handle.map(|h| h.pending.lock().unwrap_or_else(PoisonError::into_inner));
+    if let Some(reason) = pending.as_ref().and_then(|p| p.resync) {
+        return Err(Stop::Close(reason));
+    }
+    slot.send(WsMessage::Text(frame.into()));
+    Ok(())
+}
+/// Current auth is held until the frame reaches the outbound queue. An empty
+/// channel set is never treated as community authorization.
+struct QueueGuard {
+    _database: buzz_db::community_artifact::CommunityArtifactReadGuard,
+    _effect: crate::nip_fi_gate::SessionEffectPermit,
+}
+async fn current_guard(
+    handle: Option<&SyncHandle>,
+    state: Option<&AppState>,
+    conn: &ConnectionState,
+) -> Result<Option<QueueGuard>, Stop> {
+    if conn.cancel.is_cancelled() || handle.is_some_and(|h| h.cancel.is_cancelled()) {
+        return Err(Stop::Retired);
+    }
+    let Some(interest) = handle.and_then(|h| h.community.as_ref()) else {
+        return Ok(None);
+    };
+    let Some(state) = state else {
+        return Err(Stop::Close("resync: access check unavailable"));
+    };
+    if !community_credential_current(state, conn, &interest.principal) {
+        return Err(Stop::Close("resync: community access changed"));
+    }
+    let effect = conn
+        .nip_fi_gate
+        .acquire_effect()
+        .await
+        .map_err(|_| Stop::Close("resync: community credential changed"))?;
+    let guard = state
+        .db
+        .community_artifact_read_guard(conn.tenant.community(), &interest.principal)
+        .await
+        .map_err(|_| Stop::Close("resync: community access changed"))?;
+    if !community_credential_current(state, conn, &interest.principal)
+        || !community_policy_current(state, conn, guard.requires_nip_fi())
+    {
+        return Err(Stop::Close("resync: community authentication changed"));
+    }
+    Ok(Some(QueueGuard {
+        _database: guard,
+        _effect: effect,
+    }))
+}
+fn community_policy_current(state: &AppState, conn: &ConnectionState, required: bool) -> bool {
+    let mode = crate::nip_fi_policy::effective(state.config.nip_fi.mode, required);
+    !mode.denies_unconditionally() && (!mode.enforces() || conn.nip_fi_assertion.is_some())
+}
+/// Credentials are checked independently of database admission. The common
+/// node-wide backstop also uses this for idle syncs after a missed disconnect.
+fn community_credential_current(
+    state: &AppState,
+    conn: &ConnectionState,
+    principal: &CommunityArtifactPrincipal,
+) -> bool {
+    let AuthState::Authenticated(ctx) = conn.auth_state_snapshot() else {
+        return false;
+    };
+    !conn.cancel.is_cancelled()
+        && conn
+            .session_deadline
+            .is_none_or(|deadline| deadline > chrono::Utc::now())
+        && ctx.channel_ids.is_none()
+        && ctx.scopes.contains(&Scope::MessagesRead)
+        && ctx.pubkey.as_bytes().as_slice() == principal.pubkey
+        && ctx.agent_owner_pubkey.map(|p| p.to_bytes().to_vec()) == principal.verified_owner
+        && super::community_artifact::owner_admission(state, conn, ctx.agent_owner_pubkey)
+            == principal.owner_admission
+        && !conn.nip_fi_gate.is_expired_or_past_deadline()
+        && !conn.nip_fi_assertion.as_ref().is_some_and(|assertion| {
+            state.nip_fi_deny_map.as_deref().is_some_and(|map| {
+                crate::nip_fi_core::assertion_denied(map, assertion, chrono::Utc::now())
+            })
+        })
+}
+enum Snapshot {
+    Channel(buzz_db::ArtifactSnapshot),
+    Community(buzz_db::community_artifact::CommunityArtifactSnapshot),
+}
+impl Snapshot {
+    async fn next_page(
+        &mut self,
+        tags: &[(String, Vec<String>)],
+        page: i64,
+    ) -> buzz_db::Result<Vec<StoredEvent>> {
+        match self {
+            Self::Channel(s) => s.next_page(tags, page).await,
+            Self::Community(s) => s.next_page(tags, page).await,
+        }
+    }
+    async fn finish(self) -> buzz_db::Result<()> {
+        match self {
+            Self::Channel(s) => s.finish().await,
+            Self::Community(s) => s.finish().await,
+        }
+    }
 }
 
 /// Rules 3–5 after `EOSE`: read each changed head, one read at a time, and
@@ -750,11 +1036,18 @@ async fn run_live(
             if handle.cancel.is_cancelled() {
                 return;
             }
-            let head = match state
-                .db
-                .artifact_head(conn.tenant.community(), reader, d, &filter.channels)
-                .await
-            {
+            let head_result = if let Some(interest) = &handle.community {
+                state
+                    .db
+                    .community_artifact_head(conn.tenant.community(), &interest.principal, d)
+                    .await
+            } else {
+                state
+                    .db
+                    .artifact_head(conn.tenant.community(), reader, d, &filter.channels)
+                    .await
+            };
+            let head = match head_result {
                 Ok(head) => head.filter(|(head, _)| {
                     bound.is_none_or(|allowed| {
                         head.channel_id.is_some_and(|id| allowed.contains(&id))
@@ -785,7 +1078,16 @@ async fn run_live(
             };
             #[cfg(test)]
             super::close::test_seam::pause_at(&test_seam::LIVE_SEND_PAUSE).await;
-            match try_send_owned(sub_id, owner, RelayMessage::event(sub_id, &event), conn).await {
+            match try_send_owned(
+                sub_id,
+                owner,
+                RelayMessage::event(sub_id, &event),
+                conn,
+                Some(handle),
+                Some(state),
+            )
+            .await
+            {
                 Ok(()) => {}
                 Err(Stop::Retired) => return,
                 // One lost frame breaks the copy; the slow-client grace limit
@@ -826,6 +1128,12 @@ pub(crate) mod test_seam {
     tokio::task_local! {
         /// After a live head read, before its frame is queued.
         pub(crate) static LIVE_SEND_PAUSE: Arc<Pause>;
+        /// After output reservation, before the current authorization guard.
+        pub(crate) static QUEUE_CHECK_PAUSE: Arc<Pause>;
+    }
+
+    pub(crate) async fn revalidate(state: &crate::state::AppState) {
+        super::community_access::revalidate(state).await;
     }
 }
 
@@ -994,17 +1302,19 @@ mod tests {
     async fn live_frame_is_fenced_by_the_owner() {
         let (conn, mut rx) = conn_with_sub(1);
         assert!(matches!(
-            try_send_owned("s", 2, "x".into(), &conn).await,
+            try_send_owned("s", 2, "x".into(), &conn, None, None).await,
             Err(Stop::Retired)
         ));
         conn.subscriptions.lock().await.remove("s");
         assert!(matches!(
-            try_send_owned("s", 1, "x".into(), &conn).await,
+            try_send_owned("s", 1, "x".into(), &conn, None, None).await,
             Err(Stop::Retired)
         ));
         assert!(rx.try_recv().is_err());
         conn.subscriptions.lock().await.insert("s".into(), held(1));
-        assert!(try_send_owned("s", 1, "x".into(), &conn).await.is_ok());
+        assert!(try_send_owned("s", 1, "x".into(), &conn, None, None)
+            .await
+            .is_ok());
         assert!(rx.try_recv().is_ok());
     }
 
@@ -1020,7 +1330,7 @@ mod tests {
                 .try_send(WsMessage::Text("fill".into()))
                 .unwrap();
         }
-        let mut waiting = std::pin::pin!(send_owned("s", 1, "eose".into(), &conn));
+        let mut waiting = std::pin::pin!(send_owned("s", 1, "eose".into(), &conn, None, None));
         // Polled once, the frame is now waiting in `reserve`.
         assert!(futures_util::poll!(&mut waiting).is_pending());
         // A replacing REQ takes the ID while the frame waits.
@@ -1048,7 +1358,7 @@ mod tests {
                 .try_send(WsMessage::Text("fill".into()))
                 .unwrap();
         }
-        let mut waiting = std::pin::pin!(send_eose("s", 1, &handle, &conn));
+        let mut waiting = std::pin::pin!(send_eose("s", 1, &handle, &conn, None));
         assert!(futures_util::poll!(&mut waiting).is_pending());
         // The held list overflows while EOSE waits.
         for _ in 0..=MAX_SYNC_EVENTS {
@@ -1065,7 +1375,7 @@ mod tests {
 
         // Without a pending resync, EOSE is queued.
         let clean = SyncHandle::new();
-        assert!(send_eose("s", 1, &clean, &conn).await.is_ok());
+        assert!(send_eose("s", 1, &clean, &conn, None).await.is_ok());
         let Ok(WsMessage::Text(text)) = rx.try_recv() else {
             panic!("no EOSE");
         };
