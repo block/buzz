@@ -1940,6 +1940,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cmd_send_message_submits_millisecond_timestamp_for_roots_and_replies() {
+        let root = "11".repeat(32);
+        let parent = "22".repeat(32);
+        for (reply_to, parent_tags) in [
+            (None, serde_json::json!([])),
+            (Some(root.clone()), serde_json::json!([])),
+            (Some(parent), serde_json::json!([["e", root, "", "reply"]])),
+        ] {
+            let response = serde_json::json!([{ "tags": parent_tags }]).to_string();
+            let (url, _, captured_event) = fake_send_relay(response).await;
+            let client = BuzzClient::new(
+                url,
+                crate::credentials::Credentials::from_keys(Keys::generate()),
+            )
+            .unwrap();
+            let mut params = send_params("timestamp");
+            params.reply_to = reply_to;
+            let before = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap();
+            cmd_send_message(&client, params).await.unwrap();
+            let after = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap();
+            let captured = captured_event.lock().unwrap();
+            let event: nostr::Event =
+                serde_json::from_str(&captured.as_ref().unwrap().body).unwrap();
+            event.verify().unwrap();
+            let offsets: Vec<_> = event
+                .tags
+                .iter()
+                .filter(|tag| tag.as_slice()[0] == "ms")
+                .collect();
+            assert_eq!(offsets.len(), 1);
+            let offset = &offsets[0].as_slice()[1];
+            let milliseconds: u32 = offset.parse().unwrap();
+            assert!(milliseconds < 1000);
+            assert_eq!(*offset, milliseconds.to_string());
+            let timestamp =
+                u128::from(event.created_at.as_secs()) * 1000 + u128::from(milliseconds);
+            assert!((before.as_millis()..=after.as_millis()).contains(&timestamp));
+        }
+    }
+
+    #[tokio::test]
     async fn cmd_send_message_attaches_emoji_tags_for_known_shortcodes() {
         // Content contains `:wave:` which resolves in the palette.
         // The submitted event must carry an `emoji` tag for `wave`.

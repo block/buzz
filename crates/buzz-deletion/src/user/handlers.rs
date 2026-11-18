@@ -1,11 +1,12 @@
-//! Workflow handlers validate saved scope and persist outcomes; they never route.
+//! Dispatch real account cleanup or demo handlers; transitions own routing.
 
 use super::worker::RunOptions;
 use crate::RETRY_DELAY;
 use anyhow::{bail, ensure, Context, Result};
-use buzz_db::{
-    entity_deletion::{EntityDeletionStore, EntityLease, EntityStage},
-    user_deletion::{content_batches::ContentBatchOptions, ExecutionMode, UserDeletionInventory},
+use buzz_db::entity_deletion::{EntityDeletionStore, EntityLease, EntityStage};
+use buzz_db::user_deletion::{
+    account_batches::AccountBatchOptions, content_batches::ContentBatchOptions, ExecutionMode,
+    UserDeletionInventory,
 };
 use uuid::Uuid;
 
@@ -17,13 +18,59 @@ pub(super) async fn dispatch(
 ) -> Result<()> {
     let target = row.metadata_json["inputs"]["target"]
         .as_str()
-        .unwrap_or_default();
+        .ok_or_else(|| anyhow::anyhow!("missing target input"))?;
+    if !target.starts_with("demo:") && row.stage == "purge_media" {
+        return purge_media(store, lease, row, options).await;
+    }
     if !target.starts_with("demo:") {
-        return match row.stage.as_str() {
-            "purge_content" => purge_content(store, lease, row, options).await,
-            "purge_media" => purge_media(store, lease, row, options).await,
-            name => bail!("real handler {name} is not implemented"),
-        };
+        if row.stage == "purge_content" {
+            return purge_content(store, lease, row, options).await;
+        }
+        if row.stage == "purge_account" {
+            ensure!(options.delete, "real workflow execution requires --delete");
+            let db = options.db.as_ref().context("missing account database")?;
+            let row = store.start_stage(lease, row.id).await?;
+            let result = async {
+                let target = row.metadata_json["inputs"]["target"]
+                    .as_str()
+                    .context("missing target")?;
+                let community = row
+                    .target_community_id
+                    .context("missing account community")?;
+                let summary = super::account_batches::run(
+                    db,
+                    &AccountBatchOptions {
+                        community,
+                        pubkey: target.to_owned(),
+                        batch_size: options.batch_size,
+                        max_items: options.max_items,
+                    },
+                    ExecutionMode::Delete,
+                    Some((lease, row.id)),
+                )
+                .await?;
+                ensure!(
+                    summary.supported_scope_exhausted,
+                    "account batch limit reached; rerun to continue"
+                );
+                Ok::<_, anyhow::Error>(serde_json::to_value(summary)?)
+            }
+            .await;
+            match result {
+                Ok(value) => store.save_stage_success(lease, row.id, value).await?,
+                Err(error) => {
+                    store
+                        .fail_stage(lease, row.id, &format!("{error:#}"), RETRY_DELAY)
+                        .await?;
+                    return Err(error);
+                }
+            }
+            return Ok(());
+        }
+        bail!(
+            "real handler {} is not implemented in this account-cleanup PR",
+            row.stage
+        );
     }
     match row.stage.as_str() {
         "purge_media" => dummy_action(store, lease, row, options, "would purge user media").await,
@@ -122,7 +169,7 @@ async fn purge_content(
                 },
                 ExecutionMode::Delete,
                 Some((lease, row.id)),
-                &mut std::io::stdout(),
+                &mut std::io::stderr(),
             )
             .await?;
         // Agent cleanup is a separate handler; do not claim it is unnecessary.
