@@ -48,7 +48,9 @@ Future<void> confirmSignOut(BuildContext context, WidgetRef ref) async {
       ...communities.where((c) => c.id != active?.id),
       ...communities.where((c) => c.id == active?.id),
     ]) {
-      await list.removeCommunity(community.id);
+      // A device-local sign-out, not a leave: no Builderlab account's list of
+      // joined communities changes.
+      await list.removeCommunity(community.id, reportToAccount: false);
     }
     // Reveal the Sign in landing under the page that signed out.
     navigator.popUntil((route) => route.isFirst);

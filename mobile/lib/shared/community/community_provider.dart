@@ -323,6 +323,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     }
 
     await storage.save(community);
+    await recordKnownCommunityJoin(ref, community.relayUrl);
     final updatedList = [...current, community];
     state = AsyncData(updatedList);
     await _removeOrphanChannelListSnapshots(updatedList);
@@ -333,10 +334,14 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
 
   /// Removes a saved identity without letting awaited cleanup change the account
   /// that confirmed its remote edit. An explicit null confirmation is local-only.
+  /// The Builderlab account learns of the leave unless [reportToAccount] is
+  /// false: a sign-out removes the community from this device only, not from
+  /// any account's list.
   Future<void> removeCommunity(
     String id, {
     String? confirmedSubject,
     bool accountConfirmed = false,
+    bool reportToAccount = true,
   }) async {
     final account = ref.read(builderlabAccountProvider);
     final sync = ref.read(knownCommunitySyncProvider);
@@ -367,6 +372,12 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         revocationJournaled = await ref.read(
           communityPushLeaseRevocationEnqueuerProvider,
         )(current[removedIndex]);
+        // The account's list learns of the leave before the device forgets
+        // the community, so the next sign-in does not add it back. The leave
+        // itself never waits on or fails for that record.
+        if (reportToAccount) {
+          await recordKnownCommunityLeave(ref, current[removedIndex].relayUrl);
+        }
       }
       // A durable revocation commits this removal to its confirmed account.
       // Finish local deletion even if the account changed during journaling;

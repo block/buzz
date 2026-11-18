@@ -31,8 +31,10 @@ enum AccountFailure {
   /// Login completed for a different account than the stored session.
   differentAccount,
 
-  /// The server definitively refused this request (400/404/409/422); sending
-  /// it again unchanged cannot succeed.
+  /// The server definitively refused this request: a client error other
+  /// than a timeout (408) or a rate limit (429), which are retried as
+  /// unavailable. Sending it again unchanged cannot succeed. The status is
+  /// in [BuilderlabAccountClient.lastRejectedRequest].
   rejected,
 }
 
@@ -380,18 +382,6 @@ class BuilderlabAccountClient {
   Future<Map<String, dynamic>> currentIdentity() =>
       post('/v1/buzz/nostr-identities/current', {});
 
-  /// Saves a successfully admitted destination to the same account, even if
-  /// another session operation was queued before this request runs.
-  Future<void> rememberCommunity(
-    String relay, {
-    required String expectedSubject,
-  }) async {
-    final result = await _post('/v1/buzz/known-communities/add', {
-      'community_url': relay,
-    }, expectedSubject: expectedSubject);
-    if (result['error'] != null) throw AccountFailure.rejected;
-  }
-
   /// Edits only the account's saved destination list; relay membership and
   /// credentials are unchanged. Both operations are idempotent.
   Future<void> updateKnownCommunity(
@@ -646,7 +636,9 @@ class BuilderlabAccountClient {
       }
       if (response.statusCode == 401) throw AccountFailure.signedOut;
       if (response.statusCode == 403) throw AccountFailure.denied;
-      if (const {400, 404, 409, 422}.contains(response.statusCode)) {
+      if (response.statusCode >= 400 &&
+          response.statusCode < 500 &&
+          !const {408, 429}.contains(response.statusCode)) {
         lastRejectedRequest = (path: path, status: response.statusCode);
         throw AccountFailure.rejected;
       }
