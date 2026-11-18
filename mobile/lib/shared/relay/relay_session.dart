@@ -449,7 +449,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       final pending = _pendingEvents.remove(event.id);
       if (pending != null && !pending.completer.isCompleted) {
         pending.completer.completeError(
-          TimeoutException(
+          RelayAckTimeoutError(
             'Event ${event.id} not acknowledged within $timeout',
           ),
         );

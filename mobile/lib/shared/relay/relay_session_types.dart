@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 import 'relay_socket.dart';
@@ -34,6 +36,13 @@ class ActiveCommunityChangedError extends StateError {
 /// A publish was attempted while the relay socket is not connected.
 class RelayNotConnectedError extends StateError {
   RelayNotConnectedError() : super('Relay session is not connected');
+}
+
+/// The relay did not acknowledge a published EVENT in time, so it may or may
+/// not have accepted it. Other relay timeouts (history, queries) happen before
+/// anything is published and stay plain [TimeoutException]s.
+class RelayAckTimeoutError extends TimeoutException {
+  RelayAckTimeoutError(super.message, [super.duration]);
 }
 
 /// The connection ended after an EVENT was sent but before the relay

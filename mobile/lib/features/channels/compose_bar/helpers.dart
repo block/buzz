@@ -491,8 +491,9 @@ String _composeSendErrorMessage(Object error) {
 /// EVENT went out say "Not confirmed": the relay may have accepted it.
 String _sendFailureMessage(Object error) => switch (error) {
   RelayNotConnectedError() => 'Not sent. No connection.',
-  TimeoutException() => "Not confirmed. The relay didn't respond.",
+  RelayAckTimeoutError() => "Not confirmed. The relay didn't respond.",
   RelayAckLostError() => 'Not confirmed. Connection lost.',
+  TimeoutException() => "Not sent. The relay didn't respond.",
   StateError(:final message) => 'Not sent: $message',
   _ => 'Not sent: ${_composeSendErrorMessage(error)}',
 };

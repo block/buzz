@@ -1416,52 +1416,86 @@ void main() {
       });
     }
 
-    for (final (name, fail, message)
-        in <(String, Future<void> Function(ProviderContainer), String)>[
+    const unsentEvent = NostrEvent(
+      id: 'event-1',
+      pubkey: 'pubkey-1',
+      createdAt: 0,
+      kind: 9,
+      tags: [],
+      content: 'hello',
+      sig: 'sig-1',
+    );
+
+    // Each failure runs against the real relay session. `socket` records
+    // published EVENTs and never acknowledges them unless the case says so.
+    for (final (name, fail, message, publishes)
+        in <
+          (
+            String,
+            Future<void> Function(RelaySessionNotifier session),
+            String,
+            bool,
+          )
+        >[
           (
             'a disconnected relay',
-            // The real session: never connected in this harness, so publish
-            // classifies the failure itself.
-            (container) => container
-                .read(relaySessionProvider.notifier)
-                .publish(
-                  const NostrEvent(
-                    id: 'event-1',
-                    pubkey: 'pubkey-1',
-                    createdAt: 0,
-                    kind: 9,
-                    tags: [],
-                    content: 'hello',
-                    sig: 'sig-1',
-                  ),
-                ),
+            (session) {
+              session.debugPauseNow();
+              return session.publish(unsentEvent);
+            },
             'Not sent. No connection.',
+            false,
+          ),
+          (
+            'a timeout before anything was published',
+            // A pre-send roster lookup that times out, like the Solo chat
+            // recipients refresh, before the message EVENT is signed.
+            (session) => session
+                .fetchHistory(
+                  const NostrFilter(kinds: [39002]),
+                  timeout: const Duration(milliseconds: 1),
+                )
+                .then((_) => session.publish(unsentEvent)),
+            "Not sent. The relay didn't respond.",
+            false,
           ),
           (
             'an unacknowledged publish',
-            (_) => Future.error(TimeoutException('not acknowledged')),
+            (session) => session.publish(
+              unsentEvent,
+              timeout: const Duration(milliseconds: 1),
+            ),
             "Not confirmed. The relay didn't respond.",
+            true,
           ),
           (
             'a connection lost before acknowledgement',
-            (_) => Future.error(RelayAckLostError(Exception('socket closed'))),
+            (session) {
+              final delivery = session.publish(unsentEvent);
+              session.debugPauseNow();
+              return delivery;
+            },
             'Not confirmed. Connection lost.',
+            true,
           ),
           (
             'a relay rejection',
             (_) => Future.error(Exception('restricted: not a member')),
             'Not sent: restricted: not a member',
+            false,
           ),
           (
             'any other state error',
             (_) => Future.error(StateError('Relay session is disposed')),
             'Not sent: Relay session is disposed',
+            false,
           ),
         ]) {
       testWidgets('reports $name as itself, not a community switch', (
         tester,
       ) async {
-        late final ProviderContainer container;
+        final publishedEvents = <Map<String, dynamic>>[];
+        late final RelaySessionNotifier session;
         await tester.pumpWidget(
           _buildComposeBar(
             uploadService: _testUploadService(nostr.Keys.generate().nsec),
@@ -1470,20 +1504,32 @@ void main() {
                   content,
                   mentionPubkeys, {
                   mediaTags = const <List<String>>[],
-                }) => fail(container),
+                }) => fail(session),
           ),
         );
-        container = ProviderScope.containerOf(
+        session = ProviderScope.containerOf(
           tester.element(find.byType(ComposeBar)),
+        ).read(relaySessionProvider.notifier);
+        session.debugAttachSocketForTest(
+          _RecordingRelaySocket(
+            publishedEvents,
+            session.debugHandleSocketMessageForTest,
+            beforeAcknowledged: (_) => Completer<void>().future,
+          ),
         );
 
         await _expandComposer(tester);
         await tester.enterText(find.byType(TextField), 'hello');
         await tester.pumpAndSettle();
         await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+        await tester.pump(const Duration(milliseconds: 10));
         await tester.pumpAndSettle();
 
         expect(find.widgetWithText(SnackBar, message), findsOneWidget);
+        expect(
+          publishedEvents.where((event) => event['id'] == unsentEvent.id),
+          hasLength(publishes ? 1 : 0),
+        );
         expect(
           tester.widget<TextField>(find.byType(TextField)).controller!.text,
           'hello',
