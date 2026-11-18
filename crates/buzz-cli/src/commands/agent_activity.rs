@@ -8,14 +8,16 @@ use std::time::Duration;
 
 use buzz_core::kind::KIND_AGENT_OBSERVER_FRAME;
 use buzz_core::observer::{
-    decrypt_observer_payload, OBSERVER_AGENT_TAG, OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY,
+    content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY,
+    OBSERVER_MAX_PLAINTEXT_LEN,
 };
-use nostr::{Event, Keys, PublicKey};
+use nostr::{Event, PublicKey};
 use serde_json::{json, Map, Value};
 
 use super::agents::require_agent_owner;
 use super::messages::resolve_author;
 use crate::client::BuzzClient;
+use crate::credentials::Credentials;
 use crate::error::CliError;
 
 /// Frames returned when `--limit` is not given.
@@ -83,14 +85,14 @@ pub(crate) async fn fetch_activity(
     let filter = json!({
         "kinds": [KIND_AGENT_OBSERVER_FRAME],
         "authors": [agent_hex],
-        "#p": [client.keys().public_key().to_hex()],
+        "#p": [client.public_key().to_hex()],
         "since": since,
         "limit": MAX_COLLECTED,
     });
     let events = client
         .listen_events(&filter, Duration::from_secs(wait), MAX_COLLECTED)
         .await?;
-    decode_activity(client.keys(), &agent_key, &events, since, limit)
+    decode_activity(client.credentials(), &agent_key, &events, since, limit).await
 }
 
 fn unix_now() -> u64 {
@@ -119,8 +121,8 @@ fn resolve_since(since: Option<u64>, now: u64) -> Result<u64, CliError> {
 /// first, keeping the newest `limit`. Events from other agents of the same
 /// owner are ignored. Frames that fail verification, decryption, or parsing
 /// are counted; when nothing readable remains that is an error, not `[]`.
-pub(crate) fn decode_activity(
-    keys: &Keys,
+pub(crate) async fn decode_activity(
+    credentials: &Credentials,
     agent: &PublicKey,
     events: &[Event],
     since: u64,
@@ -133,10 +135,11 @@ pub(crate) fn decode_activity(
         if !is_agent_telemetry(event, &agent_hex) || event.created_at.as_secs() < since {
             continue;
         }
-        let payload = event
-            .verify()
-            .ok()
-            .and_then(|()| decrypt_observer_payload::<Value>(keys, event).ok());
+        let payload = if event.verify().is_ok() {
+            decrypt_frame(credentials, event).await?
+        } else {
+            None
+        };
         let Some(payload) = payload else {
             unreadable += 1;
             continue;
@@ -160,6 +163,25 @@ pub(crate) fn decode_activity(
         frames: decoded.into_iter().skip(skip).map(|(_, v)| v).collect(),
         unreadable,
     })
+}
+
+async fn decrypt_frame(
+    credentials: &Credentials,
+    event: &Event,
+) -> Result<Option<Value>, CliError> {
+    if !content_looks_like_nip44(&event.content) {
+        return Ok(None);
+    }
+    let Some(plaintext) = credentials
+        .nip44_decrypt(&event.pubkey, &event.content)
+        .await?
+    else {
+        return Ok(None);
+    };
+    if plaintext.len() > OBSERVER_MAX_PLAINTEXT_LEN {
+        return Ok(None);
+    }
+    Ok(serde_json::from_str(&plaintext).ok())
 }
 
 fn is_agent_telemetry(event: &Event, agent_hex: &str) -> bool {
@@ -300,7 +322,7 @@ mod tests {
     use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
     use axum::{extract::State, response::IntoResponse, routing::get, routing::post, Json, Router};
     use buzz_core::observer::{encrypt_observer_payload, OBSERVER_FRAME_CONTROL};
-    use nostr::{EventBuilder, Kind, Timestamp};
+    use nostr::{EventBuilder, Keys, Kind, Timestamp};
     use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
 
@@ -419,7 +441,7 @@ mod tests {
         let relay = Shared::default();
         relay.lock().unwrap().profiles.push(profile(agent, owner));
         let url = fake_relay(relay.clone()).await;
-        let client = BuzzClient::new(url, owner.clone(), None, None).unwrap();
+        let client = BuzzClient::new(url, Credentials::from_keys(owner.clone())).unwrap();
         (client, relay)
     }
 
@@ -595,7 +617,7 @@ mod tests {
             &[frame(1, "turn_started", json!({}))],
         );
         let url = fake_relay(relay.clone()).await;
-        let stranger = BuzzClient::new(url, Keys::generate(), None, None).unwrap();
+        let stranger = BuzzClient::new(url, Credentials::from_keys(Keys::generate())).unwrap();
 
         let error = fetch_activity(&stranger, &agent.public_key().to_hex(), None, 50, 1, NOW)
             .await
@@ -607,8 +629,11 @@ mod tests {
 
     #[tokio::test]
     async fn unreachable_relay_is_a_network_error() {
-        let client =
-            BuzzClient::new("http://127.0.0.1:1".into(), Keys::generate(), None, None).unwrap();
+        let client = BuzzClient::new(
+            "http://127.0.0.1:1".into(),
+            Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap();
         let agent = Keys::generate().public_key().to_hex();
         let error = fetch_activity(&client, &agent, None, 50, 1, NOW)
             .await
@@ -771,8 +796,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn frames_before_since_are_dropped_and_text_is_bounded() {
+    #[tokio::test]
+    async fn frames_before_since_are_dropped_and_text_is_bounded() {
         let (owner, agent) = (Keys::generate(), Keys::generate());
         let long = "é".repeat(TEXT_EXCERPT_CHARS + 50);
         let events = [
@@ -793,8 +818,15 @@ mod tests {
                 NOW - 50,
             ),
         ];
-        let activity =
-            decode_activity(&owner, &agent.public_key(), &events, NOW - 100, 10).unwrap();
+        let activity = decode_activity(
+            &Credentials::from_keys(owner),
+            &agent.public_key(),
+            &events,
+            NOW - 100,
+            10,
+        )
+        .await
+        .unwrap();
         assert_eq!(activity.frames.len(), 1);
         let text = activity.frames[0]["text"].as_str().unwrap();
         assert_eq!(text.chars().count(), TEXT_EXCERPT_CHARS + 1);

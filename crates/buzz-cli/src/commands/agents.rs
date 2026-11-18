@@ -184,7 +184,7 @@ pub(super) async fn require_agent_owner(
     client: &BuzzClient,
     agent_hex: &str,
 ) -> Result<(), CliError> {
-    let signer_hex = client.keys().public_key().to_hex();
+    let signer_hex = client.public_key().to_hex();
     let profile = fetch_kind0(client, agent_hex).await?;
     ensure_owner(profile.as_ref(), agent_hex, &signer_hex)
 }

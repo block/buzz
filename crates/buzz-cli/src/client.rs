@@ -1365,69 +1365,8 @@ impl BuzzClient {
     /// `buzz_ws_client::publish_event` which handles connect, NIP-42 auth,
     /// EVENT send, OK wait, and graceful close.
     pub async fn publish_ephemeral_event(&self, event: nostr::Event) -> Result<String, CliError> {
-        let ws_url = &self.ws_url;
-        // Two kinds of deadline: each network phase is capped as a whole,
-        // writes included (the connect below, then buzz_ws_client's challenge,
-        // AUTH, EVENT and close phases), and NIP-42 signing between them is
-        // bounded by the signer itself. A
-        // desktop provider may wait out throttling and hold `sign_event` for a
-        // person's decision, which no relay budget should cut short.
-        let signer = crate::credentials::CapturingSigner::new(&self.credentials);
-        let ws_error = |e: buzz_ws_client::WsClientError| match e.upgrade_rejection() {
-            // A denial decided on the upgrade is an HTTP response (NIP-FI).
-            Some((status, body)) => self.relay_error(status, body),
-            // A post-upgrade denial (e.g. a NIP-FI key mismatch) is a 1008 close.
-            None if matches!(e, buzz_ws_client::WsClientError::PolicyClose(_)) => {
-                CliError::Auth(e.to_string())
-            }
-            None => CliError::Other(e.to_string()),
-        };
-        //
-        // The relay closes a socket that has not signed in within seconds,
-        // so a slow or throttled sign-in signature reconnects and signs the
-        // new challenge, a bounded number of times, with current evidence:
-        // the old assertion may have expired meanwhile. A throttled sign-in
-        // is waited out between connections, never on one. EVENT, signed
-        // before any of this, is sent only once AUTH succeeds.
-        let mut attempt = 1;
-        let mut conn = loop {
-            let headers = self.upgrade_headers().await?;
-            let mut conn = tokio::time::timeout(
-                WS_CONNECT_TIMEOUT,
-                buzz_ws_client::NostrWsConnection::connect_with_headers(ws_url, headers),
-            )
-            .await
-            .map_err(|_| CliError::Other("relay WebSocket connect timed out".into()))?
-            .map_err(ws_error)?;
-            let signed_in = conn
-                .authenticate(&signer, self.credentials.auth_tag().map(|t| &t.tag))
-                .await;
-            let Err(e) = signed_in else { break conn };
-            let failure = signer.take_failure();
-            let lost = matches!(
-                e,
-                buzz_ws_client::WsClientError::ConnectionClosed
-                    | buzz_ws_client::WsClientError::WebSocket(_)
-            );
-            let (failure, wait) = failure.unzip();
-            let wait = wait.flatten();
-            let throttled = matches!(failure, Some(CliError::Throttled(_)));
-            let _ = conn.disconnect().await;
-            if !(lost || throttled) {
-                return Err(failure.unwrap_or_else(|| ws_error(e)));
-            }
-            if attempt == WS_SIGN_IN_ATTEMPTS {
-                return Err(failure.unwrap_or_else(|| {
-                    CliError::Unavailable(format!(
-                        "the relay closed the WebSocket before sign-in completed, \
-                         {WS_SIGN_IN_ATTEMPTS} times: {e}"
-                    ))
-                }));
-            }
-            tokio::time::sleep(wait.unwrap_or_else(|| jitter_delay(attempt - 1))).await;
-            attempt += 1;
-        };
-        let ok = conn.send_event(event).await.map_err(ws_error)?;
+        let mut conn = self.connect_authenticated_ws().await?;
+        let ok = conn.send_event(event).await.map_err(|e| self.ws_error(e))?;
         let _ = conn.disconnect().await;
 
         if !ok.accepted {
@@ -1444,6 +1383,75 @@ impl BuzzClient {
         .to_string())
     }
 
+    fn ws_error(&self, e: buzz_ws_client::WsClientError) -> CliError {
+        match e.upgrade_rejection() {
+            // A denial decided on the upgrade is an HTTP response (NIP-FI).
+            Some((status, body)) => self.relay_error(status, body),
+            // A post-upgrade denial (e.g. a NIP-FI key mismatch) is a 1008 close.
+            None if matches!(e, buzz_ws_client::WsClientError::PolicyClose(_)) => {
+                CliError::Auth(e.to_string())
+            }
+            None => CliError::Other(e.to_string()),
+        }
+    }
+
+    /// Connect to the relay WebSocket and complete NIP-42 sign-in.
+    async fn connect_authenticated_ws(
+        &self,
+    ) -> Result<buzz_ws_client::NostrWsConnection, CliError> {
+        // Two kinds of deadline: each network phase is capped as a whole,
+        // writes included (the connect below, then buzz_ws_client's challenge,
+        // AUTH, EVENT and close phases), and NIP-42 signing between them is
+        // bounded by the signer itself. A
+        // desktop provider may wait out throttling and hold `sign_event` for a
+        // person's decision, which no relay budget should cut short.
+        let signer = crate::credentials::CapturingSigner::new(&self.credentials);
+        // The relay closes a socket that has not signed in within seconds,
+        // so a slow or throttled sign-in signature reconnects and signs the
+        // new challenge, a bounded number of times, with current evidence:
+        // the old assertion may have expired meanwhile. A throttled sign-in
+        // is waited out between connections, never on one.
+        let mut attempt = 1;
+        let conn = loop {
+            let headers = self.upgrade_headers().await?;
+            let mut conn = tokio::time::timeout(
+                WS_CONNECT_TIMEOUT,
+                buzz_ws_client::NostrWsConnection::connect_with_headers(&self.ws_url, headers),
+            )
+            .await
+            .map_err(|_| CliError::Other("relay WebSocket connect timed out".into()))?
+            .map_err(|e| self.ws_error(e))?;
+            let signed_in = conn
+                .authenticate(&signer, self.credentials.auth_tag().map(|t| &t.tag))
+                .await;
+            let Err(e) = signed_in else { break conn };
+            let failure = signer.take_failure();
+            let lost = matches!(
+                e,
+                buzz_ws_client::WsClientError::ConnectionClosed
+                    | buzz_ws_client::WsClientError::WebSocket(_)
+            );
+            let (failure, wait) = failure.unzip();
+            let wait = wait.flatten();
+            let throttled = matches!(failure, Some(CliError::Throttled(_)));
+            let _ = conn.disconnect().await;
+            if !(lost || throttled) {
+                return Err(failure.unwrap_or_else(|| self.ws_error(e)));
+            }
+            if attempt == WS_SIGN_IN_ATTEMPTS {
+                return Err(failure.unwrap_or_else(|| {
+                    CliError::Unavailable(format!(
+                        "the relay closed the WebSocket before sign-in completed, \
+                         {WS_SIGN_IN_ATTEMPTS} times: {e}"
+                    ))
+                }));
+            }
+            tokio::time::sleep(wait.unwrap_or_else(|| jitter_delay(attempt - 1))).await;
+            attempt += 1;
+        };
+        Ok(conn)
+    }
+
     /// Subscribe with `filter` over an authenticated WebSocket and collect the
     /// matching events that arrive during `window`, stored or live.
     ///
@@ -1457,7 +1465,7 @@ impl BuzzClient {
         window: Duration,
         max_events: usize,
     ) -> Result<Vec<nostr::Event>, CliError> {
-        use buzz_ws_client::{NostrWsConnection, RelayMessage, WsClientError};
+        use buzz_ws_client::{RelayMessage, WsClientError};
 
         const SUB_ID: &str = "buzz-cli-listen";
         let ws_error = |e: WsClientError| match e {
@@ -1467,22 +1475,7 @@ impl BuzzClient {
                 body: other.to_string(),
             },
         };
-        let connect_budget =
-            env_duration_secs("BUZZ_CONNECT_TIMEOUT_SECS", 15) + Duration::from_secs(45);
-        let mut conn = tokio::time::timeout(
-            connect_budget,
-            NostrWsConnection::connect_authenticated(
-                &to_ws_url(&self.relay_url),
-                &self.keys,
-                self.auth_tag.as_ref(),
-            ),
-        )
-        .await
-        .map_err(|_| CliError::Relay {
-            status: 503,
-            body: "timed out connecting to the relay".into(),
-        })?
-        .map_err(ws_error)?;
+        let mut conn = self.connect_authenticated_ws().await?;
         conn.send_raw(&serde_json::json!(["REQ", SUB_ID, filter]))
             .await
             .map_err(ws_error)?;
