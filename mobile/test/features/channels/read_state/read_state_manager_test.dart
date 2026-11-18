@@ -11,6 +11,8 @@ import 'package:buzz/shared/read_state/read_state_storage.dart';
 import 'package:buzz/shared/relay/read_state_snapshot.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
+import '../../../helpers/signed_event.dart';
+
 const _relayUrl = 'https://relay.example';
 
 void main() {
@@ -1281,13 +1283,16 @@ void main() {
     session.debugHandleMessage([
       'EVENT',
       'l-1',
-      _readStateEvent(
-        pubkey: keychain.public,
-        crypto: crypto,
-        clientId: 'desktop',
-        slotId: 'desktop-slot',
-        contexts: {'channel-1': now},
-        createdAt: now,
+      signedBy(
+        keychain,
+        _readStateEvent(
+          pubkey: keychain.public,
+          crypto: crypto,
+          clientId: 'desktop',
+          slotId: 'desktop-slot',
+          contexts: {'channel-1': now},
+          createdAt: now,
+        ),
       ).toJson(),
     ]);
     session.debugFlushEventBuffer();
@@ -1308,13 +1313,16 @@ void main() {
     session.debugHandleMessage([
       'EVENT',
       'l-1',
-      _readStateEvent(
-        pubkey: keychain.public,
-        crypto: crypto,
-        clientId: 'phone',
-        slotId: 'phone-slot',
-        contexts: {'channel-2': now - 600},
-        createdAt: now - 600,
+      signedBy(
+        keychain,
+        _readStateEvent(
+          pubkey: keychain.public,
+          crypto: crypto,
+          clientId: 'phone',
+          slotId: 'phone-slot',
+          contexts: {'channel-2': now - 600},
+          createdAt: now - 600,
+        ),
       ).toJson(),
     ]);
     session.debugFlushEventBuffer();

@@ -17,6 +17,8 @@ import 'package:buzz/shared/read_state/thread_follows_format.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/relay/read_state_snapshot.dart';
 
+import '../../../helpers/signed_event.dart';
+
 /// Two installations of one identity against one in-memory relay: the NIP-RS
 /// Buzz profile's synced mark read, whole-channel mark unread and thread
 /// follows. Each device gets its own storage scope through its own relay URL.
@@ -208,8 +210,9 @@ void main() {
       ),
       sig: 'sig',
     );
-    relay.retained['$readStateUnreadDTagPrefix$slot'] = record;
-    relay.deliver(record);
+    final signed = signedBy(keys, record);
+    relay.retained['$readStateUnreadDTagPrefix$slot'] = signed;
+    relay.deliver(signed);
     await pumpEventQueue();
     phone.clearChannelOverride(channel);
     await phone.flush();
@@ -522,13 +525,89 @@ void main() {
     });
   });
 
+  group('live event authentication', () {
+    final key = threadFollowKey(channel, root);
+    final stranger = nostr.Keys.generate();
+
+    /// The forgeries a relay could send in place of [event]: altered
+    /// content, a stolen signature, another author, and another kind.
+    List<NostrEvent> forgeries(NostrEvent event, NostrEvent other) => [
+      NostrEvent.fromJson({...event.toJson(), 'content': other.content}),
+      NostrEvent.fromJson({...event.toJson(), 'sig': other.sig}),
+      signedBy(stranger, event),
+      signedBy(keys, NostrEvent.fromJson({...event.toJson(), 'kind': 1})),
+    ];
+
+    /// What [publish] put on the relay, withheld so only live delivery
+    /// brings it to the next device.
+    Future<NostrEvent> withheld(Future<void> Function() publish) async {
+      final before = Map.of(relay.retained);
+      await publish();
+      final [d] = [
+        for (final MapEntry(:key, :value) in relay.retained.entries)
+          if (before[key]?.id != value.id) key,
+      ];
+      return relay.retained.remove(d)!;
+    }
+
+    test('a forged live follow is ignored, and does not displace a later '
+        'valid one or the state it set', () async {
+      final desktop = await device('desktop');
+      final follow = await withheld(() async {
+        await desktop.setThreadFollow(channel, root, true);
+        await desktop.flush();
+      });
+      clock += 10;
+      final unfollow = await withheld(() async {
+        await desktop.setThreadFollow(channel, root, false);
+        await desktop.flush();
+      });
+
+      final phone = await device('phone');
+      forgeries(follow, unfollow).forEach(relay.deliver);
+      expect(phone.threadFollows[key], isNull);
+      relay.deliver(follow);
+      expect(phone.threadFollows[key]!.follow, isTrue);
+      forgeries(unfollow, follow).forEach(relay.deliver);
+      expect(phone.threadFollows[key]!.follow, isTrue);
+      relay.deliver(unfollow);
+      expect(phone.threadFollows[key]!.follow, isFalse);
+    });
+
+    test('a forged live unread record is ignored, and does not displace a '
+        'later valid one or the mark it set', () async {
+      final desktop = await device('desktop');
+      desktop.markContextRead(channel, clock - 100);
+      await desktop.flush();
+      final mark = await withheld(() async {
+        expect(desktop.markChannelUnread(channel), isTrue);
+        await desktop.flush();
+      });
+      clock += 10;
+      final clear = await withheld(() async {
+        desktop.clearChannelOverride(channel);
+        await desktop.flush();
+      });
+
+      final phone = await device('phone');
+      forgeries(mark, clear).forEach(relay.deliver);
+      expect(phone.activeChannelOverrides, isEmpty);
+      relay.deliver(mark);
+      expect(phone.activeChannelOverrides, {channel});
+      forgeries(clear, mark).forEach(relay.deliver);
+      expect(phone.activeChannelOverrides, {channel});
+      relay.deliver(clear);
+      expect(phone.activeChannelOverrides, isEmpty);
+    });
+  });
+
   group('sync seams', () {
     final key = threadFollowKey(channel, root);
     final slot = 'b' * 32;
     NostrEvent peerFollow(bool follow, int at, {String? content}) =>
         _followEvent(
           crypto: crypto,
-          pubkey: keys.public,
+          keys: keys,
           slot: slot,
           choices: {key: (follow: follow, at: at)},
           createdAt: at,
@@ -1526,8 +1605,9 @@ void main() {
           ),
           sig: 'sig',
         );
-        relay.retained[coordinate] = carrier;
-        relay.deliver(carrier);
+        final signed = signedBy(keys, carrier);
+        relay.retained[coordinate] = signed;
+        relay.deliver(signed);
         clock += 800;
         store.fail = true;
         await release.future;
@@ -1704,60 +1784,66 @@ NostrEvent _readStateEvent({
   required int createdAt,
   // The version-2 unread record instead of read positions.
   bool unread = false,
-}) => NostrEvent(
-  id: 'event-$clientId-$createdAt',
-  pubkey: keys.public,
-  createdAt: createdAt,
-  kind: EventKind.readState,
-  tags: [
-    [
-      'd',
-      unread
-          ? '$readStateUnreadDTagPrefix${_unreadSlot(slot)}'
-          : '$readStateDTagPrefix$slot',
+}) => signedBy(
+  keys,
+  NostrEvent(
+    id: 'event-$clientId-$createdAt',
+    pubkey: keys.public,
+    createdAt: createdAt,
+    kind: EventKind.readState,
+    tags: [
+      [
+        'd',
+        unread
+            ? '$readStateUnreadDTagPrefix${_unreadSlot(slot)}'
+            : '$readStateDTagPrefix$slot',
+      ],
+      ['t', unread ? readStateUnreadTag : 'read-state'],
     ],
-    ['t', unread ? readStateUnreadTag : 'read-state'],
-  ],
-  content: crypto.encrypt(
-    jsonEncode(
-      ReadStateBlob(
-        clientId: clientId,
-        contexts: contexts,
-        version: unread ? 2 : 1,
-      ).toJson(),
+    content: crypto.encrypt(
+      jsonEncode(
+        ReadStateBlob(
+          clientId: clientId,
+          contexts: contexts,
+          version: unread ? 2 : 1,
+        ).toJson(),
+      ),
     ),
+    sig: 'sig',
   ),
-  sig: 'sig',
 );
 
 NostrEvent _followEvent({
   required ReadStateCrypto crypto,
-  required String pubkey,
+  required nostr.Keys keys,
   required String slot,
   required Map<String, ThreadFollowChoice> choices,
   required int createdAt,
   String clientId = 'peer',
   String? content,
-}) => NostrEvent(
-  id: 'follow-$slot-$createdAt',
-  pubkey: pubkey,
-  createdAt: createdAt,
-  kind: EventKind.readState,
-  tags: [
-    ['d', '$threadFollowsDTagPrefix$slot'],
-    ['t', threadFollowsTag],
-  ],
-  content: crypto.encrypt(
-    content ??
-        ThreadFollowsBlob(
-          clientId: clientId,
-          entries: {
-            for (final MapEntry(:key, :value) in choices.entries)
-              key: {'follow': value.follow, 'at': value.at},
-          },
-        ).encode(),
+}) => signedBy(
+  keys,
+  NostrEvent(
+    id: 'follow-$slot-$createdAt',
+    pubkey: keys.public,
+    createdAt: createdAt,
+    kind: EventKind.readState,
+    tags: [
+      ['d', '$threadFollowsDTagPrefix$slot'],
+      ['t', threadFollowsTag],
+    ],
+    content: crypto.encrypt(
+      content ??
+          ThreadFollowsBlob(
+            clientId: clientId,
+            entries: {
+              for (final MapEntry(:key, :value) in choices.entries)
+                key: {'follow': value.follow, 'at': value.at},
+            },
+          ).encode(),
+    ),
+    sig: 'sig',
   ),
-  sig: 'sig',
 );
 
 /// A relay that keeps the newest event per coordinate and serves them all as

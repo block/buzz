@@ -169,9 +169,8 @@ class ReadStateManager {
   // Channels whose synced clear failed. Their error outlives unrelated
   // successful syncs until the clear lands or the override ends.
   final Set<String> _failedClears = {};
-  // Reading clears refused for an incomplete view, each with the register
-  // the reader saw. Retried once after the next usable snapshot; never
-  // journaled, so a restart leaves the mark live and reported.
+  // Refused reading clears and the register each reader saw: retried once
+  // after the next usable snapshot, never journaled (a restart keeps it live).
   final Map<String, OverrideRegister> _refusedReadingClears = {};
 
   Object? get _standingError {
@@ -642,6 +641,7 @@ class ReadStateManager {
 
   void _handleIncomingEvent(NostrEvent event) {
     if (_disposed || !_servesThisCommunity) return;
+    if (!isAuthenticReadStateEvent(event, viewer: pubkey)) return;
     _mergeEvents([event]);
     _persistLocalState();
     _onChanged();

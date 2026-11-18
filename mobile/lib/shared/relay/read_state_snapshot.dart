@@ -78,14 +78,8 @@ List<NostrEvent> validateReadStateSnapshot(ReadStateSnapshotInput input) {
         throw const FormatException('Invalid event object');
       }
       final event = NostrEvent.fromJson(value);
-      if (event.pubkey != input.viewer ||
-          event.kind != 30078 ||
-          !_hex64.hasMatch(event.id) ||
-          !_hex64.hasMatch(event.pubkey) ||
-          !_hex128.hasMatch(event.sig) ||
-          event.createdAt < 0 ||
-          event.createdAt > 9007199254740991) {
-        throw const FormatException('Invalid snapshot event envelope');
+      if (!isAuthenticReadStateEvent(event, viewer: input.viewer)) {
+        throw const FormatException('Invalid snapshot event');
       }
       // NIP-33 uses the first d tag, or the empty identifier if absent.
       var coordinate = '';
@@ -98,22 +92,38 @@ List<NostrEvent> validateReadStateSnapshot(ReadStateSnapshotInput input) {
       if (!coordinates.add(coordinate)) {
         throw const FormatException('Duplicate snapshot coordinate');
       }
-      // The package's verify:true additionally rejects timestamp zero, which
-      // NIP-01 permits. Enforce wire shape above, canonical hash and signature
-      // here without imposing that unrelated timestamp policy.
-      final signed = nostr.Event.fromMap(value, verify: false);
-      if (signed.getEventId() != event.id ||
-          !nostr.Schnorr.verify(
-            publicKey: event.pubkey,
-            message: event.id,
-            signature: event.sig,
-          )) {
-        throw const FormatException('Invalid snapshot event signature');
-      }
       events.add(event);
     } catch (_) {
       throw const FormatException('Invalid or duplicate snapshot event');
     }
   }
   return events;
+}
+
+/// Whether [event] is a well-formed read-state event that [viewer] signed:
+/// its kind, author, wire shape, canonical id and Schnorr signature.
+bool isAuthenticReadStateEvent(NostrEvent event, {required String viewer}) {
+  if (event.pubkey != viewer ||
+      event.kind != 30078 ||
+      !_hex64.hasMatch(event.id) ||
+      !_hex64.hasMatch(event.pubkey) ||
+      !_hex128.hasMatch(event.sig) ||
+      event.createdAt < 0 ||
+      event.createdAt > 9007199254740991) {
+    return false;
+  }
+  // The package's verify:true additionally rejects timestamp zero, which
+  // NIP-01 permits. Enforce wire shape above, canonical hash and signature
+  // here without imposing that unrelated timestamp policy.
+  try {
+    return nostr.Event.fromMap(event.toJson(), verify: false).getEventId() ==
+            event.id &&
+        nostr.Schnorr.verify(
+          publicKey: event.pubkey,
+          message: event.id,
+          signature: event.sig,
+        );
+  } catch (_) {
+    return false;
+  }
 }

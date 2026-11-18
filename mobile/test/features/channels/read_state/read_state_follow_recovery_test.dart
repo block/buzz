@@ -10,6 +10,8 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 
+import '../../../helpers/signed_event.dart';
+
 /// The shared follow-recovery witnesses
 /// (`PLANS/READ_STATE_FOLLOW_SYNC_RULES_2026_11_14.md` §8), against the real
 /// manager, journal and signing path: the accepted own head, pending edits
@@ -332,21 +334,24 @@ void main() {
     await phone.setThreadFollow(channel, 'a' * 64, true);
     await phone.flush();
     final own = relay.follows().single;
-    final ahead = NostrEvent(
-      id: '1' * 64,
-      pubkey: keys.public,
-      createdAt: clock + 1000,
-      kind: EventKind.readState,
-      tags: own.tags,
-      content: crypto.encrypt(
-        ThreadFollowsBlob(
-          clientId: relayHead().clientId,
-          entries: {
-            keyK: {'follow': true, 'at': clock},
-          },
-        ).encode(),
+    final ahead = signedBy(
+      keys,
+      NostrEvent(
+        id: '1' * 64,
+        pubkey: keys.public,
+        createdAt: clock + 1000,
+        kind: EventKind.readState,
+        tags: own.tags,
+        content: crypto.encrypt(
+          ThreadFollowsBlob(
+            clientId: relayHead().clientId,
+            entries: {
+              keyK: {'follow': true, 'at': clock},
+            },
+          ).encode(),
+        ),
+        sig: 'sig',
       ),
-      sig: 'sig',
     );
     relay.deliver(ahead);
     await phone.setThreadFollow(channel, 'a' * 64, false);
@@ -631,37 +636,44 @@ void main() {
     await phone.flush();
     final own = relay.follows().single;
     final clientId = relayHead().clientId;
-    NostrEvent head(String id, bool follow) => NostrEvent(
-      id: id,
-      pubkey: keys.public,
-      createdAt: own.createdAt + 10,
-      kind: EventKind.readState,
-      tags: own.tags,
-      content: crypto.encrypt(
-        ThreadFollowsBlob(
-          clientId: clientId,
-          entries: {
-            keyK: {'follow': follow, 'at': clock},
-          },
-        ).encode(),
+    NostrEvent head(bool follow) => signedBy(
+      keys,
+      NostrEvent(
+        id: '',
+        pubkey: keys.public,
+        createdAt: own.createdAt + 10,
+        kind: EventKind.readState,
+        tags: own.tags,
+        content: crypto.encrypt(
+          ThreadFollowsBlob(
+            clientId: clientId,
+            entries: {
+              keyK: {'follow': follow, 'at': clock},
+            },
+          ).encode(),
+        ),
+        sig: '',
       ),
-      sig: 'sig',
     );
-    final low = head('1' * 64, false);
-    final high = head('e' * 64, true);
+    // Real IDs are hashes, so either choice can hold the lower one.
+    final [low, high] = [head(false), head(true)]
+      ..sort((a, b) => a.id.compareTo(b.id));
+    final wins = decodeThreadFollowsBlob(
+      crypto.decrypt(low.content),
+    )!.choices[keyK]!.follow;
 
     relay.deliver(high);
     relay.deliver(low);
-    expect(phone.threadFollows[keyK]!.follow, isFalse);
+    expect(phone.threadFollows[keyK]!.follow, wins);
     relay.deliver(high);
-    expect(phone.threadFollows[keyK]!.follow, isFalse);
+    expect(phone.threadFollows[keyK]!.follow, wins);
 
     phone.dispose(flushPending: false);
     await prefs.clear();
     final other = await device();
     relay.deliver(low);
     relay.deliver(high);
-    expect(other.threadFollows[keyK]!.follow, isFalse);
+    expect(other.threadFollows[keyK]!.follow, wins);
   });
 }
 
