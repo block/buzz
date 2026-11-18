@@ -1171,6 +1171,35 @@ void main() {
       expect(phone.activeChannelOverrides, {channel});
     });
 
+    test(
+      'a clear made offline is kept and published once back online',
+      () async {
+        final phone = await device('phone');
+        phone.markContextRead(channel, clock - 100);
+        final marked = clock;
+        expect(phone.markChannelUnread(channel), isTrue);
+        await phone.flush();
+
+        relay.offline = true;
+        final restarted = await device('phone');
+        expect(restarted.activeChannelOverrides, {channel});
+        clock += 10;
+        expect(restarted.clearChannelOverride(channel), isTrue);
+        expect(restarted.failedClears, isEmpty);
+        expect(restarted.activeChannelOverrides, isEmpty);
+
+        relay.offline = false;
+        await reconnect(restarted);
+        await restarted.flush();
+        expect(ownGroup(restarted), {
+          channel: marked - 100,
+          'ov_c:$channel': clock,
+        });
+        final desktop = await device('desktop');
+        expect(desktop.activeChannelOverrides, isEmpty);
+      },
+    );
+
     for (final (offset, kept) in [
       (lifetime + 1, true),
       (lifetime + 600, true),

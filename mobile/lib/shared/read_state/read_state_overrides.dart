@@ -29,9 +29,14 @@ extension ReadStateOverrides on ReadStateManager {
   int? _allocateStamp(OverrideRegister register) =>
       allocateOverrideStamp(register, now: _now());
 
+  /// Whether the override view is complete enough to set a synced channel
+  /// mark: the last full-state load succeeded and no held-back group remains.
+  bool get canSyncChannelUnread => _hasFullState;
+
   /// Synchronized whole-channel mark unread (NIP-RS Actions). Returns false,
   /// leaving state unchanged, when the action must fail visibly: no complete
-  /// load, no stamp to allocate, or a record that cannot fit the group.
+  /// load ([canSyncChannelUnread]), no stamp to allocate, or a record that
+  /// cannot fit the group.
   bool markChannelUnread(String channelId) {
     if (_disposed || !_hasFullState || !isChannelOverrideTarget(channelId)) {
       return false;
@@ -75,15 +80,16 @@ extension ReadStateOverrides on ReadStateManager {
 
   /// Ends a live channel override with a fresh clear stamp, even when no
   /// frontier moved. Returns null when no live override needs a clear, and
-  /// false, setting [syncError], when no stamp can be allocated or the
-  /// record cannot carry the clear.
+  /// false, setting [syncError], when a held-back group remains, no stamp
+  /// can be allocated or the record cannot carry the clear. A clear made
+  /// offline or after a failed snapshot is journaled; the next publish pass
+  /// reads and merges the snapshot before sending it.
   bool? _clearChannelOverride(String channelId) {
     // Resolve held-back groups first: one may be this channel's.
-    final complete = _hasFullState;
+    final resolved = _resolveDeferred();
     final register = _overrides[channelId];
     if (register == null || !_isLive(channelId, register)) return null;
-    // An incomplete view refuses the clear, visibly.
-    final stamp = complete ? _allocateStamp(register) : null;
+    final stamp = resolved ? _allocateStamp(register) : null;
     if (stamp != null) {
       _overrides[channelId] = (s: register.s, c: stamp, b: register.b);
       if (_primaryFits()) {

@@ -357,6 +357,21 @@ void main() {
     },
   );
 
+  test('a channel marked unread while read state is not loaded stays on '
+      'this device until read', () async {
+    _failSnapshots = true;
+    addTearDown(() => _failSnapshots = false);
+    final notifier = await pumpNotifier();
+    notifier.markContextRead(channelId, now - 10);
+
+    expect(notifier.markContextUnread(channelId, channelId: channelId), isTrue);
+    expect(state().isForcedUnread(channelId), isTrue);
+
+    // Reading to the bottom ends it.
+    expect(notifier.clearForcedUnread(channelId), isTrue);
+    expect(state().isForcedUnread(channelId), isFalse);
+  });
+
   test('automatic channel-open read still clears a channel-level force for '
       'the same channel', () async {
     final notifier = await pumpNotifier();
@@ -410,6 +425,9 @@ class _SessionRebuild extends Notifier<int> {
 
 Future<void>? _subscribeGate;
 
+/// Makes every read-state snapshot fail, as offline.
+var _failSnapshots = false;
+
 class _FakeRelaySession extends RelaySessionNotifier {
   int fetchCount = 0;
   int subscribeCount = 0;
@@ -444,6 +462,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     fetchCount++;
+    if (_failSnapshots) throw TimeoutException('offline');
     return [];
   }
 

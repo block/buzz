@@ -260,7 +260,9 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
   }
 
   /// Mark a context unread. A channel id is synchronized whole-channel
-  /// state, published to the user's other devices. A `msg:` key stays on
+  /// state, published to the user's other devices; while that state is not
+  /// fully loaded (offline, or after a failed snapshot), the mark stays on
+  /// this device instead, as it did before sync. A `msg:` key stays on
   /// this device, until it is read here or the synced frontier covering the
   /// message moves past where it was, on any device. Returns false when the
   /// action failed and nothing changed. [channelCatchUp] says whether
@@ -273,7 +275,11 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
   }) {
     final manager = _manager;
     if (manager == null) return false;
-    if (contextId == channelId) return manager.markChannelUnread(channelId);
+    if (contextId == channelId) {
+      if (manager.markChannelUnread(channelId)) return true;
+      // Refused with the view complete: no stamp or no room. Fail visibly.
+      if (manager.canSyncChannelUnread) return false;
+    }
     _forcedUnreadContexts[contextId] = (
       channelId: channelId,
       threadRootId: threadRootId,
@@ -297,11 +303,12 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
   /// Returns false when a synced clear failed; [ReadStateState.syncError]
   /// then says why.
   bool clearForcedUnread(String contextId) {
-    if (_forcedUnreadContexts.remove(contextId) != null) {
-      _refreshForcedState();
-      return true;
-    }
-    return _manager?.clearChannelOverride(contextId) ?? true;
+    // A channel can carry both a mark kept here while offline and a synced
+    // one from another device; reading ends both.
+    final local = _forcedUnreadContexts.remove(contextId) != null;
+    final cleared = _manager?.clearChannelOverride(contextId) ?? true;
+    if (local) _refreshForcedState();
+    return cleared;
   }
 
   /// Record an explicit follow or unfollow; see [ReadStateManager]. Returns
