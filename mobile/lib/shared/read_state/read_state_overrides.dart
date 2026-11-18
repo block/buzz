@@ -110,9 +110,15 @@ extension ReadStateOverrides on ReadStateManager {
   /// Retries each refused reading clear once the view is complete, after a
   /// whole snapshot merged. Only a register still live and exactly as the
   /// reader saw it is cleared: a newer or different mark stays. A failure
-  /// here is reported as any clear's is, and not retried again.
+  /// here is reported as any clear's is, and not retried again. A publisher
+  /// shut off for good keeps the refusal standing: the clear could not sync.
   void _retryRefusedReadingClears() {
-    if (_disposed || _refusedReadingClears.isEmpty || !_hasFullState) return;
+    if (_disposed ||
+        _remoteUnsupported ||
+        _refusedReadingClears.isEmpty ||
+        !_hasFullState) {
+      return;
+    }
     final refused = Map.of(_refusedReadingClears);
     _refusedReadingClears.clear();
     var cleared = false;

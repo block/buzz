@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:buzz/shared/read_state/read_state_format.dart';
+import 'package:buzz/shared/read_state/read_state_manager.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/read_state/read_state_time.dart';
 import 'package:buzz/shared/community/community_provider.dart';
@@ -357,6 +358,59 @@ void main() {
     },
   );
 
+  test('reading to the bottom while read state is not loaded fails, then '
+      'clears once it loads', () async {
+    final notifier = await pumpNotifier();
+    notifier.markContextRead(channelId, now - 10);
+    expect(notifier.markContextUnread(channelId, channelId: channelId), isTrue);
+    await notifier.flush();
+
+    // Restored from the journal, with no snapshot.
+    session.failSnapshots = true;
+    container.invalidate(readStateProvider);
+    await settle();
+    await flushMicrotasks();
+    expect(state().isForcedUnread(channelId), isTrue);
+    expect(notifier.clearForcedUnread(channelId), isFalse);
+    expect(state().failedClears, {channelId});
+    expect(state().syncError, isNotNull);
+
+    session.failSnapshots = false;
+    session.setStatus(SessionStatus.connected);
+    await flushMicrotasks();
+    expect(state().isForcedUnread(channelId), isFalse);
+    expect(state().failedClears, isEmpty);
+    await notifier.flush();
+
+    final pubkey = state().pubkey!;
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: config.nsec,
+      pubkey: pubkey,
+    )!;
+    final unread = session.retained.values.singleWhere(hasValidUnreadStateTags);
+    final group = decodeReadStateBlob(
+      crypto.decrypt(unread.content),
+      version: 2,
+    )!.contexts;
+    expect(
+      group['ov_c:$channelId'],
+      greaterThan(group['ov_s:$channelId'] ?? 0),
+    );
+    final peer = ReadStateManager(
+      pubkey: pubkey,
+      relayUrl: 'https://peer.example',
+      prefs: await SharedPreferences.getInstance(),
+      crypto: crypto,
+      relaySession: session,
+      signedEventRelay: SignedEventRelay(session: session, nsec: config.nsec),
+      remoteEnabled: true,
+      onChanged: () {},
+    );
+    addTearDown(() => peer.dispose(flushPending: false));
+    await peer.initialize();
+    expect(peer.activeChannelOverrides, isEmpty);
+  });
+
   test('automatic channel-open read still clears a channel-level force for '
       'the same channel', () async {
     final notifier = await pumpNotifier();
@@ -444,7 +498,25 @@ class _FakeRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     fetchCount++;
-    return [];
+    if (failSnapshots) throw TimeoutException('offline');
+    return retained.values.toList();
+  }
+
+  /// Read-state events published, newest per coordinate, served back as
+  /// the snapshot.
+  final retained = <String, NostrEvent>{};
+
+  /// Makes every snapshot read fail, as offline.
+  bool failSnapshots = false;
+
+  @override
+  Future<NostrEvent> publish(
+    NostrEvent event, {
+    Duration timeout = const Duration(seconds: 8),
+    Future<bool> Function()? mayPublish,
+  }) async {
+    retained[event.tags.firstWhere((tag) => tag.first == 'd')[1]] = event;
+    return event;
   }
 
   @override

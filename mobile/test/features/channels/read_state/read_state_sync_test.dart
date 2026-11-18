@@ -1327,6 +1327,35 @@ void main() {
         expect(phone.activeChannelOverrides, isEmpty);
       });
 
+      test('stays failed while publishing is shut off', () async {
+        final phone = await device('phone');
+        phone.markContextRead(channel, clock - 100);
+        expect(phone.markChannelUnread(channel), isTrue);
+        await phone.flush();
+        final published = Map.of(ownGroup(phone));
+        relay.beforePublish = (_) =>
+            throw Exception('restricted: missing users:write');
+        phone.markContextRead('${channel}b', clock);
+        await phone.flush();
+
+        relay.offline = true;
+        relay.ready();
+        await pumpEventQueue();
+        clock += 10;
+        expect(phone.clearChannelOverride(channel, reading: true), isFalse);
+        // Reading recovers; writing still cannot.
+        relay.offline = false;
+        relay.ready();
+        await pumpEventQueue();
+        expect(phone.activeChannelOverrides, {channel});
+        expect(phone.failedClears, {channel});
+        expect(phone.syncError, isNotNull);
+        expect(ownGroup(phone), published);
+        relay.beforePublish = null;
+        final desktop = await device('desktop');
+        expect(desktop.activeChannelOverrides, {channel});
+      });
+
       test('is dropped with its manager', () async {
         final phone = await refused();
         phone.dispose(flushPending: false);
