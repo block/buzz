@@ -133,11 +133,12 @@ class BestieTranscriptionControl extends HookConsumerWidget {
       try {
         final channel = await job.destination(pending);
         if (!current(token)) return;
-        // The job survives Home being covered or removed by the destination.
-        unawaited(job.run(pending, channel));
+        // Keep progress on Home, but let delivery survive the user leaving it.
+        final delivery = job.run(pending, channel);
         draft.value = null;
         phase.value = '';
-        if (!context.mounted) return;
+        final sent = await delivery;
+        if (!sent || !current(token) || !context.mounted) return;
         unawaited(openBestieDestination(context, channel));
       } catch (failure) {
         if (current(token)) report(failure);
@@ -286,17 +287,22 @@ class BestieTranscriptionControl extends HookConsumerWidget {
           phase.value == 'Saving' || phase.value == 'Opening conversation',
       sending: job.busy || phase.value == 'Discarding',
       restoring: phase.value == 'Restoring',
-      restoreFailed: error.value != null && draft.value == null,
-      hasPending: draft.value != null,
+      restoreFailed:
+          error.value != null && draft.value == null && progress.draft == null,
+      hasPending: draft.value != null || (!job.busy && progress.draft != null),
       elapsed: elapsed.value,
       samples: samples.value,
-      error: error.value,
+      error:
+          error.value ??
+          (progress.error == null
+              ? null
+              : 'Could not send transcript. Recording saved.'),
       cancelled: cancelOnRelease,
       start: start,
       finish: finish,
       cancel: cancel,
       retry: () async {
-        final pending = draft.value;
+        final pending = draft.value ?? progress.draft;
         if (pending == null || phase.value.isNotEmpty) return;
         error.value = null;
         await process(pending, ++generation.value);
@@ -309,7 +315,11 @@ class BestieTranscriptionControl extends HookConsumerWidget {
         if (phase.value.isNotEmpty) return;
         phase.value = 'Discarding';
         try {
-          await store.clear();
+          if (job.value.draft != null) {
+            await job.discard();
+          } else {
+            await store.clear();
+          }
           if (context.mounted) {
             draft.value = null;
             error.value = null;

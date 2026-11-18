@@ -61,8 +61,9 @@ class BestieTranscriptionJob
   Future<Channel> destination(BestieTranscriptDraft draft) =>
       ref.read(channelActionsProvider).openDm(pubkeys: [draft.recipient]);
 
-  Future<void> run(BestieTranscriptDraft draft, Channel channel) async {
-    if (busy) return;
+  /// Returns true only after this attempt confirms successful delivery.
+  Future<bool> run(BestieTranscriptDraft draft, Channel channel) async {
+    if (busy) return false;
     final generation = ++_generation;
     var saved = draft;
     value = BestieTranscriptionProgress(
@@ -102,6 +103,7 @@ class BestieTranscriptionJob
       );
       _validate(generation);
       value = const BestieTranscriptionProgress();
+      return true;
     } catch (error) {
       try {
         saved = await store.read() ?? saved;
@@ -115,6 +117,7 @@ class BestieTranscriptionJob
           error: error,
         );
       }
+      return false;
     } finally {
       if (identical(_speech, native)) _speech = null;
       try {

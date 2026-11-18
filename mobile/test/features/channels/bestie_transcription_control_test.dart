@@ -276,12 +276,14 @@ void main() {
       expect(sent.tags, contains(equals(['p', 'a' * 64])));
       expect(store.saved?.event?.id, sent.id);
       relay.loseAcknowledgment = false;
-      await tester.tap(find.text('Retry'));
+      expect(pane.selectedId, isNull);
+      await tester.tap(find.text('Retry transcript'));
       await tester.pumpAndSettle();
       expect(relay.writes, 2);
       expect(relay.events.single.id, sent.id);
       expect(speech.transcriptions, 1);
       expect(store.saved, isNull);
+      expect(pane.selectedId, '11111111-1111-4111-8111-111111111111');
       await tester.pumpWidget(const SizedBox());
     },
   );
@@ -427,7 +429,7 @@ void main() {
       expect(recorder.stops, 1);
       expect(store.saved?.recipient, 'a' * 64);
       expect(speech.transcriptions, 1);
-      expect(pane.selectedId, '11111111-1111-4111-8111-111111111111');
+      expect(pane.selectedId, isNull);
       await tester.pump();
       expect(find.text('Transcribing…'), findsNothing);
       expect(find.byTooltip('Discard transcript'), findsNothing);
@@ -610,7 +612,26 @@ void main() {
     expect(tester.takeException(), isNull);
   });
   testWidgets(
-    'leaving Home for chat keeps transcription running and sends there',
+    'leaving Home during processing sends without reopening the conversation',
+    (tester) async {
+      reset();
+      await mount(tester);
+      final gesture = await hold(tester);
+      await gesture.up();
+      await tester.pump();
+      showControl.value = false;
+      await tester.pump();
+      speech.result.complete('Finish in the background');
+      await tester.pumpAndSettle();
+      expect(relay.events.single.content, 'Finish in the background');
+      expect(store.saved, isNull);
+      expect(pane.selectedId, isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets(
+    'Home keeps the Bestie loader until successful delivery then opens chat',
     (tester) async {
       reset();
       await mount(tester);
@@ -618,7 +639,7 @@ void main() {
       await gesture.up();
       await tester.pump();
       expect(speech.transcriptions, 1);
-      expect(pane.selectedId, '11111111-1111-4111-8111-111111111111');
+      expect(pane.selectedId, isNull);
       await tester.pump();
       expect(find.text('Transcribing…'), findsNothing);
       expect(find.byTooltip('Discard transcript'), findsNothing);
@@ -632,11 +653,11 @@ void main() {
             ?.maxWidth,
         56,
       );
-      showControl.value = false;
-      await tester.pump();
       speech.result.complete('Send this in the opened chat');
       await tester.pumpAndSettle();
       expect(relay.events.single.content, 'Send this in the opened chat');
+      expect(pane.selectedId, '11111111-1111-4111-8111-111111111111');
+      expect(find.byType(BestieTranscriptionLoadingIndicator), findsNothing);
       expect(store.saved, isNull);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
