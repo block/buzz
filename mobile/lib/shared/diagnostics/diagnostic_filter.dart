@@ -30,6 +30,78 @@ abstract final class DiagnosticFilter {
 
   static const _breadcrumbCategories = {networkCategory, lifecycleCategory};
 
+  /// Device fields that may leave: the hardware and its state, never the
+  /// name a person gave it or its locale and timezone.
+  static const _device = {
+    'family',
+    'model',
+    'model_id',
+    'arch',
+    'battery_level',
+    'orientation',
+    'manufacturer',
+    'brand',
+    'screen_width_pixels',
+    'screen_height_pixels',
+    'screen_density',
+    'screen_dpi',
+    'online',
+    'charging',
+    'low_memory',
+    'simulator',
+    'memory_size',
+    'free_memory',
+    'usable_memory',
+    'storage_size',
+    'free_storage',
+    'external_storage_size',
+    'external_free_storage',
+    'boot_time',
+    'processor_count',
+    'cpu_description',
+    'processor_frequency',
+    'device_type',
+    'battery_status',
+  };
+
+  /// App fields that may leave: which build, and its memory and state.
+  static const _app = {
+    'app_name',
+    'app_version',
+    'app_identifier',
+    'app_build',
+    'build_type',
+    'app_start_time',
+    'device_app_hash',
+    'app_memory',
+    'in_foreground',
+  };
+
+  static const _os = {
+    'name',
+    'version',
+    'build',
+    'kernel_version',
+    'rooted',
+    'raw_description',
+  };
+
+  static const _runtime = {
+    'name',
+    'compiler',
+    'version',
+    'raw_description',
+    'build',
+  };
+
+  static Map<String, dynamic> _only(
+    Map<String, dynamic> json,
+    Set<String> keys,
+  ) => {
+    for (final entry in json.entries)
+      if (keys.contains(entry.key)) entry.key: entry.value,
+  };
+
   /// Report contexts that may leave the device: the app, operating system and
   /// device details, the Dart runtime, and the SDK's trace identifiers. The
   /// SDK adds others on its own, such as accessibility settings and locale.
@@ -69,8 +141,25 @@ abstract final class DiagnosticFilter {
     // Kept by name, like tags: the SDK adds contexts such as the widget and
     // error description, accessibility settings and locale.
     event.contexts.removeWhere((key, _) => !_contexts.contains(key));
-    // The name a person gave their device.
-    event.contexts.device?.name = null;
+    // Within those, only listed fields leave. The native SDKs' contexts carry
+    // more, such as the device's locale and timezone, which the Dart SDK keeps
+    // and writes back out.
+    final contexts = event.contexts;
+    if (contexts.device case final device?) {
+      contexts.device = SentryDevice.fromJson(_only(device.toJson(), _device));
+    }
+    if (contexts.app case final app?) {
+      contexts.app = SentryApp.fromJson(_only(app.toJson(), _app));
+    }
+    if (contexts.operatingSystem case final os?) {
+      contexts.operatingSystem = SentryOperatingSystem.fromJson(
+        _only(os.toJson(), _os),
+      );
+    }
+    contexts.runtimes = [
+      for (final runtime in contexts.runtimes)
+        SentryRuntime.fromJson(_only(runtime.toJson(), _runtime)),
+    ];
     event.tags?.removeWhere((key, _) => !_allowsTag(key));
     event.message = switch (event.message) {
       final message? => SentryMessage(stripUrlTails(message.formatted)),

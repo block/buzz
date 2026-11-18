@@ -228,17 +228,34 @@ void main() {
       );
     });
 
-    test('drops the name a person gave their device', () {
+    test('keeps only listed fields within contexts', () {
+      // As the native SDKs report them: the Dart SDK keeps keys it has no
+      // field for and writes them back out.
       final event = SentryEvent(
         contexts: Contexts(
-          device: SentryDevice(name: 'private-marker', model: 'iPhone'),
+          device: SentryDevice.fromJson({
+            'name': 'private-marker',
+            'model': 'iPhone',
+            'locale': 'private-marker',
+            'timezone': 'private-marker',
+          }),
+          app: SentryApp.fromJson({'app_name': 'Buzz', 'x': 'private-marker'}),
+          operatingSystem: SentryOperatingSystem.fromJson({
+            'name': 'iOS',
+            'x': 'private-marker',
+          }),
+          runtimes: [
+            SentryRuntime.fromJson({'name': 'Dart', 'x': 'private-marker'}),
+          ],
         ),
       );
 
-      final device = DiagnosticFilter.filterEvent(event).contexts.device!;
+      final contexts = DiagnosticFilter.filterEvent(event).contexts;
 
-      expect(device.name, isNull);
-      expect(device.model, 'iPhone');
+      expect(jsonEncode(contexts.toJson()), isNot(contains('private-marker')));
+      expect(contexts.device!.model, 'iPhone');
+      expect(contexts.app!.name, 'Buzz');
+      expect(contexts.operatingSystem!.name, 'iOS');
     });
 
     testWidgets('leaves out what a framework error says about the screen', (
