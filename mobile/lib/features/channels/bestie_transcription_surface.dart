@@ -18,6 +18,8 @@ class BestieTranscriptionSurface extends HookWidget {
     super.key,
     required this.enabled,
     required this.recording,
+    this.preparing = false,
+    this.processingLabel = 'Processing transcript',
     required this.finalizing,
     required this.sending,
     required this.restoring,
@@ -35,6 +37,8 @@ class BestieTranscriptionSurface extends HookWidget {
     required this.discardPending,
     required this.child,
   });
+  final bool preparing;
+  final String processingLabel;
   final bool enabled,
       recording,
       finalizing,
@@ -64,7 +68,9 @@ class BestieTranscriptionSurface extends HookWidget {
       const [],
     );
     final active =
-        recording || (!finalizing && !sending && (hasPending || restoreFailed));
+        preparing ||
+        recording ||
+        (!finalizing && !sending && (hasPending || restoreFailed));
     final recordingCallback = AgentNavigationOverlay.recordingCallbackOf(
       context,
     );
@@ -97,7 +103,7 @@ class BestieTranscriptionSurface extends HookWidget {
     final recoveryPortal = useMemoized(OverlayPortalController.new);
     final recoveryLink = useMemoized(LayerLink.new);
     final recoveryAnchor = useMemoized(GlobalKey.new);
-    final recovering = active && !recording;
+    final recovering = active && !recording && !preparing;
     final showRecovery =
         recovering && !AgentNavigationOverlay.menuOpenOf(context);
     useEffect(() {
@@ -113,14 +119,17 @@ class BestieTranscriptionSurface extends HookWidget {
     }, [showRecovery]);
     final pill = Semantics(
       key: const ValueKey('default-agent-voice-status'),
-      value: recording
+      liveRegion: preparing || sending || finalizing,
+      value: preparing
+          ? 'Preparing speech. Wait before speaking.'
+          : recording
           ? cancelled.value
                 ? 'Release to cancel'
                 : 'Recording ${formatVoiceNoteDuration(elapsed)}'
           : sending
-          ? 'Sending transcript'
+          ? processingLabel
           : finalizing
-          ? 'Preparing transcript'
+          ? 'Saving recording'
           : restoring
           ? 'Restoring transcript'
           : restoreFailed
@@ -128,7 +137,9 @@ class BestieTranscriptionSurface extends HookWidget {
           : hasPending
           ? 'Transcript awaiting delivery'
           : null,
-      hint: canRecord
+      hint: preparing
+          ? 'Release to cancel preparation.'
+          : canRecord
           ? 'Hold to record a transcript. Release to send. Slide up to cancel.'
           : recording
           ? 'Release to send. Slide up to cancel.'
@@ -138,7 +149,7 @@ class BestieTranscriptionSurface extends HookWidget {
               const CustomSemanticsAction(label: 'Record transcript'): () =>
                   unawaited(start()),
             }
-          : recording
+          : recording || preparing
           ? {
               const CustomSemanticsAction(label: 'Discard transcript'): () =>
                   unawaited(cancel()),
@@ -243,6 +254,11 @@ class BestieTranscriptionSurface extends HookWidget {
                                                       size: 28,
                                                     ),
                                                   )
+                                                : preparing
+                                                ? const Text(
+                                                    'Preparing speech…',
+                                                    textAlign: TextAlign.center,
+                                                  )
                                                 : restoreFailed
                                                 ? TextButton(
                                                     onPressed: restoring
@@ -305,11 +321,10 @@ class BestieTranscriptionSurface extends HookWidget {
                                     triggerMode: TooltipTriggerMode.manual,
                                   ),
                                   child: finalizing || sending
-                                      ? const Center(
+                                      ? Center(
                                           child:
                                               BestieTranscriptionLoadingIndicator(
-                                                semanticLabel:
-                                                    'Sending transcript',
+                                                semanticLabel: processingLabel,
                                                 size: 28,
                                               ),
                                         )

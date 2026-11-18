@@ -111,7 +111,8 @@ class BestieTranscriptionControl extends HookConsumerWidget {
       // retention settles, so no new hold can race it for the slot.
       if (current(cancellation) &&
           phase.value != 'Sending' &&
-          phase.value != 'Saving') {
+          phase.value != 'Saving' &&
+          phase.value != 'Discarding') {
         phase.value = '';
       }
     }
@@ -128,6 +129,7 @@ class BestieTranscriptionControl extends HookConsumerWidget {
     }
 
     Future<void> process(BestieTranscriptDraft pending, int token) async {
+      phase.value = 'Opening conversation';
       try {
         final channel = await job.destination(pending);
         if (!current(token)) return;
@@ -144,7 +146,14 @@ class BestieTranscriptionControl extends HookConsumerWidget {
 
     Future<void> finish() async {
       if (phase.value != 'Listening') {
-        if (phase.value == 'Preparing speech') await cancel();
+        if (phase.value == 'Preparing speech') {
+          await cancel();
+          report(
+            StateError(
+              'Speech was not ready. Hold again and wait for Listening before speaking.',
+            ),
+          );
+        }
         return;
       }
       if (cancelOnRelease.value || !started.value) {
@@ -204,7 +213,6 @@ class BestieTranscriptionControl extends HookConsumerWidget {
       final token = ++generation.value;
       phase.value = 'Preparing speech';
       elapsed.value = Duration.zero;
-      unawaited(recordingHaptic());
       cancelOnRelease.value = false;
       samples.value = [];
       final native = ref.read(deviceTranscriptionProvider)();
@@ -226,6 +234,7 @@ class BestieTranscriptionControl extends HookConsumerWidget {
         if (!current(token)) return;
         started.value = true;
         phase.value = 'Listening';
+        unawaited(recordingHaptic());
         final watch = Stopwatch()..start();
         timer.value = Timer.periodic(const Duration(milliseconds: 200), (_) {
           if (!current(token)) return;
@@ -266,10 +275,16 @@ class BestieTranscriptionControl extends HookConsumerWidget {
     }, [route]);
     return BestieTranscriptionSurface(
       enabled: recipient != null && !job.busy && progress.draft == null,
-      recording:
-          phase.value == 'Listening' || phase.value == 'Preparing speech',
-      finalizing: phase.value == 'Saving',
-      sending: job.busy,
+      recording: phase.value == 'Listening',
+      preparing: phase.value == 'Preparing speech',
+      processingLabel: job.busy
+          ? '${progress.phase} transcript'
+          : phase.value == 'Discarding'
+          ? 'Discarding transcript'
+          : 'Saving recording',
+      finalizing:
+          phase.value == 'Saving' || phase.value == 'Opening conversation',
+      sending: job.busy || phase.value == 'Discarding',
       restoring: phase.value == 'Restoring',
       restoreFailed: error.value != null && draft.value == null,
       hasPending: draft.value != null,
@@ -282,7 +297,7 @@ class BestieTranscriptionControl extends HookConsumerWidget {
       cancel: cancel,
       retry: () async {
         final pending = draft.value;
-        if (pending == null) return;
+        if (pending == null || phase.value.isNotEmpty) return;
         error.value = null;
         await process(pending, ++generation.value);
       },
@@ -291,12 +306,14 @@ class BestieTranscriptionControl extends HookConsumerWidget {
         await restore();
       },
       discardPending: () async {
+        if (phase.value.isNotEmpty) return;
+        phase.value = 'Discarding';
         try {
-          await cancel();
           await store.clear();
           if (context.mounted) {
             draft.value = null;
             error.value = null;
+            phase.value = '';
           }
         } catch (failure) {
           report(failure);

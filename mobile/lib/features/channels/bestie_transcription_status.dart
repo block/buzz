@@ -57,8 +57,14 @@ class _SignedInTranscriptionStatus extends HookConsumerWidget {
               ),
             ),
             if (progress.error != null) ...[
-              TextButton(onPressed: job.discard, child: const Text('Discard')),
-              TextButton(onPressed: job.retry, child: const Text('Retry')),
+              TextButton(
+                onPressed: job.busy ? null : job.discard,
+                child: const Text('Discard'),
+              ),
+              TextButton(
+                onPressed: job.busy ? null : job.retry,
+                child: const Text('Retry'),
+              ),
             ],
           ],
         ),

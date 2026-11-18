@@ -10,6 +10,15 @@ final class DeviceTranscriptionPlugin {
   private var owner: String?
   private var cancelAnalysis: (() -> Void)?
 
+  /// Applies to new and existing durable drafts before Flutter opens their journal.
+  static func excludeDraftsFromBackup(in support: URL) throws {
+    var drafts = support.appendingPathComponent("bestie-transcripts", isDirectory: true)
+    try FileManager.default.createDirectory(at: drafts, withIntermediateDirectories: true)
+    var values = URLResourceValues()
+    values.isExcludedFromBackup = true
+    try drafts.setResourceValues(values)
+  }
+
   init(messenger: FlutterBinaryMessenger) {
     channel = FlutterMethodChannel(name: "buzz/transcription", binaryMessenger: messenger)
     channel.setMethodCallHandler { [weak self] call, reply in
@@ -19,8 +28,28 @@ final class DeviceTranscriptionPlugin {
         return
       }
       if call.method == "cancel" {
-        if owner == id { operation?.cancel(); cancelAnalysis?(); owner = nil }
+        if owner == id {
+          let task = operation
+          let cancel = cancelAnalysis
+          owner = nil
+          operation = nil
+          cancelAnalysis = nil
+          task?.cancel()
+          cancel?()
+        }
         reply(nil)
+        return
+      }
+      if call.method == "storageDirectory" {
+        do {
+          let support = try FileManager.default.url(
+            for: .applicationSupportDirectory, in: .userDomainMask,
+            appropriateFor: nil, create: true)
+          try Self.excludeDraftsFromBackup(in: support)
+          reply(support.path)
+        } catch {
+          reply(FlutterError(code: "storage_failed", message: error.localizedDescription, details: nil))
+        }
         return
       }
       guard call.method == "prepare" || call.method == "transcribe" else {
@@ -35,6 +64,9 @@ final class DeviceTranscriptionPlugin {
       owner = id
       operation = Task { [weak self] in
         guard let self else { return }
+        defer {
+          if owner == id { owner = nil; cancelAnalysis = nil; operation = nil }
+        }
         do {
           guard SpeechTranscriber.isAvailable,
             let locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale.current)
@@ -45,7 +77,6 @@ final class DeviceTranscriptionPlugin {
           }
           try Task.checkCancellation()
           if call.method == "prepare" {
-            if owner == id { owner = nil }
             reply(nil)
             return
           }
@@ -73,7 +104,6 @@ final class DeviceTranscriptionPlugin {
         } catch {
           reply(FlutterError(code: "transcription_failed", message: error.localizedDescription, details: nil))
         }
-        if owner == id { owner = nil; cancelAnalysis = nil; operation = nil }
       }
     }
   }

@@ -139,7 +139,7 @@ class MainActivity : FlutterFragmentActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        deviceTranscriptionPlugin = DeviceTranscriptionPlugin(this, flutterEngine.dartExecutor.binaryMessenger)
+        deviceTranscriptionPlugin = DeviceTranscriptionPlugin(flutterEngine.dartExecutor.binaryMessenger)
         flutterEngine.platformViewsController.registry.registerViewFactory(
             "buzz/transparent-avatar",
             TransparentAvatarViewFactory(flutterEngine.dartExecutor.binaryMessenger),

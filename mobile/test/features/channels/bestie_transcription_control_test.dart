@@ -15,6 +15,7 @@ import 'package:buzz/features/channels/bestie_transcription_draft.dart';
 import 'package:buzz/features/channels/voice_note_recording.dart';
 import 'package:buzz/features/channels/voice_note_waveform.dart';
 import 'package:buzz/features/channels/bestie_transcription_status.dart';
+import 'package:buzz/features/channels/bestie_transcription_job.dart';
 import 'package:buzz/features/channels/bestie_transcription_surface.dart';
 import 'package:buzz/shared/widgets/app_route_observer.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
@@ -30,6 +31,7 @@ class _Store extends BestieTranscriptStore {
   BestieTranscriptDraft? saved;
   Completer<void>? retention;
   Object? retentionFailure;
+  Completer<void>? deletion;
   @override
   Future<BestieTranscriptDraft?> read() async => saved;
   @override
@@ -65,6 +67,7 @@ class _Store extends BestieTranscriptStore {
 
   @override
   Future<void> clear({String? id}) async {
+    await deletion?.future;
     saved = null;
   }
 }
@@ -72,11 +75,15 @@ class _Store extends BestieTranscriptStore {
 class _Recorder implements VoiceNoteRecorder {
   bool cancelled = false;
   int stops = 0;
+  int starts = 0;
   final amplitudes = StreamController<double>.broadcast();
   @override
   Stream<double> get levels => amplitudes.stream;
   @override
-  Future<void> start() async {}
+  Future<void> start() async {
+    starts++;
+  }
+
   @override
   Future<VoiceNoteRecording> stop() async {
     stops++;
@@ -99,11 +106,13 @@ class _Recorder implements VoiceNoteRecorder {
 class _Speech implements DeviceTranscription {
   final result = Completer<String>();
   Completer<void>? preparation;
+  Object? preparationFailure;
   int transcriptions = 0;
   bool cancelled = false;
   @override
   Future<void> prepare() async {
     await preparation?.future;
+    if (preparationFailure case final failure?) throw failure;
   }
 
   @override
@@ -120,6 +129,7 @@ class _Speech implements DeviceTranscription {
 
 void main() {
   late _Store store;
+  late _Actions actions;
   late _Recorder recorder;
   late _Speech speech;
   late FakeRelay relay;
@@ -128,6 +138,7 @@ void main() {
   late ConversationPaneController pane;
   void reset() {
     store = _Store();
+    actions = _Actions();
     showControl = ValueNotifier(true);
     pane = ConversationPaneController();
     recorder = _Recorder();
@@ -149,7 +160,7 @@ void main() {
           meSyncProvider.overrideWithValue(sync),
           relaySessionProvider.overrideWith(() => relay),
           channelsProvider.overrideWith(_NoChannels.new),
-          channelActionsProvider.overrideWithValue(_Actions()),
+          channelActionsProvider.overrideWithValue(actions),
           sendMessageProvider.overrideWithValue(
             SendMessage(
               signedEventRelay: SignedEventRelay(
@@ -274,6 +285,117 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     },
   );
+  testWidgets(
+    'discard reserves the job before deletion and rejects concurrent retry',
+    (tester) async {
+      reset();
+      relay.loseAcknowledgment = true;
+      await mount(tester);
+      final gesture = await hold(tester);
+      await gesture.up();
+      await tester.pump();
+      speech.result.complete('Keep this signed event');
+      await tester.pumpAndSettle();
+      expect(relay.writes, 1);
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(BestieTranscriptionStatus)),
+      );
+      final job = container.read(bestieTranscriptionJobProvider(sync.cacheKey));
+      store.deletion = Completer<void>();
+      final discard = job.discard();
+      await tester.pump();
+      expect(job.busy, isTrue);
+      await job.retry();
+      expect(relay.writes, 1);
+      expect(store.saved, isNotNull);
+      store.deletion!.complete();
+      await discard;
+      await tester.pumpAndSettle();
+      expect(store.saved, isNull);
+      expect(job.busy, isFalse);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets(
+    'Home recovery cannot retry while discard is deleting its journal',
+    (tester) async {
+      reset();
+      store.saved = const BestieTranscriptDraft(
+        id: 'one',
+        recipient: 'agent',
+        audioPath: '/saved.wav',
+      );
+      await mount(tester);
+      final surface = tester.widget<BestieTranscriptionSurface>(
+        find.byType(BestieTranscriptionSurface),
+      );
+      store.deletion = Completer<void>();
+      final discard = surface.discardPending();
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      await tester.pump();
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await surface.retry();
+      expect(speech.transcriptions, 0);
+      expect(relay.events, isEmpty);
+      store.deletion!.complete();
+      await discard;
+      await tester.pumpAndSettle();
+      expect(store.saved, isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets('retry reserves Home recovery while the destination opens', (
+    tester,
+  ) async {
+    reset();
+    store.saved = BestieTranscriptDraft(
+      id: 'one',
+      recipient: 'a' * 64,
+      audioPath: '/saved.wav',
+      text: 'Retained text',
+    );
+    await mount(tester);
+    final surface = tester.widget<BestieTranscriptionSurface>(
+      find.byType(BestieTranscriptionSurface),
+    );
+    actions.opening = Completer<void>();
+    final retry = surface.retry();
+    await tester.pump();
+    await surface.discardPending();
+    expect(store.saved, isNotNull);
+    expect(relay.events, isEmpty);
+    actions.opening!.complete();
+    await retry;
+    await tester.pumpAndSettle();
+    expect(relay.events.single.content, 'Retained text');
+    expect(store.saved, isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets(
+    'unsupported file recognition fails before opening the microphone',
+    (tester) async {
+      reset();
+      speech.preparationFailure = StateError(
+        'Transcribing saved recordings is not available on Android yet.',
+      );
+      await mount(tester);
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.text('Bestie')),
+      );
+      await tester.pump(const Duration(milliseconds: 600));
+      await gesture.up();
+      await tester.pumpAndSettle();
+      expect(recorder.starts, 0);
+      expect(speech.transcriptions, 0);
+      expect(relay.events, isEmpty);
+      expect(find.textContaining('not available on Android'), findsWidgets);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
   testWidgets(
     'release retains original recipient and transcribes the saved audio',
     (tester) async {
@@ -455,11 +577,16 @@ void main() {
       speech.preparation = Completer<void>();
       await mount(tester);
       final gesture = await hold(tester);
+      expect(find.text('Preparing speech…'), findsOneWidget);
+      expect(find.byTooltip('Send transcript'), findsNothing);
+      expect(find.byType(VoiceNoteWaveform), findsNothing);
       await gesture.up();
       await tester.pump();
+      expect(recorder.starts, 0);
       speech.preparation!.complete();
       await tester.pumpAndSettle();
       expect(speech.cancelled, isTrue);
+      expect(find.textContaining('Speech was not ready'), findsWidgets);
       expect(recorder.stops, 0);
       expect(find.byType(VoiceNoteWaveform), findsNothing);
       await tester.pumpWidget(const SizedBox());
@@ -523,22 +650,27 @@ class _NoChannels extends ChannelsNotifier {
 }
 
 class _Actions implements ChannelActions {
+  Completer<void>? opening;
   @override
   Future<Channel> openDm({
     required List<String> pubkeys,
     bool waitForChannelList = true,
-  }) async => Channel(
-    id: '11111111-1111-4111-8111-111111111111',
-    name: 'Bestie',
-    channelType: 'dm',
-    visibility: 'private',
-    description: '',
-    createdBy: 'a' * 64,
-    createdAt: DateTime(2026),
-    memberCount: 2,
-    participantPubkeys: pubkeys,
-    isMember: true,
-  );
+  }) async {
+    await opening?.future;
+    return Channel(
+      id: '11111111-1111-4111-8111-111111111111',
+      name: 'Bestie',
+      channelType: 'dm',
+      visibility: 'private',
+      description: '',
+      createdBy: 'a' * 64,
+      createdAt: DateTime(2026),
+      memberCount: 2,
+      participantPubkeys: pubkeys,
+      isMember: true,
+    );
+  }
+
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

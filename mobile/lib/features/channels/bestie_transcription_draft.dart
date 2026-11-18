@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
@@ -28,7 +29,16 @@ class BestieTranscriptDraft {
 
 final bestieTranscriptDirectoryProvider =
     Provider<Future<Directory> Function()>(
-      (ref) => getApplicationSupportDirectory,
+      (ref) => () async {
+        if (!Platform.isIOS) return getApplicationSupportDirectory();
+        final path = await const MethodChannel(
+          'buzz/transcription',
+        ).invokeMethod<String>('storageDirectory', {'id': 'storage'});
+        if (path == null) {
+          throw StateError('Private transcript storage unavailable.');
+        }
+        return Directory(path);
+      },
     );
 final bestieTranscriptStoreProvider =
     Provider.family<BestieTranscriptStore, String>(

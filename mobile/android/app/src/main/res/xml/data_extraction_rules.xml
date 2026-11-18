@@ -5,11 +5,13 @@
      backs up and transfers as before. -->
 <data-extraction-rules>
     <cloud-backup>
+        <exclude domain="file" path="bestie-transcripts/"/>
         <exclude domain="sharedpref" path="FlutterSecureStorage.xml"/>
         <exclude domain="sharedpref" path="FlutterSecureKeyStorage.xml"/>
         <exclude domain="sharedpref" path="FlutterSecureStorageConfiguration.xml"/>
     </cloud-backup>
     <device-transfer>
+        <exclude domain="file" path="bestie-transcripts/"/>
         <exclude domain="sharedpref" path="FlutterSecureStorage.xml"/>
         <exclude domain="sharedpref" path="FlutterSecureKeyStorage.xml"/>
         <exclude domain="sharedpref" path="FlutterSecureStorageConfiguration.xml"/>

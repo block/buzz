@@ -134,11 +134,19 @@ class BestieTranscriptionJob
   Future<void> discard() async {
     if (busy) return;
     final pending = value;
+    final generation = ++_generation;
+    value = BestieTranscriptionProgress(
+      channel: pending.channel,
+      draft: pending.draft,
+      phase: 'Discarding',
+    );
     try {
       await store.clear(id: pending.draft?.id);
-      if (!_disposed) value = const BestieTranscriptionProgress();
+      if (!_disposed && generation == _generation) {
+        value = const BestieTranscriptionProgress();
+      }
     } catch (error) {
-      if (!_disposed) {
+      if (!_disposed && generation == _generation) {
         value = BestieTranscriptionProgress(
           channel: pending.channel,
           draft: pending.draft,

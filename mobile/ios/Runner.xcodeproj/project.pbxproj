@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+        A96450000000000000000001 /* DeviceTranscriptionStorageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A96450000000000000000002 /* DeviceTranscriptionStorageTests.swift */; };
 		A17100012F4100100A17E001 /* DeviceTranscriptionPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A17100022F4100100A17E001 /* DeviceTranscriptionPlugin.swift */; };
 		ACAF00000000000000000001 /* ToastLayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACAF00000000000000000002 /* ToastLayer.swift */; };
 		BC0010000000000000000003 /* BrowserAuthBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC0010000000000000000004 /* BrowserAuthBridgeTests.swift */; };
@@ -112,6 +113,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+        A96450000000000000000002 /* DeviceTranscriptionStorageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceTranscriptionStorageTests.swift; sourceTree = "<group>"; };
 		A17100022F4100100A17E001 /* DeviceTranscriptionPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceTranscriptionPlugin.swift; sourceTree = "<group>"; };
 		ACAF00000000000000000002 /* ToastLayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToastLayer.swift; sourceTree = "<group>"; };
 		BC0010000000000000000004 /* BrowserAuthBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserAuthBridgeTests.swift; sourceTree = "<group>"; };
@@ -231,6 +233,7 @@
 			isa = PBXGroup;
 			children = (
 				331C807B294A618700263BE5 /* RunnerTests.swift */,
+                A96450000000000000000002 /* DeviceTranscriptionStorageTests.swift */,
 				BC0010000000000000000004 /* BrowserAuthBridgeTests.swift */,
 				F84380010000000000000002 /* ProfileSetupRecoveryTests.swift */,
 				AB1200132F40400100A17E01 /* NativeMessageImageLoaderTests.swift */,
@@ -654,6 +657,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				331C808B294A63AB00263BE5 /* RunnerTests.swift in Sources */,
+                A96450000000000000000001 /* DeviceTranscriptionStorageTests.swift in Sources */,
 				BC0010000000000000000003 /* BrowserAuthBridgeTests.swift in Sources */,
 				F84380010000000000000001 /* ProfileSetupRecoveryTests.swift in Sources */,
 				AB1200032F40400100A17E01 /* NativeMessageImageLoaderTests.swift in Sources */,
