@@ -93,6 +93,64 @@ grep -Fxq "            type=raw,value=main-{{commit_date 'YYYYMMDDHHmmss'}}-{{sh
   exit 1
 }
 
+# A main push publishes a gateway image only when its build inputs changed
+# since the current :main image's source, so staging does not roll out
+# identical gateways. Both gateway build jobs wait for that check.
+for job in push-gateway-build push-gateway-personal-dev; do
+  job_block=$(awk -v job="  $job:" '$0==job{f=1;print;next} f&&/^  [a-z][a-z_-]*:$/{exit} f' "$workflow")
+  grep -Fxq "    needs: push-gateway-inputs" <<<"$job_block" &&
+    grep -Fxq "    if: needs.push-gateway-inputs.outputs.build == 'true'" <<<"$job_block" || {
+    echo "$job must run only when the push gateway build inputs changed" >&2
+    exit 1
+  }
+done
+inputs_job=$(awk '/^  push-gateway-inputs:/{f=1} f&&/^  [a-z][a-z_-]*:$/&&!/^  push-gateway-inputs:/{exit} f' "$workflow")
+grep -Fq 'scripts/push-gateway-image-inputs-changed.sh "$published" "$GITHUB_SHA"' <<<"$inputs_job" || {
+  echo "push-gateway-inputs must compare HEAD with the published :main gateway source" >&2
+  exit 1
+}
+
+inputs_changed="$repo_root/scripts/push-gateway-image-inputs-changed.sh"
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT
+(
+  cd "$fixture"
+  git init -q
+  git config user.email ci@example.org
+  git config user.name ci
+  git config commit.gpgsign false
+  git config core.hooksPath /dev/null
+  mkdir -p crates/buzz-push-gateway/src crates/buzz-relay/src
+  echo 'fn main() {}' >crates/buzz-push-gateway/src/main.rs
+  echo 'fn main() {}' >crates/buzz-relay/src/main.rs
+  echo '[workspace]' >Cargo.toml
+  git add -A && git commit -qm base
+  published=$(git rev-parse HEAD)
+  expect() {
+    local want=$1 got
+    got=$("$inputs_changed" "$2" HEAD)
+    [[ "$got" == "$want" ]] || {
+      echo "push gateway inputs check: $3: want $want, got $got" >&2
+      exit 1
+    }
+  }
+
+  expect false "$published" "no commits since the published source"
+  echo '// relay only' >>crates/buzz-relay/src/main.rs
+  git commit -qam relay
+  expect false "$published" "a relay-only change"
+  echo '// gateway' >>crates/buzz-push-gateway/src/main.rs
+  git commit -qam gateway
+  echo '// relay again' >>crates/buzz-relay/src/main.rs
+  git commit -qam relay-again
+  expect true "$published" "a gateway change behind a later relay-only commit"
+  expect true "" "an unknown published source"
+  expect true 0000000000000000000000000000000000000000 "a published source missing from history"
+  git checkout -q --orphan unrelated "$published"
+  git commit -qm unrelated
+  expect true "$published" "a published source that is not an ancestor"
+)
+
 select_run() {
   jq -r --arg source_sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -f "$selector" | jq -r '.id // empty'
 }
