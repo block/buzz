@@ -400,7 +400,7 @@ class _HuddleJoinSurface extends ConsumerWidget {
                   Text(
                     isThisSession && session.isConnected
                         ? '${session.participantCount} connected'
-                        : 'Foreground voice Huddle',
+                        : 'Voice Huddle',
                     style: context.textTheme.bodySmall?.copyWith(
                       color: context.colors.onSurfaceVariant,
                     ),

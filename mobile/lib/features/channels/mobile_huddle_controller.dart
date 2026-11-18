@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -14,7 +15,7 @@ typedef HuddleHumanCountLoader = Future<int> Function(String channelId);
 
 enum MobileHuddlePresentation { hidden, fullScreen, drawer }
 
-/// Tracks whether the foreground Huddle owns the screen or lives in the
+/// Tracks whether the Huddle owns the screen or lives in the
 /// persistent app-level drawer. Audio lifecycle remains owned separately by
 /// [huddleSessionProvider].
 final class MobileHuddlePresentationNotifier
@@ -102,7 +103,7 @@ final class _HuddleAdmissionToken {
   });
 }
 
-/// Coordinates the Nostr lifecycle around the foreground audio session.
+/// Coordinates the Nostr lifecycle around the Huddle audio session.
 final class MobileHuddleController extends Notifier<bool> {
   var _generation = 0;
   var _admissionEpoch = 0;
@@ -114,7 +115,7 @@ final class MobileHuddleController extends Notifier<bool> {
   bool build() {
     final unregisterBeforePause = ref
         .read(relaySessionProvider.notifier)
-        .registerBeforePause(_leaveForBackground);
+        .registerBeforePause(_onPause);
     final unregisterBeforeCommunityTransition = ref
         .read(communityTransitionProvider)
         .register(_leaveForTransition);
@@ -127,8 +128,9 @@ final class MobileHuddleController extends Notifier<bool> {
       }
     });
     ref.listen(appLifecycleProvider, (_, next) {
-      if (next == AppLifecycleState.paused ||
-          next == AppLifecycleState.detached) {
+      if (next == AppLifecycleState.paused) {
+        unawaited(_onPause());
+      } else if (next == AppLifecycleState.detached) {
         unawaited(_leaveForBackground());
       }
     });
@@ -283,6 +285,20 @@ final class MobileHuddleController extends Notifier<bool> {
   Future<void>? _backgroundLeave;
   Future<void>? _failureCleanup;
   final Set<Future<void>> _lifecycleCleanups = {};
+
+  Future<void> _onPause() async {
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      final session = ref.read(huddleSessionProvider);
+      // The active iOS voice session keeps the separate audio socket alive.
+      // The main relay can still disconnect on its normal background schedule.
+      if (session.wasAdmitted &&
+          session.isInSession &&
+          session.phase != HuddleSessionPhase.leaving) {
+        return;
+      }
+    }
+    await _leaveForBackground();
+  }
 
   Future<void> _leaveForBackground() {
     final inFlight = _backgroundLeave;
@@ -592,6 +608,6 @@ final class MobileHuddleController extends Notifier<bool> {
   }
 }
 
-/// Foreground Huddle lifecycle operations and their start-in-progress flag.
+/// Huddle lifecycle operations and their start-in-progress flag.
 final mobileHuddleControllerProvider =
     NotifierProvider<MobileHuddleController, bool>(MobileHuddleController.new);

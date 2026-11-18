@@ -11398,6 +11398,65 @@ void main() {
     );
 
     testWidgets(
+      'keeps an admitted iOS Huddle active across pause and resume until detach',
+      (tester) async {
+        final media = _HuddleTestMedia();
+        final transport = _HuddleTestTransport();
+        final relay = _ReconnectingRelaySession();
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [],
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            relaySessionNotifier: relay,
+            huddleCurrentPubkey: 'self',
+            huddleMediaFactory: () => media,
+            huddleTransportFactory: (_) => transport,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MobileHuddleShell)),
+        );
+        final lifecycle =
+            container.read(appLifecycleProvider.notifier)
+                as _TestAppLifecycleNotifier;
+        await container
+            .read(mobileHuddleControllerProvider.notifier)
+            .join(
+              parentChannelId: _channelId,
+              ephemeralChannelId: _huddleChannelId,
+              startedBy: 'desktop',
+              startedEventId: 'active-call',
+            );
+        expect(container.read(huddleSessionProvider).isConnected, isTrue);
+
+        lifecycle.setLifecycle(AppLifecycleState.paused);
+        relay.onAppPaused();
+        await tester.pump(const Duration(minutes: 1));
+        expect(
+          container.read(relaySessionProvider).status,
+          SessionStatus.disconnected,
+        );
+        expect(container.read(huddleSessionProvider).isConnected, isTrue);
+        expect(media.state.phase, HuddleMediaPhase.active);
+        expect(transport.state.phase, HuddleTransportPhase.connected);
+
+        lifecycle.setLifecycle(AppLifecycleState.resumed);
+        await tester.pump();
+        expect(container.read(huddleSessionProvider).isConnected, isTrue);
+
+        lifecycle.setLifecycle(AppLifecycleState.detached);
+        await media.stopStarted.future;
+        await tester.pump();
+        expect(container.read(huddleSessionProvider).isInSession, isFalse);
+        expect(media.state.phase, HuddleMediaPhase.stopped);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    testWidgets(
       'community transition leaves a newer call without waiting for old cleanup',
       (tester) async {
         final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
