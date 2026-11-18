@@ -5,6 +5,7 @@ import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/read_state/read_state_manager.dart';
 import 'package:buzz/shared/read_state/read_state_storage.dart';
@@ -1051,6 +1052,90 @@ void main() {
       async.elapse(const Duration(seconds: 5));
       expect(relay.submitCount, 1);
       expect(session.fetchCount, 3);
+      manager.dispose(flushPending: false);
+    });
+  });
+
+  test(
+    'an older read finishing its save cannot clear a newer read failure',
+    () {
+      fakeAsync((async) {
+        final store = _GatedPrefsStore();
+        SharedPreferencesStorePlatform.instance = store;
+        SharedPreferences.resetStatic();
+        addTearDown(() {
+          SharedPreferences.resetStatic();
+          SharedPreferences.setMockInitialValues({});
+        });
+        late SharedPreferences prefs;
+        SharedPreferences.getInstance().then((value) => prefs = value);
+        async.flushMicrotasks();
+        final keys = nostr.Keys.generate();
+        final session = _FakeRelaySession();
+        final relay = _FakeSignedEventRelay();
+        final manager = ReadStateManager(
+          pubkey: keys.public,
+          relayUrl: _relayUrl,
+          prefs: prefs,
+          crypto: ReadStateCrypto.tryCreate(
+            nsec: keys.nsec,
+            pubkey: keys.public,
+          )!,
+          relaySession: session,
+          signedEventRelay: relay,
+          remoteEnabled: true,
+          onChanged: () {},
+          now: () => 2000,
+        );
+        manager.initialize();
+        async.flushMicrotasks();
+        manager.markContextRead('room', 1990);
+        // Read A, a resync, starts first; read B, an explicit flush, after it.
+        final first = Completer<void>();
+        session.fetchGate = first.future;
+        session.statusListeners.last(RelaySubscriptionStatus.ready);
+        async.flushMicrotasks();
+        final second = Completer<void>();
+        session.fetchGate = second.future;
+        unawaited(manager.flush().catchError((Object _) {}));
+        async.flushMicrotasks();
+        final fetches = session.fetchCount;
+        // A succeeds, then its journal save is held.
+        store.gate = Completer<void>();
+        first.complete();
+        async.flushMicrotasks();
+        // B fails during that save.
+        session.failNextFetch = true;
+        second.complete();
+        async.flushMicrotasks();
+        final failure = manager.syncError;
+        expect(failure, isNotNull);
+        session.fetchGate = null;
+        store.gate!.complete();
+        store.gate = null;
+        async.flushMicrotasks();
+        // B's error and its retry stand.
+        expect(manager.syncError, same(failure));
+        async.elapse(const Duration(seconds: 5));
+        expect(session.fetchCount, greaterThan(fetches));
+        manager.dispose(flushPending: false);
+      });
+    },
+  );
+
+  test('an explicit flush reads at once, without waiting for the backoff', () {
+    fakeAsync((async) {
+      final session = _FakeRelaySession()..failNextFetch = true;
+      final relay = _FakeSignedEventRelay();
+      final manager = recoveryManager(async, session, relay);
+      expect(manager.syncError, isNotNull);
+      final fetches = session.fetchCount;
+      manager.markContextRead('room', 1990);
+      unawaited(manager.flush());
+      async.flushMicrotasks();
+      expect(session.fetchCount, fetches + 1);
+      expect(relay.submitCount, 1);
+      expect(manager.syncError, isNull);
       manager.dispose(flushPending: false);
     });
   });
@@ -2112,5 +2197,17 @@ class _RefusingRelaySession extends _FakeRelaySession {
     }
     retained[event.tags.firstWhere((tag) => tag.first == 'd')[1]] = event;
     return event;
+  }
+}
+
+class _GatedPrefsStore extends InMemorySharedPreferencesStore {
+  _GatedPrefsStore() : super.empty();
+
+  Completer<void>? gate;
+
+  @override
+  Future<bool> setValue(String valueType, String key, Object value) async {
+    if (key.contains('nip-rs.journal') && gate != null) await gate!.future;
+    return super.setValue(valueType, key, value);
   }
 }

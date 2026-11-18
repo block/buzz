@@ -448,7 +448,12 @@ class ReadStateManager {
       final recovered = _settleSnapshot(read, succeeded: true);
       _mergeEvents(events);
       await _persistLocalState();
-      if (recovered && !_disposed) {
+      // Recheck after the save: a newer read may have failed meanwhile, and
+      // its retry and error are its own.
+      if (recovered &&
+          !_disposed &&
+          _newestSettledSnapshot == read &&
+          _lastSnapshotSucceeded) {
         // Hand outstanding marks to publication before the retry that would
         // have sent them is cancelled, and retire the read error this
         // success supersedes.
@@ -727,11 +732,10 @@ class ReadStateManager {
       // The snapshot below is the whole read state (megabytes on a busy
       // account), so skip it when there is nothing to send. Each resume
       // schedules a publish after its re-sync whether or not anything changed.
-      // After a failed snapshot, run the full publish anyway: its own
-      // snapshot is the retry, which the change notifications can't replace.
-      // Automatic failed-read recovery has one owner: the publish delay joins
-      // a read in flight, and leaves a failed one to its backoff timer, which
-      // hands the marks back here. An explicit flush still reads now.
+      // After a failed snapshot, an explicit flush runs the full publish at
+      // once: its own snapshot is a retry. Automatic failed-read recovery has
+      // one owner: the publish delay joins a read in flight, and leaves a
+      // failed one to its backoff timer, which hands the marks back here.
       if (automatic) {
         if (_syncing case final syncing?) await syncing;
         if (!_lastSnapshotSucceeded && _snapshotRetryTimer != null) return;
