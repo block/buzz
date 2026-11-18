@@ -122,6 +122,18 @@ extension ReadStateRetry on ReadStateManager {
     _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
   }
 
+  /// [_acknowledge], except that a packet held for capacity stays pending
+  /// and its error is returned, so the rest of the flush still goes out.
+  StateError? _acknowledgeOrHold(String slot, NostrEvent event) {
+    try {
+      _acknowledge(slot, event);
+    } on StateError catch (error) {
+      if (error.message != readStateFullMessage) rethrow;
+      return error;
+    }
+    return null;
+  }
+
   bool _isPermanentReadStateRemoteError(Object error) {
     // Relay rejections come back as `Exception("<message>")` from the
     // websocket OK handler. Pattern-match on the message text since we no

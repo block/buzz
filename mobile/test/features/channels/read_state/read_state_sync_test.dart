@@ -269,7 +269,8 @@ void main() {
   });
 
   test('a journaled unread retry superseded by a newer own head and left '
-      'out of an overfull fallback stays pending and fails visibly', () async {
+      'out of an overfull fallback stays pending and fails visibly, without '
+      'holding back the rest of the flush', () async {
     final phone = await device('phone');
     phone.markContextRead(channel, clock - 100);
     await phone.flush();
@@ -309,9 +310,22 @@ void main() {
     );
     await overfill();
     final restarted = await device('phone');
+    // A fresh read and a follow queued beside the held packet still go out.
+    restarted.markContextRead('chan-2', clock - 50);
+    final follow = restarted.setThreadFollow(channel, root, true);
     await restarted.flush();
     await restarted.flush();
+    await follow;
     expect(relay.retained[coordinate]!.createdAt, ahead);
+    expect(
+      readStateBlobs().any((blob) => blob['chan-2'] == clock - 50),
+      isTrue,
+    );
+    final desktop = await device('desktop');
+    expect(
+      desktop.threadFollows[threadFollowKey(channel, root)]?.follow,
+      isTrue,
+    );
     expect(
       ReadStateStorage(prefs).readJournal(journalKey)!['unreadPending'] as Map,
       hasLength(1),

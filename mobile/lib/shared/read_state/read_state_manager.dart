@@ -960,7 +960,7 @@ class ReadStateManager {
       _checkSnapshotCapacity(snapshot, _pending.values);
       // A follow candidate that overfills the snapshot waits, visibly; read
       // positions that fit still publish.
-      Object? followsFull;
+      Object? followsFull, unreadFull;
       try {
         _checkSnapshotCapacity(snapshot, [
           ..._pending.values,
@@ -1007,7 +1007,7 @@ class ReadStateManager {
             (_disposed && !allowDisposed)) {
           return;
         }
-        _acknowledge(entry.key, entry.value);
+        unreadFull = _acknowledgeOrHold(entry.key, entry.value) ?? unreadFull;
         await _persistLocalState();
       }
       for (var index = 0; index < planned.length; index++) {
@@ -1163,7 +1163,7 @@ class ReadStateManager {
           'Unreadable thread follow coordinate blocks publication',
         );
       }
-      if (followsFull != null) throw followsFull;
+      if (followsFull ?? unreadFull case final full?) throw full;
       // An older send must not erase a newer read's failure.
       if (_lastSnapshotSucceeded) syncError = _standingError;
     } catch (error) {
