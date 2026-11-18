@@ -165,7 +165,7 @@ pub(crate) async fn decode_activity(
     })
 }
 
-async fn decrypt_frame(
+pub(super) async fn decrypt_frame(
     credentials: &Credentials,
     event: &Event,
 ) -> Result<Option<Value>, CliError> {

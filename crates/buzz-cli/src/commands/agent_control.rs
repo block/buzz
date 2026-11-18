@@ -9,15 +9,15 @@
 use std::time::Duration;
 
 use buzz_core::kind::KIND_AGENT_OBSERVER_FRAME;
-use buzz_core::observer::OBSERVER_FRAME_CONTROL;
-use buzz_core::observer::{decrypt_observer_payload, encrypt_observer_payload};
-use nostr::{Event, Keys, PublicKey};
+use buzz_core::observer::{OBSERVER_FRAME_CONTROL, OBSERVER_MAX_PLAINTEXT_LEN};
+use nostr::{Event, PublicKey};
 use serde_json::{json, Value};
 
-use super::agent_activity::{is_agent_telemetry, unwrap_batch};
+use super::agent_activity::{decrypt_frame, is_agent_telemetry, unwrap_batch};
 use super::agents::require_agent_owner;
 use super::messages::resolve_author;
 use crate::client::BuzzClient;
+use crate::credentials::Credentials;
 use crate::error::CliError;
 use crate::validate::{parse_uuid, sdk_err};
 
@@ -171,30 +171,42 @@ pub(crate) async fn execute(
     require_agent_owner(client, &agent_hex).await?;
     let agent_key = PublicKey::from_hex(&agent_hex)
         .map_err(|e| CliError::Usage(format!("invalid agent pubkey: {e}")))?;
-    let encrypted = encrypt_observer_payload(client.keys(), &agent_key, &payload)
+    let plaintext = serde_json::to_string(&payload)
         .map_err(|e| CliError::Other(format!("could not encrypt the control frame: {e}")))?;
-    let event = client.sign_event_unchecked(
-        buzz_sdk::build_agent_observer_frame(
-            &agent_hex,
-            &agent_hex,
-            OBSERVER_FRAME_CONTROL,
-            &encrypted,
+    if plaintext.len() > OBSERVER_MAX_PLAINTEXT_LEN {
+        return Err(CliError::Other(format!(
+            "could not encrypt the control frame: observer plaintext exceeds {OBSERVER_MAX_PLAINTEXT_LEN} bytes (got {})",
+            plaintext.len()
+        )));
+    }
+    let encrypted = client
+        .credentials()
+        .nip44_encrypt(&agent_key, &plaintext)
+        .await?;
+    let event = client
+        .sign_event_unchecked(
+            buzz_sdk::build_agent_observer_frame(
+                &agent_hex,
+                &agent_hex,
+                OBSERVER_FRAME_CONTROL,
+                &encrypted,
+            )
+            .map_err(sdk_err)?,
         )
-        .map_err(sdk_err)?,
-    )?;
+        .await?;
 
     let since = now.saturating_sub(SINCE_SLACK_SECS);
     let mut session = client
         .open_subscription(&json!({
             "kinds": [KIND_AGENT_OBSERVER_FRAME],
             "authors": [agent_hex],
-            "#p": [client.keys().public_key().to_hex()],
+            "#p": [client.public_key().to_hex()],
             "since": since,
             "limit": SUBSCRIPTION_LIMIT,
         }))
         .await?;
     let request = Request {
-        keys: client.keys(),
+        credentials: client.credentials(),
         agent: &agent_key,
         control: &control,
         channel: &channel,
@@ -223,7 +235,7 @@ pub(crate) async fn execute(
 }
 
 struct Request<'a> {
-    keys: &'a Keys,
+    credentials: &'a Credentials,
     agent: &'a PublicKey,
     control: &'a Control,
     channel: &'a str,
@@ -250,7 +262,7 @@ async fn await_result(
         let Some(event) = next else {
             break;
         };
-        for status in result_statuses(request, &event) {
+        for status in result_statuses(request, &event).await? {
             match verdict(request.control, &status) {
                 Some(Verdict::Success) => return Ok((status, Finish::Success)),
                 Some(Verdict::Refused) => return Ok((status, Finish::Refused)),
@@ -269,17 +281,17 @@ async fn await_result(
 /// Statuses of `control_result` frames in `event` that answer this exact
 /// request: signed by the agent, tagged as telemetry, no older than `since`,
 /// decryptable by the owner key, and matching type, channel, and `requestId`.
-fn result_statuses(request: &Request<'_>, event: &Event) -> Vec<String> {
+async fn result_statuses(request: &Request<'_>, event: &Event) -> Result<Vec<String>, CliError> {
     if !is_agent_telemetry(event, &request.agent.to_hex())
         || event.created_at.as_secs() < request.since
         || event.verify().is_err()
     {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    let Ok(frame) = decrypt_observer_payload::<Value>(request.keys, event) else {
-        return Vec::new();
+    let Some(frame) = decrypt_frame(request.credentials, event).await? else {
+        return Ok(Vec::new());
     };
-    unwrap_batch(&frame)
+    Ok(unwrap_batch(&frame)
         .into_iter()
         .filter(|inner| inner.get("kind").and_then(Value::as_str) == Some("control_result"))
         .filter(|inner| inner.get("channelId").and_then(Value::as_str) == Some(request.channel))
@@ -287,7 +299,7 @@ fn result_statuses(request: &Request<'_>, event: &Event) -> Vec<String> {
         .filter(|p| p.get("type").and_then(Value::as_str) == Some(request.control.type_name()))
         .filter(|p| p.get("requestId").and_then(Value::as_str) == Some(request.request_id))
         .filter_map(|p| p.get("status").and_then(Value::as_str).map(str::to_owned))
-        .collect()
+        .collect())
 }
 
 fn unix_now() -> u64 {
@@ -302,8 +314,11 @@ mod tests {
     use super::*;
     use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
     use axum::{extract::State, response::IntoResponse, routing::get, routing::post, Json, Router};
-    use buzz_core::observer::{OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY};
-    use nostr::{EventBuilder, Kind, Timestamp};
+    use buzz_core::observer::{
+        decrypt_observer_payload, encrypt_observer_payload, OBSERVER_FRAME_TAG,
+        OBSERVER_FRAME_TELEMETRY,
+    };
+    use nostr::{EventBuilder, Keys, Kind, Timestamp};
     use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
 
@@ -508,7 +523,8 @@ mod tests {
             r.agent = Some(agent.clone());
             r.owner = Some(owner.clone());
         }
-        let client = BuzzClient::new(serve(&relay).await, owner.clone(), None, None).unwrap();
+        let client =
+            BuzzClient::new(serve(&relay).await, Credentials::from_keys(owner.clone())).unwrap();
         (client, relay, owner, agent)
     }
 
@@ -694,7 +710,8 @@ mod tests {
     async fn a_non_owner_gets_exit_3_before_anything_is_sent() {
         let (_, relay, _, agent) = setup(vec![reply("sent")]).await;
         let other_owner = Keys::generate();
-        let client = BuzzClient::new(serve(&relay).await, other_owner, None, None).unwrap();
+        let client =
+            BuzzClient::new(serve(&relay).await, Credentials::from_keys(other_owner)).unwrap();
         let error = go(&client, &agent, Control::CancelTurn).await.unwrap_err();
         assert!(matches!(error, CliError::Auth(_)), "{error:?}");
         assert_eq!(crate::error::exit_code(&error), 3);
