@@ -1,4 +1,5 @@
 import 'package:buzz/shared/read_state/failed_clear_notice.dart';
+import 'package:buzz/shared/read_state/read_state_manager.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -19,6 +20,14 @@ class _ReadState extends ReadStateNotifier {
     contexts: const {},
     version: state.version + 1,
     failedClears: channels,
+  );
+
+  void error(Object? error) => state = ReadStateState(
+    isReady: true,
+    pubkey: 'self',
+    contexts: const {},
+    version: state.version + 1,
+    syncError: error,
   );
 }
 
@@ -59,5 +68,35 @@ void main() {
     readState.fail({'b'});
     await tester.pump();
     expect(find.text(notice), findsOneWidget);
+  });
+
+  testWidgets('reports a read refused for capacity once as it starts', (
+    tester,
+  ) async {
+    final readState = _ReadState();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [readStateProvider.overrideWith(() => readState)],
+        child: const MaterialApp(
+          home: FailedClearNotice(child: Scaffold(body: Text('Inbox'))),
+        ),
+      ),
+    );
+    readState.error(StateError('offline'));
+    await tester.pump();
+    expect(find.text(readStateFullMessage), findsNothing);
+
+    readState.error(StateError(readStateFullMessage));
+    await tester.pump();
+    expect(find.text(readStateFullMessage), findsOneWidget);
+    tester
+        .state<ScaffoldMessengerState>(find.byType(ScaffoldMessenger))
+        .removeCurrentSnackBar();
+    await tester.pumpAndSettle();
+
+    // A standing refusal is not reported again.
+    readState.error(StateError(readStateFullMessage));
+    await tester.pumpAndSettle();
+    expect(find.text(readStateFullMessage), findsNothing);
   });
 }

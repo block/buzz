@@ -1,3 +1,4 @@
+import 'dart:math';
 import 'dart:async';
 import 'dart:convert';
 
@@ -569,16 +570,50 @@ void main() {
       for (final key in many) key: {'follow': true, 'at': 1},
       keyU: {'follow': false, 'at': 1},
     };
+    // Peer slots of 300 keys each, as real coordinates must stay small.
+    final outranked = [...many, keyU];
+    final peers = {
+      for (var i = 0; i * 300 < outranked.length; i++)
+        i.toRadixString(16).padLeft(32, 'f'): outranked.sublist(
+          i * 300,
+          min((i + 1) * 300, outranked.length),
+        ),
+    };
+    String peerId(String slot) => '3${slot.padLeft(63, '0')}';
     saved['followHeads'] = {
-      'f' * 32: {
-        'createdAt': 10,
-        'id': '3' * 64,
-        'threads': {
-          for (final key in [...many, keyU]) key: {'follow': true, 'at': 2},
+      for (final MapEntry(key: slot, value: roots) in peers.entries)
+        slot: {
+          'createdAt': 10,
+          'id': peerId(slot),
+          'threads': {
+            for (final key in roots) key: {'follow': true, 'at': 2},
+          },
         },
-      },
     };
     await prefs.setString(journalKey(), jsonEncode(saved));
+    // The peer heads are still on the relay: a complete snapshot without
+    // them would mean their owner deleted them.
+    for (final MapEntry(key: slot, value: roots) in peers.entries) {
+      relay.retained['$threadFollowsDTagPrefix$slot'] = NostrEvent(
+        id: peerId(slot),
+        pubkey: keys.public,
+        createdAt: 10,
+        kind: EventKind.readState,
+        tags: [
+          ['d', '$threadFollowsDTagPrefix$slot'],
+          ['t', threadFollowsTag],
+        ],
+        content: crypto.encrypt(
+          ThreadFollowsBlob(
+            clientId: 'peer',
+            entries: {
+              for (final key in roots) key: {'follow': true, 'at': 2},
+            },
+          ).encode(),
+        ),
+        sig: 'sig',
+      );
+    }
     final phone = await device();
     expect(await phone.setThreadFollow(channel, 'd' * 64, true), isTrue);
     await phone.flush();

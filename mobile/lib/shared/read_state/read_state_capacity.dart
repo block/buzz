@@ -1,5 +1,10 @@
 part of 'read_state_manager.dart';
 
+/// A publication refused because the account's read state is full.
+const readStateFullMessage =
+    'Read state is full, so recent reads aren’t syncing to your other '
+    'devices.';
+
 /// Timestamp reservation and the shared full-snapshot capacity check.
 extension ReadStateCapacity on ReadStateManager {
   /// Reserves the next timestamp. `created_at` is uint32 on the wire, so a
@@ -30,9 +35,7 @@ extension ReadStateCapacity on ReadStateManager {
                   )
                   .length >
               readStateSnapshotMaxBytes) {
-        throw StateError(
-          'Read-state publication exceeds full snapshot capacity',
-        );
+        throw StateError(readStateFullMessage);
       }
     }
   }

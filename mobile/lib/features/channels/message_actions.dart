@@ -619,12 +619,24 @@ class _MarkReadUnreadTile extends ConsumerWidget {
           // unread forces this message unread on this device only (not
           // synced, session-local). It ends when the message is read here
           // or any device reads past it. The channel surfaces it as unread.
+          final readerPubkey = ref.read(myPubkeyProvider);
+          final channel = ref
+              .read(channelsProvider.notifier)
+              .channelById(channelId);
           notifier.markContextUnread(
             msgContextKey(message.id),
             channelId: channelId,
             threadRootId: message.parentId == null
                 ? null
                 : message.rootId ?? message.parentId,
+            channelCatchUp:
+                readerPubkey != null &&
+                channel != null &&
+                readByChannelCatchUp(
+                  isDm: channel.isDm,
+                  isReply: message.parentId != null,
+                  highPriority: isHighPriorityEvent(message.tags, readerPubkey),
+                ),
           );
         }
       },

@@ -325,8 +325,7 @@ class ReadStateManager {
   }) {
     if (_disposed || isOverrideContext(contextId) || unixTimestamp < 0) return;
     final publishable = explicit || !contextId.startsWith(msgContextPrefix);
-    // Whether a clear is owed is decided before the read moves the frontier
-    // past the group's baseline, and both are saved together.
+    // Decide the clear before the read passes the baseline; save both.
     final cleared = _clearChannelOverride(contextId) == true;
     final advanced = _advanceContext(
       contextId,
@@ -488,12 +487,14 @@ class ReadStateManager {
 
   Future<bool> _fetchAndMerge() async {
     final read = ++_snapshotsStarted;
+    final heads = Map.of(_followHeads);
     try {
       // Snapshot transport validates completeness and fences retired sessions.
       final events = await _relaySession!.fetchReadStateSnapshot();
       if (_disposed || !_servesThisCommunity) return false;
-      _settleSnapshot(read, succeeded: true);
+      final newest = _settleSnapshot(read, succeeded: true);
       _mergeEvents(events);
+      if (newest) _dropAbsentPeerFollows(heads, events);
       _followsLoaded = true;
       await _persistLocalState();
       _followsRecovered = true;
@@ -759,6 +760,7 @@ class ReadStateManager {
       var recovered = false;
       if (_relaySession != null) {
         final read = ++_snapshotsStarted;
+        final heads = Map.of(_followHeads);
         final List<NostrEvent> events;
         try {
           events = await _relaySession.fetchReadStateSnapshot();
@@ -766,7 +768,7 @@ class ReadStateManager {
           _settleSnapshot(read, succeeded: false);
           rethrow;
         }
-        _settleSnapshot(read, succeeded: true);
+        final newest = _settleSnapshot(read, succeeded: true);
         if (!_servesThisCommunity ||
             !_ownsJournal ||
             (_disposed && !allowDisposed)) {
@@ -775,6 +777,7 @@ class ReadStateManager {
         checkConnection?.call();
         snapshot = _capacitySnapshot = events;
         _mergeEvents(events);
+        if (newest) _dropAbsentPeerFollows(heads, events);
         _followsLoaded = recovered = true;
         // Unchanged slots publish nothing, so no echo would announce marks
         // this snapshot brought in.

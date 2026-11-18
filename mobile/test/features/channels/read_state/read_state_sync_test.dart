@@ -15,6 +15,7 @@ import 'package:buzz/shared/read_state/read_state_storage.dart';
 import 'package:buzz/shared/theme/community_theme_preference.dart';
 import 'package:buzz/shared/read_state/thread_follows_format.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/relay/read_state_snapshot.dart';
 
 /// Two installations of one identity against one in-memory relay: the NIP-RS
 /// Buzz profile's synced mark read, whole-channel mark unread and thread
@@ -194,6 +195,39 @@ void main() {
     expect(phone.activeChannelOverrides, isEmpty);
   });
 
+  test('a follow that overflows the snapshot is refused, and reads still '
+      'publish', () async {
+    final phone = await device('phone');
+    phone.markContextRead(channel, clock - 100);
+    await phone.flush();
+    // Fill the shared snapshot to its event ceiling with unrelated records.
+    final free = readStateSnapshotMaxEvents - relay.retained.length;
+    for (var i = 0; i < free; i++) {
+      relay.retained['other-$i'] = NostrEvent(
+        id: 'other-$i',
+        pubkey: keys.public,
+        createdAt: clock - 1000,
+        kind: EventKind.readState,
+        tags: [
+          ['d', 'other-$i'],
+        ],
+        content: '',
+        sig: 'sig',
+      );
+    }
+    phone.markContextRead(channel, clock - 50);
+    await phone.flush();
+    expect(phone.syncError, isNull);
+
+    expect(await phone.setThreadFollow(channel, 'a' * 64, true), isFalse);
+    expect((phone.syncError as StateError?)?.message, threadFollowsFullMessage);
+    expect(phone.threadFollows, isEmpty);
+    phone.markContextRead(channel, clock - 10);
+    await phone.flush();
+    expect(phone.syncError, isNull);
+    expect(relay.followEvents(), isEmpty);
+  });
+
   test('a peer read that never saw the mark unread deactivates it', () async {
     final phone = await device('phone');
     final desktop = await device('desktop');
@@ -309,6 +343,30 @@ void main() {
   });
 
   group('thread follows', () {
+    test(
+      'a complete snapshot drops a peer coordinate its owner deleted',
+      () async {
+        final phone = await device('phone');
+        final desktop = await device('desktop');
+        expect(await desktop.setThreadFollow(channel, root, false), isTrue);
+        await sync(desktop, phone);
+        final key = threadFollowKey(channel, root);
+        expect(phone.threadFollows[key]?.follow, isFalse);
+
+        // The desktop's installation retires its own coordinate.
+        relay.retained.removeWhere(
+          (d, _) => d.startsWith(threadFollowsDTagPrefix),
+        );
+        await reconnect(phone);
+
+        expect(phone.threadFollows.containsKey(key), isFalse);
+        // Nor does a restart bring the cached choice back.
+        relay.offline = true;
+        final restarted = await device('phone');
+        expect(restarted.threadFollows.containsKey(key), isFalse);
+      },
+    );
+
     test('a follow on one device reaches the other', () async {
       final phone = await device('phone');
       final desktop = await device('desktop');

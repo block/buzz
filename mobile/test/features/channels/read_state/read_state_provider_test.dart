@@ -319,6 +319,24 @@ void main() {
     expect(state().locallyForcedChannelIds, isEmpty);
   });
 
+  test('a legacy channel catch-up ends only a force it covers', () async {
+    final notifier = await pumpNotifier();
+    notifier.markContextRead(activityContextKey(channelId), now - 10);
+    notifier.markContextUnread(
+      msgKey,
+      channelId: channelId,
+      channelCatchUp: true,
+    );
+    notifier.markContextUnread(otherMsgKey, channelId: channelId);
+
+    // An older peer advances `activity:<channel>`, not the channel frontier.
+    notifier.markContextRead(activityContextKey(channelId), now);
+
+    expect(state().isForcedUnread(msgKey), isFalse);
+    // A mention, reply or DM is not read by channel catch-up; it stays.
+    expect(state().isForcedUnread(otherMsgKey), isTrue);
+  });
+
   test(
     'clearing a channel force keeps its marker and message forces',
     () async {

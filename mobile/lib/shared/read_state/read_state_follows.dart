@@ -249,6 +249,27 @@ extension ReadStateFollows on ReadStateManager {
     }
   }
 
+  /// Forgets cached peer follow coordinates a complete snapshot no longer
+  /// has: their owner deleted them. [before] is the heads as the read
+  /// started; a head a live event changed since then is newer and stays.
+  /// Our own coordinates and their pending intent are never touched.
+  void _dropAbsentPeerFollows(
+    Map<String, ({int createdAt, String id})> before,
+    List<NostrEvent> snapshot,
+  ) {
+    final present = {for (final event in snapshot) ?threadFollowsSlotOf(event)};
+    for (final slot in _followHeads.keys.toList()) {
+      if (_followSlots.contains(slot) ||
+          present.contains(slot) ||
+          _followHeads[slot] != before[slot]) {
+        continue;
+      }
+      _followHeads.remove(slot);
+      _remoteFollows.remove(slot);
+      _unreadableFollowSlots.remove(slot);
+    }
+  }
+
   void _mergeFollowEvent(NostrEvent event, String slot) {
     final index = _followSlots.indexOf(slot);
     // Only the coordinate's newest head counts (created_at, then lowest id),

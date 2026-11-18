@@ -106,7 +106,16 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
   bool _isInitialized = false;
   // Device-local `msg:` forces: their channel, their thread root, and the
   // merged frontier covering the message when it was set.
-  final Map<String, ({String channelId, String? threadRootId, int baseline})>
+  // [channelCatchUp]: whether `activity:<channel>` covers the message too.
+  final Map<
+    String,
+    ({
+      String channelId,
+      String? threadRootId,
+      bool channelCatchUp,
+      int baseline,
+    })
+  >
   _forcedUnreadContexts = {};
 
   @override
@@ -254,11 +263,13 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
   /// state, published to the user's other devices. A `msg:` key stays on
   /// this device, until it is read here or the synced frontier covering the
   /// message moves past where it was, on any device. Returns false when the
-  /// action failed and nothing changed.
+  /// action failed and nothing changed. [channelCatchUp] says whether
+  /// channel catch-up reads the message (see `readByChannelCatchUp`).
   bool markContextUnread(
     String contextId, {
     required String channelId,
     String? threadRootId,
+    bool channelCatchUp = false,
   }) {
     final manager = _manager;
     if (manager == null) return false;
@@ -266,11 +277,13 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
     _forcedUnreadContexts[contextId] = (
       channelId: channelId,
       threadRootId: threadRootId,
+      channelCatchUp: channelCatchUp,
       baseline: _coveringFrontier(
         manager,
         contextId: contextId,
         channelId: channelId,
         threadRootId: threadRootId,
+        channelCatchUp: channelCatchUp,
       ),
     );
     _refreshForcedState();
@@ -311,6 +324,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
     required String contextId,
     required String channelId,
     required String? threadRootId,
+    required bool channelCatchUp,
   }) {
     final contexts = manager.effectiveContexts;
     return maxReadAt([
@@ -320,6 +334,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
             contexts[threadContextKey(threadRootId)],
             contexts[threadActivityContextKey(threadRootId)],
           ],
+          if (channelCatchUp) contexts[activityContextKey(channelId)],
         ]) ??
         0;
   }
@@ -358,6 +373,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
             contextId: contextId,
             channelId: force.channelId,
             threadRootId: force.threadRootId,
+            channelCatchUp: force.channelCatchUp,
           ) >
           force.baseline,
     );
