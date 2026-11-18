@@ -217,6 +217,9 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
     );
   }
 
+  /// Publishes pending read markers now instead of after the usual delay.
+  Future<void> flush() async => _manager?.flush();
+
   void seedContextRead(String contextId, int unixTimestamp) {
     _manager?.seedContextRead(contextId, unixTimestamp);
   }
