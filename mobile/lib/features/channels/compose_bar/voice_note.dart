@@ -8,6 +8,7 @@ class _ComposerVoiceNote {
     required this.isDictating,
     required this.onKeyboardHidden,
     required this.onDraftIdentityChanged,
+    required this.insertedTranscriptionId,
     required ValueNotifier<bool> isPreparing,
     required ValueNotifier<bool> isRecording,
     required ValueChanged<VoiceNoteRecording> onRecorded,
@@ -21,6 +22,10 @@ class _ComposerVoiceNote {
   final bool isDictating;
   final VoidCallback onKeyboardHidden;
   final VoidCallback onDraftIdentityChanged;
+
+  /// The recording whose transcript the editor's next draft snapshot carries.
+  final ObjectRef<String?> insertedTranscriptionId;
+
   final ValueNotifier<bool> _isPreparing;
   final ValueNotifier<bool> _isRecording;
   final ValueChanged<VoiceNoteRecording> _onRecorded;
@@ -53,8 +58,6 @@ _ComposerVoiceNote _useComposerVoiceNote({
   required TextEditingController controller,
   required String scope,
   required String draftKey,
-  required String channelId,
-  required String? threadHeadId,
   required ValueNotifier<_InputTool?> inputTool,
   required FocusNode focusNode,
   required ValueNotifier<bool> isComposerExpanded,
@@ -68,6 +71,7 @@ _ComposerVoiceNote _useComposerVoiceNote({
   final isRecording = useState(false);
   final dictating = useState(false);
   final availabilityCheck = useRef<Object?>(null);
+  final insertedTranscriptionId = useRef<String?>(null);
   final transcript = useComposerTranscription(
     context: context,
     ref: ref,
@@ -80,20 +84,17 @@ _ComposerVoiceNote _useComposerVoiceNote({
           ? ''
           : ' ';
       final result = '$existing$separator$text';
-      final drafts = ref.read(composeDraftsProvider.notifier);
-      // Save text and its insertion identity atomically, before editor listeners.
-      drafts.save(
-        key: draftKey,
-        channelId: channelId,
-        threadHeadId: threadHeadId,
-        text: result,
-        mentionKeys: drafts.draftFor(draftKey)?.mentionKeys ?? const {},
-        transcriptionId: recordingId,
-      );
-      controller.value = TextEditingValue(
-        text: result,
-        selection: TextSelection.collapsed(offset: result.length),
-      );
+      // The editor's own draft snapshot saves this text, the mentions bound in
+      // the editor and the recording's identity together, in one write.
+      insertedTranscriptionId.value = recordingId;
+      try {
+        controller.value = TextEditingValue(
+          text: result,
+          selection: TextSelection.collapsed(offset: result.length),
+        );
+      } finally {
+        insertedTranscriptionId.value = null;
+      }
       isComposerExpanded.value = true;
       focusNode.requestFocus();
     },
@@ -188,6 +189,7 @@ _ComposerVoiceNote _useComposerVoiceNote({
     isDictating: dictating.value,
     onKeyboardHidden: beginRecording,
     onDraftIdentityChanged: resetForDraftIdentityChange,
+    insertedTranscriptionId: insertedTranscriptionId,
     isPreparing: isPreparing,
     isRecording: isRecording,
     onRecorded: complete,

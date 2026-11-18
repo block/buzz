@@ -282,6 +282,97 @@ void iosControlsTests() {
       expect(find.text('Retry'), findsNothing);
       expect(sends, 0);
       await tester.pumpWidget(const SizedBox.shrink());
+
+      // A reopened conversation shows its agent prefill again, behind the
+      // saved recording. Retry appends to it and keeps its exact recipient.
+      final viewer = 'f' * 64;
+      final agent = 'a' * 64;
+      final namesake = 'b' * 64;
+      final agentIdentity = RelayConfig(
+        baseUrl: 'http://localhost:3000',
+        nsec: nostr.Keys.generate().nsec,
+      );
+      var renamed = false;
+      List<String>? recipients;
+      Widget agentComposer() => _buildComposeBar(
+        currentPubkey: viewer,
+        channels: [_makeCurrentChannel()],
+        relayConfig: () => _SwitchableRelayConfigNotifier(agentIdentity),
+        uploadService: upload,
+        voiceNoteRecorderFactory: _FakeVoiceNoteRecorder.new,
+        loadMembers: () async => [
+          ChannelMember(
+            pubkey: agent,
+            displayName: renamed ? 'Ranger' : 'Scout',
+            role: 'bot',
+            joinedAt: DateTime(2025),
+          ),
+          ChannelMember(
+            pubkey: namesake,
+            displayName: renamed ? 'Scout' : 'Pat',
+            role: 'member',
+            joinedAt: DateTime(2025),
+          ),
+        ],
+        prefillScopeMessages: [
+          TimelineMessage(
+            id: 'own-message-to-agent',
+            pubkey: viewer,
+            createdAt: 10,
+            content: '',
+            tags: [
+              const ['h', 'channel-1'],
+              ['p', agent],
+            ],
+          ),
+        ],
+        overrides: [
+          composerTranscriptionFilesProvider.overrideWithValue(files),
+          deviceTranscriptionProvider.overrideWithValue(() => speech),
+        ],
+        onSend: (_, mentions, {mediaTags = const []}) async {
+          recipients = mentions;
+        },
+      );
+      ComposeDraft? agentDraft() => ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      ).read(composeDraftsProvider.notifier).draftFor('channel-1');
+      speech.reset();
+      await tester.pumpWidget(agentComposer());
+      await tester.pumpAndSettle();
+      // The mic is offered only for an empty field: remove the prefill.
+      await tester.tap(find.text('@Scout'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), '');
+      await tester.pumpAndSettle();
+      await _tapComposerControl(tester, 'Dictate');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Stop recording'));
+      await tester.pump();
+      speech.result.completeError(StateError('Speech service unavailable.'));
+      await tester.pumpAndSettle();
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpWidget(agentComposer());
+      await tester.pumpAndSettle();
+      expect(agentDraft(), isNull);
+      speech.reset();
+      await tester.tap(find.text('Retry'));
+      await tester.pump();
+      speech.result.complete('Keep the exact recipient.');
+      await tester.pumpAndSettle();
+      expect(agentDraft()?.text, '@Scout Keep the exact recipient.');
+      expect(agentDraft()?.mentionKeys, {'Scout': agent});
+      expect(agentDraft()?.transcriptionId, endsWith('.saved'));
+      // The agent is renamed and another member takes its old name.
+      renamed = true;
+      ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      ).invalidate(channelMembersProvider('channel-1'));
+      await tester.pumpAndSettle();
+      await _tapComposerControl(tester, 'Send');
+      await tester.pumpAndSettle();
+      expect(recipients, [agent]);
+      await tester.pumpWidget(const SizedBox.shrink());
     },
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),
   );
