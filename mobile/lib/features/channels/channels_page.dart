@@ -1,6 +1,7 @@
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+
 import 'channel_unread.dart';
 import '../../shared/widgets/collapsible_section_body.dart';
 import '../../shared/widgets/collapsible_sliver_body.dart';
@@ -28,7 +29,9 @@ import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
 import 'package:duo_kit/duo_kit.dart';
+
 import '../../shared/widgets/duo_toolbar.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart';
@@ -83,6 +86,8 @@ import 'mentions/stable_mention_rows.dart';
 import 'dm_channel_labels.dart';
 import 'ephemeral_channel_display.dart';
 import 'channel_mutes/channel_mutes_provider.dart';
+import 'channel_sections/channel_section_dialog.dart';
+import 'channel_sections/channel_section_emoji.dart';
 import 'channel_sections/channel_sections_provider.dart';
 import 'channel_sections/channel_sections_storage.dart';
 import 'channel_sort/channel_sort_provider.dart';

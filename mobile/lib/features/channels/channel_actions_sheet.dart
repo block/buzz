@@ -35,6 +35,7 @@ import 'add_members_sheet.dart';
 import 'channel_identity_names_provider.dart';
 import 'channel_management_provider.dart';
 import 'channel_mutes/channel_mutes_provider.dart';
+import 'channel_sections/channel_section_dialog.dart';
 import 'channel_sections/channel_sections_provider.dart';
 import 'channel_stars/channel_stars_provider.dart';
 import 'channels_provider.dart';
@@ -634,19 +635,15 @@ Future<void> _showMoveSectionSheet(
                 title: const Text('New section…'),
                 onTap: () async {
                   Navigator.of(sheetContext).pop();
-                  final name = await _showSectionNameDialog(context);
-                  if (name == null || name.isEmpty) return;
-                  final notifier = ref.read(channelSectionsProvider.notifier);
-                  notifier.createSection(name);
-                  final created = ref
-                      .read(channelSectionsProvider)
-                      .store
-                      .sections
-                      .where((section) => section.name == name.trim())
-                      .lastOrNull;
-                  if (created != null) {
-                    notifier.assignChannel(channel.id, created.id);
-                  }
+                  final edit = await showChannelSectionDialog(context);
+                  if (edit == null || !context.mounted) return;
+                  ref
+                      .read(channelSectionsProvider.notifier)
+                      .createSection(
+                        edit.name,
+                        icon: edit.icon,
+                        channelId: channel.id,
+                      );
                 },
               ),
               if (sectionId != null)
@@ -666,28 +663,4 @@ Future<void> _showMoveSectionSheet(
       ),
     ),
   );
-}
-
-Future<String?> _showSectionNameDialog(BuildContext context) async {
-  final controller = TextEditingController();
-  final result = await showBuzzDialog<String>(
-    context: context,
-    builder: (dialogContext) => AlertDialog(
-      title: const Text('New Section'),
-      content: TextField(controller: controller, autofocus: true),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(dialogContext).pop(),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: () =>
-              Navigator.of(dialogContext).pop(controller.text.trim()),
-          child: const Text('Create'),
-        ),
-      ],
-    ),
-  );
-  controller.dispose();
-  return result;
 }

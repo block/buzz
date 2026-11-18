@@ -1164,7 +1164,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('🎨'), findsNothing);
+    expect(find.text('🎨'), findsOneWidget);
     final sectionRow = find
         .ancestor(of: find.text('Design'), matching: find.byType(Row))
         .first;

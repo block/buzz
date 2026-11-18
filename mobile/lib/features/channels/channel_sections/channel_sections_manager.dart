@@ -205,7 +205,8 @@ class ChannelSectionsManager {
     _unsubscribe = null;
   }
 
-  void createSection(String name) {
+  /// Creates a section and optionally files the originating channel in it.
+  void createSection(String name, {String? icon, String? channelId}) {
     if (_disposed) return;
     final maxOrder = _store.sections.fold<int>(
       -1,
@@ -214,26 +215,41 @@ class ChannelSectionsManager {
     final section = ChannelSection(
       id: _uuid.v4(),
       name: name.trim(),
+      icon: icon,
       order: maxOrder + 1,
     );
     _store = ChannelSectionStore(
       sections: [..._store.sections, section],
-      assignments: _store.assignments,
+      assignments: channelId == null
+          ? _store.assignments
+          : {..._store.assignments, channelId: section.id},
     );
     _persist();
     markDirty();
+    _onChanged();
   }
 
-  void renameSection(String sectionId, String newName) {
+  /// Updates only the supplied fields. [clearIcon] explicitly removes the icon.
+  void updateSection(
+    String sectionId, {
+    String? name,
+    String? icon,
+    bool clearIcon = false,
+  }) {
     if (_disposed) return;
+    final section = _store.sections.where((s) => s.id == sectionId).firstOrNull;
+    if (section == null) return;
+    final newName = name?.trim() ?? section.name;
+    final newIcon = clearIcon ? null : icon ?? section.icon;
+    if (newName == section.name && newIcon == section.icon) return;
     _store = ChannelSectionStore(
       sections: [
         for (final s in _store.sections)
           if (s.id == sectionId)
             ChannelSection(
               id: s.id,
-              name: newName.trim(),
-              icon: s.icon,
+              name: newName,
+              icon: newIcon,
               order: s.order,
             )
           else
@@ -243,7 +259,11 @@ class ChannelSectionsManager {
     );
     _persist();
     markDirty();
+    _onChanged();
   }
+
+  void renameSection(String sectionId, String newName) =>
+      updateSection(sectionId, name: newName);
 
   void deleteSection(String sectionId) {
     if (_disposed) return;
