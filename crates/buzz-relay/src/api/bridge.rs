@@ -10518,12 +10518,15 @@ pub(crate) mod postgres_tests {
     }
 
     /// A pool whose acquires give up after `budget`, with every connection
-    /// already open. sqlx bounds connection establishment by the same
-    /// deadline as the wait for a free connection, so a pool that still had
-    /// to connect would fail on any server stall longer than `budget`. The
-    /// pool is filled first, retrying each timed-out connect within sqlx's
-    /// default 30s, and never pings on acquire: afterwards an acquire waits
-    /// only for a free connection, the wait the budget is meant to bound.
+    /// already open and idle. sqlx bounds connection establishment by the
+    /// same deadline as the wait for a free connection, so a pool that still
+    /// had to connect would fail on any server stall longer than `budget`.
+    /// The pool is filled first, retrying each timed-out connect within
+    /// sqlx's default 30s, and does not ping on acquire. sqlx still pings a
+    /// connection when it is released (`return_to_pool`), so the filled
+    /// connections are only handed back once every one is idle again, within
+    /// the same 30s. Afterwards an acquire waits only for a free connection,
+    /// the wait the budget is meant to bound.
     async fn budgeted_reader(url: &str, budget: std::time::Duration) -> sqlx::PgPool {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .acquire_timeout(budget)
@@ -10540,6 +10543,15 @@ pub(crate) mod postgres_tests {
             }
         }
         drop(open);
+        let max = pool.options().get_max_connections() as usize;
+        while pool.num_idle() < max {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "reader connections returned idle: {} of {max}",
+                pool.num_idle()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         pool
     }
 
@@ -10867,7 +10879,13 @@ pub(crate) mod postgres_tests {
             held.push(fx.replica.acquire().await.expect("hold reader connection"));
         }
         for (branch, filter) in &cases {
+            let started = std::time::Instant::now();
             let (status, body) = fx.http("/query", filter).await;
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "shed {branch} took {:?}, not the 1s reader budget",
+                started.elapsed()
+            );
             assert_eq!(
                 (status, body["error"].as_str()),
                 (
