@@ -1,6 +1,6 @@
 //! User media cleanup. Both modes use the same upload-only inventory.
 use anyhow::{bail, Context, Result};
-use buzz_db::{user_deletion::UserMediaTargets, Db, DbConfig};
+use buzz_db::{user_deletion::UserDeletionTargets, Db, DbConfig};
 use buzz_media::{
     classify_key, KeyClass, MediaStorage, ObjectVersionEntry, ObjectVersionKind, ObjectVersionRef,
     ObjectVersionsPage, UploadRecord, UPLOAD_RECORD_VERSION,
@@ -70,32 +70,37 @@ pub(super) async fn handle_with_storage(
 // Fakes replace only external DB/storage boundaries; the tests run the same
 // candidate collection, prefix scans, bounded inventory and deletion loop.
 trait Database {
-    async fn targets(&self, pubkey: &str) -> Result<UserMediaTargets>;
+    async fn targets(&self, pubkey: &str) -> Result<UserDeletionTargets>;
     async fn candidates(
         &self,
-        pubkeys: &UserMediaTargets,
+        pubkeys: &UserDeletionTargets,
         after: &str,
     ) -> Result<Vec<(String, bool)>>;
-    async fn shared(&self, pubkeys: &UserMediaTargets, hashes: &[String]) -> Result<Vec<String>>;
-    async fn remove(&self, pubkeys: &UserMediaTargets, hash: &str) -> Result<u64>;
+    async fn shared(&self, pubkeys: &UserDeletionTargets, hashes: &[String])
+        -> Result<Vec<String>>;
+    async fn remove(&self, pubkeys: &UserDeletionTargets, hash: &str) -> Result<u64>;
 }
 impl Database for Db {
-    async fn targets(&self, pubkey: &str) -> Result<UserMediaTargets> {
+    async fn targets(&self, pubkey: &str) -> Result<UserDeletionTargets> {
         Ok(self.user_media_targets(pubkey).await?)
     }
     async fn candidates(
         &self,
-        pubkeys: &UserMediaTargets,
+        pubkeys: &UserDeletionTargets,
         after: &str,
     ) -> Result<Vec<(String, bool)>> {
         Ok(self
             .user_media_candidates(pubkeys, after, PAGE_SIZE)
             .await?)
     }
-    async fn shared(&self, pubkeys: &UserMediaTargets, hashes: &[String]) -> Result<Vec<String>> {
+    async fn shared(
+        &self,
+        pubkeys: &UserDeletionTargets,
+        hashes: &[String],
+    ) -> Result<Vec<String>> {
         Ok(self.user_media_shared_hashes(pubkeys, hashes).await?)
     }
-    async fn remove(&self, pubkeys: &UserMediaTargets, hash: &str) -> Result<u64> {
+    async fn remove(&self, pubkeys: &UserDeletionTargets, hash: &str) -> Result<u64> {
         Ok(self.remove_user_media_uploader(pubkeys, hash).await?)
     }
 }
@@ -209,7 +214,7 @@ async fn run_handler_with_inventory(
     Ok(result)
 }
 
-async fn require_current_targets(db: &impl Database, targets: &UserMediaTargets) -> Result<()> {
+async fn require_current_targets(db: &impl Database, targets: &UserDeletionTargets) -> Result<()> {
     if db.targets(&targets.human).await? != *targets {
         bail!("media agent ownership changed; retry to discover current community ownership");
     }
@@ -218,7 +223,7 @@ async fn require_current_targets(db: &impl Database, targets: &UserMediaTargets)
 
 async fn scan_storage(
     media: &impl Storage,
-    targets: &UserMediaTargets,
+    targets: &UserDeletionTargets,
     inventory: &mut Inventory,
     prefix: &str,
     candidates_only: bool,
@@ -396,9 +401,9 @@ mod tests {
         removed: RefCell<Vec<String>>,
     }
     impl Database for FakeDb {
-        async fn targets(&self, pubkey: &str) -> Result<UserMediaTargets> {
+        async fn targets(&self, pubkey: &str) -> Result<UserDeletionTargets> {
             *self.target_calls.borrow_mut() += 1;
-            Ok(UserMediaTargets {
+            Ok(UserDeletionTargets {
                 human: pubkey.to_owned(),
                 agents: match &self.changed_targets {
                     Some((after, targets)) if *self.target_calls.borrow() > *after => {
@@ -410,7 +415,7 @@ mod tests {
         }
         async fn candidates(
             &self,
-            keys: &UserMediaTargets,
+            keys: &UserDeletionTargets,
             after: &str,
         ) -> Result<Vec<(String, bool)>> {
             if !self.targets.is_empty() {
@@ -424,7 +429,11 @@ mod tests {
                 .map(|hash| (hash.clone(), self.shared.contains(hash)))
                 .collect())
         }
-        async fn shared(&self, keys: &UserMediaTargets, hashes: &[String]) -> Result<Vec<String>> {
+        async fn shared(
+            &self,
+            keys: &UserDeletionTargets,
+            hashes: &[String],
+        ) -> Result<Vec<String>> {
             if !self.targets.is_empty() {
                 assert_eq!(keys.agents, self.targets);
             }
@@ -435,7 +444,7 @@ mod tests {
                 .cloned()
                 .collect())
         }
-        async fn remove(&self, keys: &UserMediaTargets, hash: &str) -> Result<u64> {
+        async fn remove(&self, keys: &UserDeletionTargets, hash: &str) -> Result<u64> {
             if !self.targets.is_empty() {
                 assert_eq!(keys.agents, self.targets);
             }

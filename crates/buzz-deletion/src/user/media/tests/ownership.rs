@@ -93,6 +93,32 @@ async fn changed_ownership_aborts_before_mutation_and_retry_rediscovers() {
 }
 
 #[tokio::test]
+async fn changed_ownership_aborts_at_uploader_removal_with_or_without_storage_deletes() {
+    for shared in [false, true] {
+        let hash = "a".repeat(64);
+        let db = FakeDb {
+            targets: vec![(uuid::Uuid::from_u128(1), AGENT.into())],
+            changed_targets: Some((if shared { 1 } else { 3 }, vec![])),
+            shared: if shared { vec![hash.clone()] } else { vec![] },
+            ..Default::default()
+        };
+        let mut media = FakeStorage::default();
+        media.upload(&hash, AGENT, 1);
+        media.object(format!("{hash}.png"), ObjectVersionKind::Object);
+        let before = media.entries.borrow().clone();
+        let error = run_handler(&db, &media, ALICE, true, &mut Vec::new())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("ownership changed"));
+        assert!(db.removed.borrow().is_empty());
+        assert_eq!(media.deleted.borrow().len(), if shared { 0 } else { 2 });
+        if shared {
+            assert_eq!(*media.entries.borrow(), before);
+        }
+    }
+}
+
+#[tokio::test]
 async fn empty_inventory_rechecks_new_agents_before_reporting_success() {
     let db = FakeDb {
         changed_targets: Some((1, vec![(uuid::Uuid::from_u128(1), AGENT.into())])),

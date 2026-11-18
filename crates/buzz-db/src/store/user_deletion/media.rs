@@ -2,34 +2,9 @@
 use crate::{Db, DbError, Result};
 use uuid::Uuid;
 
-/// Fresh human ownership and direct agents, retaining each agent’s community.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-pub struct UserMediaTargets {
-    /// The human remains the global discovery root.
-    pub human: String,
-    /// Agent authority applies only in the recorded community.
-    pub agents: Vec<(Uuid, String)>,
-}
+use super::agent_ownership::{self, UserDeletionTargets, MAX_TARGETS};
 
-impl UserMediaTargets {
-    /// Whether an upload claim belongs to this deletion scope.
-    pub fn contains(&self, community: Uuid, pubkey: &str) -> bool {
-        pubkey == self.human
-            || self
-                .agents
-                .iter()
-                .any(|(c, key)| *c == community && key == pubkey)
-    }
-
-    /// Unique public keys for indexed candidate discovery and display only.
-    pub fn pubkeys(&self) -> Vec<String> {
-        let mut keys = vec![self.human.clone()];
-        keys.extend(self.agents.iter().map(|(_, key)| key.clone()));
-        keys.sort();
-        keys.dedup();
-        keys
-    }
-
+impl UserDeletionTargets {
     fn communities(&self) -> Vec<Uuid> {
         self.agents
             .iter()
@@ -46,8 +21,6 @@ fn decode_key(key: &str) -> Result<Vec<u8>> {
     hex::decode(super::normalize_user_deletion_pubkey(key)?)
         .map_err(|error| DbError::InvalidData(error.to_string()))
 }
-
-const MAX_MEDIA_TARGETS: usize = 10_000;
 
 const CANDIDATES_SQL: &str = r#"WITH candidates AS MATERIALIZED (SELECT sha256 FROM (
                 SELECT sha256 COLLATE "C" AS sha256 FROM media_uploaders
@@ -71,28 +44,13 @@ const CANDIDATES_SQL: &str = r#"WITH candidates AS MATERIALIZED (SELECT sha256 F
 
 impl Db {
     /// Fetch direct agent ownership per community on every invocation and retry.
-    pub async fn user_media_targets(&self, pubkey: &str) -> Result<UserMediaTargets> {
+    pub async fn user_media_targets(&self, pubkey: &str) -> Result<UserDeletionTargets> {
         let human = super::normalize_user_deletion_pubkey(pubkey)?;
         let mut tx = self.pool().begin().await?;
         sqlx::query("SET LOCAL statement_timeout = '120s'")
             .execute(&mut *tx)
             .await?;
-        let agents: Vec<(Uuid, String)> = sqlx::query_as(
-            "SELECT community_id, encode(pubkey, 'hex') FROM users
-             WHERE agent_owner_pubkey = decode($1, 'hex') AND pubkey <> decode($1, 'hex')
-             ORDER BY community_id, pubkey LIMIT $2",
-        )
-        .bind(&human)
-        .bind((MAX_MEDIA_TARGETS + 1) as i64)
-        .fetch_all(&mut *tx)
-        .await?;
-        if agents.len() > MAX_MEDIA_TARGETS {
-            return Err(DbError::InvalidData(
-                "media agent scope exceeds 10000 entries".into(),
-            ));
-        }
-        let targets = UserMediaTargets { human, agents };
-        validate_keys(&targets.pubkeys())?;
+        let targets = agent_ownership::discover(&mut tx, &human, None, false).await?;
         tx.commit().await?;
         Ok(targets)
     }
@@ -101,7 +59,7 @@ impl Db {
     /// An empty cursor starts the scan. Storage-only claims are discovered separately.
     pub async fn user_media_candidates(
         &self,
-        targets: &UserMediaTargets,
+        targets: &UserDeletionTargets,
         after: &str,
         limit: u16,
     ) -> Result<Vec<(String, bool)>> {
@@ -138,7 +96,7 @@ impl Db {
     /// Call this for storage-discovered candidates too, before deleting anything.
     pub async fn user_media_shared_hashes(
         &self,
-        targets: &UserMediaTargets,
+        targets: &UserDeletionTargets,
         hashes: &[String],
     ) -> Result<Vec<String>> {
         validate_keys(&targets.pubkeys())?;
@@ -179,7 +137,7 @@ impl Db {
     /// Audit history and publication moderation records are retained.
     pub async fn remove_user_media_uploader(
         &self,
-        targets: &UserMediaTargets,
+        targets: &UserDeletionTargets,
         hash: &str,
     ) -> Result<u64> {
         validate_keys(&targets.pubkeys())?;
@@ -199,7 +157,7 @@ impl Db {
 }
 
 fn validate_keys(pubkeys: &[String]) -> Result<Vec<Vec<u8>>> {
-    if pubkeys.is_empty() || pubkeys.len() > MAX_MEDIA_TARGETS {
+    if pubkeys.is_empty() || pubkeys.len() > MAX_TARGETS {
         return Err(DbError::InvalidData(
             "media target set must contain 1..=10000 keys".into(),
         ));
@@ -463,7 +421,7 @@ mod postgres_tests {
             .contains(&(hashes[0].clone(), false)));
         assert!(db
             .remove_user_media_uploader(
-                &UserMediaTargets {
+                &UserDeletionTargets {
                     human: "invalid".into(),
                     agents: vec![]
                 },

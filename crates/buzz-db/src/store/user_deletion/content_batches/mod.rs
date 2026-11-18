@@ -30,7 +30,7 @@ const KINDS: &[i32] = &[
     30175, 30176, 30178, 30030, 30180, 30621,
 ];
 const PAGE_SIZE: i64 = 100;
-const MAX_TARGETS: usize = 10_000;
+use super::agent_ownership::MAX_TARGETS;
 const EVENT_COLUMNS: &str = "e.id,e.created_at,e.channel_id,e.kind,e.tags";
 
 /// Scope and bounds for standalone preview or explicitly requested deletion.

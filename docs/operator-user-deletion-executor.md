@@ -248,6 +248,27 @@ placeholder failures and branching only. Demo media success is synthetic; real r
 An injected community failure preserves the same retry semantics as before.
 Ctrl-C releases the worker lease; after an abrupt kill wait for lease expiry.
 
+## Shared agent discovery
+
+Media, content, account, and profile cleanup use the same discovery utility in
+`buzz-db/src/store/user_deletion/agent_ownership.rs`, including account scope
+capture. It normalizes the human key, reads current direct ownership from
+`users`, and retains `(community_id, agent_pubkey)` pairs. It does not infer
+ownership from membership, recurse through agents, or exclude deactivated
+profiles. A missing profile grants no agent cleanup authority.
+
+Every invocation and retry discovers again. Content, account, and profile
+handlers use the utility inside their existing batch transactions with row
+locks when rechecking ownership. Profile cleanup compares against the identities
+that remain after its own committed batches. Media rechecks before each storage
+mutation, uploader-row removal, and successful completion. These checks do not
+replace the requirement to stop writers, or make PostgreSQL and storage atomic.
+
+Discovery rejects more than 10,000 ownership pairs or distinct target keys
+(including the human), rather than returning a partial set. Individual handlers
+retain their additional operation and output limits. Ownership profiles must
+remain until all dependent cleanup completes; profile removal goes last.
+
 ## Media discovery and remaining limits
 
 Every invocation and retry fetches the human's current directly owned agents
