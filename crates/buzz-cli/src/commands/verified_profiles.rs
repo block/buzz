@@ -3,14 +3,12 @@
 //!
 //! A community advertises them in NIP-11 (`federated_identity.public_profile`).
 //! The only key trusted to sign them is the relay's NIP-11 `self` key, so a
-//! kind:30382 signed by anyone else is ignored. Event and projection checks
-//! mirror the Buzz mobile client (`verified_profile.dart`).
+//! kind:30382 signed by anyone else is ignored.
 
 use std::collections::HashMap;
 
 use nostr::Event;
 use serde_json::{json, Value};
-use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
 use crate::client::BuzzClient;
 use crate::commands::agents::normalize_relay_self_hex;
@@ -21,10 +19,6 @@ const KIND: u16 = buzz_core::kind::KIND_VERIFIED_PROFILE as u16;
 
 /// Subjects per query, keeping each REQ inside relay filter limits.
 const SUBJECTS_PER_QUERY: usize = 128;
-
-/// Larger events (UTF-16 units of content and every tag element) are dropped
-/// before any further work. A valid projection is well under 1 KiB.
-const MAX_EVENT_SIZE: usize = 4096;
 
 /// A verified name as the relay last published it. Historical: it records the
 /// issuer's name-to-key assertion at `verified_at`, never current access.
@@ -74,11 +68,7 @@ pub(crate) fn parse_discovery(info: &Value) -> Result<Option<String>, CliError> 
     let (Some(profile), Some(self_hex)) = (profile.as_object(), self_hex) else {
         return Err(malformed("malformed public_profile discovery"));
     };
-    if profile.get("kind").and_then(Value::as_u64) != Some(u64::from(KIND))
-        || !profile
-            .get("multiple_issuers")
-            .is_some_and(serde_json::Value::is_boolean)
-    {
+    if profile.get("kind").and_then(Value::as_u64) != Some(u64::from(KIND)) {
         return Err(malformed("malformed public_profile discovery"));
     }
     normalize_relay_self_hex(self_hex).map(Some)
@@ -128,11 +118,11 @@ pub(crate) async fn fetch_verified_profiles(
 
 /// Every valid verified profile among `events`, keyed by subject pubkey.
 ///
-/// Anything not signed by `authority`, not of kind 30382, oversized, or with
-/// a bad id or signature is ignored. Per subject the newest event is the head,
-/// as for any addressable event; a head that is not a valid active projection
-/// (including a retraction) leaves the subject with no verified profile, so a
-/// stale older name never resurfaces.
+/// Anything not signed by `authority`, not of kind 30382, or with a bad id or
+/// signature is ignored. Per subject the newest event is the head, as for any
+/// addressable event; a head that is not a valid active projection (including
+/// a retraction) leaves the subject with no verified profile, so a stale older
+/// name never resurfaces.
 pub(crate) fn verified_profiles_from_events(
     events: &[Value],
     authority: &str,
@@ -142,151 +132,62 @@ pub(crate) fn verified_profiles_from_events(
         let Ok(event) = serde_json::from_value::<Event>(raw.clone()) else {
             continue;
         };
-        let Some(subject) = subject(&event, authority) else {
+        let Some(subject) = signed_subject(&event, authority) else {
             continue;
         };
-        if event.verify().is_err() {
-            continue;
-        }
         if heads
             .get(&subject)
-            .is_none_or(|current| supersedes(&event, current))
+            .is_none_or(|current| event.created_at > current.created_at)
         {
             heads.insert(subject, event);
         }
     }
     heads
         .into_iter()
-        .filter_map(|(subject, event)| parse_projection(&event, &subject).map(|p| (subject, p)))
+        .filter_map(|(subject, event)| parse_projection(&event).map(|p| (subject, p)))
         .collect()
 }
 
-/// NIP-01 replaceable ordering: the later `created_at` wins; a tie goes to the
-/// lower event id.
-fn supersedes(candidate: &Event, current: &Event) -> bool {
-    candidate.created_at > current.created_at
-        || (candidate.created_at == current.created_at
-            && candidate.id.to_hex() < current.id.to_hex())
-}
-
-fn is_lower_hex64(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
-fn event_size(event: &Event) -> usize {
-    let mut size = event.content.encode_utf16().count();
-    for tag in event.tags.iter() {
-        size += 1;
-        for value in tag.as_slice() {
-            size += value.encode_utf16().count() + 1;
-        }
-    }
-    size
-}
-
-/// The subject a kind:30382 event addresses: its first `d` tag, when the event
-/// is by `authority`, within the size bound, and the tag is a lowercase hex
-/// pubkey. Projection shape is not checked here.
-fn subject(event: &Event, authority: &str) -> Option<String> {
-    if event.kind.as_u16() != KIND
-        || event.pubkey.to_hex() != authority
-        || event_size(event) > MAX_EVENT_SIZE
+/// The subject a kind:30382 event addresses (its first `d` tag, a lowercase hex
+/// pubkey), when the event is validly signed by `authority`.
+fn signed_subject(event: &Event, authority: &str) -> Option<String> {
+    if event.kind.as_u16() != KIND || event.pubkey.to_hex() != authority || event.verify().is_err()
     {
         return None;
     }
-    let d = event
+    let subject = tag_value(event, "d")?;
+    (subject.len() == 64
+        && subject
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    .then(|| subject.to_owned())
+}
+
+fn tag_value<'a>(event: &'a Event, name: &str) -> Option<&'a str> {
+    event
         .tags
         .iter()
         .map(|tag| tag.as_slice())
-        .find(|tag| tag.first().map(String::as_str) == Some("d"))?;
-    d.get(1).filter(|v| is_lower_hex64(v)).cloned()
+        .find(|tag| tag.first().map(String::as_str) == Some(name))
+        .and_then(|tag| tag.get(1))
+        .map(String::as_str)
 }
 
-/// Strictly validate the projection NIP-FI defines: empty content; exactly
-/// seven tags (eight with `full_name`), each of two elements with no repeated
-/// name; `d` and `p` equal; `active` equal to `true`; well-formed names,
-/// username and issuer label; and a `verified_at` no later than `created_at`.
-fn parse_projection(event: &Event, subject: &str) -> Option<VerifiedProfile> {
-    if !event.content.is_empty() || !matches!(event.tags.len(), 7 | 8) {
+/// Read the NIP-FI projection: `active` must be `true`, `username` well
+/// formed, and the names and `verified_at` present.
+fn parse_projection(event: &Event) -> Option<VerifiedProfile> {
+    let name = |name| tag_value(event, name).filter(|v| !v.is_empty());
+    if tag_value(event, "active") != Some("true") {
         return None;
     }
-    let mut tags: HashMap<&str, &str> = HashMap::new();
-    for tag in event.tags.iter() {
-        let [name, value] = tag.as_slice() else {
-            return None;
-        };
-        if tags.insert(name, value).is_some() {
-            return None;
-        }
-    }
-    const REQUIRED: [&str; 7] = [
-        "d",
-        "p",
-        "active",
-        "display_name",
-        "username",
-        "issuer_label",
-        "verified_at",
-    ];
-    let full_name = tags.get("full_name").copied();
-    if !REQUIRED.iter().all(|name| tags.contains_key(name))
-        || tags.len() != REQUIRED.len() + usize::from(full_name.is_some())
-    {
-        return None;
-    }
-    let (display_name, username, issuer_label) =
-        (tags["display_name"], tags["username"], tags["issuer_label"]);
-    let verified_at = tags["verified_at"];
-    if tags["p"] != subject
-        || tags["active"] != "true"
-        || !full_name.is_none_or(valid_name)
-        || !valid_name(display_name)
-        || !valid_username(username)
-        || !valid_name(issuer_label)
-        || verified_at.is_empty()
-        || !verified_at.bytes().all(|b| b.is_ascii_digit())
-    {
-        return None;
-    }
-    let verified_at: u64 = verified_at.parse().ok()?;
-    if verified_at > event.created_at.as_secs() {
-        return None;
-    }
+    let username = name("username").filter(|u| valid_username(u))?;
     Some(VerifiedProfile {
-        display_name: display_name.to_owned(),
+        display_name: name("display_name")?.to_owned(),
         username: username.to_owned(),
-        full_name: full_name.map(str::to_owned),
-        issuer_label: issuer_label.to_owned(),
-        verified_at,
+        full_name: name("full_name").map(str::to_owned),
+        issuer_label: name("issuer_label")?.to_owned(),
+        verified_at: name("verified_at")?.parse().ok()?,
     })
-}
-
-/// A name or issuer label: 1 to 64 scalar values in NFC, no control, format,
-/// surrogate, private-use, unassigned or line/paragraph separator characters,
-/// and no whitespace at either end.
-fn valid_name(value: &str) -> bool {
-    use GeneralCategory::{
-        Control, Format, LineSeparator, ParagraphSeparator, PrivateUse, Surrogate, Unassigned,
-    };
-    !value.is_empty()
-        && value.chars().count() <= 64
-        && value.trim() == value
-        && unicode_normalization::is_nfc(value)
-        && !value.chars().any(|c| {
-            matches!(
-                c.general_category(),
-                Control
-                    | Format
-                    | Surrogate
-                    | PrivateUse
-                    | Unassigned
-                    | LineSeparator
-                    | ParagraphSeparator
-            )
-        })
 }
 
 /// A username: 1 to 64 characters of lowercase ASCII letters, digits, `.`, `_` or `-`.
@@ -335,9 +236,8 @@ mod tests {
     fn discovery_reads_the_relay_key_only_where_advertised() {
         let key = "ab".repeat(32);
         let advertised = |profile: Value| json!({"self": key, "federated_identity": {"public_profile": profile}});
-        let good = json!({"kind": 30382, "multiple_issuers": false, "searchable": true});
         assert_eq!(
-            parse_discovery(&advertised(good)).unwrap(),
+            parse_discovery(&advertised(json!({"kind": 30382}))).unwrap(),
             Some(key.clone())
         );
         // Not advertised: absent or without `public_profile`.
@@ -349,11 +249,10 @@ mod tests {
         // Advertised but malformed is a failed check, not an absence.
         for bad in [
             advertised(json!(null)),
-            advertised(json!({"kind": 30382})),
-            advertised(json!({"kind": 1, "multiple_issuers": true})),
-            advertised(json!({"kind": 30382, "multiple_issuers": "yes"})),
-            json!({"federated_identity": {"public_profile": {"kind": 30382, "multiple_issuers": true}}}),
-            json!({"self": "nothex", "federated_identity": {"public_profile": {"kind": 30382, "multiple_issuers": true}}}),
+            advertised(json!({})),
+            advertised(json!({"kind": 1})),
+            json!({"federated_identity": {"public_profile": {"kind": 30382}}}),
+            json!({"self": "nothex", "federated_identity": {"public_profile": {"kind": 30382}}}),
             json!({"self": key, "federated_identity": "on"}),
         ] {
             assert!(parse_discovery(&bad).is_err(), "{bad}");
@@ -363,20 +262,11 @@ mod tests {
     #[test]
     fn a_relay_signed_active_projection_is_verified() {
         let relay = Keys::generate();
+        let authority = relay.public_key().to_hex();
         let subject = Keys::generate().public_key().to_hex();
         let tags = tag_pairs(&subject, &[("full_name", "Alice Example")]);
         let event = sign(&relay, 30382, "", &tags, AT);
-        let found = verified_profiles_from_events(&[event], &relay.public_key().to_hex());
-        assert_eq!(
-            found[&subject],
-            VerifiedProfile {
-                display_name: "alice".into(),
-                username: "alice".into(),
-                full_name: Some("Alice Example".into()),
-                issuer_label: "Example".into(),
-                verified_at: 1_799_999_999,
-            }
-        );
+        let found = verified_profiles_from_events(&[event], &authority);
         assert_eq!(
             found[&subject].to_json(),
             json!({
@@ -387,14 +277,9 @@ mod tests {
                 "verified_at": 1_799_999_999,
             })
         );
-    }
-
-    #[test]
-    fn full_name_is_omitted_when_absent() {
-        let relay = Keys::generate();
-        let subject = Keys::generate().public_key().to_hex();
+        // `full_name` is optional and omitted when absent.
         let event = sign(&relay, 30382, "", &tag_pairs(&subject, &[]), AT);
-        let found = verified_profiles_from_events(&[event], &relay.public_key().to_hex());
+        let found = verified_profiles_from_events(&[event], &authority);
         assert!(found[&subject].to_json().get("full_name").is_none());
     }
 
@@ -419,44 +304,33 @@ mod tests {
     }
 
     #[test]
-    fn malformed_projections_are_ignored() {
+    fn unusable_projections_are_ignored() {
         let relay = Keys::generate();
         let authority = relay.public_key().to_hex();
         let subject = Keys::generate().public_key().to_hex();
-        let other = Keys::generate().public_key().to_hex();
-        let long = "a".repeat(65);
         let cases: Vec<(&str, Vec<(&str, &str)>)> = vec![
-            ("content", vec![]),
             ("retracted", vec![("active", "false")]),
-            ("p mismatch", vec![("p", &other)]),
             ("bad username", vec![("username", "Alice")]),
             ("empty username", vec![("username", "")]),
-            ("padded name", vec![("display_name", " alice")]),
-            ("control name", vec![("display_name", "al\nice")]),
-            ("bidi name", vec![("full_name", "Al\u{202e}ice")]),
-            ("non-NFC name", vec![("full_name", "e\u{301}")]),
-            ("long name", vec![("display_name", &long)]),
-            ("future verified_at", vec![("verified_at", "1800000001")]),
-            ("signed verified_at", vec![("verified_at", "+5")]),
-            ("extra tag", vec![("extra", "x")]),
+            ("empty display_name", vec![("display_name", "")]),
+            ("non-numeric verified_at", vec![("verified_at", "soon")]),
         ];
         for (label, overrides) in cases {
             let mut tags = tag_pairs(&subject, &[]);
             for (key, value) in &overrides {
-                match tags.iter_mut().find(|(k, _)| k == key) {
-                    Some(existing) => existing.1 = value,
-                    None => tags.push((key, value)),
-                }
+                tags.iter_mut().find(|(k, _)| k == key).unwrap().1 = value;
             }
-            let content = if label == "content" { "hi" } else { "" };
-            let event = sign(&relay, 30382, content, &tags, AT);
+            let event = sign(&relay, 30382, "", &tags, AT);
             assert!(
                 verified_profiles_from_events(&[event], &authority).is_empty(),
                 "{label}"
             );
         }
-        let repeated = tag_pairs(&subject, &[("username", "bob")]);
-        let event = sign(&relay, 30382, "", &repeated, AT);
+        let missing: Vec<_> = tag_pairs(&subject, &[])
+            .into_iter()
+            .filter(|(k, _)| *k != "issuer_label")
+            .collect();
+        let event = sign(&relay, 30382, "", &missing, AT);
         assert!(verified_profiles_from_events(&[event], &authority).is_empty());
     }
 

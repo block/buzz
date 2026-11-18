@@ -1379,8 +1379,8 @@ pub enum UsersCmd {
         /// User pubkey(s) to look up (64-char hex). Omit for your own profile
         #[arg(long = "pubkey")]
         pubkeys: Vec<String>,
-        /// Search by profile name or, where advertised, verified name
-        /// (e.g. a verified username). Case-insensitive; matches word prefixes
+        /// Search by display name (case-insensitive substring match). Where
+        /// verified profiles are advertised: profile or verified name, by word prefix
         #[arg(long = "name")]
         name: Option<String>,
         /// Scope an exact-name agent lookup to its owner (`me`, hex, or npub)
