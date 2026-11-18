@@ -402,7 +402,8 @@ fn push_filter_reads_channel(
 }
 
 /// Send-time counterpart of the matcher's channel rule: the lease author is a
-/// member, or the event mentions them and the channel is still listed.
+/// member, or the event mentions them, the channel is still listed and they
+/// still pass the connection gate.
 async fn channel_authorizes_wake(
     state: &AppState,
     wake: &buzz_db::push::ClaimedWake,
@@ -414,6 +415,19 @@ async fn channel_authorizes_wake(
         .await?
     {
         return Ok(true);
+    }
+    // A non-member reads the channel only through REQ, so apply its gate.
+    let admission = buzz_db::operator_listener::DeliveryAdmission {
+        require_membership: state.config.require_relay_membership,
+        allow_owner_membership: state.config.allow_nip_oa_auth,
+        require_allowlist: state.config.pubkey_allowlist_enabled,
+    };
+    if !state
+        .db
+        .push_author_admitted(wake.community, &wake.author, admission)
+        .await?
+    {
+        return Ok(false);
     }
     if state
         .db
