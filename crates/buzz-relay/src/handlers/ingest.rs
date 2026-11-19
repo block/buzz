@@ -3458,18 +3458,12 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
+    let migration_media = if migration_write {
+        Some(super::media_access::authorize_media_references(tenant, state, &event).await?)
+    } else {
+        None
+    };
     validate_event_imeta(tenant, state, &event, &tenant_media_base).await?;
-
-    if migration_write {
-        // Authorization reads can precede admission. Publication markers
-        // consume previews, so they must wait for the shared permit.
-        let hashes = super::media_access::authorize_media_references(tenant, state, &event).await?;
-        let transport = if auth.is_http() { "http" } else { "websocket" };
-        crate::admission::migration::admit_authorized_write(&state.redis_pool, transport)
-            .await
-            .map_err(IngestError::Migration)?;
-        super::media_access::record_media_publications(tenant, state, hashes).await?;
-    }
 
     let thread_meta = if kind_u32 != KIND_SOLO_MEMBER_ROLE && requires_h_channel_scope(kind_u32) {
         if let Some(ch_id) = channel_id {
@@ -3482,6 +3476,16 @@ async fn ingest_event_inner(
     } else {
         None
     };
+
+    if let Some(hashes) = migration_media {
+        // Publication markers consume previews. Keep the authorization reads
+        // above and take a shared permit before writing any markers.
+        let transport = if auth.is_http() { "http" } else { "websocket" };
+        crate::admission::migration::admit_authorized_write(&state.redis_pool, transport)
+            .await
+            .map_err(IngestError::Migration)?;
+        super::media_access::record_media_publications(tenant, state, hashes).await?;
+    }
 
     // Pre-validate kind:0 content before storage so we don't store an event
     // whose profile sync will silently fail in the side-effect handler.
