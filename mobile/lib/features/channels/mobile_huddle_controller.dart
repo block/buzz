@@ -296,10 +296,20 @@ final class MobileHuddleController extends Notifier<bool> {
       if (session.wasAdmitted &&
           session.isInSession &&
           session.phase != HuddleSessionPhase.leaving) {
+        // An earlier call's leave still needs the main relay to publish.
+        await _settleEarlierCleanups();
         return;
       }
     }
     await _leaveForBackground();
+  }
+
+  Future<void> _settleEarlierCleanups() async {
+    final failureCleanup = _failureCleanup;
+    if (failureCleanup != null) await failureCleanup;
+    if (_lifecycleCleanups.isNotEmpty) {
+      await Future.wait(_lifecycleCleanups.toList());
+    }
   }
 
   Future<void> _leaveForBackground() {

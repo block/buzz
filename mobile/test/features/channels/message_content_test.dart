@@ -55,7 +55,10 @@ Widget _testable(
   ThemeData? theme,
 }) {
   return ProviderScope(
-    overrides: overrides,
+    overrides: [
+      appLifecycleProvider.overrideWith(_ResumedLifecycle.new),
+      ...overrides,
+    ],
     child: MaterialApp(
       theme: theme ?? (dark ? AppTheme.dark() : AppTheme.light()),
       // Use MaterialApp.builder so the MediaQuery override (including
@@ -122,6 +125,13 @@ int _changedPixels(
 void _setSurfaceSize(WidgetTester tester, Size size) {
   tester.view.devicePixelRatio = 1.0;
   tester.view.physicalSize = size;
+}
+
+class _ResumedLifecycle extends AppLifecycleNotifier {
+  @override
+  AppLifecycleState build() => AppLifecycleState.resumed;
+
+  void enter(AppLifecycleState next) => state = next;
 }
 
 class _FakeVoiceNotePlayer extends VoiceNotePlayerController {
@@ -241,10 +251,16 @@ class _ReadyTransitionVoiceNotePlayer extends _LoadingVoiceNotePlayer {
 
 class _ToggleTrackingLoadingVoiceNotePlayer extends _LoadingVoiceNotePlayer {
   int toggleCount = 0;
+  int pauseCount = 0;
 
   @override
   Future<void> toggle() async {
     toggleCount += 1;
+  }
+
+  @override
+  Future<void> pause() async {
+    pauseCount += 1;
   }
 }
 
@@ -1997,6 +2013,16 @@ void main() {
         await tester.pump();
 
         expect(player.toggleCount, 1);
+
+        // Backgrounding cancels the pending load so it can't start playback
+        // behind the lock screen.
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MessageContent)),
+        );
+        (container.read(appLifecycleProvider.notifier) as _ResumedLifecycle)
+            .enter(AppLifecycleState.paused);
+        await tester.pump();
+        expect(player.pauseCount, 1);
       });
 
       testWidgets('active buffering playback keeps its pause action', (
@@ -2319,6 +2345,16 @@ void main() {
         await tester.pump();
         expect(tester.widget<Text>(rateValueFinder).data, '.5×');
         expect(tester.getSize(rateFinder), rateSize);
+
+        // iOS keeps the app running in the background for Huddle audio, so
+        // leaving the foreground must stop a playing voice note.
+        expect(player.state.isPlaying, isTrue);
+        final container = ProviderScope.containerOf(tester.element(cardFinder));
+        (container.read(appLifecycleProvider.notifier) as _ResumedLifecycle)
+            .enter(AppLifecycleState.paused);
+        await tester.pump();
+        expect(player.state.isPlaying, isFalse);
+        expect(find.byTooltip('Play voice note'), findsOneWidget);
       });
 
       testWidgets(
