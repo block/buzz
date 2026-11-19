@@ -142,10 +142,14 @@ async fn live_messages(
     channel_id: Uuid,
     mut ids: Vec<Vec<u8>>,
 ) -> Result<Vec<Vec<u8>>> {
+    // Unnamed, so by default it is planned with the channel and the IDs and
+    // probes the ID index. A cached generic plan assumes an average channel
+    // and reads this channel's whole index instead.
     let live: std::collections::HashSet<Vec<u8>> = sqlx::query_scalar(
         "SELECT id FROM events WHERE community_id = $1 AND channel_id = $2 AND id = ANY($3) \
          AND kind = ANY($4) AND deleted_at IS NULL",
     )
+    .persistent(false)
     .bind(tx.community().as_uuid())
     .bind(channel_id)
     .bind(&ids)
