@@ -66,6 +66,9 @@ class _HuddleCallControls extends StatelessWidget {
             height: inRail ? _huddleRailControlGap : 0,
           ),
           inRail ? speaker : microphone,
+          // Hold the hidden reaction's slot so speaker and mute keep their
+          // positions on phones.
+          if (!inRail) const SizedBox(width: Grid.sm + 80),
           // Keep reactions available for a future return to the call controls.
           Visibility(
             visible: false,

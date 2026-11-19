@@ -9942,6 +9942,9 @@ void main() {
     testWidgets(
       'opens the sparse full-screen call with avatar and audio controls',
       (tester) async {
+        tester.view.devicePixelRatio = 1;
+        tester.view.physicalSize = const Size(390, 844);
+        addTearDown(tester.view.reset);
         final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
         final media = _HuddleTestMedia();
         final transport = _HuddleTestTransport(
@@ -10048,15 +10051,10 @@ void main() {
           find.byKey(const ValueKey('huddle-mute-toggle')),
         );
         expect(speakerCenter.dy, closeTo(muteCenter.dy, 0.01));
-        expect(
-          (speakerCenter.dx + muteCenter.dx) / 2,
-          closeTo(
-            tester
-                .getCenter(find.byKey(const ValueKey('huddle-call-controls')))
-                .dx,
-            0.01,
-          ),
-        );
+        // Hiding reactions keeps the row's slots: mute stays centered with
+        // speaker to its left, so a remembered mute tap still mutes.
+        expect(muteCenter.dx, closeTo(195, 0.01));
+        expect(speakerCenter.dx, closeTo(91, 0.01));
         expect(find.text('Miles'), findsNothing);
         expect(find.text('Pollen'), findsNothing);
         expect(find.text('You'), findsNothing);
@@ -10382,7 +10380,9 @@ void main() {
               .size,
           28,
         );
-        await tester.tap(find.byKey(const ValueKey('huddle-mute-toggle')));
+        // Left of mute's center, inside the band the speaker would take if
+        // the row re-centered.
+        await tester.tapAt(Offset(171, muteCenter.dy));
         await tester.pump();
         expect(hapticCalls, hasLength(2));
         expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
@@ -10413,6 +10413,20 @@ void main() {
           findsNothing,
         );
         expect(find.bySemanticsLabel('Emoji reactions'), findsNothing);
+        expect(
+          tester
+              .widget<Semantics>(
+                find
+                    .descendant(
+                      of: find.byKey(const ValueKey('huddle-speaker-toggle')),
+                      matching: find.byType(Semantics),
+                    )
+                    .first,
+              )
+              .properties
+              .toggled,
+          isTrue,
+        );
 
         await tester.tap(find.byKey(const ValueKey('huddle-minimize')));
         await tester.pumpAndSettle();
