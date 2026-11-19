@@ -773,6 +773,8 @@ class ReadStateManager {
       final checkConnection = _relaySession?.captureConnectionFence();
       var snapshot = <NostrEvent>[];
       var recovered = false;
+      // Refuses only the unread step; the rest of the pass still publishes.
+      StateError? unreadUnreadable;
       if (_relaySession != null) {
         final read = ++_snapshotsStarted;
         final heads = Map.of(_followHeads);
@@ -825,9 +827,8 @@ class ReadStateManager {
                   ) ==
                   null,
         )) {
-          throw StateError(
-            'Unreadable unread-state coordinate blocks '
-            'publication',
+          unreadUnreadable = StateError(
+            'Unreadable unread-state coordinate blocks publication',
           );
         }
         if (events.any(
@@ -894,7 +895,7 @@ class ReadStateManager {
           ),
         );
       }
-      final unreadReady = _unreadPublishable;
+      final unreadReady = _unreadPublishable && unreadUnreadable == null;
       final unread = _planUnread();
       final unreadCoordinate = _unreadCoordinate;
       if (unreadReady &&
@@ -981,7 +982,8 @@ class ReadStateManager {
             !_canPublishFollows) {
           continue; // Held with its edits; the pass reports why below.
         }
-        if (entry.key == unreadCoordinate && !_unreadStillCurrent(unread)) {
+        if (entry.key == unreadCoordinate &&
+            (unreadUnreadable != null || !_unreadStillCurrent(unread))) {
           continue; // Kept until no held-back group could need its carrier.
         }
         if (_relaySession == null) {
@@ -1163,7 +1165,9 @@ class ReadStateManager {
           'Unreadable thread follow coordinate blocks publication',
         );
       }
-      if (followsFull ?? unreadFull case final full?) throw full;
+      if (unreadUnreadable ?? followsFull ?? unreadFull case final error?) {
+        throw error;
+      }
       // An older send must not erase a newer read's failure.
       if (_lastSnapshotSucceeded) syncError = _standingError;
     } catch (error) {

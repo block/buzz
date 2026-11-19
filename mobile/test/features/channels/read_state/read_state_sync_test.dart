@@ -268,6 +268,43 @@ void main() {
     expect(desktop.activeChannelOverrides, {channel});
   });
 
+  test('an unreadable own unread head refuses only the unread step', () async {
+    final phone = await device('phone');
+    phone.markContextRead(channel, clock - 100);
+    await phone.flush();
+    final journalKey =
+        '${keys.public}:${Uri.encodeComponent(normalizeCommunityRelayUrl(phone.relayUrl))}';
+    final journal = ReadStateStorage(prefs).readJournal(journalKey)!;
+    final coordinate = '$readStateUnreadDTagPrefix${journal['unreadSlot']}';
+    final unreadable = signedBy(
+      keys,
+      NostrEvent(
+        id: '',
+        pubkey: keys.public,
+        createdAt: clock,
+        kind: EventKind.readState,
+        tags: [
+          ['d', coordinate],
+          ['t', readStateUnreadTag],
+        ],
+        content: crypto.encrypt('{"v":2}'),
+        sig: '',
+      ),
+    );
+    relay.retained[coordinate] = unreadable;
+    expect(phone.markChannelUnread(channel), isTrue);
+    phone.setThreadFollow(channel, root, true);
+    await phone.flush();
+    expect(relay.retained[coordinate]!.id, unreadable.id);
+    expect(
+      decodeThreadFollowsBlob(
+        crypto.decrypt(relay.followEvents().single.content),
+      )!.choices.keys,
+      [threadFollowKey(channel, root)],
+    );
+    expect(phone.syncError, isA<StateError>());
+  });
+
   test('a journaled unread retry superseded by a newer own head and left '
       'out of an overfull fallback stays pending and fails visibly, without '
       'holding back the rest of the flush', () async {
