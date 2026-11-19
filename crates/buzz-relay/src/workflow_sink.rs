@@ -10,6 +10,7 @@ use std::sync::{Arc, Weak};
 
 use buzz_core::kind::KIND_STREAM_MESSAGE;
 use buzz_core::tenant::CommunityId;
+use buzz_db::channel_members::MentionName;
 use buzz_workflow::action_sink::{ActionSink, ActionSinkError, SentMessage};
 use chrono::Utc;
 use nostr::{EventBuilder, Kind, Tag};
@@ -40,46 +41,47 @@ use crate::state::AppState;
 /// - **Greedy-longest, non-overlapping.** Longer names are matched first and
 ///   consume their span, so `@Alex Example` binds *Example* and a bare `@Alex`
 ///   does not match the member `"Alex Example"`.
-/// - **Ambiguous names wake no one.** If two or more members share the matched
-///   display name, no `p` tag is emitted for it — arbitrary selection would
+/// - **Verified aliases take precedence.** An ordinary name cannot suppress a
+///   verified alias. If distinct keys share a name at the highest verification
+///   level present, no `p` tag is emitted for it: arbitrary selection would
 ///   silently misroute and tagging all of them is a false-wake firehose.
 ///
 /// Returns deduplicated pubkey hexes, in first-appearance order in `text`.
-fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<String> {
-    let members: Vec<_> = members
-        .iter()
-        .map(|(name, pubkey)| {
-            (
-                name.chars()
-                    .flat_map(char::to_lowercase)
-                    .nfd()
-                    .collect::<String>(),
-                pubkey.clone(),
-            )
-        })
-        .collect();
-    // Name → pubkey, folding case (client matches case-insensitively). A name
-    // that maps to more than one distinct pubkey is ambiguous → wake no one.
-    let mut by_name: std::collections::HashMap<String, Option<String>> =
+fn resolve_mention_pubkeys(text: &str, members: &[MentionName]) -> Vec<String> {
+    // Resolve collisions only within the highest verification level present.
+    // Retain that level even for ambiguous names so an ordinary claim cannot
+    // revive or suppress a verified match, regardless of row order.
+    let mut by_name: std::collections::HashMap<String, (bool, Option<String>)> =
         std::collections::HashMap::new();
-    for (name, pubkey) in &members {
+    for member in members {
+        let name: String = member
+            .name
+            .chars()
+            .flat_map(char::to_lowercase)
+            .nfd()
+            .collect();
         if name.trim().is_empty() {
             continue;
         }
         by_name
-            .entry(name.clone())
-            .and_modify(|slot| {
-                if slot.as_deref() != Some(pubkey.as_str()) {
+            .entry(name)
+            .and_modify(|(verified, slot)| {
+                if member.verified && !*verified {
+                    *verified = true;
+                    *slot = Some(member.pubkey.clone());
+                } else if member.verified == *verified
+                    && slot.as_deref() != Some(member.pubkey.as_str())
+                {
                     *slot = None; // ambiguous
                 }
             })
-            .or_insert_with(|| Some(pubkey.clone()));
+            .or_insert_with(|| (member.verified, Some(member.pubkey.clone())));
     }
 
     // Match longest names first so a longer name consumes its span before a
     // shorter substring name can claim part of it.
-    let mut names: Vec<&(String, String)> = members.iter().collect();
-    names.sort_by_key(|(name, _)| std::cmp::Reverse(name.chars().count()));
+    let mut names: Vec<&String> = by_name.keys().collect();
+    names.sort_by_key(|name| std::cmp::Reverse(name.chars().count()));
 
     let chars: Vec<char> = text.chars().collect();
     let mut consumed = vec![false; chars.len()];
@@ -127,7 +129,7 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
         return out;
     }
 
-    for (name, _) in &names {
+    for name in names {
         let folded_name: Vec<char> = name.chars().collect();
         if folded_name.is_empty() {
             continue;
@@ -146,7 +148,7 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
             });
             if let Some(name_len) = name_len {
                 let span = 1 + name_len;
-                if let Some(Some(pubkey)) = by_name.get(name) {
+                if let Some((_, Some(pubkey))) = by_name.get(name) {
                     hits.push((at, pubkey.clone()));
                 }
                 for slot in consumed.iter_mut().skip(at).take(span) {
@@ -174,7 +176,7 @@ fn append_workflow_mention_tags(
     rendered_text: &str,
     authored_text: &str,
     may_direct_agents: bool,
-    members: &[(String, String)],
+    members: &[MentionName],
 ) -> Result<bool, ActionSinkError> {
     let rendered_mentions = resolve_mention_pubkeys(rendered_text, members);
     let authored_mentions: std::collections::HashSet<String> =
@@ -710,8 +712,12 @@ mod tests {
         ));
     }
 
-    fn m(name: &str, pubkey: &str) -> (String, String) {
-        (name.to_string(), pubkey.to_string())
+    fn m(name: &str, pubkey: &str) -> MentionName {
+        MentionName {
+            name: name.to_string(),
+            pubkey: pubkey.to_string(),
+            verified: false,
+        }
     }
 
     // A 64-char hex pubkey built from a single repeated nibble, for readable tests.
@@ -915,6 +921,30 @@ mod tests {
         // Same identity listed twice (e.g. two channels) is not a conflict.
         let members = vec![m("Fizz", &pk('6')), m("Fizz", &pk('6'))];
         assert_eq!(resolve_mention_pubkeys("@Fizz go", &members), vec![pk('6')]);
+    }
+
+    #[test]
+    fn verified_aliases_win_only_over_ordinary_names() {
+        for (claims, expected) in [
+            (vec![('a', false), ('b', true)], vec![pk('b')]),
+            (vec![('a', false), ('c', false), ('b', true)], vec![pk('b')]),
+            (vec![('a', true), ('b', true), ('c', false)], vec![]),
+            (vec![('a', false), ('b', false)], vec![]),
+            (vec![('a', false), ('a', true), ('b', false)], vec![pk('a')]),
+        ] {
+            let mut members: Vec<_> = claims
+                .iter()
+                .map(|&(key, verified)| MentionName {
+                    name: if verified { "Zoë" } else { "ZOE\u{0308}" }.to_owned(),
+                    pubkey: pk(key),
+                    verified,
+                })
+                .collect();
+            for _ in 0..2 {
+                assert_eq!(resolve_mention_pubkeys("@Zoë", &members), expected);
+                members.reverse();
+            }
+        }
     }
 
     #[test]
@@ -1665,7 +1695,7 @@ mod postgres_tests {
                 None,
             )
             .await
-            .expect("ambiguous ordinary name");
+            .expect("ordinary name shadowing a verified alias");
         for (key, username) in [(verified, "alex"), (outsider, "outsider")] {
             state
                 .db
@@ -1806,7 +1836,13 @@ mod postgres_tests {
                 true,
                 true,
             ),
-            ("ambiguous-full-name", "@Alex Example", "", false, false),
+            (
+                "verified-over-ordinary-full-name",
+                "@Alex Example",
+                "",
+                true,
+                true,
+            ),
             ("no-at-sign", "alex, Alex Example", "", false, false),
             ("verified-nonmember", "@outsider", "", false, false),
             ("foreign-profile", "@foreign-only", "", false, false),
@@ -1814,6 +1850,13 @@ mod postgres_tests {
                 "injected-verified",
                 "echo: {{trigger.text}}",
                 "@alex",
+                true,
+                false,
+            ),
+            (
+                "injected-verified-over-ordinary",
+                "echo: {{trigger.text}}",
+                "@Alex Example",
                 true,
                 false,
             ),
@@ -1854,22 +1897,23 @@ mod postgres_tests {
             .ensure_user(community, &verified.to_bytes())
             .await
             .expect("ensure ordinary profile user");
-        state
-            .db
-            .update_user_profile(
-                community,
-                &verified.to_bytes(),
-                Some("Ally Example"),
-                None,
-                None,
-                None,
-            )
-            .await
-            .expect("add ordinary profile alongside verified profile");
-        for (name, text) in [
-            ("mixed-ordinary", "@Ally Example"),
-            ("mixed-verified", "@alex"),
+        for (name, text, ordinary_name) in [
+            ("same-profile-name", "@Alex Example", "Alex Example"),
+            ("mixed-ordinary", "@Ally Example", "Ally Example"),
+            ("mixed-verified", "@alex", "Ally Example"),
         ] {
+            state
+                .db
+                .update_user_profile(
+                    community,
+                    &verified.to_bytes(),
+                    Some(ordinary_name),
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .expect("add ordinary profile alongside verified profile");
             let id = execute_send_message_workflow(
                 &state,
                 community,
@@ -1945,8 +1989,7 @@ mod postgres_tests {
             );
         }
 
-        // Same roster without the advertisement: leftover verified heads are
-        // ignored, so the ordinary name is no longer ambiguous.
+        // Without the advertisement, only ordinary names participate.
         let unadvertised = test_state().await;
         unadvertised
             .workflow_engine

@@ -363,11 +363,12 @@ simple and testable.
 Workflow mention candidates include ordinary display names and verified
 `display_name`, `username`, and `full_name` aliases for destination-channel
 members in the same community. Matching and collision detection lowercase and
-canonically normalize aliases. Alias collisions across distinct keys, including
-ordinary names colliding with verified aliases, deliberately produce no recipient
-or delegated agent-wake tag for that name rather than redirecting the mention or
-notifying every matching member. Verified-only profiles do not require a separate
-kind:0 profile.
+canonically normalize aliases. Verified aliases take precedence over ordinary
+names with the same normalized value. Collisions across distinct verified keys,
+or across ordinary keys when no verified alias matches, produce no recipient or
+delegated agent-wake tag. Keep the highest verification level even when it is
+ambiguous, so an ordinary name cannot break a verified tie. Verified-only profiles
+do not require a separate kind:0 profile.
 
 **Thread counters**: `reply_count` and `descendant_count` are materialized on
 thread root events. Any code that inserts replies must update these counters —

@@ -21,6 +21,17 @@ pub use buzz_core::channel::MemberRole;
 /// `(pubkey, channel_id)` membership rows.
 pub type PubkeyChannels = Vec<(Vec<u8>, Uuid)>;
 
+/// A community-local profile alias used to resolve workflow mentions.
+#[derive(Debug, Clone)]
+pub struct MentionName {
+    /// Display name, username, or full name as stored in the profile.
+    pub name: String,
+    /// Hex-encoded public key of the channel member.
+    pub pubkey: String,
+    /// Whether the alias comes from a relay-verified profile.
+    pub verified: bool,
+}
+
 /// A channel membership row as returned from the database.
 #[derive(Debug, Clone)]
 pub struct MemberRecord {
@@ -2972,15 +2983,15 @@ impl Db {
     /// Fetch ordinary display names and, when `include_verified`, verified
     /// name aliases for mention tags.
     ///
-    /// Returns `(name, pubkey_hex)` pairs for the supplied community-local members.
-    /// Keep every alias so the caller can reject names shared by distinct keys.
+    /// Preserve alias provenance so the caller can prefer verified names and
+    /// reject collisions between distinct keys at the same verification level.
     #[datastore_span(name = "get_mention_names_for_event_write", system = "postgresql")]
     pub async fn get_mention_names_for_event_write(
         &self,
         community_id: CommunityId,
         pubkeys: &[Vec<u8>],
         include_verified: bool,
-    ) -> Result<Vec<(String, String)>> {
+    ) -> Result<Vec<MentionName>> {
         if pubkeys.is_empty() {
             return Ok(Vec::new());
         }
@@ -3008,8 +3019,8 @@ impl Db {
         .await?;
         drop(connection);
 
-        // One entry per case-folded name and member, so a member whose aliases
-        // repeat a name does not make the resolver scan for it again.
+        // Keep provenance even when a member's ordinary and verified names
+        // agree, or an ordinary alias could hide the verified claim.
         let mut seen = std::collections::HashSet::new();
         let mut names = Vec::new();
         for row in rows {
@@ -3021,8 +3032,13 @@ impl Db {
                 "verified_full_name",
             ] {
                 if let Some(name) = row.try_get::<Option<String>, _>(column)? {
-                    if seen.insert((name.to_lowercase(), pubkey.clone())) {
-                        names.push((name, pubkey.clone()));
+                    let verified = column != "display_name";
+                    if seen.insert((name.to_lowercase(), pubkey.clone(), verified)) {
+                        names.push(MentionName {
+                            name,
+                            pubkey: pubkey.clone(),
+                            verified,
+                        });
                     }
                 }
             }
