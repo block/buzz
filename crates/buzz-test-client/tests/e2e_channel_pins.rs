@@ -81,13 +81,6 @@ async fn test_channel_pins_wire() {
         .json()
         .await
         .expect("NIP-11 JSON");
-    assert!(
-        info["supported_extensions"]
-            .as_array()
-            .is_some_and(|extensions| extensions.contains(&json!("buzz-pins"))),
-        "start the relay with BUZZ_PINS_ENABLED=true: {}",
-        info["supported_extensions"]
-    );
     let relay = info["self"].as_str().expect("relay pubkey").to_owned();
 
     let (owner, member) = (Keys::generate(), Keys::generate());

@@ -201,8 +201,6 @@ pub(crate) struct RelayCapabilityFlags {
     pub advertise_nip43: bool,
     /// Whether NIP-FI (federated identity) is advertised.
     pub advertise_fi: bool,
-    /// Whether NIP-PM pin and unpin commands are accepted (`buzz-pins`).
-    pub advertise_pins: bool,
 }
 
 impl RelayInfo {
@@ -245,7 +243,6 @@ impl RelayInfo {
         let RelayCapabilityFlags {
             advertise_nip43,
             advertise_fi,
-            advertise_pins,
         } = flags;
         debug_assert!(
             !advertise_nip43 || relay_self.is_some(),
@@ -271,9 +268,6 @@ impl RelayInfo {
             // kind:9050 edits an existing Solo member's access.
             "buzz-solo-member-role".to_string(),
         ];
-        if advertise_pins {
-            supported_extensions.push("buzz-pins".to_string());
-        }
         let gif = gif_provider.map(|provider| {
             supported_extensions.push("buzz-gif".to_string());
             GifDescriptor {
@@ -477,7 +471,6 @@ pub(crate) async fn nip11_document(
         RelayCapabilityFlags {
             advertise_nip43,
             advertise_fi,
-            advertise_pins: state.config.pins_enabled,
         },
         state.config.max_frame_bytes,
         state.config.pairing_relay_url.as_deref(),
@@ -846,31 +839,6 @@ mod tests {
         assert!(extensions.contains(&"buzz-solo-member-role".to_string()));
     }
 
-    /// Clients offer pin and unpin only where they see `buzz-pins`, so it is
-    /// advertised exactly while the relay accepts the commands.
-    #[test]
-    fn advertises_pins_only_when_enabled() {
-        for advertise_pins in [false, true] {
-            let info = RelayInfo::build(
-                None,
-                None,
-                RelayCapabilityFlags {
-                    advertise_pins,
-                    ..Default::default()
-                },
-                DEFAULT_MAX_FRAME_BYTES,
-                None,
-                None,
-                None,
-            );
-            let extensions = info.supported_extensions.expect("extensions");
-            assert_eq!(
-                extensions.contains(&"buzz-pins".to_string()),
-                advertise_pins
-            );
-        }
-    }
-
     /// NIP-WP → NIP-11 mirror: a set workspace icon is served in the standard
     /// `icon` field; no icon (or a cleared, empty icon) omits the field
     /// entirely so the JSON matches pre-icon documents byte-for-byte.
@@ -1007,7 +975,6 @@ mod tests {
             RelayCapabilityFlags {
                 advertise_nip43: true,
                 advertise_fi: false,
-                advertise_pins: false,
             },
             DEFAULT_MAX_FRAME_BYTES,
             None,
@@ -1030,7 +997,6 @@ mod tests {
             RelayCapabilityFlags {
                 advertise_nip43: true,
                 advertise_fi: false,
-                advertise_pins: false,
             },
             DEFAULT_MAX_FRAME_BYTES,
             None,
