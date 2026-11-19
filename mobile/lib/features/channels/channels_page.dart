@@ -2,6 +2,9 @@ import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'channel_unread.dart';
+import 'channel_filter/channel_filter_activity.dart';
+import 'channel_filter/channel_filter_provider.dart';
+import 'channel_filter/channel_filter_store.dart';
 import '../../shared/widgets/collapsible_section_body.dart';
 import '../../shared/widgets/collapsible_sliver_body.dart';
 import '../../shared/http/app_http_client.dart';
@@ -45,13 +48,13 @@ import '../../shared/community/community_grid_add.dart';
 import '../../shared/community/paired_community_landing.dart';
 import '../../shared/community/community_membership_provider.dart';
 import '../../shared/widgets/app_list.dart';
+import '../../shared/widgets/buzz_sheet_header.dart';
 import '../../shared/widgets/app_list_card.dart';
 import '../../shared/widgets/app_list_card_item.dart';
 import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
-import '../../shared/widgets/anchored_popover_menu.dart';
 import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/buzz_setting_menu.dart';
@@ -95,6 +98,7 @@ import '../../shared/read_state/read_state_time.dart';
 
 part 'channels_page/body.dart';
 part 'channels_page/sections.dart';
+part 'channels_page/filters.dart';
 part 'channels_page/channel_tile.dart';
 part 'channels_page/sheets.dart';
 part 'channels_page/badges.dart';
@@ -677,10 +681,15 @@ class ChannelsPage extends HookConsumerWidget {
         topSectionHeight: topSectionHeight,
         usesPinnedGradient: usesPinnedGradient,
         scrollController: channelsScrollController,
-        onRefresh: () {
+        onRefresh: () async {
           // Solo has no banner, so pulling must also restart its reader.
           if (soloSliver != null) ref.invalidate(meGroupsProvider);
-          return ref.read(channelsProvider.notifier).refresh();
+          ref.invalidate(channelFilterActivityProvider);
+          await Future.wait([
+            ref.read(channelsProvider.notifier).refresh(),
+            if (ref.read(channelFilterProvider) case final manager?)
+              manager.refresh(),
+          ]);
         },
         onSelectChannel: openChannel,
       ),

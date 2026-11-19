@@ -73,6 +73,19 @@ class SentryDiagnosticReporter implements DiagnosticReporter {
     ),
   );
 
+  @override
+  bool get reporting => true;
+
+  @override
+  void sendTestReport() => reportError(
+    DiagnosticTestError(),
+    StackTrace.current,
+    operation: DiagnosticOperation.testReport,
+  );
+
+  @override
+  void crashForTest() => _drop(SentryFlutter.nativeCrash);
+
   static Map<String, SentryAttribute> _attributes(NetworkEvent event) => {
     'backend': SentryAttribute.string(event.backend),
     'endpoint': SentryAttribute.string(event.endpoint.name),
