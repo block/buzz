@@ -21,6 +21,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use crate::{
+    api::media_access::MediaReadMode,
     config::{AdminAuth, AdminConfig, Config},
     handlers::group_state_postgres_tests::{community, create_channel},
     state::tests::build_test_state,
@@ -130,12 +131,13 @@ fn add_members(
         .unwrap()
 }
 
-fn create_migration_channel(keys: &Keys, channel: Uuid) -> Event {
+fn create_migration_channel(keys: &Keys, channel: Uuid, about: &str) -> Event {
     EventBuilder::new(Kind::Custom(KIND_NIP29_CREATE_GROUP as u16), "")
         .tags([
             Tag::parse(["h", &channel.to_string()]).unwrap(),
             Tag::parse(["name", &format!("example-import-{channel}")]).unwrap(),
             Tag::parse(["migration", "slack"]).unwrap(),
+            Tag::parse(["about", about]).unwrap(),
         ])
         .sign_with_keys(keys)
         .unwrap()
@@ -218,6 +220,7 @@ async fn migration_write_limit_controls_http_and_ws_across_relay_instances() {
     config.require_relay_membership = false;
     config.relay_url = "ws://localhost:3000".into();
     config.redis_url = redis_url.to_string();
+    config.media_read_mode = MediaReadMode::Shadow;
     config.relay_operator_pubkeys = vec![operator.public_key().to_hex()];
     config.admin = Some(AdminConfig {
         host: ADMIN_HOST.into(),
@@ -360,9 +363,15 @@ async fn migration_write_limit_controls_http_and_ws_across_relay_instances() {
         "invalid: migration tags require a channel create or membership add"
     );
 
+    let reserved_create = create_migration_channel(&owner_a, Uuid::nil(), "");
+    let (status, _, body) =
+        add_over_http(&app_a, tenant_a.host(), &owner_a, &reserved_create).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body, json!({"error": "invalid: channel ID is reserved"}));
+
     // The importer sends the create and first batch back-to-back. A one-event
     // bucket would leave a created channel with no imported members.
-    let create_event = create_migration_channel(&owner_a, channel_a);
+    let create_event = create_migration_channel(&owner_a, channel_a, "");
     let (status, _, body) = add_over_http(&app_a, tenant_a.host(), &owner_a, &create_event).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["accepted"], true);
@@ -428,10 +437,26 @@ async fn migration_write_limit_controls_http_and_ws_across_relay_instances() {
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(headers[header::RETRY_AFTER], "5");
     assert_eq!(body, json!({"error": paused[3]}));
-    let create_event = create_migration_channel(&owner_a, Uuid::new_v4());
+    // A paused write must not record a media publication marker or consume an
+    // uploader preview, even in shadow mode, where missing sidecars are allowed.
+    let base =
+        crate::api::media::media_base_url_for_tenant(&state_a.config.relay_url, tenant_a.host());
+    let hash = hex::encode(Sha256::digest(Uuid::new_v4().as_bytes()));
+    let create_event =
+        create_migration_channel(&owner_a, Uuid::new_v4(), &format!("{base}/{hash}.png"));
+    assert!(buzz_core::media::publication_hashes(&create_event, &base).contains(&hash));
     let (status, _, body) = add_over_http(&app_a, tenant_a.host(), &owner_a, &create_event).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(body, json!({"error": paused[3]}));
+    let marked: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM media_publications WHERE community_id = $1 AND sha256 = $2)",
+    )
+    .bind(tenant_a.community().as_uuid())
+    .bind(&hash)
+    .fetch_one(state_a.db.pool())
+    .await
+    .unwrap();
+    assert!(!marked);
     assert!(state_b
         .db
         .get_member_role(tenant_b.community(), channel_b, recipients[0].as_bytes())

@@ -2736,7 +2736,11 @@ async fn ingest_event_inner(
     // (commands, feedback, reports, moderation) so no write returns ahead of it.
     enforce_write_restriction(state, tenant, kind_u32, auth.pubkey()).await?;
 
-    super::media_access::validate_media_references(tenant, state, &event).await?;
+    let migration_write = matches!(kind_u32, KIND_NIP29_CREATE_GROUP | KIND_NIP29_PUT_USER)
+        && crate::admission::migration::is_labeled(&event);
+    if !migration_write {
+        super::media_access::validate_media_references(tenant, state, &event).await?;
+    }
 
     // Command kinds are routed AFTER signature verification, timestamp check,
     // pubkey/auth match, and scope validation — never before.
@@ -3344,6 +3348,11 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
 
         if let Some(client_uuid) = channel_id {
+            if migration_write && client_uuid.is_nil() {
+                return Err(IngestError::Rejected(
+                    "invalid: channel ID is reserved".into(),
+                ));
+            }
             let members = super::side_effects::initial_members(&event)
                 .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
             channel_create = Some(ChannelCreateRequest {
@@ -3392,18 +3401,6 @@ async fn ingest_event_inner(
                 _ => {} // open — OK
             }
         }
-    }
-
-    // Labeled writes reach here only for channel creation and membership adds.
-    // Both have completed their write checks. Charge the shared budget before
-    // any persistence, roster rebuild, or fan-out.
-    if matches!(kind_u32, KIND_NIP29_CREATE_GROUP | KIND_NIP29_PUT_USER)
-        && crate::admission::migration::is_labeled(&event)
-    {
-        let transport = if auth.is_http() { "http" } else { "websocket" };
-        crate::admission::migration::admit_authorized_write(&state.redis_pool, transport)
-            .await
-            .map_err(IngestError::Migration)?;
     }
 
     if kind_u32 == super::push_lease::KIND_PUSH_LEASE {
@@ -3462,6 +3459,17 @@ async fn ingest_event_inner(
     }
 
     validate_event_imeta(tenant, state, &event, &tenant_media_base).await?;
+
+    if migration_write {
+        // Authorization reads can precede admission. Publication markers
+        // consume previews, so they must wait for the shared permit.
+        let hashes = super::media_access::authorize_media_references(tenant, state, &event).await?;
+        let transport = if auth.is_http() { "http" } else { "websocket" };
+        crate::admission::migration::admit_authorized_write(&state.redis_pool, transport)
+            .await
+            .map_err(IngestError::Migration)?;
+        super::media_access::record_media_publications(tenant, state, hashes).await?;
+    }
 
     let thread_meta = if kind_u32 != KIND_SOLO_MEMBER_ROLE && requires_h_channel_scope(kind_u32) {
         if let Some(ch_id) = channel_id {
