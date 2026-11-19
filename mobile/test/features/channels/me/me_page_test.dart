@@ -1,10 +1,13 @@
 import 'dart:convert';
+
 import 'package:image_picker/image_picker.dart';
 import 'package:buzz/features/home/home_screen_shortcut_host.dart';
 import 'package:buzz/shared/shortcuts/home_screen_shortcuts.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
+
 import 'dart:async';
+
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:buzz/shared/me/me_chat_creation.dart';
 import 'package:buzz/shared/me/default_agent.dart';
@@ -102,6 +105,8 @@ class LabeledChannels extends ChannelsNotifier {
       ('filed', 'Filed labeled chat', 'owner', true, false),
       ('loose', 'Unfiled labeled chat', 'owner', true, false),
       ('shared', 'Someone else chat', 'other', true, false),
+      ('open-owner', 'Open owner Solo', 'owner', true, false),
+      ('open-shared', 'Open shared Solo', 'other', true, false),
       ('agent-created', 'Agent-created chat', 'agent', true, false),
       ('hidden', 'Inaccessible labeled chat', 'owner', false, false),
       ('archived', 'Archived labeled chat', 'other', true, true),
@@ -110,7 +115,7 @@ class LabeledChannels extends ChannelsNotifier {
         id: id,
         name: name,
         channelType: 'stream',
-        visibility: 'private',
+        visibility: id.startsWith('open-') ? 'open' : 'private',
         labels: const ['buzz.solo'],
         description: '',
         createdBy: owner,
@@ -154,6 +159,8 @@ void main() {
     expect(find.text('Filed labeled chat'), findsOneWidget);
     expect(find.text('Unfiled labeled chat'), findsOneWidget);
     expect(find.text('Someone else chat'), findsOneWidget);
+    expect(find.text('Open owner Solo'), findsOneWidget);
+    expect(find.text('Open shared Solo'), findsOneWidget);
     expect(find.text('Agent-created chat'), findsOneWidget);
     expect(find.text('Inaccessible labeled chat'), findsNothing);
     expect(find.text('Archived labeled chat'), findsNothing);
