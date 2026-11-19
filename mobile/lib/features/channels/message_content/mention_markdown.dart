@@ -1,6 +1,7 @@
 part of '../message_content.dart';
 
 class _MentionMd {
+  final bool ownBubble;
   final Map<String, Set<String>> bindings;
   final Map<String, String> displayLabels;
   final Map<String, String> mentionNames;
@@ -15,6 +16,7 @@ class _MentionMd {
 
   _MentionMd({
     required this.bindings,
+    required this.ownBubble,
     required this.displayLabels,
     required this.mentionNames,
     required this.mentionLabels,
@@ -58,6 +60,8 @@ class _MentionMd {
     );
     final pill = MessageMentionPill(
       label: visibleLabel,
+      pubkey: pubkey,
+      ownBubble: ownBubble,
       semanticsLabel: fullLabel,
       isAgent: isAgent,
       textStyle: style,

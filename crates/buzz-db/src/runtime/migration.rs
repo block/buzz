@@ -879,7 +879,10 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 101);
+        assert_eq!(migrations.len(), 102);
+        assert_eq!(migrations[100].version, 101);
+        assert!(strip_sql_comments(migrations[100].sql.as_str())
+            .contains("DROP CONSTRAINT IF EXISTS push_gateway_delegations_installation_id_fkey"));
         assert_eq!(migrations[89].version, 90);
         assert!(migrations[89]
             .sql
@@ -967,8 +970,8 @@ mod postgres_tests {
                 "0095 must run {statement}"
             );
         }
-        assert_eq!(migrations[100].version, 101);
-        let guest_grants = migrations[100].sql.as_str();
+        assert_eq!(migrations[101].version, 102);
+        let guest_grants = migrations[101].sql.as_str();
         assert!(guest_grants.contains("ADD COLUMN guest_replies BOOLEAN NOT NULL DEFAULT false"));
         assert!(guest_grants.contains("ADD COLUMN guest_reactions BOOLEAN NOT NULL DEFAULT false"));
         assert!(migrations[70]
@@ -3202,6 +3205,7 @@ mod postgres_tests {
             "entity_deletion_approvals",
             "workflow_runs",
             "push_gateway_installations",
+            "push_gateway_delegations",
         ] {
             assert_eq!(
                 constraints(&desired, table).await,
