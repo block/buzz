@@ -21,12 +21,12 @@ pub(super) fn predicates(
 ) {
     match query.view {
         ArtifactView::Current => {
-            qb.push("JOIN artifact_heads a ON a.community_id=e.community_id AND a.event_id=e.id AND NOT a.deleted ");
+            qb.push("JOIN artifact_heads a ON a.community_id=e.community_id AND a.event_id=e.id AND a.scope='channel' AND NOT a.deleted ");
         }
         ArtifactView::Head => {
-            qb.push("JOIN artifact_heads a ON a.community_id=e.community_id AND a.event_id=e.id ");
+            qb.push("JOIN artifact_heads a ON a.community_id=e.community_id AND a.event_id=e.id AND a.scope='channel' ");
         }
-        ArtifactView::History => {}
+        ArtifactView::History | ArtifactView::Policy => {}
     }
     push_scope(
         qb,
@@ -62,7 +62,9 @@ fn push_scope(
 ) {
     // The explicit kind lets the community/kind index exclude chat before
     // the join, even for an unfiltered current-state page.
-    qb.push("WHERE e.community_id=").push_bind(community.as_uuid()).push(" AND e.kind=45010 AND e.deleted_at IS NULL AND EXISTS (SELECT 1 FROM channels c WHERE c.community_id=e.community_id AND c.id=e.channel_id AND c.deleted_at IS NULL AND (")
+    qb.push("WHERE e.community_id=").push_bind(community.as_uuid()).push(" AND e.kind=45010 AND NOT ")
+        .push(crate::community_artifact_tag_sql!("e.tags"))
+        .push(" AND e.deleted_at IS NULL AND EXISTS (SELECT 1 FROM channels c WHERE c.community_id=e.community_id AND c.id=e.channel_id AND c.deleted_at IS NULL AND (")
         .push(crate::store::channel::legacy_channel_type_sql("c.channel_type"))
         .push(" OR c.id=ANY(")
         .push_bind(named_channels.clone())
@@ -132,19 +134,67 @@ pub enum SnapshotDenied {
     Restricted,
 }
 
+pub(super) async fn begin_snapshot(
+    connection: PoolConnection<Postgres>,
+) -> Result<Transaction<'static, Postgres>> {
+    let mut tx = Transaction::begin(connection, None).await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("SET LOCAL statement_timeout='2s'")
+        .execute(&mut *tx)
+        .await?;
+    Ok(tx)
+}
+
+enum SnapshotAudience {
+    Channels {
+        reader: Vec<u8>,
+        channels: Vec<Uuid>,
+    },
+    Community {
+        _permit: tokio::sync::OwnedSemaphorePermit,
+    },
+}
+
 /// One read-only `REPEATABLE READ` snapshot of a sync's current heads, read
 /// in keyset pages ordered by artifact identity. Every page sees the same
 /// database snapshot, so the pages together are one consistent cut.
 pub struct ArtifactSnapshot {
     tx: Transaction<'static, Postgres>,
     community: CommunityId,
-    reader: Vec<u8>,
-    channels: Vec<Uuid>,
+    audience: SnapshotAudience,
     after: Option<Uuid>,
     done: bool,
 }
 
 impl ArtifactSnapshot {
+    fn new(
+        tx: Transaction<'static, Postgres>,
+        community: CommunityId,
+        audience: SnapshotAudience,
+    ) -> Self {
+        Self {
+            tx,
+            community,
+            audience,
+            after: None,
+            done: false,
+        }
+    }
+
+    pub(super) fn for_community(
+        tx: Transaction<'static, Postgres>,
+        community: CommunityId,
+        permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> Self {
+        Self::new(
+            tx,
+            community,
+            SnapshotAudience::Community { _permit: permit },
+        )
+    }
+
     /// Read the next page of at most `page` heads that match `tags`, ordered
     /// by `d`. Returns an empty page once the set is exhausted.
     pub async fn next_page(
@@ -155,17 +205,21 @@ impl ArtifactSnapshot {
         if self.done {
             return Ok(vec![]);
         }
-        let mut qb = QueryBuilder::<Postgres>::new(
-            "SELECT e.id,e.pubkey,e.created_at,e.kind,e.tags,e.content,e.sig,e.received_at,e.channel_id,a.artifact_id FROM events e ",
-        );
-        qb.push("JOIN artifact_heads a ON a.community_id=e.community_id AND a.event_id=e.id AND NOT a.deleted ");
-        push_scope(
-            &mut qb,
-            self.community,
-            &self.reader,
-            tags,
-            self.channels.clone(),
-        );
+        let mut qb = match &self.audience {
+            SnapshotAudience::Channels { reader, channels } => {
+                let mut qb = QueryBuilder::<Postgres>::new(
+                    "SELECT e.id,e.pubkey,e.created_at,e.kind,e.tags,e.content,e.sig,e.received_at,e.channel_id,a.artifact_id FROM events e ",
+                );
+                qb.push("JOIN artifact_heads a ON a.community_id=e.community_id AND a.event_id=e.id AND a.scope='channel' AND NOT a.deleted ");
+                push_scope(&mut qb, self.community, reader, tags, channels.clone());
+                qb
+            }
+            SnapshotAudience::Community { .. } => super::community_artifact::query_builder(
+                self.community,
+                ArtifactView::Current,
+                tags,
+            ),
+        };
         if let Some(after) = self.after {
             qb.push(" AND a.artifact_id>").push_bind(after);
         }
@@ -175,7 +229,10 @@ impl ArtifactSnapshot {
         if let Some(last) = rows.last() {
             self.after = Some(sqlx::Row::try_get(last, "artifact_id")?);
         }
-        rows_to_events(rows)
+        match &self.audience {
+            SnapshotAudience::Channels { .. } => rows_to_events(rows),
+            SnapshotAudience::Community { .. } => super::community_artifact::rows_to_events(rows),
+        }
     }
 
     /// End the snapshot. Dropping it rolls the read-only transaction back.
@@ -196,6 +253,13 @@ impl Db {
         query: &ArtifactQuery,
         count: bool,
     ) -> Result<(Vec<StoredEvent>, i64)> {
+        if query.scope != buzz_core::artifact::ArtifactScope::Channel
+            || query.view == ArtifactView::Policy
+        {
+            return Err(crate::DbError::AccessDenied(
+                "explicit community admission required".into(),
+            ));
+        }
         let connection = read_connection(self).await?;
         let mut tx = sqlx::Transaction::begin(connection, None).await?;
         sqlx::query("SET LOCAL statement_timeout='2s'")
@@ -235,7 +299,7 @@ impl Db {
         let mut qb = QueryBuilder::<Postgres>::new(
             "SELECT e.id,e.pubkey,e.created_at,e.kind,e.tags,e.content,e.sig,e.received_at,e.channel_id,a.deleted FROM events e ",
         );
-        qb.push("JOIN artifact_heads a ON a.community_id=e.community_id AND a.event_id=e.id AND a.artifact_id=")
+        qb.push("JOIN artifact_heads a ON a.community_id=e.community_id AND a.event_id=e.id AND a.scope='channel' AND a.artifact_id=")
             .push_bind(artifact)
             .push(" ");
         push_scope(&mut qb, community, reader, &[], named_channels.to_vec());
@@ -258,14 +322,7 @@ impl Db {
         reader: &[u8],
         channels: &[Uuid],
     ) -> Result<std::result::Result<ArtifactSnapshot, SnapshotDenied>> {
-        let connection = read_connection(self).await?;
-        let mut tx = sqlx::Transaction::begin(connection, None).await?;
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("SET LOCAL statement_timeout='2s'")
-            .execute(&mut *tx)
-            .await?;
+        let mut tx = begin_snapshot(read_connection(self).await?).await?;
         let readable: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM channels c WHERE c.community_id=$1 AND c.id=ANY($2) AND c.deleted_at IS NULL AND (c.visibility='open' OR EXISTS (SELECT 1 FROM channel_members m WHERE m.community_id=c.community_id AND m.channel_id=c.id AND m.pubkey=$3 AND m.removed_at IS NULL))",
         )
@@ -277,13 +334,13 @@ impl Db {
         if readable != channels.len() as i64 {
             return Ok(Err(SnapshotDenied::Restricted));
         }
-        Ok(Ok(ArtifactSnapshot {
+        Ok(Ok(ArtifactSnapshot::new(
             tx,
             community,
-            reader: reader.to_vec(),
-            channels: channels.to_vec(),
-            after: None,
-            done: false,
-        }))
+            SnapshotAudience::Channels {
+                reader: reader.to_vec(),
+                channels: channels.to_vec(),
+            },
+        )))
     }
 }

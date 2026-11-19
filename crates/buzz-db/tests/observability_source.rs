@@ -4077,6 +4077,7 @@ fn every_production_single_table_guard_writer_preserves_its_invariants() {
             "ensure_configured_community_with_operation",
             "set_community_icon",
             "set_community_nip_fi_policy",
+            "set_policy_in_transaction",
             "soft_delete_on",
             "unarchive_community_owned_by",
             "update_channel_on",

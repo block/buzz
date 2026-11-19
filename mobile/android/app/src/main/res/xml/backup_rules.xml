@@ -4,4 +4,5 @@
     <exclude domain="sharedpref" path="FlutterSecureStorage.xml"/>
     <exclude domain="sharedpref" path="FlutterSecureKeyStorage.xml"/>
     <exclude domain="sharedpref" path="FlutterSecureStorageConfiguration.xml"/>
+    <exclude domain="file" path="diagnostics_install_id"/>
 </full-backup-content>

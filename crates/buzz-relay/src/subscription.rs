@@ -28,6 +28,7 @@ pub type SubId = String;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SubscriptionScope {
     global: bool,
+    community_artifact: bool,
     channels: Vec<Uuid>,
 }
 
@@ -36,8 +37,22 @@ impl SubscriptionScope {
     pub fn global() -> Self {
         Self {
             global: true,
+            community_artifact: false,
             channels: Vec::new(),
         }
+    }
+
+    /// Dedicated artifact signals only, without any ordinary-event match.
+    pub(crate) fn community_artifacts() -> Self {
+        Self {
+            community_artifact: true,
+            ..Self::default()
+        }
+    }
+
+    /// Whether this scope retains the dedicated artifact topic.
+    pub(crate) fn is_community_artifact(&self) -> bool {
+        self.community_artifact
     }
 
     /// Events from any of these authorized channels. Duplicates are dropped.
@@ -77,7 +92,7 @@ impl SubscriptionScope {
     }
 
     fn is_empty(&self) -> bool {
-        !self.global && self.channels.is_empty()
+        !self.global && !self.community_artifact && self.channels.is_empty()
     }
 
     /// The union of `scopes`: every topic any of them retains, once.
@@ -85,6 +100,7 @@ impl SubscriptionScope {
         let mut union = Self::default();
         for scope in scopes {
             union.global |= scope.global;
+            union.community_artifact |= scope.community_artifact;
             for &channel_id in &scope.channels {
                 union.add_channel(channel_id);
             }
