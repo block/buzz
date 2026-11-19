@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+
 import '../theme/theme.dart';
 import '../widgets/buzz_loading_indicator.dart';
 import 'community_avatar.dart';

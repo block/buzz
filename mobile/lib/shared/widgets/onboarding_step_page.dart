@@ -1,6 +1,9 @@
 import 'dart:ui' show ImageFilter;
+
 import 'package:duo_kit/duo_kit.dart';
+
 import 'duo_toolbar.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/semantics.dart';

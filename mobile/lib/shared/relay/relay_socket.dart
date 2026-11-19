@@ -9,6 +9,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'nostr_models.dart';
 import 'relay_websocket.dart';
+
 import 'package:buzz/shared/crypto/event_signing.dart';
 
 /// Low-level websocket connection with NIP-42 authentication.

@@ -14,6 +14,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:nostr/nostr.dart' as nostr;
+
 import '../../helpers/test_assertion.dart';
 
 class _FakeHpke extends HpkeBackup {

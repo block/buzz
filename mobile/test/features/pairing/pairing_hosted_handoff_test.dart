@@ -1,6 +1,8 @@
 import 'package:buzz/shared/hosted/hosted_environment.dart';
+
 import 'dart:async';
 import 'dart:convert';
+
 import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/shared/hosted/hosted_flow_provider.dart';
 import 'package:buzz/shared/community/community.dart';
@@ -9,6 +11,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
+
 import '../../helpers/hosted_communities_fixture.dart';
 
 void main() {

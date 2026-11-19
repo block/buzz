@@ -1,4 +1,5 @@
 import 'dart:async';
+
 import 'package:buzz/features/pairing/pairing_page.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/shared/theme/theme.dart';

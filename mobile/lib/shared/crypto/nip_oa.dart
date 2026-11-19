@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:crypto/crypto.dart' as crypto;
+
 import '../relay/nostr_models.dart';
 
 /// Verify the signed profile and all owner-attestation conditions against it.

@@ -1,5 +1,7 @@
 import 'dart:ui';
+
 import 'package:flutter/material.dart';
+
 import '../animated_avatar.dart';
 import '../theme/theme.dart';
 import 'avatar_image.dart';

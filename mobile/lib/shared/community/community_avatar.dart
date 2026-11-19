@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+
 import '../theme/theme.dart';
 import '../widgets/avatar_image.dart';
 import 'community_icon_provider.dart';

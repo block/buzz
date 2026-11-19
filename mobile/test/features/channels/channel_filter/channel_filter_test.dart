@@ -1,8 +1,10 @@
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+
 import 'dart:async';
 import 'dart:convert';
+
 import 'package:buzz/features/channels/channel_filter/channel_filter_manager.dart';
 import 'package:buzz/features/channels/channel_filter/channel_filter_store.dart';
 import 'package:buzz/features/channels/channel_filter/channel_filter_activity.dart';

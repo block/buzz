@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+
 import '../../shared/theme/theme.dart';
 
 /// Fixed message-avatar footprint with at most four animated occupants.

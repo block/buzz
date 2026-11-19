@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
+
 import '../../shared/theme/theme.dart';
 
 /// Three staggered dots using the desktop typing bounce.

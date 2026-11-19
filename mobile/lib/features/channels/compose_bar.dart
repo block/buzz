@@ -1,7 +1,10 @@
 import 'composer_geometry.dart';
+
 import 'package:buzz/shared/widgets/buzz_toast.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
+
 import 'composer_send_origin.dart';
+
 import 'dart:async';
 import 'dart:collection';
 import 'dart:io';
@@ -10,7 +13,9 @@ import 'dart:ui' show FlutterView;
 
 import 'package:camera/camera.dart' as camera;
 import 'package:duo_kit/duo_kit.dart';
+
 import '../../shared/widgets/duo_toolbar.dart';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
@@ -61,6 +66,7 @@ import 'photo_library.dart';
 import 'voice_note_attachment.dart';
 import 'voice_note_composer_recorder.dart';
 import 'voice_note_recording.dart';
+
 import 'package:buzz/shared/crypto/event_signing.dart';
 
 part 'compose_bar/helpers.dart';

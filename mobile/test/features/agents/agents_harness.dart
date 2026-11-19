@@ -1,6 +1,9 @@
 import 'package:buzz/shared/me/me_sync.dart';
+
 import '../../shared/me/me_sync_test.dart' show FakeRelay;
+
 import 'dart:async';
+
 import 'package:buzz/shared/relay/relay_author_provider.dart';
 import 'package:nostr/nostr.dart' as nostr;
 

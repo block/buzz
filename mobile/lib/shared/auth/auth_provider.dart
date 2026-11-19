@@ -1,5 +1,6 @@
 import '../hosted/known_community_sync_provider.dart';
 import '../hosted/hosted_relay_auth.dart';
+
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 

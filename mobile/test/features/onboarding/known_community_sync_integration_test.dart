@@ -1,14 +1,20 @@
 import 'package:flutter/widgets.dart';
 import 'package:buzz/shared/hosted/account_community_sync_status.dart';
+
 import 'dart:async';
 import 'dart:convert';
+
 import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
 import '../../helpers/controllable_pairing_socket.dart';
+
 import 'package:buzz/features/channels/channels_page.dart';
 import 'package:buzz/shared/community/community_icon_provider.dart';
 import 'package:buzz/shared/hosted/hosted_environment.dart';
+
 import '../../helpers/widget_helpers.dart';
+
 import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';

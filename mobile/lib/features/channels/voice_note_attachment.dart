@@ -1,4 +1,5 @@
 import '../../shared/widgets/message_attachment_corners.dart';
+
 import 'dart:async';
 import 'dart:math' as math;
 

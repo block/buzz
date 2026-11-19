@@ -5,6 +5,7 @@ import 'package:buzz/shared/hosted/hosted_flow.dart';
 import 'package:buzz/shared/hosted/hosted_flow_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+
 import 'agents_harness.dart';
 
 /// Fakes only the browser sign-in. Like the real flow, completion clears

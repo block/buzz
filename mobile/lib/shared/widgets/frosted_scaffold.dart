@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+
 import 'ios_navigation_bar.dart';
 import 'duo_toolbar.dart';
 import 'ios_scroll_to_top.dart';
+
 import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../theme/theme.dart';

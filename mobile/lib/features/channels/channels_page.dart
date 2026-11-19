@@ -1,6 +1,7 @@
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+
 import 'channel_unread.dart';
 import 'channel_filter/channel_filter_activity.dart';
 import 'channel_filter/channel_filter_provider.dart';
@@ -31,7 +32,9 @@ import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
 import 'package:duo_kit/duo_kit.dart';
+
 import '../../shared/widgets/duo_toolbar.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart';

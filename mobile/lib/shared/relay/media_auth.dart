@@ -4,6 +4,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import 'relay_provider.dart';
+
 import 'package:buzz/shared/crypto/event_signing.dart';
 
 const _mediaGetAuthKind = 24242;

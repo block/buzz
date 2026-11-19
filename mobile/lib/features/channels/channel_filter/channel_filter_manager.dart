@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+
 import 'package:flutter/foundation.dart';
+
 import '../../../shared/crypto/event_signing.dart';
 import '../../../shared/relay/relay.dart';
 import '../channel_sort/channel_sort_manager.dart';

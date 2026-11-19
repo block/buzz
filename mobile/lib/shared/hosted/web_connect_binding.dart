@@ -4,6 +4,7 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../deeplink/deep_link.dart';
 import 'hosted_environment.dart';
+
 import 'package:buzz/shared/crypto/event_signing.dart';
 
 /// The owner supplies keys only inside this callback, after authenticating and

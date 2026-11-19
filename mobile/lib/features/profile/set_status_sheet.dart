@@ -1,7 +1,9 @@
 import 'dart:async';
 
 import 'package:duo_kit/duo_kit.dart';
+
 import '../../shared/widgets/duo_toolbar.dart';
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart';

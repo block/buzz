@@ -1,6 +1,7 @@
 import 'package:flutter/widgets.dart';
 
 import 'composer_send_origin.dart';
+
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 const _localMessageSendAnimationClaimWindow = Duration(seconds: 1);

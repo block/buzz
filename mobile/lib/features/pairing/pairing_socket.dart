@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../../shared/relay/nostr_models.dart';
+
 import 'package:buzz/shared/crypto/event_signing.dart';
 
 const _desktopPairingAuthChallengeGrace = Duration(seconds: 3);

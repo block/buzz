@@ -1,9 +1,11 @@
 import '../../helpers/controllable_pairing_socket.dart';
+
 import 'package:buzz/features/pairing/pairing_page.dart';
 import 'package:buzz/onboarding_app_entry.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
 import 'package:buzz/shared/community/paired_community_landing.dart';
+
 import 'dart:async';
 import 'dart:convert';
 

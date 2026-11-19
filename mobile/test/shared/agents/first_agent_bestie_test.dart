@@ -4,6 +4,7 @@ import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
+
 import '../../helpers/remote_agents_fixture.dart';
 import '../me/me_sync_test.dart' show FakeRelay;
 import 'owned_agent_directory_test.dart' show registration;

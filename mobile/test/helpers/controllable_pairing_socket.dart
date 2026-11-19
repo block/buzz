@@ -1,4 +1,5 @@
 import 'dart:convert';
+
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/pairing/pairing_crypto.dart';
 import 'package:buzz/features/pairing/pairing_socket.dart';

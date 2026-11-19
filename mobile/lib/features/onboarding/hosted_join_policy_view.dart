@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
+
 import '../../shared/hosted/hosted_join_policy.dart';
 import '../../shared/theme/grid.dart';
 import '../../shared/widgets/onboarding_step_page.dart';

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+
 import '../../shared/theme/theme.dart';
 import 'typing_dots.dart';
 

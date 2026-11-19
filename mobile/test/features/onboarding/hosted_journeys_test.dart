@@ -1,4 +1,5 @@
 import '../../helpers/controllable_pairing_socket.dart';
+
 import 'package:buzz/shared/widgets/buzz_toast.dart';
 import 'package:buzz/features/onboarding/hosted_reconnect_banner.dart';
 import 'package:buzz/shared/hosted/hosted_community_creation.dart';
@@ -8,9 +9,11 @@ import 'package:buzz/shared/hosted/hosted_flow.dart';
 import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
+
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
+
 import 'package:nostr/nostr.dart' as nostr;
 
 import 'package:buzz/features/profile/profile_setup_page.dart';

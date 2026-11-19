@@ -5,6 +5,7 @@ import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
 import 'dart:async';
 
 import 'package:buzz/features/activity/activity_provider.dart';

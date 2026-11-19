@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
+
 import 'agent_typing_bubble.dart';
 import 'channel_typing_provider.dart';
 import 'timeline_message.dart';

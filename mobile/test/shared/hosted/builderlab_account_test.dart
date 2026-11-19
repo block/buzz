@@ -1,5 +1,7 @@
 import 'package:buzz/shared/hosted/known_community_sync.dart';
+
 import '../community/community_storage_test.dart' show FakeSecureStorage;
+
 import 'dart:async';
 
 import 'hosted_http_fixture.dart';

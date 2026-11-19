@@ -1,4 +1,5 @@
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';

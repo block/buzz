@@ -6,8 +6,10 @@ import 'package:buzz/shared/emoji/native_emoji_glyph.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:buzz/shared/emoji/emoji_avatar.dart';
+
 import 'dart:async';
 import 'dart:ui' show SemanticsAction;
+
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:buzz/features/channels/channel_identity_names_provider.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
@@ -19,7 +21,9 @@ import 'package:buzz/shared/hosted/native_media_headers.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:nostr/nostr.dart' as nostr;
+
 import 'dart:convert';
+
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/emoji/emoji_burst.dart';
 import 'package:buzz/shared/emoji/emoji_data.dart';

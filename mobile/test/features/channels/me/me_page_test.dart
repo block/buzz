@@ -1,10 +1,13 @@
 import 'dart:convert';
+
 import 'package:image_picker/image_picker.dart';
 import 'package:buzz/features/home/home_screen_shortcut_host.dart';
 import 'package:buzz/shared/shortcuts/home_screen_shortcuts.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
+
 import 'dart:async';
+
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:buzz/shared/me/me_chat_creation.dart';
 import 'package:buzz/shared/me/default_agent.dart';

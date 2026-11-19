@@ -1,8 +1,10 @@
 import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
+
 import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
+
 import 'package:flutter/services.dart';
 
 import 'package:buzz/features/channels/channel.dart';

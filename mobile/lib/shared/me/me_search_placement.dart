@@ -1,4 +1,5 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+
 import 'me_sync.dart';
 
 /// Optional Me placement must not make ordinary search results inaccessible.

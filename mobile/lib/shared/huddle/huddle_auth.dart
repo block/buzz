@@ -3,6 +3,7 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../relay/nostr_models.dart';
 import 'huddle_wire.dart';
+
 import 'package:buzz/shared/crypto/event_signing.dart';
 
 /// Immutable connection inputs for one Huddle audio WebSocket.

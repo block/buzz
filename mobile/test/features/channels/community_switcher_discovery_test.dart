@@ -1,5 +1,6 @@
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+
 import 'dart:async';
 
 import 'package:buzz/features/channels/channels_page.dart';
@@ -11,6 +12,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/shared/hosted/hosted_flow_provider.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
 import '../../helpers/hosted_communities_fixture.dart';
 
 import '../../helpers/widget_helpers.dart';

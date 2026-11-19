@@ -1,4 +1,5 @@
 import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
+
 import '../../helpers/two_finger_double_tap.dart';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';

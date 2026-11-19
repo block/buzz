@@ -18,6 +18,7 @@ import 'media_auth.dart';
 import 'mp4_fast_start.dart';
 import 'relay_provider.dart';
 import '../hosted/hosted_relay_auth.dart';
+
 import 'package:buzz/shared/crypto/event_signing.dart';
 
 part 'media_upload/platform_bindings.dart';

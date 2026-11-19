@@ -1,5 +1,7 @@
 import 'package:buzz/shared/hosted/hosted_environment.dart';
+
 import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:buzz/shared/community/paired_community_landing.dart';
 import 'package:flutter_test/flutter_test.dart';

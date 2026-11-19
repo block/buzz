@@ -6,6 +6,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import '../../shared/relay/relay.dart';
 import 'user_status.dart';
 import 'user_status_cache_provider.dart';
+
 import 'package:buzz/shared/crypto/event_signing.dart';
 
 /// Manages the current user's own NIP-38 status (kind:30315, d=general).

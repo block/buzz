@@ -1,4 +1,5 @@
 import 'dart:convert';
+
 import 'package:flutter/services.dart';
 import 'package:buzz/features/onboarding/organization_sign_in_banner.dart';
 import 'package:buzz/shared/hosted/browser_auth.dart';
