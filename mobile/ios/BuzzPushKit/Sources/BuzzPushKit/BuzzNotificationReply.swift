@@ -345,7 +345,8 @@ public final class BuzzNotificationReplyJournal: @unchecked Sendable {
     recorded(id: id)?["publishing"] == "true"
   }
 
-  /// Forgets a reply once the app has reported it sent, or kept its draft.
+  /// Forgets a reply once the app has reported it sent, kept its draft, or
+  /// found its community gone (after its "Reply not sent" notice is posted).
   public func settle(id: String) {
     lock.lock()
     defer { lock.unlock() }

@@ -299,7 +299,8 @@ final class BuzzNotificationReplyBridge {
     case .sent:
       UNUserNotificationCenter.current().removeDeliveredNotifications(
         withIdentifiers: [Self.replyNotSentIdentifier(id)])
-    case .unknown, .notSent where !draftKept:
+    case .unknown,
+      .notSent where !draftKept:
       if let request = recorded.flatMap(BuzzNotificationReplyRequest.init(journalArguments:)) {
         Self.finish(
           request, outcome: outcome, notificationID: "", center: .current(), done: settle)
