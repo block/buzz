@@ -2888,19 +2888,11 @@ impl Db {
         get_active_membership_ids_bulk_read_at(&self.pool, community_id, pubkeys, limit).await
     }
 
-    /// Channel IDs where a pubkey is an active member. See [`get_member_channel_ids`].
-    #[datastore_span(name = "get_member_channel_ids", system = "postgresql")]
-    pub async fn get_member_channel_ids(
-        &self,
-        community_id: CommunityId,
-        pubkey: &[u8],
-    ) -> Result<Vec<Uuid>> {
-        get_member_channel_ids(&self.pool, community_id, pubkey).await
-    }
-
     /// Every channel where a pubkey is an active member, split by type, with
     /// when its connection was checked out. See [`get_member_channels_read_at`].
-    #[datastore_span(name = "get_member_channels_read_at", system = "postgresql")]
+    /// The span keeps the name of the read it replaced, so dashboards keep
+    /// their history.
+    #[datastore_span(name = "get_member_channel_ids", system = "postgresql")]
     pub async fn get_member_channels_read_at(
         &self,
         community_id: CommunityId,
@@ -2909,22 +2901,11 @@ impl Db {
         get_member_channels_read_at(&self.pool, community_id, pubkey).await
     }
 
-    /// A community's listed open channel IDs. See [`get_listed_open_channel_ids`].
-    pub async fn get_listed_open_channel_ids(
-        &self,
-        community_id: CommunityId,
-    ) -> Result<Vec<Uuid>> {
-        Ok(self
-            .get_listed_open_channels_read_at(community_id)
-            .await?
-            .value
-            .implicit)
-    }
-
     /// Every listed open channel, split by type, with when its connection
     /// was checked out, for caches that bound staleness from the read. See
-    /// [`get_listed_open_channels_read_at`].
-    #[datastore_span(name = "get_listed_open_channels", system = "postgresql")]
+    /// [`get_listed_open_channels_read_at`]. The span keeps the name of the
+    /// read it replaced, so dashboards keep their history.
+    #[datastore_span(name = "get_listed_open_channel_ids", system = "postgresql")]
     pub async fn get_listed_open_channels_read_at(
         &self,
         community_id: CommunityId,

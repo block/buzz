@@ -4917,7 +4917,9 @@ pub(crate) mod tests {
         };
         let aged = buzz_db::ReadAt {
             value: old.clone(),
-            read_at: Instant::now() - MEMBER_CHANNELS_MAX_AGE,
+            read_at: Instant::now()
+                .checked_sub(MEMBER_CHANNELS_MAX_AGE)
+                .expect("the monotonic clock is older than the max age"),
         };
         state
             .member_channels(key.clone(), async { Ok(aged) })
