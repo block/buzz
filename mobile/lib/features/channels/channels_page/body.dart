@@ -383,9 +383,11 @@ class _SliverChannelsList extends HookConsumerWidget {
     }
 
     // Only the team sections record can be edited, and only until desktop's
-    // unified workspaces exist.
+    // unified workspaces exist. Sorted as displayed, so Move up and Move down
+    // follow what the user sees, not storage order.
     final teamSections = sectionsState.editable
-        ? sectionsState.store.sections
+        ? (sectionsState.store.sections.toList()
+            ..sort((a, b) => a.order.compareTo(b.order)))
         : const <ChannelSection>[];
     final teamSectionIds = {for (final s in teamSections) s.id};
     Widget row(Channel channel, String key) => isSoloRow(channel)

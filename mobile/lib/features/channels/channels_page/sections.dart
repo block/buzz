@@ -191,14 +191,22 @@ class _CustomSectionHeader extends StatelessWidget {
         child: Row(
           children: [
             Expanded(
-              child: _SectionLabel(
+              // The options button stays its own screen-reader stop.
+              child: Semantics(
                 label: label,
-                icon: switch (section.icon) {
-                  final icon? => _WorkspaceIcon(icon),
-                  null => null,
-                },
+                button: true,
                 expanded: expanded,
-                color: sectionColor,
+                onTap: onToggle,
+                excludeSemantics: true,
+                child: _SectionLabel(
+                  label: label,
+                  icon: switch (section.icon) {
+                    final icon? => _WorkspaceIcon(icon),
+                    null => null,
+                  },
+                  expanded: expanded,
+                  color: sectionColor,
+                ),
               ),
             ),
             if (_usesNativeSectionMenu(context))

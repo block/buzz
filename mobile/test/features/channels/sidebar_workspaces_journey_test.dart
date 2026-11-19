@@ -42,8 +42,10 @@ void main() {
     relay.stored.add(
       relay.event('channel-sections', {
         'version': 1,
+        // Stored out of display order, as a Move up leaves them.
         'sections': [
-          {'id': 'old', 'name': 'Old', 'order': 0},
+          {'id': 'old', 'name': 'Old', 'order': 1},
+          {'id': 'newer', 'name': 'Newer', 'order': 0},
         ],
         'assignments': {'design-crit': 'old'},
       }, now - 60),
@@ -66,7 +68,13 @@ void main() {
           ),
           channelsProvider.overrideWith(_Channels.new),
           meGroupsProvider.overrideWith(
-            (ref) => Stream.value(const MeGroups()),
+            (ref) => Stream.value(
+              const MeGroups(
+                groups: [
+                  {'id': 'focus', 'name': 'Focus', 'defaultTemplateId': ''},
+                ],
+              ),
+            ),
           ),
           defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
           meAssistantsProvider.overrideWith((ref) async => []),
@@ -97,13 +105,34 @@ void main() {
     );
     double top(String text) => tester.getTopLeft(inList(text)).dy;
 
-    // Legacy sections stay editable.
+    // Legacy sections stay editable, and their moves follow display order.
     expect(top('design-crit'), greaterThan(top('Old')));
+    expect(top('Old'), greaterThan(top('Newer')));
     await tester.tap(find.byTooltip('Old options'));
     await tester.pumpAndSettle();
     expect(find.text('Rename section'), findsOneWidget);
+    ListTile option(String label) => tester.widget<ListTile>(
+      find.ancestor(of: find.text(label), matching: find.byType(ListTile)),
+    );
+    expect(option('Move up').enabled, isTrue);
+    expect(option('Move down').enabled, isFalse);
     await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();
+
+    // A Solo project header tells a screen reader whether it is expanded.
+    final semantics = tester.ensureSemantics();
+    final focus = find.bySemanticsLabel('Focus');
+    expect(
+      tester.getSemantics(focus),
+      isSemantics(isButton: true, hasExpandedState: true, isExpanded: true),
+    );
+    await tester.tap(inList('Focus'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.getSemantics(focus),
+      isSemantics(isButton: true, hasExpandedState: true, isExpanded: false),
+    );
+    semantics.dispose();
 
     // Desktop saves its unified records; they arrive live.
     for (final head in [
@@ -130,6 +159,7 @@ void main() {
     }
     await tester.pumpAndSettle();
     expect(inList('Old'), findsNothing);
+    expect(inList('Focus'), findsNothing);
 
     final order = [
       'Starred',
