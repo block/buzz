@@ -1,3 +1,4 @@
+import '../../shared/widgets/native_route_controls.dart';
 import 'dart:ui' as ui;
 
 import 'package:duo_kit/duo_kit.dart';
@@ -129,6 +130,7 @@ class HomePage extends HookConsumerWidget {
       BottomUpPageRoute<void>(
         builder: (_) => AdaptiveConversationDestination(
           preferredListWidth: sidebarWidth,
+          listToolbarSlots: 1,
           child: const ActivityPage(),
         ),
         reducedMotion: reducedMotion,
@@ -585,13 +587,6 @@ class _NativeControlsGate extends HookWidget {
 
   @override
   Widget build(BuildContext context) {
-    final route = ModalRoute.of(context);
-    final coveringProgress = useAnimation(
-      route?.secondaryAnimation ?? kAlwaysDismissedAnimation,
-    );
-    return builder(
-      context,
-      (route?.isCurrent ?? true) && coveringProgress == 0,
-    );
+    return builder(context, useNativeRouteControlsVisible(context));
   }
 }
