@@ -69,7 +69,7 @@ Map<String, int> readingMarks({
     if (readState.isForcedUnread(contextId)) return false;
     final ordinary = readByChannelCatchUp(
       isDm: isDm,
-      isReply: message.parentId != null && !_isBroadcast(message),
+      isReply: message.parentId != null,
       highPriority: self == null || isHighPriorityEvent(message.tags, self),
     );
     final readAt = maxReadAt([

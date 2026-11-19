@@ -12,6 +12,10 @@ class ObservedUnreadEvent {
   /// `activity:<channel>` reads this event (see `readByChannelCatchUp`).
   final bool channelCatchUp;
 
+  /// Whether this event adds the channel's attention dot rather than only
+  /// bolding it.
+  bool get attention => countsTowardBadge;
+
   /// Reply payload for Activity's existing thread rows. Retained in the same
   /// bounded registry as its unread evidence, so eviction and deletion agree.
   final NostrEvent? threadReply;
@@ -35,6 +39,7 @@ ObservedUnreadEvent makeObservedUnreadEvent({
   required bool highPriority,
   required String? channelType,
   required bool isThreadedReply,
+  bool isBroadcast = false,
   NostrEvent? threadReply,
 }) {
   final isDm = channelType == 'dm';
@@ -47,7 +52,9 @@ ObservedUnreadEvent makeObservedUnreadEvent({
     countsTowardAppBadge: isDm || (!isThreadedReply && highPriority),
     channelCatchUp: readByChannelCatchUp(
       isDm: isDm,
-      isReply: isThreadedReply,
+      // A broadcast is read only by its own mark, like any reply, even when
+      // it counts as ordinary unread.
+      isReply: isThreadedReply || isBroadcast,
       highPriority: highPriority,
     ),
     threadReply: threadReply,

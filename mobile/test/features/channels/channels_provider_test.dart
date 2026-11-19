@@ -21,6 +21,7 @@ import 'package:buzz/shared/channels/open_channel_directory_storage.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart';
 import 'package:buzz/features/channels/channel_mutes/channel_mutes_storage.dart';
+import 'package:buzz/features/channels/channel_unread.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -3692,6 +3693,114 @@ void main() {
     // And one live subscription on the resulting channel.
     await _waitUntil(() => session.subscribeFilters.length == 1);
     expect(session.subscribeFilters, hasLength(1));
+  });
+
+  // A reply also sent to the channel shows in the timeline, but it is still a
+  // thread reply: it dots only when it mentions the reader or sits in one of
+  // their threads. Elsewhere it bolds the channel like a top-level post.
+  group('replies also sent to the channel', () {
+    final otherRoot = 'a' * 64;
+    final ownRoot = 'b' * 64;
+    bool isUnread(List<NostrFilter> batch) =>
+        batch.isNotEmpty && batch.every((filter) => filter.since != null);
+    NostrEvent post(
+      String id,
+      int createdAt, {
+      String author = 'alice',
+      String? parentId,
+      bool broadcast = false,
+      bool mention = false,
+    }) => NostrEvent(
+      id: id,
+      pubkey: author,
+      createdAt: createdAt,
+      kind: EventKind.streamMessageV2,
+      tags: [
+        const ['h', _channelA],
+        if (parentId != null) ['e', parentId, '', 'reply'],
+        if (broadcast) const ['broadcast', '1'],
+        if (mention) const ['p', myPk],
+      ],
+      content: 'hi',
+      sig: 'sig',
+    );
+
+    for (final (name, setup, mention, dotted) in [
+      ("someone else's thread", <NostrEvent>[], false, false),
+      (
+        "someone else's thread, mentioning the reader",
+        <NostrEvent>[],
+        true,
+        true,
+      ),
+      (
+        'a thread the reader started',
+        [post(ownRoot, 10, author: myPk)],
+        false,
+        true,
+      ),
+      (
+        'a thread the reader replied in',
+        [post('own-reply', 11, author: myPk, parentId: otherRoot)],
+        false,
+        true,
+      ),
+    ]) {
+      test('$name ${dotted ? 'dots' : 'only bolds'} the channel', () async {
+        final root = setup.any((event) => event.id == ownRoot)
+            ? ownRoot
+            : otherRoot;
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [_meta(id: _channelA, name: 'general')],
+        );
+        final container = _buildContainer(session: session);
+        addTearDown(container.dispose);
+        await container.read(channelsProvider.future);
+        await _waitUntil(() => session.queryBatches.any(isUnread));
+        await _settle();
+        setup.forEach(session.emit);
+        session.emit(
+          post(
+            'broadcast',
+            20,
+            parentId: root,
+            broadcast: true,
+            mention: mention,
+          ),
+        );
+        await _settle();
+
+        final notifier = container.read(channelsProvider.notifier);
+        final observed =
+            notifier.observedUnreadEventsByChannel[_channelA]!['broadcast']!;
+        expect(observed.highPriority, dotted);
+        expect(observed.attention, dotted);
+        expect(observed.countsTowardAppBadge, dotted);
+        // Read by its own mark either way, as desktop reads it: reaching the
+        // bottom of the channel does not read it.
+        expect(observed.channelCatchUp, isFalse);
+        expect(
+          notifier.observedThreadReplies(
+            container.read(channelsProvider).value!,
+          ),
+          isEmpty,
+        );
+
+        final highlights = computeChannelListHighlights(
+          channels: container.read(channelsProvider).value!,
+          readState: const ReadStateState(
+            isReady: true,
+            pubkey: myPk,
+            contexts: {},
+            version: 0,
+          ),
+          channelsNotifier: notifier,
+        );
+        expect(highlights.attention, dotted ? {_channelA} : isEmpty);
+        expect(highlights.unread, dotted ? isEmpty : {_channelA});
+      });
+    }
   });
 }
 

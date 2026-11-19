@@ -4,8 +4,9 @@ class _ChannelTile extends ConsumerWidget {
   final Channel channel;
   final bool isUnread;
 
-  /// Whether unread thread replies, mentions or broadcasts need attention.
-  /// They show as a dot without bolding the label.
+  /// Whether unread thread replies or mentions need attention, including
+  /// replies also sent to the channel from the reader's threads. They show as
+  /// a dot without bolding the label.
   final bool hasAttention;
   final bool isMuted;
   final String? currentPubkey;

@@ -681,12 +681,22 @@ extension _ObservedUnreadRecording on ChannelsNotifier {
     if (!countQuiet && isQuietAgentMessage(event.tags)) return false;
     // A counted quiet event is only a backlog marker: it never earns attention
     // through its mentions or thread.
+    final isBroadcast = !countQuiet && _isBroadcastReply(event);
     final isThreadedReply =
-        !countQuiet &&
-        event.threadReference.parentId != null &&
-        !_isBroadcastReply(event);
+        !countQuiet && event.threadReference.parentId != null && !isBroadcast;
+    // A reply also sent to the channel earns attention only in one of the
+    // viewer's threads; elsewhere it is ordinary unread, like a top-level post.
     final isHighPriority =
-        channel.isDm || (!countQuiet && isHighPriorityEvent(event.tags, myPk));
+        channel.isDm ||
+        (!countQuiet &&
+            (isHighPriorityEvent(event.tags, myPk) ||
+                (isBroadcast &&
+                    isInViewerThread(
+                      event.threadReference.rootId,
+                      participatedRootIds: _participatedRootIds,
+                      followedRootIds: _followedRootIds(),
+                      authoredRootIds: _authoredRootIds,
+                    ))));
     recordObservedUnreadEvent(
       _observedUnreadEventsByChannel,
       channel.id,
@@ -697,6 +707,7 @@ extension _ObservedUnreadRecording on ChannelsNotifier {
         highPriority: isHighPriority,
         channelType: channel.channelType,
         isThreadedReply: isThreadedReply,
+        isBroadcast: isBroadcast,
         threadReply: isThreadedReply && !channel.isDm ? event : null,
       ),
       _unreadCatchUpLimit,
