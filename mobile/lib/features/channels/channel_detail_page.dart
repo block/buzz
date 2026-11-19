@@ -1,3 +1,5 @@
+import 'package:duo_kit/duo_kit.dart';
+import '../../shared/widgets/ios_navigation_bar.dart';
 import 'bestie_transcription_status.dart';
 import '../../shared/widgets/duo_toolbar.dart';
 import 'composer_geometry.dart';
@@ -6,6 +8,7 @@ import 'message_author_visibility.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+
 import 'message_swipe_reply.dart';
 import 'bestie_welcome.dart';
 import 'bestie_welcome_storage.dart';
@@ -52,6 +55,7 @@ import '../../shared/relay/relay.dart';
 import '../../shared/relay/relay_author_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/navigation_button_surface.dart';
+import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/avatar_shape.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/dm_header_portrait.dart';
@@ -140,6 +144,7 @@ part 'channel_detail_page/huddle_participant_cluster.dart';
 part 'channel_detail_page/huddle_call_participants.dart';
 part 'channel_detail_page/huddle_participant_overlay.dart';
 part 'channel_detail_page/huddle_call_controls.dart';
+part 'channel_detail_page/huddle_call_layout.dart';
 part 'channel_detail_page/huddle_drawer.dart';
 part 'channel_detail_page/huddle_reactions.dart';
 part 'channel_detail_page/message_bubble.dart';

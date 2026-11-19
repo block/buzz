@@ -1,3 +1,6 @@
+import 'package:duo_kit/duo_kit.dart';
+import 'package:buzz/shared/widgets/duo_toolbar.dart';
+import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:buzz/features/activity/activity_page.dart';
 import 'package:buzz/shared/drafts/compose_drafts_provider.dart';
 import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
@@ -317,6 +320,7 @@ Widget _buildTestable({
   Map<String, List<NostrEvent>> localThreadReplies = const {},
   TextScaler textScaler = TextScaler.noScaling,
   bool disableAnimations = false,
+  ValueNotifier<FoldStrip?>? huddleStrip,
   bool disableRetries = false,
   Duration? Function(int retryCount, Object error)? providerRetry,
   RelaySessionNotifier? relaySessionNotifier,
@@ -550,7 +554,19 @@ Widget _buildTestable({
           textScaler: textScaler,
           disableAnimations: disableAnimations,
         ),
-        child: MobileHuddleShell(navigatorKey: navigatorKey, child: child!),
+        child: huddleStrip == null
+            ? MobileHuddleShell(navigatorKey: navigatorKey, child: child!)
+            : ValueListenableBuilder<FoldStrip?>(
+                valueListenable: huddleStrip,
+                builder: (context, strip, _) => DuoToolbarScope(
+                  strip: strip,
+                  active: true,
+                  child: MobileHuddleShell(
+                    navigatorKey: navigatorKey,
+                    child: child!,
+                  ),
+                ),
+              ),
       ),
       navigatorObservers: navigatorObservers,
       home:
@@ -9861,6 +9877,239 @@ void main() {
       },
     );
 
+    for (final window in [const Size(950, 670), const Size(466, 678)]) {
+      testWidgets(
+        'iOS Huddle keeps Tabler icons in native glass and respects reduced motion at $window',
+        (tester) async {
+          debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+          addTearDown(() => debugDefaultTargetPlatformOverride = null);
+          final strip = ValueNotifier<FoldStrip?>(null);
+          addTearDown(strip.dispose);
+          tester.view.devicePixelRatio = 1;
+          tester.view.physicalSize = window;
+          addTearDown(tester.view.reset);
+          final media = _HuddleTestMedia();
+          final transport = _HuddleTestTransport(
+            peers: const {
+              1: HuddlePeer(pubkey: 'desktop', peerIndex: 1, epoch: 0),
+              2: HuddlePeer(pubkey: 'self', peerIndex: 2, epoch: 0),
+            },
+          );
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: [
+                _huddleMsg(
+                  id: 'glass-call',
+                  kind: EventKind.huddleStarted,
+                  pubkey: 'self',
+                  createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+                ),
+              ],
+              disableAnimations: true,
+              huddleStrip: strip,
+              relayConfigNotifier: _HuddleRelayConfigNotifier(),
+              huddleCurrentPubkey: 'self',
+              huddleHumanCountLoader: (_) async => 2,
+              huddleMediaFactory: () => media,
+              huddleTransportFactory: (_) => transport,
+            ),
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+          await tester.pumpAndSettle();
+          final controls = <String, IconData>{
+            'huddle-minimize': BuzzIcons.chevronDown,
+            'huddle-leave': BuzzIcons.phoneOff,
+            'huddle-speaker-toggle': BuzzIcons.volume2,
+            'huddle-mute-toggle': BuzzIcons.mic,
+          };
+          IosGlassNavigationButton glass(String key) =>
+              tester.widget<IosGlassNavigationButton>(
+                find.descendant(
+                  of: find.byKey(ValueKey(key)),
+                  matching: find.byType(IosGlassNavigationButton),
+                ),
+              );
+          for (final entry in controls.entries) {
+            final control = glass(entry.key);
+            expect((control.artwork! as Icon).icon, entry.value);
+            expect(control.label, '');
+            expect(control.semanticLabel, isNotEmpty);
+            expect(control.width, greaterThanOrEqualTo(48));
+          }
+          expect(
+            find.byKey(const ValueKey('huddle-emoji-reactions')),
+            findsNothing,
+          );
+          expect(find.bySemanticsLabel('Emoji reactions'), findsNothing);
+          // UIKit announces isSelected as the selected trait, so the label
+          // names the microphone state rather than the mute action.
+          expect(glass('huddle-mute-toggle').isSelected, isTrue);
+          expect(glass('huddle-mute-toggle').semanticLabel, 'Microphone on');
+          glass('huddle-mute-toggle').onPressed!();
+          await tester.pumpAndSettle();
+          expect(glass('huddle-mute-toggle').isSelected, isFalse);
+          expect(glass('huddle-mute-toggle').semanticLabel, 'Microphone off');
+          expect(
+            (glass('huddle-mute-toggle').artwork! as Icon).icon,
+            BuzzIcons.micOff,
+          );
+          expect(glass('huddle-speaker-toggle').semanticLabel, 'Speaker off');
+          glass('huddle-speaker-toggle').onPressed!();
+          await tester.pumpAndSettle();
+          expect(glass('huddle-speaker-toggle').isSelected, isTrue);
+          expect(glass('huddle-speaker-toggle').semanticLabel, 'Speaker on');
+          transport.emitRemoteAudio(levelDbov: -10);
+          await tester.pump(const Duration(milliseconds: 50));
+          await tester.pump();
+          expect(
+            tester
+                .widget<Transform>(
+                  find.byKey(
+                    const ValueKey('huddle-speaking-avatar-scale-desktop'),
+                  ),
+                )
+                .transform
+                .storage
+                .first,
+            1,
+          );
+          expect(
+            tester
+                .widget<AnimatedOpacity>(
+                  find.byKey(
+                    const ValueKey('huddle-speaking-halo-opacity-desktop'),
+                  ),
+                )
+                .opacity,
+            0.5,
+          );
+          for (final side in [FoldStripSide.right, FoldStripSide.left]) {
+            strip.value = FoldStrip(
+              side: side,
+              rect: Rect.fromLTWH(
+                side == FoldStripSide.left ? 0 : window.width - 80,
+                0,
+                80,
+                window.height,
+              ),
+              topClearance: 110,
+              bottomClearance: 0,
+              isClearanceEstimated: false,
+            );
+            await tester.pumpAndSettle();
+            var previousBottom = 0.0;
+            for (final key in [
+              'huddle-leave',
+              'huddle-minimize',
+              'huddle-mute-toggle',
+              'huddle-speaker-toggle',
+            ]) {
+              final rect = tester.getRect(find.byKey(ValueKey(key)));
+              expect(
+                rect.center.dx,
+                side == FoldStripSide.left
+                    ? lessThan(80)
+                    : greaterThan(window.width - 80),
+              );
+              expect(rect.top, greaterThanOrEqualTo(previousBottom));
+              previousBottom = rect.bottom;
+            }
+            Rect controlRect(String key) =>
+                tester.getRect(find.byKey(ValueKey(key)));
+            for (final pair in [
+              ['huddle-leave', 'huddle-minimize'],
+              ['huddle-mute-toggle', 'huddle-speaker-toggle'],
+            ]) {
+              expect(
+                controlRect(pair[1]).top - controlRect(pair[0]).bottom,
+                12,
+              );
+            }
+            expect(
+              tester
+                  .getRect(
+                    find.byKey(
+                      const ValueKey('huddle-call-full-width-content'),
+                    ),
+                  )
+                  .center
+                  .dx,
+              window.width / 2,
+            );
+            expect(
+              tester
+                  .getSize(
+                    find.byKey(
+                      const ValueKey('huddle-call-full-width-content'),
+                    ),
+                  )
+                  .width,
+              window.width,
+            );
+            expect(previousBottom, window.height - 24);
+            expect(
+              controlRect('huddle-leave').top,
+              110 + (window.shortestSide < 600 ? 24 : 0),
+            );
+            expect(tester.takeException(), isNull);
+          }
+          strip.value = null;
+          await tester.pumpAndSettle();
+          expect(find.byKey(const ValueKey('huddle-call-rail')), findsNothing);
+          expect(
+            tester
+                .getCenter(find.byKey(const ValueKey('huddle-mute-toggle')))
+                .dx,
+            greaterThan(
+              tester
+                  .getCenter(
+                    find.byKey(const ValueKey('huddle-speaker-toggle')),
+                  )
+                  .dx,
+            ),
+          );
+          for (final key in ['huddle-speaker-toggle', 'huddle-mute-toggle']) {
+            expect(
+              tester.getSize(find.byKey(ValueKey(key))),
+              const Size(80, 80),
+            );
+          }
+          expect(
+            tester.getSize(find.byKey(const ValueKey('huddle-leave'))),
+            const Size(64, 64),
+          );
+          expect(
+            tester.getCenter(find.byKey(const ValueKey('huddle-minimize'))).dx,
+            lessThan(
+              tester.getCenter(find.byKey(const ValueKey('huddle-leave'))).dx,
+            ),
+          );
+          glass('huddle-minimize').onPressed!();
+          await tester.pumpAndSettle();
+          expect(
+            find.byKey(const ValueKey('huddle-call-controls')),
+            findsNothing,
+          );
+          final drawer = find.byKey(const ValueKey('mobile-huddle-drawer'));
+          expect(
+            find.descendant(
+              of: drawer,
+              matching: find.byType(IosGlassNavigationButton),
+            ),
+            findsNothing,
+          );
+          expect(
+            find.descendant(of: drawer, matching: find.byType(IconButton)),
+            findsNWidgets(4),
+          );
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pumpAndSettle();
+          debugDefaultTargetPlatformOverride = null;
+        },
+      );
+    }
+
     testWidgets(
       'opens the sparse full-screen call with avatar and audio controls',
       (tester) async {
@@ -9950,8 +10199,8 @@ void main() {
           const Size.square(80),
         );
         expect(
-          tester.getSize(find.byKey(const ValueKey('huddle-emoji-reactions'))),
-          const Size.square(80),
+          find.byKey(const ValueKey('huddle-emoji-reactions')),
+          findsNothing,
         );
         expect(
           (tester
@@ -9969,14 +10218,15 @@ void main() {
         final muteCenter = tester.getCenter(
           find.byKey(const ValueKey('huddle-mute-toggle')),
         );
-        final emojiCenter = tester.getCenter(
-          find.byKey(const ValueKey('huddle-emoji-reactions')),
-        );
         expect(speakerCenter.dy, closeTo(muteCenter.dy, 0.01));
-        expect(emojiCenter.dy, closeTo(muteCenter.dy, 0.01));
         expect(
-          (speakerCenter.dx + emojiCenter.dx) / 2,
-          closeTo(muteCenter.dx, 0.01),
+          (speakerCenter.dx + muteCenter.dx) / 2,
+          closeTo(
+            tester
+                .getCenter(find.byKey(const ValueKey('huddle-call-controls')))
+                .dx,
+            0.01,
+          ),
         );
         expect(find.text('Miles'), findsNothing);
         expect(find.text('Pollen'), findsNothing);
@@ -10137,56 +10387,76 @@ void main() {
           find.bySemanticsLabel(RegExp(r'Miles, speaking')),
           findsOneWidget,
         );
-        final speakingHalo = tester.widget<Container>(
+        final ringSize = tester.getSize(
           find.byKey(const ValueKey('huddle-speaking-halo-desktop')),
         );
-        final speakingHaloDecoration =
-            speakingHalo.decoration! as ShapeDecoration;
-        expect(speakingHaloDecoration.shape, const CircleBorder());
-        expect(speakingHaloDecoration.color?.a, closeTo(0.07, 0.001));
+        final portraitSize = tester.getSize(
+          find.byKey(const ValueKey('huddle-avatar-image-desktop')),
+        );
+        expect(ringSize.width, greaterThan(portraitSize.width));
+        expect(ringSize.width, lessThan(portraitSize.width * 1.2));
+        final ringClip = tester.widget<ClipPath>(
+          find
+              .ancestor(
+                of: find.byKey(const ValueKey('huddle-speaking-halo-desktop')),
+                matching: find.byType(ClipPath),
+              )
+              .first,
+        );
+        final ringPath = ringClip.clipper!.getClip(ringSize);
+        expect(ringPath.contains(ringSize.center(Offset.zero)), isFalse);
+        expect(ringPath.contains(Offset(ringSize.width / 2, 2)), isTrue);
         await tester.pump(const Duration(milliseconds: 70));
         final mediumScaleMidTransition = tester
             .widget<Transform>(
-              find.byKey(const ValueKey('huddle-speaking-halo-scale-desktop')),
+              find.byKey(
+                const ValueKey('huddle-speaking-avatar-scale-desktop'),
+              ),
             )
             .transform
             .storage
             .first;
         expect(mediumScaleMidTransition, greaterThan(1));
-        expect(mediumScaleMidTransition, lessThan(1.772));
+        expect(mediumScaleMidTransition, lessThan(1.0273));
         await tester.pump(const Duration(milliseconds: 70));
         final mediumSpeakingScale = tester
             .widget<Transform>(
-              find.byKey(const ValueKey('huddle-speaking-halo-scale-desktop')),
+              find.byKey(
+                const ValueKey('huddle-speaking-avatar-scale-desktop'),
+              ),
             )
             .transform
             .storage
             .first;
-        expect(mediumSpeakingScale, closeTo(1.772, 0.01));
+        expect(mediumSpeakingScale, closeTo(1.0273, 0.01));
 
         transport.emitRemoteAudio(levelDbov: -10, sequence: 2);
         await tester.pump(const Duration(milliseconds: 50));
         await tester.pump(const Duration(milliseconds: 70));
         final loudScaleMidTransition = tester
             .widget<Transform>(
-              find.byKey(const ValueKey('huddle-speaking-halo-scale-desktop')),
+              find.byKey(
+                const ValueKey('huddle-speaking-avatar-scale-desktop'),
+              ),
             )
             .transform
             .storage
             .first;
         expect(loudScaleMidTransition, greaterThan(mediumSpeakingScale));
-        expect(loudScaleMidTransition, lessThan(2.291));
+        expect(loudScaleMidTransition, lessThan(1.036));
         await tester.pump(const Duration(milliseconds: 70));
         final loudSpeakingScale = tester
             .widget<Transform>(
-              find.byKey(const ValueKey('huddle-speaking-halo-scale-desktop')),
+              find.byKey(
+                const ValueKey('huddle-speaking-avatar-scale-desktop'),
+              ),
             )
             .transform
             .storage
             .first;
-        expect(loudSpeakingScale, closeTo(2.291, 0.01));
+        expect(loudSpeakingScale, closeTo(1.036, 0.01));
         expect(loudSpeakingScale, greaterThan(mediumSpeakingScale));
-        expect(loudSpeakingScale, lessThanOrEqualTo(2.55));
+        expect(loudSpeakingScale, lessThanOrEqualTo(1.036));
 
         expect(
           find.descendant(
@@ -10309,33 +10579,11 @@ void main() {
           isTrue,
         );
 
-        final emojiIcon = find.descendant(
-          of: find.byKey(const ValueKey('huddle-emoji-reactions')),
-          matching: find.byIcon(BuzzIcons.smilePlus),
+        expect(
+          find.byKey(const ValueKey('huddle-emoji-reactions')),
+          findsNothing,
         );
-        expect(emojiIcon, findsOneWidget);
-        expect(tester.widget<Icon>(emojiIcon).size, 28);
-        expect(find.bySemanticsLabel('Emoji reactions'), findsOneWidget);
-        final huddleContainer = ProviderScope.containerOf(
-          tester.element(find.byType(MobileHuddleShell)),
-        );
-        final localBurstController = huddleContainer.read(
-          emojiBurstControllerProvider,
-        )..clear();
-        final localAvatarCenter = tester.getCenter(
-          find.byKey(const ValueKey('huddle-speaking-ring-self')),
-        );
-        await tester.tap(find.byKey(const ValueKey('huddle-emoji-reactions')));
-        await tester.pump(const Duration(milliseconds: 500));
-        expect(hapticCalls, hasLength(3));
-        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
-        expect(find.byType(EmojiPickerSheet), findsOneWidget);
-        tester
-            .widget<EmojiPickerSheet>(find.byType(EmojiPickerSheet))
-            .onSelect('🎉');
-        await tester.pump();
-        expect(localBurstController.debugLastBurstOrigin, localAvatarCenter);
-        await tester.pump(const Duration(milliseconds: 500));
+        expect(find.bySemanticsLabel('Emoji reactions'), findsNothing);
 
         await tester.tap(find.byKey(const ValueKey('huddle-minimize')));
         await tester.pumpAndSettle();
@@ -10343,7 +10591,7 @@ void main() {
           hapticCalls.where(
             (call) => call.arguments == 'HapticFeedbackType.selectionClick',
           ),
-          hasLength(4),
+          hasLength(3),
         );
         expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
         expect(find.widgetWithText(FilledButton, 'Open'), findsOneWidget);
@@ -10409,7 +10657,7 @@ void main() {
           hapticCalls.where(
             (call) => call.arguments == 'HapticFeedbackType.selectionClick',
           ),
-          hasLength(5),
+          hasLength(4),
         );
         expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
 
@@ -10421,7 +10669,7 @@ void main() {
           hapticCalls.where(
             (call) => call.arguments == 'HapticFeedbackType.selectionClick',
           ),
-          hasLength(6),
+          hasLength(5),
         );
         expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
         expect(
@@ -10471,7 +10719,7 @@ void main() {
           hapticCalls.where(
             (call) => call.arguments == 'HapticFeedbackType.selectionClick',
           ),
-          hasLength(7),
+          hasLength(6),
         );
         expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
         expect(find.byKey(const ValueKey('huddle-minimize')), findsOneWidget);
@@ -10492,7 +10740,7 @@ void main() {
           hapticCalls.where(
             (call) => call.arguments == 'HapticFeedbackType.selectionClick',
           ),
-          hasLength(8),
+          hasLength(7),
         );
         expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
         await tester.tap(find.byKey(const ValueKey('huddle-drawer-leave')));
@@ -10501,7 +10749,7 @@ void main() {
           hapticCalls.where(
             (call) => call.arguments == 'HapticFeedbackType.selectionClick',
           ),
-          hasLength(9),
+          hasLength(8),
         );
         expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
         expect(
@@ -10530,7 +10778,6 @@ void main() {
       'caps a dense Huddle roster at ten avatars with an overflow count',
       (tester) async {
         const membershipAgentPubkey = 'membership-agent';
-        tester.view.physicalSize = const Size(390, 844);
         tester.view.devicePixelRatio = 1;
         addTearDown(tester.view.resetPhysicalSize);
         addTearDown(tester.view.resetDevicePixelRatio);
@@ -12771,6 +13018,83 @@ void main() {
         findsNothing,
       );
     });
+
+    testWidgets(
+      'Huddle speaking ring resolves the portrait thumbnail while idle',
+      (tester) async {
+        // At 2.625x the 88 pt portrait (231 px) fits the 240 px thumbnail
+        // cutoff, so a ring laid out any larger would fetch the original.
+        const dpr = 2.625;
+        tester.view.devicePixelRatio = dpr;
+        tester.view.physicalSize = const Size(420 * dpr, 800 * dpr);
+        addTearDown(tester.view.reset);
+        final users = _FakeUserCacheNotifier(const {});
+        final transport = _HuddleTestTransport(
+          peers: const {
+            1: HuddlePeer(pubkey: 'desktop', peerIndex: 1, epoch: 0),
+            2: HuddlePeer(pubkey: 'self', peerIndex: 2, epoch: 0),
+            3: HuddlePeer(pubkey: 'guest', peerIndex: 3, epoch: 0),
+          },
+        );
+        final urls = <String>[];
+        final client = http_testing.MockClient((request) async {
+          urls.add(request.url.path);
+          return http.Response.bytes(_transparentPng, 200);
+        });
+        addTearDown(client.close);
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _huddleMsg(
+                id: 'avatar-network-probe',
+                kind: EventKind.huddleStarted,
+                pubkey: 'self',
+                createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+              ),
+            ],
+            disableAnimations: true,
+            userCacheNotifier: users,
+            mediaClient: client,
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            huddleCurrentPubkey: 'self',
+            huddleMediaFactory: _HuddleTestMedia.new,
+            huddleTransportFactory: (_) => transport,
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+        await tester.pumpAndSettle();
+        final pubkey = ['desktop', 'guest'].singleWhere(
+          (pubkey) =>
+              (tester
+                          .getSize(
+                            find.byKey(ValueKey('huddle-avatar-image-$pubkey')),
+                          )
+                          .width -
+                      88)
+                  .abs() <
+              0.01,
+        );
+        final hash = 'b' * 64;
+        users.replace(
+          UserProfile(
+            pubkey: pubkey,
+            avatarUrl: 'https://relay.example/media/$hash.png',
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(urls.toSet(), {'/media/$hash.thumb.webp'});
+        expect(
+          tester.getSize(
+            find.descendant(
+              of: find.byKey(ValueKey('huddle-speaking-halo-$pubkey')),
+              matching: find.byType(AvatarImage),
+            ),
+          ),
+          tester.getSize(find.byKey(ValueKey('huddle-avatar-image-$pubkey'))),
+        );
+      },
+    );
 
     testWidgets('opens a profile sheet from a huddle card avatar', (
       tester,
