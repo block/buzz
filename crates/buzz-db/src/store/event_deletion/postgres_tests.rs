@@ -117,13 +117,14 @@ async fn known_targets_across_months_are_exact_and_tenant_scoped() {
         created_at: timestamp(&may),
         ..target(&jan)
     };
-    let (_, inserted, deleted) = db
+    let (_, inserted, deleted, _) = db
         .insert_deletion_event(
             community,
             &deletion,
             None,
             None,
             &[wrong, target(&missing), target(&jan), target(&may)],
+            &Keys::generate(),
         )
         .await
         .expect("delete targets");
@@ -139,7 +140,8 @@ async fn known_targets_across_months_are_exact_and_tenant_scoped() {
             &deletion,
             None,
             None,
-            &[target(&jan), target(&may)]
+            &[target(&jan), target(&may)],
+            &Keys::generate()
         )
         .await
         .expect("replay")
@@ -198,10 +200,17 @@ async fn retention_free_contract() {
                 ..target(&ev)
             };
             assert_eq!(
-                db.insert_deletion_event(community, &deletion, None, None, &[wrong])
-                    .await
-                    .expect("wrong timestamp")
-                    .2,
+                db.insert_deletion_event(
+                    community,
+                    &deletion,
+                    None,
+                    None,
+                    &[wrong],
+                    &Keys::generate()
+                )
+                .await
+                .expect("wrong timestamp")
+                .2,
                 [false]
             );
             assert_eq!(counts(&db, community, ev.id.as_bytes()).await, (1, 1, 1));
@@ -213,25 +222,40 @@ async fn retention_free_contract() {
                     &deletion,
                     None,
                     None,
-                    &[target(&ev), target(&marker)]
+                    &[target(&ev), target(&marker)],
+                    &Keys::generate()
                 )
                 .await
                 .is_err());
             assert_eq!(counts(&db, community, ev.id.as_bytes()).await, (1, 1, 1));
             assert_eq!(
-                db.insert_deletion_event(community, &deletion, None, None, &[target(&ev)])
-                    .await
-                    .expect("hard purge")
-                    .2,
+                db.insert_deletion_event(
+                    community,
+                    &deletion,
+                    None,
+                    None,
+                    &[target(&ev)],
+                    &Keys::generate()
+                )
+                .await
+                .expect("hard purge")
+                .2,
                 [true]
             );
             assert_eq!(counts(&db, community, ev.id.as_bytes()).await, (0, 0, 0));
             assert_eq!(counts(&db, other, ev.id.as_bytes()).await, (1, 1, 1));
             assert_eq!(
-                db.insert_deletion_event(community, &deletion, None, None, &[target(&ev)])
-                    .await
-                    .expect("replay purge")
-                    .2,
+                db.insert_deletion_event(
+                    community,
+                    &deletion,
+                    None,
+                    None,
+                    &[target(&ev)],
+                    &Keys::generate()
+                )
+                .await
+                .expect("replay purge")
+                .2,
                 [false]
             );
             assert!(soft_delete_event_and_update_thread(
@@ -333,7 +357,8 @@ async fn known_target_batch_rollback_then_replay_repairs_and_counts_once() {
             &deletion,
             None,
             None,
-            &[reply_target, target(&marker)]
+            &[reply_target, target(&marker)],
+            &Keys::generate()
         )
         .await
         .is_err());
@@ -349,20 +374,35 @@ async fn known_target_batch_rollback_then_replay_repairs_and_counts_once() {
             .expect("independent pool"),
     );
     let targets = [reply_target];
+    let relay = Keys::generate();
     let (a, b) = tokio::join!(
-        db.insert_deletion_event(community, &deletion, Some(channel), None, &targets),
-        concurrent.insert_deletion_event(community, &deletion, Some(channel), None, &targets),
+        db.insert_deletion_event(community, &deletion, Some(channel), None, &targets, &relay),
+        concurrent.insert_deletion_event(
+            community,
+            &deletion,
+            Some(channel),
+            None,
+            &targets,
+            &relay
+        ),
     );
-    let (_, inserted_a, a) = a.expect("first replay");
-    let (_, inserted_b, b) = b.expect("second replay");
+    let (_, inserted_a, a, _) = a.expect("first replay");
+    let (_, inserted_b, b, _) = b.expect("second replay");
     assert!(!inserted_a && !inserted_b);
     assert_ne!(a, b);
     assert_eq!(counter().await, (0, 0));
     assert_eq!(
-        db.insert_deletion_event(community, &deletion, Some(channel), None, &targets)
-            .await
-            .expect("repeat replay")
-            .2,
+        db.insert_deletion_event(
+            community,
+            &deletion,
+            Some(channel),
+            None,
+            &targets,
+            &Keys::generate()
+        )
+        .await
+        .expect("repeat replay")
+        .2,
         [false]
     );
     assert_eq!(counter().await, (0, 0));
@@ -412,9 +452,16 @@ async fn production_known_target_statements_prune_to_one_month() {
     );
     seed(&db, community, &ev, channel).await;
     let deletion = event(5, MAY, vec![]);
-    db.insert_deletion_event(community, &deletion, None, None, &[target(&ev)])
-        .await
-        .expect("exercise production statements");
+    db.insert_deletion_event(
+        community,
+        &deletion,
+        None,
+        None,
+        &[target(&ev)],
+        &Keys::generate(),
+    )
+    .await
+    .expect("exercise production statements");
     // Explain the exact statements production executes, with their real
     // bindings. Production runs them unnamed (`.persistent(false)`), so they
     // are planned with the bound parameters; the lock test below covers the
@@ -573,7 +620,14 @@ async fn known_canvas_target_uses_canonical_replacement_lock() {
         // No channel: a channel event this old is below the floor.
         let deletion = event(5, MAY, vec![]);
         delete_db
-            .insert_deletion_event(community, &deletion, None, None, &[target(&canvas)])
+            .insert_deletion_event(
+                community,
+                &deletion,
+                None,
+                None,
+                &[target(&canvas)],
+                &Keys::generate(),
+            )
             .await
     });
     // Observe an actual advisory-lock wait, not merely a task that hasn't yet

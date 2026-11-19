@@ -777,6 +777,11 @@ pub async fn execute_kick_with_marker(
 ///
 /// The delete is idempotent: if the event is already deleted the marker is still
 /// committed (soft-delete is already-done = success).
+///
+/// A pinned target leaves its channel's NIP-CP pin list in the same
+/// transaction; the list is re-signed with `relay_signer`. Returns whether
+/// this call committed the marker, and the pin list it rewrote.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_delete_with_marker(
     pool: &PgPool,
     action_id: Uuid,
@@ -785,7 +790,8 @@ pub async fn execute_delete_with_marker(
     target_event_id: &[u8],
     parent_event_id: Option<&[u8]>,
     root_event_id: Option<&[u8]>,
-) -> Result<bool> {
+    relay_signer: &nostr::Keys,
+) -> Result<(bool, Option<buzz_core::StoredEvent>)> {
     let mut tx = crate::begin_community_event_write_transaction(
         pool,
         community_id,
@@ -811,7 +817,7 @@ pub async fn execute_delete_with_marker(
 
     if !owned {
         tx.rollback().await?;
-        return Ok(false);
+        return Ok((false, None));
     }
 
     // Acquire the action-row lock before evaluating the wall-clock expiry check.
@@ -849,6 +855,8 @@ pub async fn execute_delete_with_marker(
         )
         .await?;
     }
+    let pin_list =
+        crate::pins::unpin_deleted_message(&mut tx, target_event_id, relay_signer).await?;
 
     let marker = sqlx::query(
         r#"
@@ -868,11 +876,11 @@ pub async fn execute_delete_with_marker(
 
     if marker.rows_affected() == 0 {
         tx.rollback().await?;
-        return Ok(false);
+        return Ok((false, None));
     }
 
     tx.commit().await?;
-    Ok(true)
+    Ok((true, pin_list))
 }
 
 /// Commit the core mutation step and advance the step_marker to
@@ -2211,8 +2219,10 @@ impl crate::Db {
     }
 
     /// Atomically execute a soft-delete mutation and commit the step marker.
-    /// Returns `true` if this driver committed the marker, `false` if already marked or lease lost.
+    /// Returns `true` if this driver committed the marker, `false` if already marked or lease lost,
+    /// and the NIP-CP pin list the delete rewrote.
     #[datastore_span(name = "execute_delete_with_marker", system = "postgresql")]
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute_delete_with_marker(
         &self,
         action_id: uuid::Uuid,
@@ -2221,7 +2231,8 @@ impl crate::Db {
         target_event_id: &[u8],
         parent_event_id: Option<&[u8]>,
         root_event_id: Option<&[u8]>,
-    ) -> Result<bool> {
+        relay_signer: &nostr::Keys,
+    ) -> Result<(bool, Option<buzz_core::StoredEvent>)> {
         execute_delete_with_marker(
             &self.pool,
             action_id,
@@ -2230,6 +2241,7 @@ impl crate::Db {
             target_event_id,
             parent_event_id,
             root_event_id,
+            relay_signer,
         )
         .await
     }
@@ -3385,9 +3397,11 @@ mod postgres_tests {
                 &nested,
                 Some(&reply),
                 Some(&root),
+                &nostr::Keys::generate(),
             )
             .await
-            .expect("delete");
+            .expect("delete")
+            .0;
             assert!(committed, "each action commits its own marker");
             assert_eq!(
                 counts(&pool, cid, &reply).await,
@@ -3420,9 +3434,11 @@ mod postgres_tests {
             &nested,
             Some(&reply),
             Some(&root),
+            &nostr::Keys::generate(),
         )
         .await
-        .expect("delete");
+        .expect("delete")
+        .0;
         assert!(!committed, "expired lease must not commit");
 
         let deleted: bool = sqlx::query_scalar(
@@ -3487,6 +3503,7 @@ mod postgres_tests {
                 &nr,
                 Some(&pr),
                 Some(&rr),
+                &nostr::Keys::generate(),
             )
             .await
         });
@@ -3555,7 +3572,7 @@ mod postgres_tests {
         // Release the event row without writing a new version.
         locker.rollback().await.expect("release event-row lock");
 
-        let committed = worker.await.expect("worker join").expect("worker result");
+        let committed = worker.await.expect("worker join").expect("worker result").0;
 
         let deleted: bool = sqlx::query_scalar(
             "SELECT deleted_at IS NOT NULL FROM events WHERE community_id = $1 AND id = $2",
@@ -3639,6 +3656,7 @@ mod postgres_tests {
                 &nr,
                 Some(&pr),
                 Some(&rr),
+                &nostr::Keys::generate(),
             )
             .await
         });
@@ -3706,7 +3724,7 @@ mod postgres_tests {
         // Release the row lock without writing a new tuple version.
         locker.rollback().await.expect("release row lock");
 
-        let committed = worker.await.expect("worker join").expect("worker result");
+        let committed = worker.await.expect("worker join").expect("worker result").0;
 
         let deleted: bool = sqlx::query_scalar(
             "SELECT deleted_at IS NOT NULL FROM events WHERE community_id = $1 AND id = $2",
@@ -3752,17 +3770,21 @@ mod postgres_tests {
         let lease_until = Utc::now() + chrono::Duration::seconds(60);
         let (action_id, token) = enforcing_action(&pool, community_id, lease_until).await;
 
-        assert!(execute_delete_with_marker(
-            &pool,
-            action_id,
-            token,
-            cid,
-            &reply,
-            Some(&root),
-            Some(&root)
-        )
-        .await
-        .expect("first delete"));
+        assert!(
+            execute_delete_with_marker(
+                &pool,
+                action_id,
+                token,
+                cid,
+                &reply,
+                Some(&root),
+                Some(&root),
+                &nostr::Keys::generate()
+            )
+            .await
+            .expect("first delete")
+            .0
+        );
         let second = execute_delete_with_marker(
             &pool,
             action_id,
@@ -3771,9 +3793,11 @@ mod postgres_tests {
             &nested,
             Some(&reply),
             Some(&root),
+            &nostr::Keys::generate(),
         )
         .await
-        .expect("second delete");
+        .expect("second delete")
+        .0;
         assert!(!second, "marker already set must roll back");
 
         let deleted: bool = sqlx::query_scalar(
@@ -3794,6 +3818,64 @@ mod postgres_tests {
             counts(&pool, cid, &root).await,
             (0, 1),
             "only the first delete counted"
+        );
+    }
+
+    /// A relay admin's delete of a pinned message takes it out of the
+    /// channel's NIP-CP pin list in the same transaction.
+    /// Mutation: drop the `unpin_deleted_message` call → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn admin_delete_unpins_the_message() {
+        use nostr::{EventBuilder, Keys, Kind};
+
+        let pool = setup_pool().await;
+        let community_id = make_community(&pool).await;
+        let cid = CommunityId::from_uuid(community_id);
+        let [root, _, _] = make_thread(&pool, cid).await;
+        let channel: Uuid =
+            sqlx::query_scalar("SELECT channel_id FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community_id)
+                .bind(&root)
+                .fetch_one(&pool)
+                .await
+                .expect("channel");
+        let relay = Keys::generate();
+        let sign = |kind: u16, keys: &Keys| {
+            EventBuilder::new(Kind::Custom(kind), "")
+                .sign_with_keys(keys)
+                .expect("sign")
+        };
+        let notice = sign(40099, &relay);
+        let pinned = crate::Db::from_pool(pool.clone())
+            .apply_pin_command(
+                cid,
+                channel,
+                &sign(40010, &Keys::generate()),
+                &root,
+                crate::pins::PinChange::Pin { notice: &notice },
+                &relay,
+            )
+            .await
+            .expect("pin");
+        assert!(pinned.list.is_some());
+
+        let lease_until = Utc::now() + chrono::Duration::seconds(60);
+        let (action_id, token) = enforcing_action(&pool, community_id, lease_until).await;
+        let (committed, list) =
+            execute_delete_with_marker(&pool, action_id, token, cid, &root, None, None, &relay)
+                .await
+                .expect("delete");
+        assert!(committed);
+        let list = list.expect("the delete rewrites the pin list");
+        assert_eq!(list.event.pubkey, relay.public_key());
+        assert_eq!(
+            list.event
+                .tags
+                .iter()
+                .map(|tag| tag.as_slice().to_vec())
+                .collect::<Vec<_>>(),
+            [vec!["d".to_owned(), channel.to_string()]]
         );
     }
 

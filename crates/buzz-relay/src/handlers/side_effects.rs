@@ -1015,6 +1015,11 @@ pub async fn validate_admin_event(
                     "artifact removal markers cannot be deleted"
                 ));
             }
+            // Deleting the list would clear a channel's pins without a new
+            // list for subscribers to replace their copy with.
+            if event_kind_u32(&target_event.event) == buzz_core::kind::KIND_CHANNEL_PINS {
+                return Err(anyhow::anyhow!("the pin list cannot be deleted"));
+            }
             Ok(())
         }
         9008 => {
@@ -1077,7 +1082,7 @@ pub async fn emit_system_message(
 }
 
 /// Sign a kind:40099 system message for `channel_id` with the relay keypair.
-fn sign_system_message(
+pub(super) fn sign_system_message(
     state: &Arc<AppState>,
     channel_id: Uuid,
     content: serde_json::Value,
@@ -1094,7 +1099,7 @@ fn sign_system_message(
 
 /// Fan out a stored system message. Best-effort: clients can retrieve the
 /// persisted event.
-async fn fan_out_system_message(
+pub(super) async fn fan_out_system_message(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     channel_id: Uuid,
@@ -3554,10 +3559,20 @@ pub(crate) async fn persist_deletion(
             })
         })
         .collect::<anyhow::Result<_>>()?;
-    let (stored, inserted, deleted) = state
+    let (stored, inserted, deleted, pin_lists) = state
         .db
-        .insert_deletion_event(tenant.community(), event, channel_id, thread_meta, &targets)
+        .insert_deletion_event(
+            tenant.community(),
+            event,
+            channel_id,
+            thread_meta,
+            &targets,
+            &state.relay_keypair,
+        )
         .await?;
+    for list in &pin_lists {
+        super::pins::dispatch_list(tenant, state, list).await;
+    }
 
     let mut repaired = false;
     for (planned, deleted) in planned.iter().zip(deleted) {

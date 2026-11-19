@@ -28,13 +28,14 @@ use buzz_core::kind::{
     KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
     KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
     KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
-    KIND_PRESENCE_UPDATE, KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE,
-    KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT, KIND_SOLO_MEMBER_ROLE,
+    KIND_PIN_MESSAGE, KIND_PRESENCE_UPDATE, KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK,
+    KIND_PROFILE, KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT, KIND_SOLO_MEMBER_ROLE,
     KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
     KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
     KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE,
-    KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER,
-    RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_UNPIN_MESSAGE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
+    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -641,6 +642,8 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_STREAM_MESSAGE_SCHEDULED
         | KIND_STREAM_REMINDER
         | KIND_STREAM_MESSAGE_DIFF
+        | KIND_PIN_MESSAGE
+        | KIND_UNPIN_MESSAGE
         | KIND_FORUM_POST
         | KIND_FORUM_VOTE
         | KIND_FORUM_COMMENT => Ok(Scope::MessagesWrite),
@@ -892,6 +895,8 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_STREAM_MESSAGE_SCHEDULED
             | KIND_STREAM_REMINDER
             | KIND_STREAM_MESSAGE_DIFF
+            | KIND_PIN_MESSAGE
+            | KIND_UNPIN_MESSAGE
             | KIND_CANVAS
             | KIND_FORUM_POST
             | KIND_FORUM_VOTE
@@ -2703,8 +2708,16 @@ async fn ingest_event_inner(
         ));
     }
 
+    // NIP-CP: with the switch off, the commands are refused as kinds this
+    // relay does not know, which is what a relay without NIP-CP answers.
+    let pin_command = matches!(kind_u32, KIND_PIN_MESSAGE | KIND_UNPIN_MESSAGE);
     let required = match required_scope_for_kind(kind_u32, &event) {
-        Ok(scope) => scope,
+        Ok(scope) if !pin_command || state.config.pins_enabled => scope,
+        Ok(_) => {
+            return Err(IngestError::Rejected(
+                "restricted: unknown event kind".into(),
+            ))
+        }
         Err(msg) => return Err(IngestError::Rejected(msg.into())),
     };
     // NIP-43: relay admin commands are global — channel-scoped tokens cannot
@@ -3449,7 +3462,11 @@ async fn ingest_event_inner(
 
     validate_event_imeta(tenant, state, &event, &tenant_media_base).await?;
 
-    let thread_meta = if kind_u32 != KIND_SOLO_MEMBER_ROLE && requires_h_channel_scope(kind_u32) {
+    // A pin command's `e` tag names its target, not a thread parent.
+    let thread_meta = if kind_u32 != KIND_SOLO_MEMBER_ROLE
+        && !pin_command
+        && requires_h_channel_scope(kind_u32)
+    {
         if let Some(ch_id) = channel_id {
             resolve_nip10_thread_meta(tenant.community(), &event, ch_id, state)
                 .await
@@ -3715,6 +3732,8 @@ async fn ingest_event_inner(
         (stored, inserted)
     } else if kind_u32 == KIND_SOLO_MEMBER_ROLE {
         super::solo_member_role::persist(tenant, state, &event).await?
+    } else if pin_command {
+        super::pins::persist(tenant, state, &event).await?
     } else if kind_u32 == KIND_NIP29_REMOVE_USER {
         let thread_params = thread_meta.as_ref().map(|m| m.as_params());
         crate::handlers::side_effects::persist_remove_user(tenant, &event, state, thread_params)
