@@ -698,7 +698,7 @@ void main() {
               'offline-clear': (true, (t - 1) * 1000),
               'equal-clear': (true, t * 1000),
               'changed-by-peer': (false, t * 1000),
-              'already-current': (true, t - 2),
+              'already-current': (true, t - 1),
             }),
             t,
           ),
@@ -736,7 +736,7 @@ void main() {
           'same-second-absent': {lane.field: true, 'updatedAt': t * 1000},
           'equal-clear': {lane.field: false, 'updatedAt': t * 1000 + 1},
           'changed-by-peer': {lane.field: false, 'updatedAt': t * 1000},
-          'already-current': {lane.field: true, 'updatedAt': t - 2},
+          'already-current': {lane.field: true, 'updatedAt': t - 1},
         });
       });
 
@@ -789,6 +789,86 @@ void main() {
 
       Map readFlagCache() =>
           jsonDecode(prefs.getString(legacyCacheKey())!) as Map;
+
+      void seedLegacyEnable(Map<String, (bool, int)> snapshot) {
+        unawaited(
+          prefs.setString(legacyCacheKey(), jsonEncode(blob({'x': (true, t)}))),
+        );
+        relay.stored.add(relay.event(lane.dTag, blob(snapshot), t));
+      }
+
+      for (final path in ['live', 'writer read', 'rebuild']) {
+        fakeAsyncTest('migration keeps the newer enable through $path', (
+          clock,
+        ) {
+          seedLegacyEnable({'x': (true, (t - 4) * 1000)});
+          start(clock);
+          final enable = {lane.field: true, 'updatedAt': t * 1000};
+          expect(readFlagCache()['pending']['x'], enable);
+          expect(relay.published, isEmpty);
+
+          if (path == 'rebuild') {
+            subject.dispose();
+            start(clock);
+            expect(readFlagCache()['pending']['x'], enable);
+          }
+          final staleClear = relay.event(
+            lane.dTag,
+            blob({'x': (false, t - 2)}),
+            t + 1,
+          );
+          relay.stored.add(staleClear);
+          if (path == 'writer read') {
+            final ok = relay.holdOk = Completer<void>();
+            clock.elapse(const Duration(seconds: 5));
+            expect(subject.values()['x'], isTrue);
+            relay.holdOk = null;
+            ok.complete();
+            clock.flushMicrotasks();
+          } else {
+            relay.emit(staleClear);
+            clock.elapse(const Duration(milliseconds: 20));
+            expect(subject.values()['x'], isTrue);
+            clock.elapse(const Duration(seconds: 5));
+          }
+          final payload = relay.decrypt(relay.published.single) as Map;
+          expect(payload['channels']['x'], enable);
+          expect(subject.values()['x'], isTrue);
+          expect(readFlagCache()['pending'], isEmpty);
+        });
+      }
+
+      for (final offset in [0, 1]) {
+        fakeAsyncTest(
+          'migration skips an ${offset == 0 ? 'equal' : 'already newer'} enable',
+          (clock) {
+            final remoteMillis = (t + offset) * 1000;
+            seedLegacyEnable({'x': (true, remoteMillis)});
+            start(clock);
+            clock.elapse(const Duration(seconds: 6));
+            expect(relay.published, isEmpty);
+            expect(readFlagCache()['pending'], isEmpty);
+            expect(readFlagCache()['channels']['x']['updatedAt'], remoteMillis);
+          },
+        );
+      }
+
+      fakeAsyncTest('migration updates an older enable at the cap', (clock) {
+        final full = {
+          for (var i = 0; i < 499; i++) 'active-$i': (true, t),
+          'x': (true, t - 4),
+        };
+        seedLegacyEnable(full);
+        start(clock);
+        clock.elapse(const Duration(seconds: 5));
+        final payload = relay.decrypt(relay.published.single) as Map;
+        expect(payload['channels'].keys, unorderedEquals(full.keys));
+        expect(payload['channels']['x'], {
+          lane.field: true,
+          'updatedAt': t * 1000,
+        });
+        expect(readFlagCache()['pending'], isEmpty);
+      });
 
       void seedLegacyClear({int? clearAt, int? writerClearAt}) {
         unawaited(

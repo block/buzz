@@ -229,11 +229,15 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
       }
       final remote = snapshot[local.key];
       final localMillis = sidebarFlagTimeMillis(local.value.updatedAt);
-      final changed = remote == null
-          ? localMillis >= firstLaterMillis
-          : !remote.enabled &&
-                localMillis >= sidebarFlagTimeMillis(remote.updatedAt);
-      if (changed) _pending[local.key] = _entry(true, localMillis);
+      final remoteMillis = remote == null
+          ? firstLaterMillis
+          : sidebarFlagTimeMillis(remote.updatedAt);
+      // A newer enable still matters when the current values agree. Its
+      // timestamp protects it if a delayed clear arrives before the write.
+      if (localMillis > remoteMillis ||
+          (localMillis == remoteMillis && remote?.enabled != true)) {
+        _pending[local.key] = _entry(true, localMillis);
+      }
     }
     _head = head;
     _headNeedsWrite = head != null;
