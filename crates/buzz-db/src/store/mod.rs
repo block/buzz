@@ -62,6 +62,8 @@ pub mod operator_listener;
 pub mod partition;
 /// Private signer-owned accessory read progress.
 pub mod personal_read;
+/// NIP-CP channel pin list persistence.
+pub mod pins;
 /// Buzz product-feedback sidecar persistence.
 pub mod product_feedback;
 /// Community-scoped push lease and durable wake-outbox persistence.

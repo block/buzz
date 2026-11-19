@@ -129,6 +129,7 @@ jobs:
             --test e2e_event_reminder \
             --test e2e_author_only_deletion \
             --test e2e_existence_oracle \
+            --test e2e_channel_pins \
             --archive-file target/ci/backend-integration-tests.tar.zst
       - name: Build PostgreSQL test archive
         if: steps.relay-artifacts-cache.outputs.cache-hit != 'true' && matrix.artifact == 'postgres-tests'
@@ -624,6 +625,7 @@ jobs:
             BUZZ_REQUIRE_AUTH_TOKEN=false \
             BUZZ_RECONCILE_CHANNELS=true \
             BUZZ_GIT_PROBE_WRITERS=8 \
+            BUZZ_PINS_ENABLED=true \
             SPROUT_REMINDER_SCHEDULER_INTERVAL_SECS=1 \
             ./target/ci/buzz-relay > /tmp/buzz-relay.log 2>&1 &
           echo $! > /tmp/buzz-relay.pid
@@ -648,7 +650,7 @@ jobs:
         run: |
           cargo nextest run \
             --archive-file target/ci/backend-integration-tests.tar.zst \
-            -E 'binary(e2e_event_reminder) | binary(e2e_author_only_deletion) | binary(e2e_existence_oracle)' \
+            -E 'binary(e2e_event_reminder) | binary(e2e_author_only_deletion) | binary(e2e_existence_oracle) | binary(e2e_channel_pins)' \
             --run-ignored ignored-only
         env:
           RELAY_URL: ws://localhost:3000

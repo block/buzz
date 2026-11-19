@@ -48,6 +48,9 @@ pub mod moderation_commands;
 pub mod moderation_notices;
 /// Multi-node fan-out: Redis events to local subscribers, with lossless lag handling.
 pub mod multinode_fanout;
+mod pins;
+#[cfg(test)]
+mod pins_postgres_tests;
 /// Product-feedback validation + deployment sidecar persistence.
 pub mod product_feedback;
 #[allow(dead_code, missing_docs)]
