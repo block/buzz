@@ -84,25 +84,25 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
     let chars: Vec<char> = text.chars().collect();
     let mut consumed = vec![false; chars.len()];
 
-    // Lowercasing and canonical decomposition can expand characters. Count the
-    // matching span in original coordinates, then normalize that whole span so
-    // combining marks can reorder across character boundaries. Never index the
-    // original text with normalized offsets.
+    // Normalize once, not a candidate-length span at every `@`. Prefix lengths
+    // map back to original boundaries without splitting an expanded character.
+    // Reordering cannot cross `@` or a valid right boundary (no combining mark).
+    let folded_chars: Vec<char> = text.chars().flat_map(char::to_lowercase).nfd().collect();
+    let folded_offsets: Vec<usize> = std::iter::once(0)
+        .chain(chars.iter().scan(0, |offset, c| {
+            *offset += c.to_lowercase().nfd().count();
+            Some(*offset)
+        }))
+        .collect();
     let match_name_len = |start: usize, folded_name: &[char]| -> Option<usize> {
-        let mut ci = start;
-        let mut ni = 0;
-        while ni < folded_name.len() {
-            let c = *chars.get(ci)?;
-            ni += c.to_lowercase().nfd().count();
-            ci += 1;
+        let offset = folded_offsets[start];
+        if !folded_chars[offset..].starts_with(folded_name) {
+            return None;
         }
-        chars[start..ci]
-            .iter()
-            .copied()
-            .flat_map(char::to_lowercase)
-            .nfd()
-            .eq(folded_name.iter().copied())
-            .then_some(ci - start)
+        folded_offsets
+            .binary_search(&(offset + folded_name.len()))
+            .ok()
+            .map(|end| end - start)
     };
 
     // A mention is anchored on `@` at a left boundary (start / whitespace / `(`)
@@ -795,6 +795,8 @@ mod tests {
             ("Jose\u{0301}", "@JOSÉ! @Robby", true),
             ("a\u{0301}\u{0323}", "@a\u{0323}\u{0301}! @Robby", true),
             ("각", "@\u{1100}\u{1161}\u{11a8}! @Robby", true),
+            ("\u{1100}", "@각! @Robby", false),
+            ("José", "İ 각 @Jose\u{0301}! @Robby", true),
             ("José", "@Jose\u{0301}x @Robby", false),
             ("Jose", "@Jose\u{0301} @Robby", false),
             ("José", "@Jose\u{0301}@Robby @Robby", true),

@@ -363,7 +363,9 @@ simple and testable.
 Workflow mention candidates include ordinary display names and verified
 `display_name`, `username`, and `full_name` aliases for destination-channel
 members in the same community. Matching and collision detection lowercase and
-canonically normalize aliases. Alias collisions across distinct keys, including
+canonically normalize aliases. Message text is normalized once per resolution,
+with offsets preserving original-character boundaries rather than normalizing
+again for each alias attempt. Alias collisions across distinct keys, including
 ordinary names colliding with verified aliases, deliberately produce no recipient
 or delegated agent-wake tag for that name rather than redirecting the mention or
 notifying every matching member. Verified-only profiles do not require a separate
