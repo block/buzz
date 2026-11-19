@@ -10,12 +10,16 @@ class ChannelMutesState {
   final bool isReady;
   final ChannelMuteStore store;
 
+  /// Relay-confirmed mutes used to suppress channel row dots.
+  final Set<String> confirmedMutedChannelIds;
+
   /// Bumped on every change to force downstream rebuilds.
   final int version;
 
   const ChannelMutesState({
     this.isReady = false,
     this.store = const ChannelMuteStore(),
+    this.confirmedMutedChannelIds = const {},
     this.version = 0,
   });
 }
@@ -96,6 +100,7 @@ class ChannelMutesNotifier extends Notifier<ChannelMutesState> {
     state = ChannelMutesState(
       isReady: _isInitialized,
       store: manager.store,
+      confirmedMutedChannelIds: manager.confirmedMutedChannelIds,
       version: state.version + 1,
     );
   }

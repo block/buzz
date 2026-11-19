@@ -40,6 +40,7 @@ class ChannelMutesManager {
 
   ChannelMuteStore _store;
   ChannelMuteStore? _lastPublishedStore;
+  Set<String> _confirmedMutedChannelIds = const {};
   Timer? _publishDebounce;
   int _lastRemoteCreatedAt = 0;
   String? _lastRemoteEventId;
@@ -78,6 +79,9 @@ class ChannelMutesManager {
        _store = ChannelMutesStorage(prefs).read(pubkey, relayUrl);
 
   ChannelMuteStore get store => _store;
+
+  /// Mutes in a relay head observed or acknowledged by this session.
+  Set<String> get confirmedMutedChannelIds => _confirmedMutedChannelIds;
 
   Future<void> initialize() async {
     if (_disposed) return;
@@ -281,6 +285,16 @@ class ChannelMutesManager {
       (createdAt == _lastRemoteCreatedAt &&
           id.compareTo(_lastRemoteEventId ?? '') < 0);
 
+  void _confirmHead(int createdAt, String id, ChannelMuteStore store) {
+    if (!_isAfterCursor(createdAt, id)) return;
+    _lastRemoteCreatedAt = createdAt;
+    _lastRemoteEventId = id;
+    _confirmedMutedChannelIds = Set.unmodifiable({
+      for (final entry in store.channels.entries)
+        if (entry.value.muted) entry.key,
+    });
+  }
+
   /// Returns false only when a newer head could not be persisted; the cursor
   /// then stays put so the same head is retried. An undecodable head is
   /// skipped without holding startup open.
@@ -293,11 +307,13 @@ class ChannelMutesManager {
         continue;
       }
       if (!_isAfterCursor(event.createdAt, event.id)) continue;
+      final ChannelMuteStore remote;
       try {
         final parsed = jsonDecode(_crypto.decrypt(event.content));
         if (parsed is! Map<String, dynamic>) throw const FormatException();
+        remote = ChannelMuteStore.fromJson(parsed);
         // Per-channel merge: keep the entry with the highest updatedAt.
-        _store = mergeStores(_store, ChannelMuteStore.fromJson(parsed));
+        _store = mergeStores(_store, remote);
       } catch (error) {
         debugPrint('[ChannelMutesManager] undecodable head: $error');
         continue;
@@ -306,10 +322,7 @@ class ChannelMutesManager {
         applied = false;
         continue;
       }
-      if (_isAfterCursor(event.createdAt, event.id)) {
-        _lastRemoteCreatedAt = event.createdAt;
-        _lastRemoteEventId = event.id;
-      }
+      _confirmHead(event.createdAt, event.id, remote);
     }
     return applied;
   }
@@ -354,12 +367,12 @@ class ChannelMutesManager {
     if (_isIdenticalToLastPublished() || !_servesThisCommunity) return;
 
     try {
-      final payload = jsonEncode(_store.toJson());
+      final publishedStore = _store;
+      final payload = jsonEncode(publishedStore.toJson());
       final ciphertext = _crypto.encrypt(payload);
       final createdAt = max(currentUnixSeconds(), _lastRemoteCreatedAt + 1);
 
-      String? signedId;
-      await _signedEventRelay.submit(
+      final receipt = await _signedEventRelay.submit(
         kind: EventKind.readState,
         content: ciphertext,
         tags: [
@@ -367,17 +380,14 @@ class ChannelMutesManager {
           ['t', 'channel-mutes'],
         ],
         createdAt: createdAt,
-        onSigned: (event) => signedId = event.id,
       );
 
       // Keep the cursor a coherent (created_at, id) pair so an OK that beats
       // its own echo cannot make later same-second heads compare against a
       // stale ID. A newer head learned during the await stays.
-      if (signedId != null && _isAfterCursor(createdAt, signedId!)) {
-        _lastRemoteCreatedAt = createdAt;
-        _lastRemoteEventId = signedId;
-      }
-      _lastPublishedStore = ChannelMuteStore(channels: Map.of(_store.channels));
+      _confirmHead(createdAt, receipt.id, publishedStore);
+      _lastPublishedStore = publishedStore;
+      if (!_disposed) _onChanged();
     } catch (error) {
       debugPrint('[ChannelMutesManager] publish failed: $error');
     }

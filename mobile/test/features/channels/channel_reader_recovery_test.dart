@@ -162,6 +162,55 @@ void main() {
   setUp(() async => prefs = await freshPrefs());
   wholeBlobLanes(() => prefs);
 
+  fakeAsyncTest('channel mute confirmation follows the relay head and OK', (
+    clock,
+  ) {
+    final relay = SidebarRelay();
+    final manager = ChannelMutesManager(
+      pubkey: relay.pubkey,
+      relayUrl: 'https://relay.example',
+      prefs: prefs,
+      crypto: ChannelMutesCrypto(relay.keys.nsec, relay.pubkey),
+      relaySession: relay.session,
+      signedEventRelay: relay.signer,
+      remoteEnabled: true,
+      onChanged: () {},
+    );
+    try {
+      relay.stored.add(
+        relay.event('channel-mutes', {
+          'version': 1,
+          'channels': {
+            'peer': {'muted': true, 'updatedAt': 1},
+          },
+        }, nowSeconds()),
+      );
+      unawaited(manager.initialize());
+      clock.flushMicrotasks();
+      expect(manager.confirmedMutedChannelIds, {'peer'});
+
+      final ok = Completer<void>();
+      relay.holdOk = ok;
+      manager.muteChannel('local');
+      expect(manager.confirmedMutedChannelIds, {'peer'});
+      clock.elapse(const Duration(seconds: 5));
+      expect(relay.published, hasLength(1));
+      expect(manager.confirmedMutedChannelIds, {'peer'});
+
+      manager.unmuteChannel('local');
+      ok.complete();
+      relay.holdOk = null;
+      clock.flushMicrotasks();
+      expect(manager.confirmedMutedChannelIds, {'peer', 'local'});
+
+      clock.elapse(const Duration(seconds: 5));
+      expect(relay.published, hasLength(2));
+      expect(manager.confirmedMutedChannelIds, {'peer'});
+    } finally {
+      manager.dispose(flushPending: false);
+    }
+  });
+
   for (final MapEntry(key: dTag, value: head) in _missedHeads.entries) {
     fakeAsyncTest('$dTag provider re-reads a missed head on resume', (clock) {
       final relay = SidebarRelay();
