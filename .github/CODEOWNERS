@@ -1,2 +1,12 @@
 * @block/buzz-oss-team
 /VISION_MOBILE.md @brow
+
+# Relay database migrations and desired-state schema.
+/migrations/ @TheSentinel454 @wpfleger96 @bradseiler @salman1993 @ravarora2
+/schema/ @TheSentinel454 @wpfleger96 @bradseiler @salman1993 @ravarora2
+/scripts/reconcile-schema-after-pgschema.sql @TheSentinel454 @wpfleger96 @bradseiler @salman1993 @ravarora2
+/.pgschemaignore @TheSentinel454 @wpfleger96 @bradseiler @salman1993 @ravarora2
+
+# Relay and relay database crates.
+/crates/buzz-relay/ @TheSentinel454 @wpfleger96 @bradseiler @salman1993 @ravarora2
+/crates/buzz-db/ @TheSentinel454 @wpfleger96 @bradseiler @salman1993 @ravarora2

@@ -292,6 +292,7 @@ class _SystemMessageRow extends HookConsumerWidget {
                     RepaintBoundary(
                       key: spotlightKey,
                       child: _HuddleJoinSurface(
+                        isOwn: ownHuddle,
                         message: message,
                         allMessages: allMessages ?? const [],
                         parentChannelId: channelId,

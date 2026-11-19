@@ -45,3 +45,17 @@ skip it, so the owner is not notified by every run of their workflow. When a
 workflow mentions its owner, the relay adds a plain `["p", <owner>]`, which
 notifies them like any mention. Mobile's Activity feed, unread mention priority
 and in-app notification rule apply the same rule.
+
+## Channel access
+
+A lease wakes for a channel's events only when its author is a member, with
+one exception: a message that `p`-tags a non-member wakes that non-member when
+the channel is listed (open, not unlisted, a stream or forum). Workflow owner
+attribution does not count as a mention. The relay checks this when it matches
+and again before delivery, so a channel that becomes private or unlisted in
+between stops the wake. Delivery also applies the connection gate to the
+non-member: a ban on them or their agent's owner stops the wake, and so does
+losing community membership or their allowlist entry when the relay requires
+one. Private channels, unlisted channels, DMs and system channels still require
+membership. Anyone in the community can already read a listed channel with
+`REQ`, so the exception wakes no one for content they cannot read.
