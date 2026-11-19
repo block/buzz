@@ -277,8 +277,7 @@ pub(crate) async fn run(
 ) -> Result<Value, CliError> {
     match action {
         Action::List => {
-            let (_, mut store) = fetch_store(spec, client).await?;
-            bound(spec, &mut store, &[]);
+            let (_, store) = fetch_store(spec, client).await?;
             let on: Vec<&String> = store
                 .iter()
                 .filter(|(_, entry)| entry.on)
@@ -549,19 +548,8 @@ mod tests {
         assert!(!channels.contains_key(&format!("{:036}", 0)));
         assert!(channels.contains_key(&format!("{:036}", 1)));
 
-        // Listing an oversized head shows the same bounded view as an edit.
-        let (client, relay) = setup().await;
-        seed(
-            &client,
-            &relay,
-            &STARS,
-            json!({"version": 1, "channels": entries(520, "starred", 100)}),
-            10,
-        );
-        let list = run(&STARS, Action::List, &client).await.unwrap();
-        assert_eq!(list["channels"].as_array().unwrap().len(), 500);
-
         // An edit that would evict its own entries is refused.
+        let before = published_count(&relay);
         let ids: Vec<String> = (0..501)
             .map(|i| format!("ffffffff-0000-4000-8000-{i:012}"))
             .collect();
@@ -569,7 +557,33 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, CliError::Usage(_)), "{err:?}");
-        assert_eq!(published_count(&relay), 1);
+        assert_eq!(published_count(&relay), before);
+    }
+
+    #[tokio::test]
+    async fn lists_all_active_flags_in_an_oversized_head() {
+        for spec in [&STARS, &MUTES] {
+            let (client, relay) = setup().await;
+            let mut channels = entries(500, spec.flag, 100);
+            channels[C2] = json!({spec.flag: true, "updatedAt": 99});
+            seed(
+                &client,
+                &relay,
+                spec,
+                json!({"version": 1, "channels": channels}),
+                10,
+            );
+
+            let list = run(spec, Action::List, &client).await.unwrap();
+            let ids = list["channels"].as_array().unwrap();
+            assert_eq!(ids.len(), 501);
+            assert!(ids.contains(&json!(C2)));
+            assert_eq!(
+                run(spec, set(&[C2], true), &client).await.unwrap(),
+                sidebar_sync::unchanged()
+            );
+            assert_eq!(published_count(&relay), 1);
+        }
     }
 
     #[tokio::test]

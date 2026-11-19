@@ -21,8 +21,10 @@ class SidebarRelay {
   }
 
   final keys = nostr.Keys.generate();
+  final rateLimitGate = RelayRateLimitGate();
   late final session = ConnectedRelaySession(
     httpClient: MockClient(_handleHttp),
+    rateLimitGate: rateLimitGate,
   );
   late final signer = SignedEventRelay(session: session, nsec: keys.nsec);
   final _storedByRelay = <String?, List<NostrEvent>>{};
@@ -262,7 +264,7 @@ class SidebarRelay {
 }
 
 class ConnectedRelaySession extends RelaySessionNotifier {
-  ConnectedRelaySession({super.httpClient})
+  ConnectedRelaySession({super.httpClient, super.rateLimitGate})
     : super(
         snapshotDecoder: (input) async => validateReadStateSnapshot(input),
         queryDecoder: (response) async => parseRelayQueryEvents(

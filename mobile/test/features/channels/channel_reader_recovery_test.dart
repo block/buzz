@@ -1137,6 +1137,38 @@ void main() {
         expect(payload['channels']['unrelated'][lane.field], isTrue);
       });
 
+      fakeAsyncTest('a publish delayed by rate limiting preserves peer flags', (
+        clock,
+      ) {
+        relay.stored.add(relay.event(lane.dTag, blob({}), t));
+        start(clock).set('local', true);
+
+        final preflight = relay.holdWriterResponse = Completer<void>();
+        clock.elapse(const Duration(seconds: 5));
+        expect(relay.writerQueries, [lane.dTag]);
+        relay.rateLimitGate.activate(3);
+        relay.holdWriterResponse = null;
+        preflight.complete();
+        clock.flushMicrotasks();
+        expect(relay.published, isEmpty);
+
+        final peer = relay.event(lane.dTag, blob({'peer': (true, t)}), t + 1);
+        relay.stored.add(peer);
+        relay.emit(peer);
+        clock.elapse(const Duration(milliseconds: 20));
+        expect(subject.values(), {'local': true, 'peer': true});
+
+        clock.elapse(const Duration(seconds: 3));
+        expect(relay.published, isEmpty);
+        expect(readFlagCache()['pending']['local'][lane.field], isTrue);
+
+        clock.elapse(const Duration(seconds: 4));
+        final payload = relay.decrypt(relay.published.single) as Map;
+        expect(payload['channels']['local'][lane.field], isTrue);
+        expect(payload['channels']['peer'], {lane.field: true, 'updatedAt': t});
+        expect(readFlagCache()['pending'], isEmpty);
+      });
+
       for (final source in ['legacy clear', 'promoted again', 'fresh tap']) {
         fakeAsyncTest(
           'superseded readback preserves a pending clear ($source)',

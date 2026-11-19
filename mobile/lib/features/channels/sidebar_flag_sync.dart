@@ -458,7 +458,8 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
           ['t', _coordinate],
         ],
         createdAt: max(currentUnixSeconds(), (head?.createdAt ?? 0) + 1),
-        mayPublish: () async => _active,
+        // The relay can wait for its rate limiter before calling this.
+        mayPublish: () async => _active && _head?.id == head?.id,
       );
       final (retained, confirmed) = await _writerHead();
       if (retained != null && (_head == null || !_isNewer(_head!, retained))) {
