@@ -996,14 +996,6 @@ async fn channel_window_routes_head_to_writer_and_cursor_pages_to_replica() {
 
     // Shared history (both databases): m1 < m2 < m3.
     let base = 1_700_000_000u64;
-    for pool in [&writer, &replica] {
-        sqlx::query("UPDATE channels SET created_at = $1 WHERE id = $2")
-            .bind(chrono::DateTime::from_timestamp(base as i64 - 3600, 0).unwrap())
-            .bind(channel)
-            .execute(pool)
-            .await
-            .expect("date the channel before its history");
-    }
     let m1 = signed_event_at(&author, "m1", base);
     let m2 = signed_event_at(&author, "m2", base + 10);
     let m3 = signed_event_at(&author, "m3", base + 20);
@@ -1020,7 +1012,7 @@ async fn channel_window_routes_head_to_writer_and_cursor_pages_to_replica() {
     let marker = signed_event_at(&author, "replica-only-marker", base + 5);
     insert_top_level(&replica, community, channel, &marker).await;
 
-    let db = Db::from_pools(writer.clone(), replica.clone());
+    let mut db = Db::from_pools(writer.clone(), replica.clone());
     // Open the fence through "now": the fixture's history is far in the
     // past, so every cursor falls below the fence and routing is
     // eligible. Fence-gating itself is pinned by the fence tests below.
@@ -1064,8 +1056,12 @@ async fn channel_window_routes_head_to_writer_and_cursor_pages_to_replica() {
         "cursor page must be served by the replica"
     );
 
-    // Newer cursor page → writer: it reads up to the newest row, which no
-    // cursor bound proves, so it sees `fresh` and never `marker`.
+    // Newer cursor page → writer, always: a continuation on a replica that
+    // has yet to replay a probed row would end the walk early. It sees
+    // `fresh` and never `marker`, and reads the history dated before the
+    // channel was created. The head budget, which would let a head fetch
+    // read the replica, does not apply to it.
+    db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(3600)));
     let (newer, session) = db
         .get_channel_window_with_session(
             cid,

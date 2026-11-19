@@ -150,8 +150,9 @@ Both kinds are relay-only: client submission is rejected at ingest.
 - Reconnect refetches page 0 and re-arms the live subscription
   (`since: now`); deeper pages need no repair path. An oldest-first
   (`direction: "newer"`) reader follows NIP-CW's direction rules instead:
-  its subscription starts before the scan, and on reconnect it reads the
-  newest rows it missed newest first.
+  a live subscription with no `since`, established before the scan, or a
+  repair read of the crossed range once the scan reaches the newest rows;
+  on reconnect it reads the newest rows it missed newest first.
 - Replies never enter the channel timeline; the thread panel uses the
   existing `thread_cursor` surface (#1418). Thread filters may opt into
   `include_aux` to append the same authorized two-hop reactions, edits, and

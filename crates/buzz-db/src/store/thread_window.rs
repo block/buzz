@@ -222,9 +222,11 @@ async fn writer_window(
 impl Db {
     /// Thread page and its proved replica transaction. Older cursors supply
     /// an upper bound, including terminal pages; no forward thread "last
-    /// delivered row is newest" inference is used. Head and newer pages read
-    /// up to the newest reply, which no cursor bounds, so their routing
-    /// inherits the existing default-off budget. Writer follow-ups are pooled,
+    /// delivered row is newest" inference is used. Head pages read up to the
+    /// newest reply, which no cursor bounds, so their routing inherits the
+    /// existing default-off budget. Newer pages always read the writer: a
+    /// continuation on a replica that has yet to replay a row the previous
+    /// page probed would end the walk early. Writer follow-ups are pooled,
     /// not a snapshot spanning the response or subsequent history pages. The
     /// caller must share `budget` with every window and auxiliary scan in the request.
     #[datastore_span(name = "get_thread_window", system = "postgresql")]
@@ -240,14 +242,21 @@ impl Db {
             (Direction::Older, None) => ("thread_window_head", None),
             (Direction::Older, cursor) => ("thread_window_cursor", cursor),
         };
-        if let RouteDecision::Replica(mut tx, _, reason) = self
-            .route_read(
-                path,
-                RoutePredicate::from_channel_cursor(request.channel, &covered),
-                crate::observability::ReaderOperation::SubscriptionHistory,
-            )
-            .await?
-        {
+        let route = match request.direction {
+            Direction::Newer => {
+                Self::record_route(path, "writer", "forward_scan");
+                RouteDecision::Writer
+            }
+            Direction::Older => {
+                self.route_read(
+                    path,
+                    RoutePredicate::from_channel_cursor(request.channel, &covered),
+                    crate::observability::ReaderOperation::SubscriptionHistory,
+                )
+                .await?
+            }
+        };
+        if let RouteDecision::Replica(mut tx, _, reason) = route {
             let result = async {
                 set_deadline(&mut tx).await?;
                 select_window(&mut tx, community, request, budget).await
