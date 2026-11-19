@@ -65,9 +65,9 @@ Both modes accept an optional `direction` field: `"older"` (the default) or `"ne
 | cursor fields | `until` + `before_id` | `after` + `after_id` |
 | rows after cursor `(ts, id)` | `created_at < ts OR (created_at = ts AND id > id)` | `created_at > ts OR (created_at = ts AND id < id)` |
 
-The `"newer"` order is the exact reverse of the `"older"` order, so a client can read a channel or thread from both ends and meet without a gap or an overlap, as long as no rows are being written. A relay can accept a row whose `created_at` is in the past (the Buzz relay accepts up to 900 seconds), so a row written after a `"newer"` page was served can sort behind that page's cursor and never appear on a later page. Near the newest rows, `has_more: false` therefore means the read caught up when it ran. A client that reads oldest first up to the present keeps a live subscription, or reads the newest stretch again. `after` and `after_id` have the same grammar and rules as `until` and `before_id`: both or neither, `after` a non-negative integer of unix seconds, `after_id` exactly 64 hexadecimal characters. A `"newer"` request with `until` or `before_id`, or an `"older"` request (or one without `direction`) with `after` or `after_id`, MUST be rejected. `next_cursor` is the scan position in the request's own order; the client echoes it in that direction's cursor fields. `limit`, `kinds`, `has_more`, the aux closure and summaries mean the same in both directions.
+The `"newer"` order is the exact reverse of the `"older"` order, so a client can read a channel or thread from both ends and meet without a gap or an overlap, as long as no rows are being written. A relay can accept a row whose `created_at` is in the past (the Buzz relay accepts up to 900 seconds), so a row written after a `"newer"` page was served can sort behind that page's cursor and never appear on a later page. Near the newest rows, `has_more: false` therefore means the read caught up when it ran. A client that reads oldest first up to the present either reads the newest stretch again or keeps a live subscription that starts before the scan: live delivery also drops rows older than the subscription's `since`, so its `since` MUST be at least as far before the first page's request as the relay accepts past timestamps (900 seconds for Buzz). A subscription with `since: now` misses the same late rows. `after` and `after_id` have the same grammar and rules as `until` and `before_id`: both or neither, `after` a non-negative integer of unix seconds, `after_id` exactly 64 hexadecimal characters. A `"newer"` request with `until` or `before_id`, or an `"older"` request (or one without `direction`) with `after` or `after_id`, MUST be rejected. `next_cursor` is the scan position in the request's own order; the client echoes it in that direction's cursor fields. `limit`, `kinds`, `has_more`, the aux closure and summaries mean the same in both directions.
 
-A relay that supports `"newer"` SHOULD advertise `"buzz-window-newer"` in its NIP-11 `supported_extensions`. A client MUST NOT send `direction`, `after`, `after_id` or `root_aux` to a relay that does not advertise it; without it, the client reads newest first only.
+A relay that supports `"newer"` SHOULD advertise `"buzz-window-newer"` in its NIP-11 `supported_extensions`. A client MUST NOT send `direction`, `after` or `after_id` to a relay that does not advertise it; without it, the client reads newest first only.
 
 ## Channel-mode Request
 
@@ -186,7 +186,7 @@ Exactly one per served window response. The **only** authority on exhaustion. Ta
 1. **Head request**: send the window filter with no cursor. Render rows in received order.
 2. **Continue**: read `kind:39006`; if `has_more`, send the same filter with `until = next_cursor.created_at`, `before_id = next_cursor.id` (`after` and `after_id` for `"newer"`). Repeat until `has_more = false`.
 3. **Exhaustion**: `39006.has_more` is the only exhaustion signal. `rows < limit` proves nothing — an exact-multiple final page returns `limit` rows with `has_more = false`, and predicate filtering can shrink any page. A client MUST NOT stop paging on row count, and MUST NOT treat a full page as "more available."
-4. **Immutability**: fetched pages are immutable history chained cursor→cursor. New live events MUST NOT be spliced into fetched pages; deliver them through a separate live subscription (`since: now`) and merge at render time. On reconnect, refetch the head page and re-arm the live subscription; deeper pages need no repair.
+4. **Immutability**: fetched pages are immutable history chained cursor→cursor. New live events MUST NOT be spliced into fetched pages; deliver them through a separate live subscription (`since: now`) and merge at render time. On reconnect, refetch the head page and re-arm the live subscription; deeper pages need no repair. A `"newer"` reader instead starts its subscription before the scan, as §Direction says, and its head page holds the oldest rows: on reconnect it reads the newest rows it missed with `"older"` pages, then re-arms the subscription.
 5. **Bounds integrity**: a window response missing its `kind:39006`, or carrying more than one, or carrying one whose `d`-tag binding does not echo the request cursor, whose content is not parseable JSON, or whose content violates `has_more = true ⇔ next_cursor ≠ null`, is not a usable page — the client MUST discard it (and MAY retry) rather than guess at exhaustion. Clients SHOULD additionally reject overlays that violate the exact tag cardinality of §Channel-mode Overlay Event Formats or whose content fields have the wrong runtime types (hardening against a malformed or hostile serializer). Cryptographic verification is governed by §Overlay Trust.
 6. **Overlays are metadata**: never render a `39005`/`39006` as a message, never feed one into cursor math, and key cached summaries by their `d` tag (latest wins).
 
@@ -294,9 +294,7 @@ a sorted, distinct list. `limit` defaults to 50 and MUST be 1–200;
 `depth_limit` defaults to 100 and MUST be 1–100; `include_aux` defaults to
 false. A continuation MUST provide both `until` and `before_id`, or neither for
 the head page; a `"newer"` request uses `after` and `after_id` instead
-(§Direction). `root_aux` is an optional boolean, default `true`; `false` leaves
-the root's own edits, reactions and deletions out of the aux closure, so a client
-reads them once, on its first page, rather than on every page. Unknown fields, malformed values, and mixing thread windows with
+(§Direction). Unknown fields, malformed values, and mixing thread windows with
 another query mode MUST be rejected. A query MAY contain at most four window
 filters.
 
@@ -319,8 +317,8 @@ For an authorized request the relay MUST:
    `has_more`; when more rows exist, `next_cursor` is the last retained scan
    candidate, captured before event reconstruction. Otherwise it is `null`.
 4. If `include_aux` is true, append reactions (`kind:7`), deletions
-   (`kind:5`/`9005`), and edits (`kind:40003`) targeting the root (unless
-   `root_aux` is `false`) or returned replies, followed by deletions targeting those auxiliary events. Preserve
+   (`kind:5`/`9005`), and edits (`kind:40003`) targeting the root or returned
+   replies, followed by deletions targeting those auxiliary events. Preserve
    original signatures, deduplicate by event ID, and apply access control to
    every event. A target reference requires an `e` tag with the target ID
    in its second position; containing both strings elsewhere is insufficient.
@@ -378,14 +376,12 @@ The binding is SHA-256 over compact UTF-8 JSON of this ordered array:
 // cursor is null or [<seconds>,"<lowercase id>"]
 ```
 
-For `"older"` (or no `direction`) and `root_aux` `true` (or absent), the array
-is exactly as above, so these bindings keep their hashes. A `"newer"` request
-puts `"newer"` in place of `"older"` and its cursor element carries
-`[<after>,"<after_id>"]`. `root_aux: false` appends one trailing element,
-`"root_aux:false"`:
+For `"older"` (or no `direction`) the array is exactly as above, so these
+bindings keep their hashes. A `"newer"` request puts `"newer"` in place of
+`"older"` and its cursor element carries `[<after>,"<after_id>"]`:
 
 ```jsonc
-["tw",1,"newer","<host>","<reader hex>","<channel>","<root>",50,100,[9],[1751500000,"<lowercase id>"],true,"root_aux:false"]
+["tw",1,"newer","<host>","<reader hex>","<channel>","<root>",50,100,[9],[1751500000,"<lowercase id>"],true]
 ```
 
 The content's `direction` is the request's: `"older"` or `"newer"`. For a
