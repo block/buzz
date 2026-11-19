@@ -4026,9 +4026,13 @@ mod tests {
     #[test]
     fn add_members_keeps_the_signer_as_a_target() {
         let cid = uuid();
-        let me = keys().public_key().to_hex();
+        let signer = keys();
+        let me = signer.public_key().to_hex();
         let other = pk(1);
-        let ev = sign(build_add_members(cid, &[&me, &other], None).unwrap());
+        let ev = build_add_members(cid, &[&me, &other], None)
+            .unwrap()
+            .sign_with_keys(&signer)
+            .unwrap();
         assert_eq!(tag_values(&ev, "p"), vec![me, other]);
     }
 
