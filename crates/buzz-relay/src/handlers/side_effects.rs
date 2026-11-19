@@ -629,8 +629,8 @@ async fn actor_owns_any_owner_agent(
     Ok(false)
 }
 
-/// Why kind:9000, and kind:9001 for anyone but yourself or your own agent,
-/// are refused on a DM.
+/// Why kind:9000, and kind:9001 for anyone but yourself, your own agent, or
+/// (for a person) any agent, are refused on a DM.
 const DM_MEMBERSHIP_REFUSAL: &str = "DM members change only through kind:41011";
 
 /// Validate an admin kind event BEFORE storage.
@@ -688,15 +688,20 @@ pub async fn validate_admin_event(
         return Err(anyhow::anyhow!("channel is archived"));
     }
     // A DM is identified by its people, so people join it only through
-    // kind:41011, which keeps that identity in step. Anyone may leave, and
-    // an owner may remove their own agent: every removal releases the DM's
-    // identity when its people change (`release_dm_identity`).
+    // kind:41011, which keeps that identity in step. Anyone may leave, an
+    // owner may remove their own agent, and any person may remove an agent:
+    // every removal releases the DM's identity when its people change
+    // (`release_dm_identity`). That the actor is in the DM is checked below.
     if channel.channel_type == "dm" && kind == 9001 {
         let target = extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
         if target != actor_bytes
             && !state
                 .db
                 .is_agent_owner(tenant.community(), &target, &actor_bytes)
+                .await?
+            && !state
+                .db
+                .may_remove_agent_from_dm(tenant.community(), channel_id, &target, &actor_bytes)
                 .await?
         {
             return Err(anyhow::anyhow!(DM_MEMBERSHIP_REFUSAL));
@@ -720,10 +725,12 @@ pub async fn validate_admin_event(
                 match channel_authz::classify_remove_other(&members, &actor_bytes, &target_pubkey) {
                     RemoveOtherDecision::Allow => Ok(()),
                     RemoveOtherDecision::CheckAgentOwner => {
-                        if state
-                            .db
-                            .is_agent_owner(tenant.community(), &target_pubkey, &actor_bytes)
-                            .await?
+                        // A DM removal was authorized above.
+                        if channel.channel_type == "dm"
+                            || state
+                                .db
+                                .is_agent_owner(tenant.community(), &target_pubkey, &actor_bytes)
+                                .await?
                         {
                             Ok(())
                         } else {

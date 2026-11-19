@@ -1122,9 +1122,10 @@ fn member_put_denial_message(denial: buzz_core::channel::MemberPutDenial) -> &'s
 
 /// Remove a member from a channel (soft delete).
 ///
-/// `actor_pubkey` must be an active owner/admin, the agent's owner, or the member
-/// removing themselves. Only a channel owner may remove another channel owner,
-/// even when the target is their own agent.
+/// `actor_pubkey` must be an active owner/admin, the agent's owner, a person
+/// removing an agent from a DM, or the member removing themselves. Only a
+/// channel owner may remove another channel owner, even when the target is
+/// their own agent.
 ///
 /// Returns `Err(DbError::MemberNotFound)` if the target is not an active member.
 ///
@@ -1134,12 +1135,13 @@ fn member_put_denial_message(denial: buzz_core::channel::MemberPutDenial) -> &'s
 /// actor could commit after their role was read and this removal would proceed on
 /// a stale elevated role.
 ///
-/// The `is_agent_owner` lookup deliberately runs *before* the transaction opens:
-/// it borrows a second connection from `pool`, and issuing it while holding the
-/// lock could deadlock against ourselves on a small pool. That is safe because
-/// `agent_owner_pubkey` is immutable — [`crate::user::set_agent_owner`] only
-/// updates it when it `IS NULL` (first-mint-wins), so its value cannot change
-/// under us and needs no serialization.
+/// The `actor_may_remove_member` lookup deliberately runs *before* the
+/// transaction opens: it borrows a second connection from `pool`, and issuing
+/// it while holding the lock could deadlock against ourselves on a small pool.
+/// That is safe because a channel's type never changes and
+/// `agent_owner_pubkey` is immutable once set — [`crate::user::set_agent_owner`]
+/// only updates it when it `IS NULL` (first-mint-wins), so the answer cannot
+/// change under us in a way that needs serialization.
 pub async fn remove_member(
     pool: &PgPool,
     community_id: CommunityId,
@@ -1152,11 +1154,8 @@ pub async fn remove_member(
     // Immutable, and must not be queried while holding the lock (second pool
     // connection). Resolved up front so every *mutable* authorization read can
     // sit behind the serialization point below.
-    let actor_is_agent_owner = if is_self_remove {
-        false
-    } else {
-        crate::user::is_agent_owner(pool, community_id, pubkey, actor_pubkey).await?
-    };
+    let actor_may_remove_target = !is_self_remove
+        && actor_may_remove_member(pool, community_id, channel_id, pubkey, actor_pubkey).await?;
 
     let mut tx = crate::begin_community_write_transaction(
         pool,
@@ -1175,11 +1174,36 @@ pub async fn remove_member(
         channel_id,
         pubkey,
         actor_pubkey,
-        actor_is_agent_owner,
+        actor_may_remove_target,
     )
     .await?;
     tx.commit().await?;
     Ok(())
+}
+
+/// Whether a member who is neither owner nor admin may still remove `pubkey`:
+/// they own the agent, or the channel is a DM and they are a person removing
+/// an agent. Read before the lock: a channel's type and a target's agent
+/// ownership never change, and an actor who is a person can only later become
+/// an agent, which is the same as this removal landing first.
+async fn actor_may_remove_member(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+    actor_pubkey: &[u8],
+) -> Result<bool> {
+    Ok(
+        crate::user::is_agent_owner(pool, community_id, pubkey, actor_pubkey).await?
+            || crate::user::may_remove_agent_from_dm(
+                pool,
+                community_id,
+                channel_id,
+                pubkey,
+                actor_pubkey,
+            )
+            .await?,
+    )
 }
 
 /// Apply a removal on an admitted transaction holding the membership lock.
@@ -1188,7 +1212,7 @@ async fn remove_member_on(
     channel_id: Uuid,
     pubkey: &[u8],
     actor_pubkey: &[u8],
-    actor_is_agent_owner: bool,
+    actor_may_remove_target: bool,
 ) -> Result<()> {
     let community_id = tx.community();
     let is_self_remove = pubkey == actor_pubkey;
@@ -1205,9 +1229,9 @@ async fn remove_member_on(
                 "only owners may remove another owner".to_string(),
             ));
         }
-        if !actor_role.is_elevated() && !actor_is_agent_owner {
+        if !actor_role.is_elevated() && !actor_may_remove_target {
             return Err(DbError::AccessDenied(
-                "only owners/admins or the agent's owner may remove other members".to_string(),
+                "only owners/admins, the agent's owner, or a person removing an agent from a DM may remove other members".to_string(),
             ));
         }
     }
@@ -2657,9 +2681,10 @@ impl Db {
         thread_meta: Option<crate::event::ThreadMetadataParams<'_>>,
     ) -> Result<(buzz_core::StoredEvent, bool)> {
         let actor = event.pubkey.to_bytes();
-        // Immutable ownership lookup, before taking a pooled transaction.
-        let actor_is_agent_owner = pubkey != actor.as_slice()
-            && crate::user::is_agent_owner(&self.pool, community_id, pubkey, &actor).await?;
+        // Immutable authorization lookups, before taking a pooled transaction.
+        let actor_may_remove_target = pubkey != actor.as_slice()
+            && actor_may_remove_member(&self.pool, community_id, channel_id, pubkey, &actor)
+                .await?;
         let mut tx = crate::begin_community_event_write_transaction(
             &self.pool,
             community_id,
@@ -2680,7 +2705,7 @@ impl Db {
             return Ok((stored, false));
         }
         crate::insert_mentions_in_transaction(&mut tx, event, Some(channel_id)).await?;
-        remove_member_on(&mut tx, channel_id, pubkey, &actor, actor_is_agent_owner).await?;
+        remove_member_on(&mut tx, channel_id, pubkey, &actor, actor_may_remove_target).await?;
         tx.commit().await?;
         Ok((stored, true))
     }
