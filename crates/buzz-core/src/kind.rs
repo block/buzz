@@ -512,7 +512,7 @@ pub const KIND_WORKFLOW_DEF: u32 = 30620;
 pub const KIND_DM_VISIBILITY: u32 = 30622;
 
 /// NIP-PM: a channel's pin list (relay-signed, parameterized replaceable,
-/// d=channel_id). One `e` tag per pinned message, newest pin first. Members
+/// d=channel_id, h=channel_id). One `e` tag per pinned message, newest pin first. Members
 /// change it only through [`KIND_PIN_MESSAGE`] and [`KIND_UNPIN_MESSAGE`].
 pub const KIND_CHANNEL_PINS: u32 = 30623;
 

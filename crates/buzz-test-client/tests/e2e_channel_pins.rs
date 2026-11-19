@@ -148,7 +148,7 @@ async fn test_channel_pins_wire() {
     fresh
         .subscribe(
             "list",
-            vec![filter(json!({"kinds": [30623], "#d": [channel]}))],
+            vec![filter(json!({"kinds": [30623], "#h": [channel]}))],
         )
         .await
         .expect("subscribe");

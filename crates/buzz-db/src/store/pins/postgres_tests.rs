@@ -213,9 +213,19 @@ async fn pins_and_unpins_rewrite_one_relay_signed_list() {
     assert!(first.inserted);
     assert_eq!(list.event.pubkey, f.relay.public_key());
     assert_eq!(list.event.content, "");
+    let channel = f.channel.to_string();
     assert_eq!(
-        list.event.tags.first().map(|tag| tag.as_slice().to_vec()),
-        Some(vec!["d".to_owned(), f.channel.to_string()])
+        list.event
+            .tags
+            .iter()
+            .take(2)
+            .map(|tag| tag.as_slice().to_vec())
+            .collect::<Vec<_>>(),
+        [
+            vec!["d".to_owned(), channel.clone()],
+            vec!["h".to_owned(), channel]
+        ],
+        "the list is addressed by `d` and names its channel with `h`"
     );
     assert!(list.event.verify().is_ok(), "the list is signed");
     let (first_at, first_ids) = f.list().await;
