@@ -7,6 +7,7 @@ import 'channel_filter/channel_filter_provider.dart';
 import 'channel_filter/channel_filter_store.dart';
 import '../../shared/widgets/collapsible_section_body.dart';
 import '../../shared/widgets/collapsible_sliver_body.dart';
+import '../../shared/widgets/limited_section_sliver.dart';
 import '../../shared/http/app_http_client.dart';
 import '../../shared/me/me_sync.dart';
 import '../../shared/hosted/hosted_relay_auth.dart';

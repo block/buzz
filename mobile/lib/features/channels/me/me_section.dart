@@ -5,6 +5,7 @@ import '../../../shared/theme/theme.dart';
 import '../../../shared/theme/buzz_icons.dart';
 import '../../../shared/widgets/collapsible_section_body.dart';
 import '../../../shared/widgets/collapsible_sliver_body.dart';
+import '../../../shared/widgets/limited_section_sliver.dart';
 
 /// A project or unassigned-chat section matching the Channels list headings.
 class MeSection extends HookWidget {
@@ -80,7 +81,11 @@ class MeSection extends HookWidget {
           SliverToBoxAdapter(child: header),
           CollapsibleSliverBody(
             expanded: expanded.value,
-            sliver: SliverList.list(children: children),
+            sliver: LimitedSectionSliver(
+              itemCount: children.length,
+              horizontalInset: Grid.xxs,
+              itemBuilder: (context, index) => children[index],
+            ),
           ),
         ],
       );
