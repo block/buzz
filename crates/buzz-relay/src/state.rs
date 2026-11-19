@@ -1527,6 +1527,14 @@ pub struct AppState {
     #[allow(clippy::type_complexity)]
     pub member_channels_cache:
         Arc<moka::sync::Cache<(CommunityId, Vec<u8>), Arc<buzz_db::channel_members::ChannelSet>>>,
+    /// The newest load in flight per [`Self::member_channels_cache`] key. A
+    /// load publishes only while its token is still here; invalidation
+    /// removes it, so a read that straddles an invalidation is not cached.
+    #[allow(clippy::type_complexity)]
+    member_channels_loads: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), Arc<()>>>,
+    /// Orders [`Self::member_channels_cache`] publication against its
+    /// invalidation. Held only for cache operations, never across a read.
+    member_channels_publication: Arc<std::sync::Mutex<()>>,
     /// Listed open channel IDs per community, the half of every reader's
     /// accessible set that does not depend on the reader. Invalidated with
     /// the community's accessible channels, and used only for
@@ -1871,6 +1879,16 @@ impl AppState {
                     .support_invalidation_closures()
                     .build(),
             ),
+            // A token evicted before its load ends only stops that load from
+            // publishing, so the bounds fail safe.
+            member_channels_loads: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(10_000)
+                    .time_to_live(std::time::Duration::from_secs(60))
+                    .support_invalidation_closures()
+                    .build(),
+            ),
+            member_channels_publication: Arc::new(std::sync::Mutex::new(())),
             // Readers use an entry only for `OPEN_CHANNELS_MAX_AGE`; the TTL
             // just reclaims memory and keeps expired entries around long
             // enough to count their misses as `expired` rather than `absent`.
@@ -2182,8 +2200,13 @@ impl AppState {
         pubkey: &[u8],
     ) {
         self.membership_cache.invalidate(community_id, pubkey);
-        self.member_channels_cache
-            .invalidate(&(community_id, pubkey.to_vec()));
+        let key = (community_id, pubkey.to_vec());
+        let _publication = self
+            .member_channels_publication
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.member_channels_loads.invalidate(&key);
+        self.member_channels_cache.invalidate(&key);
     }
 
     /// Invalidate all users' accessible-channels cache (e.g. new open channel created).
@@ -2195,10 +2218,17 @@ impl AppState {
     /// Local-only accessible-channels drop. See [`invalidate_membership_local`].
     pub(crate) fn invalidate_all_accessible_channels_local(&self, community_id: CommunityId) {
         self.open_channels_cache.invalidate(&community_id);
-        if let Err(error) = self
+        let _publication = self
+            .member_channels_publication
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let loads = self
+            .member_channels_loads
+            .invalidate_entries_if(move |(entry_community, _), _| *entry_community == community_id);
+        let entries = self
             .member_channels_cache
-            .invalidate_entries_if(move |(entry_community, _), _| *entry_community == community_id)
-        {
+            .invalidate_entries_if(move |(entry_community, _), _| *entry_community == community_id);
+        if let Err(error) = loads.and(entries) {
             // AppState enables invalidation closures at construction time. If
             // that invariant ever regresses, prefer over-invalidating to
             // serving stale access state.
@@ -2206,6 +2236,7 @@ impl AppState {
                 ?error,
                 "community-scoped accessible-channel invalidation unavailable; falling back to full invalidation"
             );
+            self.member_channels_loads.invalidate_all();
             self.member_channels_cache.invalidate_all();
         }
     }
@@ -2737,19 +2768,12 @@ impl AppState {
         community_id: CommunityId,
         pubkey: &[u8],
     ) -> Result<ChannelAccess, buzz_db::DbError> {
-        let key = (community_id, pubkey.to_vec());
-        let member = match self.member_channels_cache.get(&key) {
-            Some(cached) => {
-                metrics::counter!("buzz_accessible_channels_cache_hits_total").increment(1);
-                cached
-            }
-            None => {
-                metrics::counter!("buzz_accessible_channels_cache_misses_total").increment(1);
-                let member = Arc::new(self.db.get_member_channels(community_id, pubkey).await?);
-                self.member_channels_cache.insert(key, member.clone());
-                member
-            }
-        };
+        let member = self
+            .member_channels(
+                (community_id, pubkey.to_vec()),
+                self.db.get_member_channels(community_id, pubkey),
+            )
+            .await?;
         let open = self.open_channels(community_id).await?;
         let mut implicit = member.implicit.clone();
         buzz_db::channel_members::merge_channel_ids(&mut implicit, &open.ids);
@@ -2758,6 +2782,49 @@ impl AppState {
             member,
             open: Some(open),
         })
+    }
+
+    /// The member half for `key` from [`Self::member_channels_cache`], else
+    /// from `read`.
+    ///
+    /// A read answers its own request, but is cached only if no invalidation
+    /// for its key ran while it read. Otherwise a read that saw a membership
+    /// just before its removal would grant it to later requests for the
+    /// cache's whole TTL.
+    async fn member_channels(
+        &self,
+        key: (CommunityId, Vec<u8>),
+        read: impl std::future::Future<
+            Output = Result<buzz_db::channel_members::ChannelSet, buzz_db::DbError>,
+        >,
+    ) -> Result<Arc<buzz_db::channel_members::ChannelSet>, buzz_db::DbError> {
+        if let Some(cached) = self.member_channels_cache.get(&key) {
+            metrics::counter!("buzz_accessible_channels_cache_hits_total").increment(1);
+            return Ok(cached);
+        }
+        metrics::counter!("buzz_accessible_channels_cache_misses_total").increment(1);
+        let load = Arc::new(());
+        {
+            let _publication = self
+                .member_channels_publication
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            self.member_channels_loads.insert(key.clone(), load.clone());
+        }
+        let member = Arc::new(read.await?);
+        let _publication = self
+            .member_channels_publication
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if self
+            .member_channels_loads
+            .get(&key)
+            .is_some_and(|current| Arc::ptr_eq(&current, &load))
+        {
+            self.member_channels_loads.invalidate(&key);
+            self.member_channels_cache.insert(key, member.clone());
+        }
+        Ok(member)
     }
 
     /// The community's open set from [`Self::open_channels_cache`] while it
@@ -4637,6 +4704,76 @@ pub(crate) mod tests {
             "A's cache drop must not evict B's accessible-channel entry"
         );
         assert!(state.open_channels_cache.get(&community_b).is_some());
+    }
+
+    /// A member-channels read that straddles an invalidation of its key,
+    /// per user or community-wide, answers its own request but is not
+    /// cached, so a removal is not undone by a read that began before it. A
+    /// read with no invalidation is cached.
+    /// Mutation: publish without checking the load token, or drop the token
+    /// invalidation from either path → RED.
+    #[tokio::test]
+    async fn a_member_read_that_straddles_an_invalidation_is_not_cached() {
+        use buzz_db::channel_members::ChannelSet;
+        let state = test_state().await;
+        let community = CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
+        let pubkey = vec![7u8; 32];
+        let key = (community, pubkey.clone());
+        let revoked = Uuid::from_u128(1);
+        let stale = ChannelSet {
+            implicit: Vec::new(),
+            named_only: vec![(revoked, "system".to_owned())],
+        };
+        let invalidations: [&dyn Fn(); 2] = [
+            &|| state.invalidate_membership_local(community, revoked, &pubkey),
+            &|| state.invalidate_all_accessible_channels_local(community),
+        ];
+        for (path, invalidate) in invalidations.into_iter().enumerate() {
+            let (release, held) = tokio::sync::oneshot::channel::<()>();
+            let read = {
+                let stale = stale.clone();
+                async move {
+                    held.await.ok();
+                    Ok(stale)
+                }
+            };
+            let task = {
+                let state = state.clone();
+                let key = key.clone();
+                tokio::spawn(async move { state.member_channels(key, read).await })
+            };
+            for _ in 0..1_000 {
+                if state.member_channels_loads.get(&key).is_some() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert!(
+                state.member_channels_loads.get(&key).is_some(),
+                "load started"
+            );
+            invalidate();
+            release.send(()).expect("read is waiting");
+            let answered = task.await.expect("join").expect("read");
+            assert_eq!(
+                *answered, stale,
+                "path {path}: the read answers its request"
+            );
+            assert!(
+                state.member_channels_cache.get(&key).is_none(),
+                "path {path}: a read that straddles an invalidation is not cached"
+            );
+        }
+        let fresh = ChannelSet::default();
+        state
+            .member_channels(key.clone(), async { Ok(ChannelSet::default()) })
+            .await
+            .expect("read");
+        assert_eq!(
+            state.member_channels_cache.get(&key).as_deref(),
+            Some(&fresh),
+            "a read with no invalidation is cached"
+        );
     }
 
     #[tokio::test]
