@@ -3762,7 +3762,7 @@ void main() {
 
       await _expandComposer(tester);
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
-      await tester.pump();
+      await _pumpUntilUpload(tester, () => sentContent != null);
       await tester.pumpAndSettle();
 
       expect(sentContent, '\n![image](https://relay.example/media/test.png)');
@@ -3833,6 +3833,7 @@ void main() {
 
       await _expandComposer(tester);
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await _pumpUntilUpload(tester, () => sentContent != null);
       await tester.pumpAndSettle();
 
       expect(
@@ -4255,12 +4256,16 @@ void main() {
       tester,
     ) async {
       final uploadResponse = Completer<http.Response>();
+      var requestReceived = false;
       Rect? submittedOrigin;
       var sent = false;
       final uploadService = MediaUploadService(
         baseUrl: 'https://relay.example',
         nsec: nostr.Keys.generate().nsec,
-        httpClient: http_testing.MockClient((_) => uploadResponse.future),
+        httpClient: http_testing.MockClient((_) {
+          requestReceived = true;
+          return uploadResponse.future;
+        }),
         pickGalleryVideo: () async => null,
         pickGalleryImage: () async => null,
         pickGalleryImages: () async => [
@@ -4296,6 +4301,7 @@ void main() {
             .hitTestable(),
       );
       await tester.pump(const Duration(seconds: 5));
+      await _pumpUntilUpload(tester, () => requestReceived);
       expect(sent, isFalse);
       // Layout changes during upload must not replace the submitted geometry.
       tester.view.physicalSize = Size(
@@ -4366,7 +4372,10 @@ void main() {
 
         await _expandComposer(tester);
         await tester.tap(find.byIcon(BuzzIcons.arrowUp));
-        await tester.pump();
+        await _pumpUntilUpload(
+          tester,
+          () => find.text('100%').evaluate().isNotEmpty,
+        );
 
         expect(
           find.byKey(const ValueKey('compose-upload-progress')),
@@ -5336,9 +5345,7 @@ void main() {
       );
 
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
-      for (var frame = 0; frame < 100 && sentContent == null; frame++) {
-        await tester.pump();
-      }
+      await _pumpUntilUpload(tester, () => sentContent != null);
       expect(sentContent, isNotNull);
 
       expect(busy, isTrue);
@@ -5779,6 +5786,10 @@ void main() {
       await _expandComposer(tester);
       await tester.enterText(find.byType(TextField), 'Keep this draft');
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await _pumpUntilUpload(
+        tester,
+        () => find.textContaining('upload failed').evaluate().isNotEmpty,
+      );
       await tester.pumpAndSettle();
 
       expect(find.textContaining('upload failed'), findsOneWidget);
@@ -5824,12 +5835,11 @@ void main() {
         await tester.pumpAndSettle();
         await _expandComposer(tester);
         await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+        final error = find.text("We couldn't prepare this image for upload.");
+        await _pumpUntilUpload(tester, () => error.evaluate().isNotEmpty);
         await tester.pumpAndSettle();
 
-        expect(
-          find.text("We couldn't prepare this image for upload."),
-          findsOneWidget,
-        );
+        expect(error, findsOneWidget);
         expect(find.textContaining('media contains metadata'), findsNothing);
         expect(find.textContaining('$statusCode'), findsNothing);
       });
@@ -7803,6 +7813,21 @@ Future<void> _expandComposer(WidgetTester tester) async {
   if (find.byType(TextField).evaluate().isNotEmpty) return;
   await tester.tap(find.text('Message\u2026'));
   await tester.pumpAndSettle();
+}
+
+Future<void> _pumpUntilUpload(
+  WidgetTester tester,
+  bool Function() isReady,
+) async {
+  final stopwatch = Stopwatch()..start();
+  while (!isReady()) {
+    if (stopwatch.elapsed >= const Duration(seconds: 5)) {
+      fail('Timed out waiting for attachment upload');
+    }
+    // Let the hash isolate reply on the real event loop before pumping a frame.
+    await tester.runAsync(() => Future<void>(() {}));
+    await tester.pump();
+  }
 }
 
 Future<void> _openAttachmentMenu(WidgetTester tester) async {
