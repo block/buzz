@@ -661,11 +661,12 @@ test-unit:
         cargo nextest run -p buzz-relay --lib -E 'test(/^concurrency_limits::tests::/) + test(/^feature_flags::tests::/) + test(=handlers::auth::tests::auth_cap_sheds_a_verified_login_with_a_bare_close)'
         # Relay read caches: the admitted-connection index, the shared-read
         # gates (open set, restriction, tenant host), the community-active
-        # cache, tenant host cache, the
+        # cache, tenant host cache, the access caches' refill fences and
+        # member snapshot age, the
         # overlong-host rejection and the ban disconnect's restriction-cache
         # drop. Infra-free; the
         # database URL refuses at once. Keep scripts/run-tests.sh in step.
-        cargo nextest run -p buzz-relay --lib -E 'test(=state::tests::admitted_index_follows_every_key_change) + test(/^shared_reads::tests::/) + test(/^membership_cache::tests::/) + test(/^community_active::tests::/) + test(=state::tests::concurrent_open_channel_misses_share_the_in_flight_read) + test(=state::tests::concurrent_restriction_and_host_misses_share_the_in_flight_read) + test(=tenant::tests::app_state_resolver_serves_fresh_cached_hosts_only) + test(=tenant::tests::an_overlong_host_fails_closed_before_the_resolver) + test(=state::tests::disconnect_drops_the_cached_restriction_row)'
+        cargo nextest run -p buzz-relay --lib -E 'test(=state::tests::admitted_index_follows_every_key_change) + test(/^shared_reads::tests::/) + test(/^membership_cache::tests::/) + test(/^community_active::tests::/) + test(=state::tests::concurrent_open_channel_misses_share_the_in_flight_read) + test(=state::tests::a_member_read_that_straddles_an_invalidation_is_not_cached) + test(=state::tests::a_member_snapshot_ages_from_its_read_not_its_insert) + test(=state::tests::an_open_read_that_straddles_an_invalidation_is_not_cached) + test(=state::tests::concurrent_restriction_and_host_misses_share_the_in_flight_read) + test(=tenant::tests::app_state_resolver_serves_fresh_cached_hosts_only) + test(=tenant::tests::an_overlong_host_fails_closed_before_the_resolver) + test(=state::tests::disconnect_drops_the_cached_restriction_row)'
         # Retain partially consumed mesh receives across housekeeping ticks.
         cargo nextest run -p buzz-relay --lib -E 'test(=mesh_boot::tests::demo_echo_retains_pending_receive_across_housekeeping_ticks)'
         # boot_lifecycle spawns the real relay binary and asserts its startup
