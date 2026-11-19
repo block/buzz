@@ -13,20 +13,27 @@ class _ComposerSpeechFiles extends ComposerTranscriptionFiles {
   int nextId = 0;
   bool rejectRetention = false;
   bool rejectDeletion = false;
+  bool rejectSourceDeletion = false;
   int retainCalls = 0;
   Completer<void>? finishRetention;
   final deleted = <String>[];
   @override
-  Future<String> retain(String source) async {
+  Future<String> retain(
+    String source,
+    Future<void> Function(String) reserve,
+  ) async {
     retainCalls++;
     await finishRetention?.future;
     if (rejectRetention) throw StateError('Storage unavailable');
-    return '$source.${nextId++}.saved';
+    final copy = '$source.${nextId++}.saved';
+    await reserve(copy);
+    return copy;
   }
 
   @override
   Future<void> delete(String path) async {
-    if (rejectDeletion && path.endsWith('.saved')) {
+    if ((rejectDeletion && path.endsWith('.saved')) ||
+        (rejectSourceDeletion && !path.endsWith('.saved'))) {
       throw StateError('Delete failed');
     }
     deleted.add(path);
@@ -46,6 +53,7 @@ class _ComposerSpeechPrefs extends Fake implements SharedPreferences {
   _ComposerSpeechPrefs(this.delegate);
 
   final SharedPreferences delegate;
+  Completer<void>? holdNextDraftWrite;
   bool rejectDraftWrites = false;
   bool rejectRecoveryWrites = false;
   bool rejectRetainedWrites = false;
@@ -93,6 +101,11 @@ class _ComposerSpeechPrefs extends Fake implements SharedPreferences {
 
   @override
   Future<bool> setString(String key, String value) async {
+    if (key.startsWith('compose_drafts_v1:') && holdNextDraftWrite != null) {
+      final hold = holdNextDraftWrite!;
+      holdNextDraftWrite = null;
+      await hold.future;
+    }
     if ((rejectDraftWrites && key.startsWith('compose_drafts_v1:')) ||
         (rejectRecoveryWrites && key.startsWith('composer_transcription:')) ||
         (rejectRetainedWrites &&
@@ -430,7 +443,8 @@ void iosControlsTests() {
         );
         final speech = _ComposerSpeech();
         final files = _ComposerSpeechFiles()
-          ..rejectRetention = failure == 'copy';
+          ..rejectRetention = failure == 'copy'
+          ..rejectDeletion = failure == 'retained-pointer';
         final prefs = _ComposerSpeechPrefs(_testPrefs)
           ..rejectRecoveryWrites = failure == 'source-pointer'
           ..rejectRetainedWrites = failure == 'retained-pointer';
@@ -460,10 +474,8 @@ void iosControlsTests() {
           findsOneWidget,
         );
         if (failure == 'retained-pointer') {
-          expect(
-            files.deleted.where((p) => p.endsWith('.saved')),
-            hasLength(1),
-          );
+          expect(files.deleted.where((p) => p.endsWith('.saved')), isEmpty);
+          files.rejectDeletion = false;
         }
         expect(files.deleted, isNot(contains('/tmp/voice-note-test.m4a')));
         // A failed copy/replacement pointer has a persisted source journal;
@@ -480,6 +492,9 @@ void iosControlsTests() {
         await tester.pumpWidget(composer());
         await tester.pumpAndSettle();
         expect(find.text('Retry'), findsOneWidget);
+        if (failure == 'retained-pointer') {
+          expect(files.deleted, contains('/tmp/voice-note-test.m4a.0.saved'));
+        }
         if (failure == 'copy') {
           // A Discard that fails at pointer removal journals the source while
           // the pending-source pointer still owns it: a restart keeps it.
@@ -498,6 +513,7 @@ void iosControlsTests() {
         files.rejectRetention = false;
         prefs.rejectRecoveryWrites = false;
         prefs.rejectRetainedWrites = false;
+        files.rejectSourceDeletion = true;
         final priorCopies = files.retainCalls;
         await tester.tap(find.text('Retry'));
         await tester.pump();
@@ -514,6 +530,15 @@ void iosControlsTests() {
           'Recovered once.',
         );
         expect(prefs.getString(key), isNull);
+        const original = '/tmp/voice-note-test.m4a';
+        expect(files.deleted, isNot(contains(original)));
+        await tester.pumpWidget(const SizedBox.shrink());
+        await prefs.reload();
+        files.rejectSourceDeletion = false;
+        await tester.pumpWidget(composer());
+        await tester.pumpAndSettle();
+        expect(files.deleted, contains(original));
+        expect(find.text('Retry'), findsNothing);
         await tester.pumpWidget(const SizedBox.shrink());
       },
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
@@ -572,6 +597,74 @@ void iosControlsTests() {
       );
       expect(prefs.getString(key), contains('Keep this draft.'));
       expect(files.deleted.where((p) => p.endsWith('.saved')), hasLength(1));
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
+
+  testWidgets(
+    'a retired draft save preserves the next recording after restart',
+    (tester) async {
+      final speech = _ComposerSpeech();
+      final files = _ComposerSpeechFiles();
+      final prefs = _ComposerSpeechPrefs(_testPrefs);
+      _testPrefs = prefs;
+      final identity = RelayConfig(
+        baseUrl: 'http://localhost:3000',
+        nsec: nostr.Keys.generate().nsec,
+      );
+      Widget composer(String mount) => _buildComposeBar(
+        composeBarKey: mount,
+        relayConfig: () => _SwitchableRelayConfigNotifier(identity),
+        uploadService: _FakeVoiceNoteUploadService(),
+        onSend: (_, _, {mediaTags = const []}) async {},
+        voiceNoteRecorderFactory: _FakeVoiceNoteRecorder.new,
+        overrides: [
+          composerTranscriptionFilesProvider.overrideWithValue(files),
+          deviceTranscriptionProvider.overrideWithValue(() => speech),
+        ],
+      );
+      Future<void> dictate() async {
+        await _tapComposerControl(tester, 'Dictate');
+        await tester.pumpAndSettle();
+        await tester.tap(find.byTooltip('Stop recording'));
+        await tester.pump();
+      }
+
+      await tester.pumpWidget(composer('first'));
+      await tester.pumpAndSettle();
+      await dictate();
+      final hold = Completer<void>();
+      prefs.holdNextDraftWrite = hold;
+      speech.result.complete('First');
+      await tester.pump();
+      expect(prefs.holdNextDraftWrite, isNull);
+      await tester.pumpWidget(composer('second'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Discard recording'));
+      await tester.pumpAndSettle();
+      if (find.byType(TextField).evaluate().isEmpty) {
+        await tester.tap(find.text('First'));
+        await tester.pumpAndSettle();
+      }
+      await _tapComposerControl(tester, 'Send');
+      await tester.pumpAndSettle();
+      speech.reset();
+      await dictate();
+      final key = prefs.getKeys().singleWhere(
+        (key) => key.startsWith('composer_transcription:'),
+      );
+      final second = prefs.getString(key)!;
+      hold.complete();
+      speech.result.completeError(StateError('Recognition failed'));
+      await tester.pumpAndSettle();
+      await tester.pumpWidget(const SizedBox.shrink());
+      await prefs.reload();
+      expect(prefs.getString(key), second);
+      expect(files.deleted, isNot(contains(second)));
+      await tester.pumpWidget(composer('restart'));
+      await tester.pumpAndSettle();
+      expect(find.text('Retry'), findsOneWidget);
       await tester.pumpWidget(const SizedBox.shrink());
     },
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),

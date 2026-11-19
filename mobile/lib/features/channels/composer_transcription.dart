@@ -5,7 +5,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:path_provider/path_provider.dart';
+import '../../shared/transcription/private_transcript_storage.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../shared/theme/theme_provider.dart';
@@ -16,20 +16,17 @@ import 'voice_note_recording.dart';
 
 /// Local-file boundary for retaining an unsent recording across app restarts.
 class ComposerTranscriptionFiles {
-  Future<String> retain(String source) async {
-    final root = await getApplicationSupportDirectory();
+  Future<String> retain(
+    String source,
+    Future<void> Function(String) reserve,
+  ) async {
+    final support = await privateTranscriptSupportDirectory();
+    final root = Directory('${support.path}/composer-transcripts');
+    await root.create(recursive: true);
     final path = '${root.path}/composer-${const Uuid().v4()}.m4a';
-    try {
-      await File(source).copy(path);
-      return path;
-    } catch (_) {
-      try {
-        await delete(path);
-      } catch (_) {
-        /* Preserve the copy error if partial-file cleanup fails. */
-      }
-      rethrow;
-    }
+    await reserve(path);
+    await File(source).copy(path);
+    return path;
   }
 
   Future<void> delete(String path) async {
@@ -148,7 +145,7 @@ ComposerTranscription useComposerTranscription({
     if (!saved) throw StateError('Could not schedule recording cleanup.');
   }
 
-  Future<void> sweepCleanup() => cleanupTransaction(() async {
+  Future<void> sweepUnlocked() async {
     try {
       final paths = cleanupPaths();
       for (final path in [...paths]) {
@@ -169,7 +166,7 @@ ComposerTranscription useComposerTranscription({
     } catch (_) {
       await prefs.reload();
     }
-  });
+  }
 
   void restore() {
     final stored = prefs.getString(key);
@@ -199,7 +196,7 @@ ComposerTranscription useComposerTranscription({
   }, [scope, pendingStop]);
 
   useEffect(() {
-    unawaited(sweepCleanup());
+    unawaited(cleanupTransaction(sweepUnlocked));
     restore();
     busy.value = false;
     retaining.value = false;
@@ -214,40 +211,45 @@ ComposerTranscription useComposerTranscription({
       context.mounted && owner.value == scope && generation.value == ticket;
 
   Future<String> retainSource(String source) async {
-    // A previous mount may have completed retention since this hook read
-    // the source journal. Adopt its copy instead of copying deleted audio.
-    final stored = prefs.getString(key);
-    if (stored != null && !stored.startsWith(_pendingSourcePrefix)) {
-      return stored;
-    }
-    pendingSources[key] = source;
-    try {
-      if (!await prefs.setString(key, '$_pendingSourcePrefix$source')) {
-        throw StateError('Could not save the recording.');
+    late String retainedPath;
+    await cleanupTransaction(() async {
+      final stored = prefs.getString(key);
+      if (stored != null && !stored.startsWith(_pendingSourcePrefix)) {
+        retainedPath = stored;
+        return;
       }
-      final copy = await files.retain(source);
+      pendingSources[key] = source;
       try {
-        if (!await prefs.setString(key, copy)) {
+        if (!await prefs.setString(key, '$_pendingSourcePrefix$source')) {
           throw StateError('Could not save the recording.');
         }
+        retainedPath = await files.retain(source, (destination) async {
+          // Journal both paths before the copy can leave any bytes behind.
+          await saveCleanup({...cleanupPaths(), source, destination}.toList());
+        });
+        if (!await prefs.setString(key, retainedPath)) {
+          throw StateError('Could not save the recording.');
+        }
+        pendingSources.remove(key);
       } catch (_) {
-        await files.delete(copy);
+        // SharedPreferences changes its cache even when the write fails.
+        await prefs.reload();
         rethrow;
+      } finally {
+        await sweepUnlocked();
       }
-      pendingSources.remove(key);
-      try {
-        await files.delete(source);
-      } catch (_) {
-        /* The retained copy owns recovery. */
-      }
-      return copy;
-    } catch (_) {
-      await prefs.reload();
-      rethrow;
-    }
+    });
+    return retainedPath;
   }
 
   Future<void> clear(String path) => cleanupTransaction(() async {
+    final pointer = prefs.getString(key);
+    final source = pendingSources[key];
+    if (pointer != path &&
+        pointer != '$_pendingSourcePrefix$path' &&
+        !(pointer == null && source == path)) {
+      return;
+    }
     List<String> paths;
     try {
       paths = cleanupPaths();
@@ -261,7 +263,7 @@ ComposerTranscription useComposerTranscription({
       await prefs.reload();
       rethrow;
     }
-    pendingSources.remove(key);
+    if (pendingSources[key] == path) pendingSources.remove(key);
     try {
       await files.delete(path);
       paths.remove(path);
@@ -356,6 +358,7 @@ ComposerTranscription useComposerTranscription({
       if (!await ref.read(composeDraftsProvider.notifier).ensurePersisted()) {
         throw StateError('Could not save the draft. Your recording is saved.');
       }
+      if (!current(ticket)) return;
       await clear(path);
       if (current(ticket)) savedPath.value = null;
     } catch (failure) {

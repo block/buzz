@@ -12,11 +12,13 @@ final class DeviceTranscriptionPlugin {
 
   /// Applies to new and existing durable drafts before Flutter opens their journal.
   static func excludeDraftsFromBackup(in support: URL) throws {
-    var drafts = support.appendingPathComponent("bestie-transcripts", isDirectory: true)
-    try FileManager.default.createDirectory(at: drafts, withIntermediateDirectories: true)
-    var values = URLResourceValues()
-    values.isExcludedFromBackup = true
-    try drafts.setResourceValues(values)
+    for name in ["bestie-transcripts", "composer-transcripts"] {
+      var drafts = support.appendingPathComponent(name, isDirectory: true)
+      try FileManager.default.createDirectory(at: drafts, withIntermediateDirectories: true)
+      var values = URLResourceValues()
+      values.isExcludedFromBackup = true
+      try drafts.setResourceValues(values)
+    }
   }
 
   init(messenger: FlutterBinaryMessenger) {

@@ -14,6 +14,8 @@ struct DeviceTranscriptionStorageTests {
     try bytes.write(to: audio)
     try DeviceTranscriptionPlugin.excludeDraftsFromBackup(in: support)
     #expect(try drafts.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true)
+    let composer = support.appendingPathComponent("composer-transcripts", isDirectory: true)
+    #expect(try composer.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true)
     #expect(try Data(contentsOf: audio) == bytes)
   }
 }
