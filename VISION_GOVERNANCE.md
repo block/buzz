@@ -54,7 +54,7 @@ One layer sits above the community: the **hosting operator**. "Repos here can ne
 
 ## The Repo: Building Up
 
-A repo is bound to a channel, and the channel's roles are the repo's permissions. Guests read. Members write. Admins manage: default branch, protections, and which rules the repo adds. A private channel makes a private repo, and everything about it follows: issues, patches, status events and labels are visible only to the channel's members.
+A repo is bound to a channel, and the channel's roles are the repo's permissions. Guests read. Members write. Admins manage: default branch, protections, and which rules the repo adds. A private channel makes a private repo, and everything about it follows: issues, status events and labels are visible only to the channel's members.
 
 Repo admins add rules on top of the floor. They can require a second reviewer, protect a release branch, or name code owners for a directory. They can't remove the community's review, turn off secret scanning, or loosen the agent cap. When rules overlap, every applicable rule must pass. Nothing gets "overridden by the stricter one"; they all just apply.
 
@@ -70,7 +70,7 @@ The work can happen in another room; its permissions stay with the repo. Reviews
 
 Governance adds two things: evidence that means something, and one door.
 
-**Evidence names exactly what it approved.** An approval or a check result is bound to the exact candidate commit, repository and target branch. Update the pull request, or let `main` move underneath, and the old approvals no longer match. The pull request groups the evidence; the exact change decides whether it still counts. A yes in one repo never counts in another. Re-review or re-run; there's no carrying a yes from one change to another. Missing, pending or unavailable required checks block the change. An agent's approval can't fill a required human approval. Only an identity the community knows is a person, for example one its issuer vouches for as a human, can fill one. An unattested key is never presumed human. When the rules ask for independent review, nobody can approve their own work: an agent counts as its owner, and "their own work" means everyone who actually contributed commits, not just whoever pressed Land.
+**Evidence names exactly what it approved.** Every approval and check result records the commits, repository and target branch it saw. A yes in one repo never counts in another. Rules decide what still counts: how many approvals, from whom, whether a new push clears them, and whether checks must pass on the merge result. Missing, pending or unavailable required checks block the change. Any account that carries, or is required to carry, an owner attestation ([NIP-OA](docs/nips/NIP-OA.md)) can't fill a required human approval. When the rules ask for independent review, nobody approves their own work: an agent counts as its owner, and "their own work" means every key that pushed or signed the pull request's commits.
 
 **One door, one decision.** Whoever lands a change, whether Dana, her agent or a merge coordinator, goes through the same gate. Agents and CI do the compute. The relay decides, in one step, with current authority and current evidence. A change can land only under authority still valid at that moment. You can use another client. You cannot use another entrance to skip the rules.
 
@@ -122,8 +122,6 @@ Public contributions stay portable, and your reputation on open projects travels
 **Corporate revocation is as fast as the voucher.** An issuer-backed community trades instant revocation of corporate identity for a stateless front desk with no identity registry. A deployment that needs a tighter bound shortens how long a voucher can live. The time from your directory to your issuer is the issuer's promise, not ours.
 
 **Group sync is young.** Teams come from your directory and live as channels. Until the issuer syncs groups, group changes reach Buzz only when someone makes them.
-
-**Governed repos start with pushed branches.** Pushed branches give Git proposals one controlled path in. Other code-bearing uploads must meet the same protections or be rejected. Patch events (NIP-34 kind:1617) aren't a supported proposal path in a governed repo at first. That's an unsupported workflow, not a forbidden client: any client that brings the evidence the community requires can participate.
 
 **Fail closed.** A required rule the relay doesn't understand means no. Never skip, never warn and continue. Mixed-version rollouts will feel that, on purpose.
 

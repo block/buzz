@@ -34,7 +34,7 @@ One event log. One search index. Three lenses.
 
 ## Access
 
-The relay enforces all access control. Membership gates collaboration. Owners and admins keep the record. Policy gates changes. See [VISION_GOVERNANCE.md](VISION_GOVERNANCE.md) for how a community governs changes to its code.
+The relay enforces all access control. Membership gates collaboration. For governed repos, policy gates changes and owners and admins keep the record. See [VISION_GOVERNANCE.md](VISION_GOVERNANCE.md) for how a community governs changes to its code.
 
 | Type | Visibility | Join | Create |
 |------|-----------|------|--------|

@@ -2,7 +2,7 @@
 
 > Someone pushes a fix. Buzz creates a channel for the branch. The CI agent picks up the push, runs the tests, posts results back to the channel. A co-maintainer reviews the diff inline, approves it — a signed event, cryptographic proof. Merge. The workflow runs the integration. The channel archives into a permanent record of why that code exists.
 >
-> Bug report to merged patch. One place. One search index. One identity system. The branch channel was the pull request, the CI dashboard, and the discussion thread.
+> Bug report to merged fix. One place. One search index. One identity system. The work channel held the pull request, the CI results, and the discussion.
 
 This document is the software-forge slice of the broader Buzz platform. [VISION.md](VISION.md) covers the platform. [VISION_SOVEREIGN.md](VISION_SOVEREIGN.md) covers the sovereign relay story — one domain, one relay, one project. This doc zooms in on what it looks like when that relay hosts code. In multi-community Buzz, the same rule is lifted one level up: a project domain or subdomain selects the community first, and repositories, workflows, approvals, Blossom artifacts, and git ref updates under that host are community-local even if an operator runs many communities on shared backend infrastructure.
 
@@ -27,14 +27,12 @@ The portable representation is a NIP-34 repo announcement (kind:30617) — stand
     ["maintainers", "<co-maintainer-npub>"],
     ["buzz-channel", "<channel-uuid>"],
     ["buzz-visibility", "listed"],
-    ["buzz-protect", "main", "push-allowed", "<alice-npub>", "<bob-npub>"],
-    ["buzz-protect", "main", "require-approval", "2"],
-    ["buzz-protect", "main", "no-force-push"]
+    ["buzz-protect", "refs/heads/main", "push:admin", "no-force-push", "no-delete"]
   ]
 }
 ```
 
-Branch protections live in the same event — `buzz-protect` tags. The relay enforces them at the git transport layer. Only npubs listed in `push-allowed` can push to protected branches. Force pushes are blocked. Merges require the specified number of signed approval events (kind:46011) before the relay accepts the push.
+Branch protections live in the same event as `buzz-protect` tags, and the relay enforces them at the git transport layer. The repo channel's roles decide who can push: members write, and `push:admin` narrows a protected branch to admins. `no-force-push` and `no-delete` apply to everyone, the owner included. Required approvals and checks are governance rules still to build; see [VISION_GOVERNANCE.md](VISION_GOVERNANCE.md).
 
 Agents act under their own authority, never their owner's. An agent reaches a repo through its own membership in the repo channel, and where the community requires it, a grant from its owner that further limits its repos, actions and lifetime. [NIP-OA](docs/nips/NIP-OA.md) identifies the human who delegated: every push is attributed to that owner, and a ban on the owner reaches the agent too. Owner attestation never replaces the agent's own channel access or a required grant. An agent never holds more than its owner currently does: when the owner loses access to a repo, the agent loses it too, grant or no grant. See [VISION_GOVERNANCE.md](VISION_GOVERNANCE.md).
 
