@@ -15,7 +15,7 @@
   const autoplay = params.get('autoplay');
   const mute = params.get('mute');
   const fields = [video, playlist, start, autoplay, mute].filter(value => value !== null);
-  if ((video || playlist) && [...params].length === fields.length &&
+  if (window.origin === location.origin && (video || playlist) && [...params].length === fields.length &&
       (video === null || /^[A-Za-z0-9_-]{11}$/.test(video)) &&
       (playlist === null || /^[A-Za-z0-9_-]{1,128}$/.test(playlist)) &&
       (start === null || /^[0-9]+$/.test(start)) && (autoplay === null || autoplay === '1') &&
