@@ -122,7 +122,7 @@ void main() {
       }, now),
       relay.event('channel-workspace-sort', {
         'version': 1,
-        'groups': {'group:launch': 'recent'},
+        'groups': {'section:launch': 'recent'},
       }, now),
     ]) {
       relay
@@ -151,11 +151,12 @@ void main() {
       );
     }
     expect(inList('🚀'), findsOneWidget);
-    // A workspace holds team and Solo rows alike.
+    // A workspace holds team and Solo rows alike, in desktop's sort.
     for (final filed in ['design-crit', 'solo-plan']) {
       expect(top(filed), greaterThan(top('Launch')));
       expect(top(filed), lessThan(top('Later')));
     }
+    expect(top('solo-plan'), lessThan(top('design-crit')));
     expect(inList('No chats yet'), findsNothing);
 
     // Desktop owns these workspaces and their sort: only filters remain.
@@ -201,7 +202,7 @@ void main() {
 
 late String _viewer;
 
-Channel _channel(String id, {bool solo = false}) => Channel(
+Channel _channel(String id, {bool solo = false, int day = 1}) => Channel(
   id: id,
   name: id,
   channelType: 'stream',
@@ -210,6 +211,7 @@ Channel _channel(String id, {bool solo = false}) => Channel(
   description: '',
   createdBy: solo ? _viewer : 'other',
   createdAt: DateTime(2026),
+  lastMessageAt: DateTime(2026, 1, day),
   memberCount: 2,
   isMember: true,
 );
@@ -220,7 +222,8 @@ class _Channels extends ChannelsNotifier {
     _channel('general'),
     _channel('pinned'),
     _channel('design-crit'),
-    _channel('solo-plan', solo: true),
+    // Newest in Launch, so Recent puts it above design-crit.
+    _channel('solo-plan', solo: true, day: 9),
     _channel('solo-scratch', solo: true),
   ];
 }

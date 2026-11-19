@@ -80,16 +80,19 @@ void main() {
       expect(relay.published, isEmpty);
     });
 
-    if (failedRead) continue;
+    // For sort, the third row retains the head where only the publish
+    // preflight finds it: no live EVENT ever arrives.
+    final sortArrival = failedRead ? 'only in the preflight' : arrival;
     fakeAsyncTest('sort stays unpublished when the unified head arrives '
-        '$arrival', (clock) {
+        '$sortArrival', (clock) {
       final relay = SidebarRelay();
       final head = relay.event(
         'channel-workspace-sort',
         workspaceSort,
         nowSeconds(),
       );
-      if (!live) relay.stored.add(head);
+      if (!live && !failedRead) relay.stored.add(head);
+      var notified = 0;
       final m = ChannelSortManager(
         pubkey: relay.pubkey,
         relayUrl: 'wss://relay.example',
@@ -98,10 +101,12 @@ void main() {
         relaySession: relay.session,
         signedEventRelay: relay.signer,
         remoteEnabled: true,
-        onChanged: () {},
+        onChanged: () => notified++,
       )..initialize();
       clock.flushMicrotasks();
       m.setSortModeFor('dms', ChannelSortMode.recent);
+      if (failedRead) relay.stored.add(head);
+      var notifiedBeforeHead = notified;
       if (live) {
         relay
           ..stored.add(head)
@@ -109,10 +114,15 @@ void main() {
         clock.flushMicrotasks();
       }
       m.setSortModeFor('channels', ChannelSortMode.alpha);
+      if (failedRead) notifiedBeforeHead = notified;
       clock.elapse(const Duration(seconds: 10));
 
       expect(m.editable, isFalse);
       expect(m.sortModeFor('channels'), ChannelSortMode.recent);
+      // Home must hear about the head, whichever read found it.
+      if (live || failedRead) {
+        expect(notified, greaterThan(notifiedBeforeHead));
+      }
       expect(relay.published, isEmpty);
       m.dispose();
       clock.flushMicrotasks();

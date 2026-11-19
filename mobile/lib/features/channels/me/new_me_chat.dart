@@ -175,7 +175,20 @@ Future<Channel> _createMeChat(
           (group == null || groups.assignments[channelId] == group);
     },
     // The chat is still created; only a filing desktop now owns is dropped.
-    place: () =>
-        sync.update((current) => current.place(channelId, group: filing())),
+    place: () async {
+      bool mayFile() => ref.read(channelSectionsProvider).editable;
+      try {
+        await sync.update(
+          mayFile: mayFile,
+          (current) => current.place(channelId, group: filing()),
+        );
+      } on MeFilingClosed {
+        // The lock landed mid-send. Place the chat without the filing.
+        await sync.update(
+          mayFile: mayFile,
+          (current) => current.place(channelId, group: filing()),
+        );
+      }
+    },
   );
 }

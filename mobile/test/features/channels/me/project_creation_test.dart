@@ -40,6 +40,7 @@ class _Channels extends ChannelsNotifier {
 class _Relay extends RelaySessionNotifier {
   List<NostrEvent> events = [];
   VoidCallback? beforeRead;
+  VoidCallback? beforeSend;
   bool failRead = false;
   bool failAfterPublish = false;
   int writes = 0;
@@ -59,6 +60,10 @@ class _Relay extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
     Future<bool> Function()? mayPublish,
   }) async {
+    beforeSend?.call();
+    if (mayPublish != null && !await mayPublish()) {
+      throw StateError('Event no longer wanted');
+    }
     events = [event];
     writes++;
     if (failAfterPublish) throw StateError('lost acknowledgement');
@@ -242,23 +247,28 @@ void main() {
       );
       expect(find.text('Conflicting Solo changes'), findsNothing);
 
-      // Desktop's unified layout arrives while a workspace is being named:
-      // desktop now owns filings, so nothing is written or left to resume.
+      // Desktop's unified layout arrives as the workspace is being sent:
+      // desktop now owns filings, so nothing is written or left to replay.
       final writes = relay.writes;
+      // Solo refuses two saves in the same second.
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 1100)),
+      );
       await open();
       await tester.enterText(find.byType(TextField), 'Too late');
+      await tester.pumpAndSettle();
       final sections =
           ProviderScope.containerOf(
                 tester.element(find.byType(_WorkspaceHeader)),
               ).read(channelSectionsProvider.notifier)
               as _Sections;
-      sections.lock();
-      await tester.pumpAndSettle();
+      relay.beforeSend = sections.lock;
       await tester.tap(find.widgetWithText(FilledButton, 'Create workspace'));
       await tester.pumpAndSettle();
       expect(_closed, isNotNull);
       expect(relay.writes, writes);
       expect(MeProjectCreation.pending(sync), isNull);
+      expect(prefs.getString(sync.pendingKey), isNull);
     },
     variant: TargetPlatformVariant.only(TargetPlatform.android),
   );

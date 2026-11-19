@@ -342,7 +342,12 @@ class ChannelSortManager {
     // A newer remote blob wins. If one arrives during this read, _generation
     // changes and we abort rather than overwriting it.
     final preflight = await _fetchAndApply();
-    if (_disposed || !editable || _generation != generationAtStart) return;
+    if (_disposed) return;
+    if (_generation != generationAtStart) {
+      // The preflight may be the first read to find the unified head.
+      _onChanged();
+      return;
+    }
     if (preflight == null) {
       _schedulePublish();
       return;

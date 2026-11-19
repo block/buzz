@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/widgets.dart';
+import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -377,8 +377,37 @@ class MeSync {
     }
   }
 
+  /// Publishes [event], journaled as [record], unless [refused] says no at the
+  /// send boundary, after every relay wait. A refused event leaves no
+  /// replayable journal entry behind.
+  Future<void> _publishUnlessRefused(
+    NostrEvent event,
+    String record, {
+    required bool Function() refused,
+  }) async {
+    var wasRefused = false;
+    try {
+      await session.publish(
+        event,
+        mayPublish: () async => !(wasRefused = refused()),
+      );
+    } catch (_) {
+      if (!wasRefused) rethrow;
+      await _clearConfirmedPending(record);
+      throw const MeFilingClosed();
+    }
+  }
+
   /// Refresh before applying an intent, then confirm the selected signed event.
-  Future<void> update(MeGroups Function(MeGroups) change) async {
+  ///
+  /// [mayFile] says whether this client may still change projects or chat
+  /// filings. It is asked again at each relay send, including a pending
+  /// replay; a refused filing change is dropped from the journal and throws
+  /// [MeFilingClosed].
+  Future<void> update(
+    MeGroups Function(MeGroups) change, {
+    bool Function()? mayFile,
+  }) async {
     check();
     if (_saving) throw StateError('A Solo change is still being saved.');
     _saving = true;
@@ -412,7 +441,16 @@ class MeSync {
         } else {
           if (remote?.id != event.id) {
             check();
-            await session.publish(event);
+            final baseEvent = stored['base'] as Map<String, dynamic>?;
+            final base = baseEvent == null
+                ? const MeGroups()
+                : decode(NostrEvent.fromJson(baseEvent));
+            await _publishUnlessRefused(
+              event,
+              pending,
+              refused: () =>
+                  mayFile?.call() == false && _filingsDiffer(base, local),
+            );
             if ((await head())?.id != event.id) {
               throw StateError(
                 'A previous Solo save is still unconfirmed. Try again.',
@@ -431,9 +469,11 @@ class MeSync {
           'Solo changed again. Your pending change is saved; try again.',
         );
       }
-      final value =
-          recovered ??
-          change(before == null ? const MeGroups() : decode(before));
+      final baseGroups = before == null ? const MeGroups() : decode(before);
+      final value = recovered ?? change(baseGroups);
+      bool refused() =>
+          mayFile?.call() == false && _filingsDiffer(baseGroups, value);
+      if (refused()) throw const MeFilingClosed();
       final String encoded;
       try {
         encoded = value.encode(community);
@@ -472,7 +512,7 @@ class MeSync {
         throw StateError('Couldn’t save this change on your phone. Try again.');
       }
       check();
-      await session.publish(signed);
+      await _publishUnlessRefused(signed, pendingRecord, refused: refused);
       check();
       if ((await head())?.id != signed.id) {
         throw StateError(
@@ -490,6 +530,20 @@ class MeSync {
     }
   }
 }
+
+/// Another client now owns workspace filings, so this one must not write them.
+class MeFilingClosed implements Exception {
+  /// Thrown before any filing reaches the relay.
+  const MeFilingClosed();
+
+  @override
+  String toString() =>
+      'Workspaces are now organized on desktop. Create this one there.';
+}
+
+bool _filingsDiffer(MeGroups a, MeGroups b) =>
+    jsonEncode(a.groups) != jsonEncode(b.groups) ||
+    !mapEquals(a.assignments, b.assignments);
 
 /// A verified Solo snapshot could not be retained for offline use.
 class MeCacheException implements Exception {

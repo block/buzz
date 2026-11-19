@@ -75,6 +75,7 @@ useMeWorkspace(
         onSelected?.call(project);
       } else {
         await sync.update(
+          mayFile: () => ref.read(channelSectionsProvider).editable,
           (groups) => groups.place(
             channelId,
             group: project,
