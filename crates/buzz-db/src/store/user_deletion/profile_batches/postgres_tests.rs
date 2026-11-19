@@ -337,10 +337,14 @@ async fn retained_subscription_blocks_until_the_table_is_dropped() {
     let secret = f.relay.secret_key().to_secret_hex();
     let before = export(&f.pool).await;
     let mut preview = Vec::new();
-    f.store
+    let Err(error) = f
+        .store
         .run_profile_batches(&opts, false, None, &mut preview)
         .await
-        .unwrap();
+    else {
+        panic!("preview must report the unresolved prerequisite");
+    };
+    assert!(error.to_string().contains("unresolved prerequisites"));
     let start: Value =
         serde_json::from_slice(preview.split(|b| *b == b'\n').next().unwrap()).unwrap();
     assert!(start["blockers"]

@@ -714,7 +714,7 @@ mod postgres_tests {
     /// children maintenance creates and the catch-all it replaces, read-only.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn public_parent_reader_reaches_new_monthlies_and_replaced_catch_all() {
+    async fn cluster_global_public_parent_reader_reaches_new_monthlies_and_replaced_catch_all() {
         use crate::store::partition::quote_identifier;
 
         let (pool, scratch) = scratch_pool().await;
