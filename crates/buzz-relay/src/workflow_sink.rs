@@ -35,9 +35,9 @@ use crate::state::AppState;
 /// - **Exact profile name.** Ordinary display names and verified display names,
 ///   usernames, and full names are aliases. Matching ignores case and canonical
 ///   Unicode encoding differences, with no substring, prefix, or fuzzy matching.
-///   Names may contain spaces/punctuation (`"Alex Example"`, `"Lep (Subagent)"`), so the
-///   match is anchored on `@` and terminated by a non-name boundary rather than
-///   whitespace.
+///   Names may contain spaces/punctuation (`"Alex Example"`, `"Lep (Subagent)"`),
+///   so the match is anchored on `@` and terminated by a non-name boundary rather
+///   than whitespace.
 /// - **Greedy-longest, non-overlapping.** Longer names are matched first and
 ///   consume their span, so `@Alex Example` binds *Example* and a bare `@Alex`
 ///   does not match the member `"Alex Example"`.
