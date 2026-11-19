@@ -284,38 +284,72 @@ void main() {
       },
     );
 
-    test('a search that finds nobody refutes every longer query', () async {
+    test('an empty search refutes longer queries only when it covered '
+        'every source', () async {
+      var opening = 1;
+
+      /// Opens [query]; whether it went to the directory. One that did is
+      /// answered with nobody. The recipient pickers (New DM, Add members)
+      /// read the same cache through [recipientSearchPendingProvider].
+      Future<bool> searches(String query) async {
+        final args = (channelId: _channelId, query: query, opening: opening++);
+        final close = open(args);
+        final recipients = container.listen(
+          recipientSearchPendingProvider(query),
+          (_, _) {},
+        );
+        final pending = container.read(mentionSearchPendingProvider(args));
+        expect(recipients.read(), pending, reason: query);
+        final before = session.queries.length;
+        await passTypingPause();
+        final searched = session.queries.length > before;
+        expect(searched, pending, reason: query);
+        if (searched) {
+          expect(session.queries.last, query);
+          session.searchFor(query).complete(const []);
+          await container.pump();
+        } else {
+          expect(shownFor(args), isEmpty);
+        }
+        recipients.close();
+        close();
+        await container.pump();
+        return searched;
+      }
+
       await passTypingPause();
       session.searchFor('al').complete(const []);
       await container.pump();
 
-      // `alb` cannot find anyone `al` did not: no search, nothing pending.
-      const longer = (channelId: _channelId, query: 'alb', opening: 1);
-      open(longer);
-      expect(container.read(mentionSearchPendingProvider(longer)), isFalse);
-      expect(shownFor(longer), isEmpty);
-      await passTypingPause();
-      expect(session.queries, ['al']);
+      // The relay reads verified names only once the last word has three
+      // characters (`PREFIX_MIN_CHARS`, crates/buzz-search): a shorter
+      // query that found nobody says nothing about a longer one.
+      for (final (query, searched) in [
+        ('alb', true), // `al` skipped verified names
+        ('albx', false), // `alb` covered both sources
+        ('albx yz', false), // and so every continuation
+        ('gn', true),
+        ('gna', true),
+        ('gnab', false),
+        ('mary j', true),
+        ('mary jo', true),
+        ('mary jones', true),
+        ('mary jones please', false),
+        // Every lexeme of the last token counts: `o'b` holds `o` and `b`.
+        ("o'bri", true),
+        ("o'brien", true),
+        ('ülk', true), // characters, not UTF-16 units or bytes
+        ('ülkü', false),
+        ('abc', true),
+      ]) {
+        expect(await searches(query), searched, reason: query);
+      }
 
       // An exact public key is an author lookup, never refuted by a name.
-      const hex = (channelId: _channelId, query: 'ab', opening: 1);
-      open(hex);
-      await passTypingPause();
-      session.searchFor('ab').complete(const []);
-      await container.pump();
-      final key = 'ab${'0' * 62}';
-      open((channelId: _channelId, query: key, opening: 1));
-      await passTypingPause();
-      expect(session.queries, ['al', 'ab', key]);
-
+      final key = 'abc${'0' * 61}';
+      expect(await searches(key), isTrue);
       // Any later finished search replaces the refutation.
-      session.searchFor(key).complete(const []);
-      await container.pump();
-      const cleared = (channelId: _channelId, query: 'alb', opening: 2);
-      open(cleared);
-      expect(container.read(mentionSearchPendingProvider(cleared)), isTrue);
-      await passTypingPause();
-      expect(session.queries, ['al', 'ab', key, 'alb']);
+      expect(await searches('abcd'), isTrue);
     });
 
     test('a longer query starts from the people its prefix found', () async {

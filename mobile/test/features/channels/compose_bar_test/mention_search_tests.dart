@@ -161,29 +161,36 @@ void mentionSearchTests() {
       expect(searched.last, 'alice sm');
       expect(row('Alice Smith'), findsOneWidget);
 
-      // Once a search finds nobody, longer queries are refuted: no search,
-      // and the chooser closes. A refuted query still matches members on the
-      // device, folding accents: `@zoe` lists the member Zoë after `z` found
-      // nobody in the directory. The same query searches again when it is
-      // typed afresh.
+      // A search that finds nobody refutes longer queries only when it
+      // covered every source. The relay reads verified names once the last
+      // word has three characters, so `z` and `zo` finding nobody do not stop
+      // `zoe`, and `mary j` does not stop `mary jones` (review of #9699).
+      // `zoe` does refute: the prose after it never leaves the device and
+      // the chooser closes. A refuted query still matches members on the
+      // device, folding accents: `@zoe` lists the member Zoë.
       searched.clear();
       await tester.enterText(field, '');
       await tester.pump();
       await type(tester, '', '@zoe');
-      expect(searched.where((q) => q.isNotEmpty), ['z']);
+      expect(searched.where((q) => q.isNotEmpty), ['z', 'zo', 'zoe']);
       expect(row('Zoë'), findsOneWidget);
+      searched.clear();
+      await type(tester, '@zoe', 'y please review');
+      expect(searched, isEmpty);
+      expect(popover, findsNothing);
       searched.clear();
       await tester.enterText(field, '');
       await tester.pump();
-      await type(tester, '', '@z');
-      expect(searched.where((q) => q.isNotEmpty), ['z']);
-      searched.clear();
-      await type(tester, '@z', 'ed please review');
-      expect(searched, isEmpty);
-      expect(popover, findsNothing);
-      await tester.enterText(field, '@z');
+      // The first pause comes at `@mary j`, whose search skips verified names.
+      await tester.enterText(field, '@mary j');
       await pause(tester);
-      expect(searched, ['z']);
+      await type(tester, '@mary j', 'ones');
+      expect(searched, ['mary j', 'mary jo', 'mary jon']);
+      // The same query searches again when it is typed afresh.
+      searched.clear();
+      await tester.enterText(field, '@mary jon');
+      await pause(tester);
+      expect(searched, ['mary jon']);
     },
   );
 
