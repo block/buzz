@@ -9797,22 +9797,7 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
             .await
             .expect("cache");
 
-        // Verification covers the retiring tables: a straggler fails it. The
-        // owner row is gone, so lift subscriptions' foreign key to users to
-        // seed a straggler that only this table holds.
-        let owner_fk: String = sqlx::query_scalar(
-            "SELECT conname::text FROM pg_constraint \
-             WHERE conrelid = 'subscriptions'::regclass AND confrelid = 'users'::regclass",
-        )
-        .fetch_one(&db.pool)
-        .await
-        .expect("subscriptions owner foreign key");
-        sqlx::query(AssertSqlSafe(format!(
-            "ALTER TABLE subscriptions DROP CONSTRAINT \"{owner_fk}\""
-        )))
-        .execute(&db.pool)
-        .await
-        .expect("drop owner foreign key");
+        // Verification covers the retiring tables: a straggler fails it.
         for (table, insert) in [
             (
                 "subscriptions",

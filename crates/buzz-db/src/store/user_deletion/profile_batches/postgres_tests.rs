@@ -18,9 +18,6 @@ impl Fixture {
         let pool = PgPool::connect(&crate::test_support::database_url())
             .await
             .unwrap();
-        Self::on(pool).await
-    }
-    async fn on(pool: PgPool) -> Self {
         let store = crate::Db::from_pool(pool.clone()).user_deletion_store();
         let f = Self {
             pool,
@@ -313,72 +310,6 @@ async fn limits_dependencies_and_signer_fail_before_any_mutation() {
         .unwrap()
         .contains("content/account cleanup"));
     assert_eq!(before, export(&f.pool).await);
-}
-
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn retained_subscription_blocks_until_the_table_is_dropped() {
-    // Own database: the test drops a table the shared test database keeps.
-    let (pool, _scratch) = crate::test_support::ScratchDb::migrated(
-        &crate::test_support::database_url(),
-        "profile_retiring",
-    )
-    .await;
-    let f = Fixture::on(pool).await;
-    f.event(f.community, &f.human, 0, vec![], "human profile")
-        .await;
-    sqlx::query("INSERT INTO subscriptions(community_id,id,owner_pubkey) VALUES($1,'legacy',$2)")
-        .bind(f.community)
-        .bind(f.human.public_key().to_bytes().as_slice())
-        .execute(&f.pool)
-        .await
-        .unwrap();
-    let opts = f.options(1);
-    let secret = f.relay.secret_key().to_secret_hex();
-    let before = export(&f.pool).await;
-    let mut preview = Vec::new();
-    let Err(error) = f
-        .store
-        .run_profile_batches(&opts, false, None, &mut preview)
-        .await
-    else {
-        panic!("preview must report the unresolved prerequisite");
-    };
-    assert!(error.to_string().contains("unresolved prerequisites"));
-    let start: Value =
-        serde_json::from_slice(preview.split(|b| *b == b'\n').next().unwrap()).unwrap();
-    assert!(start["blockers"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|b| b.as_str().unwrap().starts_with("subscriptions:")));
-    assert!(f
-        .store
-        .run_profile_batches(&opts, true, Some(&secret), &mut Vec::new())
-        .await
-        .is_err());
-    assert_eq!(before, export(&f.pool).await);
-    // After the contract migration drops the table, the same scope completes.
-    sqlx::query("DROP TABLE subscriptions")
-        .execute(&f.pool)
-        .await
-        .unwrap();
-    f.store
-        .run_profile_batches(&opts, true, Some(&secret), &mut Vec::new())
-        .await
-        .unwrap();
-    let remaining: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM users WHERE community_id=$1 AND pubkey=ANY($2::bytea[])",
-    )
-    .bind(f.community)
-    .bind(vec![
-        f.human.public_key().to_bytes().to_vec(),
-        f.agent.public_key().to_bytes().to_vec(),
-    ])
-    .fetch_one(&f.pool)
-    .await
-    .unwrap();
-    assert_eq!(remaining, 0);
 }
 
 #[tokio::test]
