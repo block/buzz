@@ -9,7 +9,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../theme/theme.dart';
-import 'native_route_controls.dart';
 
 /// The navigation glyph displayed by [IosGlassNavigationButton].
 enum IosGlassNavigationIcon {
@@ -122,10 +121,6 @@ class IosGlassNavigationButton extends HookWidget {
   @override
   Widget build(BuildContext context) {
     assert(defaultTargetPlatform == TargetPlatform.iOS);
-    if (!useNativeRouteControlsVisible(context)) {
-      return SizedBox(width: width, height: height);
-    }
-
     final native = HookBuilder(builder: _buildNative);
     return Tooltip(
       message: semanticLabel,
