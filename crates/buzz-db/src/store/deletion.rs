@@ -70,8 +70,7 @@ pub const CONTROL_PLANE_TABLES: &[&str] = &[
 /// Each entry is `(table, row source)`; the row source binds the community as
 /// `$1` and is prefixed with `DELETE`, `SELECT count(*)`, or `SELECT EXISTS`.
 /// Rows go child before parent: outbox rows before their actions, and both
-/// before `moderation_reports`. That order also satisfies the foreign keys
-/// while they exist; it is not needed once they are dropped.
+/// before `moderation_reports`.
 pub const RELAY_ADMIN_TABLES: &[(&str, &str)] = &[
     (
         "relay_admin_outbox",
@@ -171,10 +170,9 @@ const EXCLUDED_SCOPED_TABLES: &[&str] = &[
     "operator_listener_outbox",
 ];
 
-/// Tables the PostgreSQL purge deletes from, child before parent. The order
-/// satisfies the foreign keys while they exist; once they are dropped it does
-/// not matter, but the list must stay complete ([`EXPECTED_SCOPED_TABLES`]
-/// gates it).
+/// Tables the PostgreSQL purge deletes from, child before parent. No foreign
+/// key needs the order, but the list must stay complete
+/// ([`EXPECTED_SCOPED_TABLES`] gates it).
 pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "nip_fi_profile_heads",
     "personal_read_frontiers",
@@ -917,7 +915,7 @@ impl DeletionStore {
         }
         let mut tx = self.pool.begin().await?;
         // Keep resolution and admission together, including when a caller pins
-        // the immutable ID. NO KEY UPDATE permits the legacy request FK check.
+        // the immutable ID. NO KEY UPDATE permits `FOR KEY SHARE` reference checks.
         let target: Option<Uuid> = sqlx::query_scalar(
             "SELECT id FROM communities
              WHERE ($1::text IS NULL OR lower(host) = lower($1))

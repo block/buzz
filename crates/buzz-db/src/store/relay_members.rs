@@ -508,7 +508,7 @@ async fn lock_owner_mutation_admission(
     crate::deletion::lock_community_deletion_shared(tx, community).await?;
     // `FOR NO KEY UPDATE` still serializes with archive (`FOR NO KEY UPDATE`),
     // unarchive and deletion admission (`FOR UPDATE`), but not with the
-    // `FOR KEY SHARE` that every foreign-key child insert takes. A membership
+    // `FOR KEY SHARE` that reference checks take. A membership
     // writer holding a member row or the list lock inserts its kind:13534
     // list into `events` last, so `FOR UPDATE` here would deadlock with it.
     let target = sqlx::query(
@@ -1075,10 +1075,7 @@ impl<T> MembershipWrite<T> {
 /// changes `relay_members`, so the list commits or rolls back with the change.
 /// The per-community list lock is the last explicit lock: every other lock a
 /// membership transaction takes comes first, so the final writer reads every
-/// committed change. While `events.community_id`'s foreign key exists, the
-/// list insert also takes `FOR KEY SHARE` on the community row; owner
-/// mutations lock that row `FOR NO KEY UPDATE`, which doesn't conflict, so no
-/// lock cycle forms. `created_at` is at least one second
+/// committed change. `created_at` is at least one second
 /// past every earlier list's, so the id is new and a client replacing by
 /// timestamp never keeps an older list from the same second. A burst of
 /// changes runs the timestamp ahead of the clock by up to one second per

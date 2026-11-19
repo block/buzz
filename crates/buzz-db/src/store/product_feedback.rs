@@ -59,9 +59,8 @@ pub struct ProductFeedbackRecord {
 /// changing its source community; callers intentionally receive the same
 /// successful acknowledgment in both cases.
 ///
-/// The community must exist, and nothing is written when it does not: while
-/// the foreign key to `communities` exists it rejects the insert first, and
-/// once the key is dropped this returns [`DbError::NotFound`]. Any lifecycle
+/// The community must exist, and nothing is written when it does not: this
+/// returns [`DbError::NotFound`]. Any lifecycle
 /// state qualifies: the table is provenance-only
 /// and unfenced (`docs/database.md`), so feedback stays writable while its
 /// community is being deleted, and the purge clears its provenance.

@@ -2,7 +2,7 @@
 -- Conformance: "Channels and channel membership". PK leads with community_id.
 
 CREATE TABLE channel_members (
-    community_id UUID NOT NULL REFERENCES communities(id),
+    community_id UUID NOT NULL,
     channel_id  UUID NOT NULL,
     pubkey      BYTEA NOT NULL,
     role        member_role NOT NULL DEFAULT 'member',
@@ -12,9 +12,7 @@ CREATE TABLE channel_members (
     removed_by  BYTEA,
     hidden_at   TIMESTAMPTZ,
     sync_modified_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    PRIMARY KEY (community_id, channel_id, pubkey),
-    FOREIGN KEY (community_id, channel_id)
-        REFERENCES channels (community_id, id) ON DELETE CASCADE
+    PRIMARY KEY (community_id, channel_id, pubkey)
 );
 
 CREATE INDEX idx_channel_members_pubkey ON channel_members (community_id, pubkey)

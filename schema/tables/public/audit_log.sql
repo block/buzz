@@ -4,7 +4,7 @@
 -- (Lane Audit/Dawn builds the chain logic; Lane 0 fixes the scoped schema.)
 
 CREATE TABLE audit_log (
-    community_id    UUID NOT NULL REFERENCES communities(id),
+    community_id    UUID NOT NULL,
     seq             BIGINT NOT NULL,
     hash_version    SMALLINT NOT NULL DEFAULT 1 CHECK (hash_version IN (1, 2)),
     hash            BYTEA NOT NULL,

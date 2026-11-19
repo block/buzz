@@ -307,8 +307,8 @@ pub async fn lock_channel_memberships_in_transaction<'tx>(
 /// rolls back, so a join cannot commit into a channel archived concurrently.
 /// `FOR UPDATE` would invert the lock order against a membership writer that
 /// key-share locks `channels` after taking the advisory membership lock
-/// ([`ChannelMembershipLocks::insert_auto_membership`]'s channel check, and a
-/// membership INSERT's foreign key while it exists); `FOR NO KEY UPDATE` still
+/// ([`ChannelMembershipLocks::insert_auto_membership`]'s channel check);
+/// `FOR NO KEY UPDATE` still
 /// blocks archive (a non-key update) and a delete, but is compatible with
 /// `KEY SHARE`. Re-reading under the lock is safe: the caller already holds it.
 pub async fn lock_channel_archived_at_in_transaction(
