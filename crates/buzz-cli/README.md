@@ -311,15 +311,26 @@ The table below mirrors that tree for readers who are not at a terminal.
 `raw query` takes one filter object or an array of filters (`-` reads stdin) and
 prints the relay's JSON response as-is: usually the matching events, signatures
 included, though some filters (read-state snapshots, for example) return an
-object. Each response is bounded by the relay, so pass your own `limit`. `raw publish` signs with the CLI's identity and
-attaches its NIP-OA auth tag. `--tag` is a JSON array of strings and may be
+object. Each response is bounded by the relay, so pass your own `limit`. The CLI
+checks only the shape (JSON objects; a malformed one exits 1); the relay checks
+the fields, and its rejection exits 2 as a relay error.
+
+`raw publish` signs with the CLI's identity and attaches its NIP-OA auth tag.
+A refusal by the relay (`accepted:false`) exits 2 with the event id and message.
+Replaceable (0, 3, 10000 to 19999) and addressable (30000 to 39999) kinds
+replace the whole stored event, with no read-merge-write: `--kind 0` drops
+profile fields you leave out, and `--kind 3` replaces the full follow list, so
+prefer the dedicated commands (`users set-profile`, `social`) for those. `--tag` is a JSON array of strings and may be
 repeated; `--event-json` takes an unsigned `{kind, content, tags, created_at}`
 template and rejects any other field. An `auth` tag in the input is refused.
 Ephemeral kinds (20000 to 29999) are sent over the WebSocket, except the NIP-43
 leave request (28936), which goes over HTTP. Gift wraps (kind 1059) are refused:
 they need NIP-59 signing with a throwaway key. `raw publish` also cannot
 attach an owner attestation; use `agents archive` and `agents unarchive` for the
-identity archive requests (kinds 9035 and 9036) that need one.
+identity archive requests (kinds 9035 and 9036) that need one. The attached auth
+tag also travels on artifact revisions (kind 45010), where the relay checks its
+`kind=` conditions against the revision, so a credential scoped to other kinds
+gets `artifact auth kind mismatch`.
 
 ## Huddles
 

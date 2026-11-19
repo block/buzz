@@ -363,6 +363,8 @@ enum Cmd {
     Raw(RawCmd),
 }
 
+/// `buzz raw` subcommands: query or publish any Nostr event with the CLI's
+/// own credentials, for reads and writes no purpose-built command covers.
 #[derive(Subcommand)]
 pub enum RawCmd {
     /// Query events with one Nostr filter or an array of filters (POST /query).
@@ -383,6 +385,8 @@ pub enum RawCmd {
     /// template with `--event-json` (fields: kind, content, tags, created_at).
     /// The CLI signs with its own identity and attaches its NIP-OA auth tag;
     /// an `auth` tag in the input is rejected, and so are gift wraps (kind 1059).
+    /// Replaceable and addressable kinds replace the whole stored event; use the
+    /// dedicated commands to change part of a profile or list.
     #[command(
         after_help = "Examples:\n  buzz raw publish --kind 1 --content 'hello'\n  buzz raw publish --kind 9 --tag '[\"h\",\"<channel uuid>\"]' --content 'hi'\n  buzz raw publish --event-json '{\"kind\":1,\"content\":\"hi\",\"tags\":[]}'"
     )]
