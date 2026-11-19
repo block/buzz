@@ -47,6 +47,12 @@ class ChannelSortManager {
 
   ChannelSortStore _store;
   ChannelSortSyncState _syncState;
+
+  /// Desktop's unified sort head; when present it replaces [_store] for
+  /// display and legacy edits stop.
+  ChannelSortStore? _workspace;
+  int _workspaceCreatedAt = 0;
+  String _workspaceEventId = '';
   Timer? _publishDebounce;
   Timer? _startupRetryTimer;
   int _startupRetryAttempt = 0;
@@ -80,11 +86,22 @@ class ChannelSortManager {
        _syncState = ChannelSortStorage(prefs).readSyncState(pubkey, relayUrl) {
     _lastRemoteCreatedAt = _syncState.updatedAt;
     _lastRemoteEventId = _syncState.eventId;
+    final cached = _storage.readWorkspace(pubkey, relayUrl);
+    if (cached != null) {
+      _workspace = cached.store;
+      _workspaceCreatedAt = cached.createdAt;
+      _workspaceEventId = cached.eventId;
+    }
   }
 
-  ChannelSortStore get store => _store;
+  /// The sort choices desktop renders with.
+  ChannelSortStore get store => _workspace ?? _store;
+
+  /// Whether a legacy `channel-sort` edit still reaches desktop.
+  bool get editable => _workspace == null;
+
   ChannelSortMode sortModeFor(String groupKey) =>
-      _store.groups[groupKey] ?? kDefaultSortMode;
+      store.groups[groupKey] ?? defaultSortModeFor(groupKey);
 
   Future<void> initialize() async {
     if (_disposed || !_remoteEnabled || _relaySession == null) {
@@ -153,7 +170,7 @@ class ChannelSortManager {
     ChannelSortMode mode, {
     Iterable<String>? liveSectionIds,
   }) {
-    if (_disposed || _store.groups[groupKey] == mode) return;
+    if (_disposed || !editable || _store.groups[groupKey] == mode) return;
     final updated = ChannelSortStore(
       groups: {..._store.groups, groupKey: mode},
     );
@@ -191,11 +208,17 @@ class ChannelSortManager {
     try {
       final events = await _relaySession.fetchHistory(_filter());
       if (isCurrent != null && !isCurrent()) return null;
+      // The result reports only the legacy head: it drives legacy republish.
       var found = false;
       for (final event in events) {
-        if (event.pubkey != pubkey || event.getTagValue('d') != _dTag) continue;
-        found = true;
-        _applyRemote(event);
+        if (event.pubkey != pubkey) continue;
+        final dTag = event.getTagValue('d');
+        if (dTag == workspaceSortCoordinate) {
+          _applyWorkspace(event);
+        } else if (dTag == _dTag) {
+          found = true;
+          _applyRemote(event);
+        }
       }
       return found;
     } catch (error) {
@@ -228,10 +251,41 @@ class ChannelSortManager {
     kinds: const [EventKind.readState],
     authors: [pubkey],
     tags: const {
-      '#d': [_dTag],
+      '#d': [_dTag, workspaceSortCoordinate],
     },
-    limit: 1,
+    limit: 2,
   );
+
+  void _applyWorkspace(NostrEvent event) {
+    if (event.createdAt > currentUnixSeconds() + _maxClockDriftSeconds ||
+        event.createdAt < _workspaceCreatedAt ||
+        (event.createdAt == _workspaceCreatedAt &&
+            event.id.compareTo(_workspaceEventId) >= 0)) {
+      return;
+    }
+    try {
+      final parsed = jsonDecode(_crypto.decrypt(event.content));
+      if (parsed is! Map<String, dynamic> || parsed['version'] != 1) return;
+      _workspace = ChannelSortStore.fromWorkspaceJson(parsed);
+      _workspaceCreatedAt = event.createdAt;
+      _workspaceEventId = event.id;
+      // Legacy edits no longer reach desktop; drop any still queued.
+      _publishDebounce?.cancel();
+      _publishDebounce = null;
+      _generation++;
+      if (!_disposed) {
+        _storage.writeWorkspace(
+          pubkey,
+          relayUrl,
+          _workspace!,
+          event.createdAt,
+          event.id,
+        );
+      }
+    } catch (_) {
+      // Keep the last readable head without advancing the cursor.
+    }
+  }
 
   void _applyRemote(NostrEvent event) {
     if (event.createdAt > currentUnixSeconds() + _maxClockDriftSeconds) return;
@@ -265,23 +319,29 @@ class ChannelSortManager {
   }
 
   void _handleIncomingEvent(NostrEvent event) {
-    if (_disposed ||
-        event.pubkey != pubkey ||
-        event.getTagValue('d') != _dTag) {
-      return;
-    }
+    if (_disposed || event.pubkey != pubkey) return;
+    final dTag = event.getTagValue('d');
     final before = _generation;
-    _applyRemote(event);
+    if (dTag == workspaceSortCoordinate) {
+      _applyWorkspace(event);
+    } else if (dTag == _dTag) {
+      _applyRemote(event);
+    }
     if (_generation != before && !_disposed) _onChanged();
   }
 
   Future<void> _publish() async {
-    if (_disposed || !_remoteEnabled || _signedEventRelay == null) return;
+    if (_disposed ||
+        !editable ||
+        !_remoteEnabled ||
+        _signedEventRelay == null) {
+      return;
+    }
     final generationAtStart = _generation;
     // A newer remote blob wins. If one arrives during this read, _generation
     // changes and we abort rather than overwriting it.
     final preflight = await _fetchAndApply();
-    if (_disposed || _generation != generationAtStart) return;
+    if (_disposed || !editable || _generation != generationAtStart) return;
     if (preflight == null) {
       _schedulePublish();
       return;

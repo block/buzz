@@ -171,6 +171,10 @@ class ChannelActionsSheet extends HookConsumerWidget {
     final isMuted =
         ref.watch(channelMutesProvider).store.channels[channel.id]?.muted ==
         true;
+    // Desktop's unified workspaces are read-only here.
+    final canFile = ref.watch(
+      channelSectionsProvider.select((state) => state.editable),
+    );
     final isStarred =
         !channel.isDm &&
         ref.watch(channelStarsProvider).store.channels[channel.id]?.starred ==
@@ -247,7 +251,7 @@ class ChannelActionsSheet extends HookConsumerWidget {
       ],
       SheetActionSection(
         children: [
-          if (!channel.isDm)
+          if (!channel.isDm && canFile)
             _ChannelSheetRow(
               leading: const Icon(BuzzIcons.folderInput),
               title: const Text('Move to section…'),

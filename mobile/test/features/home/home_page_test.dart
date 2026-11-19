@@ -591,8 +591,13 @@ void main() {
       await tester.tap(find.text('All'));
       await tester.pumpAndSettle();
       expect(find.text('Personal workspace'), findsOneWidget);
+      // The Team section heading, not the filter chip of the same name.
+      final teamSection = find.descendant(
+        of: find.byType(CustomScrollView),
+        matching: find.text('Team'),
+      );
       await tester.tap(find.text('Chats'));
-      await tester.tap(find.text('Channels'));
+      await tester.tap(teamSection);
       await tester.pumpAndSettle();
       for (final filter in ['Solo', 'Team', 'All']) {
         await tester.tap(
@@ -606,7 +611,7 @@ void main() {
         expect(find.text('General').hitTestable(), findsNothing);
       }
       await tester.tap(find.text('Chats'));
-      await tester.tap(find.text('Channels'));
+      await tester.tap(teamSection);
       await tester.pumpAndSettle();
       expect(find.text('Personal workspace').hitTestable(), findsOneWidget);
       expect(find.text('General').hitTestable(), findsOneWidget);

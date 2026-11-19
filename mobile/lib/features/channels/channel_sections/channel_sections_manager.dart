@@ -11,6 +11,7 @@ import '../../../shared/crypto/nip44.dart';
 import '../../../shared/relay/relay.dart';
 import '../../../shared/read_state/read_state_time.dart';
 import 'channel_sections_storage.dart';
+import 'workspace_layout.dart';
 
 const _uuid = Uuid();
 
@@ -43,6 +44,12 @@ class ChannelSectionsManager {
 
   ChannelSectionStore _store;
   ChannelSectionStore? _lastPublishedStore;
+
+  /// Desktop's unified layout head. Once one exists, desktop no longer reads
+  /// `channel-sections` edits, so this manager stops making them.
+  WorkspaceRecord? _workspace;
+  int _workspaceCreatedAt = 0;
+  String _workspaceEventId = '';
   Timer? _publishDebounce;
   int _lastRemoteCreatedAt = 0;
   String? _lastRemoteEventId;
@@ -78,9 +85,24 @@ class ChannelSectionsManager {
        _remoteEnabled = remoteEnabled,
        _onChanged = onChanged,
        _startupRetryBaseDelay = startupRetryBaseDelay,
-       _store = ChannelSectionsStorage(prefs).read(pubkey, relayUrl);
+       _store = ChannelSectionsStorage(prefs).read(pubkey, relayUrl) {
+    final cached = _storage.readWorkspace(pubkey, relayUrl);
+    if (cached != null) {
+      try {
+        _workspace = WorkspaceRecord.decode(cached.plaintext);
+        _workspaceCreatedAt = cached.createdAt;
+        _workspaceEventId = cached.eventId;
+      } on FormatException {
+        // A record this build cannot read waits for the relay head.
+      }
+    }
+  }
 
   ChannelSectionStore get store => _store;
+  WorkspaceRecord? get workspace => _workspace;
+
+  /// Legacy group edits reach desktop only until it saves a unified layout.
+  bool get _editable => !_disposed && _workspace == null;
 
   Future<void> initialize() async {
     if (_disposed) return;
@@ -98,11 +120,13 @@ class ChannelSectionsManager {
   /// an EVENT a healthy socket never delivered. Skipped while a local edit is
   /// pending and discarded if one lands before the read returns.
   void refreshFromRelay() {
-    if (_disposed || !_remoteEnabled || _publishPending) return;
+    if (_disposed || !_remoteEnabled) return;
     final revision = _localRevision;
+    final legacyCurrent = !_publishPending;
     unawaited(
       _fetchAndMerge(
-        isCurrent: () => revision == _localRevision && !_publishPending,
+        isCurrent: () =>
+            legacyCurrent && revision == _localRevision && !_publishPending,
       ),
     );
   }
@@ -143,8 +167,15 @@ class ChannelSectionsManager {
       _startupFetchSucceeded = fetched;
     }
 
-    final subscribed = _unsubscribe != null || await _startLiveSubscription();
+    final wasSubscribed = _unsubscribe != null;
+    final subscribed = wasSubscribed || await _startLiveSubscription();
     if (_disposed) return;
+    // Read again once live: a head saved between the first read and the
+    // subscription would otherwise wait for the next resume.
+    if (subscribed && !wasSubscribed && _startupFetchSucceeded) {
+      await _fetchAndMerge();
+      if (_disposed) return;
+    }
 
     if (!_startupFetchSucceeded || !subscribed) {
       _scheduleStartupRetry();
@@ -206,7 +237,7 @@ class ChannelSectionsManager {
   }
 
   void createSection(String name) {
-    if (_disposed) return;
+    if (!_editable) return;
     final maxOrder = _store.sections.fold<int>(
       -1,
       (max, s) => s.order > max ? s.order : max,
@@ -225,7 +256,7 @@ class ChannelSectionsManager {
   }
 
   void renameSection(String sectionId, String newName) {
-    if (_disposed) return;
+    if (!_editable) return;
     _store = ChannelSectionStore(
       sections: [
         for (final s in _store.sections)
@@ -246,7 +277,7 @@ class ChannelSectionsManager {
   }
 
   void deleteSection(String sectionId) {
-    if (_disposed) return;
+    if (!_editable) return;
     final updatedAssignments = Map<String, String>.from(_store.assignments)
       ..removeWhere((_, sid) => sid == sectionId);
     _store = ChannelSectionStore(
@@ -261,7 +292,7 @@ class ChannelSectionsManager {
   }
 
   void moveSectionUp(String sectionId) {
-    if (_disposed) return;
+    if (!_editable) return;
     final sorted = _sortedSections();
     final idx = sorted.indexWhere((s) => s.id == sectionId);
     if (idx <= 0) return;
@@ -270,7 +301,7 @@ class ChannelSectionsManager {
   }
 
   void moveSectionDown(String sectionId) {
-    if (_disposed) return;
+    if (!_editable) return;
     final sorted = _sortedSections();
     final idx = sorted.indexWhere((s) => s.id == sectionId);
     if (idx < 0 || idx >= sorted.length - 1) return;
@@ -279,7 +310,7 @@ class ChannelSectionsManager {
   }
 
   void assignChannel(String channelId, String sectionId) {
-    if (_disposed) return;
+    if (!_editable) return;
     final updated = Map<String, String>.from(_store.assignments)
       ..[channelId] = sectionId;
     _store = ChannelSectionStore(
@@ -291,7 +322,7 @@ class ChannelSectionsManager {
   }
 
   void unassignChannel(String channelId) {
-    if (_disposed) return;
+    if (!_editable) return;
     final updated = Map<String, String>.from(_store.assignments)
       ..remove(channelId);
     _store = ChannelSectionStore(
@@ -330,14 +361,14 @@ class ChannelSectionsManager {
           kinds: const [EventKind.readState],
           authors: [pubkey],
           tags: const {
-            '#d': ['channel-sections'],
+            '#d': ['channel-sections', workspaceCoordinate],
           },
-          limit: 1,
+          limit: 2,
         ),
       );
       if (_disposed && !allowDisposed) return false;
-      if (isCurrent != null && !isCurrent()) return false;
-      _mergeEvents(events);
+      // A pending local edit fences only the legacy head it would replace.
+      _mergeEvents(events, legacy: isCurrent == null || isCurrent());
       _persist();
       if (!_disposed) _onChanged();
       return true;
@@ -358,9 +389,9 @@ class ChannelSectionsManager {
           kinds: const [EventKind.readState],
           authors: [pubkey],
           tags: const {
-            '#d': ['channel-sections'],
+            '#d': ['channel-sections', workspaceCoordinate],
           },
-          limit: 1,
+          limit: 2,
         ),
         _handleIncomingEvent,
         onClosed: (message) => _handleSubscriptionClosed(generation, message),
@@ -394,19 +425,19 @@ class ChannelSectionsManager {
     _scheduleStartupRetry();
   }
 
-  void _mergeEvents(List<NostrEvent> events) {
+  void _mergeEvents(List<NostrEvent> events, {required bool legacy}) {
     for (final event in events) {
       if (event.pubkey != pubkey) continue;
-      _mergeEvent(event);
+      _mergeEvent(event, legacy: legacy);
     }
   }
 
-  void _mergeEvent(NostrEvent event) {
+  void _mergeEvent(NostrEvent event, {bool legacy = true}) {
     // Another community's groups must never reach this community's store.
     if (!_servesThisCommunity) return;
-    // Only process channel-sections d-tag events.
     final dTag = event.getTagValue('d');
-    if (dTag != 'channel-sections') return;
+    if (dTag == workspaceCoordinate) return _mergeWorkspace(event);
+    if (dTag != 'channel-sections' || !legacy) return;
 
     try {
       final plaintext = _crypto.decrypt(event.content);
@@ -425,6 +456,30 @@ class ChannelSectionsManager {
       }
     } catch (_) {
       // Decryption failure or parse error — keep existing state.
+    }
+  }
+
+  void _mergeWorkspace(NostrEvent event) {
+    if (event.createdAt < _workspaceCreatedAt ||
+        (event.createdAt == _workspaceCreatedAt &&
+            event.id.compareTo(_workspaceEventId) >= 0)) {
+      return;
+    }
+    try {
+      final plaintext = _crypto.decrypt(event.content);
+      _workspace = WorkspaceRecord.decode(plaintext);
+      _workspaceCreatedAt = event.createdAt;
+      _workspaceEventId = event.id;
+      if (!_disposed) {
+        _storage.writeWorkspace(pubkey, relayUrl, (
+          plaintext: plaintext,
+          createdAt: event.createdAt,
+          eventId: event.id,
+        ));
+      }
+    } catch (error) {
+      // Desktop rejects the same record, so keep the last readable head.
+      debugPrint('[ChannelSectionsManager] unreadable workspace head: $error');
     }
   }
 
@@ -464,6 +519,7 @@ class ChannelSectionsManager {
 
   Future<void> _publish({bool allowDisposed = false}) async {
     if ((!allowDisposed && _disposed) ||
+        _workspace != null ||
         !_remoteEnabled ||
         _signedEventRelay == null ||
         !_servesThisCommunity) {
@@ -474,7 +530,11 @@ class ChannelSectionsManager {
     await _fetchAndMerge(allowDisposed: allowDisposed);
 
     // No-op suppression: skip if nothing changed
-    if (_isIdenticalToLastPublished() || !_servesThisCommunity) return;
+    if (_isIdenticalToLastPublished() ||
+        !_servesThisCommunity ||
+        _workspace != null) {
+      return;
+    }
 
     final submitted = _store;
     final revision = _localRevision;

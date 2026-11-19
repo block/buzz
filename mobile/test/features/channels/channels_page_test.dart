@@ -248,8 +248,8 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('general'), findsNothing);
-      expect(find.byTooltip('Channels options'), findsOneWidget);
-      await tester.tap(find.byTooltip('Channels options'));
+      expect(find.byTooltip('Team options'), findsOneWidget);
+      await tester.tap(find.byTooltip('Team options'));
       await tester.pumpAndSettle();
       expect(find.text('general'), findsNothing);
       final all = tester.widget<AppListRow>(
@@ -310,7 +310,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('Channels options'));
+      await tester.tap(find.byTooltip('Team options'));
       await tester.pumpAndSettle();
       // Sort is available while preferences load. A late verified load must
       // update the untouched filter draft and never cause an All publication.
@@ -330,7 +330,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(publications, 0);
       expect(manager.store.modeFor('channels'), ChannelFilterMode.unreads);
-      await tester.tap(find.byTooltip('Channels options'));
+      await tester.tap(find.byTooltip('Team options'));
       await tester.pumpAndSettle();
       final header = find.byType(BuzzSheetHeader);
       final apply = find.widgetWithText(FilledButton, 'Apply');
@@ -354,7 +354,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(manager.store.modeFor('channels'), ChannelFilterMode.active);
       expect(manager.store.windowFor('channels'), 7 * 86400);
-      await tester.tap(find.byTooltip('Channels options'));
+      await tester.tap(find.byTooltip('Team options'));
       await tester.pumpAndSettle();
       final days = tester.widget<AppListRow>(
         find.ancestor(
@@ -401,7 +401,7 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        await tester.tap(find.byTooltip('Channels options'));
+        await tester.tap(find.byTooltip('Team options'));
         await tester.pumpAndSettle();
         await tester.tap(find.text('Active'));
         await tester.pumpAndSettle();
@@ -534,7 +534,7 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
-  for (final label in ['Channels options', 'Design options']) {
+  for (final label in ['Team options', 'Design options']) {
     testWidgets('$label exposes a labeled button and tap action', (
       tester,
     ) async {
@@ -577,7 +577,7 @@ void main() {
         final title = tester.widget<Text>(
           find.byKey(const ValueKey('buzz-sheet-title')),
         );
-        expect(title.data, label == 'Channels options' ? 'Channels' : 'Design');
+        expect(title.data, label == 'Team options' ? 'Team' : 'Design');
         expect(find.text('Sort'), findsOneWidget);
         expect(find.text('Show'), findsOneWidget);
       } finally {
@@ -610,7 +610,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     final ellipsis = find.descendant(
-      of: find.byTooltip('Channels options'),
+      of: find.byTooltip('Team options'),
       matching: find.byIcon(BuzzIcons.ellipsis),
     );
     expect(
@@ -672,7 +672,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       final ellipsis = find.descendant(
-        of: find.byTooltip('Channels options'),
+        of: find.byTooltip('Team options'),
         matching: find.byIcon(BuzzIcons.ellipsis),
       );
       final clock = tester.getCenter(
@@ -795,15 +795,15 @@ void main() {
     expect(find.text('general'), findsOneWidget);
     expect(find.text('design-forum'), findsNothing);
     expect(find.text('Alice'), findsOneWidget);
-    expect(find.text('Channels'), findsOneWidget);
+    expect(find.text('Team'), findsOneWidget);
     expect(find.text('FORUMS'), findsNothing);
-    expect(find.text('DMs'), findsOneWidget);
+    expect(find.text('Direct messages'), findsOneWidget);
     expect(find.text('Community'), findsNothing);
     expect(find.byTooltip('Create'), findsOneWidget);
-    expect(find.byTooltip('Channels options'), findsOneWidget);
+    expect(find.byTooltip('Team options'), findsOneWidget);
     expect(find.byIcon(BuzzIcons.ellipsis), findsWidgets);
     expect(find.byIcon(BuzzIcons.arrowUpDown), findsNothing);
-    expect(find.byTooltip('DMs options'), findsOneWidget);
+    expect(find.byTooltip('Direct messages options'), findsOneWidget);
 
     // DM identity display: the unnamed counterpart tile renders its
     // compact npub label, but its avatar initial stays keyed to the hex
@@ -829,17 +829,14 @@ void main() {
       tester
           .getTopRight(
             find.descendant(
-              of: find.byTooltip('Channels options'),
+              of: find.byTooltip('Team options'),
               matching: find.byIcon(BuzzIcons.ellipsis),
             ),
           )
           .dx,
-      closeTo(
-        tester.getTopRight(find.byTooltip('Channels options')).dx - 3,
-        0.01,
-      ),
+      closeTo(tester.getTopRight(find.byTooltip('Team options')).dx - 3, 0.01),
     );
-    await tester.tap(find.byTooltip('Channels options'));
+    await tester.tap(find.byTooltip('Team options'));
     await tester.pumpAndSettle();
     expect(find.text('Recent'), findsOneWidget);
     expect(find.text('A–Z'), findsOneWidget);
@@ -859,7 +856,7 @@ void main() {
       expect(text.style?.color, const Color(0xFF404040));
     }
     expect(find.byKey(const ValueKey('channel-icon-1')), findsOneWidget);
-    final sectionTitle = tester.widget<Text>(find.text('Channels'));
+    final sectionTitle = tester.widget<Text>(find.text('Team'));
     expect(sectionTitle.style?.fontSize, navigationSectionTextStyle.fontSize);
     expect(sectionTitle.style?.fontWeight, FontWeight.w500);
   });
@@ -1446,7 +1443,8 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('🎨'), findsNothing);
+      // Desktop draws workspace icons as decoration before the name.
+      expect(find.text('🎨'), findsOneWidget);
       final sectionRow = find
           .ancestor(of: find.text('Design'), matching: find.byType(Row))
           .first;
@@ -1616,7 +1614,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Community'), findsNothing);
-    final sectionLabelX = tester.getTopLeft(find.text('Channels')).dx;
+    final sectionLabelX = tester.getTopLeft(find.text('Team')).dx;
     final rowLabelX = tester.getTopLeft(find.text('general')).dx;
     final rowIconX = tester
         .getTopLeft(find.byKey(const ValueKey('channel-icon-1')))
@@ -4249,11 +4247,11 @@ void main() {
     );
 
     expect(
-      tester.widget<Text>(find.text('Channels')).style?.color,
+      tester.widget<Text>(find.text('Team')).style?.color,
       const Color(0xFFC7C7C7),
     );
     final options = find.descendant(
-      of: find.byTooltip('Channels options'),
+      of: find.byTooltip('Team options'),
       matching: find.byIcon(BuzzIcons.ellipsis),
     );
     expect(tester.widget<Icon>(options).color, const Color(0xFFC7C7C7));

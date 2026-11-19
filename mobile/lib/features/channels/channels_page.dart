@@ -88,6 +88,11 @@ import 'dm_channel_labels.dart';
 import 'ephemeral_channel_display.dart';
 import 'channel_mutes/channel_mutes_provider.dart';
 import 'channel_sections/channel_sections_provider.dart';
+import 'channel_sections/workspace_layout.dart';
+import '../../shared/custom_emoji/custom_emoji.dart' show normalizeShortcode;
+import '../../shared/custom_emoji/custom_emoji_provider.dart';
+import '../../shared/custom_emoji/custom_emoji_render.dart';
+import 'me/me_page.dart' show SoloChatTile;
 import 'channel_sections/channel_sections_storage.dart';
 import 'channel_sort/channel_sort_provider.dart';
 import 'channel_sort/channel_sort_storage.dart';
@@ -131,6 +136,9 @@ const double _kTopSectionBottomPadding = Grid.xxs;
 const double _kTopSectionInset = Grid.twelve;
 const double _kHeaderFrostScrollDistance = Grid.xxl;
 
+/// Home's All / Solo / Team filter: which rows the sidebar lists.
+enum SidebarRowFilter { all, solo, team }
+
 class ChannelsPage extends HookConsumerWidget {
   const ChannelsPage({
     required this.settingsPageBuilder,
@@ -139,8 +147,7 @@ class ChannelsPage extends HookConsumerWidget {
     this.messagesActionsBuilder,
     this.messagesActionsWidth = 0,
     this.soloSliver,
-    this.showTeam = true,
-    this.showTeamHeading = false,
+    this.rowFilter = SidebarRowFilter.all,
     this.newChannelAction,
     this.newDmAction,
     this.onInbox,
@@ -159,8 +166,7 @@ class ChannelsPage extends HookConsumerWidget {
   /// Width of the trailing controls that collapsed filters must leave clear.
   final double messagesActionsWidth;
   final Widget? soloSliver;
-  final bool showTeam;
-  final bool showTeamHeading;
+  final SidebarRowFilter rowFilter;
   final ValueNotifier<VoidCallback?>? newChannelAction;
   final ValueNotifier<VoidCallback?>? newDmAction;
 
@@ -316,11 +322,7 @@ class ChannelsPage extends HookConsumerWidget {
     if (channelsAsync.asData?.value case final data?) {
       cachedChannels.value = data;
     }
-    final personalIds =
-        ref.watch(meGroupsProvider).asData?.value.channels ?? const <String>[];
-    final channels = cachedChannels.value
-        ?.where((channel) => !channel.isSoloChat(personalIds))
-        .toList();
+    final channels = cachedChannels.value;
     Future<void> openChannel(Channel channel) async {
       if (!context.mounted) return;
       // A lookup, not a dependency: the page doesn't rebuild with the pane.
@@ -670,8 +672,7 @@ class ChannelsPage extends HookConsumerWidget {
       // updates still construct a fresh body with current channel data.
       child: _ChannelsBody(
         soloSliver: soloSliver,
-        showTeam: showTeam,
-        showTeamHeading: showTeamHeading,
+        rowFilter: rowFilter,
         onInbox: onInbox,
         onReadyChanged: (ready) => bodyReady.value = ready,
         channels: channels,

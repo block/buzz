@@ -325,8 +325,11 @@ class HomePage extends HookConsumerWidget {
               offstage: filter.value == 'Team',
               sliver: solo,
             ),
-      showTeam: filter.value != 'Solo',
-      showTeamHeading: filter.value == 'All',
+      rowFilter: switch (filter.value) {
+        'Solo' => SidebarRowFilter.solo,
+        'Team' => SidebarRowFilter.team,
+        _ => SidebarRowFilter.all,
+      },
       newChannelAction: newChannel,
       newDmAction: newDm,
       communityInvitePageBuilder: communityInvitePageBuilder,
