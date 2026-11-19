@@ -1378,6 +1378,12 @@ impl Default for ConnectionManager {
 /// that left the open set elsewhere stays granted here.
 pub const OPEN_CHANNELS_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// How long a pod uses a reader's cached member channels after the database
+/// read that produced them began (its connection checkout). Every membership
+/// write drops the reader's entry on every pod, so this bounds only a pod
+/// that misses that best-effort notification.
+pub const MEMBER_CHANNELS_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// How long a pod serves a cached ban/timeout row after the database read
 /// that produced it began, at its connection checkout (see
 /// [`AppState::restriction_cache`]). Every restriction write drops the
@@ -1407,6 +1413,16 @@ pub struct OpenChannels {
     pub ids: Vec<Uuid>,
     /// The community's listed open channels of other types, with their type.
     pub named_only: Vec<(Uuid, String)>,
+    /// When the database read that listed them checked out its connection.
+    pub read_at: Instant,
+}
+
+/// A reader's member channels and when the read that listed them checked out
+/// its connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberChannels {
+    /// The channels, split into legacy and named-only types.
+    pub set: Arc<buzz_db::channel_members::ChannelSet>,
     /// When the database read that listed them checked out its connection.
     pub read_at: Instant,
 }
@@ -1521,25 +1537,21 @@ pub struct AppState {
     /// All active memberships per community and user, shared by channel checks.
     pub(crate) membership_cache: Arc<crate::membership_cache::MembershipCache>,
     /// Member channels cache: (community_id, pubkey_bytes) → the channels the
-    /// pubkey is an active member of, split into legacy types and named-only
-    /// types. Short TTL (10s) — invalidated on membership changes and
-    /// community-wide channel changes.
-    #[allow(clippy::type_complexity)]
-    pub member_channels_cache:
-        Arc<moka::sync::Cache<(CommunityId, Vec<u8>), Arc<buzz_db::channel_members::ChannelSet>>>,
-    /// The newest load in flight per [`Self::member_channels_cache`] key. A
-    /// load publishes only while its token is still here; invalidation
-    /// removes it, so a read that straddles an invalidation is not cached.
-    #[allow(clippy::type_complexity)]
-    member_channels_loads: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), Arc<()>>>,
-    /// Orders [`Self::member_channels_cache`] publication against its
-    /// invalidation. Held only for cache operations, never across a read.
-    member_channels_publication: Arc<std::sync::Mutex<()>>,
+    /// pubkey is an active member of. Invalidated on membership changes and
+    /// community-wide channel changes, and used only for
+    /// [`MEMBER_CHANNELS_MAX_AGE`] after its read's connection checkout.
+    pub member_channels_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), MemberChannels>>,
+    /// Keeps a [`Self::member_channels_cache`] read that straddles an
+    /// invalidation of its key from being cached.
+    member_channels_loads: Arc<crate::load_fence::LoadFence<(CommunityId, Vec<u8>)>>,
     /// Listed open channel IDs per community, the half of every reader's
     /// accessible set that does not depend on the reader. Invalidated with
     /// the community's accessible channels, and used only for
     /// [`OPEN_CHANNELS_MAX_AGE`] after its read's connection checkout.
     pub open_channels_cache: Arc<moka::sync::Cache<CommunityId, Arc<OpenChannels>>>,
+    /// Keeps an [`Self::open_channels_cache`] read that straddles an
+    /// invalidation of its community from being cached.
+    open_channels_loads: Arc<crate::load_fence::LoadFence<CommunityId>>,
     /// Lets concurrent misses on [`Self::open_channels_cache`] share one read.
     pub(crate) open_channels_reads: Arc<crate::shared_reads::SharedReads<CommunityId>>,
     /// Per-community channel visibility string, used to gate the private-channel fan-out
@@ -1872,23 +1884,16 @@ impl AppState {
             membership_cache: Arc::new(crate::membership_cache::MembershipCache::new(
                 shared_read_wait,
             )),
+            // Readers use an entry only for `MEMBER_CHANNELS_MAX_AGE`; the
+            // TTL, which starts later, at insert, just reclaims memory.
             member_channels_cache: Arc::new(
                 moka::sync::Cache::builder()
                     .max_capacity(10_000)
-                    .time_to_live(std::time::Duration::from_secs(10))
+                    .time_to_live(MEMBER_CHANNELS_MAX_AGE)
                     .support_invalidation_closures()
                     .build(),
             ),
-            // A token evicted before its load ends only stops that load from
-            // publishing, so the bounds fail safe.
-            member_channels_loads: Arc::new(
-                moka::sync::Cache::builder()
-                    .max_capacity(10_000)
-                    .time_to_live(std::time::Duration::from_secs(60))
-                    .support_invalidation_closures()
-                    .build(),
-            ),
-            member_channels_publication: Arc::new(std::sync::Mutex::new(())),
+            member_channels_loads: Arc::new(crate::load_fence::LoadFence::new(10_000)),
             // Readers use an entry only for `OPEN_CHANNELS_MAX_AGE`; the TTL
             // just reclaims memory and keeps expired entries around long
             // enough to count their misses as `expired` rather than `absent`.
@@ -1898,6 +1903,7 @@ impl AppState {
                     .time_to_live(std::time::Duration::from_secs(10))
                     .build(),
             ),
+            open_channels_loads: Arc::new(crate::load_fence::LoadFence::new(10_000)),
             open_channels_reads: Arc::new(crate::shared_reads::SharedReads::new(
                 10_000,
                 shared_read_wait,
@@ -2201,12 +2207,8 @@ impl AppState {
     ) {
         self.membership_cache.invalidate(community_id, pubkey);
         let key = (community_id, pubkey.to_vec());
-        let _publication = self
-            .member_channels_publication
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        self.member_channels_loads.invalidate(&key);
-        self.member_channels_cache.invalidate(&key);
+        self.member_channels_loads
+            .invalidate(&key, || self.member_channels_cache.invalidate(&key));
     }
 
     /// Invalidate all users' accessible-channels cache (e.g. new open channel created).
@@ -2217,28 +2219,27 @@ impl AppState {
 
     /// Local-only accessible-channels drop. See [`invalidate_membership_local`].
     pub(crate) fn invalidate_all_accessible_channels_local(&self, community_id: CommunityId) {
-        self.open_channels_cache.invalidate(&community_id);
-        let _publication = self
-            .member_channels_publication
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let loads = self
-            .member_channels_loads
-            .invalidate_entries_if(move |(entry_community, _), _| *entry_community == community_id);
-        let entries = self
-            .member_channels_cache
-            .invalidate_entries_if(move |(entry_community, _), _| *entry_community == community_id);
-        if let Err(error) = loads.and(entries) {
-            // AppState enables invalidation closures at construction time. If
-            // that invariant ever regresses, prefer over-invalidating to
-            // serving stale access state.
-            tracing::error!(
-                ?error,
-                "community-scoped accessible-channel invalidation unavailable; falling back to full invalidation"
-            );
-            self.member_channels_loads.invalidate_all();
-            self.member_channels_cache.invalidate_all();
-        }
+        self.open_channels_loads.invalidate(&community_id, || {
+            self.open_channels_cache.invalidate(&community_id);
+        });
+        self.member_channels_loads.invalidate_matching(
+            move |(entry_community, _)| *entry_community == community_id,
+            || {
+                let entries = self.member_channels_cache.invalidate_entries_if(
+                    move |(entry_community, _), _| *entry_community == community_id,
+                );
+                if let Err(error) = entries {
+                    // AppState enables invalidation closures at construction
+                    // time. If that invariant ever regresses, prefer
+                    // over-invalidating to serving stale access state.
+                    tracing::error!(
+                        ?error,
+                        "community-scoped accessible-channel invalidation unavailable; falling back to full invalidation"
+                    );
+                    self.member_channels_cache.invalidate_all();
+                }
+            },
+        );
     }
 
     /// Invalidate the cached visibility for a single channel (e.g. after a flip).
@@ -2771,10 +2772,15 @@ impl AppState {
         let member = self
             .member_channels(
                 (community_id, pubkey.to_vec()),
-                self.db.get_member_channels(community_id, pubkey),
+                self.db.get_member_channels_read_at(community_id, pubkey),
             )
             .await?;
-        let open = self.open_channels(community_id).await?;
+        let open = self
+            .open_channels(
+                community_id,
+                self.db.get_listed_open_channels_read_at(community_id),
+            )
+            .await?;
         let mut implicit = member.implicit.clone();
         buzz_db::channel_members::merge_channel_ids(&mut implicit, &open.ids);
         Ok(ChannelAccess {
@@ -2784,47 +2790,43 @@ impl AppState {
         })
     }
 
-    /// The member half for `key` from [`Self::member_channels_cache`], else
-    /// from `read`.
+    /// The member half for `key` from [`Self::member_channels_cache`] while it
+    /// is younger than [`MEMBER_CHANNELS_MAX_AGE`], else from `read`.
     ///
     /// A read answers its own request, but is cached only if no invalidation
     /// for its key ran while it read. Otherwise a read that saw a membership
     /// just before its removal would grant it to later requests for the
-    /// cache's whole TTL.
+    /// entry's whole life.
     async fn member_channels(
         &self,
         key: (CommunityId, Vec<u8>),
         read: impl std::future::Future<
-            Output = Result<buzz_db::channel_members::ChannelSet, buzz_db::DbError>,
+            Output = Result<
+                buzz_db::ReadAt<buzz_db::channel_members::ChannelSet>,
+                buzz_db::DbError,
+            >,
         >,
     ) -> Result<Arc<buzz_db::channel_members::ChannelSet>, buzz_db::DbError> {
-        if let Some(cached) = self.member_channels_cache.get(&key) {
+        if let Some(cached) = self
+            .member_channels_cache
+            .get(&key)
+            .filter(|member| member.read_at.elapsed() < MEMBER_CHANNELS_MAX_AGE)
+        {
             metrics::counter!("buzz_accessible_channels_cache_hits_total").increment(1);
-            return Ok(cached);
+            return Ok(cached.set);
         }
         metrics::counter!("buzz_accessible_channels_cache_misses_total").increment(1);
-        let load = Arc::new(());
-        {
-            let _publication = self
-                .member_channels_publication
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            self.member_channels_loads.insert(key.clone(), load.clone());
-        }
-        let member = Arc::new(read.await?);
-        let _publication = self
-            .member_channels_publication
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if self
-            .member_channels_loads
-            .get(&key)
-            .is_some_and(|current| Arc::ptr_eq(&current, &load))
-        {
-            self.member_channels_loads.invalidate(&key);
-            self.member_channels_cache.insert(key, member.clone());
-        }
-        Ok(member)
+        let load = self.member_channels_loads.begin(&key);
+        let read = read.await?;
+        let member = MemberChannels {
+            set: Arc::new(read.value),
+            read_at: read.read_at,
+        };
+        let set = member.set.clone();
+        self.member_channels_loads.publish(&key, load, || {
+            self.member_channels_cache.insert(key.clone(), member);
+        });
+        Ok(set)
     }
 
     /// The community's open set from [`Self::open_channels_cache`] while it
@@ -2837,9 +2839,18 @@ impl AppState {
     /// A waiter also stops waiting once the leader has had the writer pool's
     /// acquire timeout plus [`SHARED_READ_STATEMENT_WAIT`], and reads on its
     /// own, so a leader whose read hangs stalls its waiters at most that long.
+    ///
+    /// As with [`Self::member_channels`], a read answers its own request but
+    /// is cached only if no invalidation for its community ran while it read.
     async fn open_channels(
         &self,
         community_id: CommunityId,
+        read: impl std::future::Future<
+            Output = Result<
+                buzz_db::ReadAt<buzz_db::channel_members::ChannelSet>,
+                buzz_db::DbError,
+            >,
+        >,
     ) -> Result<Arc<OpenChannels>, buzz_db::DbError> {
         let fresh = || {
             self.open_channels_cache
@@ -2861,16 +2872,16 @@ impl AppState {
             "absent"
         };
         metrics::counter!("buzz_open_channels_cache_misses_total", "reason" => reason).increment(1);
-        let read = self
-            .db
-            .get_listed_open_channels_read_at(community_id)
-            .await?;
+        let load = self.open_channels_loads.begin(&community_id);
+        let read = read.await?;
         let open = Arc::new(OpenChannels {
             ids: read.value.implicit,
             named_only: read.value.named_only,
             read_at: read.read_at,
         });
-        self.open_channels_cache.insert(community_id, open.clone());
+        self.open_channels_loads.publish(&community_id, load, || {
+            self.open_channels_cache.insert(community_id, open.clone());
+        });
         Ok(open)
     }
 
@@ -2885,6 +2896,23 @@ impl AppState {
         self.restriction_cache.seed(key, state);
     }
 
+    /// Seeds a fresh member-channels entry for `key` without touching the
+    /// database.
+    #[cfg(test)]
+    pub(crate) fn seed_member_channels(
+        &self,
+        key: (CommunityId, Vec<u8>),
+        set: buzz_db::channel_members::ChannelSet,
+    ) {
+        self.member_channels_cache.insert(
+            key,
+            MemberChannels {
+                set: Arc::new(set),
+                read_at: Instant::now(),
+            },
+        );
+    }
+
     /// Seeds both accessible-channel caches so `pubkey` reads exactly
     /// `channels`, with no open channels, without touching the database.
     #[cfg(test)]
@@ -2894,12 +2922,12 @@ impl AppState {
         pubkey: Vec<u8>,
         channels: Vec<Uuid>,
     ) {
-        self.member_channels_cache.insert(
+        self.seed_member_channels(
             (community_id, pubkey),
-            Arc::new(buzz_db::channel_members::ChannelSet {
+            buzz_db::channel_members::ChannelSet {
                 implicit: channels,
                 named_only: Vec::new(),
-            }),
+            },
         );
         self.open_channels_cache.insert(
             community_id,
@@ -4108,7 +4136,14 @@ pub(crate) mod tests {
 
             behind_held_connection(&pool, wait, misses, || {
                 let reader = Arc::clone(&state);
-                async move { reader.open_channels(community).await }
+                async move {
+                    reader
+                        .open_channels(
+                            community,
+                            reader.db.get_listed_open_channels_read_at(community),
+                        )
+                        .await
+                }
             })
             .await
             .into_iter()
@@ -4260,7 +4295,14 @@ pub(crate) mod tests {
                 (0..n)
                     .map(|_| {
                         let state = Arc::clone(&state);
-                        tokio::spawn(async move { state.open_channels(community).await })
+                        tokio::spawn(async move {
+                            state
+                                .open_channels(
+                                    community,
+                                    state.db.get_listed_open_channels_read_at(community),
+                                )
+                                .await
+                        })
                     })
                     .collect::<Vec<_>>()
             };
@@ -4423,9 +4465,7 @@ pub(crate) mod tests {
                 // A cached reader and a fresh stamp keep the control off the
                 // database and the clock, however slowly the steps above ran.
                 let control = reader();
-                reader_pod
-                    .member_channels_cache
-                    .insert((community, control.clone()), Arc::default());
+                reader_pod.seed_member_channels((community, control.clone()), Default::default());
                 restamp(Instant::now());
                 assert!(
                     grants(control, channel).await,
@@ -4699,11 +4739,33 @@ pub(crate) mod tests {
             state
                 .member_channels_cache
                 .get(&(community_b, pubkey.clone()))
-                .map(|set| set.implicit.clone()),
+                .map(|member| member.set.implicit.clone()),
             Some(channels_b),
             "A's cache drop must not evict B's accessible-channel entry"
         );
         assert!(state.open_channels_cache.get(&community_b).is_some());
+    }
+
+    /// A read result whose connection was checked out now.
+    fn read_now<T>(value: T) -> buzz_db::ReadAt<T> {
+        buzz_db::ReadAt {
+            value,
+            read_at: Instant::now(),
+        }
+    }
+
+    /// Yields until a refill of `key` is in flight in `fence`.
+    async fn until_loading<K>(fence: &crate::load_fence::LoadFence<K>, key: &K)
+    where
+        K: std::hash::Hash + Eq + Clone + Send + Sync + 'static,
+    {
+        for _ in 0..1_000 {
+            if fence.is_loading(key) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("the refill never started");
     }
 
     /// A member-channels read that straddles an invalidation of its key,
@@ -4734,7 +4796,7 @@ pub(crate) mod tests {
                 let stale = stale.clone();
                 async move {
                     held.await.ok();
-                    Ok(stale)
+                    Ok(read_now(stale))
                 }
             };
             let task = {
@@ -4742,16 +4804,7 @@ pub(crate) mod tests {
                 let key = key.clone();
                 tokio::spawn(async move { state.member_channels(key, read).await })
             };
-            for _ in 0..1_000 {
-                if state.member_channels_loads.get(&key).is_some() {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-            assert!(
-                state.member_channels_loads.get(&key).is_some(),
-                "load started"
-            );
+            until_loading(&state.member_channels_loads, &key).await;
             invalidate();
             release.send(()).expect("read is waiting");
             let answered = task.await.expect("join").expect("read");
@@ -4766,13 +4819,118 @@ pub(crate) mod tests {
         }
         let fresh = ChannelSet::default();
         state
-            .member_channels(key.clone(), async { Ok(ChannelSet::default()) })
+            .member_channels(key.clone(), async { Ok(read_now(ChannelSet::default())) })
             .await
             .expect("read");
         assert_eq!(
-            state.member_channels_cache.get(&key).as_deref(),
-            Some(&fresh),
+            state
+                .member_channels_cache
+                .get(&key)
+                .map(|member| (*member.set).clone()),
+            Some(fresh),
             "a read with no invalidation is cached"
+        );
+    }
+
+    /// A member snapshot is dated from its read's connection checkout, not
+    /// from its insert: one already [`MEMBER_CHANNELS_MAX_AGE`] old when it
+    /// is published is not served to the next lookup, so a slow read cannot
+    /// stretch a missed peer invalidation past that bound.
+    /// Mutation: drop the `read_at` age check on hits → RED.
+    #[tokio::test]
+    async fn a_member_snapshot_ages_from_its_read_not_its_insert() {
+        use buzz_db::channel_members::ChannelSet;
+        let state = test_state().await;
+        let key = (
+            CommunityId::from_uuid(Uuid::from_u128(0xAAAB)),
+            vec![7u8; 32],
+        );
+        let old = ChannelSet {
+            implicit: vec![Uuid::from_u128(1)],
+            named_only: Vec::new(),
+        };
+        let aged = buzz_db::ReadAt {
+            value: old.clone(),
+            read_at: Instant::now() - MEMBER_CHANNELS_MAX_AGE,
+        };
+        state
+            .member_channels(key.clone(), async { Ok(aged) })
+            .await
+            .expect("read");
+        let next = state
+            .member_channels(key.clone(), async { Ok(read_now(ChannelSet::default())) })
+            .await
+            .expect("read");
+        assert_eq!(
+            *next,
+            ChannelSet::default(),
+            "a snapshot past its age at publication is read again"
+        );
+        let again = state
+            .member_channels(key, async { Ok(read_now(old)) })
+            .await
+            .expect("read");
+        assert_eq!(
+            *again,
+            ChannelSet::default(),
+            "control: a fresh snapshot is served from the cache"
+        );
+    }
+
+    /// An open-set read that straddles its community's invalidation (an
+    /// open channel made private on this pod) answers its own request but
+    /// is not cached, so the next request reads again instead of using the
+    /// old snapshot. A read with no invalidation is cached.
+    /// Mutation: publish the open set without checking its load token, or
+    /// drop the token invalidation → RED.
+    #[tokio::test]
+    async fn an_open_read_that_straddles_an_invalidation_is_not_cached() {
+        use buzz_db::channel_members::ChannelSet;
+        let state = test_state().await;
+        let community = CommunityId::from_uuid(Uuid::from_u128(0xBBBB));
+        let revoked = Uuid::from_u128(1);
+        let stale = ChannelSet {
+            implicit: vec![revoked],
+            named_only: vec![(Uuid::from_u128(2), "system".to_owned())],
+        };
+        let (release, held) = tokio::sync::oneshot::channel::<()>();
+        let task = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                state
+                    .open_channels(community, async move {
+                        held.await.ok();
+                        Ok(read_now(stale))
+                    })
+                    .await
+            })
+        };
+        until_loading(&state.open_channels_loads, &community).await;
+        state.invalidate_all_accessible_channels_local(community);
+        release.send(()).expect("read is waiting");
+        let answered = task.await.expect("join").expect("read");
+        assert_eq!(answered.ids, [revoked], "the read answers its request");
+
+        let next = state
+            .open_channels(community, async { Ok(read_now(ChannelSet::default())) })
+            .await
+            .expect("read");
+        assert!(
+            next.ids.is_empty() && next.named_only.is_empty(),
+            "a later request reads again instead of using the straddling snapshot"
+        );
+        let again = state
+            .open_channels(community, async {
+                Ok(read_now(ChannelSet {
+                    implicit: vec![revoked],
+                    named_only: Vec::new(),
+                }))
+            })
+            .await
+            .expect("read");
+        assert!(
+            Arc::ptr_eq(&again, &next),
+            "control: a read with no invalidation is cached"
         );
     }
 
@@ -4800,9 +4958,7 @@ pub(crate) mod tests {
 
         // Another reader shares the community's open half.
         let other = vec![8u8; 32];
-        state
-            .member_channels_cache
-            .insert((community, other.clone()), Arc::default());
+        state.seed_member_channels((community, other.clone()), Default::default());
         let ids = state
             .get_accessible_channel_ids_cached(community, &other)
             .await
@@ -4825,7 +4981,14 @@ pub(crate) mod tests {
             (0..8)
                 .map(|_| {
                     let state = Arc::clone(state);
-                    tokio::spawn(async move { state.open_channels(community).await })
+                    tokio::spawn(async move {
+                        state
+                            .open_channels(
+                                community,
+                                state.db.get_listed_open_channels_read_at(community),
+                            )
+                            .await
+                    })
                 })
                 .collect::<Vec<_>>()
         };
@@ -4994,7 +5157,7 @@ pub(crate) mod tests {
             state
                 .member_channels_cache
                 .get(&(community_b, pubkey.clone()))
-                .map(|set| set.implicit.clone()),
+                .map(|member| member.set.implicit.clone()),
             Some(vec![channel_id])
         );
         assert!(state.open_channels_cache.get(&community_b).is_some());

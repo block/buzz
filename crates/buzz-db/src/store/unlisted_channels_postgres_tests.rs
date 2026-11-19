@@ -427,7 +427,7 @@ async fn channel_created_unlisted_is_never_listed() {
 /// request's named-only channels from them when it names nothing else. Their
 /// named-only halves together must equal the uncached read with no names,
 /// and their implicit halves the accessible set, for a member and a non-member.
-/// Mutation: restrict `get_member_channels` or
+/// Mutation: restrict `get_member_channels_read_at` or
 /// `get_listed_open_channels_read_at` to legacy types, or drop `NOT unlisted`
 /// from the latter → RED.
 #[tokio::test]
@@ -483,9 +483,10 @@ async fn cached_channel_sets_match_the_uncached_named_only_read() {
         (&f.outsider, Vec::new()),
     ] {
         let member =
-            f.db.get_member_channels(f.community, &reader.public_key().to_bytes())
+            f.db.get_member_channels_read_at(f.community, &reader.public_key().to_bytes())
                 .await
-                .expect("member channels");
+                .expect("member channels")
+                .value;
         assert_eq!(
             sorted(member.named_only.iter().map(|(id, _)| *id).collect()),
             member_named_only
@@ -511,9 +512,10 @@ async fn cached_channel_sets_match_the_uncached_named_only_read() {
     }
     // The owner is a member of every stream channel, listed or not.
     let owner =
-        f.db.get_member_channels(f.community, &f.owner.public_key().to_bytes())
+        f.db.get_member_channels_read_at(f.community, &f.owner.public_key().to_bytes())
             .await
-            .expect("owner member channels");
+            .expect("owner member channels")
+            .value;
     assert_eq!(
         sorted(owner.implicit),
         sorted(vec![stream_listed, stream_unlisted, stream_private])

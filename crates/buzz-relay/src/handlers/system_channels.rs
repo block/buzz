@@ -667,16 +667,16 @@ mod tests {
         let community = CommunityId::from_uuid(Uuid::new_v4());
         let reader = Keys::generate().public_key().to_bytes().to_vec();
         let [stream, member_system, listed_system, unknown] = [(); 4].map(|()| Uuid::new_v4());
-        state.member_channels_cache.insert(
+        state.seed_member_channels(
             (community, reader.clone()),
-            std::sync::Arc::new(buzz_db::channel_members::ChannelSet {
+            buzz_db::channel_members::ChannelSet {
                 implicit: vec![stream],
                 // A member of a listed system channel has it in both halves.
                 named_only: vec![
                     (member_system, "system".to_owned()),
                     (listed_system, "system".to_owned()),
                 ],
-            }),
+            },
         );
         state.open_channels_cache.insert(
             community,

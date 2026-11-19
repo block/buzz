@@ -1728,24 +1728,27 @@ pub async fn get_member_channel_ids(
     community_id: CommunityId,
     pubkey: &[u8],
 ) -> Result<Vec<Uuid>> {
-    Ok(get_member_channels(pool, community_id, pubkey)
+    Ok(get_member_channels_read_at(pool, community_id, pubkey)
         .await?
+        .value
         .implicit)
 }
 
-/// Every channel where the pubkey is an active member, split by type. Its
-/// implicit half is [`get_member_channel_ids`]; its named-only half is the
-/// member part of [`get_readable_named_only_channels`].
-pub async fn get_member_channels(
+/// Every channel where the pubkey is an active member, split by type, with
+/// when its connection was checked out. Its implicit half is
+/// [`get_member_channel_ids`]; its named-only half is the member part of
+/// [`get_readable_named_only_channels`].
+pub async fn get_member_channels_read_at(
     pool: &PgPool,
     community_id: CommunityId,
     pubkey: &[u8],
-) -> Result<ChannelSet> {
+) -> Result<ReadAt<ChannelSet>> {
     let mut connection = crate::observability::acquire_writer(
         pool,
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
+    let read_at = std::time::Instant::now();
     let rows: Vec<(Uuid, String)> = sqlx::query_as(
         r#"
         SELECT cm.channel_id, c.channel_type::text
@@ -1758,7 +1761,10 @@ pub async fn get_member_channels(
     .bind(pubkey)
     .fetch_all(&mut *connection)
     .await?;
-    Ok(rows.into_iter().collect())
+    Ok(ReadAt {
+        value: rows.into_iter().collect(),
+        read_at,
+    })
 }
 
 /// The open half of [`get_accessible_channel_ids`]: listed open channels of
@@ -1831,7 +1837,7 @@ pub struct ReadableNamedOnlyChannel {
 ///   as well is harmless, since a filter's scope is deduplicated.
 ///
 /// Uncached, so a caller can trust it for a channel the request names. With
-/// no names, it is the named-only halves of [`get_member_channels`] and
+/// no names, it is the named-only halves of [`get_member_channels_read_at`] and
 /// [`get_listed_open_channels_read_at`] together, which the relay caches. A
 /// read reaches one only by naming it, or, for system channels, by opting in
 /// to them. The opt-in needs every listed system channel, so those are all
@@ -2892,15 +2898,15 @@ impl Db {
         get_member_channel_ids(&self.pool, community_id, pubkey).await
     }
 
-    /// Every channel where a pubkey is an active member, split by type. See
-    /// [`get_member_channels`].
-    #[datastore_span(name = "get_member_channels", system = "postgresql")]
-    pub async fn get_member_channels(
+    /// Every channel where a pubkey is an active member, split by type, with
+    /// when its connection was checked out. See [`get_member_channels_read_at`].
+    #[datastore_span(name = "get_member_channels_read_at", system = "postgresql")]
+    pub async fn get_member_channels_read_at(
         &self,
         community_id: CommunityId,
         pubkey: &[u8],
-    ) -> Result<ChannelSet> {
-        get_member_channels(&self.pool, community_id, pubkey).await
+    ) -> Result<ReadAt<ChannelSet>> {
+        get_member_channels_read_at(&self.pool, community_id, pubkey).await
     }
 
     /// A community's listed open channel IDs. See [`get_listed_open_channel_ids`].

@@ -1810,12 +1810,12 @@ async fn named_channels_missing_from_a_stale_cache_still_route_live() {
     let reader_hex = reader.public_key().to_hex();
     // This pod cached the reader's access set before the join.
     let stale = || {
-        f.state.member_channels_cache.insert(
+        f.state.seed_member_channels(
             (
                 f.tenant.community(),
                 reader.public_key().to_bytes().to_vec(),
             ),
-            std::sync::Arc::default(),
+            Default::default(),
         );
     };
 
