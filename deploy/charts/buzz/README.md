@@ -12,7 +12,7 @@ This chart has two operating profiles selected by values:
 ## Quickstart (eval only)
 
 ```sh
-helm install buzz oci://ghcr.io/block/buzz/charts/buzz --version 0.1.10 \
+helm install buzz oci://ghcr.io/block/buzz/charts/buzz --version 0.1.12 \
   --create-namespace --namespace buzz \
   --set quickstart=true \
   --set postgresql.enabled=true \
@@ -675,11 +675,11 @@ and the relay image via its own `chart-v*` tags. Every PR/`main` push still
 lints, unit-tests, and render-checks the chart; only a `chart-v*` tag publishes,
 so an in-progress `main` can never overwrite a released version.
 
-To cut a release, push a `chart-release/<version>` branch whose `<version>`
-matches `Chart.yaml`'s `version`; merging it auto-tags `chart-v<version>` and
-dispatches the publish job (same lane machinery as the desktop and relay
-releases — see `.github/workflows/auto-tag-on-release-pr-merge.yml`). The publish
-job fails loudly if the tag version and `Chart.yaml` version disagree.
+Merging a PR from a branch in `block/buzz` that bumps `version` in
+`Chart.yaml` creates a `chart-v<version>` tag and triggers the publish job.
+For a dedicated release PR, use a `chart-release/<version>` branch with a
+version matching `Chart.yaml`. The publish job checks that the tag and
+`Chart.yaml` version agree.
 
 ## Development
 
