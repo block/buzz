@@ -58,8 +58,25 @@ void _messageActionsScrollTests() {
           await tester.drag(body, const Offset(0, -900));
           await tester.pumpAndSettle();
           expect(find.text('Delete message').hitTestable(), findsOneWidget);
-          position.jumpTo(0);
+          // A fast flick back from mid-content that only just crosses the top
+          // settles there: velocity alone must not dismiss this gesture.
+          position.jumpTo(60);
           await tester.pumpAndSettle();
+          final flick = await tester.startGesture(start);
+          for (var i = 1; i <= 8; i++) {
+            await flick.moveBy(
+              const Offset(0, 25),
+              timeStamp: Duration(milliseconds: 8 * i),
+            );
+          }
+          await tester.pump();
+          expect(position.pixels, 0);
+          expect(animation.value, inExclusiveRange(0.5, 1));
+          await flick.up(timeStamp: const Duration(milliseconds: 64));
+          await tester.pumpAndSettle();
+          expect(sheet, findsOneWidget);
+          expect(animation.value, 1);
+          expect(position.pixels, 0);
           await tester.drag(
             find.byKey(const ValueKey('quick-reaction-👍')),
             const Offset(-120, 0),
@@ -77,7 +94,8 @@ void _messageActionsScrollTests() {
           await pull.up();
           await tester.pumpAndSettle();
           expect(animation.value, 1);
-          await tester.tap(find.text('Copy link'));
+          // The same short pull released as a fling from the top dismisses.
+          await tester.flingFrom(start, const Offset(0, 84), 2000);
           await tester.pumpAndSettle();
           expect(sheet, findsNothing);
         } finally {

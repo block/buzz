@@ -1,6 +1,7 @@
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/modal_presentation.dart';
 import 'package:buzz/shared/widgets/modal_scroll_handoff.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
@@ -217,7 +218,154 @@ void main() {
         await h.close(tester);
       }
     }
+    // A gesture that began mid-content closes on progress, never on velocity.
+    for (final (progress, velocity, closes) in [
+      (0.9, 2000.0, false),
+      (0.501, 700.01, false),
+      (0.499, 2000.0, true),
+      (0.499, 0.0, true),
+      (0.499, -700.01, false),
+    ]) {
+      final h = _Harness();
+      await h.open(tester);
+      final position = h.position(tester);
+      position.jumpTo(30);
+      final drag = _start(position);
+      _move(drag, 30 + (1 - progress) * h.sheetHeight(tester));
+      expect(position.pixels, 0);
+      expect(h.animation(tester).value, closeTo(progress, 1e-9));
+      _end(drag, velocity);
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Handoff'),
+        closes ? findsNothing : findsOneWidget,
+        reason: 'mid-content start, progress=$progress, velocity=$velocity',
+      );
+      if (!closes) {
+        expect(h.animation(tester).value, 1);
+        expect(position.pixels, 0);
+      }
+      await h.close(tester);
+    }
   });
+
+  testWidgets('a displaced release cannot zero a later gesture ballistic', (
+    tester,
+  ) async {
+    final h = _Harness();
+    await h.open(tester);
+    final position = h.position(tester) as ScrollPositionWithSingleContext;
+    final displaced = _start(position);
+    _move(displaced, 60);
+    // Interrupted by an activity that never goes ballistic for this gesture.
+    position.beginActivity(IdleScrollActivity(position));
+    await tester.pumpAndSettle();
+    expect(h.animation(tester).value, 1);
+    final scroll = _start(position);
+    _move(scroll, -100);
+    expect(position.pixels, 100);
+    position.goBallistic(1500);
+    await tester.pumpAndSettle();
+    expect(position.pixels, greaterThan(100));
+    await h.close(tester);
+  });
+
+  // Pointer events with explicit timestamps, through the real recognizers. A
+  // zero velocity rests before lifting, so no fling is reported.
+  Future<void> release(
+    WidgetTester tester,
+    Offset from,
+    double dy,
+    double velocity,
+  ) async {
+    const steps = 10;
+    final micros = velocity == 0 ? 80000 : (dy / velocity * 1e6).round();
+    final gesture = await tester.startGesture(from);
+    for (var i = 1; i <= steps; i++) {
+      await gesture.moveBy(
+        Offset(0, dy / steps),
+        timeStamp: Duration(microseconds: micros * i ~/ steps),
+      );
+    }
+    if (velocity == 0) await tester.pump(const Duration(milliseconds: 200));
+    await gesture.up(timeStamp: Duration(microseconds: micros));
+    await tester.pumpAndSettle();
+  }
+
+  for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
+    testWidgets(
+      'body releases from the top match the stock sheet drag: $platform',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = platform;
+        try {
+          // Both sides of the stock 700 px/s and 0.5 progress thresholds, with
+          // room for touch slop. A Flutter upgrade that moves either threshold
+          // changes the stock outcome and fails here.
+          for (final (fraction, velocity, closes) in [
+            (0.2, 0.0, false),
+            (0.4, 0.0, false),
+            (0.6, 0.0, true),
+            (0.25, 400.0, false),
+            (0.25, 1000.0, true),
+          ]) {
+            for (final stock in [true, false]) {
+              final h = _Harness();
+              await h.open(tester);
+              final target = stock
+                  ? tester.getCenter(
+                      find.byKey(const ValueKey('buzz-sheet-drag-handle')),
+                    )
+                  : tester.getRect(find.byType(ModalScrollHandoff)).topCenter +
+                        const Offset(0, 20);
+              await release(
+                tester,
+                target,
+                fraction * h.sheetHeight(tester),
+                velocity,
+              );
+              expect(
+                find.text('Handoff'),
+                closes ? findsNothing : findsOneWidget,
+                reason:
+                    '${stock ? 'stock handle' : 'body'}, '
+                    'fraction=$fraction, velocity=$velocity',
+              );
+              await h.close(tester);
+            }
+          }
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+        }
+      },
+    );
+
+    testWidgets(
+      'pointer flicks dismiss from the top but not from mid-content: $platform',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = platform;
+        try {
+          final h = _Harness();
+          await h.open(tester);
+          h.bouncing.value = platform == TargetPlatform.iOS;
+          await tester.pumpAndSettle();
+          final from =
+              tester.getRect(find.byType(ModalScrollHandoff)).topCenter +
+              const Offset(0, 20);
+          h.position(tester).jumpTo(40);
+          await tester.pumpAndSettle();
+          // 40 px of content, then a small sheet displacement, at 2000 px/s.
+          await release(tester, from, 120, 2000);
+          expect(find.text('Handoff'), findsOneWidget);
+          expect(h.animation(tester).value, 1);
+          expect(h.position(tester).pixels, 0);
+          await release(tester, from, 80, 2000);
+          expect(find.text('Handoff'), findsNothing);
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+        }
+      },
+    );
+  }
 
   testWidgets('interruptions restore deeply displaced sheets without closing', (
     tester,

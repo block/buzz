@@ -34,7 +34,8 @@ class ModalScrollHandoff extends HookConsumerWidget {
 
 // Flutter 3.47.9, material/bottom_sheet.dart: _kMinFlingVelocity and
 // _kCloseProgressThreshold. Keep the body policy aligned with the stock handle,
-// except that a deliberate upward release vetoes the distance-based close.
+// except that a deliberate upward release vetoes the distance-based close and
+// that velocity alone closes only a gesture that began at the leading edge.
 const _minFlingVelocity = 700.0;
 const _closeProgressThreshold = 0.5;
 
@@ -119,6 +120,9 @@ class _HandoffPosition extends ScrollPositionWithSingleContext {
   Object? _gesture;
   _SheetBinding? _sheet;
   DragStartDetails? _start;
+  // Whether the current gesture began with content at its leading edge. A
+  // flick that began mid-content must not dismiss on velocity alone.
+  bool _startedAtLeadingEdge = false;
   bool _suppressBallistic = false;
 
   // A terminal token is cleared before delegating end/cancel: Flutter disposes
@@ -141,6 +145,9 @@ class _HandoffPosition extends ScrollPositionWithSingleContext {
   Drag drag(DragStartDetails details, VoidCallback dragCancelCallback) {
     interrupt();
     final drag = super.drag(details, dragCancelCallback);
+    // A displaced release that never went ballistic belongs to the old gesture.
+    _suppressBallistic = false;
+    _startedAtLeadingEdge = pixels <= minScrollExtent;
     final token = Object();
     _gesture = token;
     _start = details;
@@ -220,7 +227,7 @@ class _HandoffPosition extends ScrollPositionWithSingleContext {
         end != null &&
         binding.route.isCurrent &&
         displaced &&
-        (velocity > _minFlingVelocity ||
+        ((_startedAtLeadingEdge && velocity > _minFlingVelocity) ||
             (velocity >= -_minFlingVelocity &&
                 animation.value < _closeProgressThreshold));
     binding.sheet.onDragEnd?.call(end ?? DragEndDetails(), isClosing: closing);
