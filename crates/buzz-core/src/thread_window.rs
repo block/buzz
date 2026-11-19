@@ -104,8 +104,6 @@ pub struct Request {
     pub cursor: Option<Cursor>,
     /// Include root/retained-row edits, reactions and deletion closure.
     pub include_aux: bool,
-    /// Include the root in the aux closure's targets.
-    pub root_aux: bool,
 }
 
 fn event_id(v: &Value) -> Result<String, String> {
@@ -152,7 +150,6 @@ impl Request {
             "after",
             "after_id",
             "include_aux",
-            "root_aux",
         ];
         if object.keys().any(|key| !FIELDS.contains(&key.as_str())) {
             return Err("thread_window: unsupported or conflicting filter field".into());
@@ -204,14 +201,12 @@ impl Request {
                 ))
             }
         };
-        let flag = |key: &str, default: bool| match raw.get(key) {
-            None => Ok(default),
+        let include_aux = match raw.get("include_aux") {
+            None => false,
             Some(v) => v
                 .as_bool()
-                .ok_or_else(|| format!("thread_window: {key} must be boolean")),
+                .ok_or("thread_window: include_aux must be boolean")?,
         };
-        let include_aux = flag("include_aux", false)?;
-        let root_aux = flag("root_aux", true)?;
         Ok(Self {
             channel,
             root,
@@ -221,7 +216,6 @@ impl Request {
             direction,
             cursor,
             include_aux,
-            root_aux,
         })
     }
 
@@ -232,7 +226,7 @@ impl Request {
     /// options keep the original array, so existing bindings are unchanged.
     pub fn binding(&self, resolved_host: &str, reader_hex: &str) -> String {
         let cursor = self.cursor.as_ref().map(|c| json!([c.created_at, c.id]));
-        let mut canonical = json!([
+        let canonical = json!([
             "tw",
             1,
             self.direction.as_str(),
@@ -246,9 +240,6 @@ impl Request {
             cursor,
             self.include_aux
         ]);
-        if let (false, Some(items)) = (self.root_aux, canonical.as_array_mut()) {
-            items.push(json!("root_aux:false"));
-        }
         format!(
             "tw:1:{}",
             hex::encode(Sha256::digest(canonical.to_string().as_bytes()))
@@ -272,7 +263,6 @@ mod tests {
             ("depth_limit", json!(101)),
             ("depth_limit", json!(-1)),
             ("include_aux", json!("true")),
-            ("root_aux", json!("false")),
             ("direction", json!("up")),
             ("direction", json!(null)),
             ("after", json!(1)),
@@ -355,7 +345,6 @@ mod tests {
         explicit["depth_limit"] = json!(100);
         explicit["include_aux"] = json!(false);
         explicit["direction"] = json!("older");
-        explicit["root_aux"] = json!(true);
         explicit["#e"] = json!(["AB".repeat(32)]);
         assert_eq!(expected, binding(&explicit));
         for (key, val) in [
@@ -363,7 +352,6 @@ mod tests {
             ("depth_limit", json!(1)),
             ("include_aux", json!(true)),
             ("direction", json!("newer")),
-            ("root_aux", json!(false)),
             ("kinds", json!([40002])),
             ("#e", json!(["cd".repeat(32)])),
             ("#h", json!([Uuid::new_v4()])),
@@ -382,16 +370,15 @@ mod tests {
         assert_ne!(expected, binding(&changed));
     }
 
-    /// `newer` and `root_aux:false` bind the canonical arrays NIP-CW specifies.
+    /// `newer` binds the canonical array NIP-CW specifies.
     #[test]
-    fn binding_encodes_direction_cursor_and_root_aux_as_specified() {
+    fn binding_encodes_direction_and_cursor_as_specified() {
         let (host, reader, root) = ("relay.example", "ab".repeat(32), "cd".repeat(32));
         let mut f = filter();
         f["#e"] = json!([root]);
         f["direction"] = json!("newer");
         f["after"] = json!(5);
         f["after_id"] = json!("ef".repeat(32));
-        f["root_aux"] = json!(false);
         let expected = json!([
             "tw",
             1,
@@ -404,8 +391,7 @@ mod tests {
             100,
             [9],
             [5, "ef".repeat(32)],
-            false,
-            "root_aux:false"
+            false
         ]);
         assert_eq!(
             Request::parse(&f).unwrap().binding(host, &reader),

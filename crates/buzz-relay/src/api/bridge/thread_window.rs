@@ -188,11 +188,7 @@ async fn query(
     let mut events = Vec::new();
     let page_start_bytes = budget.bytes;
     budget.bytes += 2;
-    let mut targets: Vec<String> = request
-        .root_aux
-        .then(|| request.root.clone())
-        .into_iter()
-        .collect();
+    let mut targets = vec![request.root.clone()];
     for row in &window.rows {
         if !visible(row) {
             // This would contradict the SQL's channel and row-kind predicates.
