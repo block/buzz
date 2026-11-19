@@ -50,6 +50,7 @@ class _ComposerSpeechPrefs extends Fake implements SharedPreferences {
   bool rejectRecoveryWrites = false;
   bool rejectRetainedWrites = false;
   bool rejectRemoval = false;
+  bool rejectCleanupRemoval = false;
   final hiddenKeys = <String>{};
   final cachedWrites = <String, String>{};
   int removalCalls = 0;
@@ -73,6 +74,11 @@ class _ComposerSpeechPrefs extends Fake implements SharedPreferences {
   Set<String> getKeys() => delegate.getKeys();
   @override
   Future<bool> remove(String key) async {
+    if (rejectCleanupRemoval &&
+        key.startsWith('composer_transcription_cleanup:')) {
+      hiddenKeys.add(key);
+      return false;
+    }
     if (key.startsWith('composer_transcription:')) {
       removalCalls++;
       if (rejectRemoval) {
@@ -752,6 +758,8 @@ void iosControlsTests() {
       );
       final speech = _ComposerSpeech();
       final files = _ComposerSpeechFiles()..rejectDeletion = true;
+      final prefs = _ComposerSpeechPrefs(_testPrefs);
+      _testPrefs = prefs;
       final sent = <String>[];
       Widget composer() => _buildComposeBar(
         relayConfig: () => _SwitchableRelayConfigNotifier(identity),
@@ -807,6 +815,27 @@ void iosControlsTests() {
       await _tapComposerControl(tester, 'Send');
       await tester.pumpAndSettle();
       expect(sent, ['Text is already saved.']);
+      // The file deletes but its journal removal fails: the transcript still
+      // lands in the editor, and a later mount removes the journal.
+      prefs.rejectCleanupRemoval = true;
+      speech.reset();
+      await _tapComposerControl(tester, 'Dictate');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Stop recording'));
+      await tester.pump();
+      speech.result.complete('Journal removal failed.');
+      await tester.pumpAndSettle();
+      expect(editorText(), 'Journal removal failed.');
+      expect(find.text('Retry'), findsNothing);
+      expect(_testPrefs.getString(cleanupKey), isNotNull);
+      prefs.rejectCleanupRemoval = false;
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+      await _testPrefs.reload();
+      await tester.pumpWidget(composer());
+      await tester.pumpAndSettle();
+      await _testPrefs.reload();
+      expect(_testPrefs.getString(cleanupKey), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
     },
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),

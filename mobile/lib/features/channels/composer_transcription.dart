@@ -204,13 +204,12 @@ ComposerTranscription useComposerTranscription({
       // The journal is the durable retry record; a later mount sweeps it.
       return;
     }
+    // The pointer and file are gone; a leftover journal is swept on a later
+    // mount, so it must not hold the editor behind the panel.
     try {
-      if (!await prefs.remove(cleanupKey)) {
-        throw StateError('Could not finish recording cleanup.');
-      }
+      if (!await prefs.remove(cleanupKey)) await prefs.reload();
     } catch (_) {
       await prefs.reload();
-      rethrow;
     }
   }
 
