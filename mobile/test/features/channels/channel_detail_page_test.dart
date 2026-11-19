@@ -11457,6 +11457,54 @@ void main() {
     );
 
     testWidgets(
+      'leaving an iOS Huddle stops audio and removes membership after reconnect',
+      (tester) async {
+        final media = _HuddleTestMedia();
+        final transport = _HuddleTestTransport();
+        final relay = _ReconnectingRelaySession(
+          initialStatus: SessionStatus.connected,
+        );
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [],
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            relaySessionNotifier: relay,
+            huddleCurrentPubkey: 'self',
+            huddleMediaFactory: () => media,
+            huddleTransportFactory: (_) => transport,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MobileHuddleShell)),
+        );
+        final controller = container.read(
+          mobileHuddleControllerProvider.notifier,
+        );
+        await controller.join(
+          parentChannelId: _channelId,
+          ephemeralChannelId: _huddleChannelId,
+          startedBy: 'desktop',
+          startedEventId: 'active-call',
+        );
+        relay.setReconnecting();
+        await controller.leave();
+        expect(media.state.phase, HuddleMediaPhase.stopped);
+        expect(relay.publishedKinds, isNot(contains(9022)));
+
+        relay.connect();
+        await tester.pumpAndSettle();
+        expect(relay.publishedKinds.where((kind) => kind == 9022), [9022]);
+        expect(relay.publishedKinds, isNot(contains(EventKind.huddleEnded)));
+        // Let the relay fixture's channel-list subscription settle.
+        await tester.pump(const Duration(milliseconds: 500));
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    testWidgets(
       'community transition leaves a newer call without waiting for old cleanup',
       (tester) async {
         final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -21785,7 +21833,11 @@ class _FakeChannelActions extends ChannelActions {
   }
 
   @override
-  Future<void> leaveChannel(String channelId) async {
+  Future<void> leaveChannel(
+    String channelId, {
+    Future<bool> Function()? mayPublish,
+  }) async {
+    if (mayPublish != null && !await mayPublish()) return;
     await onLeaveChannel?.call(channelId);
   }
 

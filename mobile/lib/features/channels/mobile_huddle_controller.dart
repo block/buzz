@@ -110,6 +110,7 @@ final class MobileHuddleController extends Notifier<bool> {
   String? _latestAdmissionTargetBackingChannelId;
   _HuddleAdmissionToken? _admissionToken;
   final Set<_HuddleAdmissionToken> _finishedLifecycleAdmissions = {};
+  final Map<_HuddleAdmissionToken, int> _pendingMembershipLeaves = {};
 
   @override
   bool build() {
@@ -121,6 +122,17 @@ final class MobileHuddleController extends Notifier<bool> {
         .register(_leaveForTransition);
     ref.onDispose(unregisterBeforePause);
     ref.onDispose(unregisterBeforeCommunityTransition);
+    ref.listen(relaySessionProvider, (previous, next) {
+      if (next.status != SessionStatus.connected ||
+          previous?.status == SessionStatus.connected) {
+        return;
+      }
+      final pending = Map.of(_pendingMembershipLeaves);
+      _pendingMembershipLeaves.clear();
+      for (final entry in pending.entries) {
+        unawaited(_leaveBackingMembership(entry.key, entry.value));
+      }
+    });
     ref.listen(huddleSessionProvider, (previous, next) {
       if (previous?.wasAdmitted == true &&
           next.phase == HuddleSessionPhase.failed) {
@@ -364,6 +376,7 @@ final class MobileHuddleController extends Notifier<bool> {
     _backgroundLeave = null;
     _failureCleanup = null;
     _lifecycleCleanups.clear();
+    _pendingMembershipLeaves.clear();
     _admissionToken = null;
     final startFuture = _startFuture;
     if (startFuture != null) {
@@ -504,10 +517,44 @@ final class MobileHuddleController extends Notifier<bool> {
     }
 
     if (admissionToken.preserveMembership) return;
+    await _leaveBackingMembership(admissionToken, generation);
+  }
+
+  Future<void> _leaveBackingMembership(
+    _HuddleAdmissionToken admissionToken,
+    int generation,
+  ) async {
+    bool stillDeparted() {
+      if (!ref.mounted ||
+          generation != _lifecycleGeneration ||
+          _newerAdmissionTargetsSameHuddle(admissionToken)) {
+        return false;
+      }
+      final session = ref.read(huddleSessionProvider);
+      return !session.isInSession ||
+          session.ephemeralChannelId != admissionToken.backingChannelId;
+    }
+
+    bool relayUnavailable() =>
+        defaultTargetPlatform == TargetPlatform.iOS &&
+        ref.read(relaySessionProvider).status != SessionStatus.connected;
+
+    if (!stillDeparted()) return;
+    if (relayUnavailable()) {
+      _pendingMembershipLeaves[admissionToken] = generation;
+      return;
+    }
     try {
-      await actions.leaveChannel(backingChannelId);
+      await ref
+          .read(channelActionsProvider)
+          .leaveChannel(
+            admissionToken.backingChannelId,
+            mayPublish: () async => stillDeparted() && !relayUnavailable(),
+          );
     } catch (_) {
-      // The audio relay may already have auto-ended and archived the room.
+      if (stillDeparted() && relayUnavailable()) {
+        _pendingMembershipLeaves[admissionToken] = generation;
+      }
     }
   }
 
