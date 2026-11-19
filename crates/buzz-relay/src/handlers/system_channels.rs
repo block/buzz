@@ -46,35 +46,45 @@ pub(crate) struct NamedOnlyChannels {
 }
 
 impl NamedOnlyChannels {
-    /// From `(id, channel_type)` rows of non-legacy channels.
-    pub(crate) fn from_typed(rows: impl IntoIterator<Item = (Uuid, String)>) -> Self {
-        let mut channels = Self::default();
-        for (id, channel_type) in rows {
-            channels.insert(id, &channel_type);
-        }
-        channels
+    /// From `(id, channel_type)` rows of non-legacy channels. A repeated
+    /// channel is kept once.
+    pub(crate) fn from_typed<S: AsRef<str>>(rows: impl IntoIterator<Item = (Uuid, S)>) -> Self {
+        Self::from_rows(
+            rows.into_iter()
+                .map(|(id, channel_type)| (id, channel_type, true)),
+        )
     }
 
     /// From [`buzz_db::channel_members::get_readable_named_only_channels`],
     /// which says which channels the opt-in may add.
     pub(crate) fn from_readable(
-        rows: impl IntoIterator<Item = buzz_db::channel_members::ReadableNamedOnlyChannel>,
+        rows: &[buzz_db::channel_members::ReadableNamedOnlyChannel],
     ) -> Self {
+        Self::from_rows(
+            rows.iter()
+                .map(|row| (row.id, row.channel_type.as_str(), row.opt_in)),
+        )
+    }
+
+    /// `(id, channel_type, opt_in)` rows; the first row for a channel wins.
+    fn from_rows<S: AsRef<str>>(rows: impl IntoIterator<Item = (Uuid, S, bool)>) -> Self {
         let mut channels = Self::default();
-        for row in rows {
-            channels.insert_with_opt_in(row.id, &row.channel_type, row.opt_in);
+        let mut seen = HashSet::new();
+        for (id, channel_type, opt_in) in rows {
+            if seen.insert(id) {
+                channels.push(id, channel_type.as_ref(), opt_in);
+            }
         }
         channels
     }
 
     fn insert(&mut self, id: Uuid, channel_type: &str) {
-        self.insert_with_opt_in(id, channel_type, true);
+        if !self.ids.contains(&id) {
+            self.push(id, channel_type, true);
+        }
     }
 
-    fn insert_with_opt_in(&mut self, id: Uuid, channel_type: &str, opt_in: bool) {
-        if self.ids.contains(&id) {
-            return;
-        }
+    fn push(&mut self, id: Uuid, channel_type: &str, opt_in: bool) {
         self.ids.push(id);
         if opt_in && channel_type == buzz_core::channel::ChannelType::System.as_str() {
             self.system.push(id);
@@ -286,9 +296,10 @@ pub(crate) fn filter_live_scope(
 /// channel scope, when at least one filter could use them. Returns an empty
 /// set when no filter opts in or names a channel outside the implicit set.
 ///
-/// `cached` is the reader's named-only access from
-/// [`AppState::get_channel_access_cached`], read with `implicit`: the
-/// non-legacy channels it is a member of and the listed open ones. It answers
+/// `cached` is the reader's access from
+/// [`AppState::get_channel_access_cached`], read with `implicit`. Its
+/// named-only channels are the non-legacy ones the reader is a member of
+/// and the listed open ones. It answers
 /// the opt-in, which needs exactly those, and every name it holds. Only a
 /// request that names a channel outside both sets, such as an unlisted open
 /// channel, reads the database, so a fleet reconnect costs no extra read per
@@ -299,7 +310,7 @@ pub(crate) async fn readable_named_only_channels_for_filters(
     pubkey: &[u8],
     filters: &[Filter],
     implicit: &[Uuid],
-    cached: &[(Uuid, String)],
+    cached: &crate::state::ChannelAccess,
     token_channel_ids: Option<&[Uuid]>,
 ) -> Result<NamedOnlyChannels, buzz_db::DbError> {
     if !filters
@@ -309,16 +320,18 @@ pub(crate) async fn readable_named_only_channels_for_filters(
         return Ok(NamedOnlyChannels::default());
     }
     let named = named_outside(filters, implicit);
-    let mut readable = if named
-        .iter()
-        .all(|id| cached.iter().any(|(have, _)| have == id))
-    {
+    let cached_ids: HashSet<Uuid> = cached.named_only().map(|(id, _)| *id).collect();
+    let mut readable = if named.iter().all(|id| cached_ids.contains(id)) {
         metrics::counter!("buzz_named_only_channel_reads_total", "source" => "cache").increment(1);
-        NamedOnlyChannels::from_typed(cached.iter().cloned())
+        NamedOnlyChannels::from_typed(
+            cached
+                .named_only()
+                .map(|(id, channel_type)| (*id, channel_type.as_str())),
+        )
     } else {
         metrics::counter!("buzz_named_only_channel_reads_total", "source" => "db").increment(1);
         NamedOnlyChannels::from_readable(
-            state
+            &state
                 .db
                 .get_readable_named_only_channels(community, pubkey, &named)
                 .await?,
@@ -658,7 +671,11 @@ mod tests {
             (community, reader.clone()),
             std::sync::Arc::new(buzz_db::channel_members::ChannelSet {
                 implicit: vec![stream],
-                named_only: vec![(member_system, "system".to_owned())],
+                // A member of a listed system channel has it in both halves.
+                named_only: vec![
+                    (member_system, "system".to_owned()),
+                    (listed_system, "system".to_owned()),
+                ],
             }),
         );
         state.open_channels_cache.insert(
@@ -686,7 +703,7 @@ mod tests {
                     &reader,
                     &filters,
                     &access.implicit,
-                    &access.named_only,
+                    &access,
                     token.as_deref(),
                 )
                 .await
@@ -698,6 +715,7 @@ mod tests {
         let named = read(vec![discovery.clone()], None)
             .await
             .expect("discovery is served from the cache");
+        assert_eq!(named.ids(), &[member_system, listed_system], "each once");
         assert_eq!(
             filter_channel_scope(&discovery, &access.implicit, &named).as_ref(),
             &[stream, member_system, listed_system]

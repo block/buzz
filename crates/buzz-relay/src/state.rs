@@ -1411,6 +1411,32 @@ pub struct OpenChannels {
     pub read_at: Instant,
 }
 
+/// A reader's channel access from the two access caches. See
+/// [`AppState::get_channel_access_cached`].
+#[derive(Debug, Clone, Default)]
+pub struct ChannelAccess {
+    /// The implicit channel set, as from
+    /// [`AppState::get_accessible_channel_ids_cached`].
+    pub implicit: Vec<Uuid>,
+    member: Arc<buzz_db::channel_members::ChannelSet>,
+    open: Option<Arc<OpenChannels>>,
+}
+
+impl ChannelAccess {
+    /// The reader's channels of non-legacy types that it is a member of or
+    /// that are open and listed, with their type. A channel in both halves
+    /// appears twice. This is the part of
+    /// [`buzz_db::channel_members::get_readable_named_only_channels`] that
+    /// does not depend on which channels a request names, so a request that
+    /// names only these needs no other access read.
+    pub fn named_only(&self) -> impl Iterator<Item = &(Uuid, String)> + '_ {
+        self.member
+            .named_only
+            .iter()
+            .chain(self.open.iter().flat_map(|open| open.named_only.iter()))
+    }
+}
+
 /// Minimum spacing between live thread-summary emits for one thread root on
 /// one relay pod. See [`AppState::thread_summary_refresh`].
 pub const THREAD_SUMMARY_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
@@ -2703,19 +2729,14 @@ impl AppState {
             .implicit)
     }
 
-    /// [`Self::get_accessible_channel_ids_cached`] as `implicit`, plus, as
-    /// `named_only`, the channels of other types that the reader is a member
-    /// of or that are open and listed, from the same two cached reads.
-    ///
-    /// `named_only` is the part of
-    /// [`buzz_db::channel_members::get_readable_named_only_channels`] that
-    /// does not depend on which channels a request names. A request that
-    /// names only channels in either set needs no other access read.
+    /// [`Self::get_accessible_channel_ids_cached`] as `implicit`, plus the
+    /// reader's named-only channels from the same two cached reads (see
+    /// [`ChannelAccess::named_only`]).
     pub async fn get_channel_access_cached(
         &self,
         community_id: CommunityId,
         pubkey: &[u8],
-    ) -> Result<buzz_db::channel_members::ChannelSet, buzz_db::DbError> {
+    ) -> Result<ChannelAccess, buzz_db::DbError> {
         let key = (community_id, pubkey.to_vec());
         let member = match self.member_channels_cache.get(&key) {
             Some(cached) => {
@@ -2730,14 +2751,13 @@ impl AppState {
             }
         };
         let open = self.open_channels(community_id).await?;
-        let mut access = (*member).clone();
-        buzz_db::channel_members::merge_channel_ids(&mut access.implicit, &open.ids);
-        for (id, channel_type) in &open.named_only {
-            if !access.named_only.iter().any(|(have, _)| have == id) {
-                access.named_only.push((*id, channel_type.clone()));
-            }
-        }
-        Ok(access)
+        let mut implicit = member.implicit.clone();
+        buzz_db::channel_members::merge_channel_ids(&mut implicit, &open.ids);
+        Ok(ChannelAccess {
+            implicit,
+            member,
+            open: Some(open),
+        })
     }
 
     /// The community's open set from [`Self::open_channels_cache`] while it
