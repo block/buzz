@@ -18,6 +18,8 @@ This NIP defines how members pin and unpin messages in a channel. A member signs
 | `40011` | Unpin | member | Command: unpin one message |
 | `30623` | Channel pins | relay | The channel's pin list |
 
+`kind:40004` is an older Buzz kind named for pinned messages. It is not a pin here: it never changes the list, and clients MUST NOT send it to pin a message. This NIP uses new kinds because a relay without it stores `kind:40004` unchecked, and rejects the kinds above as unknown.
+
 ## Commands
 
 ```jsonc
@@ -71,7 +73,7 @@ A channel's list changes through a command or through the deletion of a pinned m
 For each command the relay:
 
 1. Checks that the author may post a message in the channel. The rule for posting decides, not membership alone: a guest cannot pin or unpin, and nobody can in an archived channel.
-2. For a pin, checks that the target is a message in this channel that is not deleted and that every reader of the channel can see. It puts the target at the front of the list.
+2. For a pin, checks that the target is a message in this channel that is not deleted. It puts the target at the front of the list.
 3. For an unpin, removes the target from the list.
 4. Stores the command, the new list and the notice together, then answers.
 
