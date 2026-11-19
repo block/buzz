@@ -1,15 +1,35 @@
-/// A letter, mark, digit or underscore directly after a label continues the
-/// name, so `@Bobby` holds no `Bob`. Anything else ends it: punctuation, a
+/// What continues a name directly after a label, as a pattern source: a
+/// letter, mark or digit, or underscores leading to one, so `@Bobby` and
+/// `@Bob_smith` hold no `Bob`. Anything else ends the name: punctuation, a
 /// straight or curly apostrophe, a hyphen or a slash (`@Bob's`, `@Bob-bot`,
-/// `@Bob/Alice`). Same rule as the composer's `mentionEndsAtBoundary`.
-const _nameCharacter = r'[\p{L}\p{M}\p{N}_]';
+/// `@Bob/Alice`), and underscores that close Markdown emphasis (`_@Bob_`,
+/// `__@Bob__`), which the composer's Italic button writes and sent messages
+/// already hold. The composer's `mentionEndsAtBoundary`, the message scan
+/// and the bubble's pill pattern all read this one rule.
+const mentionNameContinuation = r'(?:[\p{L}\p{M}\p{N}]|_+[\p{L}\p{M}\p{N}])';
+
+final _typedMentionEnd = RegExp(r'^(?:\|\||[\s,;.!?:)\]}*_]|$)');
+final _markdownLinkLabel = RegExp(r'\[[^\]\n]*\]\(');
+
+/// Whether a typed, unpicked name at `[start, end)` of [text] may notify by
+/// name alone. A picked chip keeps its recipient before any suffix; a name
+/// nobody picked must end as it always has, at whitespace, sentence
+/// punctuation, a closing bracket or a Markdown delimiter, so the `@Alice` of
+/// `@Alice@example.org` or `@Alice's` is prose. The label of a Markdown link
+/// (`[@Alice](url)`) is link text, not a mention.
+bool typedMentionNotifies(String text, int start, int end) {
+  if (!_typedMentionEnd.hasMatch(text.substring(end))) return false;
+  return !_markdownLinkLabel
+      .allMatches(text)
+      .any((link) => link.start < start && end < link.end - 1);
+}
 
 /// Longest literal ranges win, including labels containing another @ sign.
 /// Recognition precedes eligibility: ambiguous labels still block shorter ones.
 /// A label opens where a query does (portable mention rules, section 2): at
 /// the start, after whitespace, `(`, `[` or `{`, or after a Markdown
 /// delimiter, so a mention picked after a bracket keeps its recipient. It
-/// ends at the composer's suffix boundary, [_nameCharacter].
+/// ends at the composer's suffix boundary, [mentionNameContinuation].
 List<({int start, int end, String label})> mentionOccurrences(
   String text,
   Iterable<String> labels,
@@ -21,10 +41,10 @@ List<({int start, int end, String label})> mentionOccurrences(
     // candidate binds it. Never fall back to a shorter, different recipient.
     final suffix =
         RegExp(r' \([0-9a-f]{64}\)$', caseSensitive: false).hasMatch(label)
-        ? '(?! (?:[2-9]|[1-9][0-9]+)(?!$_nameCharacter))'
+        ? '(?! (?:[2-9]|[1-9][0-9]+)(?!$mentionNameContinuation))'
         : '';
     final pattern = RegExp(
-      '(?:^|[\\s(\\[{]|[*_]{1,3}|\\|\\|)(@${RegExp.escape(label)})(?! \\([0-9a-f]{64}\\))$suffix(?!$_nameCharacter)',
+      '(?:^|[\\s(\\[{]|[*_]{1,3}|\\|\\|)(@${RegExp.escape(label)})(?! \\([0-9a-f]{64}\\))$suffix(?!$mentionNameContinuation)',
       caseSensitive: false,
       unicode: true,
     );

@@ -19,10 +19,16 @@ void main() {
       '\u{1F600}',
       ' x',
       '',
+      // Underscores that close Markdown emphasis, as the Italic button
+      // writes them around a chip.
+      '_',
+      '_ x',
+      '__',
+      '_.',
     ]) {
       expect(mentionEndsAtBoundary('@Bob$suffix', 4), isTrue, reason: suffix);
     }
-    for (final suffix in ['by', '2', '_x', 'é', '́']) {
+    for (final suffix in ['by', '2', '_x', '__x', '_2', 'é', '́']) {
       expect(mentionEndsAtBoundary('@Bob$suffix', 4), isFalse, reason: suffix);
     }
   });

@@ -87,6 +87,64 @@ void main() {
     expect(tapped, isNull);
   });
 
+  // Review of #9699: an italic or bold mention sent before underscores
+  // counted as name characters draws its whole name as one pill, and a chip
+  // the composer qualified because its suffix spelled another name opens
+  // its own profile.
+  testWidgets('emphasis and a qualified chip keep each pill on its owner', (
+    tester,
+  ) async {
+    final kenny = 'd' * 64;
+    final bob = 'b' * 64;
+    final bobBot = 'e' * 64;
+    for (final content in ['_@Kenny Lopez_', '__@Kenny Lopez__ hi']) {
+      String? tapped;
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          child: MessageContent(
+            content: content,
+            mentionNames: {kenny: 'Kenny Lopez'},
+            tags: [
+              ['p', kenny],
+            ],
+            onMentionTap: (key) => tapped = key,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Kenny Lopez'), findsOneWidget, reason: content);
+      expect(
+        find.textContaining('Lopez', findRichText: true),
+        findsOneWidget,
+        reason: content,
+      );
+      expect(find.textContaining('_', findRichText: true), findsNothing);
+      await tester.tap(find.text('Kenny Lopez'));
+      expect(tapped, kenny, reason: content);
+    }
+    final taps = <String>[];
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: MessageContent(
+          content: '@Bob ($bob)-bot and @Bob-bot',
+          mentionNames: {bob: 'Bob', bobBot: 'Bob-bot'},
+          tags: [
+            ['p', bob],
+            ['p', bobBot],
+          ],
+          onMentionTap: taps.add,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    // A qualified pill reads the name with a short key, as namesakes do.
+    await tester.tap(find.text('Bob (bbbbbbbb…bbbb)'));
+    await tester.tap(find.text('Bob-bot'));
+    expect(taps, [bob, bobBot]);
+    expect(find.textContaining('-bot and', findRichText: true), findsOneWidget);
+    expect(find.textContaining(bob, findRichText: true), findsNothing);
+  });
+
   for (final tagged in [false, true]) {
     testWidgets(
       'qualified chips preserve authority and narrow layout: $tagged',

@@ -498,6 +498,10 @@ class ComposeBar extends HookConsumerWidget {
         draft,
         mentions,
         code: controller._styledCodeRanges(draft),
+        otherLabels: [
+          for (final candidate in memberMentionCandidates()) candidate.label,
+          for (final candidate in selectedMentions) candidate.label,
+        ],
       ).trim();
       final outgoing = _OutgoingMentions(selectedMentions);
       // Read before any await. These actions belong to this community and

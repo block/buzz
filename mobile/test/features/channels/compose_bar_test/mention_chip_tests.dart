@@ -281,6 +281,27 @@ void mentionChipTests() {
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
       expect(sent, [bob]);
+
+      // Review of #9699 (typed fallback): a name nobody picked ends where
+      // it always has and is never a Markdown link's label, so an address
+      // and a pasted link notify nobody; typed emphasis and brackets around
+      // the name still notify.
+      for (final (text, recipients) in [
+        ('mail @Alice@example.org', <String>[]),
+        ('[@Alice](https://example.org/a) wrote', <String>[]),
+        ("@Alice's idea", <String>[]),
+        ('_@Bob_ and (@Alice)', [bob, alice]),
+      ]) {
+        sent = null;
+        await tester.pump(mentionSearchDebounce * 2);
+        await tester.enterText(find.byType(TextField), text);
+        await tester.pumpAndSettle();
+        expect(personChip, findsNothing, reason: text);
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+        await tester.pumpAndSettle();
+        expect(sentText, text);
+        expect(sent, recipients, reason: text);
+      }
       await tester.pump(mentionSearchDebounce * 2);
       semantics.dispose();
     },
@@ -292,6 +313,7 @@ void mentionChipTests() {
       'recipient', (tester) async {
     final samA = '1' * 64;
     final samB = '2' * 64;
+    final bobBot = '3' * 64;
     final quinn = UserProfile(pubkey: 'c' * 64, displayName: 'Quinn');
     final signer = nostr.Keys.generate();
     List<String>? sent;
@@ -310,6 +332,12 @@ void mentionChipTests() {
               role: 'member',
               joinedAt: DateTime(2025),
             ),
+          ChannelMember(
+            pubkey: bobBot,
+            displayName: 'Bob-bot',
+            role: 'member',
+            joinedAt: DateTime(2025),
+          ),
         ],
         channels: [_makeCurrentChannel()],
         customEmoji: const [
@@ -391,9 +419,11 @@ void mentionChipTests() {
     expect(sentTags, contains(orderedEquals(['mention', quinn.pubkey])));
     await _expandComposer(tester);
 
-    // The other wrapping formats keep a member's chip bound too. Neither
-    // delimiter opens a typed name, so only the chip can notify Bob.
+    // The other wrapping formats keep a member's chip bound too: the saved
+    // binding moves inside the delimiters. Italic writes `_`, which closes
+    // emphasis after the chip rather than continuing its name.
     for (final (icon, mark) in [
+      (BuzzIcons.italic, '_'),
       (BuzzIcons.strikethrough, '~~'),
       (BuzzIcons.code, '`'),
     ]) {
@@ -412,6 +442,33 @@ void mentionChipTests() {
       await send();
       expect(sent, [bob], reason: mark);
     }
+
+    // Review of #9699 (chip suffix): `-bot` typed against Bob's chip spells
+    // the member Bob-bot, who is picked too. The two read alike in the
+    // draft; the sent text qualifies the chip whose suffix made the longer
+    // name, so the bubble cannot draw both as Bob-bot.
+    sent = null;
+    await pickRow('@bo', row('Bob'));
+    await tester.enterText(field, '@Bob-bot and ');
+    await tester.pump();
+    await pickRow('@Bob-bot and @bo', row('Bob-bot'));
+    expect(controller.text, '@Bob-bot and @Bob-bot ');
+    expect(saved(), [
+      ComposeDraftMention(start: 0, end: 4, pubkey: bob),
+      ComposeDraftMention(start: 13, end: 21, pubkey: bobBot),
+    ]);
+    await send();
+    expect(sentText, '@Bob ($bob)-bot and @Bob-bot');
+    expect(sent, [bob, bobBot]);
+    // The same suffix beside a member nobody picked is qualified too: the
+    // bubble may know that member's name.
+    sent = null;
+    await pickRow('@bo', row('Bob'));
+    await tester.enterText(field, '@Bob-bot ');
+    await tester.pump();
+    await send();
+    expect(sentText, '@Bob ($bob)-bot');
+    expect(sent, [bob]);
 
     // An emoji and the at-sign button go in at the caret end of a
     // selection; the selected chip is not replaced.

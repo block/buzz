@@ -168,7 +168,9 @@ bool _startsSelectedMention(List<_ComposerMention> mentions, int start) =>
 
 /// The recipients a send notifies, in text order: every bound mention, then
 /// typed names outside a chip. A typed name notifies when it is exact and
-/// unique among the chips and [members]; a name several identities share is
+/// unique among the chips and [members], ends as [typedMentionNotifies]
+/// requires and is not a Markdown link's label, so `@Alice@example.org` and
+/// a pasted `[@Alice](url)` notify nobody; a name several identities share is
 /// refused so nobody is silently dropped. That holds beside a chip of the
 /// same name too: text restored without its binding, as by a system Undo,
 /// needs a pick rather than borrowing the surviving chip's key.
@@ -215,6 +217,7 @@ List<MentionCandidate> _resolveComposerMentions(
   }
   for (final range in mentionOccurrences(text, byName.keys)) {
     if (mentions.any((m) => m.start == range.start)) continue;
+    if (!typedMentionNotifies(text, range.start, range.end)) continue;
     final identities = byName[range.label]!;
     if (identities.length > 1) {
       throw FormatException(
@@ -231,23 +234,39 @@ List<MentionCandidate> _resolveComposerMentions(
   return winners.values.toList();
 }
 
-/// The content sent for [text]. When bound mentions of different keys share
-/// a name, ignoring case, each is written `@Name (<key>)` so readers tell
-/// them apart, as buzz-app's `composer-markdown.ts` does; one key under a
-/// name stays bare, and a mention inside [code] the composer styles stays as
+/// The content sent for [text]. A bound mention is written `@Name (<key>)`
+/// when its plain text would read as someone else in the bubble: when bound
+/// mentions of different keys share its name, ignoring case, as buzz-app's
+/// `composer-markdown.ts` qualifies them, or when the text typed against it
+/// spells a longer name among [otherLabels] or the other chips (`-bot` after
+/// a picked `@Bob`, beside a `Bob-bot`), which the bubble's longest-name
+/// match would otherwise draw as that other person. One key under a name
+/// stays bare, and a mention inside [code] the composer styles stays as
 /// typed. The composer itself never showed the key.
 String _qualifiedMentionContent(
   String text,
   List<_ComposerMention> mentions, {
   required List<TextRange> code,
+  Iterable<String> otherLabels = const [],
 }) {
   final keysByName = <String, Set<String>>{};
   for (final mention in mentions) {
     (keysByName[mention.label(text).toLowerCase()] ??= {}).add(mention.pubkey);
   }
+  // Every `@` where the text reads as a longer name than the chip there.
+  final longer = {
+    for (final range in mentionOccurrences(text, {
+      ...keysByName.keys,
+      for (final label in otherLabels) label.toLowerCase(),
+    }))
+      range.start: range.end,
+  };
   var content = text;
   for (final mention in mentions.reversed) {
-    if (keysByName[mention.label(text).toLowerCase()]!.length < 2) continue;
+    if (keysByName[mention.label(text).toLowerCase()]!.length < 2 &&
+        (longer[mention.start] ?? 0) <= mention.end) {
+      continue;
+    }
     if (code.any((c) => c.start < mention.start && mention.end < c.end)) {
       continue;
     }

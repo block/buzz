@@ -2,22 +2,27 @@ import 'dart:math' as math;
 
 import 'package:flutter/services.dart';
 
+import 'mention_bindings.dart';
+
 /// Where a picked mention sits in a draft: [start] is its `@`, [end] is
 /// exclusive. The text between is the literal `@Label` the composer shows
 /// as one chip. The binding to a recipient lives beside the range, so two
 /// namesakes can both read `@Sam` and still notify two different people.
 typedef MentionRange = ({int start, int end});
 
-final _nameCharacter = RegExp(r'^[\p{L}\p{M}\p{N}_]', unicode: true);
+final _nameContinues = RegExp('^$mentionNameContinuation', unicode: true);
 
 /// Whether a mention ending at [end] in [text] still ends at a name
-/// boundary. A letter, mark, digit or underscore typed directly against it
-/// continues the name (`@Bobby`), so the mention returns to prose and its
-/// recipient goes; punctuation, quotes, hyphens, slashes and emoji keep both
-/// (`@Bob's`, `@Bob’s`, `@Bob-bot`, `@Bob/Alice`). Same rule as buzz-app's
-/// `mentionBoundary` in `src/features/messages/mention-draft.ts`.
+/// boundary. A letter, mark or digit typed directly against it continues
+/// the name (`@Bobby`), so the mention returns to prose and its recipient
+/// goes; punctuation, quotes, hyphens, slashes and emoji keep both (`@Bob's`,
+/// `@Bob’s`, `@Bob-bot`, `@Bob/Alice`). This is buzz-app's `mentionBoundary`
+/// (`src/features/messages/mention-draft.ts`) with one difference its rich
+/// editor does not need: this draft is Markdown source, so underscores that
+/// close emphasis end the name (`_@Bob_`) and only underscores leading to a
+/// name character continue it (`@Bob_smith`).
 bool mentionEndsAtBoundary(String text, int end) =>
-    end >= text.length || !_nameCharacter.hasMatch(text.substring(end));
+    end >= text.length || !_nameContinues.hasMatch(text.substring(end));
 
 /// The range of [oldText] an edit replaced to produce [newText].
 ///
