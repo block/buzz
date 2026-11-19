@@ -2990,7 +2990,7 @@ impl Db {
     /// accepts the resend only within its timestamp window, so this does not
     /// repair older rows.
     ///
-    /// A target that is pinned leaves its channel's NIP-CP pin list in the
+    /// A target that is pinned leaves its channel's NIP-PM pin list in the
     /// same transaction; the list is re-signed with `relay_signer`.
     ///
     /// Returns `(StoredEvent, was_inserted, deleted, pin_lists)`, where

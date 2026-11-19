@@ -201,7 +201,7 @@ pub(crate) struct RelayCapabilityFlags {
     pub advertise_nip43: bool,
     /// Whether NIP-FI (federated identity) is advertised.
     pub advertise_fi: bool,
-    /// Whether NIP-CP pin and unpin commands are accepted (`buzz-pins`).
+    /// Whether NIP-PM pin and unpin commands are accepted (`buzz-pins`).
     pub advertise_pins: bool,
 }
 

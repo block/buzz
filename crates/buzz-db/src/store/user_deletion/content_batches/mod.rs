@@ -31,7 +31,7 @@ const KINDS: &[i32] = &[
     30175, 30176, 30178, 30030, 30180, 30621,
     // Private per-viewer state: only the trusted relay's matching d/p snapshot.
     30622, 1063,
-    // NIP-CP pin and unpin commands. A recent one keeps its ID and timestamp
+    // NIP-PM pin and unpin commands. A recent one keeps its ID and timestamp
     // (`crate::pins::keeps_replay_record`).
     40010, 40011,
 ];

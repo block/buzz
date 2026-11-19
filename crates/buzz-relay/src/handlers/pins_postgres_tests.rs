@@ -1,4 +1,4 @@
-//! Postgres-backed tests for NIP-CP channel pins through ingest and REQ: who
+//! Postgres-backed tests for NIP-PM channel pins through ingest and REQ: who
 //! may pin, what the relay answers, who can read the list, and that deleting a
 //! pinned message rewrites it.
 

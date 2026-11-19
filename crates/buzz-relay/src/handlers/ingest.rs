@@ -2708,8 +2708,8 @@ async fn ingest_event_inner(
         ));
     }
 
-    // NIP-CP: with the switch off, the commands are refused as kinds this
-    // relay does not know, which is what a relay without NIP-CP answers.
+    // NIP-PM: with the switch off, the commands are refused as kinds this
+    // relay does not know, which is what a relay without NIP-PM answers.
     let pin_command = matches!(kind_u32, KIND_PIN_MESSAGE | KIND_UNPIN_MESSAGE);
     let required = match required_scope_for_kind(kind_u32, &event) {
         Ok(scope) if !pin_command || state.config.pins_enabled => scope,

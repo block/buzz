@@ -347,7 +347,7 @@ async fn replace_parameterized_event_in_transaction_impl(
 ///
 /// These are the lists the relay signs and republishes in full on every
 /// change: the NIP-43 membership list (13534), the NIP-IA archived list
-/// (13535), the NIP-CP pin list (30623) and NIP-29 group state
+/// (13535), the NIP-PM pin list (30623) and NIP-29 group state
 /// (39000–39002), written by the addressable path, the kind:39002 member
 /// snapshot and the kind:13534 writer, which all
 /// build their supersede with [`replacement_sql`] from this predicate. A

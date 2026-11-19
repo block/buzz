@@ -511,7 +511,7 @@ pub const KIND_WORKFLOW_DEF: u32 = 30620;
 /// `hidden_at` per viewer; this is the only Nostr-visible projection of it.
 pub const KIND_DM_VISIBILITY: u32 = 30622;
 
-/// NIP-CP: a channel's pin list (relay-signed, parameterized replaceable,
+/// NIP-PM: a channel's pin list (relay-signed, parameterized replaceable,
 /// d=channel_id). One `e` tag per pinned message, newest pin first. Members
 /// change it only through [`KIND_PIN_MESSAGE`] and [`KIND_UNPIN_MESSAGE`].
 pub const KIND_CHANNEL_PINS: u32 = 30623;
@@ -562,11 +562,11 @@ pub const KIND_STREAM_MESSAGE_SCHEDULED: u32 = 40006;
 pub const KIND_STREAM_REMINDER: u32 = 40007;
 /// A diff/patch message showing file changes (unified diff format).
 pub const KIND_STREAM_MESSAGE_DIFF: u32 = 40008;
-/// NIP-CP: member-signed command that pins one message of its `h` channel.
+/// NIP-PM: member-signed command that pins one message of its `h` channel.
 pub const KIND_PIN_MESSAGE: u32 = 40010;
-/// NIP-CP: member-signed command that unpins one message of its `h` channel.
+/// NIP-PM: member-signed command that unpins one message of its `h` channel.
 pub const KIND_UNPIN_MESSAGE: u32 = 40011;
-/// NIP-CP: the message kinds a channel can pin.
+/// NIP-PM: the message kinds a channel can pin.
 pub const PINNABLE_KINDS: [u32; 5] = [
     KIND_STREAM_MESSAGE,
     KIND_STREAM_MESSAGE_V2,
@@ -574,7 +574,7 @@ pub const PINNABLE_KINDS: [u32; 5] = [
     KIND_FORUM_POST,
     KIND_FORUM_COMMENT,
 ];
-/// NIP-CP: the most messages one channel can pin.
+/// NIP-PM: the most messages one channel can pin.
 pub const MAX_CHANNEL_PINS: usize = 250;
 /// Canvas (shared document) for a channel.
 pub const KIND_CANVAS: u32 = 40100;
