@@ -1,0 +1,139 @@
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+
+/// The one interface app code uses for diagnostic reporting.
+///
+/// See `docs/mobile-diagnostic-reporting.md`. Every call returns at once and
+/// never throws: a failure inside reporting is dropped so it cannot reach the
+/// code that made the call.
+abstract interface class DiagnosticReporter {
+  /// Reports something that should never happen, such as a frame the app
+  /// cannot decode. [operation] names where it happened, from a fixed list.
+  void reportError(
+    Object error,
+    StackTrace? stackTrace, {
+    required DiagnosticOperation operation,
+  });
+
+  /// Counts one networking event, with how long it took when known.
+  void countNetworkEvent(NetworkEvent event);
+
+  /// Adds one entry to the trail attached to later reports.
+  void leaveBreadcrumb(DiagnosticBreadcrumb breadcrumb);
+
+  /// Attributes later reports and counts to [pubkey], or to no one.
+  void setMember(String? pubkey);
+
+  /// Whether this build has a reporting destination. Only then does Settings
+  /// offer the checks below.
+  bool get reporting;
+
+  /// Sends a [DiagnosticTestError], to check a build's reporting end to end.
+  void sendTestReport();
+
+  /// Crashes the app in native code, to check native crash reports.
+  void crashForTest();
+}
+
+/// The error a test report carries, so it is easy to tell apart.
+///
+/// Not const: each report needs its own instance, or the destination's
+/// deduplication drops every report after the first.
+class DiagnosticTestError implements Exception {
+  DiagnosticTestError();
+
+  @override
+  String toString() => 'DiagnosticTestError';
+}
+
+/// Where an explicit error report comes from.
+enum DiagnosticOperation {
+  relayFrame,
+  relayQuery,
+  relayRejection,
+  accountResponse,
+  pushGatewayResponse,
+  storedData,
+  eventSubscriber,
+  testReport,
+}
+
+/// The operation a networking event belongs to.
+enum NetworkEndpoint { relayConnection, relayQuery, relayPublish }
+
+/// How a networking event ended.
+enum NetworkOutcome { success, failure }
+
+/// Why a networking event failed.
+enum NetworkFailure {
+  timeout,
+  disconnected,
+  offline,
+  unreachable,
+  insecure,
+  rateLimited,
+  authRefused,
+  serverError,
+  relayError,
+  relayRefused,
+}
+
+/// One counted networking event. [backend] is the server's host name.
+class NetworkEvent {
+  const NetworkEvent({
+    required this.backend,
+    required this.endpoint,
+    required this.outcome,
+    this.failure,
+    this.duration,
+  }) : assert((outcome == NetworkOutcome.failure) == (failure != null));
+
+  final String backend;
+  final NetworkEndpoint endpoint;
+  final NetworkOutcome outcome;
+  final NetworkFailure? failure;
+  final Duration? duration;
+}
+
+/// One entry in the trail of recent networking events.
+class DiagnosticBreadcrumb {
+  const DiagnosticBreadcrumb(this.event);
+
+  /// Breadcrumbs from the fixed list are networking events.
+  final NetworkEvent event;
+}
+
+/// Used when the build has no reporting destination.
+class NoopDiagnosticReporter implements DiagnosticReporter {
+  const NoopDiagnosticReporter();
+
+  @override
+  void reportError(
+    Object error,
+    StackTrace? stackTrace, {
+    required DiagnosticOperation operation,
+  }) {}
+
+  @override
+  void countNetworkEvent(NetworkEvent event) {}
+
+  @override
+  void leaveBreadcrumb(DiagnosticBreadcrumb breadcrumb) {}
+
+  @override
+  void setMember(String? pubkey) {}
+
+  @override
+  bool get reporting => false;
+
+  @override
+  void sendTestReport() {}
+
+  @override
+  void crashForTest() {}
+}
+
+/// The reporter chosen at startup. The root scope overrides it; tests
+/// override it with a fake that records what it was given.
+final diagnosticReporterProvider = Provider<DiagnosticReporter>(
+  (ref) => const NoopDiagnosticReporter(),
+);

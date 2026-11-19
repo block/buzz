@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/mentions/mention_tags.dart';
@@ -63,6 +65,8 @@ class SendMessage {
     List<String>? mentionPubkeys,
     Channel? channel,
     List<List<String>> mediaTags = const [],
+    FutureOr<void> Function(NostrEvent)? beforePublish,
+    void Function()? validateDelivery,
     Future<bool> Function()? mayPublish,
   }) async {
     _ensureDeliveryValid();
@@ -123,7 +127,10 @@ class SendMessage {
         kind: EventKind.streamMessage,
         content: content,
         tags: tags,
-        onSigned: (event) {
+        onSigned: (event) async {
+          await beforePublish?.call(event);
+          _ensureDeliveryValid();
+          validateDelivery?.call();
           localMessage = event;
           _markLocalMessageForAnimation(channelId, event.id);
           _addLocalMessage(channelId, event);

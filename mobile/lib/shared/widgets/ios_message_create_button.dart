@@ -11,6 +11,7 @@ import '../relay/relay.dart';
 import '../theme/theme.dart';
 import 'avatar_image.dart';
 import 'duo_toolbar.dart';
+import 'native_route_controls.dart';
 
 /// The four desktop creation destinations, presented by UIKit on iOS.
 class IosMessageCreateButton extends HookConsumerWidget {
@@ -26,6 +27,7 @@ class IosMessageCreateButton extends HookConsumerWidget {
     this.sectionTitles = const {},
     this.icon = 'plus',
     this.iconSize,
+    this.trailingIconSlotWidth,
     this.foregroundColor,
     this.accessibilityLabel = 'Create',
     this.width = 64,
@@ -50,6 +52,9 @@ class IosMessageCreateButton extends HookConsumerWidget {
   final String? avatarUrl, avatarInitial;
   final String icon;
   final double? iconSize;
+
+  /// Right-aligned visual slot inside the unchanged full-width hit target.
+  final double? trailingIconSlotWidth;
   final Color? foregroundColor;
   final String accessibilityLabel;
   final double width, height;
@@ -80,15 +85,8 @@ class IosMessageCreateButton extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final route = ModalRoute.of(context);
-    final coveringProgress = useAnimation(
-      route?.secondaryAnimation ?? kAlwaysDismissedAnimation,
-    );
-    final nativeControlsVisible =
-        (route?.isCurrent ?? true) && coveringProgress == 0;
+    final nativeControlsVisible = useNativeRouteControlsVisible(context);
 
-    final brightness = context.theme.brightness;
-    final foreground = (foregroundColor ?? context.colors.onSurface).toARGB32();
     // Only an avatar trigger fetches media, so only it depends on the relay.
     final media = avatarInitial == null
         ? null
@@ -122,6 +120,15 @@ class IosMessageCreateButton extends HookConsumerWidget {
       ],
     );
     final avatar = useFuture(avatarFuture, preserveState: false).data;
+    if (!nativeControlsVisible) {
+      return SizedBox(width: width, height: height);
+    }
+    return HookBuilder(builder: (context) => _buildNative(context, avatar));
+  }
+
+  Widget _buildNative(BuildContext context, Uint8List? avatar) {
+    final brightness = context.theme.brightness;
+    final foreground = (foregroundColor ?? context.colors.onSurface).toARGB32();
     final channel = useState<MethodChannel?>(null);
     final latest = useRef(actions)..value = actions;
     final latestVisibility = useRef(onMenuVisibilityChanged)
@@ -204,11 +211,6 @@ class IosMessageCreateButton extends HookConsumerWidget {
         foreground,
       ],
     );
-    // UIKit glass layers can float above the incoming Flutter route during
-    // its transition. Remove the covered route's platform view immediately.
-    if (!nativeControlsVisible) {
-      return SizedBox(width: width, height: height);
-    }
     return SizedBox(
       width: width,
       height: height,
@@ -222,10 +224,12 @@ class IosMessageCreateButton extends HookConsumerWidget {
           ...content,
           'plain': plain,
           'fillWidth': fillWidth,
-          'buttonCenterX': width / 2,
+          'buttonCenterX': trailingIconSlotWidth == null
+              ? width / 2
+              : width - trailingIconSlotWidth! / 2,
           'controlWidth': mergingNavigation && navigationAxis == Axis.horizontal
               ? 112.0
-              : width,
+              : trailingIconSlotWidth ?? width,
           'mergingNavigation': mergingNavigation,
           'menuAbove':
               mergingNavigation &&
