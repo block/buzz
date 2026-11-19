@@ -233,10 +233,18 @@ class ComposeBar extends HookConsumerWidget {
       agentOwners: agentOwners,
     );
 
+    final memberMentions = _useMemberMentions(memberMentionCandidates, [
+      membersAsync.asData?.value,
+      sessionStatus,
+      cachedMembers,
+      userCache,
+      agentOwners,
+    ]);
+
     _useMentionChipQualifiers(
       ref: ref,
       controller: controller,
-      members: memberMentionCandidates,
+      members: () => memberMentions().candidates,
       memberKeys: [
         membersAsync.asData?.value,
         cachedMembers,
@@ -251,11 +259,13 @@ class ComposeBar extends HookConsumerWidget {
     useEffect(
       () {
         if (!hasLegacyMentions) return null;
-        final labels = [for (final m in memberMentionCandidates()) m.label];
         // After the frame: the change is saved, which a build must not do.
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!context.mounted) return;
-          controller.settleLegacyMentions(labels, complete: membersLoaded);
+          controller.settleLegacyMentions(
+            memberMentions,
+            complete: membersLoaded,
+          );
         });
         return null;
       },
@@ -434,10 +444,7 @@ class ComposeBar extends HookConsumerWidget {
     Future<void> send() async {
       if (!canSend()) return;
       // A draft saved by an earlier Buzz yields to member names first.
-      controller.settleLegacyMentions(
-        memberMentionCandidates().map((member) => member.label),
-        complete: false,
-      );
+      controller.settleLegacyMentions(memberMentions, complete: false);
       final draft = controller.text;
       final mentions = controller.mentions;
       final submittedOrigin = ComposerSendOrigin.capture(sendSurfaceKey);
@@ -455,13 +462,14 @@ class ComposeBar extends HookConsumerWidget {
       final messenger = ScaffoldMessenger.maybeOf(context);
 
       // The recipients: every chip, then typed names the fallback resolves.
-      List<MentionCandidate> selectedMentions;
+      final List<MentionCandidate> selectedMentions;
+      final Map<int, int> nameEnds;
       try {
-        selectedMentions = _resolveComposerMentions(
+        (recipients: selectedMentions, :nameEnds) = _resolveComposerMentions(
           draft,
           mentions,
           mentionsInvalid: controller.mentionsInvalid,
-          members: memberMentionCandidates(),
+          members: memberMentions(),
           restoredCandidates: buildMentionCandidates(
             members: membersAsync.asData?.value ?? const [],
             relayAgents: relayAgents ?? const [],
@@ -498,10 +506,7 @@ class ComposeBar extends HookConsumerWidget {
         draft,
         mentions,
         code: controller._styledCodeRanges(draft),
-        otherLabels: [
-          for (final candidate in memberMentionCandidates()) candidate.label,
-          for (final candidate in selectedMentions) candidate.label,
-        ],
+        nameEnds: nameEnds,
       ).trim();
       final outgoing = _OutgoingMentions(selectedMentions);
       // Read before any await. These actions belong to this community and

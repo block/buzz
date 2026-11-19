@@ -1,3 +1,9 @@
+import 'package:flutter/foundation.dart';
+
+import 'mention_label_index.dart';
+
+export 'mention_label_index.dart';
+
 /// What continues a name directly after a label, as a pattern source: a
 /// letter, mark or digit, or underscores leading to one, so `@Bobby` and
 /// `@Bob_smith` hold no `Bob`. Anything else ends the name: punctuation, a
@@ -24,41 +30,89 @@ bool typedMentionNotifies(String text, int start, int end) {
       .any((link) => link.start < start && end < link.end - 1);
 }
 
+final _opensMention = RegExp(r'[\s(\[{*_]', unicode: true);
+final _nameContinues = RegExp(mentionNameContinuation, unicode: true);
+final _keyQualifierNext = RegExp(r' \([0-9a-f]{64}\)', caseSensitive: false);
+final _keyQualified = RegExp(r' \([0-9a-f]{64}\)$', caseSensitive: false);
+final _reservationNext = RegExp(
+  ' (?:[2-9]|[1-9][0-9]+)(?!$mentionNameContinuation)',
+  unicode: true,
+);
+
+/// How many candidate names [mentionOccurrences] has looked up, for tests
+/// that check a scan's work does not grow with the roster.
+@visibleForTesting
+int mentionScanLookups = 0;
+
 /// Longest literal ranges win, including labels containing another @ sign.
 /// Recognition precedes eligibility: ambiguous labels still block shorter ones.
 /// A label opens where a query does (portable mention rules, section 2): at
 /// the start, after whitespace, `(`, `[` or `{`, or after a Markdown
 /// delimiter, so a mention picked after a bracket keeps its recipient. It
 /// ends at the composer's suffix boundary, [mentionNameContinuation].
+///
+/// No pattern is built from a name. Each `@` is found once, and the text
+/// after it is looked up in a hash index at each length a label has, longest
+/// first, as buzz-app's `typedContinuation` probes its name map. The cost
+/// per `@` therefore depends on how many distinct lengths the labels have
+/// and not on how many labels there are, and text with no `@` costs one
+/// search for it. Names compare as a case-insensitive Unicode pattern
+/// compares them ([foldMentionLabel]). [labels] are indexed on each call, so
+/// a channel roster belongs in [known], built once and reused; a label in
+/// [labels] wins over one in [known] that differs only by case.
 List<({int start, int end, String label})> mentionOccurrences(
   String text,
-  Iterable<String> labels,
-) {
-  final matches = <int, ({int start, int end, String label})>{};
-  for (final label in labels) {
-    if (label.isEmpty) continue;
-    // A qualifier and reservation suffix belong to the literal even when no
-    // candidate binds it. Never fall back to a shorter, different recipient.
-    final suffix =
-        RegExp(r' \([0-9a-f]{64}\)$', caseSensitive: false).hasMatch(label)
-        ? '(?! (?:[2-9]|[1-9][0-9]+)(?!$mentionNameContinuation))'
-        : '';
-    final pattern = RegExp(
-      '(?:^|[\\s(\\[{]|[*_]{1,3}|\\|\\|)(@${RegExp.escape(label)})(?! \\([0-9a-f]{64}\\))$suffix(?!$mentionNameContinuation)',
-      caseSensitive: false,
-      unicode: true,
-    );
-    for (final match in pattern.allMatches(text)) {
-      final start = match.end - match.group(1)!.length;
-      if (matches[start] == null || matches[start]!.end < match.end) {
-        matches[start] = (start: start, end: match.end, label: label);
+  Iterable<String> labels, {
+  MentionLabelIndex? known,
+}) {
+  final result = <({int start, int end, String label})>[];
+  var at = text.indexOf('@');
+  if (at < 0) return result;
+  final own = MentionLabelIndex(labels);
+  final lengths = known == null || known.lengths.isEmpty
+      ? own.lengths
+      : own.lengths.isEmpty
+      ? known.lengths
+      : ({...own.lengths, ...known.lengths}.toList()
+          ..sort((a, b) => b.compareTo(a)));
+  while (at >= 0) {
+    var next = at + 1;
+    final opens =
+        at == 0 ||
+        _opensMention.matchAsPrefix(text, at - 1) != null ||
+        at >= 2 && text.startsWith('||', at - 2);
+    if (opens) {
+      for (final length in lengths) {
+        final end = at + 1 + length;
+        if (end > text.length) continue;
+        // A label never ends inside a surrogate pair or against a name
+        // character, and a key qualifier belongs to the literal even when no
+        // candidate binds it: never fall back to a shorter, different
+        // recipient.
+        if (end < text.length &&
+            (text.codeUnitAt(end) & 0xFC00) == 0xDC00 &&
+            (text.codeUnitAt(end - 1) & 0xFC00) == 0xD800) {
+          continue;
+        }
+        if (_nameContinues.matchAsPrefix(text, end) != null ||
+            _keyQualifierNext.matchAsPrefix(text, end) != null) {
+          continue;
+        }
+        mentionScanLookups++;
+        final folded = foldMentionLabel(text.substring(at + 1, end));
+        final label = own[folded] ?? known?[folded];
+        // The same holds for a qualified label's reservation suffix.
+        if (label == null ||
+            _keyQualified.hasMatch(label) &&
+                _reservationNext.matchAsPrefix(text, end) != null) {
+          continue;
+        }
+        result.add((start: at, end: end, label: label));
+        next = end;
+        break;
       }
     }
-  }
-  final result = <({int start, int end, String label})>[];
-  for (final match
-      in matches.values.toList()..sort((a, b) => a.start.compareTo(b.start))) {
-    if (result.isEmpty || match.start >= result.last.end) result.add(match);
+    at = text.indexOf('@', next);
   }
   return result;
 }

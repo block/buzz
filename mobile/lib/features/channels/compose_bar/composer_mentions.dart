@@ -64,24 +64,67 @@ class _ComposerMention {
   );
 }
 
+/// The channel's members as a send reads them: by lowercase name, and
+/// indexed for the text scan. Built once per roster, since both cost a pass
+/// over every member; see [_useMemberMentions].
+class _MemberMentions {
+  _MemberMentions(this.candidates) {
+    for (final member in candidates) {
+      (byName[member.label.toLowerCase()] ??= {}).putIfAbsent(
+        member.pubkey.toLowerCase(),
+        () => member,
+      );
+    }
+    labels = MentionLabelIndex(byName.keys);
+  }
+
+  final List<MentionCandidate> candidates;
+
+  /// The members under each lowercase name, by lowercase key.
+  final byName = <String, Map<String, MentionCandidate>>{};
+  late final MentionLabelIndex labels;
+}
+
+/// The channel's members for the send path, read when asked for and kept
+/// until one of [keys], the objects [build] reads, is replaced. A send, a
+/// legacy draft and the chip labels then share one pass over the roster
+/// however often they run.
+_MemberMentions Function() _useMemberMentions(
+  List<MentionCandidate> Function() build,
+  List<Object?> keys,
+) {
+  final cache = useRef<(List<Object?>, _MemberMentions)?>(null);
+  return () {
+    final cached = cache.value;
+    if (cached != null &&
+        Iterable<int>.generate(
+          keys.length,
+        ).every((i) => identical(cached.$1[i], keys[i]))) {
+      return cached.$2;
+    }
+    final members = _MemberMentions(build());
+    cache.value = (keys, members);
+    return members;
+  };
+}
+
 extension _LegacyMentions on _MarkdownEditingController {
   /// Gives member names the occurrences the old send gave them. A draft
   /// saved with label-keyed bindings is read without the roster, so its
-  /// bindings arrive marked legacy; here a longer member name in
-  /// [memberLabels] that covers one (`@Sam Smith` over a picked `@Sam`)
-  /// takes it back, and the typed name resolves at send as it used to.
+  /// bindings arrive marked legacy; here a longer name among [members]
+  /// that covers one (`@Sam Smith` over a picked `@Sam`) takes it back,
+  /// and the typed name resolves at send as it used to.
   /// Backticks read as spaces, as they did when the binding was saved.
   /// Once the roster is [complete] the surviving bindings are ordinary.
   void settleLegacyMentions(
-    Iterable<String> memberLabels, {
+    _MemberMentions Function() members, {
     required bool complete,
   }) {
     if (!_mentions.any((mention) => mention.legacy)) return;
     final occurrences = mentionOccurrences(text.replaceAll('`', ' '), {
       for (final mention in _mentions)
         if (mention.legacy) mention.label(text).toLowerCase(),
-      for (final label in memberLabels) label.toLowerCase(),
-    });
+    }, known: members().labels);
     final settled = <_ComposerMention>[];
     for (final mention in _mentions) {
       if (!mention.legacy) {
@@ -174,11 +217,19 @@ bool _startsSelectedMention(List<_ComposerMention> mentions, int start) =>
 /// refused so nobody is silently dropped. That holds beside a chip of the
 /// same name too: text restored without its binding, as by a system Undo,
 /// needs a pick rather than borrowing the surviving chip's key.
-List<MentionCandidate> _resolveComposerMentions(
+///
+/// The text is scanned once, against the chips' names, the names their
+/// recipients go by now and the [members] index. `nameEnds` is that scan:
+/// where the longest known name starting at each `@` ends, which
+/// [_qualifiedMentionContent] reads to see a chip that would draw as someone
+/// else. A name known only as a chip recipient's current name notifies
+/// nobody by being typed, and no shorter name inside it does either.
+({List<MentionCandidate> recipients, Map<int, int> nameEnds})
+_resolveComposerMentions(
   String text,
   List<_ComposerMention> mentions, {
   required bool mentionsInvalid,
-  required List<MentionCandidate> members,
+  required _MemberMentions members,
   required List<MentionCandidate> restoredCandidates,
 }) {
   // A broken record cannot fall back to a same-name roster entry.
@@ -209,16 +260,19 @@ List<MentionCandidate> _resolveComposerMentions(
     (byName[mention.label(text).toLowerCase()] ??= {})[mention.pubkey] =
         mention.candidate;
   }
-  for (final member in members) {
-    (byName[member.label.toLowerCase()] ??= {}).putIfAbsent(
-      member.pubkey.toLowerCase(),
-      () => member,
-    );
-  }
-  for (final range in mentionOccurrences(text, byName.keys)) {
+  final nameEnds = <int, int>{};
+  for (final range in mentionOccurrences(text, {
+    ...byName.keys,
+    for (final (_, candidate) in found) candidate.label.toLowerCase(),
+  }, known: members.labels)) {
+    nameEnds[range.start] = range.end;
     if (mentions.any((m) => m.start == range.start)) continue;
     if (!typedMentionNotifies(text, range.start, range.end)) continue;
-    final identities = byName[range.label]!;
+    final identities = {
+      ...?members.byName[range.label],
+      ...?byName[range.label],
+    };
+    if (identities.isEmpty) continue;
     if (identities.length > 1) {
       throw FormatException(
         'The mention @${range.label} is ambiguous. Choose a recipient from the mention picker.',
@@ -231,40 +285,34 @@ List<MentionCandidate> _resolveComposerMentions(
   for (final (_, candidate) in found) {
     winners[candidate.pubkey.toLowerCase()] ??= candidate;
   }
-  return winners.values.toList();
+  return (recipients: winners.values.toList(), nameEnds: nameEnds);
 }
 
 /// The content sent for [text]. A bound mention is written `@Name (<key>)`
 /// when its plain text would read as someone else in the bubble: when bound
 /// mentions of different keys share its name, ignoring case, as buzz-app's
 /// `composer-markdown.ts` qualifies them, or when the text typed against it
-/// spells a longer name among [otherLabels] or the other chips (`-bot` after
-/// a picked `@Bob`, beside a `Bob-bot`), which the bubble's longest-name
-/// match would otherwise draw as that other person. One key under a name
-/// stays bare, and a mention inside [code] the composer styles stays as
-/// typed. The composer itself never showed the key.
+/// spells a longer known name (`-bot` after a picked `@Bob`, beside a
+/// `Bob-bot`), which the bubble's longest-name match would otherwise draw
+/// as that other person. [nameEnds] says where the longest name at each `@`
+/// ends, among the chips, the recipients and the channel's members; it is
+/// the send's one scan, from [_resolveComposerMentions]. One key under a
+/// name stays bare, and a mention inside [code] the composer styles stays
+/// as typed. The composer itself never showed the key.
 String _qualifiedMentionContent(
   String text,
   List<_ComposerMention> mentions, {
   required List<TextRange> code,
-  Iterable<String> otherLabels = const [],
+  required Map<int, int> nameEnds,
 }) {
   final keysByName = <String, Set<String>>{};
   for (final mention in mentions) {
     (keysByName[mention.label(text).toLowerCase()] ??= {}).add(mention.pubkey);
   }
-  // Every `@` where the text reads as a longer name than the chip there.
-  final longer = {
-    for (final range in mentionOccurrences(text, {
-      ...keysByName.keys,
-      for (final label in otherLabels) label.toLowerCase(),
-    }))
-      range.start: range.end,
-  };
   var content = text;
   for (final mention in mentions.reversed) {
     if (keysByName[mention.label(text).toLowerCase()]!.length < 2 &&
-        (longer[mention.start] ?? 0) <= mention.end) {
+        (nameEnds[mention.start] ?? 0) <= mention.end) {
       continue;
     }
     if (code.any((c) => c.start < mention.start && mention.end < c.end)) {
