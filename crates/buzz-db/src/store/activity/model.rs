@@ -263,6 +263,9 @@ pub struct Page {
     pub marker: Option<Marker>,
     /// The marker was too old, or too much changed: start over.
     pub reset: bool,
+    /// Whether the person's NIP-RS read state has been carried over
+    /// (`finish_import`). `None` on a reset.
+    pub imported: Option<bool>,
 }
 
 /// Database facts every query of one read shares.
@@ -271,6 +274,8 @@ pub(super) struct Snapshot {
     /// The account's start: the floor of every read position. `None` until
     /// the account starts, and nothing is unread.
     pub(super) started_at: Option<DateTime<Utc>>,
+    /// Whether the person finished carrying their NIP-RS read state over.
+    pub(super) imported: bool,
     /// The account's change counter.
     pub(super) seq: i64,
     /// Database time of the read.

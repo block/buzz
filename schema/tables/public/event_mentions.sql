@@ -16,6 +16,9 @@ CREATE TABLE event_mentions (
     received_at         TIMESTAMPTZ,
     -- Thread root when the event is a reply; NULL for a top-level message.
     root_id             BYTEA,
+    -- When the tagged person read this mention on its own (mark_read). NULL:
+    -- it follows the read position of its channel timeline or thread.
+    read_at             TIMESTAMPTZ,
     PRIMARY KEY (community_id, pubkey_hex, event_id)
 );
 

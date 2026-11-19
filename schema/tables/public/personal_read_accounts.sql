@@ -12,5 +12,8 @@ CREATE TABLE personal_read_accounts (
     -- row, increments seq and stamps the frontier row it changed, so seq
     -- order is commit order. It is the personal half of the activity marker.
     seq BIGINT NOT NULL DEFAULT 0,
+    -- When the actor finished carrying their NIP-RS read state over
+    -- (finish_import). NULL: clients do not yet trust this read state.
+    imported_at TIMESTAMPTZ,
     PRIMARY KEY (community_id, actor)
 );

@@ -1056,7 +1056,12 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 106);
+        assert_eq!(migrations.len(), 107);
+        assert_eq!(migrations[106].version, 107);
+        assert!(migrations[106]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN imported_at TIMESTAMPTZ"));
         assert_eq!(migrations[105].version, 106);
         assert!(
             strip_sql_comments(migrations[105].sql.as_str()).contains("CREATE TABLE search_outbox")
@@ -3062,6 +3067,15 @@ mod postgres_tests {
         assert!(activity.contains("ALTER COLUMN through_timestamp DROP NOT NULL"));
         assert!(activity.contains("ADD COLUMN engaged_at TIMESTAMPTZ"));
         let account_seq_column = "seq bigint not null default 0, ";
+        // 0091 records when the NIP-RS read state was carried over.
+        let account_imported_column = "imported_at timestamptz, ";
+        assert!(MIGRATOR
+            .iter()
+            .find(|m| m.version == 91)
+            .expect("per-message read migration")
+            .sql
+            .as_str()
+            .contains("ALTER TABLE personal_read_accounts ADD COLUMN imported_at TIMESTAMPTZ"));
         let frontier_columns = "state text not null default 'default' \
             check (state in ('default', 'muted')), \
             marked_unread boolean not null default false, \
@@ -3074,6 +3088,7 @@ mod postgres_tests {
                     schema_definition
                         .replacen(started_at_column, "", 1)
                         .replacen(account_seq_column, "", 1)
+                        .replacen(account_imported_column, "", 1)
                 } else if table == "personal_read_frontiers" {
                     assert!(schema_definition.contains(frontier_columns));
                     schema_definition

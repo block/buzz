@@ -147,6 +147,7 @@ fn body(mut page: Page, filter: &str, since: bool) -> Value {
             "next": page.next.as_ref().map(|cursor| encode_cursor(cursor, filter)),
             "marker": page.marker.map(Marker::encode),
             "reset": page.reset,
+            "imported": page.imported,
         });
         let fits =
             serde_json::to_vec(&value).is_ok_and(|bytes| bytes.len() <= auth::MAX_RESPONSE_BYTES);
@@ -327,8 +328,10 @@ pub(super) async fn write(
         )
         .await
         .unwrap_or_else(|_| json!({"status":"unknown","retryable":true}));
-        if outcome["status"] == "applied" && !applied.contains(intent.target()) {
-            applied.push(intent.target().clone());
+        if let Some(target) = intent.target().filter(|_| outcome["status"] == "applied") {
+            if !applied.contains(target) {
+                applied.push(target.clone());
+            }
         }
         outcomes.push(outcome);
     }
