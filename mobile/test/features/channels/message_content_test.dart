@@ -124,6 +124,13 @@ void _setSurfaceSize(WidgetTester tester, Size size) {
   tester.view.physicalSize = size;
 }
 
+class _ResumedLifecycle extends AppLifecycleNotifier {
+  @override
+  AppLifecycleState build() => AppLifecycleState.resumed;
+
+  void enter(AppLifecycleState next) => state = next;
+}
+
 class _FakeVoiceNotePlayer extends VoiceNotePlayerController {
   VoiceNotePlaybackState _state = const VoiceNotePlaybackState();
 
@@ -2219,6 +2226,7 @@ void main() {
             ),
             overrides: [
               voiceNotePlayerFactoryProvider.overrideWithValue(() => player),
+              appLifecycleProvider.overrideWith(_ResumedLifecycle.new),
             ],
           ),
         );
@@ -2319,6 +2327,16 @@ void main() {
         await tester.pump();
         expect(tester.widget<Text>(rateValueFinder).data, '.5×');
         expect(tester.getSize(rateFinder), rateSize);
+
+        // iOS keeps the app running in the background for Huddle audio, so
+        // leaving the foreground must stop a playing voice note.
+        expect(player.state.isPlaying, isTrue);
+        final container = ProviderScope.containerOf(tester.element(cardFinder));
+        (container.read(appLifecycleProvider.notifier) as _ResumedLifecycle)
+            .enter(AppLifecycleState.paused);
+        await tester.pump();
+        expect(player.state.isPlaying, isFalse);
+        expect(find.byTooltip('Play voice note'), findsOneWidget);
       });
 
       testWidgets(
