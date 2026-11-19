@@ -1,5 +1,9 @@
+import 'inline_activity_groups.dart';
+import 'inline_agent_activity.dart';
 import 'message_author_visibility.dart';
+
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+
 import 'message_swipe_reply.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
 import 'message_footer_layout.dart';
@@ -70,6 +74,7 @@ import 'timeline_message.dart';
 
 part 'thread_detail_page/nested_thread_summary_row.dart';
 part 'thread_detail_page/message_list.dart';
+part 'thread_detail_page/inline_activity.dart';
 part 'thread_detail_page/head_layout.dart';
 part 'thread_detail_page/sticky_date.dart';
 part 'thread_detail_helpers.dart';
@@ -320,13 +325,24 @@ class ThreadDetailPage extends HookConsumerWidget {
     final threadViewportVisible =
         !relayRepliesAvailable || initialViewportReady.value;
 
-    // Item 0 is the thread head; reply `i` lives at `i + 1`.
+    final activityGroups = groupInlineActivity(
+      replies,
+      (message) => message,
+      revealMessageId: initialMessageId,
+    );
+    // Item 0 is the head; quiet replies share one displayed row.
     const headIndex = 0;
-    int indexForReply(int chronologicalIndex) => chronologicalIndex + 1;
-    final tailAnchorIndex = replies.length + 1;
+    int indexForReply(int chronologicalIndex) =>
+        1 +
+        activityGroups.indexWhere(
+          (group) => group.any(
+            (message) => message.id == replies[chronologicalIndex].id,
+          ),
+        );
+    final tailAnchorIndex = activityGroups.length + 1;
     final stickyDateIndex = _ThreadStickyDateIndex(
       head: liveHead,
-      replies: replies,
+      replies: activityGroups.map((group) => group.first).toList(),
     );
 
     void updateStickyDateHeader(Iterable<ItemPosition> positions) {
@@ -364,7 +380,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       if (!viewportHeight.isFinite || viewportHeight <= 0) return false;
       final trailingBoundary =
           1 - ((Grid.xs + timelineBottomInset) / viewportHeight) + 0.001;
-      final lastMessageIndex = _threadTailIndex(replies.length);
+      final lastMessageIndex = _threadTailIndex(activityGroups.length);
       var tailItemIsLaidOut = false;
       var tailItemIsVisible = false;
       for (final item in itemPositionsListener.itemPositions.value) {
@@ -638,6 +654,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     // while the last item is on screen, scroll it into view. If the user has
     // scrolled up to read, leave them where they are.
     final previousReplyCount = useRef(replies.length);
+    final previousDisplayCount = useRef(activityGroups.length);
     final topOverlayFraction = viewportHeight > 0
         ? frostedAppBarHeight(context) / viewportHeight
         : 0.0;
@@ -660,6 +677,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       if (initialMessageId != null && !initialViewportReady.value) {
         initialTailSettle.abandon();
         previousReplyCount.value = replies.length;
+        previousDisplayCount.value = activityGroups.length;
         return null;
       }
       if (canReply && composerDockHeight.value <= 0) {
@@ -667,6 +685,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       }
       if (!initialTailSettle.isComplete) {
         previousReplyCount.value = replies.length;
+        previousDisplayCount.value = activityGroups.length;
         followsThreadTail.value = true;
         initialTailSettle.schedule(
           context: context,
@@ -686,13 +705,14 @@ class ThreadDetailPage extends HookConsumerWidget {
       }
 
       final previous = previousReplyCount.value;
+      final previousTailAnchorIndex = previousDisplayCount.value + 1;
+      previousDisplayCount.value = activityGroups.length;
       previousReplyCount.value = replies.length;
       if (replies.length <= previous) return null;
       final positions = itemPositionsListener.itemPositions.value;
       // Positions still describe the list as it was *before* these replies, so
       // compare against the old tail. Measuring against the new one only reads
       // as "at the tail" when exactly one reply arrived.
-      final previousTailAnchorIndex = previous + 1;
       final wasAtTail =
           positions.isEmpty ||
           positions.any(
@@ -747,12 +767,12 @@ class ThreadDetailPage extends HookConsumerWidget {
       for (final position in itemPositionsListener.itemPositions.value) {
         // The head is read like a reply. A thread opened directly, from a
         // link or a notification, may be the only place it is seen.
-        final replyIndex = position.index - indexForReply(0);
+        final replyIndex = position.index - 1;
         final message = position.index == headIndex
             ? (liveDeletionHidesHead ? null : liveHead)
-            : replyIndex < 0 || replyIndex >= replies.length
+            : replyIndex < 0 || replyIndex >= activityGroups.length
             ? null
-            : replies[replyIndex];
+            : activityGroups[replyIndex].last;
         if (message != null &&
             isReadableRow(
               position,
@@ -766,7 +786,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       // The tail can sit at the scroll end while the keyboard still covers
       // it, so it counts as the bottom only when its end is above the
       // keyboard and composer.
-      final tailIndex = _threadTailIndex(replies.length);
+      final tailIndex = _threadTailIndex(activityGroups.length);
       final atBottom =
           replies.isNotEmpty &&
           threadTailIsVisible() &&
@@ -999,7 +1019,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                             itemPositionsListener.itemPositions.value.any(
                               (item) =>
                                   item.index ==
-                                  _threadTailIndex(replies.length),
+                                  _threadTailIndex(activityGroups.length),
                             ),
                       );
                     }
@@ -1068,6 +1088,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                     channelId: channelId,
                     currentPubkey: currentPubkey,
                     highlightedMessageId: highlightedMessageId.value,
+                    revealMessageId: initialMessageId,
                     allMessages: allMsgs,
                     isMember: isMember,
                     isArchived: isArchived,

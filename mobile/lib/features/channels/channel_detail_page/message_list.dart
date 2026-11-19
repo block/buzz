@@ -68,7 +68,10 @@ class _MessageList extends HookConsumerWidget {
     final localSendAnimations = ref.watch(
       localMessageSendAnimationProvider(channelId),
     );
-    final displayEntries = groupMembershipTimelineEntries(entries);
+    final displayEntries = groupConversationEntries(
+      entries,
+      revealMessageId: initialMessageId,
+    );
     final itemScrollController = useMemoized(ItemScrollController.new);
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
     final stickyDayTimestamp = useValueNotifier<int?>(null);
@@ -847,50 +850,13 @@ class _MessageList extends HookConsumerWidget {
       olderFetchPaused: olderFetchPaused,
     );
 
-    if (entries.isEmpty &&
-        welcomeAgent == null &&
-        (displayedTyping.isNotEmpty || TypingMotionPreview.enabled)) {
-      return Align(
-        alignment: Alignment.bottomCenter,
-        child: Padding(
-          padding: EdgeInsets.fromLTRB(
-            Grid.gutter,
-            0,
-            Grid.gutter,
-            composerBottomInset,
-          ),
-          child: _aboveHiddenHistory(
-            hiddenHistory,
-            TypingMotionPreview.enabled
-                ? TypingMotionPreview(channelId: channelId)
-                : InlineAgentTyping(
-                    channelId: channelId,
-                    entries: displayedTyping,
-                    knownAgents: workingAgents,
-                  ),
-          ),
-        ),
-      );
-    }
     if (entries.isEmpty) {
-      if (welcomeAgent != null) {
-        return _welcomeMessages(
-          context,
-          appBarTitleContentHeight: appBarTitleContentHeight,
-          composerBottomInset: composerBottomInset,
-          children: [
-            BestieWelcome(agent: welcomeAgent!),
-            ?hiddenHistory,
-            if (displayedTyping.isNotEmpty)
-              InlineAgentTyping(
-                channelId: channelId,
-                entries: displayedTyping,
-                knownAgents: workingAgents,
-              ),
-          ],
-        );
-      }
-      return hiddenHistory ?? const _EmptyMessages();
+      return _buildEmptyTimeline(
+        context,
+        hiddenHistory,
+        displayedTyping,
+        workingAgents,
+      );
     }
 
     final channelNamesMap = ref.watch(channelIdsByNameProvider);
@@ -1044,6 +1010,21 @@ class _MessageList extends HookConsumerWidget {
                 final endsDay =
                     nextMessage != null &&
                     !isSameDay(message.createdAt, nextMessage.createdAt);
+                if (isInlineActivity(message)) {
+                  return _buildActivityRow(
+                    context,
+                    entryGroup,
+                    channelNamesMap,
+                    inheritLiveExpansion: index == 0,
+                    showDayDivider: showDayDivider,
+                    typing: index == 0 ? displayedTyping : const [],
+                    onToggle: () {
+                      followsLatest.value = false;
+                      hasUserScrolled.value = true;
+                    },
+                    stickyDayTimestamp: stickyDayTimestamp,
+                  );
+                }
                 final inputs = _rowInputs(entryGroup, [
                   prevMessage,
                   nextMessage,

@@ -116,6 +116,7 @@ import '../../helpers/thread_ids.dart';
 import '../../helpers/widget_helpers.dart';
 
 part 'thread_reply_refresh_cases.dart';
+part 'channel_detail_page_test/inline_activity_tests.dart';
 part 'thread_title_capsule_cases.dart';
 part 'channel_detail_page_test/loading_review_tests.dart';
 part 'channel_detail_page_test/presence_tests.dart';
@@ -639,6 +640,7 @@ const _directoryAlice =
 const _directoryBob =
     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 void main() {
+  inlineActivityTests();
   testWidgets('chat Back follows visibility of the conversation list', (
     tester,
   ) async {

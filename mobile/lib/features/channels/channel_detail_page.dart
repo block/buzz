@@ -1,3 +1,5 @@
+import 'inline_activity_groups.dart';
+import 'inline_agent_activity.dart';
 import '../../shared/widgets/duo_toolbar.dart';
 import 'composer_geometry.dart';
 import 'message_author_visibility.dart';
@@ -5,6 +7,7 @@ import 'message_author_visibility.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+
 import 'message_swipe_reply.dart';
 import 'bestie_welcome.dart';
 import 'bestie_welcome_storage.dart';
@@ -121,6 +124,7 @@ import 'reading_marks.dart';
 import 'timeline_message.dart';
 
 part 'channel_detail_page/message_list.dart';
+part 'channel_detail_page/inline_activity.dart';
 part 'channel_detail_page/jump_to_oldest_unread_button.dart';
 part 'channel_detail_page/row_cache.dart';
 part 'channel_detail_page/placement_route.dart';

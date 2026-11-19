@@ -25,6 +25,7 @@ class _ThreadMessageList extends HookWidget {
   final String channelId;
   final String? currentPubkey;
   final String? highlightedMessageId;
+  final String? revealMessageId;
   final List<TimelineMessage> allMessages;
   final bool isMember;
   final bool isArchived;
@@ -57,6 +58,7 @@ class _ThreadMessageList extends HookWidget {
     required this.channelId,
     required this.currentPubkey,
     required this.highlightedMessageId,
+    required this.revealMessageId,
     required this.allMessages,
     required this.isMember,
     required this.isArchived,
@@ -162,7 +164,12 @@ class _ThreadMessageList extends HookWidget {
     final loadingHeadLink = useMemoized(LayerLink.new);
     final headScrollPosition = useRef<ScrollPosition?>(null);
     const headIndex = 0;
-    final tailAnchorIndex = replies.length + 1;
+    final groups = groupInlineActivity(
+      replies,
+      (message) => message,
+      revealMessageId: revealMessageId,
+    );
+    final tailAnchorIndex = groups.length + 1;
 
     useIosScrollToTop(context, () {
       if (!itemScrollController.isAttached) return;
@@ -218,7 +225,7 @@ class _ThreadMessageList extends HookWidget {
                       // anchor lets Latest align the end directly rather than
                       // asking the final reply's leading edge to overshoot the
                       // viewport and rebound against the scroll extent.
-                      itemCount: replies.length + 2,
+                      itemCount: groups.length + 2,
                       itemBuilder: (context, index) {
                         if (index == tailAnchorIndex) {
                           return trackActiveScrollPosition(
@@ -246,9 +253,10 @@ class _ThreadMessageList extends HookWidget {
 
                         // Chronological list: index 1 = oldest reply.
                         final chronologicalIndex = index - 1;
-                        final reply = replies[chronologicalIndex];
+                        final group = groups[chronologicalIndex];
+                        final reply = group.first;
                         final previousReply = chronologicalIndex > 0
-                            ? replies[chronologicalIndex - 1]
+                            ? groups[chronologicalIndex - 1].last
                             : null;
                         final previousMessage = previousReply ?? head;
                         final showDayDivider = !isSameDay(
@@ -264,9 +272,8 @@ class _ThreadMessageList extends HookWidget {
                                 reply.pubkey.toLowerCase() ||
                             (reply.createdAt - previousReply.createdAt) > 300;
 
-                        final nextReply =
-                            chronologicalIndex + 1 < replies.length
-                            ? replies[chronologicalIndex + 1]
+                        final nextReply = chronologicalIndex + 1 < groups.length
+                            ? groups[chronologicalIndex + 1].first
                             : null;
                         final showAvatar =
                             reply.hasAttachments ||
@@ -276,6 +283,19 @@ class _ThreadMessageList extends HookWidget {
                             nextReply.pubkey.toLowerCase() !=
                                 reply.pubkey.toLowerCase() ||
                             nextReply.createdAt - reply.createdAt > 300;
+
+                        if (isInlineActivity(reply)) {
+                          return trackActiveScrollPosition(
+                            _buildActivityRow(
+                              group,
+                              inheritLiveExpansion: nextReply == null,
+                              showDayDivider: showDayDivider,
+                              typing: nextReply == null
+                                  ? inlineTyping
+                                  : const [],
+                            ),
+                          );
+                        }
 
                         // Check if this reply itself has children (nested thread).
                         final nestedChildren = childrenByParent[reply.id];
