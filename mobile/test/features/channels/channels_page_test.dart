@@ -120,7 +120,6 @@ void main() {
     TextScaler textScaler = TextScaler.noScaling,
     Gradient? topSectionGradient,
     ValueChanged<double>? onSettingsTransitionProgress,
-    ValueListenable<int>? tabReselection,
     _FakeProfileNotifier? profile,
     bool realHome = false,
     Widget? soloSliver,
@@ -173,7 +172,6 @@ void main() {
                     const Scaffold(body: Text('Appearance destination')),
                 onSettingsTransitionProgress:
                     onSettingsTransitionProgress ?? (_) {},
-                tabReselection: tabReselection,
                 soloSliver: soloSliver,
               ),
       ),
@@ -1346,45 +1344,6 @@ void main() {
       },
     );
   }
-
-  testWidgets('scrolls Home to the top when its tab is selected again', (
-    tester,
-  ) async {
-    tester.view.physicalSize = const Size(320, 160);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.reset);
-    final tabReselection = ValueNotifier(0);
-    addTearDown(tabReselection.dispose);
-    await tester.pumpWidget(
-      buildTestable(
-        tabReselection: tabReselection,
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    final scrollable = tester.state<ScrollableState>(
-      find
-          .descendant(
-            of: find.byType(CustomScrollView),
-            matching: find.byType(Scrollable),
-          )
-          .first,
-    );
-    scrollable.position.jumpTo(scrollable.position.maxScrollExtent);
-    tabReselection.value++;
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 130));
-
-    expect(
-      scrollable.position.pixels,
-      lessThan(scrollable.position.maxScrollExtent),
-    );
-    await tester.pumpAndSettle();
-    expect(scrollable.position.pixels, scrollable.position.minScrollExtent);
-  });
 
   testWidgets('truncates long custom section names beside the menu', (
     tester,

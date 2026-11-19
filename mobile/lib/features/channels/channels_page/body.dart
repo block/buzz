@@ -2,7 +2,6 @@ part of '../channels_page.dart';
 
 class _ChannelsBody extends StatelessWidget {
   final Widget? soloSliver;
-  final SidebarRowFilter rowFilter;
   final VoidCallback? onInbox;
   final List<Channel>? channels;
   final AsyncValue<List<Channel>> channelsAsync;
@@ -18,7 +17,6 @@ class _ChannelsBody extends StatelessWidget {
 
   const _ChannelsBody({
     this.soloSliver,
-    this.rowFilter = SidebarRowFilter.all,
     required this.onInbox,
     required this.channels,
     required this.channelsAsync,
@@ -112,7 +110,6 @@ class _ChannelsBody extends StatelessWidget {
                         currentPubkey: currentPubkey,
                         onSelectChannel: onSelectChannel,
                         soloSliver: soloSliver,
-                        rowFilter: rowFilter,
                       )
                     : DecoratedSliver(
                         decoration: BoxDecoration(
@@ -126,7 +123,6 @@ class _ChannelsBody extends StatelessWidget {
                           currentPubkey: currentPubkey,
                           onSelectChannel: onSelectChannel,
                           soloSliver: soloSliver,
-                          rowFilter: rowFilter,
                         ),
                       ),
                 SliverToBoxAdapter(
@@ -172,14 +168,12 @@ class _SliverChannelsList extends HookConsumerWidget {
   /// Home's Solo chats, rendered at the Solo section's place in the order.
   /// Without it, Solo chats stay out of this list.
   final Widget? soloSliver;
-  final SidebarRowFilter rowFilter;
 
   const _SliverChannelsList({
     required this.channels,
     required this.currentPubkey,
     required this.onSelectChannel,
     this.soloSliver,
-    this.rowFilter = SidebarRowFilter.all,
   });
 
   @override
@@ -221,10 +215,6 @@ class _SliverChannelsList extends HookConsumerWidget {
     for (final channel in [...visibleChannels, ...soloChannels]) {
       if (!channel.isStream && !channel.isDm) continue;
       final solo = isSoloRow(channel);
-      if (rowFilter == SidebarRowFilter.solo && !solo ||
-          rowFilter == SidebarRowFilter.team && solo) {
-        continue;
-      }
       final key = layout.sectionKeyFor(
         channel.id,
         starred: starredChannelIds.contains(channel.id),
@@ -492,14 +482,10 @@ class _SliverChannelsList extends HookConsumerWidget {
     Widget? sectionFor(String key) {
       final rows = buckets[key] ?? const <Channel>[];
       final group = sidebarGroupKey(key);
-      final filtered = rowFilter != SidebarRowFilter.all;
       ChannelSortMode mode() => sortState.sortModeFor(group);
       if (key == 'solo') return soloSliver;
       if (key == 'starred' || key == 'channels' || key == 'dms') {
         if (key == 'starred' && rows.isEmpty) return null;
-        if (key != 'starred' && rowFilter == SidebarRowFilter.solo) {
-          return null;
-        }
         return _ChannelSection(
           key: ValueKey(key),
           title: switch (key) {
@@ -527,7 +513,7 @@ class _SliverChannelsList extends HookConsumerWidget {
         );
       }
       final section = layout.section(key.substring(6));
-      if (section == null || filtered && rows.isEmpty) return null;
+      if (section == null) return null;
       final team = teamSections.where((s) => s.id == section.id).firstOrNull;
       return _CustomChannelSection(
         key: ValueKey(section.id),
@@ -574,8 +560,7 @@ class _SliverChannelsList extends HookConsumerWidget {
             ),
           if (empty) ...[
             ?soloSliver,
-            if (rowFilter != SidebarRowFilter.solo)
-              const SliverToBoxAdapter(child: _EmptyState()),
+            const SliverToBoxAdapter(child: _EmptyState()),
           ] else
             for (final (index, section) in sections.indexed) ...[
               if (index > 0)

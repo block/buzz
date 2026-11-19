@@ -30,7 +30,6 @@ import '../activity/inbox_unread_provider.dart';
 import '../channels/channels_page.dart';
 import '../search/search_page.dart';
 import 'home_screen_shortcut_host.dart';
-import 'messages_filters.dart';
 import 'messages_navigation_bar.dart';
 import '../../shared/widgets/covered_route_keyboard_insets.dart';
 
@@ -88,10 +87,8 @@ class HomePage extends HookConsumerWidget {
 
     final communitySurfaceProgress = useState(0.0);
     final recordingFocus = useState(false);
-    final filter = useState('All');
     final hasUnreadInbox = ref.watch(inboxHasUnreadProvider);
     final inboxLabel = hasUnreadInbox ? 'Activity, unread items' : 'Activity';
-    final reselect = useValueNotifier(0);
     final newChat = useValueNotifier<VoidCallback?>(null);
     final newWorkspace = useValueNotifier<VoidCallback?>(null);
     final newChannel = useValueNotifier<VoidCallback?>(null);
@@ -138,8 +135,6 @@ class HomePage extends HookConsumerWidget {
     );
     final messages = ChannelsPage(
       settingsPageBuilder: settingsPageBuilder,
-      messagesActionsWidth:
-          2 * (defaultTargetPlatform == TargetPlatform.iOS ? 44 : 48) + Grid.xs,
       messagesActionsBuilder: (openSwitcher, avatarKey) {
         final moreActions = [
           // An internal build reaches only its organization's community.
@@ -309,32 +304,11 @@ class HomePage extends HookConsumerWidget {
           ),
         ];
       },
-      messagesFilters: (isCollapsed) => MessagesFilters(
-        useNativeGlass: !recordingFocus.value,
-        isCollapsed: isCollapsed,
-        selected: filter.value,
-        onSelected: (value) {
-          filter.value = value;
-          reselect.value++;
-        },
-      ),
-      soloSliver: solo == null
-          ? null
-          : SliverOffstage(
-              key: const ValueKey('messages-solo-inventory'),
-              offstage: filter.value == 'Team',
-              sliver: solo,
-            ),
-      rowFilter: switch (filter.value) {
-        'Solo' => SidebarRowFilter.solo,
-        'Team' => SidebarRowFilter.team,
-        _ => SidebarRowFilter.all,
-      },
+      soloSliver: solo,
       newChannelAction: newChannel,
       newDmAction: newDm,
       communityInvitePageBuilder: communityInvitePageBuilder,
       communityAppearancePageBuilder: communityAppearancePageBuilder,
-      tabReselection: reselect,
       onSettingsTransitionProgress: (progress) {
         communitySurfaceProgress.value = progress;
       },

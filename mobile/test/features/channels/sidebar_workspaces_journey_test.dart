@@ -5,7 +5,6 @@ import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/me/me_page.dart';
 import 'package:buzz/features/channels/me/me_unread_provider.dart';
 import 'package:buzz/features/home/home_page.dart';
-import 'package:buzz/features/home/messages_filters.dart';
 import 'package:buzz/shared/me/default_agent.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
 import 'package:buzz/shared/me/me_groups.dart';
@@ -174,25 +173,6 @@ void main() {
     expect(inList('solo-plan'), findsOneWidget);
     expect(inList('design-crit'), findsNothing);
 
-    // Solo lists only Solo rows, still in their workspaces.
-    await tester.tap(
-      find.descendant(
-        of: find.byType(MessagesFilters),
-        matching: find.text('Solo'),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(inList('solo-plan'), findsOneWidget);
-    expect(inList('solo-scratch'), findsOneWidget);
-    for (final hidden in [
-      'design-crit',
-      'general',
-      'pinned',
-      'Later',
-      'Team',
-    ]) {
-      expect(inList(hidden), findsNothing, reason: hidden);
-    }
     // Only the filter choice was saved; no layout or sort record desktop
     // would have to reconcile.
     expect(relay.published.map((e) => e.getTagValue('d')), ['channel-filter']);
