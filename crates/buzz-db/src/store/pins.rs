@@ -17,9 +17,9 @@ use crate::{AdmittedTx, Db};
 
 pub(crate) const COMMAND_KINDS: [i32; 2] = [KIND_PIN_MESSAGE as i32, KIND_UNPIN_MESSAGE as i32];
 
-/// How long account erasure keeps the ID and timestamp of a pin or unpin
-/// command it erases. A resend of the command is still a duplicate for that
-/// long; the relay accepts no command with an older timestamp.
+/// How long the ID and timestamp of a pin or unpin command outlive account
+/// erasure. A resend of the command is still a duplicate for that long; the
+/// relay accepts no command with an older timestamp.
 const REPLAY_RECORD_SECS: i64 = 60 * 60;
 
 /// Whether account erasure reduces this event to its ID and timestamp rather
@@ -222,20 +222,6 @@ impl Db {
             });
         }
 
-        // Drop the records account erasure left of commands in this channel
-        // that are now too old to be sent again.
-        sqlx::query(
-            "DELETE FROM events WHERE community_id = $1 AND kind = ANY($2) AND pubkey = $3 \
-             AND channel_id = $4 AND created_at <= $5",
-        )
-        .bind(community.as_uuid())
-        .bind(COMMAND_KINDS.as_slice())
-        .bind(&[] as &[u8])
-        .bind(channel_id)
-        .bind(chrono::Utc::now() - chrono::Duration::seconds(REPLAY_RECORD_SECS))
-        .execute(tx.conn())
-        .await?;
-
         let pinned = pins.iter().position(|id| id == target);
         let list = match (change, pinned) {
             (PinChange::Pin { notice }, pinned) => {
@@ -275,6 +261,61 @@ impl Db {
             inserted,
             list,
         })
+    }
+
+    /// Remove, in every community, the records account erasure left of pin
+    /// and unpin commands that are now an hour old. Returns how many.
+    ///
+    /// The relay calls this from its leader-only periodic tick, so a record
+    /// goes whether or not its channel sees another command and whether or
+    /// not the relay accepts pins.
+    #[datastore_span(name = "reap_expired_pin_command_records", system = "postgresql")]
+    pub async fn reap_expired_pin_command_records(&self) -> Result<u64> {
+        const ERASED: &[u8] = &[];
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(REPLAY_RECORD_SECS);
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Maintenance,
+        )
+        .await?;
+        // Every index on `events` leads with the community, so probe once for
+        // each community rather than scan the table for the kinds.
+        let communities: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT community.id FROM communities community \
+             WHERE community.deletion_state = 'active' AND community.deleted_at IS NULL \
+               AND EXISTS (SELECT 1 FROM events record \
+                 WHERE record.community_id = community.id AND record.kind = ANY($1) \
+                   AND record.pubkey = $2 AND record.created_at <= $3)",
+        )
+        .bind(COMMAND_KINDS.as_slice())
+        .bind(ERASED)
+        .bind(cutoff)
+        .fetch_all(&mut *connection)
+        .await?;
+        drop(connection);
+
+        let removed = crate::sweep_admitted_communities(
+            &self.pool,
+            communities,
+            crate::observability::WriterOperation::Maintenance,
+            "pin_command_record_reap",
+            |id, mut tx| async move {
+                let result = sqlx::query(
+                    "DELETE FROM events WHERE community_id = $1 AND kind = ANY($2) \
+                     AND pubkey = $3 AND created_at <= $4",
+                )
+                .bind(id)
+                .bind(COMMAND_KINDS.as_slice())
+                .bind(ERASED)
+                .bind(cutoff)
+                .execute(tx.conn())
+                .await?;
+                tx.commit().await?;
+                Ok(result.rows_affected())
+            },
+        )
+        .await;
+        Ok(removed.into_iter().sum())
     }
 }
 
