@@ -1191,7 +1191,9 @@ void main() {
       final bytes = Uint8List(2 * 1024 * 1024)
         ..first = 1
         ..last = 2;
+      final hashEvents = <(HashChunkEvent, int)>[];
       final service = MediaUploadService(
+        onHashChunk: (event, count) => hashEvents.add((event, count)),
         baseUrl: 'https://relay.example',
         nsec: nostr.Keys.generate().nsec,
         httpClient: http_testing.MockClient((request) async {
@@ -1216,6 +1218,46 @@ void main() {
         XFile.fromData(bytes, name: 'attachment.bin'),
       );
       expect(descriptor.size, bytes.length);
+      expect(hashEvents, [
+        (HashChunkEvent.sent, 1024 * 1024),
+        (HashChunkEvent.acked, 1024 * 1024),
+        (HashChunkEvent.sent, 2 * 1024 * 1024),
+        (HashChunkEvent.acked, 2 * 1024 * 1024),
+      ]);
+    });
+
+    test(
+      'hashes in bounded worker chunks without copying the payload',
+      () async {
+        final bytes = Uint8List.fromList(
+          List.generate(2 * 1024 * 1024 + 123, (i) => (i * 31 + 7) & 0xff),
+        );
+        final events = <(HashChunkEvent, int)>[];
+
+        final digest = await sha256HexInWorker(
+          bytes,
+          onChunk: (event, count) => events.add((event, count)),
+        );
+
+        expect(digest, crypto.sha256.convert(bytes).toString());
+        // Each send is followed by the worker's ack of exactly the bytes sent
+        // so far, so only one chunk is ever in flight.
+        expect(events, [
+          (HashChunkEvent.sent, 1024 * 1024),
+          (HashChunkEvent.acked, 1024 * 1024),
+          (HashChunkEvent.sent, 2 * 1024 * 1024),
+          (HashChunkEvent.acked, 2 * 1024 * 1024),
+          (HashChunkEvent.sent, bytes.length),
+          (HashChunkEvent.acked, bytes.length),
+        ]);
+      },
+    );
+
+    test('hashes an empty payload in the worker', () async {
+      expect(
+        await sha256HexInWorker(Uint8List(0)),
+        crypto.sha256.convert(const <int>[]).toString(),
+      );
     });
 
     test('sanitizes generic filenames to relay imeta constraints', () async {
