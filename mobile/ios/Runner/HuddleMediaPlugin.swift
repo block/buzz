@@ -2,7 +2,7 @@ import AVFoundation
 import Flutter
 import UIKit
 
-/// Foreground-only native seam for iOS Huddle media.
+/// Native Flutter interface for iOS Huddle media.
 ///
 /// Owns microphone permission, the voice-processing audio session, native
 /// Opus capture/playout, interruptions, and the built-in output toggle.

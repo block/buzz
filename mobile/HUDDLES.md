@@ -1,7 +1,7 @@
 # Mobile Huddles MVP
 
-This foreground-only product slice preserves the existing Desktop/relay
-contract. Android and iOS clients can start a human Huddle, open a recent
+Mobile Huddles use the same Desktop and relay protocol. An admitted iOS
+Huddle can also continue while the phone is locked. Android and iOS clients can start a human Huddle, open a recent
 Desktop-started Huddle card, join with the microphone on, hear multiple remote
 participants, send microphone audio, mute, and leave.
 

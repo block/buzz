@@ -404,7 +404,7 @@ struct HuddleActiveTalkerSelector {
   }
 }
 
-/// Foreground-only iOS realtime media engine for the fixed Huddle Opus v2 path.
+/// Real-time iOS media engine for the Huddle Opus v2 protocol.
 ///
 /// AVAudioEngine owns voice-processed capture and per-peer mixed playout.
 /// AVAudioConverter keeps PCM native and moves only Opus packets across Flutter.
