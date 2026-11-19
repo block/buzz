@@ -132,6 +132,7 @@ can be a break-glass root, silently discarding it would be a lockout.
 | Resolve reports (dismiss, escalate, delete, kick, ban, timeout) | ✓ | ✓ |
 | Update feedback status | ✓ | ✓ |
 | Manage operator roster (`GET/PUT/DELETE /operators`) | ✓ | ✗ |
+| Read or change the deployment migration write limit | ✓ | ✗ |
 
 Capability checks are server-authoritative; the desktop console hides Staffing
 tab controls for Moderators as a UX convenience only.
