@@ -7,9 +7,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
-import '../../shared/emoji/emoji_avatar.dart';
-import '../../shared/emoji/emoji_data_provider.dart';
-import '../../shared/emoji/native_emoji_glyph.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
@@ -18,25 +15,21 @@ import '../../shared/widgets/ios_native_segmented_control.dart';
 import '../../shared/widgets/playing_avatar_image.dart';
 import 'animated_avatar_capture.dart';
 import 'camera_disposal_barrier.dart';
-import '../../shared/widgets/emoji_avatar_controls.dart';
 import '../../shared/widgets/avatar_image_source_controls.dart';
 import 'image_avatar_capture.dart';
 import 'profile_avatar_crop_page.dart';
 import 'profile_avatar_draft.dart';
-
-part 'profile_avatar_editor/emoji_avatar_picker.dart';
 
 /// Avatar kinds shared with the desktop profile editor.
 enum ProfileAvatarMode {
   /// A still image selected from the camera or photo library.
   image,
 
-  /// A system emoji composited over a selected background color.
-  emoji,
-
   /// A short camera animation with framing and background controls.
   animated,
 }
+
+const _humanAvatarModes = [ProfileAvatarMode.image, ProfileAvatarMode.animated];
 
 /// Builds the animated capture surface for the profile avatar editor.
 typedef AnimatedAvatarCaptureBuilder =
@@ -48,7 +41,6 @@ typedef AnimatedAvatarCaptureBuilder =
 
 const _previewSize = 220.0;
 const _motionDuration = Duration(milliseconds: 150);
-const _previewSquishDuration = Duration(milliseconds: 200);
 const Curve _entranceCurve = Curves.easeOutCubic;
 const Curve _exitCurve = Curves.easeInCubic;
 const Curve _modeTransitionCurve = Cubic(0.22, 1, 0.36, 1);
@@ -58,7 +50,6 @@ const double _modeControlHeight = 40;
 const double _editorControlsBottom = Grid.xl + Grid.xxs;
 const double _editorRailHeight = 88;
 const double _previewControlGap = Grid.twelve;
-const double _emojiPickerPreviewShift = 140;
 // Settings' avatar center sits 96dp below its standard app bar, including its
 // lower 8dp app-bar rail. The expanded editor preview is centred on screen.
 const double _settingsAvatarCenterBelowAppBar = 96;
@@ -149,34 +140,13 @@ class ProfileAvatarEditor extends HookConsumerWidget {
     final previousAnchor = useRef(anchoredPreview);
     final anchorMoved = previousAnchor.value != anchoredPreview;
     previousAnchor.value = anchoredPreview;
-    // Seed Emoji controls from the opening draft without making it the Image baseline.
-    final currentEmojiAvatar = useMemoized(
-      () => parseEmojiAvatarDataUrl(
-        draft is ProfileUrlAvatarDraft
-            ? (draft as ProfileUrlAvatarDraft).url
-            : currentAvatarUrl,
-      ),
-      const [],
-    );
-    final selectedEmoji = useState(currentEmojiAvatar?.emoji ?? '😊');
-    final initialColor = useMemoized(
-      () =>
-          currentEmojiAvatar?.colorValue ??
-          emojiAvatarColors[Random().nextInt(18)],
-      [currentEmojiAvatar],
-    );
-    final selectedColor = useState(initialColor);
-    final emojiSection = useState(EmojiEditorSection.emoji);
-    final emojiPreviewKey = useState(0);
     final isPickingImage = useState(false);
     final isCapturingImage = useState(false);
     final cameraDisposal = useRef(CameraDisposalBarrier());
     final imageSelectionGeneration = useRef(0);
     final currentMode = useRef(mode)..value = mode;
     final error = useState<String?>(null);
-    final dataset = ref.watch(emojiDatasetOrEmptyProvider);
     final modeTransitionDirection = useRef(1.0);
-    final modeTransitionFrom = useRef(mode);
     final retainedPreview = useRef<Widget?>(null);
     final retainedPreviewTop = useRef(0.0);
     final currentPreviewTop = useRef<double?>(null);
@@ -195,7 +165,6 @@ class ProfileAvatarEditor extends HookConsumerWidget {
     void selectMode(ProfileAvatarMode nextMode) {
       if (nextMode == mode) return;
       modeStartPreviewTop.value = currentPreviewTop.value;
-      modeTransitionFrom.value = mode;
       modeTransitionDirection.value = nextMode.index > mode.index ? 1 : -1;
       unawaited(HapticFeedback.selectionClick());
       onAnimatedPrepareChanged(null);
@@ -207,27 +176,11 @@ class ProfileAvatarEditor extends HookConsumerWidget {
       }
       if (!reduceMotion) modeTransitionController.value = 0;
       onModeChanged(nextMode);
-      if (nextMode == ProfileAvatarMode.emoji) {
-        onDraftChanged(
-          ProfileUrlAvatarDraft(
-            emojiAvatarDataUrl(selectedEmoji.value, selectedColor.value),
-          ),
-        );
-      }
       if (reduceMotion) {
         modeTransitionController.value = 1;
       } else {
         unawaited(modeTransitionController.forward());
       }
-    }
-
-    void updateEmojiPreview() {
-      emojiPreviewKey.value++;
-      onDraftChanged(
-        ProfileUrlAvatarDraft(
-          emojiAvatarDataUrl(selectedEmoji.value, selectedColor.value),
-        ),
-      );
     }
 
     Future<void> selectGalleryImage() async {
@@ -302,16 +255,6 @@ class ProfileAvatarEditor extends HookConsumerWidget {
           ),
         ),
       ),
-      ProfileAvatarMode.emoji => _EmojiAvatarPreview(
-        key: const ValueKey('avatar-editor-fixed-preview'),
-        emoji: selectedEmoji.value,
-        color: Color(selectedColor.value),
-        animationKey: emojiPreviewKey.value,
-        reduceMotion:
-            reduceMotion ||
-            (modeTransitionFrom.value == ProfileAvatarMode.animated &&
-                modeTransitionProgress < 1),
-      ),
       ProfileAvatarMode.animated => null,
     };
     final fixedPreview = fixedPreviewContent == null
@@ -338,14 +281,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
             ],
           );
     if (mode != ProfileAvatarMode.animated && fixedPreview != null) {
-      retainedPreview.value = mode == ProfileAvatarMode.emoji
-          ? _EmojiAvatarPreview(
-              emoji: selectedEmoji.value,
-              color: Color(selectedColor.value),
-              animationKey: emojiPreviewKey.value,
-              reduceMotion: true,
-            )
-          : fixedPreview;
+      retainedPreview.value = fixedPreview;
     }
 
     final curvedEntrance = CurvedAnimation(
@@ -374,23 +310,11 @@ class ProfileAvatarEditor extends HookConsumerWidget {
               (topPadding + _modeControlHeight + _previewControlGap),
         );
         final requestedShift = switch (mode) {
-          ProfileAvatarMode.emoji => _emojiPickerPreviewShift,
           ProfileAvatarMode.animated when anchoredPreview != null => 64.0,
           _ => 0.0,
         };
         final previewShift = min(requestedShift, maximumShift);
         final previewTop = basePreviewTop - previewShift;
-        final returningToEmoji =
-            anchoredPreview == null &&
-            mode == ProfileAvatarMode.emoji &&
-            modeTransitionFrom.value == ProfileAvatarMode.animated;
-        final animatedModeHeight = max(
-          0.0,
-          viewportHeight - controlsBottom - basePreviewTop,
-        );
-        final animatedPreviewSize = animatedModeHeight < 400 ? 180.0 : 228.0;
-        final animatedPreviewTop =
-            basePreviewTop + (animatedPreviewSize - _previewBlockSize) / 2;
         final fixedContentTop =
             previewTop +
             (anchoredPreview?.height ?? _previewBlockSize) +
@@ -404,21 +328,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
             : mode == ProfileAvatarMode.image && isCapturingImage.value
             ? imageCameraTop
             : fixedContentTop;
-        // Keep the picker fixed and balance the whole preview circle between
-        // the mode selector and the search row in the embedded setup editor.
-        final centeredEmojiTop =
-            (topPadding +
-                _modeControlHeight +
-                modeTop -
-                (anchoredPreview?.height ?? _previewBlockSize)) /
-            2;
-        final targetPreviewTop =
-            anchoredPreview != null && mode == ProfileAvatarMode.emoji
-            ? centeredEmojiTop
-            : returningToEmoji
-            ? animatedPreviewTop +
-                  (previewTop - animatedPreviewTop) * modeTransitionProgress
-            : previewTop;
+        final targetPreviewTop = previewTop;
         final displayedPreviewTop = anchoredPreview != null
             ? (modeStartPreviewTop.value ?? targetPreviewTop) +
                   (targetPreviewTop -
@@ -430,10 +340,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
           retainedPreviewTop.value = displayedPreviewTop;
         }
         final modeHeight = max(0.0, viewportHeight - controlsBottom - modeTop);
-        final contentHeight =
-            anchoredPreview != null && mode == ProfileAvatarMode.emoji
-            ? max(240.0, modeHeight)
-            : modeHeight;
+        final contentHeight = modeHeight;
         final modeContent = switch (mode) {
           ProfileAvatarMode.image when isCapturingImage.value => KeyedSubtree(
             key: const ValueKey('image-camera-mode'),
@@ -462,26 +369,6 @@ class ProfileAvatarEditor extends HookConsumerWidget {
             },
             onLibrary: () => unawaited(selectGalleryImage()),
           ),
-          ProfileAvatarMode.emoji => EmojiAvatarControls(
-            key: const ValueKey(1),
-            height: contentHeight,
-            activeSection: emojiSection.value,
-            dataset: dataset,
-            selectedEmoji: selectedEmoji.value,
-            selectedColor: selectedColor.value,
-            transitionProgress: modeTransitionProgress,
-            transitionDirection: modeTransitionDirection.value,
-            controlsFromBelow: anchoredPreview != null,
-            onSectionChanged: (section) => emojiSection.value = section,
-            onEmojiSelected: (emoji) {
-              selectedEmoji.value = emoji;
-              updateEmojiPreview();
-            },
-            onColorSelected: (color) {
-              selectedColor.value = color;
-              updateEmojiPreview();
-            },
-          ),
           ProfileAvatarMode.animated => KeyedSubtree(
             key: const ValueKey(2),
             child:
@@ -508,9 +395,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
             appBarHeight +
             _settingsAvatarCenterBelowAppBar -
             (previewTop + _previewBlockSize / 2);
-        final transitionedModeContent =
-            mode == ProfileAvatarMode.animated ||
-                mode == ProfileAvatarMode.emoji
+        final transitionedModeContent = mode == ProfileAvatarMode.animated
             ? modeContent
             : ClipRect(
                 child: Transform.translate(
@@ -562,14 +447,14 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                       if (defaultTargetPlatform == TargetPlatform.iOS) {
                         return IosNativeSegmentedControl(
                           key: const ValueKey('avatar-mode-control'),
-                          items: const ['Image', 'Emoji', 'Animated'],
-                          selectedIndex: mode.index,
+                          items: const ['Image', 'Animated'],
+                          selectedIndex: _humanAvatarModes.indexOf(mode),
                           onChanged: (index) {
                             if (index < 0 ||
-                                index >= ProfileAvatarMode.values.length) {
+                                index >= _humanAvatarModes.length) {
                               return;
                             }
-                            selectMode(ProfileAvatarMode.values[index]);
+                            selectMode(_humanAvatarModes[index]);
                           },
                         );
                       }
@@ -592,8 +477,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                 right: Grid.gutter,
                 top: displayedPreviewTop,
                 height: anchoredPreview?.height ?? _previewBlockSize,
-                duration:
-                    anchoredPreview != null || anchorMoved || returningToEmoji
+                duration: anchoredPreview != null || anchorMoved
                     ? Duration.zero
                     : reduceMotion
                     ? Duration.zero
@@ -766,12 +650,13 @@ class _AvatarModeControl extends StatelessWidget {
       padding: const EdgeInsets.all(Grid.quarter),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final segmentWidth =
-              constraints.maxWidth / ProfileAvatarMode.values.length;
+          final segmentWidth = constraints.maxWidth / _humanAvatarModes.length;
           return Stack(
             children: [
               TweenAnimationBuilder<double>(
-                tween: Tween(end: selected.index.toDouble()),
+                tween: Tween(
+                  end: _humanAvatarModes.indexOf(selected).toDouble(),
+                ),
                 duration: reduceMotion ? Duration.zero : _motionDuration,
                 curve: Curves.easeInOut,
                 builder: (context, position, child) => Transform.translate(
@@ -792,12 +677,11 @@ class _AvatarModeControl extends StatelessWidget {
               ),
               Row(
                 children: [
-                  for (final mode in ProfileAvatarMode.values)
+                  for (final mode in _humanAvatarModes)
                     Expanded(
                       child: Semantics(
                         label: switch (mode) {
                           ProfileAvatarMode.image => 'Image',
-                          ProfileAvatarMode.emoji => 'Emoji',
                           ProfileAvatarMode.animated => 'Animated',
                         },
                         button: true,
@@ -814,7 +698,6 @@ class _AvatarModeControl extends StatelessWidget {
                                 child: Text(
                                   switch (mode) {
                                     ProfileAvatarMode.image => 'Image',
-                                    ProfileAvatarMode.emoji => 'Emoji',
                                     ProfileAvatarMode.animated => 'Animated',
                                   },
                                   style: context.textTheme.labelLarge?.copyWith(
