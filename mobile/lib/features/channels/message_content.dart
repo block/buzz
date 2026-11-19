@@ -1,8 +1,10 @@
 import 'message_reply_drag_target.dart';
+
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'dart:async';
 import 'dart:convert';
+
 import '../../shared/widgets/ios_media_carousel.dart';
 import '../../shared/widgets/message_attachment_corners.dart';
 
@@ -232,7 +234,13 @@ class MessageContent extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final markdownTheme = GptMarkdownTheme.of(context);
-    final chatColors = ChatColors.of(context);
+    final resolvedChatColors = ChatColors.of(context);
+    // The fallback palette is newly allocated; keep the nested theme stable so
+    // unchanged messages do not reparse their Markdown on parent rebuilds.
+    final chatColors = useMemoized(() => resolvedChatColors, [
+      resolvedChatColors.outgoing,
+      resolvedChatColors.foreground,
+    ]);
     final ownTextColor = chatColors.foreground;
     // Own-bubble links share the bubble ink; markdown marks them by underline.
     final linkColor = ownMessage ? ownTextColor : context.colors.tertiary;
@@ -396,6 +404,7 @@ class MessageContent extends HookConsumerWidget {
     }, [markdownContent, mentionPresentationKey]);
 
     final inlinePatterns = _useMessageInlinePatterns(
+      ownBubble: bubble && ownMessage,
       content: content,
       finalContent: finalContent,
       mentionNames: resolvedMentionNames,
@@ -554,6 +563,10 @@ class MessageContent extends HookConsumerWidget {
                             ),
                             child: Theme(
                               data: Theme.of(context).copyWith(
+                                extensions: [
+                                  ...Theme.of(context).extensions.values,
+                                  chatColors,
+                                ],
                                 colorScheme: context.colors.copyWith(
                                   primary: linkColor,
                                 ),
