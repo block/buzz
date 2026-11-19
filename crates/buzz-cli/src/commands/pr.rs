@@ -1,10 +1,11 @@
 use crate::client::BuzzClient;
+use crate::commands::pr_review::{cmd_pr_comment, cmd_pr_review, InlineAnchorArgs, ReviewAction};
 use crate::commands::with_git_provenance;
 use crate::error::CliError;
 use crate::validate::{
     read_file_or_stdin, read_or_stdin, sdk_err, validate_hex64, validate_repo_id,
 };
-use buzz_sdk::{GitPrUpdateMeta, GitPullRequestMeta, GitRepoCoord, GitStatusMeta};
+use buzz_sdk::{GitDiffSide, GitPrUpdateMeta, GitPullRequestMeta, GitRepoCoord, GitStatusMeta};
 
 fn read_optional_body(body: Option<&str>, body_file: Option<&str>) -> Result<String, CliError> {
     match (body, body_file) {
@@ -289,6 +290,44 @@ pub async fn dispatch(cmd: crate::PrCmd, client: &BuzzClient) -> Result<(), CliE
                 &to,
             )
             .await
+        }
+        PrCmd::Comment {
+            pr,
+            content,
+            mention,
+            file,
+            line,
+            side,
+        } => {
+            let anchor = match (file, line) {
+                (Some(file), Some(line)) => Some(InlineAnchorArgs {
+                    file,
+                    line,
+                    side: if side.as_deref() == Some("old") {
+                        GitDiffSide::Old
+                    } else {
+                        GitDiffSide::New
+                    },
+                }),
+                _ => None,
+            };
+            cmd_pr_comment(client, &pr, &content, &mention, anchor).await
+        }
+        PrCmd::Review {
+            pr,
+            request,
+            approve,
+            request_changes,
+            content,
+        } => {
+            let action = if approve {
+                ReviewAction::Approve
+            } else if request_changes {
+                ReviewAction::RequestChanges
+            } else {
+                ReviewAction::Request(request)
+            };
+            cmd_pr_review(client, &pr, action, content.as_deref()).await
         }
         PrCmd::Get { event } => cmd_get_pr(client, &event).await,
         PrCmd::List {
