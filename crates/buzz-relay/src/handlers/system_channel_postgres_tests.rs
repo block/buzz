@@ -1915,3 +1915,48 @@ async fn a_token_scope_narrows_system_channels_on_both_access_paths() {
         );
     }
 }
+
+/// A strong `POST /query` sees a system channel its caller just created even
+/// when this pod's cached member set predates the create (a peer pod that has
+/// not yet seen the membership invalidation). This is buzz-app's
+/// create-then-look-up-by-label sequence.
+/// Mutation: pass the cached access for strong reads in
+/// `query_member_events` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn a_strong_query_sees_a_just_created_system_channel_past_a_stale_cache() {
+    let f = fixture().await;
+    let owner = Keys::generate();
+    let owner_hex = owner.public_key().to_hex();
+    let label = "agent-config";
+    let channel = create_channel(
+        &f.state,
+        &f.tenant,
+        &owner,
+        &[&["channel_type", "system"], &["t", label]],
+    )
+    .await;
+    let stale = || {
+        f.state.seed_member_channels(
+            (f.tenant.community(), owner.public_key().to_bytes().to_vec()),
+            Default::default(),
+        );
+    };
+    let lookup = json!({"kinds": [39000], "#P": [owner_hex], "#t": [label]});
+    let mut strong = lookup.clone();
+    strong["consistency"] = json!("strong");
+
+    // The stale entry is in effect: a default read answers from it.
+    stale();
+    assert_eq!(
+        bridge_ids(bridge(&f, &owner, "/query", json!([lookup])).await),
+        Vec::<String>::new(),
+        "default read answers from the stale cache"
+    );
+    stale();
+    assert_eq!(
+        bridge_ids(bridge(&f, &owner, "/query", json!([strong])).await),
+        [group_state_id(&f, channel, 39000).await],
+        "strong read takes named-only access from the database"
+    );
+}

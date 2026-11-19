@@ -183,7 +183,7 @@ pub async fn handle_admitted_req(
         &pubkey_bytes,
         &filters,
         &accessible_channels,
-        &cached_access,
+        Some(&cached_access),
         token_channel_ids.as_deref(),
     )
     .await

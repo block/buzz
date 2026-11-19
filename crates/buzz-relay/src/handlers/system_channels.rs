@@ -304,13 +304,16 @@ pub(crate) fn filter_live_scope(
 /// request that names a channel outside both sets, such as an unlisted open
 /// channel, reads the database, so a fleet reconnect costs no extra read per
 /// client.
+///
+/// `None` reads the database regardless, for a request that must see the
+/// caller's own just-accepted write (a strong read).
 pub(crate) async fn readable_named_only_channels_for_filters(
     state: &AppState,
     community: CommunityId,
     pubkey: &[u8],
     filters: &[Filter],
     implicit: &[Uuid],
-    cached: &crate::state::ChannelAccess,
+    cached: Option<&crate::state::ChannelAccess>,
     token_channel_ids: Option<&[Uuid]>,
 ) -> Result<NamedOnlyChannels, buzz_db::DbError> {
     if !filters
@@ -320,8 +323,11 @@ pub(crate) async fn readable_named_only_channels_for_filters(
         return Ok(NamedOnlyChannels::default());
     }
     let named = named_outside(filters, implicit);
-    let cached_ids: HashSet<Uuid> = cached.named_only().map(|(id, _)| *id).collect();
-    let mut readable = if named.iter().all(|id| cached_ids.contains(id)) {
+    let cached = cached.filter(|cached| {
+        let ids: HashSet<Uuid> = cached.named_only().map(|(id, _)| *id).collect();
+        named.iter().all(|id| ids.contains(id))
+    });
+    let mut readable = if let Some(cached) = cached {
         metrics::counter!("buzz_named_only_channel_reads_total", "source" => "cache").increment(1);
         NamedOnlyChannels::from_typed(
             cached
@@ -692,7 +698,7 @@ mod tests {
             .expect("both halves are cached");
         assert_eq!(access.implicit, [stream]);
 
-        let read = |filters: Vec<Filter>, token: Option<Vec<Uuid>>| {
+        let read_with = |filters: Vec<Filter>, token: Option<Vec<Uuid>>, cached: bool| {
             let state = state.clone();
             let reader = reader.clone();
             let access = access.clone();
@@ -703,12 +709,13 @@ mod tests {
                     &reader,
                     &filters,
                     &access.implicit,
-                    &access,
+                    cached.then_some(&access),
                     token.as_deref(),
                 )
                 .await
             }
         };
+        let read = |filters: Vec<Filter>, token: Option<Vec<Uuid>>| read_with(filters, token, true);
         let discovery = filter(serde_json::json!({
             "kinds": [39002], "#p": [hex::encode(&reader)], "#t": ["system"]
         }));
@@ -738,8 +745,12 @@ mod tests {
 
         let outside = filter(serde_json::json!({"kinds": [9], "#h": [unknown.to_string()]}));
         assert!(
-            read(vec![discovery, outside], None).await.is_err(),
+            read(vec![discovery.clone(), outside], None).await.is_err(),
             "a name outside the cached sets reads the database"
+        );
+        assert!(
+            read_with(vec![discovery], None, false).await.is_err(),
+            "without the cache, discovery reads the database"
         );
     }
 }
