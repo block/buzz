@@ -11,6 +11,9 @@ import 'theme_extensions.dart';
 /// Desktop uses --radius: 0.625rem (10px) as base:
 ///   lg = 10px, md = 8px, sm = 6px
 class Radii {
+  /// Current desktop --corner-control (1.25rem at the default scale).
+  static const double control = 20.0;
+
   /// Capsule radius for 56-point navigation controls.
   static const double navigationCapsule = 28.0;
 

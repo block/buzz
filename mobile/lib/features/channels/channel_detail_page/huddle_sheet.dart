@@ -309,13 +309,14 @@ IosNavigationAction _huddleNavigationAction(
   );
 }
 
-class _HuddleJoinSurface extends ConsumerWidget {
+class _HuddleJoinSurface extends HookConsumerWidget {
   const _HuddleJoinSurface({
     required this.message,
     required this.allMessages,
     required this.parentChannelId,
     required this.isMember,
     required this.isArchived,
+    required this.isOwn,
   });
 
   final TimelineMessage message;
@@ -323,6 +324,7 @@ class _HuddleJoinSurface extends ConsumerWidget {
   final String parentChannelId;
   final bool isMember;
   final bool isArchived;
+  final bool isOwn;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -341,8 +343,9 @@ class _HuddleJoinSurface extends ConsumerWidget {
       allMessages: allMessages,
       ephemeralChannelId: ephemeralChannelId,
     );
+    final now = useState(DateTime.now());
     final stale =
-        DateTime.now().difference(
+        now.value.difference(
           DateTime.fromMillisecondsSinceEpoch(message.createdAt * 1000),
         ) >
         _huddleLifetime;
@@ -350,10 +353,20 @@ class _HuddleJoinSurface extends ConsumerWidget {
     final canJoin =
         isMember && !isArchived && !ended && !stale && !blockedByOtherHuddle;
 
+    useEffect(() {
+      if (ended || stale || unavailable) return null;
+      final timer = Timer.periodic(const Duration(seconds: 1), (_) {
+        now.value = DateTime.now();
+      });
+      return timer.cancel;
+    }, [ended, stale, unavailable]);
     final historyState = (ended || stale) && !isThisSession;
-    final viewHistory =
-        historyState &&
-        ref.watch(channelViewerIsMemberProvider(ephemeralChannelId));
+    // Like desktop, keep the conversation reachable before the membership
+    // cache loads. The history read still enforces the relay's access rules.
+    final historyMembership = ref.watch(
+      huddleHistoryMembershipProvider(ephemeralChannelId),
+    );
+    final viewHistory = historyState && historyMembership != false;
     final label = viewHistory
         ? 'View'
         : unavailable
@@ -370,78 +383,110 @@ class _HuddleJoinSurface extends ConsumerWidget {
 
     return Padding(
       padding: const EdgeInsets.only(top: Grid.xxs),
-      child: Container(
-        key: ValueKey('huddle-card-${message.id}'),
-        padding: const EdgeInsets.all(Grid.twelve),
-        decoration: BoxDecoration(
-          color: context.colors.primary.withValues(alpha: 0.08),
-          borderRadius: conversationAttachmentCorners,
-          border: Border.all(
-            color: context.colors.primary.withValues(alpha: 0.18),
+      child: Align(
+        alignment: isOwn ? Alignment.centerRight : Alignment.centerLeft,
+        child: Container(
+          key: ValueKey('huddle-card-${message.id}'),
+          padding: const EdgeInsets.symmetric(
+            vertical: Grid.xxs,
+            horizontal: Grid.twelve,
           ),
-        ),
-        child: Row(
-          children: [
-            Icon(BuzzIcons.headphones, size: 20, color: context.colors.primary),
-            const SizedBox(width: Grid.xxs),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
+          decoration: BoxDecoration(
+            color: context.huddleCardSurface,
+            borderRadius: BorderRadius.circular(Radii.control),
+            border: Border.all(color: context.huddleCardBorder),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ExcludeSemantics(
+                child: Container(
+                  width: 32,
+                  height: 32,
+                  decoration: historyState || unavailable
+                      ? BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: context.huddleCardEndedSurface,
+                        )
+                      : null,
+                  child: Icon(
                     historyState || unavailable
-                        ? 'Huddle ended'
-                        : 'Huddle in progress',
-                    style: context.textTheme.labelLarge?.copyWith(
-                      color: context.colors.onSurface,
-                      fontWeight: FontWeight.w600,
-                    ),
+                        ? BuzzIcons.phoneEnd
+                        : BuzzIcons.headphones,
+                    size: 22,
+                    color: historyState || unavailable
+                        ? context.huddleCardEndedText
+                        : context.huddleCardText,
                   ),
-                  Text(
-                    isThisSession && session.isConnected
-                        ? '${session.participantCount} connected'
-                        : 'Foreground voice Huddle',
-                    style: context.textTheme.bodySmall?.copyWith(
-                      color: context.colors.onSurfaceVariant,
-                    ),
-                  ),
-                ],
+                ),
               ),
-            ),
-            const SizedBox(width: Grid.xxs),
-            FilledButton.tonal(
-              key: ValueKey('huddle-$label-$ephemeralChannelId'),
-              onPressed: viewHistory
-                  ? () => Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) =>
-                            _HuddleHistoryPage(channelId: ephemeralChannelId),
+              const SizedBox(width: Grid.xxs),
+              Flexible(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      historyState || unavailable
+                          ? 'Huddle ended'
+                          : 'Huddle in progress',
+                      style: context.textTheme.labelLarge?.copyWith(
+                        color: context.huddleCardText,
+                        fontWeight: FontWeight.w600,
                       ),
-                    )
-                  : (canJoin || isThisSession) &&
-                        session.phase != HuddleSessionPhase.leaving
-                  ? () => unavailable
-                        ? unawaited(
-                            _startMobileHuddleFromChannel(
+                    ),
+                    _HuddleCardSummary(
+                      message: message,
+                      allMessages: allMessages,
+                      parentChannelId: parentChannelId,
+                      now: now.value,
+                      finished: historyState || unavailable,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: Grid.xxs),
+              FilledButton.tonal(
+                key: ValueKey('huddle-$label-$ephemeralChannelId'),
+                style: FilledButton.styleFrom(
+                  backgroundColor: context.huddleCardControl,
+                  foregroundColor: context.huddleCardText,
+                  minimumSize: const Size(48, 32),
+                  tapTargetSize: MaterialTapTargetSize.padded,
+                  padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
+                  shape: const StadiumBorder(),
+                ),
+                onPressed: viewHistory
+                    ? () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) =>
+                              _HuddleHistoryPage(channelId: ephemeralChannelId),
+                        ),
+                      )
+                    : (canJoin || isThisSession) &&
+                          session.phase != HuddleSessionPhase.leaving
+                    ? () => unavailable
+                          ? unawaited(
+                              _startMobileHuddleFromChannel(
+                                context: context,
+                                ref: ref,
+                                parentChannelId: parentChannelId,
+                              ),
+                            )
+                          : _openMobileHuddle(
                               context: context,
                               ref: ref,
-                              parentChannelId: parentChannelId,
-                            ),
-                          )
-                        : _openMobileHuddle(
-                            context: context,
-                            ref: ref,
-                            invite: _HuddleInvite(
-                              parentChannelId: parentChannelId,
-                              ephemeralChannelId: ephemeralChannelId,
-                              startedBy: message.pubkey,
-                              startedEventId: message.id,
-                            ),
-                          )
-                  : null,
-              child: Text(label),
-            ),
-          ],
+                              invite: _HuddleInvite(
+                                parentChannelId: parentChannelId,
+                                ephemeralChannelId: ephemeralChannelId,
+                                startedBy: message.pubkey,
+                                startedEventId: message.id,
+                              ),
+                            )
+                    : null,
+                child: Text(label),
+              ),
+            ],
+          ),
         ),
       ),
     );

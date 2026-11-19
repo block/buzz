@@ -329,13 +329,8 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
     qb.push_bind(&tsquery);
     qb.push("::tsquery");
 
-    qb.push(concat!(
-        " AND (events.kind <> 45010 OR (events.channel_id IS NOT NULL AND NOT ",
-        buzz_db::community_artifact_tag_sql!("events.tags"),
-        "))",
-    ));
     // Search is a current-state surface; old artifact snapshots cannot match.
-    qb.push(" AND (events.kind <> 45010 OR EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id=events.community_id AND ah.event_id=events.id AND ah.scope='channel' AND NOT ah.deleted))");
+    qb.push(" AND (events.kind <> 45010 OR EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id=events.community_id AND ah.event_id=events.id AND NOT ah.deleted))");
 
     // Channel scope — see `ChannelScope` doc for the four-case mapping. The
     // emitted SQL fragments are identical to the legacy 2x2 tuple for the

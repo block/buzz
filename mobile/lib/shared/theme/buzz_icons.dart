@@ -289,6 +289,9 @@ abstract final class BuzzIcons {
   /// Tabler `pencil`.
   static const pencil = IconData(0xeb04, fontFamily: 'BuzzTabler');
 
+  /// Tabler `phone-end`.
+  static const phoneEnd = IconData(0xff9d, fontFamily: 'BuzzTabler');
+
   /// Tabler `phone-off`.
   static const phoneOff = IconData(0xecf5, fontFamily: 'BuzzTabler');
 

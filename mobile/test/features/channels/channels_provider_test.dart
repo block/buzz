@@ -32,6 +32,7 @@ import 'package:buzz/features/activity/inbox_read_state.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 part 'channels_provider_live_cases.dart';
+part 'channels_provider_huddle_cases.dart';
 part 'channels_provider_deletion_cases.dart';
 part 'channels_provider_terminal_cases.dart';
 part 'channels_provider_readiness_cases.dart';
@@ -54,6 +55,7 @@ part 'channels_provider_thread_interest_cases.dart';
 /// records [subscribe] calls so we can assert filter shapes and emit live
 /// events on demand.
 void main() {
+  _huddleNavigationCases();
   _unreadReadinessCases();
   _unreadDeletionCases();
   _requestPathCases();
@@ -2480,6 +2482,52 @@ void main() {
     expect(members.every((member) => member.joinedAt == joinedAt), isTrue);
   });
 
+  test(
+    'self-authored activity invalidates filter reads without changing unread or sort time',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      final notifier = container.read(channelsProvider.notifier);
+      final before = container
+          .read(channelsProvider)
+          .requireValue
+          .single
+          .lastMessageAt;
+      final versions = <int>[];
+      final listener = container.listen(
+        channelsProvider.select((_) => notifier.activityRevisionFor(_channelA)),
+        (_, next) => versions.add(next),
+      );
+      addTearDown(listener.close);
+      session.emit(
+        const NostrEvent(
+          id: 'self-message',
+          pubkey: myPk,
+          createdAt: 20,
+          kind: EventKind.streamMessageV2,
+          tags: [
+            ['h', _channelA],
+          ],
+          content: 'my own activity',
+          sig: 'sig',
+        ),
+      );
+      await _settle();
+      expect(versions, [1]);
+      expect(notifier.latestObservedByChannel[_channelA], isNull);
+      expect(
+        container.read(channelsProvider).requireValue.single.lastMessageAt,
+        before,
+      );
+      expect(notifier.activityRevisionFor(_channelB), 0);
+    },
+  );
+
   test('live channel events update channel lastMessageAt', () async {
     final session = _FakeRelaySession(
       memberships: [_membership(_channelA, myPk)],
@@ -3703,6 +3751,8 @@ NostrEvent _meta({
   String visibility = 'open',
   int createdAt = 1,
   int? ttlSeconds,
+  String? creator,
+  String? description,
   bool archived = false,
   bool unlisted = false,
   List<String> participants = const [],
@@ -3714,6 +3764,8 @@ NostrEvent _meta({
   tags: [
     ['d', id],
     ['name', name],
+    if (creator != null) ['P', creator],
+    if (description != null) ['about', description],
     ['t', channelType],
     [visibility == 'private' ? 'private' : 'public'],
     if (ttlSeconds != null) ['ttl', '$ttlSeconds'],
@@ -3813,6 +3865,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     this.maxMetadataPageRequests,
     this.hiddenDmEvents = const [],
     this.huddleStarts = const [],
+    this.creations = const [],
     this.recentMessages = const [],
     this.deletionChannels = const {},
     this.enforceHistoryLimits = false,
@@ -3830,6 +3883,10 @@ class _FakeRelaySession extends RelaySessionNotifier {
   final int? maxMetadataPageRequests;
   final List<NostrEvent> hiddenDmEvents;
   final List<NostrEvent> huddleStarts;
+  final List<NostrEvent> creations;
+  Completer<void>? creationGate;
+  int creationReads = 0;
+  bool failCreations = false;
   List<NostrEvent> recentMessages;
   final Map<String, String> deletionChannels;
   final bool enforceHistoryLimits;
@@ -4100,6 +4157,13 @@ class _FakeRelaySession extends RelaySessionNotifier {
         await paused.future;
       }
       return hiddenDmEvents;
+    }
+    if (filter.kinds.contains(9007)) {
+      creationReads++;
+      await creationGate?.future;
+      if (failCreations) throw Exception('receipt unavailable');
+      final ids = filter.tags['#h'] ?? const <String>[];
+      return creations.where((e) => ids.contains(e.getTagValue('h'))).toList();
     }
     if (filter.kinds.contains(EventKind.huddleStarted)) {
       // Claim the parked slot so the newer refresh's own Huddle query runs

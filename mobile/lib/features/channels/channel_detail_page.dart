@@ -1,3 +1,4 @@
+import 'bestie_transcription_status.dart';
 import '../../shared/widgets/duo_toolbar.dart';
 import 'composer_geometry.dart';
 import 'message_author_visibility.dart';
@@ -18,8 +19,9 @@ import 'message_footer_layout.dart';
 import 'reply_summary_link.dart';
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' show cos, max, min, pi;
-import 'dart:ui' show ImageFilter, lerpDouble;
+import 'dart:ui' show FontFeature, ImageFilter, lerpDouble;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -47,6 +49,7 @@ import '../../shared/identity_names/identity_names.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/relay/relay_author_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/navigation_button_surface.dart';
 import '../../shared/widgets/avatar_shape.dart';
@@ -55,7 +58,6 @@ import '../../shared/widgets/dm_header_portrait.dart';
 import '../../shared/widgets/dm_header_cluster.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/bouncing_dots_indicator.dart';
-import '../../shared/widgets/concentric_sheet_surface.dart';
 import '../../shared/widgets/covered_route_keyboard_insets.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
@@ -101,7 +103,6 @@ import 'message_actions.dart';
 import 'message_action_backdrop_state.dart';
 import 'message_long_press_region.dart';
 import 'message_content.dart';
-import '../../shared/widgets/message_attachment_corners.dart';
 import 'message_media_avatar.dart';
 import 'message_skeleton_body.dart';
 import '../../shared/read_state/deferred_read_state_update.dart';
@@ -131,6 +132,7 @@ part 'channel_detail_page/system_rows.dart';
 part 'channel_detail_page/thread_working.dart';
 part 'channel_detail_page/activity_members_sheet.dart';
 part 'channel_detail_page/huddle_sheet.dart';
+part 'channel_detail_page/huddle_card_summary.dart';
 part 'channel_detail_page/huddle_history.dart';
 part 'channel_detail_page/huddle_agent_connection.dart';
 part 'channel_detail_page/huddle_call_avatar.dart';
@@ -927,6 +929,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      BestieTranscriptionStatus(channelId: channel.id),
                       ?assistant.pendingNotice,
                       ComposeBar(
                         channelId: channel.id,

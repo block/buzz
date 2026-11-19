@@ -253,7 +253,7 @@ struct BuzzPushPresentationCacheTests {
     #expect(cached.relayMetadataPubkey == relayPubkey)
   }
 
-  @Test("Channel metadata marks only private buzz.solo streams as Solo")
+  @Test("Channel metadata marks buzz.solo streams as Solo regardless of visibility")
   func soloClassification() throws {
     let directory = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -262,7 +262,7 @@ struct BuzzPushPresentationCacheTests {
     let creator = try pubkey(for: profileKey)
     let cases: [(String, [[String]], Bool)] = [
       ("solo", [["t", "stream"], ["t", "buzz.solo"], ["private"], ["P", creator.uppercased()]], true),
-      ("open-solo", [["t", "stream"], ["t", "buzz.solo"], ["public"]], false),
+      ("open-solo", [["t", "stream"], ["t", "buzz.solo"], ["public"]], true),
       ("forum-solo", [["t", "forum"], ["t", "buzz.solo"], ["private"]], false),
       ("type-only", [["t", "buzz.solo"], ["private"]], false),
       ("private", [["t", "stream"], ["private"]], false),

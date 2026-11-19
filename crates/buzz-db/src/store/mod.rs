@@ -95,8 +95,6 @@ pub mod workflow;
 
 /// NIP-AR artifact lifecycle and durable delivery.
 pub mod artifact;
-/// Explicit community artifact admission, policies and storage.
-pub mod community_artifact;
 
 mod artifact_query;
 /// Timestamp-based incremental artifact reads.

@@ -25,6 +25,8 @@ import 'unread_badge/observed_unread_event.dart';
 import 'unread_badge/should_notify_for_event.dart';
 
 part 'channel_directory.dart';
+part 'huddle_creation_receipts.dart';
+part 'channel_lookup.dart';
 part 'channel_unread_deletions.dart';
 part 'channel_unread_catch_up.dart';
 part 'channel_snapshot.dart';
@@ -101,6 +103,13 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   bool _listNoticesReopened = false;
   final Set<String> _reopenedLiveChunks = {};
   final Map<String, int> _latestObservedByChannel = {};
+  final Map<String, int> _activityRevisions = {};
+
+  /// Invalidates verified activity reads for every live message, including
+  /// self-authored or muted messages, without changing unread or sort state.
+  int activityRevisionFor(String channelId) =>
+      _activityRevisions[channelId] ?? 0;
+
   // Per channel, when an earlier unread catch-up in this session was sent, and
   // the read timestamp and mute state it used. See [_UnreadCatchUp].
   final Map<String, ({int sentAt, int? readAt, bool muted})>
@@ -122,10 +131,15 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   String? _memberSnapshotRelayBaseUrl;
   String? _memberSnapshotPubkey;
   Map<String, List<ChannelMember>> _memberSnapshotsByChannelId = const {};
+  bool _hasAuthoritativeMemberships = false;
   List<NostrEvent> _directoryMetas = const [];
   // The scope and read times of [_directoryMetas]; a switch resets them.
   final _savedDirectory = _SavedDirectory();
   Set<String> _hiddenDmIds = const {};
+  final Set<String> _verifiedHuddleIds = {};
+  final Set<String> _checkedHuddleReceiptIds = {};
+  bool _huddleReceiptsReading = false;
+  List<ChannelData>? _pendingHuddleReceiptMetadata;
 
   /// Fences directory responses to the relay and identity that requested them.
   late final _ChannelRefreshCoordinator _refreshCoordinator =
@@ -208,6 +222,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   @override
   Future<List<Channel>> build() async {
     final buildGeneration = ++_buildGeneration;
+    _huddleReceiptsReading = false;
+    _pendingHuddleReceiptMetadata = null;
     _backgroundRefreshInFlight = false;
     _backgroundRefreshQueued = false;
     _refreshCoordinator.retireInFlight();
@@ -223,9 +239,12 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _memberSnapshotRelayBaseUrl = relayBaseUrl;
       _memberSnapshotPubkey = pubkey;
       _memberSnapshotsByChannelId = const {};
+      _hasAuthoritativeMemberships = false;
       _directoryMetas = const [];
       _savedDirectory.reset();
       _hiddenDmIds = const {};
+      _verifiedHuddleIds.clear();
+      _checkedHuddleReceiptIds.clear();
       _confirmedJoins.clear();
       // Retire any in-flight directory request: its response describes the
       // previous relay or identity and must not reach this scope's state.
@@ -309,6 +328,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _refreshCoordinator.retireInFlight();
       _clearLiveSubscriptions();
       _latestObservedByChannel.clear();
+      _activityRevisions.clear();
       _observedUnreadEventsByChannel.clear();
       _unreadCaughtUpByChannel.clear();
       _unreadDeletedIdsByChannel.clear();
@@ -445,6 +465,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // Membership discovery already returned the full authoritative rosters.
     // Their owner roles validate Huddle links without downloading them again.
     final huddleBackingIds = huddleBackingChannelIds(huddleStarts, memberships);
+    huddleBackingIds.addAll(_verifiedHuddleIds);
     final hiddenDms = hiddenDmIds ?? _hiddenDmIds;
     final visibleMetas = parsedMetas.entries.where((entry) {
       final data = entry.value;
@@ -454,6 +475,15 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         return false;
       }
       if (data.channelType == 'dm' && hiddenDms.contains(data.id)) {
+        return false;
+      }
+      if (isGeneratedHuddleChannel(
+        id: data.id,
+        name: data.name,
+        channelType: data.channelType,
+        visibility: data.visibility,
+        ttlSeconds: data.ttlSeconds,
+      )) {
         return false;
       }
       return !(huddleBackingIds.contains(data.id) &&
@@ -495,6 +525,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // Name resolution may return without a fenced read; check before writing.
     fence.ensureCurrent();
     _cacheMemberSnapshots(memberships, replaceAll: true);
+    _hasAuthoritativeMemberships = true;
     // Without the hidden-DM response, keep the DMs hidden before. The read is
     // then incomplete, so it stays counted as unread and is retried.
     if (hiddenDmIds != null) _hiddenDmIds = Set.unmodifiable(hiddenDmIds);
@@ -629,7 +660,24 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     } else {
       _channelListChanges++;
     }
+    channels.removeWhere(
+      (channel) =>
+          channel.channelType == 'stream' &&
+          channel.visibility == 'private' &&
+          _verifiedHuddleIds.contains(channel.id),
+    );
     saveSnapshot?.call(channels, _hiddenDmIds);
+    // Publish the list before optional immutable receipt reconciliation.
+    final generation = _buildGeneration;
+    unawaited(
+      Future(
+        () => _reconcileHuddleReceipts(
+          session,
+          parsedMetas.values.toList(),
+          generation,
+        ),
+      ),
+    );
     return channels;
   }
 
@@ -860,6 +908,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       }
       final updated = List<Channel>.of(channels);
       final channel = updated[idx];
+      _activityRevisions[channelId] = activityRevisionFor(channelId) + 1;
 
       if (myPk != null &&
           event.pubkey.toLowerCase() == myPk.toLowerCase() &&
@@ -946,6 +995,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
   void clearObservedUnreadForChannel(String channelId) {
     _latestObservedByChannel.remove(channelId);
+    _activityRevisions.remove(channelId);
     _observedUnreadEventsByChannel.remove(channelId);
     state = state.whenData((channels) => List<Channel>.of(channels));
   }
@@ -1142,58 +1192,3 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 final channelsProvider = AsyncNotifierProvider<ChannelsNotifier, List<Channel>>(
   ChannelsNotifier.new,
 );
-
-/// The channel with this id from the list, else as it was opened ahead of the
-/// list (see [ChannelsNotifier.rememberOpened]).
-final channelByIdProvider = Provider.autoDispose.family<Channel?, String>(
-  (ref, channelId) =>
-      ref.watch(
-        channelsProvider.select(
-          (channels) => channels.value
-              ?.where((channel) => channel.id == channelId)
-              .firstOrNull,
-        ),
-      ) ??
-      ref.watch(_openedAheadProvider.select((opened) => opened[channelId])),
-);
-
-/// Whether this channel can start or continue threads. A Solo chat's agents
-/// answer at its top level, so it keeps existing threads readable but starts
-/// none and takes no thread replies, as desktop does. A channel not loaded yet
-/// keeps the default thread behavior.
-final channelStartsThreadsProvider = Provider.autoDispose.family<bool, String>(
-  (ref, channelId) => !(ref.watch(
-    channelByIdProvider(
-      channelId,
-    ).select((channel) => channel?.isSolo ?? false),
-  )),
-);
-
-/// Channels opened from their own metadata before the list had them, as a
-/// fast DM open does. Scoped to one relay and identity. Each is dropped once
-/// the list has it, so a DM later hidden or left is not found through it.
-final _openedAheadProvider =
-    NotifierProvider<_OpenedAheadNotifier, Map<String, Channel>>(
-      _OpenedAheadNotifier.new,
-    );
-
-class _OpenedAheadNotifier extends Notifier<Map<String, Channel>> {
-  @override
-  Map<String, Channel> build() {
-    ref.watch(relayConfigProvider.select((config) => config.baseUrl));
-    ref.watch(myPubkeyProvider);
-    return const {};
-  }
-
-  void remember(Channel channel) => state = {...state, channel.id: channel};
-
-  void dropListed(List<Channel> listed) {
-    if (state.isEmpty) return;
-    final ids = {for (final channel in listed) channel.id};
-    if (!state.keys.any(ids.contains)) return;
-    state = {
-      for (final entry in state.entries)
-        if (!ids.contains(entry.key)) entry.key: entry.value,
-    };
-  }
-}

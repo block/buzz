@@ -16,7 +16,7 @@ The protocol has one relay-signed event kind:
 
 - a relay-signed per-viewer snapshot (`kind:30622` DM visibility snapshot).
 
-There is no user-signed request kind. The hide/unhide intent is already carried by the existing DM commands (`kind:41012` hide, `kind:41010` open/re-open); the relay derives and re-publishes the visibility snapshot as a side effect of accepting those commands.
+There is no user-signed request kind. The hide/unhide intent is already carried by the existing DM commands (`kind:41012` hide, `kind:41010` open/re-open); the relay derives and re-publishes the visibility snapshot as a side effect of accepting those commands, and of accepting a new message that resurfaces a hidden DM (see §Relay Processing Algorithm).
 
 ## Motivation
 
@@ -32,7 +32,7 @@ This NIP does not change membership. A hidden DM keeps the viewer as an active `
 
 This NIP does not delete events. No DM message or membership event is removed.
 
-This NIP does not define a shared or global hide state. The snapshot is per-viewer and relay-scoped. A viewer's hide state is theirs alone; the other DM participant's view is unaffected.
+This NIP does not define a shared or global hide state. The snapshot is per-viewer and relay-scoped. A viewer's hiding a DM leaves the other participants' views unaffected. Only another member's new message clears the hide.
 
 This NIP does not define a user-signed request kind. Hide and unhide intent is already expressed by `kind:41012` and `kind:41010`. NIP-DV only describes the relay-signed projection.
 
@@ -88,16 +88,17 @@ The `content` field is empty and carries no meaning. Clients MUST NOT parse sema
 
 ## Relay Processing Algorithm
 
-After the relay accepts and commits a DM command that changes a viewer's hide state, it republishes that viewer's snapshot:
+After the relay accepts and commits an event that changes a viewer's hide state, it republishes that viewer's snapshot:
 
 1. On `kind:41012` (hide): the viewer's `hidden_at` for the target channel is set.
 2. On `kind:41010` (open/re-open) that clears an existing `hidden_at`: the viewer's hide state for the target channel is cleared.
+3. On a new member or workflow message (`kind:9`, `40002` or `40008`) in a DM: the hide state of every other member who hid it is cleared, so a new message resurfaces the conversation. The author's own hide is kept, and a message tagged `["audience", "agents"]` clears nothing. That optional tag marks a message as meant only for agents, such as coordination between them; its only defined value is `agents`, and a message without it is for everyone. A hide that commits concurrently with a message lands wholly before or after it: before, and the message clears it; after, and it stays. For a relay-signed message, the author is the member named by its `actor` tag, or else its first `p` tag, not the relay. The relay commits the message, the cleared hides and these snapshots in one transaction, so a client that rereads its snapshot when the message arrives sees the DM, and a hide made after the message is kept. Live delivery order between the message and its snapshots is not guaranteed. Relay moderation notices are separate: they clear the recipient's hide and republish their snapshot in their own commits before the notice is stored.
 
-In both cases the relay recomputes the viewer's full hidden-DM set from its authoritative state (active, non-removed DM memberships with `hidden_at IS NOT NULL`) and publishes a fresh `kind:30622` snapshot signed by the relay identity, with `d` = the viewer's pubkey and one `h` tag per hidden DM.
+In each case the relay recomputes the viewer's full hidden-DM set from its authoritative state (active, non-removed DM memberships with `hidden_at IS NOT NULL`) and publishes a fresh `kind:30622` snapshot signed by the relay identity, with `d` = the viewer's pubkey and one `h` tag per hidden DM.
 
 The recompute-and-replace shape means the latest snapshot is always the complete, authoritative hidden set. There is no delta event to merge and no ordering hazard between hide and unhide: a stale snapshot is simply superseded by the newer one under NIP-01 parameterized-replaceable semantics.
 
-Snapshot publication is a best-effort post-commit side effect. If publication fails, the hide/unhide command itself still succeeds; the relay SHOULD republish the snapshot on the next state change. A momentarily stale snapshot only affects sidebar presentation, never membership or delivery.
+For hide and re-open, snapshot publication is a best-effort post-commit side effect. If publication fails, the hide/unhide command itself still succeeds; the relay SHOULD republish the snapshot on the next state change. A momentarily stale snapshot only affects sidebar presentation, never membership or delivery. A new message is different: if its snapshots cannot be written, the relay rejects the message and stores nothing, and the client's resend tries again.
 
 ## Client Behavior
 

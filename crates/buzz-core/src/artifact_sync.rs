@@ -1,7 +1,7 @@
 //! NIP-AR sync filter: `{"artifact":"current", "#h":[...], ...}` on a `REQ`.
 //! The same current-state filter as HTTP `/query`; the `REQ` transport makes
 //! it a sync (complete set, `EOSE`, then live heads).
-use crate::artifact::{canonical_uuid, exact_type, parse_predicates, parse_scope, ArtifactScope};
+use crate::artifact::{canonical_uuid, parse_predicates};
 use uuid::Uuid;
 
 /// Largest set one sync serves: it bounds each initial read and the held
@@ -12,8 +12,6 @@ pub const MAX_SYNC_EVENTS: usize = 4096;
 /// `#name` predicate, `#h` included, with NIP-AR match semantics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactSyncFilter {
-    /// Explicit identity and audience class.
-    pub scope: ArtifactScope,
     /// Named channels (`#h`), deduplicated in request order. Never empty.
     pub channels: Vec<Uuid>,
     /// Exact tag-name/value predicates (AND across names, OR within one).
@@ -50,19 +48,7 @@ pub fn parse_sync(value: &serde_json::Value) -> Result<ArtifactSyncFilter, &'sta
     if !is_sync_filter(value) {
         return Err("artifact must be \"current\"");
     }
-    let scope = parse_scope(object)?;
-    let tags = parse_predicates(object, &["artifact", "scope", "kinds"])?;
-    if scope == ArtifactScope::Community {
-        if tags.iter().any(|(n, _)| n == "h") {
-            return Err("community sync forbids #h");
-        }
-        exact_type(&tags)?;
-        return Ok(ArtifactSyncFilter {
-            scope,
-            channels: vec![],
-            tags,
-        });
-    }
+    let tags = parse_predicates(object, &["artifact", "kinds"])?;
     let mut channels = Vec::new();
     for (_, values) in tags.iter().filter(|(name, _)| name == "h") {
         for value in values {
@@ -75,11 +61,7 @@ pub fn parse_sync(value: &serde_json::Value) -> Result<ArtifactSyncFilter, &'sta
     if channels.is_empty() {
         return Err("sync requires #h");
     }
-    Ok(ArtifactSyncFilter {
-        scope,
-        channels,
-        tags,
-    })
+    Ok(ArtifactSyncFilter { channels, tags })
 }
 
 #[cfg(test)]

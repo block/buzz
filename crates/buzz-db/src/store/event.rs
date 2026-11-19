@@ -783,12 +783,11 @@ fn build_query_events_sql(
 /// test, the channel scope (`push_channel_scope`) and the `#p` join, on
 /// columns qualified by `col_prefix` (`""` or `"e."`).
 fn push_event_filters(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q: &EventQuery) {
-    push_community_artifact_exclusion(qb, col_prefix);
     // Generic reads return only current artifact revisions, including delete
     // tombstones; explicit revision IDs also read earlier revisions.
     if q.ids.is_none() {
         let table = col_prefix.strip_suffix('.').unwrap_or("events");
-        qb.push(format!(" AND NOT ({table}.kind = 45010 AND NOT EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id={table}.community_id AND ah.event_id={table}.id AND ah.scope='channel'))"));
+        qb.push(format!(" AND NOT ({table}.kind = 45010 AND NOT EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id={table}.community_id AND ah.event_id={table}.id))"));
     }
     push_notice_visibility(qb, col_prefix, q);
 
@@ -1537,17 +1536,6 @@ pub(crate) fn row_to_stored_event(row: sqlx::postgres::PgRow) -> Result<Option<S
     let received_at: DateTime<Utc> = row.try_get("received_at")?;
 
     let channel_id: Option<Uuid> = row.try_get("channel_id")?;
-    // Defense in depth for every hydration caller. Explicit community reads
-    // reconstruct their ledger payload only after community admission.
-    if kind_i32 == 45010
-        && (channel_id.is_none()
-            || tags_json.as_array().is_none_or(|tags| {
-                tags.iter()
-                    .any(|tag| tag.get(0).and_then(serde_json::Value::as_str) == Some("community"))
-            }))
-    {
-        return Ok(None);
-    }
 
     // kind is stored as i32 (Postgres INT) but Nostr uses u16. Values > 65535 are corrupt.
     let kind_u16 = u16::try_from(kind_i32)
@@ -1651,12 +1639,11 @@ fn count_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
     };
 
     let col_prefix = if q.p_tag_hex.is_some() { "e." } else { "" };
-    push_community_artifact_exclusion(&mut qb, col_prefix);
     // Generic reads return only current artifact revisions, including delete
     // tombstones; explicit revision IDs also read earlier revisions.
     if q.ids.is_none() {
         let table = if q.p_tag_hex.is_some() { "e" } else { "events" };
-        qb.push(format!(" AND NOT ({table}.kind = 45010 AND NOT EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id={table}.community_id AND ah.event_id={table}.id AND ah.scope='channel'))"));
+        qb.push(format!(" AND NOT ({table}.kind = 45010 AND NOT EXISTS (SELECT 1 FROM artifact_heads ah WHERE ah.community_id={table}.community_id AND ah.event_id={table}.id))"));
     }
     push_notice_visibility(&mut qb, col_prefix, q);
 
@@ -1847,12 +1834,10 @@ pub(crate) async fn get_event_by_id_with_operation(
     operation: crate::observability::WriterOperation,
 ) -> Result<Option<StoredEvent>> {
     let mut connection = crate::observability::acquire_writer(pool, operation).await?;
-    let row = sqlx::query(concat!(
+    let row = sqlx::query(
         "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
-         FROM events WHERE community_id = $1 AND id = $2 AND (kind <> 45010 OR (channel_id IS NOT NULL AND NOT ",
-        crate::community_artifact_tag_sql!("tags"),
-        ")) AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
-    ))
+         FROM events WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
+    )
     .bind(community_id.as_uuid())
     .bind(id_bytes)
     .fetch_optional(&mut *connection)
@@ -1926,12 +1911,10 @@ pub(crate) async fn get_event_by_id_including_deleted_with_operation(
     operation: crate::observability::WriterOperation,
 ) -> Result<Option<StoredEvent>> {
     let mut connection = crate::observability::acquire_writer(pool, operation).await?;
-    let row = sqlx::query(concat!(
+    let row = sqlx::query(
         "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
-         FROM events WHERE community_id = $1 AND id = $2 AND (kind <> 45010 OR (channel_id IS NOT NULL AND NOT ",
-        crate::community_artifact_tag_sql!("tags"),
-        ")) ORDER BY created_at DESC LIMIT 1",
-    ))
+         FROM events WHERE community_id = $1 AND id = $2 ORDER BY created_at DESC LIMIT 1",
+    )
     .bind(community_id.as_uuid())
     .bind(id_bytes)
     .fetch_optional(&mut *connection)
@@ -1990,7 +1973,6 @@ pub(crate) async fn get_events_by_ids_on(
          FROM events WHERE community_id = ",
     );
     qb.push_bind(community_id.as_uuid());
-    push_community_artifact_exclusion(&mut qb, "");
     qb.push(" AND deleted_at IS NULL AND id IN (");
     let mut sep = qb.separated(", ");
     for id in ids {
@@ -2310,6 +2292,23 @@ pub async fn insert_event_with_thread_metadata(
     let result =
         insert_event_with_thread_metadata_tx(&mut tx, event, channel_id, thread_meta).await?;
     tx.commit().await?;
+    Ok(result)
+}
+
+/// The body of [`Db::insert_event_with_thread_metadata`] on a caller-owned
+/// transaction, for callers that commit related writes with the event. The
+/// caller owns commit or rollback.
+pub async fn insert_event_with_thread_metadata_in_transaction(
+    tx: &mut AdmittedTx,
+    event: &Event,
+    channel_id: Option<Uuid>,
+    thread_meta: Option<ThreadMetadataParams<'_>>,
+) -> Result<(StoredEvent, bool)> {
+    acquire_canvas_event_write_lock_if_needed(tx, event, channel_id).await?;
+    let result = insert_event_with_thread_metadata_tx(tx, event, channel_id, thread_meta).await?;
+    if result.1 {
+        crate::insert_mentions_in_transaction(tx, event, channel_id).await?;
+    }
     Ok(result)
 }
 
@@ -2972,17 +2971,13 @@ impl Db {
         )
         .await?;
         tx.set_push_enqueue(self.push_enqueue.clone());
-        crate::event::acquire_canvas_event_write_lock_if_needed(&mut tx, event, channel_id).await?;
-        let result = crate::event::insert_event_with_thread_metadata_tx(
+        let result = crate::event::insert_event_with_thread_metadata_in_transaction(
             &mut tx,
             event,
             channel_id,
             thread_meta,
         )
         .await?;
-        if result.1 {
-            crate::insert_mentions_in_transaction(&mut tx, event, channel_id).await?;
-        }
         tx.commit().await?;
         Ok(result)
     }
@@ -3105,10 +3100,7 @@ mod e_tag_filter_shape_tests {
 
         assert!(sql.starts_with("WITH m AS MATERIALIZED (SELECT "));
         assert_eq!(sql.matches("tags @> ANY(").count(), 1);
-        // Audience predicates may contain OR; reference alternatives must
-        // remain one array-bound predicate inside the materialized fence.
-        assert!(!sql.contains(" OR tags @>"));
-        assert!(!sql.contains(" OR e.tags @>"));
+        assert!(!sql.contains(" OR "));
         let fence_end = sql.find(") SELECT * FROM m ").expect("fence closes");
         assert!(sql.contains("::jsonb[])"));
         assert!(!sql[..fence_end].contains("ORDER BY"));
@@ -7434,18 +7426,4 @@ mod postgres_tests {
             "mention row must be committed atomically alongside the thread event"
         );
     }
-}
-
-/// Exclude the explicit community audience from every ordinary event surface,
-/// even on disabled/bridge relays. A missing home also fails closed. This only
-/// withholds data; it never derives or grants an audience from unsigned metadata.
-fn push_community_artifact_exclusion(qb: &mut QueryBuilder<sqlx::Postgres>, prefix: &str) {
-    let tag_sql = if prefix.is_empty() {
-        crate::community_artifact_tag_sql!("tags")
-    } else {
-        crate::community_artifact_tag_sql!("e.tags")
-    };
-    qb.push(format!(
-        " AND ({prefix}kind <> 45010 OR ({prefix}channel_id IS NOT NULL AND NOT {tag_sql}))"
-    ));
 }
