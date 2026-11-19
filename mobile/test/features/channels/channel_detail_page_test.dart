@@ -77,6 +77,8 @@ import 'package:buzz/features/channels/local_send_bubble_surface.dart';
 import 'package:buzz/features/channels/message_action_backdrop_state.dart';
 import 'package:buzz/features/channels/message_author_visibility.dart';
 import 'package:buzz/features/channels/message_content.dart';
+import 'package:buzz/features/channels/message_content/edited_marker.dart';
+import 'package:buzz/shared/widgets/message_attachment_corners.dart';
 import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';

@@ -1,5 +1,27 @@
 part of '../message_content.dart';
 
+/// The "N photos" label above a stack, part of the message but not of its
+/// reply-drag target.
+class _MessageImageStackCount extends StatelessWidget {
+  final List<MessageGalleryItem> items;
+
+  const _MessageImageStackCount({required this.items});
+
+  @override
+  Widget build(BuildContext context) => MessageLongPressTarget(
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
+      child: Text(
+        '${items.length} ${items.any((item) => item.isVideo) ? 'attachments' : 'photos'}',
+        key: const ValueKey('message-media-stack-count'),
+        style: context.textTheme.labelSmall?.copyWith(
+          color: context.colors.onSurfaceVariant,
+        ),
+      ),
+    ),
+  );
+}
+
 /// A compact rounded photo fan with continuous perspective and depth overlap.
 class _MessageImageStack extends HookConsumerWidget {
   const _MessageImageStack({

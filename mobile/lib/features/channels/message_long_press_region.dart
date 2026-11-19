@@ -7,6 +7,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
+import 'message_reply_drag_target.dart';
+
 /// Shared hold deadline so nested reaction pills win before the message menu.
 const iosMessageLongPressDuration = Duration(milliseconds: 500);
 const _maxMessageSnapshotDimension = 2048.0;
@@ -60,10 +62,10 @@ class MessageLongPressInkWell extends StatelessWidget {
   /// content. When omitted, this widget inserts and owns that boundary.
   final GlobalKey? snapshotKey;
 
-  /// Whether a long press may start at a global pointer position.
-  ///
-  /// When omitted, a long press may start anywhere in the region.
-  final bool Function(Offset globalPosition)? canStartAt;
+  /// Whether a pointer long press starts only on a [MessageLongPressTarget] or
+  /// [MessageReplyDragTarget] below this region, leaving the empty row space
+  /// around them inert. Otherwise it may start anywhere in the region.
+  final bool targetsOnly;
   final Widget child;
 
   const MessageLongPressInkWell({
@@ -74,7 +76,7 @@ class MessageLongPressInkWell extends StatelessWidget {
     this.borderRadius,
     this.highlightColor,
     this.snapshotKey,
-    this.canStartAt,
+    this.targetsOnly = false,
     required this.child,
   }) : assert(onLongPress != null || onLongPressDetails != null);
 
@@ -87,7 +89,7 @@ class MessageLongPressInkWell extends StatelessWidget {
       borderRadius: borderRadius,
       highlightColor: highlightColor,
       externalSnapshotKey: snapshotKey,
-      canStartAt: canStartAt,
+      targetsOnly: targetsOnly,
       child: child,
     );
   }
@@ -104,7 +106,7 @@ class _MessageLongPressRegion extends HookWidget {
   final BorderRadius? borderRadius;
   final Color? highlightColor;
   final GlobalKey? externalSnapshotKey;
-  final bool Function(Offset globalPosition)? canStartAt;
+  final bool targetsOnly;
   final Widget child;
 
   const _MessageLongPressRegion({
@@ -114,7 +116,7 @@ class _MessageLongPressRegion extends HookWidget {
     required this.borderRadius,
     required this.highlightColor,
     required this.externalSnapshotKey,
-    required this.canStartAt,
+    required this.targetsOnly,
     required this.child,
   });
 
@@ -207,7 +209,12 @@ class _MessageLongPressRegion extends HookWidget {
                       : null,
                 ),
                 (recognizer) => recognizer
-                  ..canStartAt = canStartAt
+                  ..canStartAt = targetsOnly
+                      ? (position) => messageLongPressTargetAt(
+                          context.findRenderObject(),
+                          position,
+                        )
+                      : null
                   ..onLongPressStart = (_) => recognize(),
               ),
         },

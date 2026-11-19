@@ -599,17 +599,7 @@ class MessageContent extends HookConsumerWidget {
           : CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (bubble)
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
-            child: Text(
-              '${trailingGallery.items.length} ${trailingGallery.items.any((item) => item.isVideo) ? 'attachments' : 'photos'}',
-              key: const ValueKey('message-media-stack-count'),
-              style: context.textTheme.labelSmall?.copyWith(
-                color: context.colors.onSurfaceVariant,
-              ),
-            ),
-          ),
+        if (bubble) _MessageImageStackCount(items: trailingGallery.items),
         if (trailingGallery.content.trim().isNotEmpty) markdown,
         MessageReplyDragTarget(
           child: MessageAttachmentCorners(
