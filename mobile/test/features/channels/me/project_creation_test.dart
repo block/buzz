@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'package:buzz/shared/crypto/nip44.dart';
 import 'package:buzz/features/channels/me/me_workspace_picker.dart';
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_sections/channel_sections_provider.dart';
+import 'package:buzz/features/channels/channel_sections/workspace_layout.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/me/me_page.dart';
 import 'package:buzz/features/channels/me/new_me_project.dart';
@@ -90,12 +92,33 @@ class _WorkspaceHeader extends HookConsumerWidget {
               error.message,
               contains('Project setup saved on this phone'),
             );
+          } on MeFilingClosed catch (error) {
+            _closed = error;
           }
         },
         child: const Text('Open workspace creation'),
       ),
     );
   }
+}
+
+MeFilingClosed? _closed;
+
+/// Starts on legacy Solo filings; [lock] delivers desktop's unified layout.
+class _Sections extends ChannelSectionsNotifier {
+  @override
+  ChannelSectionsState build() => const ChannelSectionsState(isReady: true);
+
+  void lock() => state = ChannelSectionsState(
+    isReady: true,
+    workspace: WorkspaceRecord.fromJson({
+      'version': 1,
+      'sections': <Object>[],
+      'assignments': <String, Object>{},
+      'sectionOrder': <String>[],
+    }),
+    version: 2,
+  );
 }
 
 void main() {
@@ -120,6 +143,7 @@ void main() {
             meGroupsProvider.overrideWith(
               (ref) => Stream.value(const MeGroups()),
             ),
+            channelSectionsProvider.overrideWith(_Sections.new),
           ],
           child: MaterialApp(
             theme: AppTheme.light(),
@@ -217,6 +241,24 @@ void main() {
         isFalse,
       );
       expect(find.text('Conflicting Solo changes'), findsNothing);
+
+      // Desktop's unified layout arrives while a workspace is being named:
+      // desktop now owns filings, so nothing is written or left to resume.
+      final writes = relay.writes;
+      await open();
+      await tester.enterText(find.byType(TextField), 'Too late');
+      final sections =
+          ProviderScope.containerOf(
+                tester.element(find.byType(_WorkspaceHeader)),
+              ).read(channelSectionsProvider.notifier)
+              as _Sections;
+      sections.lock();
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Create workspace'));
+      await tester.pumpAndSettle();
+      expect(_closed, isNotNull);
+      expect(relay.writes, writes);
+      expect(MeProjectCreation.pending(sync), isNull);
     },
     variant: TargetPlatformVariant.only(TargetPlatform.android),
   );

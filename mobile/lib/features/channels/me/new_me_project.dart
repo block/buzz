@@ -9,6 +9,7 @@ import '../../../shared/me/me_project_creation.dart';
 import '../../../shared/me/me_recovery.dart';
 import '../../../shared/theme/theme.dart';
 import '../../../shared/widgets/modal_presentation.dart';
+import '../channel_sections/channel_sections_provider.dart';
 
 /// Creates or resumes a workspace and returns its stable ID.
 Future<String?> createMeProject(
@@ -19,6 +20,10 @@ Future<String?> createMeProject(
 }) async {
   final noun = workspace ? 'workspace' : 'project';
   final sync = ref.read(meSyncProvider);
+  // Desktop's unified record can arrive while a form is open. Ask at write
+  // time, through a container that outlives this page.
+  final container = ProviderScope.containerOf(context, listen: false);
+  bool mayFile() => container.read(channelSectionsProvider).editable;
   var intent = MeProjectCreation.pending(sync);
   if (intent != null) {
     final reviewed = intent;
@@ -64,10 +69,19 @@ Future<String?> createMeProject(
           current.pubkey != sync.pubkey) {
         throw StateError('Your account or community changed. Open Solo again.');
       }
-      await intent!.complete(current);
+      await intent!.complete(current, mayFile: mayFile);
       return intent.channelId == channelId ? intent.id : null;
     } catch (error) {
       if (error is MeRecoveryConflict) rethrow;
+      if (error is MeFilingClosed) {
+        // Nothing on this phone can resume it now.
+        try {
+          await intent!.discard(sync);
+        } catch (_) {
+          // Nothing was journaled, or it changed; keep it for review.
+        }
+        rethrow;
+      }
       // A failed preferences write can still update its optimistic cache.
       // Only advertise recovery after rereading the durable journal.
       var saved = false;

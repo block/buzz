@@ -130,17 +130,17 @@ class ChannelSortManager {
     }
   }
 
-  /// Re-reads the retained head once, e.g. on app foreground resume, to catch
-  /// an EVENT a healthy socket never delivered. Skipped while a local edit is
-  /// pending and discarded if a mutation lands before the read returns.
+  /// Re-reads the retained heads once, e.g. on app foreground resume, to catch
+  /// an EVENT a healthy socket never delivered. A pending or newer local edit
+  /// fences only the legacy head it would replace; the unified head always
+  /// applies, since it ends legacy editing.
   void refreshFromRelay() {
-    if (_disposed || !_remoteEnabled || _syncState.hasPendingLocalChanges) {
-      return;
-    }
+    if (_disposed || !_remoteEnabled) return;
     final generation = _generation;
+    final pending = _syncState.hasPendingLocalChanges;
     unawaited(
       _fetchAndApply(
-        isCurrent: () => !_disposed && generation == _generation,
+        legacyIsCurrent: () => !pending && generation == _generation,
       ).then((_) {
         if (!_disposed && generation != _generation) _onChanged();
       }),
@@ -203,11 +203,12 @@ class ChannelSortManager {
     });
   }
 
-  Future<bool?> _fetchAndApply({bool Function()? isCurrent}) async {
+  Future<bool?> _fetchAndApply({bool Function()? legacyIsCurrent}) async {
     if (_relaySession == null) return null;
     try {
       final events = await _relaySession.fetchHistory(_filter());
-      if (isCurrent != null && !isCurrent()) return null;
+      if (_disposed) return null;
+      final legacy = legacyIsCurrent?.call() ?? true;
       // The result reports only the legacy head: it drives legacy republish.
       var found = false;
       for (final event in events) {
@@ -215,7 +216,7 @@ class ChannelSortManager {
         final dTag = event.getTagValue('d');
         if (dTag == workspaceSortCoordinate) {
           _applyWorkspace(event);
-        } else if (dTag == _dTag) {
+        } else if (dTag == _dTag && legacy) {
           found = true;
           _applyRemote(event);
         }
@@ -368,6 +369,9 @@ class ChannelSortManager {
         ],
         createdAt: createdAt,
         onSigned: (event) => submittedEventId = event.id,
+        // A unified head can arrive during the relay's rate-limit wait.
+        mayPublish: () async =>
+            !_disposed && editable && _generation == generationAtStart,
       );
       if (_disposed || _generation != generationAtStart) return;
       // Keep local publications strictly ordered for this manager lifetime, as

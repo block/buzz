@@ -26,13 +26,23 @@ void main() {
     'groups': {'channels': 'recent'},
   };
 
-  for (final live in [false, true]) {
-    final arrival = live ? 'while an edit waits' : 'before any edit';
+  // live: the head arrives on the subscription while an edit waits.
+  // failedRead: the publish preflight fails while the relay already holds it.
+  for (final (live, failedRead) in [
+    (false, false),
+    (true, false),
+    (false, true),
+  ]) {
+    final arrival = failedRead
+        ? 'past a failed preflight'
+        : live
+        ? 'while an edit waits'
+        : 'before any edit';
     fakeAsyncTest('sections stay unpublished when the unified head arrives '
         '$arrival', (clock) {
       final relay = SidebarRelay();
       final head = relay.event('channel-workspaces', workspaces, nowSeconds());
-      if (!live) relay.stored.add(head);
+      if (!live && !failedRead) relay.stored.add(head);
       final m = ChannelSectionsManager(
         pubkey: relay.pubkey,
         relayUrl: 'https://relay.example',
@@ -45,16 +55,23 @@ void main() {
       )..initialize();
       clock.flushMicrotasks();
       m.createSection('mine');
+      if (failedRead) {
+        relay
+          ..historyFailures = 1
+          ..stored.add(head);
+      }
       if (live) {
         relay
           ..stored.add(head)
           ..emit(head);
         clock.flushMicrotasks();
       }
-      m
-        ..createSection('later')
-        ..assignChannel('general', 'launch');
-      clock.elapse(const Duration(seconds: 10));
+      if (!failedRead) {
+        m
+          ..createSection('later')
+          ..assignChannel('general', 'launch');
+      }
+      clock.elapse(const Duration(seconds: 60));
 
       expect(m.workspace, isNotNull);
       expect(relay.published, isEmpty);
@@ -63,6 +80,7 @@ void main() {
       expect(relay.published, isEmpty);
     });
 
+    if (failedRead) continue;
     fakeAsyncTest('sort stays unpublished when the unified head arrives '
         '$arrival', (clock) {
       final relay = SidebarRelay();

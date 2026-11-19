@@ -2179,14 +2179,28 @@ void wholeBlobLanes(SharedPreferences Function() prefs) {
       expect({for (final k in prefs().getKeys()) k: prefs().get(k)}, before);
     });
 
-    fakeAsyncTest('resume leaves a pending edit alone', (clock) {
+    fakeAsyncTest('resume leaves a pending edit alone but takes the unified '
+        'head', (clock) {
       start(clock).setSortModeFor('dms', ChannelSortMode.alpha);
       relay.stored.add(recent(nowSeconds() + 9));
-      final reads = relay.reqsFor('channel-sort', 'h-').length;
       m.refreshFromRelay();
       clock.flushMicrotasks();
       expect(m.sortModeFor('dms'), ChannelSortMode.alpha);
-      expect(relay.reqsFor('channel-sort', 'h-'), hasLength(reads));
+      expect(m.editable, isTrue);
+
+      // A missed unified head still ends legacy editing on resume.
+      relay.stored.add(
+        relay.event('channel-workspace-sort', {
+          'version': 1,
+          'groups': {'dms': 'recent'},
+        }, nowSeconds()),
+      );
+      m.refreshFromRelay();
+      clock.flushMicrotasks();
+      expect(m.editable, isFalse);
+      expect(m.sortModeFor('dms'), ChannelSortMode.recent);
+      clock.elapse(const Duration(seconds: 30));
+      expect(relay.published, isEmpty);
     });
   });
 }

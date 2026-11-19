@@ -61,6 +61,8 @@ class ChannelSectionsManager {
   Timer? _startupRetryTimer;
   int _startupRetryAttempt = 0;
   bool _startupFetchSucceeded = false;
+  bool _caughtUpSinceSubscribe = false;
+  int _failedPreflights = 0;
   Future<void>? _syncInFlight;
   bool _syncAgain = false;
   int _subscriptionGeneration = 0;
@@ -170,14 +172,15 @@ class ChannelSectionsManager {
     final wasSubscribed = _unsubscribe != null;
     final subscribed = wasSubscribed || await _startLiveSubscription();
     if (_disposed) return;
+    if (subscribed && !wasSubscribed) _caughtUpSinceSubscribe = false;
     // Read again once live: a head saved between the first read and the
     // subscription would otherwise wait for the next resume.
-    if (subscribed && !wasSubscribed && _startupFetchSucceeded) {
-      await _fetchAndMerge();
+    if (subscribed && !_caughtUpSinceSubscribe && _startupFetchSucceeded) {
+      _caughtUpSinceSubscribe = await _fetchAndMerge();
       if (_disposed) return;
     }
 
-    if (!_startupFetchSucceeded || !subscribed) {
+    if (!_startupFetchSucceeded || !subscribed || !_caughtUpSinceSubscribe) {
       _scheduleStartupRetry();
     } else {
       // Fully recovered — later transient failures (e.g. a late relay
@@ -526,8 +529,13 @@ class ChannelSectionsManager {
       return;
     }
 
-    // Read-before-write: merge remote state before publishing
-    await _fetchAndMerge(allowDisposed: allowDisposed);
+    // Read-before-write: only a successful read can rule out a unified head
+    // the legacy record must not follow.
+    if (!await _fetchAndMerge(allowDisposed: allowDisposed)) {
+      _retryPublishLater();
+      return;
+    }
+    _failedPreflights = 0;
 
     // No-op suppression: skip if nothing changed
     if (_isIdenticalToLastPublished() ||
@@ -553,6 +561,11 @@ class ChannelSectionsManager {
         ],
         createdAt: createdAt,
         onSigned: (event) => signedId = event.id,
+        // A unified head can arrive during the relay's rate-limit wait.
+        mayPublish: () async =>
+            (allowDisposed || !_disposed) &&
+            _workspace == null &&
+            _servesThisCommunity,
       );
 
       // Keep the cursor a coherent (created_at, id) pair so an OK that beats
@@ -576,6 +589,21 @@ class ChannelSectionsManager {
     } catch (error) {
       debugPrint('[ChannelSectionsManager] publish failed: $error');
     }
+  }
+
+  /// Retries a publish whose preflight read failed, backing off to 40s.
+  void _retryPublishLater() {
+    if (_disposed || _publishDebounce != null) return;
+    final delay = Duration(seconds: 5 << min(_failedPreflights++, 3));
+    _publishPending = true;
+    _publishDebounce = Timer(delay, () {
+      _publishDebounce = null;
+      unawaited(
+        _publish().whenComplete(
+          () => _publishPending = _publishDebounce != null,
+        ),
+      );
+    });
   }
 
   /// Switching community rebuilds the session in place before this manager

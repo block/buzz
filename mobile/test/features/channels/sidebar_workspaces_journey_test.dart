@@ -1,16 +1,16 @@
 import 'package:buzz/features/channels/channel.dart';
-import 'package:buzz/features/channels/channel_sections/channel_sections_provider.dart';
-import 'package:buzz/features/channels/channel_sections/workspace_layout.dart';
-import 'package:buzz/features/channels/channel_sort/channel_sort_provider.dart';
 import 'package:buzz/features/channels/channel_stars/channel_stars_provider.dart';
 import 'package:buzz/features/channels/channel_stars/channel_stars_storage.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/me/me_page.dart';
+import 'package:buzz/features/channels/me/me_unread_provider.dart';
 import 'package:buzz/features/home/home_page.dart';
 import 'package:buzz/features/home/messages_filters.dart';
 import 'package:buzz/shared/me/default_agent.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
 import 'package:buzz/shared/me/me_groups.dart';
+import 'package:buzz/shared/community/community.dart';
+import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -20,8 +20,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Home renders desktop's unified sidebar: its order, its filings across
-/// team and Solo rows, and no edits mobile can't save.
+import 'sidebar_sync_fixture.dart';
+
+/// Home renders desktop's unified sidebar once its records arrive: its
+/// order, its filings across team and Solo rows, and no edits mobile can't
+/// save.
 void main() {
   testWidgets('Home follows desktop workspaces and keeps them read-only', (
     tester,
@@ -31,33 +34,45 @@ void main() {
     addTearDown(tester.view.reset);
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
-    final workspace = WorkspaceRecord.fromJson({
-      'version': 1,
-      'sections': [
-        {'id': 'launch', 'name': 'Launch', 'icon': '🚀', 'order': 0},
-        {'id': 'later', 'name': 'Later', 'order': 1},
-      ],
-      'assignments': {'design-crit': 'launch', 'solo-plan': 'launch'},
-      // Saved on desktop with Team above Solo. Later is newer than the
-      // reorder, so it follows Launch.
-      'sectionOrder': ['starred', 'group:launch', 'channels', 'solo', 'dms'],
-    });
+    final relay = SidebarRelay();
+    // The relay this Home's config names; its store holds the heads below.
+    relay.session.debugRelayUrl = 'https://relay.example';
+    _viewer = relay.pubkey;
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    // Before desktop's unified record, the legacy Team sections apply.
+    relay.stored.add(
+      relay.event('channel-sections', {
+        'version': 1,
+        'sections': [
+          {'id': 'old', 'name': 'Old', 'order': 0},
+        ],
+        'assignments': {'design-crit': 'old'},
+      }, now - 60),
+    );
 
     await tester.pumpWidget(
       ProviderScope(
         retry: (_, _) => null,
         overrides: [
           savedPrefsProvider.overrideWithValue(prefs),
-          myPubkeyProvider.overrideWithValue('viewer'),
+          relayConfigProvider.overrideWith(() => _Config(relay.keys.nsec)),
+          relaySessionProvider.overrideWith(() => relay.session),
+          activeCommunityProvider.overrideWith(
+            (ref) async => Community(
+              id: 'example',
+              name: 'Example',
+              relayUrl: 'https://relay.example',
+              addedAt: DateTime(2026),
+            ),
+          ),
           channelsProvider.overrideWith(_Channels.new),
           meGroupsProvider.overrideWith(
             (ref) => Stream.value(const MeGroups()),
           ),
           defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
           meAssistantsProvider.overrideWith((ref) async => []),
-          channelSectionsProvider.overrideWith(() => _Sections(workspace)),
-          channelSortProvider.overrideWith(_UnifiedSort.new),
           channelStarsProvider.overrideWith(_Stars.new),
+          meUnreadChannelIdsProvider.overrideWith(_SoloUnread.new),
         ],
         child: MaterialApp(
           theme: AppTheme.light(),
@@ -82,6 +97,40 @@ void main() {
       matching: find.text(text),
     );
     double top(String text) => tester.getTopLeft(inList(text)).dy;
+
+    // Legacy sections stay editable.
+    expect(top('design-crit'), greaterThan(top('Old')));
+    await tester.tap(find.byTooltip('Old options'));
+    await tester.pumpAndSettle();
+    expect(find.text('Rename section'), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+
+    // Desktop saves its unified records; they arrive live.
+    for (final head in [
+      relay.event('channel-workspaces', {
+        'version': 1,
+        'sections': [
+          {'id': 'launch', 'name': 'Launch', 'icon': '🚀', 'order': 0},
+          {'id': 'later', 'name': 'Later', 'order': 1},
+        ],
+        'assignments': {'design-crit': 'launch', 'solo-plan': 'launch'},
+        // Saved with Team above Solo. Later is newer than the reorder, so
+        // it follows Launch.
+        'sectionOrder': ['starred', 'group:launch', 'channels', 'solo', 'dms'],
+        'legacyImportClosed': true,
+      }, now),
+      relay.event('channel-workspace-sort', {
+        'version': 1,
+        'groups': {'group:launch': 'recent'},
+      }, now),
+    ]) {
+      relay
+        ..stored.add(head)
+        ..emit(head);
+    }
+    await tester.pumpAndSettle();
+    expect(inList('Old'), findsNothing);
 
     final order = [
       'Starred',
@@ -117,8 +166,12 @@ void main() {
     expect(find.text('Delete section'), findsNothing);
     final sortChoice = find.byKey(const ValueKey('section-choice-Sort-Recent'));
     expect(tester.widget<AppListRow>(sortChoice).onTap, isNull);
-    await tester.tap(find.text('Cancel'));
+    // Unreads keeps the unread Solo chat its row shows as unread.
+    await tester.tap(find.text('Unreads'));
+    await tester.tap(find.text('Apply'));
     await tester.pumpAndSettle();
+    expect(inList('solo-plan'), findsOneWidget);
+    expect(inList('design-crit'), findsNothing);
 
     // Solo lists only Solo rows, still in their workspaces.
     await tester.tap(
@@ -139,9 +192,14 @@ void main() {
     ]) {
       expect(inList(hidden), findsNothing, reason: hidden);
     }
+    // Only the filter choice was saved; no layout or sort record desktop
+    // would have to reconcile.
+    expect(relay.published.map((e) => e.getTagValue('d')), ['channel-filter']);
     await tester.pumpWidget(const SizedBox());
   });
 }
+
+late String _viewer;
 
 Channel _channel(String id, {bool solo = false}) => Channel(
   id: id,
@@ -150,7 +208,7 @@ Channel _channel(String id, {bool solo = false}) => Channel(
   visibility: 'private',
   labels: solo ? const ['buzz.solo'] : const [],
   description: '',
-  createdBy: solo ? 'viewer' : 'other',
+  createdBy: solo ? _viewer : 'other',
   createdAt: DateTime(2026),
   memberCount: 2,
   isMember: true,
@@ -167,21 +225,6 @@ class _Channels extends ChannelsNotifier {
   ];
 }
 
-class _Sections extends ChannelSectionsNotifier {
-  _Sections(this._workspace);
-  final WorkspaceRecord _workspace;
-
-  @override
-  ChannelSectionsState build() =>
-      ChannelSectionsState(isReady: true, workspace: _workspace, version: 1);
-}
-
-class _UnifiedSort extends ChannelSortNotifier {
-  @override
-  ChannelSortState build() =>
-      const ChannelSortState(isReady: true, editable: false);
-}
-
 class _Stars extends ChannelStarsNotifier {
   @override
   ChannelStarsState build() => const ChannelStarsState(
@@ -190,4 +233,18 @@ class _Stars extends ChannelStarsNotifier {
       channels: {'pinned': ChannelStarEntry(starred: true, updatedAt: 1)},
     ),
   );
+}
+
+class _Config extends RelayConfigNotifier {
+  _Config(this._nsec);
+  final String _nsec;
+
+  @override
+  RelayConfig build() =>
+      RelayConfig(baseUrl: 'https://relay.example', nsec: _nsec);
+}
+
+class _SoloUnread extends MeUnreadChannelIds {
+  @override
+  Set<String> build() => const {'solo-plan'};
 }

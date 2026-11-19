@@ -122,6 +122,9 @@ Future<Channel> _createMeChat(
                 secretKey: sync.privateHex,
               ).toMap(),
             );
+  // Desktop's unified record can arrive mid-creation and owns filings then.
+  String? filing() =>
+      ref.read(channelSectionsProvider).editable ? project : null;
   final intent = MeChatCreation(
     channelId,
     name,
@@ -167,10 +170,12 @@ Future<Channel> _createMeChat(
       final latest = await sync.head();
       if (latest == null) return false;
       final groups = sync.decode(latest);
+      final group = filing();
       return groups.channels.contains(channelId) &&
-          (project == null || groups.assignments[channelId] == project);
+          (group == null || groups.assignments[channelId] == group);
     },
+    // The chat is still created; only a filing desktop now owns is dropped.
     place: () =>
-        sync.update((current) => current.place(channelId, group: project)),
+        sync.update((current) => current.place(channelId, group: filing())),
   );
 }

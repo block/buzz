@@ -349,6 +349,10 @@ class _SliverChannelsList extends HookConsumerWidget {
       highlights.rowUnread,
     );
     final attentionChannelIds = highlights.attention.where(seeded).toSet();
+    // Solo rows show Solo's own unread state; filters must agree with it.
+    final soloUnreadIds = soloSliver == null
+        ? const <String>{}
+        : ref.watch(meUnreadChannelIdsProvider);
 
     final liveSectionIds = [for (final s in layout.sections) s.id];
     // Desktop's unified sort record is read-only here.
@@ -375,9 +379,10 @@ class _SliverChannelsList extends HookConsumerWidget {
       final evidence = activity[channel.id];
       return channelMatchesFilter(
         mode: filters?.store.modeFor(group) ?? ChannelFilterMode.all,
-        unread:
-            rowUnreadChannelIds.contains(channel.id) ||
-            attentionChannelIds.contains(channel.id),
+        unread: isSoloRow(channel)
+            ? soloUnreadIds.contains(channel.id)
+            : rowUnreadChannelIds.contains(channel.id) ||
+                  attentionChannelIds.contains(channel.id),
         activitySeconds: evidence?.asData?.value,
         activityKnown: evidence?.asData != null,
         nowSeconds: now,

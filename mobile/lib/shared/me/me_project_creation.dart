@@ -5,6 +5,16 @@ import 'me_groups.dart';
 import 'me_sync.dart';
 import 'me_journal.dart';
 
+/// Another client now owns workspace filings, so this one must not write them.
+class MeFilingClosed implements Exception {
+  /// Thrown before any filing reaches the relay.
+  const MeFilingClosed();
+
+  @override
+  String toString() =>
+      'Workspaces are now organized on desktop. Create this one there.';
+}
+
 /// An accepted project name and stable ID, retained until confirmed or discarded.
 class MeProjectCreation {
   /// Stable UUID reused across restarts and retries.
@@ -85,7 +95,10 @@ class MeProjectCreation {
   }
 
   /// Retry using the same ID, preserving projects already confirmed on desktop.
-  Future<void> complete(MeSync sync) async {
+  /// [mayFile] is asked again as the write is built; when it says no, this
+  /// throws [MeFilingClosed] without writing.
+  Future<void> complete(MeSync sync, {bool Function()? mayFile}) async {
+    if (mayFile?.call() == false) throw const MeFilingClosed();
     await save(sync);
     final record = sync.prefs!.getString(storageKey(sync))!;
     final head = await sync.head();
@@ -96,6 +109,7 @@ class MeProjectCreation {
         (channelId == null || confirmed.assignments[channelId] == id);
     if (!exists || sync.prefs?.getString(sync.pendingKey) != null) {
       await sync.update((current) {
+        if (mayFile?.call() == false) throw const MeFilingClosed();
         final groups = current.groups.any((g) => g['id'] == id)
             ? current
             : MeGroups(
