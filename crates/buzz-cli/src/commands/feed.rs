@@ -20,8 +20,8 @@ const WATCH_POLL_SECS: u64 = 5;
 
 /// Split and validate a `--types` value against [`VALID_FEED_TYPES`].
 ///
-/// Shared by `feed get` and `feed watch` so both reject the same bad input
-/// with the same message.
+/// Only `feed get` accepts `--types`: the relay honors `feed_types` on its
+/// HTTP query path but drops it from WebSocket `REQ` filters.
 fn parse_feed_types(types_str: &str) -> Result<Vec<&str>, CliError> {
     let type_list: Vec<&str> = types_str.split(',').map(str::trim).collect();
     for t in &type_list {
@@ -37,9 +37,8 @@ fn parse_feed_types(types_str: &str) -> Result<Vec<&str>, CliError> {
 
 /// Build the relay filter for the activity feed.
 ///
-/// Shared by `feed get` and `feed watch` so a stream and a one-shot read
-/// select exactly the same events. `limit` is omitted for the streaming case,
-/// where the relay should not cap the live subscription.
+/// Shared by `feed get` and `feed watch`. `limit` is omitted for the streaming
+/// case, where the relay should not cap the live subscription.
 fn build_feed_filter(
     my_pubkey: &str,
     since: Option<i64>,
@@ -61,6 +60,56 @@ fn build_feed_filter(
         filter["#h"] = serde_json::json!([c]);
     }
     filter
+}
+
+/// Build the `REQ` filter for `feed watch`.
+///
+/// Never carries `feed_types`: the relay parses WebSocket filters as plain
+/// NIP-01 filters and silently drops that key, so sending it would look like
+/// filtering while streaming everything.
+fn build_watch_filter(
+    my_pubkey: &str,
+    since: Option<i64>,
+    channel: Option<&str>,
+) -> serde_json::Value {
+    build_feed_filter(my_pubkey, since, None, None, channel)
+}
+
+/// What the watch loop should do with one relay message.
+#[derive(Debug, PartialEq)]
+enum WatchAction {
+    /// Write this NDJSON line to stdout.
+    Emit(String),
+    /// Print this to stderr and keep streaming.
+    Notice(String),
+    /// Print this to stderr and stop: the relay closed our subscription.
+    Closed(String),
+    /// Answer a NIP-42 re-auth challenge.
+    Reauth,
+    /// Nothing to do.
+    Ignore,
+}
+
+/// Decide how the watch loop handles one relay message. Pure, so the
+/// routing can be tested without a live relay.
+fn watch_action(msg: &RelayMessage, sub_id: &str) -> Result<WatchAction, CliError> {
+    Ok(match msg {
+        RelayMessage::Event {
+            subscription_id,
+            event,
+        } if subscription_id == sub_id => WatchAction::Emit(
+            serde_json::to_string(event).map_err(|e| CliError::Other(e.to_string()))?,
+        ),
+        RelayMessage::Closed {
+            subscription_id,
+            message,
+        } if subscription_id == sub_id => {
+            WatchAction::Closed(format!("relay closed subscription: {message}"))
+        }
+        RelayMessage::Notice { message } => WatchAction::Notice(format!("relay notice: {message}")),
+        RelayMessage::Auth { .. } => WatchAction::Reauth,
+        _ => WatchAction::Ignore,
+    })
 }
 
 /// Generate a NIP-01 subscription id (1–64 chars).
@@ -96,27 +145,22 @@ pub async fn cmd_get_feed(
 /// Stream activity feed entries as NDJSON until Ctrl-C or idle timeout.
 ///
 /// Opens its own authenticated WebSocket connection and issues a NIP-01 `REQ`
-/// with the same filter [`cmd_get_feed`] builds. One JSON object is written per
+/// for events mentioning us. One JSON object is written per
 /// line to stdout and flushed immediately; relay notices and closures go to
 /// stderr so a `| jq` consumer only ever sees events.
 pub async fn cmd_watch_feed(
     client: &BuzzClient,
-    types: Option<&str>,
     since: Option<i64>,
     channel: Option<&str>,
     idle_timeout: u64,
 ) -> Result<(), CliError> {
     let my_pk = client.public_key().to_hex();
 
-    let parsed_types = match types {
-        Some(t) => Some(parse_feed_types(t)?),
-        None => None,
-    };
     if let Some(c) = channel {
         crate::validate::validate_uuid(c)?;
     }
 
-    let filter = build_feed_filter(&my_pk, since, None, parsed_types.as_deref(), channel);
+    let filter = build_watch_filter(&my_pk, since, channel);
     let sub_id = new_subscription_id();
 
     // NIP-42 signing goes through the credentials' signer (local keys or the
@@ -180,21 +224,26 @@ async fn watch_loop(
             _ = tokio::signal::ctrl_c() => return Ok(()),
             _ = idle_expired => return Ok(()),
             msg = conn.next_event(poll) => {
-                match msg {
-                    Ok(RelayMessage::Event { event, .. }) => {
+                let msg = match msg {
+                    Ok(m) => m,
+                    // A poll that expired with no frame is the normal idle path.
+                    // Anything else — a closed socket, a transport failure — is
+                    // terminal and must surface rather than spin.
+                    Err(WsClientError::Timeout) => continue,
+                    Err(e) => return Err(CliError::Other(e.to_string())),
+                };
+                match watch_action(&msg, sub_id)? {
+                    WatchAction::Emit(line) => {
                         last_event = Instant::now();
-                        let line = serde_json::to_string(&event)
-                            .map_err(|e| CliError::Other(e.to_string()))?;
                         writeln!(stdout, "{line}").map_err(|e| CliError::Other(e.to_string()))?;
                         stdout.flush().map_err(|e| CliError::Other(e.to_string()))?;
                     }
-                    Ok(RelayMessage::Eose { .. }) => {}
-                    Ok(RelayMessage::Closed { message, .. }) => {
-                        eprintln!("relay closed subscription: {message}");
+                    WatchAction::Notice(text) => eprintln!("{text}"),
+                    WatchAction::Closed(text) => {
+                        eprintln!("{text}");
                         return Ok(());
                     }
-                    Ok(RelayMessage::Notice { message }) => eprintln!("relay notice: {message}"),
-                    Ok(RelayMessage::Auth { .. }) => {
+                    WatchAction::Reauth => {
                         // Re-auth waits on the relay's OK, so it has to keep racing
                         // both Ctrl-C and the idle deadline. A relay that issues
                         // AUTH and withholds OK would otherwise swallow a SIGINT and
@@ -217,12 +266,7 @@ async fn watch_loop(
                             },
                         }
                     }
-                    Ok(RelayMessage::Ok(_)) | Ok(RelayMessage::Count { .. }) => {}
-                    // A poll that expired with no frame is the normal idle path.
-                    // Anything else — a closed socket, a transport failure — is
-                    // terminal and must surface rather than spin.
-                    Err(WsClientError::Timeout) => {}
-                    Err(e) => return Err(CliError::Other(e.to_string())),
+                    WatchAction::Ignore => {}
                 }
             }
         }
@@ -242,26 +286,20 @@ pub async fn dispatch(
             types,
         } => cmd_get_feed(client, since, limit, types.as_deref(), format).await,
         FeedCmd::Watch {
-            types,
             since,
             channel,
             idle_timeout,
-        } => {
-            cmd_watch_feed(
-                client,
-                types.as_deref(),
-                since,
-                channel.as_deref(),
-                idle_timeout,
-            )
-            .await
-        }
+        } => cmd_watch_feed(client, since, channel.as_deref(), idle_timeout).await,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{build_feed_filter, new_subscription_id, parse_feed_types};
+    use super::{
+        build_feed_filter, build_watch_filter, new_subscription_id, parse_feed_types, watch_action,
+        WatchAction,
+    };
+    use buzz_ws_client::RelayMessage;
     use serde_json::json;
 
     const PUBKEY: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
@@ -321,6 +359,90 @@ mod tests {
         assert_eq!(full["feed_types"], json!(["mentions"]));
         assert_eq!(full["#h"], json!([UUID]));
         assert_eq!(full["#p"], json!([PUBKEY]));
+    }
+
+    #[test]
+    fn the_watch_filter_never_carries_feed_types() {
+        let bare = build_watch_filter(PUBKEY, None, None);
+        assert_eq!(bare, json!({ "#p": [PUBKEY] }));
+
+        let full = build_watch_filter(PUBKEY, Some(1_783_497_600), Some(UUID));
+        assert!(full.get("feed_types").is_none());
+        assert!(full.get("limit").is_none());
+        assert_eq!(full["since"], json!(1_783_497_600));
+        assert_eq!(full["#h"], json!([UUID]));
+    }
+
+    #[test]
+    fn the_get_filter_still_carries_feed_types() {
+        let f = build_feed_filter(PUBKEY, None, Some(20), Some(&["mentions"]), None);
+        assert_eq!(f["feed_types"], json!(["mentions"]));
+    }
+
+    fn signed_event() -> nostr::Event {
+        nostr::EventBuilder::new(nostr::Kind::TextNote, "hello")
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap()
+    }
+
+    #[test]
+    fn an_event_for_our_subscription_is_emitted_as_one_json_line() {
+        let event = signed_event();
+        let msg = RelayMessage::Event {
+            subscription_id: "sub".into(),
+            event: Box::new(event.clone()),
+        };
+        let WatchAction::Emit(line) = watch_action(&msg, "sub").unwrap() else {
+            panic!("expected Emit");
+        };
+        assert!(!line.contains('\n'));
+        let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(parsed["id"], json!(event.id.to_hex()));
+        assert_eq!(parsed["content"], json!("hello"));
+    }
+
+    #[test]
+    fn messages_for_another_subscription_are_ignored() {
+        let event = RelayMessage::Event {
+            subscription_id: "other".into(),
+            event: Box::new(signed_event()),
+        };
+        assert_eq!(watch_action(&event, "sub").unwrap(), WatchAction::Ignore);
+        let closed = RelayMessage::Closed {
+            subscription_id: "other".into(),
+            message: "bye".into(),
+        };
+        assert_eq!(watch_action(&closed, "sub").unwrap(), WatchAction::Ignore);
+    }
+
+    #[test]
+    fn eose_notice_closed_and_auth_are_routed() {
+        let eose = RelayMessage::Eose {
+            subscription_id: "sub".into(),
+        };
+        assert_eq!(watch_action(&eose, "sub").unwrap(), WatchAction::Ignore);
+
+        let notice = RelayMessage::Notice {
+            message: "slow down".into(),
+        };
+        assert_eq!(
+            watch_action(&notice, "sub").unwrap(),
+            WatchAction::Notice("relay notice: slow down".into())
+        );
+
+        let closed = RelayMessage::Closed {
+            subscription_id: "sub".into(),
+            message: "restricted".into(),
+        };
+        assert_eq!(
+            watch_action(&closed, "sub").unwrap(),
+            WatchAction::Closed("relay closed subscription: restricted".into())
+        );
+
+        let auth = RelayMessage::Auth {
+            challenge: "c".into(),
+        };
+        assert_eq!(watch_action(&auth, "sub").unwrap(), WatchAction::Reauth);
     }
 
     #[test]

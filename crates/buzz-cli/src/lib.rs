@@ -1526,12 +1526,9 @@ pub enum FeedCmd {
     },
     /// Stream activity feed entries as they arrive (NDJSON, one event per line)
     #[command(
-        after_help = "Examples:\n  buzz feed watch\n  buzz feed watch --types mentions\n  buzz feed watch --since 1783497600 | jq -r '.content'"
+        after_help = "Examples:\n  buzz feed watch\n  buzz feed watch --since 1783497600 | jq -r '.content'\n\nType filtering (--types) is only available on `buzz feed get`."
     )]
     Watch {
-        /// Comma-separated feed types to include: mentions, needs_action, activity, agent_activity
-        #[arg(long)]
-        types: Option<String>,
         /// Unix timestamp — replay entries after this time before going live
         #[arg(long)]
         since: Option<i64>,
@@ -2910,6 +2907,13 @@ mod tests {
             "--emoji alone must not imply a status"
         );
         assert!(Cli::try_parse_from(["buzz", "users", "set-status", "--clear"]).is_ok());
+    }
+
+    #[test]
+    fn feed_watch_rejects_types_but_feed_get_keeps_it() {
+        assert!(Cli::try_parse_from(["buzz", "feed", "watch", "--types", "mentions"]).is_err());
+        assert!(Cli::try_parse_from(["buzz", "feed", "watch"]).is_ok());
+        assert!(Cli::try_parse_from(["buzz", "feed", "get", "--types", "mentions"]).is_ok());
     }
 
     #[test]

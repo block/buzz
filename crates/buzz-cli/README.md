@@ -175,7 +175,7 @@ buzz channels list | jq '.[].name'
 # Activity feed
 buzz feed get --limit 20
 buzz feed watch                                  # stream NDJSON until Ctrl-C
-buzz feed watch --types mentions | jq -r '.content'
+buzz feed watch | jq -r '.content'
 buzz feed watch --since 1783497600               # replay backfill, then stay live
 ```
 
@@ -210,7 +210,9 @@ CLI: it still shows in `sort list`, `sort set` refuses it, and `sort reset
 `feed watch` writes one JSON event per line and flushes immediately, so it
 composes with `jq --unbuffered` and other line-oriented consumers. Relay
 notices and subscription closures go to stderr, leaving stdout pure NDJSON.
-`feed get` keeps its JSON-array output unchanged.
+`feed get` keeps its JSON-array output unchanged. Type filtering (`--types`)
+is only on `feed get`: the relay applies `feed_types` to HTTP queries, not to
+WebSocket subscriptions, so `feed watch` streams every feed entry.
 
 `protect set` replaces every existing rule for the exact ref pattern. Any
 constraint omitted from the command is removed. `protect list` reports malformed
