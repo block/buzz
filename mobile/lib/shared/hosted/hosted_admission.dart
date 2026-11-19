@@ -168,7 +168,11 @@ class HostedAdmission {
         RelayConfig(baseUrl: community.relayUrl, nsec: community.nsec),
         fresh: true,
       );
-      socket.diagnostics = diagnostics;
+      // The joining identity isn't the member reports name yet.
+      socket.diagnostics = SignerDiagnosticReporter(
+        diagnostics,
+        signer: pubkeyFromNsec(community.nsec),
+      );
       await socket.connect().timeout(const Duration(seconds: 30));
       if (socket.state != SocketState.connected) throw AccountFailure.denied;
     } finally {

@@ -92,6 +92,9 @@ Future<NostrEvent> submitSignedEventOnce({
     createdAt: createdAt,
   );
   final event = NostrEvent.fromJson(signed.toMap());
+  // The signer may be a community that isn't active, such as a removed one's
+  // push tombstone; its reports must not name the active member.
+  final reporter = SignerDiagnosticReporter(diagnostics, signer: event.pubkey);
   final result = Completer<NostrEvent>();
   late final RelaySocket socket;
   socket = RelaySocket(
@@ -119,7 +122,7 @@ Future<NostrEvent> submitSignedEventOnce({
           );
         } else {
           if (isInvalidRequestRejection(detail)) {
-            diagnostics.reportError(
+            reporter.reportError(
               RelayInvalidRequest(),
               StackTrace.current,
               operation: DiagnosticOperation.relayRejection,
@@ -137,7 +140,7 @@ Future<NostrEvent> submitSignedEventOnce({
     },
   );
   socket.headers = headers;
-  socket.diagnostics = diagnostics;
+  socket.diagnostics = reporter;
   final resultFuture = result.future.timeout(timeout);
   try {
     await socket.connect();

@@ -1070,6 +1070,7 @@ class _SnapshotStore extends InMemorySharedPreferencesStore {
 }
 
 class _MemberRecorder extends NoopDiagnosticReporter {
+  @override
   String? member = 'unset';
 
   @override

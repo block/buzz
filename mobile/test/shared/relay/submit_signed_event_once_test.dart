@@ -35,12 +35,13 @@ void main() {
       'a refusal "$reason" ${reported ? 'is' : 'is not'} reported',
       () async {
         final server = await relayRefusing(reason);
-        final reporter = _RecordingDiagnostics();
+        final keys = nostr.Keys.generate();
+        final reporter = _RecordingDiagnostics()..setMember(keys.public);
 
         await expectLater(
           submitSignedEventOnce(
             wsUrl: 'ws://127.0.0.1:${server.port}',
-            nsec: nostr.Keys.generate().nsec,
+            nsec: keys.nsec,
             kind: 1,
             content: '',
             tags: const [],
@@ -56,10 +57,41 @@ void main() {
       },
     );
   }
+
+  // A removed community's tombstone, say, signs with a key other than the
+  // active member's. Its report would name the wrong member.
+  for (final member in [nostr.Keys.generate().public, null]) {
+    test('a refusal for a signer that is not the member ($member) is not '
+        'reported', () async {
+      final server = await relayRefusing('invalid: bad signature');
+      final reporter = _RecordingDiagnostics()..setMember(member);
+
+      await expectLater(
+        submitSignedEventOnce(
+          wsUrl: 'ws://127.0.0.1:${server.port}',
+          nsec: nostr.Keys.generate().nsec,
+          kind: 1,
+          content: '',
+          tags: const [],
+          diagnostics: reporter,
+        ),
+        throwsA(isA<Exception>()),
+      );
+
+      expect(reporter.errors, isEmpty);
+    });
+  }
 }
 
 class _RecordingDiagnostics extends NoopDiagnosticReporter {
   final errors = <(Type, DiagnosticOperation)>[];
+  String? _member;
+
+  @override
+  String? get member => _member;
+
+  @override
+  void setMember(String? pubkey) => _member = pubkey;
 
   @override
   void reportError(

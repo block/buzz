@@ -208,13 +208,13 @@ class BuzzPushLeaseDescriptor {
   }
 }
 
-/// The desired lease requires channel IDs that this relay cannot accept yet.
 /// The relay does not offer Buzz push: an expected answer, not a fault.
 class BuzzPushNotAdvertised extends FormatException {
   const BuzzPushNotAdvertised()
     : super('NIP-11 does not advertise buzz-push-v1');
 }
 
+/// The desired lease requires channel IDs that this relay cannot accept yet.
 class BuzzPushChannelGrammarException implements Exception {
   const BuzzPushChannelGrammarException();
 

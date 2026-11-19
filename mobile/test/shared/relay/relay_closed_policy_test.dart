@@ -35,6 +35,9 @@ void main() {
       'invalid: channel is archived': false,
       'invalid: an open channel named "general" already exists': false,
       'invalid: event timestamp too far from server time': false,
+      'invalid: policy:nobody \u2014 this agent has disabled external channel additions':
+          false,
+      'invalid: policy:owner_only': false,
       'duplicate: channel already exists': false,
       'restricted: access revoked': false,
       'rate-limited: quota exceeded; retry in 4s': false,

@@ -24,6 +24,9 @@ abstract interface class DiagnosticReporter {
 
   /// Attributes later reports and counts to [pubkey], or to no one.
   void setMember(String? pubkey);
+
+  /// The member later reports and counts name, as last given to [setMember].
+  String? get member;
 }
 
 /// Where an explicit error report comes from.
@@ -108,6 +111,49 @@ class NoopDiagnosticReporter implements DiagnosticReporter {
 
   @override
   void setMember(String? pubkey) {}
+
+  @override
+  String? get member => null;
+}
+
+/// Reports from work signed by [signer], such as a one-shot socket for a
+/// community that may not be active. They go through only while [signer] is
+/// the member [reporter] names; otherwise they would name another member.
+class SignerDiagnosticReporter implements DiagnosticReporter {
+  const SignerDiagnosticReporter(this.reporter, {required this.signer});
+
+  final DiagnosticReporter reporter;
+  final String? signer;
+
+  bool get _current => signer != null && reporter.member == signer;
+
+  @override
+  void reportError(
+    Object error,
+    StackTrace? stackTrace, {
+    required DiagnosticOperation operation,
+  }) {
+    if (_current) {
+      reporter.reportError(error, stackTrace, operation: operation);
+    }
+  }
+
+  @override
+  void countNetworkEvent(NetworkEvent event) {
+    if (_current) reporter.countNetworkEvent(event);
+  }
+
+  @override
+  void leaveBreadcrumb(DiagnosticBreadcrumb breadcrumb) {
+    if (_current) reporter.leaveBreadcrumb(breadcrumb);
+  }
+
+  /// Signed work never changes who the app's reports name.
+  @override
+  void setMember(String? pubkey) {}
+
+  @override
+  String? get member => reporter.member;
 }
 
 /// The reporter chosen at startup. The root scope overrides it; tests

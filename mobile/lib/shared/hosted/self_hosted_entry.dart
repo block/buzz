@@ -5,6 +5,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../community/community.dart';
+import '../relay/relay_provider.dart';
 import '../relay/relay_socket.dart';
 import '../storage/secure_storage.dart';
 import 'account_identity_store.dart';
@@ -177,7 +178,11 @@ class SelfHostedEntry {
     );
     try {
       socket.headers = headers;
-      socket.diagnostics = diagnostics;
+      // The joining identity isn't the member reports name yet.
+      socket.diagnostics = SignerDiagnosticReporter(
+        diagnostics,
+        signer: pubkeyFromNsec(community.nsec),
+      );
       await socket.connect().timeout(const Duration(seconds: 20));
       if (socket.state != SocketState.connected) {
         throw StateError('Community refused entry');
