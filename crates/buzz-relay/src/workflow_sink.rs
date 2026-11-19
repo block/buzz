@@ -540,8 +540,11 @@ impl ActionSink for RelayActionSink {
                     members.iter().map(|m| m.pubkey.clone()).collect();
                 // Verified names count only where the community advertises
                 // them, matching profile search; leftover heads stay inert.
-                let include_verified = crate::verified_profiles::discovery(&state, &tenant)
+                // A failed lookup fails the send like the reads around it,
+                // rather than silently dropping verified-only mentions.
+                let include_verified = crate::verified_profiles::try_discovery(&state, &tenant)
                     .await
+                    .map_err(|e| ActionSinkError::Database(e.to_string()))?
                     .is_some();
                 let named_members = state
                     .db
