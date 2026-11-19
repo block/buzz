@@ -2,6 +2,7 @@
 -- Conformance: durable invite records for atomic redemption, community-scoped.
 -- Stores only SHA-256(code) as 32-byte BYTEA; never the reusable bearer code.
 -- PK and UNIQUE both lead with community_id. max_uses NULL = unlimited.
+-- expires_at NULL = never expires.
 
 CREATE TABLE relay_invites (
     community_id  UUID        NOT NULL,
@@ -10,7 +11,7 @@ CREATE TABLE relay_invites (
     role         TEXT        NOT NULL DEFAULT 'member' CHECK (role = 'member'),
     max_uses     INTEGER     CHECK (max_uses BETWEEN 1 AND 10000),
     use_count    INTEGER     NOT NULL DEFAULT 0 CHECK (use_count >= 0),
-    expires_at   TIMESTAMPTZ NOT NULL,
+    expires_at   TIMESTAMPTZ,
     revoked_at   TIMESTAMPTZ,
     legacy_admission BOOLEAN NOT NULL DEFAULT true,
     created_by   TEXT        NOT NULL,

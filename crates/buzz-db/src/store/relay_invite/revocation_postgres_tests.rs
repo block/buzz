@@ -52,17 +52,17 @@ async fn ban_permanently_revokes_issued_invites_but_not_another_tenant() {
         .await
         .unwrap();
     let other = CommunityId::from_uuid(other_id);
-    let invite = mint_relay_invite(&pool, community, &issuer, 3600, None)
+    let invite = mint_relay_invite(&pool, community, &issuer, InviteExpiry::After(3600), None)
         .await
         .unwrap();
-    let unaffected = mint_relay_invite(&pool, other, &issuer, 3600, None)
+    let unaffected = mint_relay_invite(&pool, other, &issuer, InviteExpiry::After(3600), None)
         .await
         .unwrap();
     ban_member(&pool, community, &[1; 32], &[3; 32], None, None)
         .await
         .unwrap();
     assert!(matches!(
-        mint_relay_invite(&pool, community, &issuer, 3600, None).await,
+        mint_relay_invite(&pool, community, &issuer, InviteExpiry::After(3600), None).await,
         Err(crate::DbError::InviteRestricted)
     ));
     assert!(unban_member(&pool, community, &[1; 32], &[3; 32])
@@ -92,7 +92,7 @@ async fn ban_permanently_revokes_issued_invites_but_not_another_tenant() {
         .unwrap(),
         ClaimOutcome::Joined { .. }
     ));
-    let renewed = mint_relay_invite(&pool, community, &issuer, 3600, None)
+    let renewed = mint_relay_invite(&pool, community, &issuer, InviteExpiry::After(3600), None)
         .await
         .unwrap();
     assert!(matches!(
@@ -113,9 +113,15 @@ async fn ban_permanently_revokes_issued_invites_but_not_another_tenant() {
 #[ignore = "requires Postgres"]
 async fn nonmember_restrictions_cover_both_claim_formats_and_owner() {
     let (pool, community, issuer, claimant) = fixture().await;
-    let invite = mint_relay_invite(&pool, community, &issuer, 3600, Some(1))
-        .await
-        .unwrap();
+    let invite = mint_relay_invite(
+        &pool,
+        community,
+        &issuer,
+        InviteExpiry::After(3600),
+        Some(1),
+    )
+    .await
+    .unwrap();
     ban_member(&pool, community, &[2; 32], &[3; 32], None, None)
         .await
         .unwrap();
@@ -189,7 +195,7 @@ async fn issuer_agent_revocation_survives_owner_unban() {
     crate::user::set_agent_owner(&pool, community, &[1; 32], &[4; 32])
         .await
         .unwrap();
-    let invite = mint_relay_invite(&pool, community, &issuer, 3600, None)
+    let invite = mint_relay_invite(&pool, community, &issuer, InviteExpiry::After(3600), None)
         .await
         .unwrap();
     ban_member(&pool, community, &[4; 32], &[3; 32], None, None)
@@ -255,7 +261,14 @@ async fn stalled_production_mint_ignores_lifted_history_and_later_audit_touches(
     let (mint_pool, mint_name) = named_pool().await;
     let mint_issuer = issuer.clone();
     let mint = tokio::spawn(async move {
-        mint_relay_invite(&mint_pool, community, &mint_issuer, 3600, None).await
+        mint_relay_invite(
+            &mint_pool,
+            community,
+            &mint_issuer,
+            InviteExpiry::After(3600),
+            None,
+        )
+        .await
     });
     wait_for_lock(&pool, &mint_name, "advisory", &mint).await;
 
@@ -346,7 +359,7 @@ async fn stalled_production_mint_ignores_lifted_history_and_later_audit_touches(
 #[ignore = "requires Postgres"]
 async fn active_ban_lazily_revokes_new_protocol_rows() {
     let (pool, community, issuer, claimant) = fixture().await;
-    let invite = mint_relay_invite(&pool, community, &issuer, 3600, None)
+    let invite = mint_relay_invite(&pool, community, &issuer, InviteExpiry::After(3600), None)
         .await
         .unwrap();
     let legacy_admission: bool = sqlx::query_scalar(
@@ -510,9 +523,15 @@ async fn queued_claim(
 async fn claimant_ban_and_timeout_commit_before_queued_claim_without_consuming_a_use() {
     for timeout in [false, true] {
         let (pool, community, issuer, claimant) = fixture().await;
-        let invite = mint_relay_invite(&pool, community, &issuer, 3600, Some(1))
-            .await
-            .unwrap();
+        let invite = mint_relay_invite(
+            &pool,
+            community,
+            &issuer,
+            InviteExpiry::After(3600),
+            Some(1),
+        )
+        .await
+        .unwrap();
         // Hold the existing restriction row so the production writer stops only
         // after acquiring admission. The claim must queue behind that writer.
         ban_member(&pool, community, &[2; 32], &[3; 32], None, None)
@@ -569,7 +588,7 @@ async fn claimant_ban_and_timeout_commit_before_queued_claim_without_consuming_a
 #[ignore = "requires Postgres"]
 async fn owner_materialization_commits_before_queued_agent_claim() {
     let (pool, community, issuer, agent) = fixture().await;
-    let invite = mint_relay_invite(&pool, community, &issuer, 3600, None)
+    let invite = mint_relay_invite(&pool, community, &issuer, InviteExpiry::After(3600), None)
         .await
         .unwrap();
     sqlx::query("INSERT INTO users(community_id,pubkey) VALUES($1,$2),($1,$3)")
@@ -604,9 +623,15 @@ async fn owner_materialization_commits_before_queued_agent_claim() {
 #[ignore = "requires Postgres"]
 async fn admission_first_then_ban_preserves_the_committed_use_and_denies_retries() {
     let (pool, community, issuer, claimant) = fixture().await;
-    let invite = mint_relay_invite(&pool, community, &issuer, 3600, Some(2))
-        .await
-        .unwrap();
+    let invite = mint_relay_invite(
+        &pool,
+        community,
+        &issuer,
+        InviteExpiry::After(3600),
+        Some(2),
+    )
+    .await
+    .unwrap();
     assert!(matches!(
         claim_relay_invite_outcome(
             &pool,

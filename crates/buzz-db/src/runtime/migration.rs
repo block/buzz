@@ -1036,7 +1036,12 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 105);
+        assert_eq!(migrations.len(), 106);
+        assert_eq!(migrations[105].version, 106);
+        assert!(migrations[105]
+            .sql
+            .as_str()
+            .contains("ALTER TABLE relay_invites ALTER COLUMN expires_at DROP NOT NULL"));
         assert_eq!(migrations[104].version, 105);
         assert!(strip_sql_comments(migrations[104].sql.as_str())
             .contains("ADD COLUMN finished BOOLEAN NOT NULL DEFAULT true;"));
@@ -3487,6 +3492,7 @@ mod postgres_tests {
             "audit_log",
             "media_publications",
             "relay_members",
+            "relay_invites",
             "relay_admin_actions",
             "relay_admin_outbox",
             "relay_operator_audit",

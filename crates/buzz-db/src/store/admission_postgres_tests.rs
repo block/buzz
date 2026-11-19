@@ -188,7 +188,7 @@ async fn relay_invite_writers_require_application_admission() {
                 &db.pool,
                 *community,
                 &"e".repeat(64),
-                3600,
+                super::relay_invite::InviteExpiry::After(3600),
                 Some(1),
             )
             .await
@@ -212,7 +212,7 @@ async fn relay_invite_writers_require_application_admission() {
         &db.pool,
         communities[0],
         &"e".repeat(64),
-        3600,
+        super::relay_invite::InviteExpiry::After(3600),
         Some(1),
     )
     .await

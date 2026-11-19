@@ -415,6 +415,20 @@ async fn assert_admission_column(pool: &PgPool) {
         revoked,
         Some(("timestamp with time zone".into(), "YES".into(), None))
     );
+    let expires: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT data_type, is_nullable, column_default \
+         FROM information_schema.columns \
+         WHERE table_schema = 'public' AND table_name = 'relay_invites' \
+           AND column_name = 'expires_at'",
+    )
+    .fetch_optional(pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        expires,
+        Some(("timestamp with time zone".into(), "YES".into(), None)),
+        "a NULL expires_at is a never-expiring invite"
+    );
 }
 
 async fn apply_pgschema_to_existing_database(pool: &PgPool) {
@@ -685,4 +699,117 @@ async fn migration_schema_desired_pgschema_reconcile_matches_populated_upgrade()
         0,
         "pgschema preserves the legacy default for populated rows"
     );
+}
+
+/// Version of `0106_relay_invites_optional_expiry.sql`.
+const OPTIONAL_EXPIRY_MIGRATION: i64 = 106;
+
+async fn invite_rows(
+    pool: &PgPool,
+) -> Vec<(
+    Uuid,
+    Option<DateTime<Utc>>,
+    Option<DateTime<Utc>>,
+    i32,
+    Option<i32>,
+)> {
+    sqlx::query_as(
+        "SELECT id, expires_at, revoked_at, use_count, max_uses \
+         FROM relay_invites ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn claim_outcome(pool: &PgPool, community: CommunityId, code: &str) -> ClaimOutcome {
+    claim_relay_invite(
+        pool,
+        community,
+        &hash_v2_code(code),
+        &hex::encode(rand::random::<[u8; 32]>()),
+        None,
+        &nostr::Keys::generate(),
+    )
+    .await
+    .unwrap()
+    .outcome
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn migration_schema_optional_expiry_keeps_populated_invites_and_admits_permanent_ones() {
+    let (pool, _scratch) = crate::test_support::ScratchDb::migrated_through(
+        &crate::test_support::database_url(),
+        "invite_optional_expiry",
+        OPTIONAL_EXPIRY_MIGRATION - 1,
+    )
+    .await;
+    let community = Uuid::new_v4();
+    sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+        .bind(community)
+        .bind(format!("optional-expiry-{community}.example"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let community = CommunityId::from_uuid(community);
+    let issuer = hex::encode([1u8; 32]);
+    let mint = |max_uses| {
+        mint_relay_invite(
+            &pool,
+            community,
+            &issuer,
+            InviteExpiry::After(3600),
+            max_uses,
+        )
+    };
+    let finite = mint(Some(5)).await.unwrap();
+    let revoked = mint(None).await.unwrap();
+    let exhausted = mint(Some(1)).await.unwrap();
+    sqlx::query("UPDATE relay_invites SET revoked_at = now() WHERE id = $1")
+        .bind(revoked.invite_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        claim_outcome(&pool, community, &exhausted.code).await,
+        ClaimOutcome::Joined { .. }
+    ));
+    let before = invite_rows(&pool).await;
+
+    crate::migration::run_migrations(&pool).await.unwrap();
+    assert_admission_column(&pool).await;
+    assert_eq!(
+        invite_rows(&pool).await,
+        before,
+        "the migration rewrites no rows"
+    );
+
+    assert!(matches!(
+        claim_outcome(&pool, community, &finite.code).await,
+        ClaimOutcome::Joined { .. }
+    ));
+    assert_eq!(
+        claim_outcome(&pool, community, &revoked.code).await,
+        ClaimOutcome::Revoked
+    );
+    assert_eq!(
+        claim_outcome(&pool, community, &exhausted.code).await,
+        ClaimOutcome::Exhausted
+    );
+
+    let permanent = mint_relay_invite(&pool, community, &issuer, InviteExpiry::Never, None)
+        .await
+        .unwrap();
+    let stored: Option<DateTime<Utc>> =
+        sqlx::query_scalar("SELECT expires_at FROM relay_invites WHERE id = $1")
+            .bind(permanent.invite_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, None);
+    assert!(matches!(
+        claim_outcome(&pool, community, &permanent.code).await,
+        ClaimOutcome::Joined { .. }
+    ));
 }
