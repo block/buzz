@@ -10,6 +10,63 @@ import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
   test(
+    'persists the signed event before publishing and blocks delivery on disk failure',
+    () async {
+      final session = _PendingPublishRelaySession();
+      final signed = Completer<NostrEvent>();
+      final persisted = Completer<void>();
+      var didPublish = false;
+      unawaited(
+        session.published.then((_) {
+          didPublish = true;
+        }),
+      );
+      final send = SendMessage(
+        signedEventRelay: SignedEventRelay(
+          session: session,
+          nsec: nostr.Keys.generate().nsec,
+        ),
+        fetchMembers: (_) async => const [],
+        readUserCache: () => const {},
+        addLocalMessage: (_, _) {},
+        completeLocalMessage: (_, _) {},
+        removeLocalMessage: (_, _) {},
+      );
+      final result = send(
+        channelId: _channelId,
+        content: 'voice note',
+        beforePublish: (event) {
+          signed.complete(event);
+          return persisted.future;
+        },
+      );
+      await signed.future;
+      expect(didPublish, isFalse);
+      final rejected = expectLater(result, throwsStateError);
+      persisted.completeError(StateError('disk full'));
+      await rejected;
+      expect(didPublish, isFalse);
+
+      // A successful durable save must still respect the final send veto.
+      NostrEvent? saved;
+      await expectLater(
+        send(
+          channelId: _channelId,
+          content: 'retained voice note',
+          beforePublish: (event) => saved = event,
+          mayPublish: () async {
+            expect(saved?.content, 'retained voice note');
+            return false;
+          },
+        ),
+        throwsStateError,
+      );
+      expect(saved, isNotNull);
+      expect(didPublish, isFalse);
+    },
+  );
+
+  test(
     'adds the signed message locally before relay acknowledgement',
     () async {
       final session = _PendingPublishRelaySession();
@@ -274,7 +331,10 @@ class _PendingPublishRelaySession extends RelaySessionNotifier {
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
     Future<bool> Function()? mayPublish,
-  }) {
+  }) async {
+    if (mayPublish != null && !await mayPublish()) {
+      throw StateError('Event no longer wanted');
+    }
     this.event = event;
     _published.complete();
     return _result.future;

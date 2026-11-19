@@ -1,6 +1,7 @@
 package xyz.block.buzz.mobile
 
 import android.media.MediaCodec
+import android.media.MediaCodecList
 import android.media.MediaCodecInfo
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -78,22 +79,45 @@ internal object AndroidVoiceNotePackager {
         }
     }
 
+    internal data class EncoderCandidate(
+        val name: String,
+        val supportsSize: Boolean,
+        val colorFormats: IntArray,
+    )
+
+    internal fun selectEncoder(candidates: Sequence<EncoderCandidate>): Pair<String, Int> {
+        for (candidate in candidates) {
+            if (!candidate.supportsSize) continue
+            val color = candidate.colorFormats.firstOrNull {
+                it == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible ||
+                    it == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar ||
+                    it == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
+            } ?: continue
+            return candidate.name to color
+        }
+        throw IllegalStateException("This device cannot create the voice note envelope.")
+    }
+
     private fun writeBlackVideoTrack(
         outputFile: File,
         durationUs: Long,
     ) {
-        val codec = MediaCodec.createEncoderByType(videoMimeType)
+        val encoder = selectEncoder(
+            MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.asSequence()
+                .filter { it.isEncoder && it.supportedTypes.any { type -> type.equals(videoMimeType, true) } }
+                .map { info ->
+                    val capabilities = info.getCapabilitiesForType(videoMimeType)
+                    EncoderCandidate(
+                        info.name,
+                        capabilities.videoCapabilities.isSizeSupported(videoWidth, videoHeight),
+                        capabilities.colorFormats,
+                    )
+                },
+        )
+        val codec = MediaCodec.createByCodecName(encoder.first)
         var muxer: MediaMuxer? = null
         try {
-            val colorFormat = codec.codecInfo
-                .getCapabilitiesForType(videoMimeType)
-                .colorFormats
-                .firstOrNull {
-                    it == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible ||
-                        it == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar ||
-                        it == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
-                }
-                ?: throw IllegalStateException("This device cannot create the voice note envelope.")
+            val colorFormat = encoder.second
             val format = MediaFormat.createVideoFormat(
                 videoMimeType,
                 videoWidth,

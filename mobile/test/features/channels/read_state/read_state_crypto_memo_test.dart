@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -265,7 +266,8 @@ class _RecordingSignedEventRelay implements SignedEventRelay {
     required String content,
     required List<List<String>> tags,
     int? createdAt,
-    void Function(NostrEvent event)? onSigned,
+    FutureOr<void> Function(NostrEvent event)? onSigned,
+    void Function()? validateDelivery,
     Future<bool> Function()? mayPublish,
   }) async {
     contents.add(content);

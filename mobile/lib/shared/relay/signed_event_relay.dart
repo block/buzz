@@ -37,6 +37,7 @@ class SignedEventRelay {
     required List<List<String>> tags,
     int? createdAt,
     FutureOr<void> Function(NostrEvent event)? onSigned,
+    void Function()? validateDelivery,
     Future<bool> Function()? mayPublish,
   }) async {
     final nsec = _nsec;
@@ -61,6 +62,7 @@ class SignedEventRelay {
     // Durable callers must finish journaling the exact signed bytes before
     // the relay can accept an event whose acknowledgement might be lost.
     await onSigned?.call(nostrEvent);
+    validateDelivery?.call();
     return _session.publish(nostrEvent, mayPublish: mayPublish);
   }
 }

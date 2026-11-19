@@ -478,6 +478,7 @@ class _RecordingSender implements SendMessage {
     List<String>? mentionPubkeys,
     Channel? channel,
     List<List<String>> mediaTags = const [],
+    FutureOr<void> Function(NostrEvent)? beforePublish,
     Future<bool> Function()? mayPublish,
   }) async {
     if (mayPublish != null && !await mayPublish()) {

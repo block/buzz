@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/buzz_switch.dart';
 import 'dart:async';
 
 import 'package:buzz/features/settings/settings_page.dart';
@@ -105,15 +106,30 @@ void main() {
         reason:
             '${container.read(activeCommunityProvider)} / ${container.read(communityListProvider)}',
       );
-      expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
-      await tester.tap(find.byType(Switch));
+      expect(
+        tester
+            .widget<BuzzSwitch>(
+              find.descendant(
+                of: find.byKey(const ValueKey('push-notifications-setting')),
+                matching: find.byType(BuzzSwitch),
+              ),
+            )
+            .value,
+        isTrue,
+      );
+      await tester.tap(find.text('Notifications'));
       await tester.pumpAndSettle();
       final stored = (await storage.loadAll()).single;
       expect(stored.pushNotificationsEnabled, isFalse);
       expect(stored.pushSubscriptionState.pendingTombstoneGeneration, 8);
       expect(tombstones, [8]);
       expect(snapshots.last.single.pushNotificationsEnabled, isFalse);
-      final offSwitch = tester.widget<Switch>(find.byType(Switch));
+      final offSwitch = tester.widget<BuzzSwitch>(
+        find.descendant(
+          of: find.byKey(const ValueKey('push-notifications-setting')),
+          matching: find.byType(BuzzSwitch),
+        ),
+      );
       expect(offSwitch.value, isFalse);
       expect(offSwitch.onChanged, isNull);
       relayAvailable = true;

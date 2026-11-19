@@ -243,7 +243,9 @@ enum VoiceNotePackager {
 
         guard let exportSession = AVAssetExportSession(
             asset: composition,
-            presetName: AVAssetExportPresetMediumQuality
+            // Both tracks are already upload-ready H.264/AAC. Preserve them
+            // rather than requiring a second encoder (unavailable on some simulators).
+            presetName: AVAssetExportPresetPassthrough
         ) else {
             try? FileManager.default.removeItem(at: videoURL)
             result(

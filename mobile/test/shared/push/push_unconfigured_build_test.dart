@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/buzz_switch.dart';
 import 'package:buzz/features/settings/settings_page.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
@@ -124,11 +125,22 @@ void main() {
           if (enabled) {
             await tester.tap(find.text('Notifications'));
             await tester.pumpAndSettle();
-            final toggle = tester.widget<Switch>(find.byType(Switch));
+            final toggle = tester.widget<BuzzSwitch>(
+              find.descendant(
+                of: find.byKey(const ValueKey('push-notifications-setting')),
+                matching: find.byType(BuzzSwitch),
+              ),
+            );
             expect(toggle.value, isTrue);
             expect(toggle.onChanged, isNotNull);
           } else {
-            expect(find.byType(Switch), findsNothing);
+            expect(
+              find.descendant(
+                of: find.byKey(const ValueKey('push-notifications-setting')),
+                matching: find.byType(BuzzSwitch),
+              ),
+              findsNothing,
+            );
           }
           expect(tester.takeException(), isNull);
           debugDefaultTargetPlatformOverride = null;

@@ -1983,6 +1983,7 @@ class _FakeSignedEventRelay implements SignedEventRelay {
     required List<List<String>> tags,
     int? createdAt,
     FutureOr<void> Function(NostrEvent event)? onSigned,
+    void Function()? validateDelivery,
     Future<bool> Function()? mayPublish,
   }) async {
     submitCount++;
@@ -2014,6 +2015,7 @@ class _ParkedSignedEventRelay implements SignedEventRelay {
     required List<List<String>> tags,
     int? createdAt,
     FutureOr<void> Function(NostrEvent event)? onSigned,
+    void Function()? validateDelivery,
     Future<bool> Function()? mayPublish,
   }) async {
     contents.add(content);
@@ -2038,6 +2040,7 @@ class _UnsupportedKindSignedEventRelay implements SignedEventRelay {
     required List<List<String>> tags,
     int? createdAt,
     FutureOr<void> Function(NostrEvent event)? onSigned,
+    void Function()? validateDelivery,
     Future<bool> Function()? mayPublish,
   }) async {
     submitCount++;
@@ -2058,6 +2061,7 @@ class _MissingScopeSignedEventRelay implements SignedEventRelay {
     required List<List<String>> tags,
     int? createdAt,
     FutureOr<void> Function(NostrEvent event)? onSigned,
+    void Function()? validateDelivery,
     Future<bool> Function()? mayPublish,
   }) async {
     submitCount++;
