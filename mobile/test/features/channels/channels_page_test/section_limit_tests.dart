@@ -30,6 +30,17 @@ void _sectionLimitTests(
         build(
           overrides: [
             channelsProvider.overrideWith(() => _FakeNotifier(channels)),
+            readStateProvider.overrideWith(
+              () => _FakeReadStateNotifier(
+                const ReadStateState(
+                  isReady: true,
+                  pubkey: 'abc',
+                  contexts: {},
+                  version: 0,
+                  forcedUnreadContexts: {'item-0': 'item-0'},
+                ),
+              ),
+            ),
             channelSortProvider.overrideWith(
               () => _EditableTestSort(recent: true),
             ),
@@ -45,6 +56,11 @@ void _sectionLimitTests(
         lessThan(tester.getTopLeft(find.text('Item 3')).dy),
       );
       final more = find.text('Show more');
+      expect(find.text('Unread'), findsOneWidget);
+      expect(
+        find.bySemanticsLabel(RegExp(r'Show more.*Unread', dotAll: true)),
+        findsOneWidget,
+      );
       final previous = find.text('Item 3');
       expect(
         tester.getTopLeft(more).dx,
@@ -66,6 +82,7 @@ void _sectionLimitTests(
       await tester.tap(more);
       await tester.pumpAndSettle();
       expect(find.text('Item 0'), findsOneWidget);
+      expect(find.text('Unread'), findsNothing);
       await tester.tap(find.text('Show fewer'));
       await tester.pumpAndSettle();
       expect(find.text('Item 2'), findsNothing);

@@ -6,7 +6,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../theme/theme.dart';
 import '../theme/buzz_icons.dart';
-import 'collapsible_sliver_body.dart';
+import 'collapsible_section_body.dart';
 
 /// A compact inventory with the same reveal motion as its enclosing section.
 class LimitedSectionSliver extends HookWidget {
@@ -16,11 +16,13 @@ class LimitedSectionSliver extends HookWidget {
     this.horizontalInset = Grid.gutter,
     this.findChildIndexCallback,
     this.revealAll = false,
+    this.overflowActivity,
     super.key,
   });
 
   static const visibleLimit = 7;
   final bool revealAll;
+  final String? overflowActivity;
   final int itemCount;
   final IndexedWidgetBuilder itemBuilder;
   final double horizontalInset;
@@ -33,35 +35,47 @@ class LimitedSectionSliver extends HookWidget {
     final initialCount = revealAll
         ? itemCount
         : math.min(itemCount, visibleLimit);
-    int? childIndex(Key key, int start, int end) {
-      final index = findChildIndexCallback?.call(key);
-      return index == null || index < start || index >= end
-          ? null
-          : index - start;
-    }
-
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
     return SliverMainAxisGroup(
       slivers: [
         SliverToBoxAdapter(child: SizedBox(key: startKey)),
-        SliverList.builder(
-          itemCount: initialCount,
-          itemBuilder: itemBuilder,
-          findChildIndexCallback: findChildIndexCallback == null
-              ? null
-              : (key) => childIndex(key, 0, initialCount),
-        ),
-        if (!revealAll && itemCount > visibleLimit) ...[
-          CollapsibleSliverBody(
-            expanded: showAll.value,
-            sliver: SliverList.builder(
-              itemCount: itemCount - initialCount,
+        TweenAnimationBuilder<double>(
+          tween: Tween(end: showAll.value ? 1.0 : 0.0),
+          duration: reducedMotion
+              ? Duration.zero
+              : showAll.value
+              ? sectionExpandDuration
+              : sectionCollapseDuration,
+          curve: showAll.value ? sectionExpandCurve : sectionCollapseCurve,
+          builder: (context, progress, _) {
+            final extent = initialCount + progress * (itemCount - initialCount);
+            final count = extent.ceil().clamp(0, itemCount);
+            return SliverList.builder(
+              itemCount: count,
               findChildIndexCallback: findChildIndexCallback == null
                   ? null
-                  : (key) => childIndex(key, initialCount, itemCount),
-              itemBuilder: (context, index) =>
-                  itemBuilder(context, index + initialCount),
-            ),
-          ),
+                  : (key) {
+                      if (key is! ValueKey<Key>) return null;
+                      final index = findChildIndexCallback!(key.value);
+                      return index != null && index >= 0 && index < count
+                          ? index
+                          : null;
+                    },
+              itemBuilder: (context, index) {
+                final row = itemBuilder(context, index);
+                return ClipRect(
+                  key: row.key == null ? null : ValueKey<Key>(row.key!),
+                  child: Align(
+                    alignment: Alignment.topCenter,
+                    heightFactor: (extent - index).clamp(0.0, 1.0),
+                    child: row,
+                  ),
+                );
+              },
+            );
+          },
+        ),
+        if (!revealAll && itemCount > visibleLimit) ...[
           SliverToBoxAdapter(
             child: Semantics(
               expanded: showAll.value,
@@ -120,6 +134,11 @@ class LimitedSectionSliver extends HookWidget {
                           ),
                         ),
                       ),
+                      if (!showAll.value && overflowActivity != null)
+                        Text(
+                          overflowActivity!,
+                          style: Theme.of(context).textTheme.labelMedium,
+                        ),
                     ],
                   ),
                 ),

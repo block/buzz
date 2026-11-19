@@ -61,6 +61,39 @@ void main() {
     });
   }
 
+  testWidgets('focused row survives promotion across the disclosure boundary', (
+    tester,
+  ) async {
+    final ids = List.generate(10, (i) => i);
+    Widget roster() => MaterialApp(
+      home: Scaffold(
+        body: CustomScrollView(
+          slivers: [
+            LimitedSectionSliver(
+              itemCount: ids.length,
+              findChildIndexCallback: (key) =>
+                  ids.indexOf((key as ValueKey<int>).value),
+              itemBuilder: (_, i) => TextField(key: ValueKey(ids[i])),
+            ),
+          ],
+        ),
+      ),
+    );
+    await tester.pumpWidget(roster());
+    await tester.tap(find.text('Show more'));
+    await tester.pumpAndSettle();
+    final field = find.byKey(const ValueKey(8)).last;
+    await tester.enterText(field, 'draft');
+    ids.insert(0, ids.removeAt(8));
+    await tester.pumpWidget(roster());
+    await tester.pumpAndSettle();
+    final editable = tester.widget<EditableText>(
+      find.descendant(of: field, matching: find.byType(EditableText)),
+    );
+    expect(editable.focusNode.hasFocus, isTrue);
+    expect(editable.controller.text, 'draft');
+  });
+
   testWidgets('seven rows need no disclosure', (tester) async {
     await tester.pumpWidget(page(7));
     expect(find.text('Conversation 6'), findsOneWidget);

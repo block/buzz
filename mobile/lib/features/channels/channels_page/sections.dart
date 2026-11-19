@@ -61,6 +61,8 @@ class _CustomChannelSection extends StatelessWidget {
         ),
       ),
       _SectionChannelsBody(
+        unreadChannelIds: unreadChannelIds,
+        attentionChannelIds: attentionChannelIds,
         expanded: expanded,
         channels: channels,
         isVisible: isVisible,
@@ -308,6 +310,8 @@ class _ChannelSection extends StatelessWidget {
         ),
       ),
       _SectionChannelsBody(
+        unreadChannelIds: unreadChannelIds,
+        attentionChannelIds: attentionChannelIds,
         expanded: expanded,
         channels: channels,
         isVisible: isVisible,
@@ -353,6 +357,8 @@ class _SectionChannelsBody extends HookWidget {
     required this.channels,
     required this.isVisible,
     required this.buildRow,
+    required this.unreadChannelIds,
+    required this.attentionChannelIds,
     this.emptySliver,
   });
 
@@ -360,6 +366,8 @@ class _SectionChannelsBody extends HookWidget {
   final List<Channel> channels;
   final bool Function(Channel) isVisible;
   final Widget Function(Channel) buildRow;
+  final Set<String> unreadChannelIds;
+  final Set<String> attentionChannelIds;
   final Widget? emptySliver;
 
   @override
@@ -381,6 +389,14 @@ class _SectionChannelsBody extends HookWidget {
     }, [hiddenIds.join(',')]);
     final displayed = reveal.value ? channels : visibleChannels;
 
+    final overflow = displayed.skip(LimitedSectionSliver.visibleLimit);
+    final activity =
+        overflow.any((channel) => attentionChannelIds.contains(channel.id))
+        ? 'Needs attention'
+        : overflow.any((channel) => unreadChannelIds.contains(channel.id))
+        ? 'Unread'
+        : null;
+
     return CollapsibleSliverBody(
       expanded: expanded,
       sliver: channels.isEmpty && emptySliver != null
@@ -390,6 +406,7 @@ class _SectionChannelsBody extends HookWidget {
                 LimitedSectionSliver(
                   itemCount: displayed.length,
                   revealAll: reveal.value,
+                  overflowActivity: activity,
                   findChildIndexCallback: (key) {
                     final index = displayed.indexWhere(
                       (channel) => ValueKey(channel.id) == key,
