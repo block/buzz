@@ -14,7 +14,7 @@ fn tables(batch: &Value) -> Result<Vec<&str>> {
     // A batch can straddle selection pages, with an event from the previous
     // page preceding the next page's side rows. Always remove dependants first.
     tables.sort_by_key(|table| match *table {
-        "subscriptions" | "push_leases" => 1,
+        "subscriptions" | "push_leases" | "workflows" => 1,
         "events" => 2,
         _ => 0,
     });
@@ -115,6 +115,8 @@ pub(super) async fn execute(tx: &mut AdmittedTx, batch: &Value) -> Result<()> {
         children(tx.conn(), community, number, table).await?;
         if table == "events" {
             erase_events(tx, number).await?;
+        } else if matches!(table, "workflow_runs" | "workflow_approvals") {
+            workflows::scrub(tx, number, table, expected).await?;
         } else {
             let query = format!(
                 "DELETE FROM {table} t USING content_batch_work w
@@ -151,6 +153,8 @@ async fn children(
             OR EXISTS(SELECT 1 FROM push_match_queue WHERE community_id=$1 AND event_id=decode(w.row_key->>'id','hex'))
             OR EXISTS(SELECT 1 FROM push_wake_outbox WHERE community_id=$1 AND event_id=decode(w.row_key->>'id','hex'))
             OR EXISTS(SELECT 1 FROM operator_listener_outbox WHERE community_id=$1 AND event_id=decode(w.row_key->>'id','hex'))",
+        "workflows" => workflows::DEFINITION_CHILDREN,
+        "scheduled_workflow_fires" => workflows::FIRE_HISTORY,
         _ => return Ok(()),
     };
     let query = format!(
@@ -161,8 +165,25 @@ async fn children(
         .bind(community)
         .bind(table)
         .bind(number)
-        .fetch_one(conn)
+        .fetch_one(&mut *conn)
         .await?;
+    // Delivery logs have no event-ID index. Probe the whole batch as a set so
+    // unrelated history is not scanned again for every selected event. IS TRUE
+    // keeps membership as a hashed subplan instead of a nested-loop semi join
+    // when tenant or temporary-worklist estimates are too small.
+    let remains = remains
+        || (table == "events"
+            && sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM delivery_log d
+                 WHERE d.community_id=$1 AND (d.event_id IN (
+                     SELECT decode(w.row_key->>'id','hex') FROM content_batch_work w
+                     WHERE w.table_name=$2 AND w.batch=$3)) IS TRUE)",
+            )
+            .bind(community)
+            .bind(table)
+            .bind(number)
+            .fetch_one(&mut *conn)
+            .await?);
     if remains {
         return Err(invalid(
             "new dependent records appeared; current batch rolled back; rerun to plan them",
@@ -253,12 +274,12 @@ pub(super) async fn verify_remaining(
         OR EXISTS(SELECT 1 FROM operator_listener_outbox WHERE community_id=$1 AND (target_pubkey=ANY($2) OR listener_pubkey=ANY($2)))",include_str!("authored.sql"));
     let remains: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(query))
         .bind(options.community)
-        .bind(targets)
+        .bind(&targets)
         .bind(relay)
         .bind(KINDS)
-        .fetch_one(conn)
+        .fetch_one(&mut *conn)
         .await?;
-    if remains {
+    if remains || workflows::remaining(conn, options.community, &targets).await? {
         return Err(invalid(
             "supported rows remain after execution; deletion incomplete; rerun",
         ));

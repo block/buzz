@@ -14,11 +14,51 @@ execution is unsupported.
 
 ## Content batches
 
+Run deletion offline with the relay, workflow engine and external writers stopped.
+Read-only preview does not require stopping them. This command does not install
+a lasting account fence.
+
 `content-batches` selects the user plus agents owned by that user **in the target
 community**. Ownership in another community does not authorize cleanup here.
 The start record reports excluded agent keys with missing or conflicting local
 ownership. Every batch rechecks ownership; a change aborts the batch. Former
 membership does not prevent cleanup of historical content.
+
+With `--relay-pubkey`, content cleanup also selects private hidden-DM visibility
+snapshots (kind 30622) for the user and currently owned agents. A snapshot must be
+signed by that trusted relay, have no channel, and have exactly one canonical
+`d` tag and one `p` tag matching its stored viewer coordinate. Conflicting,
+malformed or untrusted snapshots are left outside the supported scope. Without
+the trusted relay key, these snapshots are not selected. Selected snapshots and
+their dependent delivery records are removed, including historical soft-deleted
+rows. DM conversations, other participants' preferences and encrypted message
+copies are not selected by this rule.
+
+Content cleanup also removes signed file-metadata publications (kind 1063),
+without deleting referenced blobs. Delivery logs under surviving subscriptions
+follow every selected source event, including events reduced to tombstones.
+Mentions and pending delivery rows are removed before their source events.
+
+Workflow cleanup deletes owned definitions with no runs, approvals or linked
+schedule history, removing each definition and its unused schedule claims in the same transaction.
+The complete group must fit `--batch-size` (maximum 100 rows); otherwise planning
+fails before deletion. Increase the batch size for a larger group. More than 99
+claims on one unused definition requires a separately reviewed cleanup.
+Definitions with history and all run/approval rows are retained. For recorded
+`event` causes, it clears the signer's saved trigger text and emoji; for recorded
+`manual` causes, it empties the caller's input map. It clears the recorded
+approver's note. These field changes also apply inside another owner's workflow.
+Required trigger fields remain present, and every other field is preserved.
+Retained runs, including waiting approvals, will read the cleared inputs if
+resumed later. This change does not cancel those runs. The existing signed-event
+cleanup of kind 30620 is unchanged; retained definitions here mean database rows.
+Missing provenance, malformed input shapes, webhook payloads, execution traces
+and errors are not selected. This is partial content cleanup, not a claim of
+complete workflow erasure or stopped workflow execution.
+
+Workflow rows use the same bounded preview, fingerprint and retry checks as
+other content. New history or schedule claims block definition deletion before
+any cascade can occur. No device installations or gateway delegations are deleted.
 
 The handler preserves actual reply ancestry and other users' reactions by erasing
 selected messages into structural tombstones. Plain links, quotes and unmarked

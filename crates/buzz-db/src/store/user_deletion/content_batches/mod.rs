@@ -20,6 +20,7 @@ mod owned;
 mod ownership;
 mod retention;
 mod rows;
+mod workflows;
 
 const KINDS: &[i32] = &[
     5, 41010, 41011, 41012, 46020, 46030, 46031, 3, 10000, 10001, 10002, 10003, 30000, 30003,
@@ -28,6 +29,8 @@ const KINDS: &[i32] = &[
     // Signer-owned definitions, including shared publications. Project membership
     // grants no ownership over its repositories; their events remain excluded.
     30175, 30176, 30178, 30030, 30180, 30621,
+    // Private per-viewer state: only the trusted relay's matching d/p snapshot.
+    30622, 1063,
 ];
 const PAGE_SIZE: i64 = 100;
 const MAX_TARGETS: usize = 10_000;
@@ -243,8 +246,9 @@ async fn plan(
         "excluded_agents": excluded_agents,
         "target_pubkeys": target_pubkeys, "trusted_relay_pubkey": relay, "included_event_kinds": KINDS,
         "batch_size": options.batch_size, "max_items": options.max_items,
-        "scope": "user- and owned-agent-attributed events (including persona, team, emoji and project definitions) and reactions, owned subscriptions and notification delivery",
-        "preserved": "other users' events and reactions; member repositories; workflow database records and other owners' delivery logs",
+        "scope": "user- and owned-agent-attributed events (including persona, team, emoji and project definitions), trusted-relay private hidden-DM snapshots, reactions, owned subscriptions and notification delivery; unused owned workflows and recorded personal workflow inputs/notes",
+        "hidden_dm_selection": "kind 30622 requires a trusted relay signer, no channel, and exactly one matching canonical d/p viewer; ambiguous or untrusted snapshots are not selected",
+        "preserved": "other users' events and reactions; member repositories; workflow history except recorded personal trigger inputs and approval notes; other owners' delivery logs unrelated to selected events",
         "relay_attribution": if relay.is_some() { "enabled" } else { "not included; supply --relay-pubkey for relay-authored history" },
         "execution": "preview only; --delete prints and commits batches after execution checks",
         "thread_repairs": "reported separately from row items; metadata mutations are not expanded",
@@ -265,6 +269,7 @@ async fn plan(
         collected: collect.then(Vec::new),
     };
     owned::plan(conn, &targets, &mut output).await?;
+    workflows::plan(conn, &targets, &mut output).await?;
     rows::authored_reactions(conn, &targets, &mut output).await?;
     let mut cursor = Cursor::default();
     let mut selected = Vec::new();
@@ -320,8 +325,13 @@ async fn plan(
         }
     }
     let query = format!(
-        "WITH authored AS ({}) SELECT jsonb_build_object('kind',kind,'count',count(*))
-            FROM authored WHERE NOT(kind=ANY($4)) GROUP BY kind ORDER BY kind",
+        "WITH authored AS ({}), excluded AS (
+            SELECT kind FROM authored WHERE NOT(kind=ANY($4))
+            UNION ALL
+            SELECT kind FROM events WHERE community_id=$1 AND kind=30622
+                AND pubkey=ANY($2::bytea[])
+        ) SELECT jsonb_build_object('kind',kind,'count',count(*))
+            FROM excluded GROUP BY kind ORDER BY kind",
         include_str!("authored.sql")
     );
     let excluded: Vec<Value> = sqlx::query_scalar(sqlx::AssertSqlSafe(query))
@@ -358,3 +368,15 @@ mod scrub_postgres_tests;
 
 #[cfg(test)]
 mod safety_postgres_tests;
+
+#[cfg(test)]
+mod private_state_postgres_tests;
+
+#[cfg(test)]
+mod workflow_postgres_tests;
+
+#[cfg(test)]
+mod copies_postgres_tests;
+
+#[cfg(test)]
+mod schedule_postgres_tests;
