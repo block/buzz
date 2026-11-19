@@ -4477,6 +4477,13 @@ void main() {
         ),
       );
       final mutes = _FakeChannelMutesNotifier();
+      final filters = _filterTestManager(
+        cached: ChannelFilterStore.empty().edit(
+          'channels',
+          seenAt == null ? ChannelFilterMode.all : ChannelFilterMode.unreads,
+        ),
+      );
+      addTearDown(filters.dispose);
 
       await tester.pumpWidget(
         buildTestable(
@@ -4489,10 +4496,18 @@ void main() {
             ),
             readStateProvider.overrideWith(() => readState),
             channelMutesProvider.overrideWith(() => mutes),
+            channelFilterProvider.overrideWithValue(filters),
           ],
         ),
       );
       await tester.pumpAndSettle();
+
+      final hiddenByUnreads = seenAt != null && !bold && !dot;
+      if (hiddenByUnreads) {
+        expect(find.text('general'), findsNothing);
+        await tester.tap(find.text('Show hidden channels · 1'));
+        await tester.pumpAndSettle();
+      }
 
       expect(
         tester.widget<Text>(find.text('general')).style?.fontWeight,
@@ -4503,18 +4518,18 @@ void main() {
       );
       expect(attentionDot, dot ? findsOneWidget : findsNothing);
 
-      if (seenAt != null && !bold && !dot) {
+      if (hiddenByUnreads) {
         await tester.longPress(find.text('general'));
         await tester.pumpAndSettle();
         expect(find.text('Mark Read'), findsOneWidget);
       }
 
       if (dot) {
-        mutes.setMute(muted: true, confirmed: false);
+        mutes.setMute(muted: true, relayMuted: false);
         await tester.pump();
         expect(attentionDot, findsOneWidget);
 
-        mutes.setMute(muted: true, confirmed: true);
+        mutes.setMute(muted: true, relayMuted: true);
         await tester.pump();
         expect(attentionDot, findsNothing);
         expect(
@@ -4522,7 +4537,11 @@ void main() {
           'Needs your attention',
         );
 
-        mutes.setMute(muted: false, confirmed: true);
+        mutes.setMute(muted: false, relayMuted: true);
+        await tester.pump();
+        expect(attentionDot, findsOneWidget);
+
+        mutes.setMute(muted: false, relayMuted: false);
         await tester.pump();
         expect(attentionDot, findsOneWidget);
       }
@@ -4760,13 +4779,13 @@ class _FakeChannelMutesNotifier extends ChannelMutesNotifier {
   @override
   ChannelMutesState build() => const ChannelMutesState(isReady: true);
 
-  void setMute({required bool muted, required bool confirmed}) {
+  void setMute({required bool muted, required bool relayMuted}) {
     state = ChannelMutesState(
       isReady: true,
       store: ChannelMuteStore(
         channels: {'1': ChannelMuteEntry(muted: muted, updatedAt: 40)},
       ),
-      confirmedMutedChannelIds: confirmed && muted ? {'1'} : {},
+      confirmedMutedChannelIds: relayMuted ? {'1'} : {},
     );
   }
 }

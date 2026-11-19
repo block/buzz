@@ -32,11 +32,12 @@ class _ChannelTile extends ConsumerWidget {
     final showUnread = isUnread && boldUnread;
     final showAttention =
         hasAttention &&
-        !ref.watch(
-          channelMutesProvider.select(
-            (state) => state.confirmedMutedChannelIds.contains(channel.id),
-          ),
-        );
+        (!isMuted ||
+            !ref.watch(
+              channelMutesProvider.select(
+                (state) => state.confirmedMutedChannelIds.contains(channel.id),
+              ),
+            ));
     final contentColor = isMuted
         ? navigationMetadataForeground(context)
         : channelNavigationForeground(context);

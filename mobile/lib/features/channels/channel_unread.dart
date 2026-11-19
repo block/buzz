@@ -19,7 +19,7 @@ Set<String> computeUnreadChannelIds({
 /// Channel-list highlights, following the desktop sidebar (`buzz-app`'s
 /// `docs/unread.md`). Ordinary unread backlog bolds a channel (`rowUnread`)
 /// unless a synced `seen:<channel>` mark covers it. `unread` keeps the
-/// underlying evidence for read actions and filters.
+/// underlying evidence for read actions.
 /// Unread thread replies, mentions and broadcasts only add an attention dot
 /// ([attention]), so a channel the reader caught up on stays regular. An
 /// unread DM bolds and dots. Marking a channel unread bolds it without
