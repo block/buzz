@@ -1554,7 +1554,13 @@ void main() {
           await phone.flush();
           // The socket drops, as the provider reports it.
           phone.liveInterrupted();
-          if (snapshotInGap) await phone.retrySync();
+          if (snapshotInGap) {
+            // An unrelated read publishes, and its snapshot reads the relay.
+            final fetches = relay.fetches;
+            phone.markContextRead('other', clock - 50);
+            await phone.flush();
+            expect(relay.fetches, greaterThan(fetches));
+          }
           // A peer marks it again during the gap; the phone does not see it.
           clock += 5;
           relay.retained['${readStateUnreadDTagPrefix}peer'] = _readStateEvent(
@@ -2095,6 +2101,7 @@ class _MemoryRelay extends RelaySessionNotifier {
   final retained = <String, NostrEvent>{};
   final _live = <void Function(NostrEvent)>[];
   bool failNext = false;
+  int fetches = 0;
 
   /// Runs as each event reaches the relay, before it is stored.
   void Function(NostrEvent event)? beforePublish;
@@ -2120,6 +2127,7 @@ class _MemoryRelay extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     if (offline) throw TimeoutException('offline');
+    fetches++;
     final held = hold;
     if (held != null) await held;
     return retained.values.toList();

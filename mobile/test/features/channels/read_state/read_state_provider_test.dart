@@ -180,7 +180,10 @@ void main() {
 
     session.setStatus(SessionStatus.reconnecting);
     // A snapshot read while the stream is still down does not count.
-    await notifier.retrySync();
+    final fetches = session.fetchCount;
+    notifier.markContextRead(otherChannelId, now);
+    await notifier.flush();
+    expect(session.fetchCount, greaterThan(fetches));
     expect(notifier.clearForcedUnread(channelId), isFalse);
     expect(state().locallyForcedChannelIds, {channelId});
 
