@@ -175,6 +175,27 @@ pub(crate) async fn unpin_deleted_message(
     ))
 }
 
+/// The author column of a command record that account erasure scrubbed.
+const ERASED: &[u8] = &[];
+
+/// Remove the community's erased command records from `cutoff` and before.
+async fn delete_erased_command_records(
+    tx: &mut AdmittedTx,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> Result<u64> {
+    let result = sqlx::query(
+        "DELETE FROM events WHERE community_id = $1 AND kind = ANY($2) \
+         AND pubkey = $3 AND created_at <= $4",
+    )
+    .bind(tx.community().as_uuid())
+    .bind(COMMAND_KINDS.as_slice())
+    .bind(ERASED)
+    .bind(cutoff)
+    .execute(tx.conn())
+    .await?;
+    Ok(result.rows_affected())
+}
+
 impl Db {
     /// Store a NIP-PM pin (kind:40010) or unpin (kind:40011) command and
     /// apply it to `channel_id`'s pin list, in one transaction.
@@ -274,7 +295,6 @@ impl Db {
     /// not the relay accepts pins.
     #[datastore_span(name = "reap_expired_pin_command_records", system = "postgresql")]
     pub async fn reap_expired_pin_command_records(&self) -> Result<u64> {
-        const ERASED: &[u8] = &[];
         let cutoff = chrono::Utc::now() - chrono::Duration::seconds(REPLAY_RECORD_SECS);
         let mut connection = crate::observability::acquire_writer(
             &self.pool,
@@ -302,19 +322,10 @@ impl Db {
             communities,
             crate::observability::WriterOperation::Maintenance,
             "pin_command_record_reap",
-            |id, mut tx| async move {
-                let result = sqlx::query(
-                    "DELETE FROM events WHERE community_id = $1 AND kind = ANY($2) \
-                     AND pubkey = $3 AND created_at <= $4",
-                )
-                .bind(id)
-                .bind(COMMAND_KINDS.as_slice())
-                .bind(ERASED)
-                .bind(cutoff)
-                .execute(tx.conn())
-                .await?;
+            |_, mut tx| async move {
+                let removed = delete_erased_command_records(&mut tx, cutoff).await?;
                 tx.commit().await?;
-                Ok(result.rows_affected())
+                Ok(removed)
             },
         )
         .await;
