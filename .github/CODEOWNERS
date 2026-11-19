@@ -2,7 +2,7 @@
 /VISION_MOBILE.md @brow
 
 # Relay database migrations and desired-state schema.
-/migrations/ @TheSentinel454 @wpfleger96 @bradseiler
-/schema/ @TheSentinel454 @wpfleger96 @bradseiler
-/scripts/reconcile-schema-after-pgschema.sql @TheSentinel454 @wpfleger96 @bradseiler
-/.pgschemaignore @TheSentinel454 @wpfleger96 @bradseiler
+/migrations/ @TheSentinel454 @wpfleger96 @bradseiler @salman1993 @ravarora2
+/schema/ @TheSentinel454 @wpfleger96 @bradseiler @salman1993 @ravarora2
+/scripts/reconcile-schema-after-pgschema.sql @TheSentinel454 @wpfleger96 @bradseiler @salman1993 @ravarora2
+/.pgschemaignore @TheSentinel454 @wpfleger96 @bradseiler @salman1993 @ravarora2
