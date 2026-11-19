@@ -623,6 +623,73 @@ void main() {
     );
   });
 
+  testWidgets(
+    'unread dots align with trailing icons and follow the temporary clock',
+    (tester) async {
+      final temporary = Channel(
+        id: 'temporary',
+        name: 'temporary',
+        channelType: 'stream',
+        visibility: 'open',
+        description: '',
+        createdBy: 'abc',
+        createdAt: DateTime(2025),
+        memberCount: 1,
+        isMember: true,
+        ttlSeconds: 3600,
+      );
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            channelsProvider.overrideWith(
+              () => _FakeNotifier(
+                [temporary, testChannels.first],
+                observedEventsByChannel: {
+                  for (final id in ['temporary', testChannels.first.id])
+                    id: [
+                      _observed(
+                        id: 'mention-$id',
+                        createdAt: 20,
+                        highPriority: true,
+                      ),
+                    ],
+                },
+              ),
+            ),
+            readStateProvider.overrideWith(
+              () => _FakeReadStateNotifier(
+                const ReadStateState(
+                  isReady: true,
+                  pubkey: 'pk',
+                  contexts: {},
+                  version: 0,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      final ellipsis = find.descendant(
+        of: find.byTooltip('Channels options'),
+        matching: find.byIcon(BuzzIcons.ellipsis),
+      );
+      final clock = tester.getCenter(
+        find.byKey(const Key('channel-ephemeral-temporary')),
+      );
+      final dot = tester.getCenter(
+        find.byKey(const ValueKey('channel-attention-dot-temporary')),
+      );
+      final otherDot = tester.getCenter(
+        find.byKey(ValueKey('channel-attention-dot-${testChannels.first.id}')),
+      );
+      expect(dot.dx, closeTo(tester.getCenter(ellipsis).dx, 0.01));
+      expect(dot.dx, closeTo(otherDot.dx, 0.01));
+      expect(clock.dx, lessThan(dot.dx));
+      expect(clock.dy, closeTo(dot.dy, 0.01));
+    },
+  );
+
   testWidgets('shows channel visibility icons and excludes Solo chats', (
     tester,
   ) async {

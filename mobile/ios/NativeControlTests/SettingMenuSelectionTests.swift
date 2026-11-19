@@ -38,6 +38,22 @@ struct SettingMenuSelectionTests {
     precondition(merging.leftSurface.alpha == 1 && merging.rightSurface.alpha == 1)
     UIView.setAnimationsEnabled(true)
 
+    let aligned = NavigationGlassButtonPlatformView(
+      frame: CGRect(x: 0, y: 0, width: 44, height: 44),
+      viewIdentifier: 22,
+      arguments: ["plain": true, "icon": "more", "iconSize": 14,
+                   "buttonCenterX": 34, "controlWidth": 20, "controlSize": 44,
+                   "hitTargetWidth": 44, "hitTargetHeight": 44],
+      messenger: SettingMenuMessenger()
+    )
+    let alignedButton = aligned.view().subviews.compactMap { $0 as? NavigationGlassButton }.first!
+    aligned.view().layoutIfNeeded()
+    precondition(alignedButton.center.x == 34)
+    for x in [CGFloat(1), 22, 43] {
+      let point = alignedButton.convert(CGPoint(x: x, y: 22), from: aligned.view())
+      precondition(alignedButton.point(inside: point, with: nil))
+    }
+
     for deferred in [false, true] {
       let messenger = SettingMenuMessenger()
       let view = NavigationGlassButtonPlatformView(
