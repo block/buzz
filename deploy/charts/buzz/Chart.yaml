@@ -7,8 +7,8 @@ description: |
   PostgreSQL and Redis. Configurable for single-node evaluation
   (subcharts on) and HA production (external services, existingSecret).
 type: application
-version: 0.1.11
-appVersion: "0.1.0"
+version: 0.1.12
+appVersion: "0.3.0"
 home: https://github.com/block/buzz
 sources:
   - https://github.com/block/buzz
@@ -24,7 +24,7 @@ maintainers:
 annotations:
   artifacthub.io/changes: |
     - kind: changed
-      description: Chart-managed Pods derive tags.datadoghq.com/version from the deployed image identity instead of operator-supplied labels.
+      description: The default relay image is now Buzz Relay 0.3.0. Installs that leave image.tag and image.digest unset upgrade from 0.1.0.
   artifacthub.io/license: Apache-2.0
 
 # Optional eval-only subcharts. Production deploys disable both and point
