@@ -1,18 +1,24 @@
+import 'dart:async';
+
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
+import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
+
+import '../../helpers/widget_helpers.dart';
 
 const _channelId = 'channel-1';
 final _bob = 'b' * 64;
@@ -41,9 +47,51 @@ final _members = [
     ),
 ];
 
+/// Sheet builds read the cached roster once each, so its reads count them.
+var _rosterReads = 0;
+
 class _ChannelsNotifier extends ChannelsNotifier {
   @override
   Future<List<Channel>> build() async => [_channel];
+
+  @override
+  List<ChannelMember> cachedMembersForChannel(String channelId) {
+    _rosterReads++;
+    return super.cachedMembersForChannel(channelId);
+  }
+}
+
+/// The identity link an edit writes for [label] naming [key].
+String _link(String label, String key) {
+  final npub = nostr.Nip19.encode(prefix: nostr.Nip19Prefix.npub, data: key);
+  return '[$label](nostr:$npub)';
+}
+
+/// Draws [edit] as the timeline does: an edit's own tags replace the
+/// original's, so nothing but the body can name a person.
+Future<List<String>> _pumpEditedBubble(
+  WidgetTester tester,
+  ({String channelId, String eventId, String content, List<List<String>> tags})
+  edit,
+) async {
+  final taps = <String>[];
+  await tester.pumpWidget(const SizedBox.shrink());
+  await tester.pumpWidget(
+    WidgetHelpers.testable(
+      child: MessageContent(
+        content: edit.content,
+        tags: [
+          ['h', edit.channelId],
+          ['e', edit.eventId],
+          ...edit.tags,
+        ],
+        edited: true,
+        onMentionTap: taps.add,
+      ),
+    ),
+  );
+  await tester.pumpAndSettle();
+  return taps;
 }
 
 class _RelayConfigNotifier extends RelayConfigNotifier {
@@ -102,10 +150,12 @@ Future<_RecordingActions> _openEditSheet(
   WidgetTester tester, {
   required TimelineMessage message,
   Future<List<UserProfile>> Function(String query)? searchPeople,
+  Future<List<ChannelMember>>? members,
 }) async {
   SharedPreferences.setMockInitialValues({});
   final prefs = await SharedPreferences.getInstance();
   final actions = _RecordingActions();
+  await tester.pumpWidget(const SizedBox.shrink());
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
@@ -118,7 +168,7 @@ Future<_RecordingActions> _openEditSheet(
         channelsProvider.overrideWith(_ChannelsNotifier.new),
         channelMembersProvider(
           _channelId,
-        ).overrideWith((ref) => Future.value(_members)),
+        ).overrideWith((ref) => members ?? Future.value(_members)),
         agentDirectoryProvider.overrideWith((ref) async => const []),
         agentOwnersProvider.overrideWith((ref) async => const {}),
         channelActionsProvider.overrideWithValue(actions),
@@ -168,7 +218,7 @@ void main() {
   }
 
   testWidgets(
-    'editing a message offers the mention chooser and saves prose only',
+    'editing a message offers the mention chooser and saves picks as links',
     (tester) async {
       final original = 'The agenda is ready @Alice';
       final searched = <String>[];
@@ -191,9 +241,24 @@ void main() {
       await tester.enterText(field, '$original cc @bo');
       await tester.pumpAndSettle();
       expect(row('Bob'), findsOneWidget);
-      await tester.tap(row('Bob'));
-      await tester.pumpAndSettle();
-      expect(controller.text, '$original cc @Bob ');
+      // The pick is a stylus press: the chooser is inside the field's tap
+      // region, so the press keeps focus and the row is there at release.
+      final focusNode = tester.widget<TextField>(field).focusNode!;
+      for (final kind in [PointerDeviceKind.stylus, PointerDeviceKind.mouse]) {
+        await tester.enterText(field, '$original cc @bo');
+        await tester.pumpAndSettle();
+        final press = await tester.startGesture(
+          tester.getCenter(row('Bob')),
+          kind: kind,
+        );
+        await tester.pumpAndSettle();
+        expect(focusNode.hasFocus, isTrue, reason: '$kind');
+        expect(row('Bob'), findsOneWidget, reason: '$kind');
+        await press.up();
+        await press.removePointer();
+        await tester.pumpAndSettle();
+        expect(controller.text, '$original cc @Bob ', reason: '$kind');
+      }
       expect(personChip, findsNWidgets(2));
       expect(popover, findsNothing);
 
@@ -228,19 +293,154 @@ void main() {
       expect(controller.text, '$original cc @Bob @Quinn ');
       expect(personChip, findsNWidgets(3));
 
-      // Saving writes the text with the picks and adds no recipient: the
-      // edit carries the tags this path always wrote, never a `p` tag.
+      // Saving writes each chip as an identity link to its exact key and
+      // adds no recipient: the edit carries the tags this path always wrote,
+      // never a `p` tag.
       await tester.tap(find.text('Save'));
       await tester.pumpAndSettle();
       expect(actions.edits, hasLength(1));
       final edit = actions.edits.single;
       expect(edit.channelId, _channelId);
       expect(edit.eventId, 'msg-1');
-      expect(edit.content, '$original cc @Bob @Quinn');
+      expect(
+        edit.content,
+        'The agenda is ready ${_link('@Alice', _alice)} cc '
+        '${_link('@Bob', _bob)} ${_link('@Quinn', _quinn.pubkey)}',
+      );
       expect(edit.tags.where((tag) => tag.first == 'p'), isEmpty);
       expect(find.text('Edit message'), findsNothing);
+
+      // The bubble draws each link as that person's pill, with no tag.
+      final taps = await _pumpEditedBubble(tester, edit);
+      for (final name in ['Alice', 'Bob', 'Quinn']) {
+        await tester.tap(find.text(name));
+      }
+      expect(taps, [_alice, _bob, _quinn.pubkey]);
+      expect(find.textContaining('npub', findRichText: true), findsNothing);
+
+      // Reopening the saved edit shows the same three chips and plain names.
+      final again = await _openEditSheet(
+        tester,
+        message: _message(edit.content),
+      );
+      expect(controllerOf(tester).text, '$original cc @Bob @Quinn');
+      expect(personChip, findsNWidgets(3));
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+      expect(again.edits, isEmpty);
     },
   );
+
+  testWidgets('two picked namesakes save as links and never as raw keys', (
+    tester,
+  ) async {
+    final samA = '1' * 64, samB = '2' * 64;
+    final actions = await _openEditSheet(
+      tester,
+      message: _message('ask'),
+      members: Future.value([
+        for (final key in [samA, samB])
+          ChannelMember(
+            pubkey: key,
+            displayName: 'Sam',
+            role: 'member',
+            joinedAt: DateTime(2025),
+          ),
+      ]),
+    );
+    final controller = controllerOf(tester);
+    // Namesake rows carry a short key; the draft and the chips never do.
+    final sams = find.descendant(
+      of: popover,
+      matching: find.textContaining('Sam · '),
+    );
+    for (final pick in [0, 1]) {
+      await tester.enterText(
+        field,
+        '${controller.text}${pick == 0 ? ' ' : ''}@sam',
+      );
+      await tester.pumpAndSettle();
+      expect(sams, findsNWidgets(2));
+      await tester.tap(sams.at(pick));
+      await tester.pumpAndSettle();
+    }
+    expect(controller.text, 'ask @Sam @Sam ');
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    final edit = actions.edits.single;
+    expect(edit.tags.where((tag) => tag.first == 'p'), isEmpty);
+    expect(edit.content, isNot(contains(samA)));
+    expect(edit.content, isNot(contains(samB)));
+    final keys = {
+      for (final key in [samA, samB])
+        if (edit.content.contains(_link('@Sam', key))) key,
+    };
+    expect(keys, {samA, samB});
+
+    // Each pill opens its own Sam, and no key is shown.
+    final taps = await _pumpEditedBubble(tester, edit);
+    expect(find.text('Sam'), findsNWidgets(2));
+    await tester.tap(find.text('Sam').first);
+    await tester.tap(find.text('Sam').last);
+    expect(taps.toSet(), {samA, samB});
+    expect(taps.first, isNot(taps.last));
+    for (final hidden in ['npub', '1111', '2222']) {
+      expect(find.textContaining(hidden, findRichText: true), findsNothing);
+    }
+  });
+
+  testWidgets('a cleared edit stays empty when a mentioned profile arrives', (
+    tester,
+  ) async {
+    // Untouched, the field gains Bob's chip once his name is known.
+    var members = Completer<List<ChannelMember>>();
+    await _openEditSheet(
+      tester,
+      message: _message('hello @Bob', mentions: [_bob]),
+      members: members.future,
+    );
+    expect(controllerOf(tester).text, 'hello @Bob');
+    expect(personChip, findsNothing);
+    members.complete(_members);
+    await tester.pumpAndSettle();
+    expect(controllerOf(tester).text, 'hello @Bob');
+    expect(personChip, findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+
+    // Cleared before the name arrives, it stays as the user left it.
+    members = Completer<List<ChannelMember>>();
+    final actions = await _openEditSheet(
+      tester,
+      message: _message('hello @Bob', mentions: [_bob]),
+      members: members.future,
+    );
+    await tester.enterText(field, '');
+    await tester.pumpAndSettle();
+    members.complete(_members);
+    await tester.pumpAndSettle();
+    expect(controllerOf(tester).text, isEmpty);
+    expect(personChip, findsNothing);
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect(actions.edits, isEmpty);
+  });
+
+  testWidgets('the keyboard moving does not rebuild the sheet', (tester) async {
+    addTearDown(tester.view.reset);
+    await _openEditSheet(tester, message: _message('hello'));
+    final before = _rosterReads;
+    final top = tester.getTopLeft(field).dy;
+    for (final inset in [80.0, 160.0, 240.0, 320.0]) {
+      tester.view.viewInsets = FakeViewPadding(
+        bottom: inset * tester.view.devicePixelRatio,
+      );
+      await tester.pump();
+    }
+    // The field moved up with the keyboard; the sheet built nothing again.
+    expect(tester.getTopLeft(field).dy, lessThan(top));
+    expect(_rosterReads, before);
+  });
 
   testWidgets('an unchanged or emptied edit saves nothing', (tester) async {
     final actions = await _openEditSheet(

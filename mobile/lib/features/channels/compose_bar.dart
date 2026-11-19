@@ -31,6 +31,7 @@ import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/mentions/bound_mentions.dart';
 import '../../shared/mentions/mention_bindings.dart';
+import '../../shared/mentions/mention_identity_links.dart';
 import '../../shared/mentions/mention_rules.dart';
 import '../../shared/huddle/huddle_session.dart';
 import '../../shared/relay/relay.dart';

@@ -204,6 +204,9 @@ void mentionSearchTests() {
         focusNode: focusNode,
         searchPeople: (query) async {
           searched.add(query);
+          if (query == 'xq' && searched.where((q) => q == 'xq').length == 1) {
+            throw StateError('relay down');
+          }
           return fold(bobby.displayName!).startsWith(fold(query))
               ? [bobby]
               : const [];
@@ -217,6 +220,23 @@ void mentionSearchTests() {
     await _expandComposer(tester);
     final controller = tester.widget<TextField>(field).controller!;
     final channelChooser = find.byKey(const ValueKey('channel-suggestions'));
+
+    /// A press and release with a pointer that is not a finger. Flutter
+    /// unfocuses a field on a mouse or stylus press outside its tap region,
+    /// so the chooser must still be there, with focus kept, at the release.
+    Future<void> press(Finder target, ui.PointerDeviceKind kind) async {
+      final gesture = await tester.startGesture(
+        tester.getCenter(target),
+        kind: kind,
+      );
+      await tester.pumpAndSettle();
+      expect(focusNode.hasFocus, isTrue, reason: '$kind press');
+      expect(target, findsOneWidget, reason: '$kind press');
+      await gesture.up();
+      await gesture.removePointer();
+      await tester.pumpAndSettle();
+    }
+
     void expectBobThenBobby() {
       expect(row('Bob'), findsOneWidget);
       expect(row('Bobby'), findsOneWidget);
@@ -258,8 +278,32 @@ void mentionSearchTests() {
     expect(sentText, 'hi @Bob');
     expect(sent, [bob]);
 
-    // The channel chooser follows focus the same way.
+    // A stylus or mouse press on a row picks it too: the chooser is part
+    // of the field's tap region, so the press leaves focus where it is.
     await _expandComposer(tester);
+    for (final (kind, text) in [
+      (ui.PointerDeviceKind.stylus, 'a'),
+      (ui.PointerDeviceKind.mouse, 'b'),
+    ]) {
+      await tester.enterText(field, '$text @bo');
+      await pause(tester);
+      await press(row('Bobby'), kind);
+      expect(controller.text, '$text @Bobby ', reason: '$kind');
+      expect(popover, findsNothing);
+    }
+
+    // Retry answers the same press: the failed search runs again.
+    await tester.enterText(field, '@xq');
+    await pause(tester);
+    expect(find.byKey(const ValueKey('mention-search-error')), findsOneWidget);
+    expect(searched.where((q) => q == 'xq'), hasLength(1));
+    await press(find.text('Retry'), ui.PointerDeviceKind.mouse);
+    await pause(tester);
+    expect(searched.where((q) => q == 'xq'), hasLength(2));
+    expect(find.byKey(const ValueKey('mention-search-error')), findsNothing);
+    expect(focusNode.hasFocus, isTrue);
+
+    // The channel chooser follows focus the same way.
     await tester.enterText(field, '#cur');
     await tester.pumpAndSettle();
     expect(channelChooser, findsOneWidget);

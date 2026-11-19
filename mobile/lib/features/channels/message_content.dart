@@ -30,6 +30,7 @@ import '../../shared/widgets/media_loading_placeholder.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/mentions/mention_bindings.dart';
+import '../../shared/mentions/mention_identity_links.dart';
 import '../../shared/mentions/mention_tags.dart';
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/deeplink/pending_deep_link_provider.dart';
@@ -702,6 +703,15 @@ class MessageContent extends HookConsumerWidget {
     });
 
     final baseStyle = fallbackStyle ?? link.style;
+    final mention = _identityMentionSpan(
+      link,
+      url,
+      text,
+      baseStyle,
+      agentMentionPubkeys,
+      onMentionTap,
+    );
+    if (mention != null) return mention;
     if (imeta != null &&
         classifyMediaUrl(url, imeta: imeta) == MessageMediaKind.audio) {
       return link.asWidgetSpan(_buildMedia(context, url, imeta));

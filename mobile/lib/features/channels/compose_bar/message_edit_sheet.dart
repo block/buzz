@@ -3,21 +3,25 @@ part of '../compose_bar.dart';
 /// Opens the sheet that edits the text of [message] in [channelId].
 ///
 /// The sheet offers the composer's `@` chooser with the same rules, and a
-/// pick inserts the same bound chip. An edit replaces prose only: the saved
+/// pick inserts the same bound chip. An edit notifies nobody: the saved
 /// edit event carries the tags the edit path writes today and never a `p`
-/// tag for the pick, so nobody is notified from an edit (buzz-app's edit
-/// rule; project recommendation 9). The message's existing mentions open
-/// as chips.
+/// tag. Each chip is saved in the body as an identity link to its exact key
+/// (`[@Name](nostr:npub1…)`, buzz-app's edit rule; project recommendation
+/// 9), which the bubble draws as that person's pill. The message's existing
+/// mentions and identity links open as chips.
 void showMessageEditSheet({
   required BuildContext context,
   required TimelineMessage message,
   required String channelId,
 }) {
+  // One instance for the sheet's life: the route calls its builder again on
+  // every keyboard frame, and an identical widget is not rebuilt.
+  final sheet = _MessageEditSheet(message: message, channelId: channelId);
   showBuzzModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
-    builder: (_) => _MessageEditSheet(message: message, channelId: channelId),
+    builder: (_) => sheet,
   );
 }
 
@@ -67,9 +71,11 @@ class _MessageEditSheet extends HookConsumerWidget {
     );
 
     // The message's existing mentions, as the bubble names them, open as
-    // chips. Names can arrive after the sheet (a profile still loading), so
-    // the chips are brought up to date while the text is still the original.
-    final seeded = _editedMessageMentions(
+    // chips. The field is filled once. Names can arrive after the sheet (a
+    // profile still loading), so the chips are brought up to date only
+    // while the draft is still exactly what was last seeded: a field the
+    // user cleared or changed is never filled again.
+    final seed = _editedMessageDraft(
       message,
       names: _editedMentionNames(
         ref,
@@ -84,34 +90,38 @@ class _MessageEditSheet extends HookConsumerWidget {
       ),
       agentPubkeys: ref.watch(agentMentionPubkeysProvider(channelId)),
       members: memberCandidates(),
+      code: controller._styledCodeRanges(message.content),
     );
-    final seededKey = [
-      for (final m in seeded) '${m.start}:${m.end}:${m.pubkey}',
-    ].join(',');
+    final seeded = useRef<_EditedDraft?>(null);
+    _EditedDraft currentDraft() => (
+      text: controller.text,
+      bound: [for (final m in controller.mentions) (m.range, m.pubkey)],
+    );
+    final seedBound = [for (final m in seed.mentions) (m.range, m.pubkey)];
     useEffect(() {
-      final text = message.content;
-      if (controller.text.isNotEmpty && controller.text != text) return null;
-      final bound = [for (final m in controller.mentions) (m.range, m.pubkey)];
-      if (controller.text == text &&
-          listEquals(bound, [for (final m in seeded) (m.range, m.pubkey)])) {
+      final last = seeded.value;
+      if (last != null &&
+          (!_sameEditedDraft(last, currentDraft()) ||
+              listEquals(last.bound, seedBound))) {
         return null;
       }
       isModifyingText.value = true;
       try {
         controller.replaceDraft(
           TextEditingValue(
-            text: text,
-            selection: controller.selection.isValid
+            text: seed.text,
+            selection: last != null && controller.selection.isValid
                 ? controller.selection
-                : TextSelection.collapsed(offset: text.length),
+                : TextSelection.collapsed(offset: seed.text.length),
           ),
-          mentions: seeded,
+          mentions: seed.mentions,
         );
       } finally {
         isModifyingText.value = false;
       }
+      seeded.value = (text: seed.text, bound: seedBound);
       return null;
-    }, [controller, seededKey]);
+    }, [controller, seedBound.join(',')]);
 
     final chooser = _useMentionChooser(
       ref,
@@ -161,17 +171,20 @@ class _MessageEditSheet extends HookConsumerWidget {
 
     void save() {
       final draft = controller.text;
-      final text = _qualifiedMentionContent(
+      final text = _editedMentionContent(
         draft,
         controller.mentions,
         code: controller._styledCodeRanges(draft),
       ).trim();
-      if (text.isEmpty || text == message.content) {
+      final unchanged =
+          seeded.value != null &&
+          _sameEditedDraft(seeded.value!, currentDraft());
+      if (text.isEmpty || unchanged || text == message.content) {
         Navigator.of(context).pop();
         return;
       }
-      // Prose only: the edit keeps the tags this path always wrote and adds
-      // no recipient for a pick.
+      // The edit keeps the tags this path always wrote and adds no
+      // recipient: every chip is in the body as an identity link.
       ref
           .read(channelActionsProvider)
           .editMessage(
@@ -186,13 +199,7 @@ class _MessageEditSheet extends HookConsumerWidget {
       Navigator.of(context).pop();
     }
 
-    return Padding(
-      padding: EdgeInsets.fromLTRB(
-        Grid.gutter,
-        0,
-        Grid.gutter,
-        MediaQuery.viewInsetsOf(context).bottom,
-      ),
+    return _KeyboardInset(
       child: SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -297,39 +304,124 @@ Map<String, String> _editedMentionNames(
   );
 }
 
-/// The mentions already in [message], bound to the people its tags name,
-/// in text order. Each `@Name` or `@Name (<key>)` the content writes for
-/// exactly one tagged person becomes a chip; a name two tagged people share
-/// stays text, since the text cannot say which one it meant.
-List<_ComposerMention> _editedMessageMentions(
+/// Keeps its [child] above the keyboard. The inset changes on every frame
+/// of the keyboard's animation; reading it here rebuilds this padding alone,
+/// not the sheet and the roster's mention candidates it builds.
+class _KeyboardInset extends StatelessWidget {
+  final Widget child;
+
+  const _KeyboardInset({required this.child});
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: EdgeInsets.fromLTRB(
+      Grid.gutter,
+      0,
+      Grid.gutter,
+      MediaQuery.viewInsetsOf(context).bottom,
+    ),
+    child: child,
+  );
+}
+
+/// An edit draft's text and the key bound at each chip's range.
+typedef _EditedDraft = ({String text, List<(MentionRange, String)> bound});
+
+bool _sameEditedDraft(_EditedDraft a, _EditedDraft b) =>
+    a.text == b.text && listEquals(a.bound, b.bound);
+
+final _keyQualifier = RegExp(r' \(([0-9a-f]{64})\)$', caseSensitive: false);
+
+/// The body an edit saves for [text]: each chip becomes an identity link to
+/// its exact key, a display-only reference that notifies nobody and that
+/// every reader resolves without a tag. Two picked namesakes are two links
+/// with the same label, so no key is written as prose. A chip inside [code]
+/// the composer styles stays as typed.
+String _editedMentionContent(
+  String text,
+  List<_ComposerMention> mentions, {
+  required List<TextRange> code,
+}) {
+  var content = text;
+  for (final mention in mentions.reversed) {
+    if (code.any((c) => c.start < mention.start && mention.end < c.end)) {
+      continue;
+    }
+    // A chip seeded from `@Name (<key>)` names its key in the link instead.
+    var label = text.substring(mention.start, mention.end);
+    if (_keyQualifier.firstMatch(label)?[1]?.toLowerCase() == mention.pubkey) {
+      label = label.replaceFirst(_keyQualifier, '');
+    }
+    content = content.replaceRange(
+      mention.start,
+      mention.end,
+      mentionIdentityLink(label, mention.pubkey),
+    );
+  }
+  return content;
+}
+
+/// The draft that edits [message]: its text, with each identity link outside
+/// [code] shown as its `@Name`, and its chips in text order. A chip is an
+/// identity link, bound to the key it names, or an `@Name` or
+/// `@Name (<key>)` the content writes for exactly one tagged person; a name
+/// two tagged people share stays text, since the text cannot say which one
+/// it meant.
+({String text, List<_ComposerMention> mentions}) _editedMessageDraft(
   TimelineMessage message, {
   required Map<String, String> names,
   required Set<String> agentPubkeys,
   required List<MentionCandidate> members,
+  required List<TextRange> code,
 }) {
-  if (names.isEmpty) return const [];
+  _ComposerMention chip(int start, int end, String pubkey, String? name) =>
+      _ComposerMention(
+        start: start,
+        end: end,
+        candidate:
+            members
+                .where((m) => m.pubkey.toLowerCase() == pubkey)
+                .firstOrNull ??
+            MentionCandidate(
+              pubkey: pubkey,
+              displayName: name,
+              isAgent: agentPubkeys.contains(pubkey),
+            ),
+      );
+
+  final text = StringBuffer();
+  final mentions = <_ComposerMention>[];
+  var offset = 0;
+  for (final link in mentionIdentityLinks(message.content)) {
+    if (code.any((c) => c.start < link.start && link.end < c.end)) continue;
+    text.write(message.content.substring(offset, link.start));
+    final start = text.length;
+    text.write(link.label);
+    mentions.add(
+      chip(start, text.length, link.pubkey, link.label.substring(1)),
+    );
+    offset = link.end;
+  }
+  text.write(message.content.substring(offset));
+  final draft = text.toString();
+
   final keysByLabel = <String, Set<String>>{};
   for (final MapEntry(key: pubkey, value: name) in names.entries) {
     (keysByLabel[name.toLowerCase()] ??= {}).add(pubkey);
     keysByLabel['${name.toLowerCase()} ($pubkey)'] = {pubkey};
   }
-  final content = message.content;
-  return [
-    for (final range in mentionOccurrences(content, keysByLabel.keys))
-      if (keysByLabel[range.label.toLowerCase()] case final keys?
-          when keys.length == 1)
-        _ComposerMention(
-          start: range.start,
-          end: range.end,
-          candidate:
-              members
-                  .where((m) => m.pubkey.toLowerCase() == keys.single)
-                  .firstOrNull ??
-              MentionCandidate(
-                pubkey: keys.single,
-                displayName: names[keys.single],
-                isAgent: agentPubkeys.contains(keys.single),
-              ),
-        ),
-  ];
+  final linked = [...mentions];
+  for (final range in mentionOccurrences(draft, keysByLabel.keys)) {
+    if (linked.any((m) => m.start < range.end && range.start < m.end)) continue;
+    if (keysByLabel[range.label.toLowerCase()] case final keys?
+        when keys.length == 1) {
+      mentions.add(
+        chip(range.start, range.end, keys.single, names[keys.single]),
+      );
+    }
+  }
+  return (
+    text: draft,
+    mentions: mentions..sort((a, b) => a.start.compareTo(b.start)),
+  );
 }

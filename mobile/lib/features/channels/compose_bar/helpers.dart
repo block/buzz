@@ -311,6 +311,10 @@ void _expandComposer({
   });
 }
 
+/// The chooser above an editor's field. Its rows and Retry sit in the
+/// field's [TextFieldTapRegion]: a mouse or stylus press outside that region
+/// unfocuses the field, and the chooser follows focus, so a press on a row
+/// would remove the row before its release could pick it.
 Widget _composerSuggestionPanel({
   required List<Channel> channelSuggestions,
   required List<MentionCandidate> mentionSuggestions,
@@ -327,25 +331,29 @@ Widget _composerSuggestionPanel({
 }) => channelSuggestions.isNotEmpty
     ? KeyedSubtree(
         key: const ValueKey('channel-suggestions'),
-        child: _ChannelSuggestions(
-          suggestions: channelSuggestions,
-          onSelect: onChannelSelect,
+        child: TextFieldTapRegion(
+          child: _ChannelSuggestions(
+            suggestions: channelSuggestions,
+            onSelect: onChannelSelect,
+          ),
         ),
       )
     : mentionSuggestions.isNotEmpty || mentionSearchFailed
     ? KeyedSubtree(
         key: const ValueKey('mention-suggestions'),
-        child: _MentionSuggestions(
-          suggestions: mentionSuggestions,
-          unavailable: unavailableMentions,
-          searchFailed: mentionSearchFailed,
-          reserveHeight: reserveMentionHeight,
-          searching: mentionSearching,
-          onRetry: onMentionSearchRetry,
-          userCache: userCache,
-          currentPubkey: currentPubkey,
-          isDmChannel: isDmChannel,
-          onSelect: onMentionSelect,
+        child: TextFieldTapRegion(
+          child: _MentionSuggestions(
+            suggestions: mentionSuggestions,
+            unavailable: unavailableMentions,
+            searchFailed: mentionSearchFailed,
+            reserveHeight: reserveMentionHeight,
+            searching: mentionSearching,
+            onRetry: onMentionSearchRetry,
+            userCache: userCache,
+            currentPubkey: currentPubkey,
+            isDmChannel: isDmChannel,
+            onSelect: onMentionSelect,
+          ),
         ),
       )
     : const SizedBox.shrink(key: ValueKey('no-suggestions'));
