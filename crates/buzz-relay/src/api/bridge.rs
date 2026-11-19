@@ -109,8 +109,6 @@ pub(crate) struct ProvenCaller {
     pub(crate) signed_at: Option<u64>,
     /// The owner named by a verified agent token (Enforce only).
     pub(crate) token_owner: Option<nostr::PublicKey>,
-    /// Owner proven by current membership admission for explicit artifact reads.
-    pub(crate) artifact_owner: Option<nostr::PublicKey>,
     slot: AccessSlot,
 }
 
@@ -130,7 +128,6 @@ impl ProvenCaller {
             event_id_bytes,
             signed_at,
             token_owner,
-            artifact_owner: None,
             slot: slot.clone(),
         }
     }
@@ -1467,25 +1464,17 @@ async fn submit_event_authed(
         token_owner,
     )
     .await;
-    let artifact_owner = match caller.admit_member(membership) {
-        Ok(owner) => owner.or(token_owner),
-        Err(e) => {
-            return SubmitOutcome::Err {
-                response: e.into_response(),
-            }
-        }
-    };
+    if let Err(e) = caller.admit_member(membership) {
+        return SubmitOutcome::Err {
+            response: e.into_response(),
+        };
+    }
 
     let auth = IngestAuth::Http {
         pubkey,
         scopes: buzz_auth::Scope::all_known(), // Pure Nostr: full scopes, channel access via membership
-        auth_method: if signed_auth_created_at.is_some() {
-            crate::handlers::ingest::HttpAuthMethod::Nip98
-        } else {
-            crate::handlers::ingest::HttpAuthMethod::DevPubkey
-        },
-    }
-    .with_verified_owner(artifact_owner);
+        auth_method: crate::handlers::ingest::HttpAuthMethod::Nip98,
+    };
 
     // Typing indicators are ephemeral: broadcast to the channel, never stored.
     let result = if is_typing {
@@ -1635,9 +1624,8 @@ pub async fn query_events(
 
     // This authority surface always needs payload-bound NIP-98, including dev.
     // Detect before admission, and before Filter can drop the extension key.
-    let compact_membership = serde_json::from_slice::<Vec<Value>>(&body).is_ok_and(|filters| {
-        membership_snapshot::requested(&filters) || filters.iter().any(|f| f.get("scope").is_some())
-    });
+    let compact_membership = serde_json::from_slice::<Vec<Value>>(&body)
+        .is_ok_and(|filters| membership_snapshot::requested(&filters));
 
     // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
     let proof = crate::nip_fi_shadow::EnforcedProof::new(&state, &headers, "bridge");
@@ -1711,7 +1699,7 @@ async fn query_events_authed(
         caller.token_owner,
     )
     .await;
-    caller.artifact_owner = caller
+    caller
         .admit_member(membership)
         .map_err(IntoResponse::into_response)?;
 
@@ -1746,7 +1734,7 @@ async fn query_member_events(
     }
     let routed = || caller.read_artifact(&raw_filters);
     if let Some(result) =
-        super::artifact::query(state, tenant, caller, &raw_filters, false, routed).await
+        super::artifact::query(state, tenant, &pubkey, &raw_filters, false, routed).await
     {
         return result;
     }
@@ -2409,7 +2397,7 @@ async fn count_events_authed(
         caller.token_owner,
     )
     .await;
-    caller.artifact_owner = caller
+    caller
         .admit_member(membership)
         .map_err(IntoResponse::into_response)?;
 
@@ -2430,7 +2418,7 @@ async fn count_member_events(
     let raw: Vec<Value> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
     let routed = || caller.read_artifact(&raw);
-    if let Some(result) = super::artifact::query(state, tenant, caller, &raw, true, routed).await {
+    if let Some(result) = super::artifact::query(state, tenant, &pubkey, &raw, true, routed).await {
         return result;
     }
     let filters: Vec<nostr::Filter> = serde_json::from_slice(body)
@@ -3506,7 +3494,6 @@ pub(crate) mod postgres_tests {
                 event_id_bytes: fresh_nip98_event_id_bytes(),
                 signed_at: None,
                 token_owner: None,
-                artifact_owner: None,
                 slot: AccessSlot::default(),
             };
             caller.read_artifact(&raw);
@@ -11327,7 +11314,6 @@ pub(crate) mod postgres_tests {
                         event_id_bytes: fresh_nip98_event_id_bytes(),
                         signed_at: Some(nostr::Timestamp::now().as_secs()),
                         token_owner: None,
-                        artifact_owner: None,
                         slot: AccessSlot::default(),
                     },
                     None,
@@ -11507,7 +11493,6 @@ pub(crate) mod postgres_tests {
                     event_id_bytes: fresh_nip98_event_id_bytes(),
                     signed_at: Some(nostr::Timestamp::now().as_secs()),
                     token_owner: None,
-                    artifact_owner: None,
                     slot: AccessSlot::default(),
                 },
                 None,

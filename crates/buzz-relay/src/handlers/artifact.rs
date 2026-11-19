@@ -47,27 +47,25 @@ pub(crate) async fn accept(
         )
         .await
         .map_err(|e| IngestError::Internal(format!("artifact storage: {e}")))?;
-    for stored in accepted_events(outcome)? {
-        publish(state, tenant, &stored).await;
+    match outcome {
+        ArtifactOutcome::Accepted(events) => {
+            for stored in &events {
+                publish(state, tenant, stored).await;
+            }
+        }
+        ArtifactOutcome::Duplicate => {}
+        ArtifactOutcome::Conflict(message) => {
+            return Err(IngestError::CanvasConflict(format!("conflict: {message}")))
+        }
+        ArtifactOutcome::Rejected(message) => {
+            return Err(IngestError::Rejected(format!("invalid: {message}")))
+        }
     }
     Ok(IngestResult {
         event_id: event.id.to_hex(),
         accepted: true,
         message: String::new(),
     })
-}
-
-pub(super) fn accepted_events(outcome: ArtifactOutcome) -> Result<Vec<StoredEvent>, IngestError> {
-    match outcome {
-        ArtifactOutcome::Accepted(events) => Ok(events),
-        ArtifactOutcome::Duplicate => Ok(Vec::new()),
-        ArtifactOutcome::Conflict(message) => {
-            Err(IngestError::CanvasConflict(format!("conflict: {message}")))
-        }
-        ArtifactOutcome::Rejected(message) => {
-            Err(IngestError::Rejected(format!("invalid: {message}")))
-        }
-    }
 }
 
 fn head_unavailable() -> IngestError {
@@ -90,7 +88,7 @@ async fn publish(state: &Arc<AppState>, tenant: &TenantContext, stored: &StoredE
     super::event::fan_out_event_to_local_subscribers(state, tenant.community(), stored).await;
 }
 
-pub(super) fn verify_revision_auth(event: &Event) -> Result<(), IngestError> {
+fn verify_revision_auth(event: &Event) -> Result<(), IngestError> {
     for tag in event.tags.iter().filter(|t| t.as_slice()[0] == "auth") {
         let json = serde_json::to_string(tag.as_slice())
             .map_err(|e| IngestError::Internal(e.to_string()))?;

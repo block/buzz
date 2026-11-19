@@ -19,8 +19,6 @@ pub enum EventTopic {
     Channel(Uuid),
     /// Community-global events that are not exact-channel routed.
     Global,
-    /// Compact artifact signals, isolated from ordinary event fan-out.
-    CommunityArtifact,
 }
 
 /// A fully qualified event topic, including its server-resolved community.
@@ -48,9 +46,6 @@ impl EventTopicKey {
                 format!("{BUZZ_PREFIX}:{}:channel:{channel_id}", self.community_id)
             }
             EventTopic::Global => format!("{BUZZ_PREFIX}:{}:global", self.community_id),
-            EventTopic::CommunityArtifact => {
-                format!("{BUZZ_PREFIX}:{}:artifacts", self.community_id)
-            }
         }
     }
 
@@ -76,7 +71,6 @@ impl EventTopicKey {
         };
 
         let topic = match scope {
-            "artifacts" if parts.next().is_none() => EventTopic::CommunityArtifact,
             "global" => {
                 if parts.next().is_some() {
                     return Err(PubSubError::InvalidChannelKey(channel.to_string()));

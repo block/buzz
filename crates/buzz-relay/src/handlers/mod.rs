@@ -14,8 +14,6 @@ pub mod close;
 pub mod coalesced_refresh;
 /// Command executor — transactional processing for command kinds.
 pub mod command_executor;
-/// NIP-AR explicit community operations and admission.
-pub(crate) mod community_artifact;
 /// Relay-operator community provisioning HTTP support.
 pub mod community_provisioning;
 /// NIP-45 COUNT handler.

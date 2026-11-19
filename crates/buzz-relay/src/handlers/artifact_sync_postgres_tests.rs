@@ -691,5 +691,3 @@ async fn a_replaced_req_sends_nothing_under_a_sync_that_took_its_id() {
             .unwrap();
     }
 }
-
-mod community_postgres_tests;

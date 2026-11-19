@@ -521,12 +521,7 @@ pub async fn validate_standard_deletion_event(
             return Err(anyhow::anyhow!("invalid a-tag format"));
         }
         if let Ok(target_kind) = parts[0].parse() {
-            if matches!(
-                target_kind,
-                KIND_VERIFIED_PROFILE
-                    | buzz_core::kind::KIND_ARTIFACT
-                    | buzz_core::kind::KIND_ARTIFACT_REMOVAL
-            ) {
+            if target_kind == KIND_VERIFIED_PROFILE {
                 anyhow::bail!(DELETION_TARGET_DENIED);
             }
             check_deletion_privacy_k_tag(event, target_kind)?;
