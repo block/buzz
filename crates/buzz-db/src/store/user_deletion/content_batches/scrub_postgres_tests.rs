@@ -613,3 +613,110 @@ async fn late_legacy_references_block_deletion_for_lower_and_upper_hex() {
         assert_eq!(row(&db, c, &survivor).await, before);
     }
 }
+
+/// Erasure removes the pin and unpin commands of an account. One under an
+/// hour old keeps its ID and timestamp and nothing else, so sending it again
+/// cannot pin a message another member has unpinned since.
+/// Mutation: drop `keeps_replay_record` from the plan → RED (the resend pins
+/// again); drop the command kinds from the scrub tag filter → RED (the record
+/// keeps the target).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn erased_pin_commands_keep_only_a_replay_record() {
+    use crate::pins::{PinChange, PinCommandWrite};
+
+    async fn apply(
+        db: &Db,
+        c: CommunityId,
+        ch: Uuid,
+        relay: &Keys,
+        command: &nostr::Event,
+        target: &nostr::Event,
+    ) -> PinCommandWrite {
+        let notice = EventBuilder::new(Kind::Custom(40099), command.id.to_hex())
+            .tags([Tag::parse(["h", &ch.to_string()]).unwrap()])
+            .sign_with_keys(relay)
+            .unwrap();
+        let change = if command.kind == Kind::Custom(40010) {
+            PinChange::Pin { notice: &notice }
+        } else {
+            PinChange::Unpin
+        };
+        db.apply_pin_command(c, ch, command, target.id.as_bytes(), change, relay)
+            .await
+            .unwrap()
+    }
+
+    let (db, c, ch, alice, bob) = setup().await;
+    let relay = Keys::generate();
+    let pinned = message(&db, c, ch, &bob, "pinned", None).await;
+    let command = |kind: u16, author: &Keys, age_secs: u64| {
+        EventBuilder::new(Kind::Custom(kind), "")
+            .tags([
+                Tag::parse(["h", &ch.to_string()]).unwrap(),
+                // Scrubbing keeps a marked reference like this on a message.
+                Tag::parse(["e", &pinned.id.to_hex(), "", "reply"]).unwrap(),
+            ])
+            .custom_created_at(Timestamp::from(Timestamp::now().as_secs() - age_secs))
+            .sign_with_keys(author)
+            .unwrap()
+    };
+
+    // The relay stores no command this old, so it was stored back then.
+    let old = command(40011, &alice, 2 * 60 * 60);
+    sqlx::query(
+        "INSERT INTO events (community_id,id,pubkey,created_at,kind,tags,content,sig,channel_id)
+         VALUES ($1,$2,$3,$4,40011,$5,'',$6,$7)",
+    )
+    .bind(c.as_uuid())
+    .bind(old.id.as_bytes().as_slice())
+    .bind(old.pubkey.to_bytes().as_slice())
+    .bind(timestamp(&old))
+    .bind(serde_json::to_value(&old.tags).unwrap())
+    .bind(old.sig.serialize().as_slice())
+    .bind(ch)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let pin = command(40010, &alice, 0);
+    assert!(apply(&db, c, ch, &relay, &pin, &pinned)
+        .await
+        .list
+        .is_some());
+
+    let erased = db
+        .user_deletion_store()
+        .run_message_batches(
+            &options(c, &alice),
+            ExecutionMode::Delete,
+            None,
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(erased.scrubbed_events, 1);
+    let old_remains: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM events WHERE community_id=$1 AND id=$2)")
+            .bind(c.as_uuid())
+            .bind(old.id.as_bytes().as_slice())
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert!(!old_remains, "a command too old to resend is removed");
+    let record = row(&db, c, &pin).await;
+    assert_eq!(record["pubkey"], "\\x");
+    assert_eq!(record["sig"], "\\x");
+    assert_eq!(record["content"], "");
+    assert_eq!(record["tags"], json!([]));
+
+    let unpin = command(40011, &bob, 0);
+    assert!(apply(&db, c, ch, &relay, &unpin, &pinned)
+        .await
+        .list
+        .is_some());
+    let resent = apply(&db, c, ch, &relay, &pin, &pinned).await;
+    assert!(
+        !resent.inserted && resent.list.is_none(),
+        "the unpin stands"
+    );
+}

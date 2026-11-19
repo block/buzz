@@ -23,7 +23,7 @@ fn only_tag<'a>(event: &'a Event, name: &str) -> Result<&'a str, IngestError> {
         .tags
         .iter()
         .filter(|tag| tag.as_slice().first().is_some_and(|key| key == name));
-    if let (Some([_, value]), None) = (tags.next().map(Tag::as_slice), tags.next()) {
+    if let (Some([_, value, ..]), None) = (tags.next().map(Tag::as_slice), tags.next()) {
         return Ok(value);
     }
     Err(IngestError::Rejected(format!(
@@ -79,6 +79,8 @@ pub(super) async fn persist(
                     "type": "message_pinned",
                     "actor": event.pubkey.to_hex(),
                     "target_event_id": target_hex,
+                    // Two pins of one message by one member are two notices.
+                    "command_event_id": event.id.to_hex(),
                 }),
                 chrono::Utc::now(),
             )

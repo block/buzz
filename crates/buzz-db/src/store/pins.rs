@@ -5,13 +5,33 @@
 //! unpin commands of a channel, and the deletes that remove a pinned message,
 //! apply one at a time.
 
-use buzz_core::kind::{KIND_CHANNEL_PINS, MAX_CHANNEL_PINS, PINNABLE_KINDS};
+use buzz_core::kind::{
+    KIND_CHANNEL_PINS, KIND_PIN_MESSAGE, KIND_UNPIN_MESSAGE, MAX_CHANNEL_PINS, PINNABLE_KINDS,
+};
 use buzz_core::{CommunityId, StoredEvent};
 use buzz_datastore_tracing::datastore_span;
 use uuid::Uuid;
 
 use crate::error::{DbError, Result};
 use crate::{AdmittedTx, Db};
+
+pub(crate) const COMMAND_KINDS: [i32; 2] = [KIND_PIN_MESSAGE as i32, KIND_UNPIN_MESSAGE as i32];
+
+/// How long account erasure keeps the ID and timestamp of a pin or unpin
+/// command it erases. A resend of the command is still a duplicate for that
+/// long; the relay accepts no command with an older timestamp.
+const REPLAY_RECORD_SECS: i64 = 60 * 60;
+
+/// Whether account erasure reduces this event to its ID and timestamp rather
+/// than removing it: a pin or unpin command young enough to be sent again.
+pub(crate) fn keeps_replay_record(
+    kind: i32,
+    created_at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    COMMAND_KINDS.contains(&kind)
+        && created_at > now - chrono::Duration::seconds(REPLAY_RECORD_SECS)
+}
 
 /// What a NIP-CP command does to its target message.
 pub enum PinChange<'a> {
@@ -160,6 +180,9 @@ impl Db {
     /// not, stores the command and leaves the list alone. A list that
     /// changes also drops every entry whose message is gone.
     ///
+    /// Account erasure keeps the ID and timestamp of a command under an hour
+    /// old, so a resend of it is still a duplicate here.
+    ///
     /// Returns [`DbError::AccessDenied`], with nothing stored, when the
     /// target of a pin is not a live message of the channel or the channel
     /// already holds [`MAX_CHANNEL_PINS`] pins.
@@ -199,9 +222,24 @@ impl Db {
             });
         }
 
+        // Drop the records account erasure left of commands in this channel
+        // that are now too old to be sent again.
+        sqlx::query(
+            "DELETE FROM events WHERE community_id = $1 AND kind = ANY($2) AND pubkey = $3 \
+             AND channel_id = $4 AND created_at <= $5",
+        )
+        .bind(community.as_uuid())
+        .bind(COMMAND_KINDS.as_slice())
+        .bind(&[] as &[u8])
+        .bind(channel_id)
+        .bind(chrono::Utc::now() - chrono::Duration::seconds(REPLAY_RECORD_SECS))
+        .execute(tx.conn())
+        .await?;
+
         let pinned = pins.iter().position(|id| id == target);
-        let list = match (&change, pinned) {
-            (PinChange::Pin { notice }, None) => {
+        let list = match (change, pinned) {
+            (PinChange::Pin { notice }, pinned) => {
+                // A listed message can be gone: bulk erasure leaves the list.
                 if live_messages(&mut tx, channel_id, vec![target.to_vec()])
                     .await?
                     .is_empty()
@@ -210,22 +248,26 @@ impl Db {
                         "target is not a message in this channel".to_string(),
                     ));
                 }
-                pins = live_messages(&mut tx, channel_id, pins).await?;
-                if pins.len() >= MAX_CHANNEL_PINS {
-                    return Err(DbError::AccessDenied("pin limit reached".to_string()));
+                if pinned.is_some() {
+                    None
+                } else {
+                    pins = live_messages(&mut tx, channel_id, pins).await?;
+                    if pins.len() >= MAX_CHANNEL_PINS {
+                        return Err(DbError::AccessDenied("pin limit reached".to_string()));
+                    }
+                    pins.insert(0, target.to_vec());
+                    let list = replace_pins(&mut tx, channel_id, &pins, relay_signer).await?;
+                    crate::event::insert_event_in_transaction(&mut tx, notice, Some(channel_id))
+                        .await?;
+                    Some(list)
                 }
-                pins.insert(0, target.to_vec());
-                let list = replace_pins(&mut tx, channel_id, &pins, relay_signer).await?;
-                crate::event::insert_event_in_transaction(&mut tx, notice, Some(channel_id))
-                    .await?;
-                Some(list)
             }
             (PinChange::Unpin, Some(index)) => {
                 pins.remove(index);
                 pins = live_messages(&mut tx, channel_id, pins).await?;
                 Some(replace_pins(&mut tx, channel_id, &pins, relay_signer).await?)
             }
-            (PinChange::Pin { .. }, Some(_)) | (PinChange::Unpin, None) => None,
+            (PinChange::Unpin, None) => None,
         };
         tx.commit().await?;
         Ok(PinCommandWrite {

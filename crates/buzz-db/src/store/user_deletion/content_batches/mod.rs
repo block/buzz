@@ -28,6 +28,9 @@ const KINDS: &[i32] = &[
     // Signer-owned definitions, including shared publications. Project membership
     // grants no ownership over its repositories; their events remain excluded.
     30175, 30176, 30178, 30030, 30180, 30621,
+    // NIP-CP pin and unpin commands. A recent one keeps its ID and timestamp
+    // (`crate::pins::keeps_replay_record`).
+    40010, 40011,
 ];
 const PAGE_SIZE: i64 = 100;
 const MAX_TARGETS: usize = 10_000;
@@ -301,11 +304,15 @@ async fn plan(
     // whose selected ancestor was already physically removed.
     let metadata = retention::metadata(conn, options.community, &selected).await?;
     let selected = retention::children_first(selected, &metadata)?;
+    let now = Utc::now();
+    let mut scrubbed_events = 0;
     for page in selected.chunks(PAGE_SIZE as usize) {
         rows::event_rows(conn, page, &mut output).await?;
         for event in page {
             let id = hex::encode(&event.id);
-            let scrub = needed.contains(&id);
+            let scrub = needed.contains(&id)
+                || crate::pins::keeps_replay_record(event.kind, event.created_at, now);
+            scrubbed_events += usize::from(scrub);
             output
                 .repairs
                 .push(json!({"event_id": id, "channel_id": event.channel_id,
@@ -337,7 +344,7 @@ async fn plan(
         batches: output.batches,
         items: output.seen.len(),
         warnings: output.warnings,
-        scrubbed_events: needed.len(),
+        scrubbed_events,
         excluded_event_kinds: excluded,
     };
     Ok(Plan {
