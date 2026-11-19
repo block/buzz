@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-WaeXIg0MklXhGjJJmHNaC2VroFU3W33l/05l2S6naY4='; style-src 'unsafe-inline'; frame-src https:">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Embedded content</title>
+<style>
+  html, body, iframe { display: block; margin: 0; width: 100%; height: 100%; border: 0; background: black; }
+</style>
+</head>
+<body>
+<script>
+  const parents = new Set(['tauri://localhost', 'http://tauri.localhost', 'https://tauri.localhost']);
+
+  function destination(src) {
+    if (typeof src !== 'string') return null;
+    let url;
+    try {
+      url = new URL(src);
+    } catch {
+      return null;
+    }
+    if (!/^https:\/\/[a-z0-9.-]+(?::[0-9]{1,5})?$/i.test(url.origin) ||
+        url.protocol !== 'https:' || url.username || url.password || url.origin === location.origin ||
+        url.hostname.endsWith('.') || url.hostname === 'localhost' || url.hostname.endsWith('.localhost') ||
+        url.hostname.startsWith('127.') || url.hostname === '0.0.0.0') return null;
+    return url;
+  }
+
+  function mount(event) {
+    if (event.source !== parent || event.data?.type !== 'buzz-embed:mount') return;
+    removeEventListener('message', mount);
+    const url = parents.has(event.origin) && destination(event.data.src);
+    if (!url) {
+      parent.postMessage({ type: 'buzz-embed:refused' }, '*');
+      return;
+    }
+
+    const policy = document.createElement('meta');
+    policy.httpEquiv = 'Content-Security-Policy';
+    policy.content = 'frame-src ' + url.origin;
+    document.head.append(policy);
+
+    const frame = document.createElement('iframe');
+    frame.title = document.title;
+    frame.sandbox = 'allow-scripts allow-same-origin allow-presentation allow-popups allow-popups-to-escape-sandbox';
+    frame.allow = 'autoplay; encrypted-media; picture-in-picture; fullscreen';
+    frame.allowFullscreen = true;
+    frame.referrerPolicy = 'strict-origin-when-cross-origin';
+    frame.src = url.href;
+    document.body.append(frame);
+    parent.postMessage({ type: 'buzz-embed:mounted' }, '*');
+  }
+
+  if (self !== parent && self.origin === location.origin) {
+    addEventListener('message', mount);
+    parent.postMessage({ type: 'buzz-embed:ready' }, '*');
+  }
+</script>
+</body>
+</html>
