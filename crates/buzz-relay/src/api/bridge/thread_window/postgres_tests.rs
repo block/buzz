@@ -341,11 +341,11 @@ async fn thread_window_real_query_signed_bounds_and_sentinel_aux() {
     }
 }
 
-/// A newer window pages forward from the oldest reply, and `root_aux: false`
-/// leaves the root's aux out while the rows keep theirs.
+/// A newer window pages forward from the oldest reply; every page carries the
+/// root's aux and its own rows' aux.
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn thread_window_newer_pages_forward_and_root_aux_is_optional() {
+async fn thread_window_newer_pages_forward() {
     let f = Fixture::new().await;
     let mut replies = Vec::new();
     for n in 0..51 {
@@ -370,11 +370,10 @@ async fn thread_window_newer_pages_forward_and_root_aux_is_optional() {
     let mut tail = filter.clone();
     tail["after"] = bounds["next_cursor"]["created_at"].clone();
     tail["after_id"] = bounds["next_cursor"]["id"].clone();
-    tail["root_aux"] = json!(false);
     let page = f.query(&tail).await;
     assert_eq!(ids(&page, Some(9)), hex(&replies[50..]));
     let all = ids(&page, None);
-    assert!(!all.contains(&root_edit.id.to_hex().as_str()), "{page}");
+    assert!(all.contains(&root_edit.id.to_hex().as_str()), "{page}");
     assert!(all.contains(&reply_reaction.id.to_hex().as_str()), "{page}");
     let bounds = f.bounds(&page, &tail);
     assert_eq!(
@@ -382,12 +381,13 @@ async fn thread_window_newer_pages_forward_and_root_aux_is_optional() {
         (&json!(false), &Value::Null)
     );
 
-    // Past the last reply, a page without the root's aux is the bounds alone.
+    // Past the last reply, a page is the root's aux and the bounds.
     let mut end = tail.clone();
     end["after"] = json!(replies[50].created_at.as_secs());
     end["after_id"] = json!(replies[50].id.to_hex());
     let page = f.query(&end).await;
-    assert_eq!(page.as_array().unwrap().len(), 1, "{page}");
+    assert_eq!(ids(&page, None)[0], root_edit.id.to_hex(), "{page}");
+    assert_eq!(page.as_array().unwrap().len(), 2, "{page}");
     assert_eq!(f.bounds(&page, &end)["has_more"], false);
 }
 
@@ -589,7 +589,6 @@ async fn thread_window_real_query_validation_forgery_and_sql_failure() {
         ("after", json!(1)),
         ("after_id", json!("a".repeat(64))),
         ("direction", json!("up")),
-        ("root_aux", json!("false")),
     ] {
         let mut filter = f.filter();
         filter[key] = val;
