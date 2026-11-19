@@ -25,6 +25,13 @@ const CANONICAL_DEV_IDENTIFIER: &str = "xyz.block.buzz.app.dev";
 const LEGACY_CANONICAL_DEV_IDENTIFIER: &str = "xyz.block.sprout.app.dev";
 const LEGACY_RELEASE_IDENTIFIER: &str = "xyz.block.sprout.app";
 
+/// The 1.0 bundle identifier. Data migration maps this to the 0.x identifier
+/// (`xyz.block.buzz.app`) so users who upgrade from 0.x to 1.0 do not lose
+/// their agents, harnesses, and config. The dev variant follows the same
+/// pattern (`xyz.block.buzz.desktop.dev*` -> `xyz.block.buzz.app.dev*`).
+const DESKTOP_IDENTIFIER: &str = "xyz.block.buzz.desktop";
+const DESKTOP_DEV_IDENTIFIER: &str = "xyz.block.buzz.desktop.dev";
+
 /// JSON files symlinked from worktree data directories to the canonical
 /// dev data directory. Only data files — never `agent-pids/` or `logs/`.
 /// `identity.key` is deliberately excluded because worktree instances
@@ -58,9 +65,17 @@ fn canonical_dev_data_dir(current: &Path) -> Option<PathBuf> {
 
 pub(crate) fn legacy_app_data_dir(current: &Path) -> Option<PathBuf> {
     let name = current.file_name()?.to_str()?;
-    let legacy_name = if name.starts_with(CANONICAL_DEV_IDENTIFIER) {
+    let legacy_name = if name.starts_with(DESKTOP_DEV_IDENTIFIER) {
+        // 1.0 dev -> 0.x dev: xyz.block.buzz.desktop.dev* -> xyz.block.buzz.app.dev*
+        name.replacen(DESKTOP_DEV_IDENTIFIER, CANONICAL_DEV_IDENTIFIER, 1)
+    } else if name.starts_with(DESKTOP_IDENTIFIER) {
+        // 1.0 release -> 0.x release: xyz.block.buzz.desktop -> xyz.block.buzz.app
+        name.replacen(DESKTOP_IDENTIFIER, "xyz.block.buzz.app", 1)
+    } else if name.starts_with(CANONICAL_DEV_IDENTIFIER) {
+        // 0.x dev -> sprout dev: xyz.block.buzz.app.dev* -> xyz.block.sprout.app.dev*
         name.replacen(CANONICAL_DEV_IDENTIFIER, LEGACY_CANONICAL_DEV_IDENTIFIER, 1)
     } else if name.starts_with("xyz.block.buzz.app") {
+        // 0.x release -> sprout release: xyz.block.buzz.app -> xyz.block.sprout.app
         name.replacen("xyz.block.buzz.app", LEGACY_RELEASE_IDENTIFIER, 1)
     } else {
         return None;
