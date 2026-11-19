@@ -14047,7 +14047,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Message #general'));
+      await tester.tap(find.byType(ComposeBar));
       await tester.pumpAndSettle();
       final editor = find.descendant(
         of: find.byType(ComposeBar),
@@ -14060,12 +14060,19 @@ void main() {
       ]) {
         await tester.enterText(editor, draft);
         await tester.pumpAndSettle();
-        await tester.tap(
-          find.descendant(
-            of: find.byType(ComposeBar),
-            matching: find.byIcon(BuzzIcons.arrowUp),
-          ),
-        );
+        if (defaultTargetPlatform == TargetPlatform.iOS) {
+          tester
+              .widget<IosGlassNavigationButton>(
+                find.byWidgetPredicate(
+                  (widget) =>
+                      widget is IosGlassNavigationButton &&
+                      widget.semanticLabel == 'Send',
+                ),
+              )
+              .onPressed!();
+        } else {
+          await tester.tap(find.byTooltip('Send'));
+        }
         await tester.pumpAndSettle();
         expect(tester.widget<TextField>(editor).controller!.text, isEmpty);
         expect(find.text('Not sent. Community changed.'), findsNothing);
