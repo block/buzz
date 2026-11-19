@@ -26,10 +26,10 @@ keypair.
 ## Upgrade
 
 Compose defaults to the exact relay release `ghcr.io/block/buzz:0.3.0`.
-To upgrade, set `BUZZ_IMAGE` in `.env` to the exact relay image tag you
-want, then run `./run.sh upgrade`. If your existing `.env` specifies
-`ghcr.io/block/buzz:main`, change it to a release tag to pin your deployment.
-Set `BUZZ_IMAGE=ghcr.io/block/buzz:main` to opt into rolling builds for testing.
+A `BUZZ_IMAGE` already set in `.env` takes precedence over that default.
+To upgrade to a newer release, set `BUZZ_IMAGE` in `.env` to its exact relay
+image tag, then run `./run.sh upgrade`. For rolling test builds, set
+`BUZZ_IMAGE=ghcr.io/block/buzz:main`.
 
 ## Production notes
 
