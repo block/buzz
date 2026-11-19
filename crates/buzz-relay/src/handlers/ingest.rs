@@ -29,13 +29,12 @@ use buzz_core::kind::{
     KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
     KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
     KIND_PRESENCE_UPDATE, KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE,
-    KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE,
-    KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT,
-    KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2,
-    KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS,
-    KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
-    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_ARTIFACT_TYPE_POLICY,
-    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT, KIND_SOLO_MEMBER_ROLE,
+    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
+    KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
+    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE,
+    KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER,
+    RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -291,9 +290,6 @@ pub(crate) fn parse_canvas_expected_revision(
     Ok(Some(CanvasRevisionSpec::Head(bytes)))
 }
 
-pub(super) const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes
-pub(super) const MAX_EVENT_CONTENT_BYTES: usize = 256 * 1024;
-
 /// How the HTTP caller authenticated (for [`IngestAuth::Http`]).
 #[derive(Debug, Clone)]
 pub enum HttpAuthMethod {
@@ -306,15 +302,6 @@ pub enum HttpAuthMethod {
 /// Authentication context for event ingestion — transport-neutral.
 #[derive(Debug, Clone)]
 pub enum IngestAuth {
-    /// A verified transport delegation, kept separate from event payloads.
-    Delegated {
-        /// Original transport's scopes and restrictions.
-        auth: Box<IngestAuth>,
-        /// Owner proven by the authenticated transport.
-        owner: nostr::PublicKey,
-        /// Current transport policy permits owner roster fallback.
-        owner_admission: bool,
-    },
     /// WebSocket NIP-42 authenticated connection.
     Nip42 {
         /// The authenticated Nostr public key.
@@ -338,56 +325,10 @@ pub enum IngestAuth {
 }
 
 impl IngestAuth {
-    /// Attach only an owner verified by the current transport admission.
-    pub fn with_verified_owner(self, owner: Option<nostr::PublicKey>) -> Self {
-        self.with_owner_admission(owner, true)
-    }
-    /// Keep restriction identity separately from permission to use its roster.
-    pub fn with_owner_admission(
-        self,
-        owner: Option<nostr::PublicKey>,
-        owner_admission: bool,
-    ) -> Self {
-        match owner {
-            Some(owner) => Self::Delegated {
-                auth: Box::new(self),
-                owner,
-                owner_admission,
-            },
-            None => self,
-        }
-    }
-    /// Proven delegated owner, independently of any artifact tag or payload.
-    pub fn verified_owner(&self) -> Option<nostr::PublicKey> {
-        match self {
-            Self::Delegated { owner, .. } => Some(*owner),
-            _ => None,
-        }
-    }
-    /// Whether the verified owner may supply current relay membership.
-    pub fn owner_admission(&self) -> bool {
-        matches!(
-            self,
-            Self::Delegated {
-                owner_admission: true,
-                ..
-            }
-        )
-    }
-    /// Community operations require the relay's signed authenticated transport.
-    pub fn signed_transport(&self) -> bool {
-        match self {
-            Self::Delegated { auth, .. } => auth.signed_transport(),
-            Self::Nip42 { .. } => true,
-            Self::Http { auth_method, .. } => matches!(auth_method, HttpAuthMethod::Nip98),
-        }
-    }
-
     /// The authenticated public key.
     pub fn pubkey(&self) -> &nostr::PublicKey {
         match self {
             Self::Nip42 { pubkey, .. } | Self::Http { pubkey, .. } => pubkey,
-            Self::Delegated { auth, .. } => auth.pubkey(),
         }
     }
 
@@ -400,7 +341,6 @@ impl IngestAuth {
     pub fn scopes(&self) -> &[Scope] {
         match self {
             Self::Nip42 { scopes, .. } | Self::Http { scopes, .. } => scopes,
-            Self::Delegated { auth, .. } => auth.scopes(),
         }
     }
 
@@ -409,7 +349,6 @@ impl IngestAuth {
         match self {
             Self::Nip42 { conn_id, .. } => Some(*conn_id),
             Self::Http { .. } => None,
-            Self::Delegated { auth, .. } => auth.conn_id(),
         }
     }
 
@@ -422,17 +361,13 @@ impl IngestAuth {
                 channel_ids: Some(ids),
                 ..
             } => Some(ids),
-            Self::Delegated { auth, .. } => auth.channel_ids(),
             _ => None,
         }
     }
 
     /// Whether this auth context is an HTTP request (not WebSocket).
     pub fn is_http(&self) -> bool {
-        match self {
-            Self::Delegated { auth, .. } => auth.is_http(),
-            _ => matches!(self, Self::Http { .. }),
-        }
+        matches!(self, Self::Http { .. })
     }
 }
 
@@ -709,7 +644,8 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_FORUM_POST
         | KIND_FORUM_VOTE
         | KIND_FORUM_COMMENT => Ok(Scope::MessagesWrite),
-        KIND_NIP29_PUT_USER | KIND_NIP29_REMOVE_USER | KIND_NIP29_DELETE_GROUP => {
+        KIND_NIP29_PUT_USER | KIND_NIP29_REMOVE_USER | KIND_NIP29_DELETE_GROUP
+        | KIND_SOLO_MEMBER_ROLE => {
             Ok(Scope::AdminChannels)
         }
         // NIP-43: relay membership admin commands (9030–9032) + Buzz
@@ -717,7 +653,7 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         k if k == RELAY_ADMIN_ADD_MEMBER
             || k == RELAY_ADMIN_REMOVE_MEMBER
             || k == RELAY_ADMIN_CHANGE_ROLE
-            || k == RELAY_ADMIN_SET_WORKSPACE_PROFILE || k == RELAY_ADMIN_SET_ARTIFACT_TYPE_POLICY =>
+            || k == RELAY_ADMIN_SET_WORKSPACE_PROFILE =>
         {
             Ok(Scope::AdminUsers)
         }
@@ -930,7 +866,6 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | RELAY_ADMIN_REMOVE_MEMBER
             | RELAY_ADMIN_CHANGE_ROLE
             | RELAY_ADMIN_SET_WORKSPACE_PROFILE
-            | RELAY_ADMIN_SET_ARTIFACT_TYPE_POLICY
             | KIND_NIP43_LEAVE_REQUEST
             // NIP-IA: identity archive/unarchive requests drive relay-global
             // archive state (8002/8003/13535) and are audited as global request
@@ -968,6 +903,7 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_NIP29_DELETE_EVENT
             | KIND_NIP29_DELETE_GROUP
             | KIND_NIP29_LEAVE_REQUEST
+            | KIND_SOLO_MEMBER_ROLE
             // Huddle lifecycle events + guidelines
             | KIND_HUDDLE_STARTED
             | KIND_HUDDLE_PARTICIPANT_JOINED
@@ -985,7 +921,7 @@ pub(crate) enum ChannelWrite {
     /// post ([`buzz_db::channel::MemberRole::can_post`]), never guests; and
     /// non-members only in an open channel with `join_role = member`.
     Post,
-    /// Membership changes (kind:9000 put-user, 9001 remove-user, 9022 leave).
+    /// Membership changes (put-user, remove-user, leave, Solo member role).
     /// Members, or anyone in an open channel. The role table does not apply
     /// here: a guest must still be able to leave, and `decide_put_user` owns
     /// who may add whom.
@@ -996,9 +932,10 @@ impl ChannelWrite {
     /// The rule for an event kind that passes the generic channel gate.
     pub(crate) fn for_kind(kind: u32) -> Self {
         match kind {
-            KIND_NIP29_PUT_USER | KIND_NIP29_REMOVE_USER | KIND_NIP29_LEAVE_REQUEST => {
-                Self::Membership
-            }
+            KIND_NIP29_PUT_USER
+            | KIND_NIP29_REMOVE_USER
+            | KIND_NIP29_LEAVE_REQUEST
+            | KIND_SOLO_MEMBER_ROLE => Self::Membership,
             _ => Self::Post,
         }
     }
@@ -2614,7 +2551,7 @@ struct ChannelCreateRequest {
     members: Vec<Vec<u8>>,
 }
 
-pub(super) async fn validate_event_imeta(
+async fn validate_event_imeta(
     tenant: &TenantContext,
     state: &AppState,
     event: &Event,
@@ -2706,17 +2643,6 @@ async fn ingest_event_inner(
     }
     let event = std::sync::Arc::try_unwrap(event).unwrap_or_else(|arc| (*arc).clone());
 
-    if let Some(result) = super::community_artifact::ingest(state, tenant, &event, &auth).await {
-        let result = result?;
-        emit_product_feedback_success(tracer, tenant, &event, &auth);
-        return Ok(result);
-    }
-    if kind_u32 == buzz_core::kind::KIND_ARTIFACT {
-        // Reject mixed/repeated scopes before even a channel receipt lookup.
-        buzz_core::artifact::validate(&event)
-            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
-    }
-
     if kind_u32 == buzz_core::kind::KIND_ARTIFACT
         && event.pubkey == *auth.pubkey()
         && state
@@ -2744,6 +2670,7 @@ async fn ingest_event_inner(
         });
     }
 
+    const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes
     let now = chrono::Utc::now().timestamp();
     let event_ts = event.created_at.as_secs() as i64;
     if (event_ts - now).abs() > MAX_TIMESTAMP_DRIFT_SECS {
@@ -2760,6 +2687,7 @@ async fn ingest_event_inner(
         }
     }
 
+    const MAX_EVENT_CONTENT_BYTES: usize = 256 * 1024; // 256 KB
     if event.content.len() > MAX_EVENT_CONTENT_BYTES {
         return Err(IngestError::Rejected(format!(
             "invalid: content exceeds maximum size of {} bytes (got {})",
@@ -3213,15 +3141,16 @@ async fn ingest_event_inner(
     }
 
     if channel_id.is_some() {
-        // kind:9002 is not checked here: its atomic write decides the
+        // Metadata edits and Solo member role changes decide the
         // archive state under the channel row lock, after its duplicate
         // check, so a resend that races the first commit is a duplicate.
-        let is_edit_metadata = kind_u32 == KIND_NIP29_EDIT_METADATA;
+        let checks_archive_in_write =
+            matches!(kind_u32, KIND_NIP29_EDIT_METADATA | KIND_SOLO_MEMBER_ROLE);
 
         // A member may still leave an archived channel by themselves.
         let is_self_departure = crate::handlers::side_effects::is_self_departure(&event);
 
-        if !is_edit_metadata && !is_self_departure {
+        if !checks_archive_in_write && !is_self_departure {
             if let Some(channel) = &channel_row {
                 if channel.archived_at.is_some() {
                     return Err(match target_denial {
@@ -3520,7 +3449,7 @@ async fn ingest_event_inner(
 
     validate_event_imeta(tenant, state, &event, &tenant_media_base).await?;
 
-    let thread_meta = if requires_h_channel_scope(kind_u32) {
+    let thread_meta = if kind_u32 != KIND_SOLO_MEMBER_ROLE && requires_h_channel_scope(kind_u32) {
         if let Some(ch_id) = channel_id {
             resolve_nip10_thread_meta(tenant.community(), &event, ch_id, state)
                 .await
@@ -3784,6 +3713,8 @@ async fn ingest_event_inner(
         })?;
         message = ok_message;
         (stored, inserted)
+    } else if kind_u32 == KIND_SOLO_MEMBER_ROLE {
+        super::solo_member_role::persist(tenant, state, &event).await?
     } else if kind_u32 == KIND_NIP29_REMOVE_USER {
         let thread_params = thread_meta.as_ref().map(|m| m.as_params());
         crate::handlers::side_effects::persist_remove_user(tenant, &event, state, thread_params)
@@ -3930,13 +3861,13 @@ async fn ingest_event_inner(
         });
     }
 
-    // Workflow deletion, kind 5 / 9005 deletions of `e` targets, and kinds
-    // 9000–9002 applied their changes in the insert's own transaction above.
+    // These commands applied their changes in the insert's own transaction.
     let persisted_atomically = workflow_deletion
         || atomic_deletion
         || kind_u32 == KIND_NIP29_PUT_USER
         || kind_u32 == KIND_NIP29_REMOVE_USER
-        || kind_u32 == KIND_NIP29_EDIT_METADATA;
+        || kind_u32 == KIND_NIP29_EDIT_METADATA
+        || kind_u32 == KIND_SOLO_MEMBER_ROLE;
     if !persisted_atomically && crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
         if let Err(e) =
             crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)

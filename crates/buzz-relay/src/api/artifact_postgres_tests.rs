@@ -308,9 +308,7 @@ async fn lifecycle_routes_duplicate_replay_delete_and_redaction() {
         EventBuilder::new(Kind::Custom(kind), "")
             .tags([
                 Tag::parse(["e", &restore.id.to_hex()]).unwrap(),
-                // Legacy channel moderation accepts Uuid::parse_str forms
-                // and extra tag fields; community canonicality is independent.
-                Tag::parse(["h", &f.home.simple().to_string().to_uppercase(), "legacy"]).unwrap(),
+                Tag::parse(["h", &f.home.to_string()]).unwrap(),
             ])
             .sign_with_keys(&f.owner)
             .unwrap()
@@ -322,28 +320,6 @@ async fn lifecycle_routes_duplicate_replay_delete_and_redaction() {
             .contains("artifacts cannot be deleted with kind 5"),
         "{body}"
     );
-    for scopes in [
-        vec![],
-        vec![
-            vec!["h".to_owned(), f.home.to_string()],
-            vec!["h".to_owned(), f.home.to_string()],
-        ],
-        vec![
-            vec!["h".to_owned(), f.home.to_string()],
-            vec!["community".to_owned(), f.community.to_string()],
-        ],
-        vec![
-            vec!["community".to_owned(), f.community.to_string()],
-            vec!["community".to_owned(), f.community.to_string()],
-        ],
-    ] {
-        let malformed = EventBuilder::new(Kind::Custom(9005), "")
-            .tags(scopes.into_iter().map(|t| Tag::parse(t).unwrap()))
-            .tag(Tag::event(restore.id))
-            .sign_with_keys(&f.owner)
-            .unwrap();
-        assert!(!f.request("/events", json!(malformed)).await.0.is_success());
-    }
     // Redaction is the ordinary 9005 removal; the head stays editable.
     f.publish(&command(9005)).await;
     let current = json!([{"artifact":"current","#d":[d]}]);
@@ -513,6 +489,3 @@ async fn generic_d_lookup_matches_before_limit() {
 
 #[path = "artifact_postgres_tests/sync_postgres_tests.rs"]
 mod sync_postgres_tests;
-
-#[path = "artifact_postgres_tests/community_postgres_tests.rs"]
-mod community_postgres_tests;

@@ -25,6 +25,7 @@ import 'unread_badge/observed_unread_event.dart';
 import 'unread_badge/should_notify_for_event.dart';
 
 part 'channel_directory.dart';
+part 'channel_lookup.dart';
 part 'channel_unread_deletions.dart';
 part 'channel_unread_catch_up.dart';
 part 'channel_snapshot.dart';
@@ -101,6 +102,13 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   bool _listNoticesReopened = false;
   final Set<String> _reopenedLiveChunks = {};
   final Map<String, int> _latestObservedByChannel = {};
+  final Map<String, int> _activityRevisions = {};
+
+  /// Invalidates verified activity reads for every live message, including
+  /// self-authored or muted messages, without changing unread or sort state.
+  int activityRevisionFor(String channelId) =>
+      _activityRevisions[channelId] ?? 0;
+
   // Per channel, when an earlier unread catch-up in this session was sent, and
   // the read timestamp and mute state it used. See [_UnreadCatchUp].
   final Map<String, ({int sentAt, int? readAt, bool muted})>
@@ -309,6 +317,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _refreshCoordinator.retireInFlight();
       _clearLiveSubscriptions();
       _latestObservedByChannel.clear();
+      _activityRevisions.clear();
       _observedUnreadEventsByChannel.clear();
       _unreadCaughtUpByChannel.clear();
       _unreadDeletedIdsByChannel.clear();
@@ -860,6 +869,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       }
       final updated = List<Channel>.of(channels);
       final channel = updated[idx];
+      _activityRevisions[channelId] = activityRevisionFor(channelId) + 1;
 
       if (myPk != null &&
           event.pubkey.toLowerCase() == myPk.toLowerCase() &&
@@ -946,6 +956,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
   void clearObservedUnreadForChannel(String channelId) {
     _latestObservedByChannel.remove(channelId);
+    _activityRevisions.remove(channelId);
     _observedUnreadEventsByChannel.remove(channelId);
     state = state.whenData((channels) => List<Channel>.of(channels));
   }
@@ -1142,58 +1153,3 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 final channelsProvider = AsyncNotifierProvider<ChannelsNotifier, List<Channel>>(
   ChannelsNotifier.new,
 );
-
-/// The channel with this id from the list, else as it was opened ahead of the
-/// list (see [ChannelsNotifier.rememberOpened]).
-final channelByIdProvider = Provider.autoDispose.family<Channel?, String>(
-  (ref, channelId) =>
-      ref.watch(
-        channelsProvider.select(
-          (channels) => channels.value
-              ?.where((channel) => channel.id == channelId)
-              .firstOrNull,
-        ),
-      ) ??
-      ref.watch(_openedAheadProvider.select((opened) => opened[channelId])),
-);
-
-/// Whether this channel can start or continue threads. A Solo chat's agents
-/// answer at its top level, so it keeps existing threads readable but starts
-/// none and takes no thread replies, as desktop does. A channel not loaded yet
-/// keeps the default thread behavior.
-final channelStartsThreadsProvider = Provider.autoDispose.family<bool, String>(
-  (ref, channelId) => !(ref.watch(
-    channelByIdProvider(
-      channelId,
-    ).select((channel) => channel?.isSolo ?? false),
-  )),
-);
-
-/// Channels opened from their own metadata before the list had them, as a
-/// fast DM open does. Scoped to one relay and identity. Each is dropped once
-/// the list has it, so a DM later hidden or left is not found through it.
-final _openedAheadProvider =
-    NotifierProvider<_OpenedAheadNotifier, Map<String, Channel>>(
-      _OpenedAheadNotifier.new,
-    );
-
-class _OpenedAheadNotifier extends Notifier<Map<String, Channel>> {
-  @override
-  Map<String, Channel> build() {
-    ref.watch(relayConfigProvider.select((config) => config.baseUrl));
-    ref.watch(myPubkeyProvider);
-    return const {};
-  }
-
-  void remember(Channel channel) => state = {...state, channel.id: channel};
-
-  void dropListed(List<Channel> listed) {
-    if (state.isEmpty) return;
-    final ids = {for (final channel in listed) channel.id};
-    if (!state.keys.any(ids.contains)) return;
-    state = {
-      for (final entry in state.entries)
-        if (!ids.contains(entry.key)) entry.key: entry.value,
-    };
-  }
-}

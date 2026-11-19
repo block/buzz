@@ -1438,8 +1438,6 @@ pub struct AppState {
     pub(crate) search_slots: Arc<crate::api::bridge::search_slots::SearchSlots>,
     /// Registry of active client subscriptions.
     pub sub_registry: Arc<SubscriptionRegistry>,
-    /// Startup-cached verification of the optional operator schema contract.
-    pub(crate) community_artifact_schema: tokio::sync::OnceCell<bool>,
     /// Live NIP-AR syncs this node serves.
     pub artifact_syncs: Arc<crate::handlers::artifact_sync::ArtifactSyncs>,
     /// Registry of active WebSocket connections.
@@ -1813,7 +1811,6 @@ impl AppState {
             search_slots: Arc::default(),
             sub_registry: Arc::new(SubscriptionRegistry::new()),
             artifact_syncs: Arc::default(),
-            community_artifact_schema: tokio::sync::OnceCell::new(),
             conn_manager: Arc::new(ConnectionManager::new()),
             community_connections: Arc::new(CommunityConnectionRegistry::new()),
             community_revalidator_cancel: CancellationToken::new(),
@@ -2252,7 +2249,6 @@ impl AppState {
     ) {
         match invalidation {
             CacheInvalidation::CommunityHost { host } => {
-                self.artifact_syncs.resync_community(community_id);
                 self.tenant_host_cache.invalidate(&host);
                 self.community_active.invalidate(&community_id);
             }
@@ -2277,7 +2273,6 @@ impl AppState {
     /// Drop the host's policy/routing snapshot locally and best-effort on peers.
     /// Lease expiry, not notification delivery, protects acceptance consistency.
     pub fn invalidate_community_host(&self, tenant: &TenantContext) {
-        self.artifact_syncs.resync_community(tenant.community());
         self.tenant_host_cache.invalidate(tenant.host());
         self.community_active.invalidate(&tenant.community());
         self.spawn_cache_invalidation(

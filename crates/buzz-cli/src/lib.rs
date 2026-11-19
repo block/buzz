@@ -1375,12 +1375,15 @@ pub enum DmsCmd {
 
 #[derive(Subcommand)]
 pub enum UsersCmd {
-    /// Look up user profiles by pubkey or name
+    /// Look up user profiles by pubkey or name. Where the community
+    /// advertises verified profiles, a person's relay-verified username, full
+    /// name and issuer appear in a `verified` object
     Get {
         /// User pubkey(s) to look up (64-char hex). Omit for your own profile
         #[arg(long = "pubkey")]
         pubkeys: Vec<String>,
-        /// Search by display name (case-insensitive substring match)
+        /// Search by display name (case-insensitive substring match). Where
+        /// verified profiles are advertised: profile or verified name, by word prefix
         #[arg(long = "name")]
         name: Option<String>,
         /// Scope an exact-name agent lookup to its owner (`me`, hex, or npub)

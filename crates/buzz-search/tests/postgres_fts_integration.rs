@@ -1852,7 +1852,7 @@ async fn artifact_search_uses_only_live_current_head() {
     let pk = rand_bytes32();
     let old = rand_bytes32();
     let head = rand_bytes32();
-    let (artifact, home) = (Uuid::new_v4(), Uuid::new_v4());
+    let artifact = Uuid::new_v4();
     insert_event(
         &pool,
         community,
@@ -1860,7 +1860,7 @@ async fn artifact_search_uses_only_live_current_head() {
         pk,
         45010,
         "artifactneedle old",
-        Some(home),
+        None,
         1700000000,
     )
     .await;
@@ -1871,12 +1871,12 @@ async fn artifact_search_uses_only_live_current_head() {
         pk,
         45010,
         "artifactneedle current",
-        Some(home),
+        None,
         1700000001,
     )
     .await;
     sqlx::query("INSERT INTO artifact_heads(community_id,artifact_id,event_id,channel_id,artifact_type) VALUES($1,$2,$3,$4,'buzz.task')")
-        .bind(community.as_uuid()).bind(artifact).bind(head.as_slice()).bind(home).execute(&pool).await.unwrap();
+        .bind(community.as_uuid()).bind(artifact).bind(head.as_slice()).bind(Uuid::new_v4()).execute(&pool).await.unwrap();
     let svc = SearchService::new(pool.clone());
     let query = SearchQuery {
         community,

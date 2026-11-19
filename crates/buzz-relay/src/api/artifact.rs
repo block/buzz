@@ -14,7 +14,7 @@ use std::sync::Arc;
 pub(super) async fn query(
     state: &Arc<AppState>,
     tenant: &TenantContext,
-    caller: &super::bridge::ProvenCaller,
+    reader: &nostr::PublicKey,
     filters: &[Value],
     count: bool,
     routed: impl FnOnce(),
@@ -34,7 +34,7 @@ pub(super) async fn query(
         Ok(false) => None,
         Ok(true) => {
             routed();
-            Some(execute(state, tenant, caller, filters, count).await)
+            Some(execute(state, tenant, reader, filters, count).await)
         }
         Err(reason) => {
             routed();
@@ -46,11 +46,10 @@ pub(super) async fn query(
 async fn execute(
     state: &Arc<AppState>,
     tenant: &TenantContext,
-    caller: &super::bridge::ProvenCaller,
+    reader: &nostr::PublicKey,
     filters: &[Value],
     count: bool,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let reader = &caller.pubkey;
     // One filter avoids ambiguous OR-union count/page semantics. AND/OR inside
     // exact predicates still supports cross-channel multi-value lists.
     if filters.len() != 1 {
@@ -70,60 +69,6 @@ async fn execute(
     }
     let query = buzz_core::artifact::parse_query(&filters[0])
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, e))?;
-    if query.scope == buzz_core::artifact::ArtifactScope::Community {
-        if count {
-            return Err(api_error(
-                StatusCode::BAD_REQUEST,
-                "community artifact count is unsupported",
-            ));
-        }
-        if caller.signed_at.is_none() {
-            return Err(api_error(
-                StatusCode::UNAUTHORIZED,
-                "community artifacts require signed HTTP authentication",
-            ));
-        }
-        if !crate::handlers::community_artifact::enabled(state)
-            .await
-            .unwrap_or(false)
-        {
-            return Err(api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "community artifacts unavailable",
-            ));
-        }
-        let principal = buzz_db::community_artifact::CommunityArtifactPrincipal {
-            owner_admission: true,
-            pubkey: reader.to_bytes().to_vec(),
-            verified_owner: caller
-                .token_owner
-                .or(caller.artifact_owner)
-                .map(|p| p.to_bytes().to_vec()),
-            require_membership: state.config.require_relay_membership,
-            reject_required_nip_fi: false,
-        };
-        if query.view == buzz_core::artifact::ArtifactView::Policy {
-            let artifact_type = buzz_core::artifact::exact_type(&query.tags)
-                .map_err(|e| api_error(StatusCode::BAD_REQUEST, e))?;
-            let policy = state
-                .db
-                .community_artifact_policy(tenant.community(), &principal, artifact_type)
-                .await
-                .map_err(community_error)?;
-            return Ok(Json(serde_json::json!(policy)));
-        }
-        let events = state
-            .db
-            .query_community_artifacts(tenant.community(), &principal, &query)
-            .await
-            .map_err(community_error)?;
-        return Ok(Json(Value::Array(
-            events
-                .into_iter()
-                .map(|e| serde_json::json!(e.event))
-                .collect(),
-        )));
-    }
     // The query's statement_timeout is the enforced execution budget.
     let (events, n) = state
         .db
@@ -149,13 +94,4 @@ async fn execute(
             )
         })?;
     Ok(Json(Value::Array(events)))
-}
-
-fn community_error(error: buzz_db::DbError) -> (StatusCode, Json<Value>) {
-    let status = if matches!(error, buzz_db::DbError::AccessDenied(_)) {
-        StatusCode::FORBIDDEN
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE
-    };
-    api_error(status, "community artifact read denied or unavailable")
 }

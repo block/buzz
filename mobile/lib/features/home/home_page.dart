@@ -1,3 +1,5 @@
+import 'dart:ui' as ui;
+
 import 'package:duo_kit/duo_kit.dart';
 
 import '../../shared/widgets/adaptive_conversation_pane.dart';
@@ -84,6 +86,7 @@ class HomePage extends HookConsumerWidget {
     final showWorkspaceNavigation = wide || conversations.selectedId == null;
 
     final communitySurfaceProgress = useState(0.0);
+    final recordingFocus = useState(false);
     final filter = useState('All');
     final hasUnreadInbox = ref.watch(inboxHasUnreadProvider);
     final inboxLabel = hasUnreadInbox ? 'Activity, unread items' : 'Activity';
@@ -172,7 +175,8 @@ class HomePage extends HookConsumerWidget {
                 : Stack(
                     alignment: Alignment.center,
                     children: [
-                      defaultTargetPlatform == TargetPlatform.iOS
+                      defaultTargetPlatform == TargetPlatform.iOS &&
+                              !recordingFocus.value
                           ? IosGlassNavigationButton(
                               icon: IosGlassNavigationIcon.bell,
                               semanticLabel: inboxLabel,
@@ -185,6 +189,7 @@ class HomePage extends HookConsumerWidget {
                           : IconButton.filledTonal(
                               tooltip: inboxLabel,
                               style: IconButton.styleFrom(
+                                shape: const CircleBorder(),
                                 backgroundColor:
                                     context.colors.surfaceContainerHighest,
                                 foregroundColor: context.colors.onSurface,
@@ -246,7 +251,9 @@ class HomePage extends HookConsumerWidget {
           const SizedBox(width: Grid.xs),
           SizedBox(
             key: avatarKey,
-            child: defaultTargetPlatform == TargetPlatform.iOS
+            child:
+                defaultTargetPlatform == TargetPlatform.iOS &&
+                    !recordingFocus.value
                 ? IosMessageCreateButton(
                     actions: moreActions,
                     dividerBefore: OrganizationEnvironment.enabled
@@ -261,6 +268,26 @@ class HomePage extends HookConsumerWidget {
                     width: 44,
                     height: 44,
                     plain: false,
+                  )
+                : recordingFocus.value &&
+                      defaultTargetPlatform == TargetPlatform.iOS
+                ? SizedBox.square(
+                    dimension: 44,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: context.colors.surfaceContainerHighest,
+                      ),
+                      child: Center(
+                        child: ClipOval(
+                          child: CommunityAvatar(
+                            name: communityName,
+                            relayUrl: community?.relayUrl,
+                            size: 36,
+                          ),
+                        ),
+                      ),
+                    ),
                   )
                 : AndroidExpandingMenuButton(
                     label: 'Community menu',
@@ -281,6 +308,7 @@ class HomePage extends HookConsumerWidget {
         ];
       },
       messagesFilters: (isCollapsed) => MessagesFilters(
+        useNativeGlass: !recordingFocus.value,
         isCollapsed: isCollapsed,
         selected: filter.value,
         onSelected: (value) {
@@ -306,9 +334,33 @@ class HomePage extends HookConsumerWidget {
         communitySurfaceProgress.value = progress;
       },
     );
+    final focusedMessages = Stack(
+      children: [
+        ImageFiltered(
+          key: const ValueKey('voice-recording-focus'),
+          enabled: recordingFocus.value,
+          imageFilter: ui.ImageFilter.blur(sigmaX: 6, sigmaY: 6),
+          child: ExcludeSemantics(
+            excluding: recordingFocus.value,
+            child: messages,
+          ),
+        ),
+        Positioned.fill(
+          child: IgnorePointer(
+            ignoring: !recordingFocus.value,
+            child: ColoredBox(
+              color: recordingFocus.value
+                  ? context.colors.surface.withValues(alpha: 0.18)
+                  : Colors.transparent,
+            ),
+          ),
+        ),
+      ],
+    );
     final bottom = mobileTabBarBottom(context);
     Widget navigationBar(Axis axis) => MessagesNavigationBar(
       axis: axis,
+      onRecordingChanged: (value) => recordingFocus.value = value,
       onSearch: openSearch,
       agent: ConversationPaneScope(
         controller: conversations,
@@ -330,6 +382,7 @@ class HomePage extends HookConsumerWidget {
       ],
     );
     return DuoWorkspaceScaffold(
+      navigationOverflow: 100,
       navigationBuilder: (context, placement) => _NativeControlsGate(
         builder: (_, nativeControlsVisible) =>
             wide ||
@@ -343,7 +396,8 @@ class HomePage extends HookConsumerWidget {
                         MediaQuery.sizeOf(context),
                         strip!.rect.center.dx,
                       ) -
-                      strip.rect.center.dx,
+                      strip.rect.center.dx -
+                      100,
                   0,
                 ),
                 child: SafeArea(
@@ -460,7 +514,7 @@ class HomePage extends HookConsumerWidget {
                                           mobileTabBarBottomGap,
                                     ),
                                   ),
-                                  child: messages,
+                                  child: focusedMessages,
                                 ),
                                 Positioned(
                                   left: 0,
@@ -495,7 +549,7 @@ class HomePage extends HookConsumerWidget {
                             );
                           },
                         )
-                      : messages,
+                      : focusedMessages,
                 ),
               ),
             ),

@@ -3100,51 +3100,6 @@ mod postgres_tests {
             .await
             .expect("apply migrations for schema parity");
 
-        // Migration 0097 leaves the legacy conflict target available during
-        // the bridge rollout. Compare desired state after the operator contract.
-        {
-            let mut connection = migrated.acquire().await.expect("connect contract session");
-            sqlx::query(
-                "SET buzz.community_artifact_contract_ready='all-backends-enforce-community-audience'",
-            )
-            .execute(&mut *connection)
-            .await
-            .expect("attest fleet compatibility");
-            sqlx::raw_sql(include_str!(
-                "../../../../scripts/maintenance/community-artifact-contract.sql"
-            ))
-            .execute(&mut *connection)
-            .await
-            .expect("contract the migrated artifact head key");
-        }
-        let plan = pgschema(
-            &conn,
-            migrated_db.name(),
-            &["plan", "--output-json", "stdout"],
-        );
-        assert!(
-            plan.status.success(),
-            "pgschema plan after artifact contract failed: {}\n{}",
-            String::from_utf8_lossy(&plan.stdout),
-            String::from_utf8_lossy(&plan.stderr),
-        );
-        let plan: serde_json::Value =
-            serde_json::from_slice(&plan.stdout).expect("pgschema returns a structured plan");
-        let head_changes: Vec<_> = plan["groups"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .flat_map(|group| group["steps"].as_array().expect("plan group has steps"))
-            .filter(|step| {
-                let path = step["path"].as_str().expect("plan step has an object path");
-                path == "public.artifact_heads" || path.starts_with("public.artifact_heads.")
-            })
-            .collect();
-        assert!(
-            head_changes.is_empty(),
-            "pgschema planned artifact_heads changes after contract: {head_changes:?}"
-        );
-
         for table in [
             "media_uploaders",
             "audit_log",

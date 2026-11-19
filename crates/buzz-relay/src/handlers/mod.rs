@@ -14,8 +14,6 @@ pub mod close;
 pub mod coalesced_refresh;
 /// Command executor — transactional processing for command kinds.
 pub mod command_executor;
-/// NIP-AR explicit community operations and admission.
-pub(crate) mod community_artifact;
 /// Relay-operator community provisioning HTTP support.
 pub mod community_provisioning;
 /// NIP-45 COUNT handler.
@@ -68,6 +66,9 @@ pub mod report_resolution;
 pub mod req;
 /// NIP-29 and NIP-25 side-effect handlers.
 pub mod side_effects;
+mod solo_member_role;
+#[cfg(test)]
+mod solo_member_role_postgres_tests;
 #[cfg(test)]
 mod system_channel_postgres_tests;
 /// Per-filter query scope for system channels.

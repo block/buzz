@@ -8,7 +8,8 @@ use tracing::{debug, error, info, warn};
 use buzz_core::event::StoredEvent;
 use buzz_core::kind::{
     event_kind_u32, is_ephemeral, is_unshared_gated_event, KIND_AGENT_OBSERVER_FRAME,
-    KIND_AGENT_PRESENCE, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE, KIND_TYPING_INDICATOR,
+    KIND_AGENT_PRESENCE, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE, KIND_SOLO_MEMBER_ROLE,
+    KIND_TYPING_INDICATOR,
 };
 use buzz_core::observer::{
     content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -35,6 +36,7 @@ pub(crate) fn bounded_kind_label(kind: u32) -> String {
     match kind {
         0..=9 | 1059 | 1063 => kind.to_string(),
         8000..=8003 | 9000..=9022 | 9030..=9036 => kind.to_string(),
+        KIND_SOLO_MEMBER_ROLE => kind.to_string(),
         13534..=13535 => kind.to_string(),
         20000..=29999 => kind.to_string(),
         30023 | 30315 | 39000..=39003 => kind.to_string(),
@@ -150,21 +152,6 @@ async fn check_fanout_access(
     matches: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
     threaded: Option<&crate::state::ThreadedChannelVisibility>,
 ) -> FanoutAccess {
-    // Ordinary delivery has no community artifact audience. This fence is
-    // unconditional, including callers that use the access helper directly.
-    if stored_event.event.kind.as_u16() == 45010
-        && (stored_event.channel_id.is_none()
-            || stored_event.event.tags.iter().any(|tag| {
-                tag.as_slice()
-                    .first()
-                    .is_some_and(|name| name == "community")
-            }))
-    {
-        return FanoutAccess {
-            allowed: Vec::new(),
-            unverified: Vec::new(),
-        };
-    }
     let verified = |allowed| FanoutAccess {
         allowed,
         unverified: Vec::new(),
@@ -328,17 +315,6 @@ pub(crate) async fn route_fanout_matches(
     matches: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
     threaded: Option<&crate::state::ThreadedChannelVisibility>,
 ) -> Vec<(crate::subscription::ConnId, crate::subscription::SubId)> {
-    let kind = stored.event.kind.as_u16();
-    let community_tag = stored
-        .event
-        .tags
-        .iter()
-        .any(|t| t.as_slice().first().is_some_and(|n| n == "community"));
-    if (kind == 45010 && (stored.channel_id.is_none() || community_tag))
-        || (kind == 9005 && community_tag)
-    {
-        return vec![];
-    }
     state.artifact_syncs.signal_access_change(stored, &matches);
     let access = check_fanout_access(state, community_id, stored, matches, threaded).await;
     // A sync that the gate could not check loses this change, so its copy is
@@ -441,7 +417,7 @@ pub(crate) fn take_local_echo(state: &AppState, channel_event: &buzz_pubsub::Cha
 pub(crate) fn pubsub_stored_event(channel_event: buzz_pubsub::ChannelEvent) -> StoredEvent {
     let channel_id = match channel_event.topic {
         buzz_pubsub::EventTopic::Channel(id) => Some(id),
-        buzz_pubsub::EventTopic::Global | buzz_pubsub::EventTopic::CommunityArtifact => None,
+        buzz_pubsub::EventTopic::Global => None,
     };
     StoredEvent::new(channel_event.event, channel_id)
 }
@@ -740,7 +716,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     )
     .increment(1);
 
-    let (conn_id, pubkey_bytes, auth_pubkey, scopes, channel_ids, artifact_owner) = {
+    let (conn_id, pubkey_bytes, auth_pubkey, scopes, channel_ids) = {
         match conn.auth_state_snapshot() {
             AuthState::Authenticated(ctx) => (
                 conn.conn_id,
@@ -748,7 +724,6 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                 ctx.pubkey,
                 ctx.scopes.clone(),
                 ctx.channel_ids.clone(),
-                ctx.agent_owner_pubkey,
             ),
             _ => {
                 reject("auth");
@@ -960,11 +935,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         scopes,
         channel_ids,
         conn_id,
-    }
-    .with_owner_admission(
-        artifact_owner,
-        super::community_artifact::owner_admission(&state, &conn, artifact_owner),
-    );
+    };
 
     // B2: acquire effect permit immediately before the persistent ingest call.
     // The permit is held through ingest_event() (DB write + side effects +

@@ -2448,8 +2448,7 @@ impl DeletionStore {
         let tombstone: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1 \
              AND deletion_state = 'tombstone' AND deleted_at IS NOT NULL \
-             AND deletion_fence_generation = $2 \
-             AND COALESCE(to_jsonb(communities)->'artifact_type_policies' = '{}'::jsonb, true))",
+             AND deletion_fence_generation = $2)",
         )
         .bind(token.community_id.as_uuid())
         .bind(generation)
@@ -3486,15 +3485,6 @@ async fn transition_community(
         }
     };
     set_executor_gucs(tx, community, generation).await?;
-    // The community remains as a tombstone, so tenant policy state must be
-    // erased explicitly. Pre-expand schemas remain supported by deletion
-    // recovery; the schema/destruction lock keeps this catalog check stable.
-    if tombstone && sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='communities'::regclass AND attname='artifact_type_policies' AND NOT attisdropped)"
-    ).fetch_one(&mut **tx).await? {
-        sqlx::query("UPDATE communities SET artifact_type_policies='{}'::jsonb WHERE id=$1")
-            .bind(community.as_uuid()).execute(&mut **tx).await?;
-    }
     let affected = sqlx::query(
         "UPDATE communities SET deletion_state = $2, deletion_fence_generation = $3, \
          archived_at = CASE WHEN $4 THEN COALESCE(archived_at, now()) ELSE $5 END, \
@@ -9140,16 +9130,6 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         .await
         .expect("seed operator feedback");
 
-        sqlx::query("UPDATE communities SET artifact_type_policies='{\"example.settings\":{\"policy\":\"admins\",\"revision\":\"retained\"}}'::jsonb WHERE id=$1 AND deletion_state = 'active'")
-            .bind(community.as_uuid()).execute(&db.pool).await.unwrap();
-        for (scope, byte) in [("channel", 10_u8), ("community", 11_u8)] {
-            let d = Uuid::new_v4();
-            sqlx::query("INSERT INTO artifact_heads(community_id,scope,artifact_id,event_id,channel_id,artifact_type) VALUES($1,$2,$3,$4,$5,'example.settings')")
-                .bind(community.as_uuid()).bind(scope).bind(d).bind(vec![byte;32]).bind(channel).execute(&db.pool).await.unwrap();
-            sqlx::query("INSERT INTO artifact_revisions(community_id,scope,artifact_id,event_id) VALUES($1,$2,$3,$4)")
-                .bind(community.as_uuid()).bind(scope).bind(d).bind(vec![byte;32]).execute(&db.pool).await.unwrap();
-        }
-
         store
             .approve(request.id, "approver", None)
             .await
@@ -9263,20 +9243,6 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         );
         assert_eq!(replayed.expect("replay accepted"), feedback_id);
         let deleted = purged.expect("purge without FK actions");
-        assert_eq!(deleted.get("artifact_heads"), Some(&2));
-        assert_eq!(deleted.get("artifact_revisions"), Some(&2));
-        let policies: serde_json::Value =
-            sqlx::query_scalar("SELECT artifact_type_policies FROM communities WHERE id=$1")
-                .bind(community.as_uuid())
-                .fetch_one(&db.pool)
-                .await
-                .unwrap();
-        assert_eq!(
-            policies,
-            serde_json::json!({}),
-            "tombstones retain no artifact policies"
-        );
-
         for table in [
             "channel_members",
             "personal_read_frontiers",
@@ -9606,7 +9572,6 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
             .await
             .expect("bindings");
         let deleted = store.purge_postgres(&token).await.expect("purge postgres");
-
         for table in PENDING_SCOPED_TABLES {
             assert_eq!(deleted.get(*table), Some(&1), "{table}");
         }
