@@ -26,9 +26,15 @@ async fn channel(pool: &PgPool, community: Uuid) -> Uuid {
 }
 
 async fn fixture() -> Fixture {
-    let pool = PgPool::connect(&crate::test_support::database_url())
-        .await
-        .expect("test database");
+    fixture_on(
+        PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("test database"),
+    )
+    .await
+}
+
+async fn fixture_on(pool: PgPool) -> Fixture {
     let community = Uuid::new_v4();
     sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
         .bind(community)
@@ -560,4 +566,106 @@ async fn erased_command_records_expire_after_an_hour() {
         );
     }
     assert!(f.is_stored(&command).await, "a live command stays");
+}
+
+/// Monthly `events` partitions (not their indexes) this backend holds a
+/// relation lock on right now.
+async fn locked_event_partitions(tx: &mut AdmittedTx) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT DISTINCT c.relname::text FROM pg_locks l \
+         JOIN pg_class c ON c.oid = l.relation \
+         WHERE l.locktype = 'relation' AND l.pid = pg_backend_pid() \
+         AND c.relkind = 'r' AND c.relname LIKE 'events\\_p%' ORDER BY 1",
+    )
+    .fetch_all(tx.conn())
+    .await
+    .expect("observe partition locks")
+}
+
+/// A message delete's pin cleanup reads only the list's own month, and no
+/// `events` partition when the channel has no list, as the delete itself
+/// locks only its target's month (`production_known_target_deletion_locks_one_partition`).
+/// Mutation: read the list in `unpin_deleted_messages` through `lock_pins`
+/// → RED (every partition is locked).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_message_delete_locks_only_the_months_it_reads() {
+    // One connection, so every round reuses its statement cache: a cached
+    // statement can flip to a generic plan, which locks every partition.
+    let f = fixture_on(
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&crate::test_support::database_url())
+            .await
+            .expect("test database"),
+    )
+    .await;
+    let unlisted = channel(&f.db.pool, *f.community.as_uuid()).await;
+    let pinned = f.message().await;
+    let list = f.pin(&pinned).await.expect("pin").list.expect("a list");
+    let list_month: String = sqlx::query_scalar(
+        "SELECT tableoid::regclass::text FROM events WHERE community_id = $1 AND id = $2",
+    )
+    .bind(f.community.as_uuid())
+    .bind(list.event.id.as_bytes().as_slice())
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("the list's partition");
+    assert_ne!(list_month, "events_p2026_01");
+
+    // A January message, so its month differs from the list's.
+    let january = |channel: Uuid| {
+        EventBuilder::new(Kind::Custom(9), "")
+            .tag(Tag::parse(["h", &channel.to_string()]).expect("h"))
+            .custom_created_at(nostr::Timestamp::from(1_768_003_200)) // 2026-01-10 UTC
+            .sign_with_keys(&Keys::generate())
+            .expect("signed event")
+    };
+    let cases = [
+        ("a channel with no list", unlisted, vec!["events_p2026_01"]),
+        (
+            "a channel whose list holds another message",
+            f.channel,
+            vec!["events_p2026_01", list_month.as_str()],
+        ),
+    ];
+    for (case, channel, months) in cases {
+        let message = january(channel);
+        crate::test_support::insert_historical_event(&f.db.pool, f.community, &message, channel)
+            .await;
+        let created_at = chrono::DateTime::from_timestamp(message.created_at.as_secs() as i64, 0)
+            .expect("timestamp");
+        for round in 0..10 {
+            let mut tx = crate::begin_community_event_write_transaction(
+                &f.db.pool,
+                f.community,
+                crate::observability::WriterOperation::EventWrite,
+            )
+            .await
+            .expect("admit deletion");
+            let (deleted, message_channel) =
+                crate::event::soft_delete_event_and_update_thread_in_tx(
+                    &mut tx,
+                    message.id.as_bytes(),
+                    Some(created_at),
+                    None,
+                    None,
+                )
+                .await
+                .expect("delete");
+            assert!(deleted, "{case}, round {round}");
+            assert_eq!(message_channel, Some(channel));
+            let lists =
+                unpin_deleted_messages(&mut tx, &[(channel, message.id.as_bytes())], &f.relay)
+                    .await
+                    .expect("unpin");
+            assert!(lists.is_empty(), "{case}: the message was not pinned");
+            let locked = locked_event_partitions(&mut tx).await;
+            tx.rollback().await.expect("rollback");
+            assert!(
+                locked.iter().all(|name| months.contains(&name.as_str())),
+                "{case}, round {round}: locked {locked:?}, expected within {months:?}"
+            );
+        }
+    }
 }
