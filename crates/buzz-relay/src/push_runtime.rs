@@ -1,6 +1,7 @@
 //! Durable NIP-PL event matcher and gateway delivery worker.
 
 use std::{
+    collections::HashSet,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -302,6 +303,12 @@ fn match_job(
     context: &MatchContext,
 ) -> anyhow::Result<Vec<buzz_db::push::WakeRequest>> {
     let mut wakes = Vec::new();
+    // Collected once per event: the per-lease check below runs for every
+    // non-member lease on every listed-channel message.
+    let mentioned = match job.event.channel_id {
+        Some(channel) if context.listed.contains(&channel) => mentioned_readers(&job.event.event),
+        _ => HashSet::new(),
+    };
     for lease in &context.leases {
         let author_hex = hex::encode(&lease.author);
         if !reader_authorized_for_event(&job.event.event, &author_hex) {
@@ -311,8 +318,7 @@ fn match_job(
             if !context
                 .memberships
                 .contains(&(channel, lease.author.clone()))
-                && !(context.listed.contains(&channel)
-                    && mentions_reader(&job.event.event, &author_hex))
+                && !mentioned.contains(author_hex.as_str())
             {
                 continue;
             }
@@ -372,14 +378,23 @@ fn match_job(
     Ok(wakes)
 }
 
-/// Whether `event` mentions `reader_hex` with a `p` tag. Workflow owner
-/// attribution is not a mention.
+/// The pubkeys `event` mentions with a `p` tag. Workflow owner attribution
+/// is not a mention.
+fn mentioned_readers(event: &nostr::Event) -> HashSet<&str> {
+    event
+        .tags
+        .iter()
+        .filter(|tag| {
+            tag.as_slice().first().is_some_and(|name| name == "p")
+                && !is_workflow_owner_attribution(event, tag)
+        })
+        .filter_map(|tag| tag.content())
+        .collect()
+}
+
+/// Whether `event` mentions `reader_hex`, by the same rule as matching.
 fn mentions_reader(event: &nostr::Event, reader_hex: &str) -> bool {
-    event.tags.iter().any(|tag| {
-        tag.kind().to_string() == "p"
-            && tag.content() == Some(reader_hex)
-            && !is_workflow_owner_attribution(event, tag)
-    })
+    mentioned_readers(event).contains(reader_hex)
 }
 
 /// Whether a lease filter may push an event in `channel`, by the same rule as
