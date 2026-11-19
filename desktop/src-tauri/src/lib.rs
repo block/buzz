@@ -910,6 +910,8 @@ pub fn run() {
             if let Some(window) = app_handle.get_webview_window("main") {
                 if let Err(error) = window.hide() {
                     eprintln!("buzz-desktop: failed to hide main window: {error}");
+                } else {
+                    windows_tray::hint_first_close(app_handle);
                 }
             }
         }

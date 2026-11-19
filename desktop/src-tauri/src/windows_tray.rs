@@ -10,15 +10,20 @@
 //! macOS has its own richer status-item menu in `tray_menu`; the two are
 //! mutually exclusive and share no code.
 
+use std::{fs::OpenOptions, io::ErrorKind, path::Path};
+
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager, Runtime,
 };
+use tauri_plugin_notification::NotificationExt;
 
 const TRAY_ID: &str = "buzz-windows-tray";
 const OPEN_BUZZ_ID: &str = "windows-tray-open-buzz";
 const QUIT_ID: &str = "windows-tray-quit";
+/// Written to the app data dir once the close-to-tray hint has been shown.
+const CLOSE_HINT_MARKER: &str = "windows-close-to-tray-hint-shown";
 
 #[derive(Debug, PartialEq, Eq)]
 enum TrayCommand {
@@ -64,6 +69,53 @@ pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     }
     if let Err(error) = window.set_focus() {
         eprintln!("buzz-desktop: failed to focus main window from tray: {error}");
+    }
+}
+
+/// Records that the close-to-tray hint is being shown and returns whether this
+/// is the first time. Creating the marker is the claim, so a failure to write
+/// it suppresses the hint rather than repeating it on every close.
+fn claim_close_hint(data_dir: &Path) -> bool {
+    if let Err(error) = std::fs::create_dir_all(data_dir) {
+        eprintln!("buzz-desktop: failed to create app data dir for close hint: {error}");
+        return false;
+    }
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(data_dir.join(CLOSE_HINT_MARKER))
+    {
+        Ok(_) => true,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => false,
+        Err(error) => {
+            eprintln!("buzz-desktop: failed to record close hint: {error}");
+            false
+        }
+    }
+}
+
+/// Tells the user, once, that closing the window left Buzz running. Closing
+/// quits most Windows apps, so without this the first close looks like a quit
+/// and the tray icon is easy to miss.
+pub(crate) fn hint_first_close<R: Runtime>(app: &AppHandle<R>) {
+    let data_dir = match app.path().app_data_dir() {
+        Ok(dir) => dir,
+        Err(error) => {
+            eprintln!("buzz-desktop: failed to resolve app data dir for close hint: {error}");
+            return;
+        }
+    };
+    if !claim_close_hint(&data_dir) {
+        return;
+    }
+    if let Err(error) = app
+        .notification()
+        .builder()
+        .title("Buzz is still running")
+        .body("Closing the window keeps Buzz running in the notification area. Right-click the Buzz icon there to quit.")
+        .show()
+    {
+        eprintln!("buzz-desktop: failed to show close hint: {error}");
     }
 }
 
@@ -115,7 +167,10 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{command_for_menu_id, is_open_click, TrayCommand, OPEN_BUZZ_ID, QUIT_ID, TRAY_ID};
+    use super::{
+        claim_close_hint, command_for_menu_id, is_open_click, TrayCommand, CLOSE_HINT_MARKER,
+        OPEN_BUZZ_ID, QUIT_ID, TRAY_ID,
+    };
     use tauri::{
         tray::{MouseButton, MouseButtonState, TrayIconEvent, TrayIconId},
         PhysicalPosition, Rect,
@@ -175,5 +230,34 @@ mod tests {
             position: PhysicalPosition::new(0.0, 0.0),
             rect: Rect::default(),
         }));
+    }
+
+    #[test]
+    fn close_hint_is_claimed_only_once() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(claim_close_hint(dir.path()));
+        assert!(dir.path().join(CLOSE_HINT_MARKER).exists());
+        assert!(!claim_close_hint(dir.path()));
+    }
+
+    #[test]
+    fn close_hint_creates_a_missing_data_dir() {
+        // A fresh install may close the window before anything else has
+        // written to the app data dir.
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("xyz.block.buzz");
+        assert!(claim_close_hint(&data_dir));
+        assert!(!claim_close_hint(&data_dir));
+    }
+
+    #[test]
+    fn close_hint_is_suppressed_when_the_marker_cannot_be_written() {
+        // The data dir path is a regular file, so neither the dir nor the
+        // marker can be created. Repeating the hint on every close would be
+        // worse than never showing it.
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("not-a-dir");
+        std::fs::write(&blocker, b"").unwrap();
+        assert!(!claim_close_hint(&blocker));
     }
 }
