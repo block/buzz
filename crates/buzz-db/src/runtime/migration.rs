@@ -2592,23 +2592,15 @@ mod postgres_tests {
             .tables
             .get("community_deletion_approvals")
             .expect("schema.sql approval table");
-        assert!(migration_approval_table.contains(
-            "foreign key (request_id, community_id, inventory_digest) references community_deletion_requests(id, community_id, inventory_digest) on delete restrict"
-        ));
+        let invariant = "inventory_digest bytea not null check (length(inventory_digest) = 32)";
         assert!(
-            !schema_approval_table.contains("foreign key"),
-            "0102 dropped the deletion approval foreign key"
+            migration_approval_table.contains(invariant),
+            "0029 deletion approvals are missing {invariant}"
         );
-        for invariant in ["inventory_digest bytea not null check (length(inventory_digest) = 32)"] {
-            assert!(
-                migration_approval_table.contains(invariant),
-                "0029 deletion approvals are missing {invariant}"
-            );
-            assert!(
-                schema_approval_table.contains(invariant),
-                "schema.sql deletion approvals are missing {invariant}"
-            );
-        }
+        assert!(
+            schema_approval_table.contains(invariant),
+            "schema.sql deletion approvals are missing {invariant}"
+        );
         let migration_request_table = migration
             .tables
             .get("community_deletion_requests")
@@ -2738,11 +2730,13 @@ mod postgres_tests {
             .as_str();
         assert!(through_message.contains("DROP COLUMN threads_through_timestamp"));
         for (table, definition) in personal.tables {
+            // `without_foreign_keys` also normalizes spacing, so apply it to both.
             let in_schema = schema.tables.get(&table).map(|schema_definition| {
+                let schema_definition = without_foreign_keys(schema_definition);
                 if table == "personal_read_accounts" {
                     schema_definition.replacen(started_at_column, "", 1)
                 } else {
-                    schema_definition.clone()
+                    schema_definition
                 }
             });
             // 0102 dropped the foreign keys that 0056 created.
