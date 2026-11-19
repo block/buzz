@@ -178,7 +178,7 @@ class SelfHostedEntry {
     );
     try {
       socket.headers = headers;
-      // The joining identity isn't the member reports name yet.
+      // Until the joining identity is active, reports name another member.
       socket.diagnostics = SignerDiagnosticReporter(
         diagnostics,
         signer: pubkeyFromNsec(community.nsec),

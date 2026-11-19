@@ -2320,6 +2320,16 @@ void main() {
       'invalid: event timestamp too far from server time',
     ]);
     await expectLater(stale, throwsA(isA<Exception>()));
+    // Ordinary outcomes of Add Members and of a sole owner's Leave.
+    for (final (id, reason) in [
+      ('event-policy', 'invalid: policy:nobody'),
+      ('event-owner-only', 'invalid: policy:owner_only'),
+      ('event-last-owner', 'invalid: cannot remove the last owner'),
+    ]) {
+      final refused = session.publish(_event(id: id));
+      session.debugHandleMessage(['OK', id, false, reason]);
+      await expectLater(refused, throwsA(isA<Exception>()));
+    }
     expect(reporter.errors, isEmpty);
 
     final invalid = session.publish(_event(id: 'event-2'));

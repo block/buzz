@@ -148,15 +148,19 @@ class NoopDiagnosticReporter implements DiagnosticReporter {
 }
 
 /// Reports from work signed by [signer], such as a one-shot socket for a
-/// community that may not be active. They go through only while [signer] is
-/// the member [reporter] names; otherwise they would name another member.
+/// community that may not be active. They go through while [reporter] names
+/// [signer] or no member (reports then carry the install identifier), and are
+/// dropped while it names another member, who didn't hit them.
 class SignerDiagnosticReporter implements DiagnosticReporter {
   const SignerDiagnosticReporter(this.reporter, {required this.signer});
 
   final DiagnosticReporter reporter;
   final String? signer;
 
-  bool get _current => signer != null && reporter.member == signer;
+  bool get _current => switch (reporter.member) {
+    null => true,
+    final member => member == signer,
+  };
 
   @override
   void reportError(

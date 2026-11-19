@@ -59,10 +59,14 @@ void main() {
   }
 
   // A removed community's tombstone, say, signs with a key other than the
-  // active member's. Its report would name the wrong member.
-  for (final member in [nostr.Keys.generate().public, null]) {
-    test('a refusal for a signer that is not the member ($member) is not '
-        'reported', () async {
+  // active member's, and its report would name the wrong member. With no
+  // member set, as on first run, reports carry the install identifier.
+  for (final (member, reported) in [
+    (nostr.Keys.generate().public, false),
+    (null, true),
+  ]) {
+    test('a refusal while the member is ${member ?? 'unset'} '
+        '${reported ? 'is' : 'is not'} reported', () async {
       final server = await relayRefusing('invalid: bad signature');
       final reporter = _RecordingDiagnostics()..setMember(member);
 
@@ -78,7 +82,9 @@ void main() {
         throwsA(isA<Exception>()),
       );
 
-      expect(reporter.errors, isEmpty);
+      expect(reporter.errors, [
+        if (reported) (RelayInvalidRequest, DiagnosticOperation.relayRejection),
+      ]);
     });
   }
 }

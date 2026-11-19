@@ -38,6 +38,7 @@ void main() {
       'invalid: policy:nobody \u2014 this agent has disabled external channel additions':
           false,
       'invalid: policy:owner_only': false,
+      'invalid: cannot remove the last owner': false,
       'duplicate: channel already exists': false,
       'restricted: access revoked': false,
       'rate-limited: quota exceeded; retry in 4s': false,

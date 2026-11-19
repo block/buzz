@@ -156,8 +156,8 @@ void main() {
     },
   );
 
-  test('a tombstone refusal reports only while its community is the member '
-      'reports name', () async {
+  test('a tombstone refusal reports only while its community or no one is '
+      'the member reports name', () async {
     // After the active community is removed, reports name the next one while
     // the outbox still publishes the removed community's tombstone.
     final overrides = HttpOverrides.current;
@@ -228,6 +228,22 @@ void main() {
       throwsA(anything),
     );
     expect(diagnostics.operations, [DiagnosticOperation.relayRejection]);
+
+    // With no member set, as after the last community is removed, the report
+    // carries the install identifier.
+    diagnostics.setMember(null);
+    await expectLater(
+      publishBuzzPushLeaseRevocation(
+        record,
+        relayAuth: auth,
+        diagnostics: diagnostics,
+      ),
+      throwsA(anything),
+    );
+    expect(diagnostics.operations, [
+      DiagnosticOperation.relayRejection,
+      DiagnosticOperation.relayRejection,
+    ]);
   });
 
   test('community removal journals one precise lease address', () async {
