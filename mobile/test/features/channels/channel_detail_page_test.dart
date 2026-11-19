@@ -12241,9 +12241,11 @@ void main() {
         relay.setConnectionStatus(SessionStatus.reconnecting);
         await tester.pumpAndSettle();
         expect(find.text('The transcript remains available.'), findsOneWidget);
+        relay.huddleHistoryError = Exception('connection reset');
         relay.setConnectionStatus(SessionStatus.connected);
         await tester.pumpAndSettle();
         expect(find.text('The transcript remains available.'), findsOneWidget);
+        relay.huddleHistoryError = null;
         expect(find.widgetWithText(FilledButton, 'Join'), findsNothing);
         expect(find.byType(TextField), findsNothing);
         await tester.tap(

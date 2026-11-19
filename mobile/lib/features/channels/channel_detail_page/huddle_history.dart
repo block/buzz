@@ -1,5 +1,18 @@
 part of '../channel_detail_page.dart';
 
+class _HuddleHistoryAuthorization {
+  bool allowed = false;
+}
+
+// The lease lives only while this history route is open, and is retired on
+// identity/community changes. It is never a persisted permission cache.
+final _huddleHistoryAuthorizationProvider = Provider.autoDispose
+    .family<_HuddleHistoryAuthorization, String>((ref, channelId) {
+      ref.watch(relayConfigProvider);
+      ref.watch(myPubkeyProvider);
+      return _HuddleHistoryAuthorization();
+    });
+
 /// Read the original room, where voice transcripts and Huddle chat are stored.
 /// Opening history never joins audio or changes room membership.
 final _huddleHistoryAccessProvider = FutureProvider.autoDispose
@@ -11,8 +24,14 @@ final _huddleHistoryAccessProvider = FutureProvider.autoDispose
           channelId,
         ).select((update) => update.version),
       );
+      final authorization = ref.watch(
+        _huddleHistoryAuthorizationProvider(channelId),
+      );
       final membership = ref.watch(huddleHistoryMembershipProvider(channelId));
-      if (membership == false) return false;
+      if (membership == false) {
+        authorization.allowed = false;
+        return false;
+      }
       // Keep this open route's successful authorization through a transient
       // disconnect. Reopening still requires a fresh check; reconnecting
       // revalidates before showing any retained private history.
@@ -23,14 +42,22 @@ final _huddleHistoryAccessProvider = FutureProvider.autoDispose
         }
       });
       final status = ref.read(relaySessionProvider).status;
-      if (status != SessionStatus.connected) throw StateError('Not connected');
+      if (status != SessionStatus.connected) {
+        if (authorization.allowed) return true;
+        throw StateError('Not connected');
+      }
       try {
         await ref
             .read(relaySessionProvider.notifier)
             .fetchHistory(NostrFilters.messages(channelId, limit: 1));
+        authorization.allowed = true;
         return true;
       } catch (error) {
-        if (isRelayAccessDenied(error)) return false;
+        if (isRelayAccessDenied(error)) {
+          authorization.allowed = false;
+          return false;
+        }
+        if (authorization.allowed) return true;
         rethrow;
       }
     });
