@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::channel::ChannelRecord;
 use crate::error::{DbError, Result};
-use crate::Db;
+use crate::{AdmittedTx, Db};
 use buzz_core::CommunityId;
 use buzz_datastore_tracing::datastore_span;
 
@@ -1085,6 +1085,10 @@ pub async fn hide_dm(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    // Exclusive, so a hide never overlaps a message that read the DM as
+    // visible (see [`lock_dm_for_unhide`]): it lands before or after it.
+    crate::channel_members::acquire_channel_membership_lock(tx.conn(), community_id, channel_id)
+        .await?;
     let result = sqlx::query(
         r#"
         UPDATE channel_members
@@ -1139,6 +1143,145 @@ pub async fn unhide_dm(
 
     tx.commit().await?;
     Ok(())
+}
+
+/// In `tx`, before a message by `author` is stored in DM `channel_id`, take
+/// the DM's membership lock in shared mode and return whether another member
+/// has it hidden. A hide takes the lock exclusively, so it commits before
+/// this read or after the message, never in between; messages do not wait on
+/// each other. A removal takes the lock before its thread-counter writes and
+/// a channel settings write before the channel row, so the message takes it
+/// before both.
+pub async fn lock_dm_for_unhide(
+    tx: &mut AdmittedTx,
+    channel_id: Uuid,
+    author: &[u8],
+) -> Result<bool> {
+    let community_id = tx.community();
+    crate::channel_members::acquire_channel_membership_lock_shared(
+        tx.conn(),
+        community_id,
+        channel_id,
+    )
+    .await?;
+    // A separate statement, so its snapshot is taken after the lock.
+    let hidden = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM channel_members \
+         WHERE community_id = $1 AND channel_id = $2 AND pubkey <> $3 \
+           AND removed_at IS NULL AND hidden_at IS NOT NULL)",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(author)
+    .fetch_one(tx.conn())
+    .await?;
+    Ok(hidden)
+}
+
+/// In `tx`, which holds [`lock_dm_for_unhide`]'s lock, unhide DM `channel_id`
+/// for every active member except `author`, and return whose hide was
+/// cleared, sorted so callers lock them in one order. A new message from
+/// someone else resurfaces a hidden DM, as a re-open does. The rows are
+/// locked in pubkey order, so concurrent messages cannot deadlock on them.
+pub async fn unhide_dm_for_recipients(
+    tx: &mut AdmittedTx,
+    channel_id: Uuid,
+    author: &[u8],
+) -> Result<Vec<Vec<u8>>> {
+    let community_id = tx.community();
+    let mut unhidden: Vec<Vec<u8>> = sqlx::query_scalar(
+        r#"
+        UPDATE channel_members
+        SET hidden_at = NULL
+        WHERE community_id = $1 AND channel_id = $2 AND pubkey IN (
+            SELECT pubkey FROM channel_members
+            WHERE community_id = $1 AND channel_id = $2 AND pubkey <> $3
+              AND removed_at IS NULL AND hidden_at IS NOT NULL
+            ORDER BY pubkey
+            FOR UPDATE
+        )
+          AND hidden_at IS NOT NULL
+        RETURNING pubkey
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(author)
+    .fetch_all(tx.conn())
+    .await?;
+    unhidden.sort();
+    Ok(unhidden)
+}
+
+/// The state `viewer`'s next NIP-DV snapshot is built from.
+pub struct DmVisibilityState {
+    /// The DMs `viewer` has hidden now.
+    pub hidden: Vec<Uuid>,
+    /// The `created_at` of `viewer`'s latest snapshot, in Unix seconds.
+    pub latest_snapshot_at: Option<i64>,
+}
+
+/// In `tx`, take the replacement lock on `viewer`'s NIP-DV snapshot (signed by
+/// `relay_pubkey`), then read what the next snapshot is built from. Every
+/// snapshot writer takes this lock before it reads, so an older hidden set can
+/// never replace a newer one.
+pub async fn lock_dm_visibility(
+    tx: &mut AdmittedTx,
+    relay_pubkey: &[u8],
+    viewer: &[u8],
+) -> Result<DmVisibilityState> {
+    let community_id = tx.community();
+    let kind = buzz_core::kind::KIND_DM_VISIBILITY as i32;
+    let d_tag = hex::encode(viewer);
+    let lock_key = crate::replaceable::event_replacement_lock_key(
+        community_id,
+        kind,
+        relay_pubkey,
+        Some(d_tag.as_bytes()),
+    );
+    crate::observability::observe_event_lock(
+        crate::observability::LockType::Replacement,
+        kind,
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(tx.conn()),
+    )
+    .await?;
+    let hidden = sqlx::query_scalar(
+        r#"
+        SELECT cm.channel_id
+        FROM channel_members cm
+        JOIN channels c
+          ON c.community_id = cm.community_id
+         AND c.id = cm.channel_id
+        WHERE cm.community_id = $1
+          AND cm.pubkey = $2
+          AND cm.removed_at IS NULL
+          AND cm.hidden_at IS NOT NULL
+          AND c.channel_type = 'dm'
+          AND c.deleted_at IS NULL
+        ORDER BY cm.channel_id
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(viewer)
+    .fetch_all(tx.conn())
+    .await?;
+    let latest: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT max(created_at) FROM events \
+         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 \
+           AND deleted_at IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(kind)
+    .bind(relay_pubkey)
+    .bind(&d_tag)
+    .fetch_one(tx.conn())
+    .await?;
+    Ok(DmVisibilityState {
+        hidden,
+        latest_snapshot_at: latest.map(|at| at.timestamp()),
+    })
 }
 
 /// Return the channel IDs of all DMs the given user currently has hidden
