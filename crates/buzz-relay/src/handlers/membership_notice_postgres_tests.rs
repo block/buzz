@@ -595,9 +595,10 @@ async fn dm_message_from_someone_else_unhides_it() {
 }
 
 /// A hide racing a message from someone else lands wholly before or after it.
-/// The message is parked after it read the DM as visible; the hide waits for
-/// it rather than committing underneath it, so the hide is the later write
-/// and the reader's snapshot ends up hiding the DM.
+/// The message is parked after it read the DM as visible, holding the DM's
+/// membership key shared; the hide waits on that key exclusively rather than
+/// committing underneath it, so the hide is the later write and the reader's
+/// snapshot ends up hiding the DM.
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
 async fn dm_hide_racing_a_message_lands_after_it() {
@@ -644,8 +645,30 @@ async fn dm_hide_racing_a_message_lands_after_it() {
                 .await
             }
         });
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        assert!(!hide.is_finished(), "hide committed under the message");
+        // The hide must wait for the message's shared hold, exclusively, on
+        // this DM's membership key, not commit underneath it.
+        let key = format!("buzz_channel_membership:{}:{dm}", tenant.community().as_uuid());
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' \
+                     AND NOT granted AND mode = 'ExclusiveLock' \
+                     AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) \
+                     AND ((classid::bigint << 32) | objid::bigint) = hashtextextended($1, 0))",
+                )
+                .bind(&key)
+                .fetch_one(state.db.pool())
+                .await
+                .expect("observe the hide waiting");
+                if waiting {
+                    break;
+                }
+                assert!(!hide.is_finished(), "hide committed under the message");
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("hide never waited on the message");
         // Released when this returns; the hide then follows the message.
         Some(hide)
     })
