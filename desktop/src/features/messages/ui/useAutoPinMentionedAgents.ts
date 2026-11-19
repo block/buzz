@@ -203,11 +203,8 @@ export function useAutoPinMentionedAgents({
     }) => {
       // Ordinary @mentions stay one-shot when auto-mention is off. An intentional
       // "Always address" / pin action passes persist:true and must still opt in.
-      if (
-        !promotion.persist &&
-        !shouldPromoteExplicitAddress(enabled)
-      ) {
-        return;
+      if (!promotion.persist && !shouldPromoteExplicitAddress(enabled)) {
+        return false;
       }
       promoteAgents({
         ...promotion,
@@ -215,6 +212,7 @@ export function useAutoPinMentionedAgents({
         requirePreference: false,
       });
       requestPreferenceChange(true);
+      return true;
     },
     [enabled, promoteAgents, requestPreferenceChange],
   );

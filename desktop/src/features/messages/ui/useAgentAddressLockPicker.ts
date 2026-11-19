@@ -34,7 +34,7 @@ export function useAgentAddressLockPicker({
   onAddressAgentMention?: (
     suggestion: MentionSuggestion,
     options?: { persist?: boolean },
-  ) => void;
+  ) => boolean;
   onAutoPinAgentMention?: (
     suggestion: MentionSuggestion,
     options: { reinstateExcluded: boolean },
@@ -315,7 +315,10 @@ export function useAgentAddressLockPicker({
         if (!lockedAgentPubkeys.has(pubkey)) {
           trackMentionAddressedAgent(pubkey);
           if (onAddressAgentMention) {
-            onAddressAgentMention(suggestion);
+            if (!onAddressAgentMention(suggestion)) {
+              setAnnouncement(`Mentioned ${suggestion.displayName}`);
+              return;
+            }
           } else {
             audience.addPubkey(pubkey);
             onPulseAddressLock(pubkey);
