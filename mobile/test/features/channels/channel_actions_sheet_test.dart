@@ -1227,5 +1227,6 @@ class _RecordingReadState extends ReadStateNotifier {
     String contextId,
     int unixTimestamp, {
     bool clearForcedMessages = false,
+    bool explicit = false,
   }) => marks.add((contextId, unixTimestamp, clearForcedMessages));
 }

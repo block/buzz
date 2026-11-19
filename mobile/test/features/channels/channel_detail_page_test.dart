@@ -85,6 +85,8 @@ import 'package:buzz/features/channels/thread_detail_page.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/activity/inbox_local_state_provider.dart';
+import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/read_state/message_read_state.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
@@ -301,6 +303,7 @@ Widget _buildTestable({
   List<UserProfile>? directoryPeople,
   ChannelActions Function(Ref ref)? createChannelActions,
   ReadStateNotifier? readStateNotifier,
+  InboxLocalStateNotifier? inboxLocalState,
   _FakeMessagesNotifier? messagesNotifier,
 
   /// The channel's own history in a personal chat, which [messagesNotifier]
@@ -477,6 +480,8 @@ Widget _buildTestable({
         channelActionsProvider.overrideWith(createChannelActions),
       if (readStateNotifier != null)
         readStateProvider.overrideWith(() => readStateNotifier),
+      if (inboxLocalState != null)
+        inboxLocalStateProvider.overrideWith(() => inboxLocalState),
       for (final entry in threadReplies.entries)
         threadRepliesProvider(
           ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
@@ -3466,7 +3471,7 @@ void main() {
 
       await tester.pump(const Duration(milliseconds: 300));
 
-      expect(readState.markedContexts, {'activity:$_channelId': 1200});
+      expect(readState.markedContexts, {_channelId: 1200});
       expect(tester.takeException(), isNull);
     });
 
@@ -3682,7 +3687,7 @@ void main() {
 
       await tester.pump(const Duration(milliseconds: 300));
 
-      expect(readState.markedContexts, {'activity:$_channelId': 1200});
+      expect(readState.markedContexts, {_channelId: 1200});
       expect(tester.takeException(), isNull);
     });
 
@@ -3717,11 +3722,162 @@ void main() {
 
       await tester.pump(const Duration(milliseconds: 300));
 
-      expect(readState.clearedForcedContexts, [_channelId]);
-      // The channel mark does not move, and a message the reader marked
-      // unread stays unread.
-      expect(readState.markedContexts, {'activity:$_channelId': 1200});
-      expect(readState.state.isForcedUnread('msg:old'), isTrue);
+      // The catch-up covers the top-level message marked unread too.
+      expect(readState.clearedForcedContexts, ['msg:old', _channelId]);
+      expect(readState.markedContexts, {_channelId: 1200});
+      expect(readState.state.isForcedUnread('msg:old'), isFalse);
+    });
+
+    testWidgets('a catch-up with no frontier progress still clears its marks', (
+      tester,
+    ) async {
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {_channelId: 1200},
+          version: 0,
+          forcedUnreadContexts: {'msg:old': _channelId},
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'msg1',
+              pubkey: 'alice',
+              content: 'Latest',
+              createdAt: 1200,
+            ),
+          ],
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(readState.markedContexts, isEmpty);
+      expect(readState.state.isForcedUnread('msg:old'), isFalse);
+    });
+
+    testWidgets('marking unread in place holds until the page returns', (
+      tester,
+    ) async {
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'shown',
+              pubkey: 'alice',
+              content: 'Here',
+              createdAt: 1200,
+            ),
+          ],
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      readState.force('msg:shown');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      // Still on screen since the last dwell: the action holds.
+      expect(readState.state.isForcedUnread('msg:shown'), isTrue);
+
+      for (final state in [
+        AppLifecycleState.inactive,
+        AppLifecycleState.hidden,
+        AppLifecycleState.paused,
+        AppLifecycleState.hidden,
+        AppLifecycleState.inactive,
+        AppLifecycleState.resumed,
+      ]) {
+        tester.binding.handleAppLifecycleStateChanged(state);
+        await tester.pump();
+      }
+      await tester.pump(const Duration(milliseconds: 300));
+      // Hidden, then back: displayed again, so it is read.
+      expect(readState.state.isForcedUnread('msg:shown'), isFalse);
+    });
+
+    testWidgets('displaying a message ends its Inbox mark unread', (
+      tester,
+    ) async {
+      final inbox = _SeededInbox({'shown': 1000, 'elsewhere': 1000});
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'shown',
+              pubkey: 'alice',
+              content: 'Here',
+              createdAt: 1200,
+            ),
+          ],
+          readStateNotifier: _SynchronousReadStateNotifier(
+            const ReadStateState(
+              isReady: true,
+              pubkey: 'self',
+              contexts: {_channelId: 1200},
+              version: 0,
+            ),
+          ),
+          inboxLocalState: inbox,
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(inbox.state.unreadBaselines, {'elsewhere': 1000});
+    });
+
+    testWidgets('displaying a message ends its device-local mark unread', (
+      tester,
+    ) async {
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+          forcedUnreadContexts: {
+            'msg:shown': _channelId,
+            'msg:old': _channelId,
+          },
+        ),
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'shown',
+              pubkey: 'alice',
+              content: 'Marked unread elsewhere',
+              createdAt: 1200,
+            ),
+          ],
+          readStateNotifier: readState,
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      // The displayed row goes back to read, and the catch-up covers the rest.
+      expect(readState.clearedForcedContexts, ['msg:shown', 'msg:old']);
+      expect(readState.state.isForcedUnread('msg:shown'), isFalse);
+      expect(readState.state.isForcedUnread('msg:old'), isFalse);
+      expect(readState.markedContexts, {_channelId: 1200});
     });
 
     testWidgets('opening a DM reads the whole DM', (tester) async {
@@ -4026,7 +4182,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       await tester.pump(const Duration(milliseconds: 300));
-      expect(readState.markedContexts, {'activity:$_channelId': 1000});
+      expect(readState.markedContexts, {_channelId: 1000});
       readState.markedContexts.clear();
 
       Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
@@ -4048,7 +4204,7 @@ void main() {
       // mark too, as in `buzz-app`: the thread mark reads a reply only while
       // its root is loaded. The covered channel page does not read meanwhile.
       expect(readState.markedContexts, {
-        'thread-activity:$threadIdRoot': 1102,
+        threadContextKey(threadIdRoot): 1102,
         'msg:reply0': 1100,
         'msg:reply1': 1101,
         'msg:reply2': 1102,
@@ -4102,7 +4258,7 @@ void main() {
 
       expect(find.byType(ThreadDetailPage), findsOneWidget);
       expect(readState.markedContexts['msg:$threadIdRoot'], 1000);
-      expect(readState.markedContexts['thread-activity:$threadIdRoot'], 1100);
+      expect(readState.markedContexts[threadContextKey(threadIdRoot)], 1100);
     });
 
     testWidgets('a thread with no replies reads its head', (tester) async {
@@ -4386,8 +4542,9 @@ void main() {
           context: messageListElement,
           direction: ScrollDirection.reverse,
         ).dispatch(messageListElement);
-        // Settling can already complete the read dwell; record the whole jump.
-        readState.markedContexts.clear();
+        // Settling can already complete the read dwell, and the opening
+        // catch-up covers every row; record the whole jump.
+        readState.forgetMarks();
         tester
             .widget<ScrollablePositionedList>(messageList)
             .itemScrollController!
@@ -4623,7 +4780,7 @@ void main() {
             .getTopLeft(find.byKey(const ValueKey('thread-composer-dock')))
             .dy;
         final marked = readState.markedContexts.keys.toSet();
-        expect(marked, isNot(contains('thread-activity:$threadIdRoot')));
+        expect(marked, isNot(contains(threadContextKey(threadIdRoot))));
         var hiddenRows = 0;
         for (var i = 0; i < 40; i++) {
           final row = find.byKey(ValueKey('thread-message-group-reply$i'));
@@ -22201,6 +22358,7 @@ class _SynchronousReadStateNotifier extends ReadStateNotifier {
     String contextId,
     int unixTimestamp, {
     bool clearForcedMessages = false,
+    bool explicit = false,
   }) {
     markedContexts[contextId] = unixTimestamp;
     state = state.copyWithContext(contextId, unixTimestamp);
@@ -22208,9 +22366,63 @@ class _SynchronousReadStateNotifier extends ReadStateNotifier {
 
   final List<String> clearedForcedContexts = [];
 
+  /// Marks [contextId] unread on this device, as the message action does.
+  void force(String contextId) =>
+      _setForced({...state.forcedUnreadContexts, contextId: _channelId});
+
+  void _setForced(Map<String, String> forced) => state = ReadStateState(
+    isReady: state.isReady,
+    pubkey: state.pubkey,
+    contexts: state.contexts,
+    version: state.version + 1,
+    forcedUnreadContexts: forced,
+  );
+
   @override
-  void clearForcedUnread(String contextId) {
+  void clearCovered({
+    String? scope,
+    Iterable<String> displayed = const [],
+    Set<String> onScreen = const {},
+  }) {
+    final shown = displayed.map(msgContextKey).toSet();
+    final kept = onScreen.map(msgContextKey).toSet();
+    final cleared = [
+      for (final MapEntry(:key, :value) in state.forcedUnreadContexts.entries)
+        if (key.startsWith(msgContextPrefix) &&
+            (shown.contains(key) || value == scope && !kept.contains(key)))
+          key,
+    ];
+    if (cleared.isEmpty) return;
+    clearedForcedContexts.addAll(cleared);
+    _setForced(
+      {...state.forcedUnreadContexts}
+        ..removeWhere((key, _) => cleared.contains(key)),
+    );
+  }
+
+  /// Forgets every mark so far, such as the catch-up on opening.
+  void forgetMarks() {
+    markedContexts.clear();
+    state = _initialState;
+  }
+
+  /// Whether a synced channel clear fails, as when the primary is full.
+  bool failClear = false;
+
+  @override
+  bool clearForcedUnread(String contextId) {
     clearedForcedContexts.add(contextId);
+    if (failClear && contextId == _channelId) {
+      state = ReadStateState(
+        isReady: state.isReady,
+        pubkey: state.pubkey,
+        contexts: state.contexts,
+        version: state.version + 1,
+        forcedUnreadContexts: state.forcedUnreadContexts,
+        failedClears: {contextId},
+      );
+      return false;
+    }
     state = ReadStateState(
       isReady: state.isReady,
       pubkey: state.pubkey,
@@ -22221,7 +22433,17 @@ class _SynchronousReadStateNotifier extends ReadStateNotifier {
           if (entry.key != contextId) entry.key: entry.value,
       },
     );
+    return true;
   }
+}
+
+class _SeededInbox extends InboxLocalStateNotifier {
+  _SeededInbox(this._baselines);
+  final Map<String, int> _baselines;
+
+  @override
+  InboxLocalState build() =>
+      InboxLocalState(doneIds: const {}, unreadBaselines: _baselines);
 }
 
 class _FakeProfileNotifier extends ProfileNotifier {

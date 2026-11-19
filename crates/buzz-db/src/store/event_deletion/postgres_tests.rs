@@ -167,10 +167,12 @@ async fn retention_free_contract() {
     let (db, community, channel) = fixture().await;
     let (other, other_channel) = tenant(&db.pool).await;
     let slot = format!("read-state:{}", "b".repeat(32));
+    let unread = format!("read-state-unread-v2:{}", "b".repeat(32));
     let marker = event(45011, JAN, vec![]);
     seed(&db, community, &marker, channel).await;
     for (kind, d, extra) in [
         (30078, slot.as_str(), ["t", "read-state"]),
+        (30078, unread.as_str(), ["t", "read-state-unread-v2"]),
         (
             30003,
             "buzz-mesh-member-status:test",

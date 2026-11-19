@@ -34,6 +34,7 @@ part 'channel_member_snapshots.dart';
 part 'channels_provider_lifecycle.dart';
 part 'channel_list_changes.dart';
 part 'channels_provider_joins.dart';
+part 'channel_thread_follows.dart';
 
 const _channelTypeOrder = {'stream': 0, 'forum': 1, 'dm': 2};
 const _unreadCatchUpLimit = 1000;
@@ -342,6 +343,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         Future<void>.microtask(() async {
           if (waitingForInitialConnection) await connected.future;
           if (!ref.mounted || buildGeneration != _buildGeneration) return;
+          _listenThreadFollows();
           await _refreshInBackground();
         }),
       );
@@ -356,6 +358,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     }
 
     final channels = await _fetch(subscribeLive: true);
+    if (ref.mounted) _listenThreadFollows();
     // As on resume, a failed part of the cold read (such as hidden DMs) is
     // retried.
     if (ref.mounted &&
@@ -910,11 +913,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       final channel = updated[idx];
       _activityRevisions[channelId] = activityRevisionFor(channelId) + 1;
 
-      if (myPk != null &&
-          event.pubkey.toLowerCase() == myPk.toLowerCase() &&
-          _addSelfThreadInterest(event)) {
-        _writeThreadInterestStores(myPk);
-      }
+      _noteThreadEvent(event, channel.id, myPk);
 
       if (myPk != null &&
           shouldNotifyForEvent(
@@ -923,6 +922,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
             participatedRootIds: _participatedRootIds,
             followedRootIds: _followedRootIds(),
             authoredRootIds: _authoredRootIds,
+            mutedRootIds: _unfollowedRootIds(channel),
             mutedChannelIds: mutedChannelIds,
             channelId: channel.id,
           ) &&
@@ -945,9 +945,6 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     for (final entry in ref.read(channelMutesProvider).store.channels.entries)
       if (entry.value.muted) entry.key,
   };
-
-  Set<String> _followedRootIds() =>
-      ref.read(threadFollowsProvider).followedRootIds;
 
   void _loadThreadInterestStores(String pubkey) {
     final normalizedPubkey = pubkey.toLowerCase();

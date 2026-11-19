@@ -4596,6 +4596,92 @@ void main() {
     expect(readState.seededContexts, {'1': 20});
     expect(readState.markedContexts, isEmpty);
   });
+
+  group('read-state sync notice', () {
+    const notice = Key('read-state-sync-notice');
+    const retryText =
+        'Unread status isn’t syncing with your other devices. Tap to retry.';
+    const offlineText =
+        'Unread status isn’t syncing with your other devices. It will retry when you’re back online.';
+    const unsupportedText =
+        'Unread status can’t sync with your other devices right now. Sign in again or restart Buzz to try again.';
+
+    Future<(_FakeReadStateNotifier, _ReconnectingRelaySession)> pumpNotice(
+      WidgetTester tester, {
+      SessionStatus status = SessionStatus.connected,
+    }) async {
+      final readState = _FakeReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'pk',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      final relay = _ReconnectingRelaySession(initialStatus: status);
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            channelsProvider.overrideWith(() => _FakeNotifier(const [])),
+            readStateProvider.overrideWith(() => readState),
+            relaySessionProvider.overrideWith(() => relay),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      return (readState, relay);
+    }
+
+    testWidgets('shows on a sync failure, retries on tap, and clears', (
+      tester,
+    ) async {
+      final (readState, _) = await pumpNotice(tester);
+      expect(find.byKey(notice), findsNothing);
+
+      readState.setSync(failed: true);
+      await tester.pumpAndSettle();
+      expect(find.text(retryText), findsOneWidget);
+      await tester.tap(find.byKey(notice));
+      expect(readState.retries, 1);
+
+      readState.setSync(failed: false);
+      await tester.pumpAndSettle();
+      expect(find.byKey(notice), findsNothing);
+    });
+
+    testWidgets('the unsupported notice stays after an unrelated success', (
+      tester,
+    ) async {
+      final (readState, _) = await pumpNotice(tester);
+      readState.setSync(failed: true, unsupported: true);
+      await tester.pumpAndSettle();
+      expect(find.text(unsupportedText), findsOneWidget);
+
+      readState.setSync(failed: false, unsupported: true);
+      await tester.pumpAndSettle();
+      expect(find.text(unsupportedText), findsOneWidget);
+      await tester.tap(find.byKey(notice));
+      expect(readState.retries, 0);
+    });
+
+    testWidgets('offline it offers no retry and says it resumes on reconnect', (
+      tester,
+    ) async {
+      final (readState, relay) = await pumpNotice(
+        tester,
+        status: SessionStatus.reconnecting,
+      );
+      readState.setSync(failed: true);
+      await tester.pumpAndSettle();
+      expect(find.text(offlineText), findsOneWidget);
+      await tester.tap(find.byKey(notice));
+      expect(readState.retries, 0);
+
+      relay.connect();
+      await tester.pumpAndSettle();
+      expect(find.text(retryText), findsOneWidget);
+    });
+  });
 }
 
 Widget _buildSettingsPage(BuildContext context) =>
@@ -4795,7 +4881,23 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
   final Map<String, int> seededContexts = {};
   final Map<String, int> markedContexts = {};
 
+  int retries = 0;
+
   _FakeReadStateNotifier(this._initialState);
+
+  void setSync({required bool failed, bool unsupported = false}) {
+    state = ReadStateState(
+      isReady: state.isReady,
+      pubkey: state.pubkey,
+      contexts: state.contexts,
+      version: state.version + 1,
+      syncFailed: failed,
+      syncUnsupported: unsupported,
+    );
+  }
+
+  @override
+  Future<void> retrySync() async => retries++;
 
   @override
   ReadStateState build() => _initialState;
@@ -4828,6 +4930,7 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
     String contextId,
     int unixTimestamp, {
     bool clearForcedMessages = false,
+    bool explicit = false,
   }) {
     markedContexts[contextId] = unixTimestamp;
     state = state.copyWithContext(contextId, unixTimestamp);

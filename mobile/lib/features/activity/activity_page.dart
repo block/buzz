@@ -158,7 +158,8 @@ class ActivityPage extends HookConsumerWidget {
     bool isDone(InboxItem item) => isInboxItemDone(
       item,
       markerOf: markerOf,
-      localUnreadOverrides: localState.unreadIds,
+      rawMarkerOf: (contextId) => readState.contexts[contextId],
+      localUnreadOverrides: localState.unreadBaselines,
       localDoneSet: localState.doneIds,
     );
 
@@ -262,19 +263,36 @@ class ActivityPage extends HookConsumerWidget {
         notifier.markContextRead(
           rootId == null ? channelId : threadContextKey(rootId),
           cap,
+          explicit: true,
         );
       }
       for (final e in shown.values) {
         if (inContext(e) && cap != null && e.createdAt <= cap) continue;
-        notifier.markContextRead(msgContextKey(e.id), e.createdAt);
+        notifier.markContextRead(
+          msgContextKey(e.id),
+          e.createdAt,
+          explicit: true,
+        );
       }
+    }
+
+    // The catch-up scope covering a row: its thread, or its whole channel
+    // for a DM or top-level row.
+    String? scopeOf(InboxItem item) {
+      final threadRootId = item.conversationId.startsWith('dm:')
+          ? null
+          : item.threadRootId;
+      return threadRootId != null
+          ? threadContextKey(threadRootId)
+          : item.item.channelId;
     }
 
     void markItemRead(InboxItem item) {
       final notifier = ref.read(readStateProvider.notifier);
-      ref
-          .read(inboxLocalStateProvider.notifier)
-          .clearUnread(groupedInboxItemIds(item));
+      final inbox = ref.read(inboxLocalStateProvider.notifier);
+      // Only this row's own marks. A scope-wide clear belongs to catch-up
+      // and to an explicit channel or thread mark read.
+      inbox.clearUnread(groupedInboxItemIds(item));
       final isDmRow = item.conversationId.startsWith('dm:');
       final partialChannelId = rowsArePartial ? item.item.channelId : null;
       if (partialChannelId != null) {
@@ -310,9 +328,17 @@ class ActivityPage extends HookConsumerWidget {
     }
 
     void markItemUnread(InboxItem item) {
+      final readState = ref.read(readStateProvider);
       ref
           .read(inboxLocalStateProvider.notifier)
-          .markUnread(groupedInboxItemIds(item));
+          .markUnread(
+            groupedInboxItemIds(item),
+            baseline: inboxItemReadAt(
+              item,
+              markerOf: (contextId) => readState.contexts[contextId],
+            ),
+            scope: scopeOf(item),
+          );
     }
 
     Future<void> openItem(InboxItem item) async {

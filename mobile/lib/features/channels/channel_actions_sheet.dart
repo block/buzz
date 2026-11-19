@@ -43,6 +43,7 @@ import 'members_sheet.dart';
 import 'unread_badge/observed_unread_event.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/read_state/read_state_provider.dart';
+import '../activity/inbox_local_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
 import '../../shared/widgets/covered_route_keyboard_insets.dart';
 
@@ -142,6 +143,7 @@ void _markChannelReadNow(WidgetRef ref, String channelId) {
       .read(readStateProvider.notifier)
       .markContextRead(channelId, timestamp ?? 0, clearForcedMessages: true);
   if (timestamp != null) {
+    ref.read(inboxLocalStateProvider.notifier).clearScope(channelId);
     channels.clearObservedUnreadCoveredByRead(channelId, timestamp);
   }
 }
@@ -225,9 +227,19 @@ class ChannelActionsSheet extends HookConsumerWidget {
             if (isUnread) {
               _markChannelReadNow(ref, channel.id);
             } else {
-              ref
+              final marked = ref
                   .read(readStateProvider.notifier)
                   .markContextUnread(channel.id, channelId: channel.id);
+              if (!marked) {
+                ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+                  const SnackBar(
+                    content: Text(
+                      'Couldn’t mark this channel unread. Try again.',
+                    ),
+                  ),
+                  kind: ToastKind.error,
+                );
+              }
             }
           },
         ),

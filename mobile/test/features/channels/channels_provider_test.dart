@@ -22,6 +22,7 @@ import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart';
 import 'package:buzz/features/channels/channel_mutes/channel_mutes_storage.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/channels/thread_follows/thread_follows_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
@@ -39,6 +40,7 @@ part 'channels_provider_readiness_cases.dart';
 part 'channels_provider_request_path_cases.dart';
 part 'channels_provider_activity_cases.dart';
 part 'channels_provider_join_cases.dart';
+part 'channels_provider_follow_cases.dart';
 part 'channels_provider_saved_directory_cases.dart';
 part 'channels_provider_thread_interest_cases.dart';
 
@@ -61,6 +63,7 @@ void main() {
   _requestPathCases();
   _threadActivityCases();
   _confirmedJoinCases();
+  _threadFollowCases();
   _savedDirectoryCases();
   _threadInterestCases();
   const myPk = 'me';
@@ -3780,6 +3783,7 @@ NostrEvent _meta({
 ProviderContainer _buildContainer({
   required _FakeRelaySession session,
   _TestMutes? mutes,
+  _TestFollows? follows,
   List<Override> overrides = const [],
 }) {
   return ProviderContainer(
@@ -3787,6 +3791,7 @@ ProviderContainer _buildContainer({
     overrides: [
       ...overrides,
       if (mutes != null) channelMutesProvider.overrideWith(() => mutes),
+      if (follows != null) threadFollowsProvider.overrideWith(() => follows),
       appLifecycleProvider.overrideWith(() => _FakeAppLifecycleNotifier()),
       relaySessionProvider.overrideWith(() => session),
       // Route the pubkey through a mutable notifier so tests can switch the
