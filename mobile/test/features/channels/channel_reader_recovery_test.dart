@@ -731,9 +731,9 @@ void main() {
         final payload = relay.decrypt(relay.published.single) as Map;
         expect(payload['channels'], {
           'offline-clear': {lane.field: false, 'updatedAt': (t + 1) * 1000},
-          'offline-add': {lane.field: true, 'updatedAt': (t + 2) * 1000},
-          'older-absent': {lane.field: true, 'updatedAt': (t - 10) * 1000},
-          'same-second-absent': {lane.field: true, 'updatedAt': t * 1000},
+          'offline-add': {lane.field: true, 'updatedAt': t + 2},
+          'older-absent': {lane.field: true, 'updatedAt': t - 10},
+          'same-second-absent': {lane.field: true, 'updatedAt': t},
           'equal-clear': {lane.field: false, 'updatedAt': t * 1000 + 1},
           'changed-by-peer': {lane.field: false, 'updatedAt': t * 1000},
           'already-current': {lane.field: true, 'updatedAt': t - 1},
@@ -765,10 +765,7 @@ void main() {
         final payload = relay.decrypt(relay.published.single) as Map;
         final channels = payload['channels'] as Map;
         expect(channels, hasLength(500));
-        expect(channels['offline-add'], {
-          lane.field: true,
-          'updatedAt': (t + 2) * 1000,
-        });
+        expect(channels['offline-add'], {lane.field: true, 'updatedAt': t + 2});
         expect(channels, isNot(contains('evicted')));
         expect(channels, isNot(contains('same-second-absent')));
         expect(channels, isNot(contains('absent-clear')));
@@ -783,7 +780,7 @@ void main() {
         clock.elapse(const Duration(seconds: 5));
         final payload = relay.decrypt(relay.published.single) as Map;
         expect(payload['channels'], {
-          'offline-add': {lane.field: true, 'updatedAt': (t - 10) * 1000},
+          'offline-add': {lane.field: true, 'updatedAt': t - 10},
         });
       });
 
@@ -797,13 +794,55 @@ void main() {
         relay.stored.add(relay.event(lane.dTag, blob(snapshot), t));
       }
 
+      for (final head in [
+        'absent',
+        'seconds-stamped',
+        'milliseconds-stamped',
+      ]) {
+        fakeAsyncTest('recovered enable when the writer entry is $head', (
+          clock,
+        ) {
+          final milliseconds = head == 'milliseconds-stamped';
+          seedLegacyEnable({
+            if (head != 'absent')
+              'x': (true, milliseconds ? (t - 4) * 1000 : t - 4),
+          });
+          start(clock);
+          clock.elapse(const Duration(seconds: 5));
+
+          final published = relay.published.single;
+          final payload = relay.decrypt(published) as Map;
+          final flag = payload['channels']['x'] as Map;
+          final restoredAt = flag['updatedAt'] as int;
+          expect(flag[lane.field], isTrue);
+          expect(restoredAt, milliseconds ? t * 1000 : t);
+          expect(readFlagCache()['pending'], isEmpty);
+
+          if (milliseconds) return;
+          // The shipped phone keeps its offline clear if the relay's raw
+          // timestamp is older. Its own publish must settle on this device.
+          final clearAt = t + 60;
+          expect(restoredAt, lessThan(clearAt));
+          final peer = relay.event(
+            lane.dTag,
+            blob({'x': (false, clearAt)}),
+            published.createdAt + 1,
+          );
+          relay.stored.add(peer);
+          relay.emit(peer);
+          clock.elapse(const Duration(seconds: 6));
+          expect(subject.values()['x'], isFalse);
+          expect(relay.published, hasLength(1));
+        });
+      }
+
       for (final path in ['live', 'writer read', 'rebuild']) {
         fakeAsyncTest('migration keeps the newer enable through $path', (
           clock,
         ) {
           seedLegacyEnable({'x': (true, (t - 4) * 1000)});
           start(clock);
-          final enable = {lane.field: true, 'updatedAt': t * 1000};
+          final enable = {lane.field: true, 'updatedAt': t};
           expect(readFlagCache()['pending']['x'], enable);
           expect(relay.published, isEmpty);
 
@@ -863,10 +902,7 @@ void main() {
         clock.elapse(const Duration(seconds: 5));
         final payload = relay.decrypt(relay.published.single) as Map;
         expect(payload['channels'].keys, unorderedEquals(full.keys));
-        expect(payload['channels']['x'], {
-          lane.field: true,
-          'updatedAt': t * 1000,
-        });
+        expect(payload['channels']['x'], {lane.field: true, 'updatedAt': t});
         expect(readFlagCache()['pending'], isEmpty);
       });
 
@@ -899,6 +935,7 @@ void main() {
         'live',
         'rebuild',
         'equal stamp',
+        'older milliseconds',
         'writer read',
       ]) {
         fakeAsyncTest('a kept clear wins on $scenario', (clock) {
@@ -917,8 +954,11 @@ void main() {
             start(clock);
           }
           final clearMillis = (t - 1) * 1000;
-          final equal = scenario == 'equal stamp';
-          final returning = returningFlag(true, equal ? clearMillis : (t - 2));
+          final returning = returningFlag(true, switch (scenario) {
+            'equal stamp' => clearMillis,
+            'older milliseconds' => (t - 2) * 1000,
+            _ => t - 2,
+          });
           relay.stored.add(returning);
           if (scenario == 'writer read') {
             relay.holdOk = Completer<void>();
@@ -935,14 +975,18 @@ void main() {
             expect(subject.values()['x'], isFalse);
             expect(readFlagCache()['pending']['x'], {
               lane.field: false,
-              'updatedAt': clearMillis,
+              'updatedAt': t - 1,
             });
             clock.elapse(const Duration(seconds: 5));
           }
           final payload = relay.decrypt(relay.published.single) as Map;
           expect(payload['channels']['x'], {
             lane.field: false,
-            'updatedAt': clearMillis + (equal ? 1 : 0),
+            'updatedAt': switch (scenario) {
+              'equal stamp' => clearMillis + 1,
+              'older milliseconds' => clearMillis,
+              _ => t - 1,
+            },
           });
           if (scenario == 'writer read') {
             expect(payload['channels']['unrelated'][lane.field], isTrue);
@@ -1002,10 +1046,7 @@ void main() {
             clock.elapse(const Duration(seconds: 5));
           }
           final payload = relay.decrypt(relay.published.single) as Map;
-          expect(payload['channels']['x'], {
-            lane.field: false,
-            'updatedAt': t * 1000,
-          });
+          expect(payload['channels']['x'], {lane.field: false, 'updatedAt': t});
           expect(readFlagCache().containsKey('keptClears'), isFalse);
           expect(readFlagCache().containsKey('promotedClears'), isFalse);
           expect(readFlagCache()['pending'], isEmpty);
@@ -1163,7 +1204,7 @@ void main() {
         expect(readFlagCache().containsKey('promotedClears'), isFalse);
         expect(readFlagCache()['keptClears']['x'], {
           lane.field: false,
-          'updatedAt': (t - 1) * 1000,
+          'updatedAt': t - 1,
         });
 
         final returning = relay.event(lane.dTag, blob(withOldEnable), t + 3);
@@ -1176,7 +1217,7 @@ void main() {
         expect(payload['channels'].keys, unorderedEquals(withOldEnable.keys));
         expect(payload['channels']['x'], {
           lane.field: false,
-          'updatedAt': (t - 1) * 1000,
+          'updatedAt': t - 1,
         });
         expect(readFlagCache().containsKey('keptClears'), isFalse);
         expect(readFlagCache().containsKey('promotedClears'), isFalse);

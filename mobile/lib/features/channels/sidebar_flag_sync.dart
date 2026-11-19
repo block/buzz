@@ -236,7 +236,7 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
       // timestamp protects it if a delayed clear arrives before the write.
       if (localMillis > remoteMillis ||
           (localMillis == remoteMillis && remote?.enabled != true)) {
-        _pending[local.key] = _entry(true, localMillis);
+        _pending[local.key] = local.value;
       }
     }
     _head = head;
@@ -277,7 +277,7 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
       if (remote.enabled &&
           remoteMillis <= clearMillis &&
           !_pending.containsKey(id)) {
-        _pending[id] = _entry(false, clearMillis);
+        _pending[id] = clear;
         _promotedClears.add(id);
       }
       return true;
@@ -410,9 +410,10 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
         final latest = snapshot[edit.key];
         var value = edit.value;
         if (latest != null) {
+          final editMillis = sidebarFlagTimeMillis(value.updatedAt);
           final age = sidebarFlagTimeMillis(
             latest.updatedAt,
-          ).compareTo(sidebarFlagTimeMillis(edit.value.updatedAt));
+          ).compareTo(editMillis);
           if (age > 0 || (age == 0 && latest.enabled == edit.value.enabled)) {
             settled[edit.key] = edit.value;
             continue;
@@ -420,10 +421,11 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
           // Break a conflicting tie for older clients that keep their local
           // value at equal timestamps. Strictly newer writer values win.
           if (age == 0) {
-            value = _entry(
-              value.enabled,
-              sidebarFlagTimeMillis(value.updatedAt) + 1,
-            );
+            value = _entry(value.enabled, editMillis + 1);
+          } else if (latest.updatedAt > value.updatedAt) {
+            // Keep recovered seconds stamps unless the writer already uses
+            // milliseconds for this flag and would win a raw comparison.
+            value = _entry(value.enabled, editMillis);
           }
         }
         outgoing[edit.key] = value;
