@@ -32,6 +32,13 @@ final _huddleHistoryAccessProvider = FutureProvider.autoDispose
         authorization.allowed = false;
         return false;
       }
+      // A known member reads the room directly, as before this route checked
+      // access, so cached rows stay available offline. A later refusal still
+      // clears them in the message provider.
+      if (membership == true) {
+        authorization.allowed = true;
+        return true;
+      }
       // Keep this open route's successful authorization through a transient
       // disconnect. Reopening still requires a fresh check; reconnecting
       // revalidates before showing any retained private history.
@@ -72,7 +79,6 @@ class _HuddleHistoryPage extends ConsumerWidget {
     return FrostedScaffold(
       appBar: const FrostedAppBar(title: Text('Huddle')),
       body: access.when(
-        skipLoadingOnRefresh: false,
         loading: () => const Center(child: BuzzLoadingIndicator()),
         error: (error, _) => isRelayAccessDenied(error)
             ? const Center(

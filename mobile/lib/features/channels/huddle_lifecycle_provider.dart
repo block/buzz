@@ -60,22 +60,41 @@ final huddleLifecycleProvider = StreamProvider.autoDispose
         reading = true;
         do {
           readAgain = false;
-          try {
-            final history = await Future.wait([
-              session.fetchHistory(NostrFilters.huddleLifecycle(channelId)),
-              session.fetchHistory(
-                NostrFilter(
-                  kinds: const [48101, 48102],
-                  tags: {
-                    '#h': [channelId],
+          // Each read stands on its own: participation history only enriches
+          // the roster, so its failure must not hide an active start.
+          Object? discoveryError;
+          StackTrace? discoveryStack;
+          final history = await Future.wait([
+            session
+                .fetchHistory(NostrFilters.huddleLifecycle(channelId))
+                .then<List<NostrEvent>?>(
+                  (events) => events,
+                  onError: (Object error, StackTrace stack) {
+                    discoveryError = error;
+                    discoveryStack = stack;
+                    return null;
                   },
-                  limit: 200,
                 ),
-              ),
-            ]);
-            merge(history.expand((batch) => batch));
-          } catch (error, stack) {
-            if (!disposed && events.isEmpty) stream.addError(error, stack);
+            session
+                .fetchHistory(
+                  NostrFilter(
+                    kinds: const [48101, 48102],
+                    tags: {
+                      '#h': [channelId],
+                    },
+                    limit: 200,
+                  ),
+                )
+                .then<List<NostrEvent>?>(
+                  (events) => events,
+                  onError: (Object _, StackTrace _) => null,
+                ),
+          ]);
+          final succeeded = history.nonNulls;
+          if (succeeded.isNotEmpty) merge(succeeded.expand((batch) => batch));
+          final error = discoveryError;
+          if (error != null && !disposed && events.isEmpty) {
+            stream.addError(error, discoveryStack);
           }
         } while (!disposed && readAgain);
         reading = false;
