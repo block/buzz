@@ -388,6 +388,7 @@ class _SectionChannelsBody extends HookWidget {
               slivers: [
                 LimitedSectionSliver(
                   itemCount: displayed.length,
+                  revealAll: reveal.value,
                   findChildIndexCallback: (key) {
                     final index = displayed.indexWhere(
                       (channel) => ValueKey(channel.id) == key,

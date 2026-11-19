@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../theme/theme.dart';
@@ -14,10 +15,12 @@ class LimitedSectionSliver extends HookWidget {
     required this.itemBuilder,
     this.horizontalInset = Grid.gutter,
     this.findChildIndexCallback,
+    this.revealAll = false,
     super.key,
   });
 
   static const visibleLimit = 7;
+  final bool revealAll;
   final int itemCount;
   final IndexedWidgetBuilder itemBuilder;
   final double horizontalInset;
@@ -26,7 +29,10 @@ class LimitedSectionSliver extends HookWidget {
   @override
   Widget build(BuildContext context) {
     final showAll = useState(false);
-    final initialCount = math.min(itemCount, visibleLimit);
+    final startKey = useMemoized(GlobalKey.new);
+    final initialCount = revealAll
+        ? itemCount
+        : math.min(itemCount, visibleLimit);
     int? childIndex(Key key, int start, int end) {
       final index = findChildIndexCallback?.call(key);
       return index == null || index < start || index >= end
@@ -36,6 +42,7 @@ class LimitedSectionSliver extends HookWidget {
 
     return SliverMainAxisGroup(
       slivers: [
+        SliverToBoxAdapter(child: SizedBox(key: startKey)),
         SliverList.builder(
           itemCount: initialCount,
           itemBuilder: itemBuilder,
@@ -43,7 +50,7 @@ class LimitedSectionSliver extends HookWidget {
               ? null
               : (key) => childIndex(key, 0, initialCount),
         ),
-        if (itemCount > visibleLimit) ...[
+        if (!revealAll && itemCount > visibleLimit) ...[
           CollapsibleSliverBody(
             expanded: showAll.value,
             sliver: SliverList.builder(
@@ -61,7 +68,26 @@ class LimitedSectionSliver extends HookWidget {
               button: true,
               child: InkWell(
                 borderRadius: BorderRadius.circular(Radii.md),
-                onTap: () => showAll.value = !showAll.value,
+                onTap: () {
+                  if (showAll.value) {
+                    final target = startKey.currentContext?.findRenderObject();
+                    final position = Scrollable.of(context).position;
+                    if (target != null) {
+                      final offset = RenderAbstractViewport.of(
+                        target,
+                      ).getOffsetToReveal(target, 0).offset;
+                      if (position.pixels > offset) {
+                        position.jumpTo(
+                          offset.clamp(
+                            position.minScrollExtent,
+                            position.maxScrollExtent,
+                          ),
+                        );
+                      }
+                    }
+                  }
+                  showAll.value = !showAll.value;
+                },
                 child: Padding(
                   padding: EdgeInsets.fromLTRB(
                     horizontalInset,

@@ -21,6 +21,46 @@ void main() {
     ),
   );
 
+  for (final reducedMotion in [false, true]) {
+    testWidgets('long collapse keeps its section visible ($reducedMotion)', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: MediaQuery(
+            data: MediaQueryData(disableAnimations: reducedMotion),
+            child: Scaffold(
+              body: CustomScrollView(
+                slivers: [
+                  const SliverToBoxAdapter(child: SizedBox(height: 180)),
+                  LimitedSectionSliver(
+                    itemCount: 40,
+                    itemBuilder: (context, index) =>
+                        SizedBox(height: 44, child: Text('First $index')),
+                  ),
+                  SliverList.builder(
+                    itemCount: 100,
+                    itemBuilder: (context, index) =>
+                        SizedBox(height: 44, child: Text('Later $index')),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.ensureVisible(find.text('Show more'));
+      await tester.tap(find.text('Show more'));
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(find.text('Show fewer'), 400);
+      await tester.tap(find.text('Show fewer'));
+      await tester.pumpAndSettle();
+      expect(find.text('First 0').hitTestable(), findsOneWidget);
+      expect(find.text('Show more').hitTestable(), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   testWidgets('seven rows need no disclosure', (tester) async {
     await tester.pumpWidget(page(7));
     expect(find.text('Conversation 6'), findsOneWidget);
