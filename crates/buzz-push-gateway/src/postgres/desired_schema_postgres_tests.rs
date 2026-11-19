@@ -111,6 +111,27 @@ fn desired_state_schema_layout_is_complete_and_schemabot_shaped() {
     );
 }
 
+/// The password SQLx resolved for `options`, which has no public getter.
+/// Serializes a copy with a TCP host only to read the password back:
+/// `to_url_lossy` panics when the host is a socket directory found through
+/// `PGHOST` or SQLx's default socket search. The caller's `options` keep it.
+fn resolved_password(options: &PgConnectOptions) -> String {
+    let url = options.clone().host("localhost").to_url_lossy();
+    percent_encoding::percent_decode_str(url.password().unwrap_or_default())
+        .decode_utf8()
+        .expect("database password utf-8")
+        .into_owned()
+}
+
+#[test]
+fn resolved_password_reads_through_a_socket_directory_host() {
+    let options = PgConnectOptions::new_without_pgpass()
+        .host("/var/run/postgresql")
+        .password("p@ss:/#% word");
+    assert_eq!(resolved_password(&options), "p@ss:/#% word");
+    assert_eq!(options.get_host(), "/var/run/postgresql");
+}
+
 /// One probe database is bootstrapped from `schema/schema.sql` through the
 /// real `bin/pgschema apply` binary (the SchemaBot-equivalent desired-state
 /// path); another runs every gateway migration. Their `public` catalogs must
@@ -123,8 +144,7 @@ fn desired_state_schema_layout_is_complete_and_schemabot_shaped() {
 /// constraints, or indexes fails here. Data-only migrations and objects
 /// outside `public` (other schemas, roles, database settings) are not
 /// compared. This proves equivalence under `pgschema`, not full SchemaBot
-/// support: the inline FK in `push_gateway_delegations.sql` must be revisited
-/// before SchemaBot adopts this schema.
+/// support.
 #[tokio::test]
 #[ignore = "requires PostgreSQL"]
 async fn desired_state_schema_matches_migrations() {
@@ -204,11 +224,7 @@ async fn desired_state_schema_matches_migrations() {
         Some(dir) => dir.to_str().expect("socket directory utf-8").to_owned(),
         None => options.get_host().to_owned(),
     };
-    let password =
-        percent_encoding::percent_decode_str(options.to_url_lossy().password().unwrap_or_default())
-            .decode_utf8()
-            .expect("database password utf-8")
-            .into_owned();
+    let password = resolved_password(&options);
     let connection = PgschemaConnection {
         host,
         port: options.get_port().to_string(),
