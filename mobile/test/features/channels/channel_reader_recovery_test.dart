@@ -3,9 +3,11 @@ import 'dart:convert';
 
 import 'package:buzz/features/channels/channel_mutes/channel_mutes_manager.dart';
 import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart';
+import 'package:buzz/features/channels/channel_mutes/channel_mutes_storage.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_provider.dart';
 import 'package:buzz/features/channels/channel_sort/channel_sort_provider.dart';
 import 'package:buzz/features/channels/channel_stars/channel_stars_provider.dart';
+import 'package:buzz/features/channels/channel_stars/channel_stars_storage.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/read_state/read_state_format.dart';
@@ -672,6 +674,102 @@ void main() {
           expect((payload['channels'] as Map).keys, ['kept-local']);
         });
       }
+
+      String legacyCacheKey() => lane.dTag == 'channel-stars'
+          ? channelStarsKey(relay.pubkey, 'https://relay.example')
+          : channelMutesKey(relay.pubkey, 'https://relay.example');
+
+      fakeAsyncTest('upgrading recovers newer offline flag edits', (clock) {
+        final local = blob({
+          'offline-clear': (false, t + 1),
+          'offline-add': (true, t + 2),
+          'evicted': (true, t - 10),
+          'changed-by-peer': (true, t - 2),
+          'already-current': (true, t - 1),
+        });
+        unawaited(prefs.setString(legacyCacheKey(), jsonEncode(local)));
+        relay.stored.add(
+          relay.event(
+            lane.dTag,
+            blob({
+              'offline-clear': (true, (t - 1) * 1000),
+              'changed-by-peer': (false, t * 1000),
+              'already-current': (true, t - 2),
+            }),
+            t,
+          ),
+        );
+
+        start(clock);
+        expect(subject.values(), {
+          'offline-clear': false,
+          'offline-add': true,
+          'changed-by-peer': false,
+          'already-current': true,
+        });
+        final migrated = jsonDecode(prefs.getString(legacyCacheKey())!) as Map;
+        expect(
+          migrated['pending'].keys,
+          unorderedEquals(['offline-clear', 'offline-add']),
+        );
+        expect(migrated.containsKey('legacyCache'), isFalse);
+
+        clock.elapse(const Duration(seconds: 5));
+        final payload = relay.decrypt(relay.published.single) as Map;
+        expect(payload['channels'], {
+          'offline-clear': {lane.field: false, 'updatedAt': (t + 1) * 1000},
+          'offline-add': {lane.field: true, 'updatedAt': (t + 2) * 1000},
+          'changed-by-peer': {lane.field: false, 'updatedAt': t * 1000},
+          'already-current': {lane.field: true, 'updatedAt': t - 2},
+        });
+      });
+
+      fakeAsyncTest('an offline toggle keeps legacy migration retryable', (
+        clock,
+      ) {
+        final cached = blob({'offline-clear': (false, t - 2)});
+        unawaited(prefs.setString(legacyCacheKey(), jsonEncode(cached)));
+        relay.stored.add(
+          relay.event(lane.dTag, blob({'offline-clear': (true, t - 5)}), t - 4),
+        );
+        relay.writerFailures = 1;
+        start(clock).set('new-edit', true);
+        expect(relay.published, isEmpty);
+        final offline = jsonDecode(prefs.getString(legacyCacheKey())!) as Map;
+        expect(offline['legacyCache'], isTrue);
+        subject.dispose();
+
+        start(clock);
+        clock.elapse(const Duration(seconds: 5));
+        final payload = relay.decrypt(relay.published.single) as Map;
+        expect(payload['channels']['offline-clear'][lane.field], isFalse);
+        expect(payload['channels']['new-edit'][lane.field], isTrue);
+      });
+
+      fakeAsyncTest('legacy migration waits for a readable writer head', (
+        clock,
+      ) {
+        final cached = blob({'offline-clear': (false, t - 2)});
+        unawaited(prefs.setString(legacyCacheKey(), jsonEncode(cached)));
+        relay.stored.add(relay.event(lane.dTag, 'garbage', t - 5));
+        start(clock);
+
+        clock.elapse(const Duration(minutes: 2));
+        expect(relay.writerQueries, [lane.dTag]);
+        expect(relay.published, isEmpty);
+        expect(prefs.getString(legacyCacheKey()), jsonEncode(cached));
+
+        final valid = relay.event(
+          lane.dTag,
+          blob({'offline-clear': (true, t - 4)}),
+          t - 4,
+        );
+        relay.stored.add(valid);
+        relay.emit(valid);
+        clock.elapse(const Duration(seconds: 6));
+        final payload = relay.decrypt(relay.published.single) as Map;
+        expect(payload['channels']['offline-clear'][lane.field], isFalse);
+      });
 
       fakeAsyncTest(
         'a stale writer read retries without replacing newer flags',

@@ -63,6 +63,7 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
   final Duration _startupRetryBaseDelay;
   Map<String, T> _confirmed;
   late final Map<String, T> _pending;
+  bool _legacyCache = false;
   NostrEvent? _head;
   bool _headNeedsWrite = false;
   Timer? _writeTimer;
@@ -97,6 +98,9 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
       final raw = _prefs.getString(_cacheKey);
       if (raw == null) return {};
       final cached = jsonDecode(raw) as Map<String, dynamic>;
+      _legacyCache =
+          _confirmed.isNotEmpty &&
+          (!cached.containsKey('pending') || cached['legacyCache'] == true);
       return _decode({'version': 1, 'channels': cached['pending']}, false);
     } catch (error) {
       debugPrint('[$_coordinate] cannot load pending flags: $error');
@@ -112,6 +116,7 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
         jsonEncode({
           ..._encode(_confirmed),
           'pending': _encode(_pending)['channels'],
+          if (_legacyCache) 'legacyCache': true,
         }),
       );
     } catch (error) {
@@ -167,7 +172,7 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
   }
 
   Future<void> _resume() async {
-    if (_pending.isEmpty && !_writing) await _recoverHead();
+    if (_legacyCache || (_pending.isEmpty && !_writing)) await _recoverHead();
     if (_writeTimer?.isActive == true || _writing) return;
     _writeFailures = 0;
     _scheduleWrite();
@@ -175,14 +180,52 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
 
   Future<bool> _recoverHead() async {
     try {
+      if (_legacyCache) return await _recoverLegacyCache();
       final events = await _relay!.fetchHistory(_filter());
       if (!_active) return false;
       if (events.isEmpty) return true;
       return await _acceptRead(events.single);
+    } on FormatException catch (error) {
+      // An unreadable legacy head can recover on a valid live event or resume.
+      debugPrint('[$_coordinate] unreadable flag snapshot: $error');
+      return _legacyCache;
     } catch (error) {
-      debugPrint('[$_coordinate] flag history failed: $error');
+      debugPrint('[$_coordinate] flag read failed: $error');
       return false;
     }
+  }
+
+  Future<bool> _recoverLegacyCache() async {
+    final (head, snapshot) = await _writerHead();
+    if (!_legacyCache) return true;
+
+    // Old caches combine confirmed entries with offline edits. For IDs absent
+    // from the snapshot, a timestamp after the snapshot's second is evidence
+    // of an offline edit. Older absent entries may have been evicted.
+    final firstLaterMillis = head == null ? 0 : (head.createdAt + 1) * 1000;
+    for (final local in _confirmed.entries) {
+      final remote = snapshot[local.key];
+      final localMillis = sidebarFlagTimeMillis(local.value.updatedAt);
+      final changed = remote == null
+          ? localMillis >= firstLaterMillis
+          : local.value.enabled != remote.enabled &&
+                localMillis > sidebarFlagTimeMillis(remote.updatedAt);
+      if (changed) {
+        _pending.putIfAbsent(
+          local.key,
+          () => _entry(local.value.enabled, localMillis),
+        );
+      }
+    }
+    _head = head;
+    _headNeedsWrite = head != null;
+    _confirmed = snapshot;
+    _legacyCache = false;
+    if (!await _persist() || !_active) return false;
+    if (identical(_head, head)) _headNeedsWrite = false;
+    _onChanged();
+    _scheduleWrite();
+    return true;
   }
 
   bool _matches(NostrEvent event) =>
@@ -208,6 +251,7 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
       debugPrint('[$_coordinate] unreadable flag snapshot: $error');
       return true;
     }
+    if (_legacyCache) return await _recoverHead();
     _head = event;
     _headNeedsWrite = true;
     _confirmed = confirmed;
@@ -249,6 +293,7 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
   void _scheduleWrite({Duration delay = const Duration(seconds: 5)}) {
     if (!_remoteEnabled ||
         !_active ||
+        _legacyCache ||
         _relay == null ||
         _signer == null ||
         _pending.isEmpty ||
