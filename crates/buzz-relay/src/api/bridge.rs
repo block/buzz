@@ -1470,6 +1470,18 @@ async fn submit_event_authed(
         };
     }
 
+    // Mismatched signers still take the normal rejection path and cannot
+    // spend the migration budget.
+    if event.pubkey == pubkey {
+        if let Err(refusal) =
+            crate::admission::migration::check_event(&state.redis_pool, &event, "http").await
+        {
+            return SubmitOutcome::Err {
+                response: migration_refusal_response(refusal),
+            };
+        }
+    }
+
     let auth = IngestAuth::Http {
         pubkey,
         scopes: buzz_auth::Scope::all_known(), // Pure Nostr: full scopes, channel access via membership
@@ -1581,6 +1593,30 @@ async fn submit_event_authed(
             }
         }
     }
+}
+
+fn migration_refusal_response(refusal: crate::admission::migration::Refusal) -> Response {
+    use crate::admission::migration::Refusal;
+
+    let message = refusal.message();
+    let mut response = match refusal {
+        // Admission always runs before event application. Make the refusal
+        // definitive for publishers that treat other HTTP 503s as ambiguous.
+        Refusal::Unavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": message, "sent": false})),
+        )
+            .into_response(),
+        Refusal::InvalidEvent(_) => api_error(StatusCode::BAD_REQUEST, &message).into_response(),
+        _ => api_error(StatusCode::TOO_MANY_REQUESTS, &message).into_response(),
+    };
+    if let Some(seconds) = refusal.retry_after() {
+        response.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from(seconds),
+        );
+    }
+    response
 }
 
 /// Query events via HTTP bridge (NIP-98 auth). Returns JSON array of events.

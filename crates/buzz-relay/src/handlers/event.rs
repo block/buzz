@@ -764,6 +764,17 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         return;
     }
 
+    if let Err(refusal) =
+        crate::admission::migration::check_event(&state.redis_pool, &event, "websocket").await
+    {
+        reject(match refusal {
+            crate::admission::migration::Refusal::InvalidEvent(_) => "invalid",
+            _ => "rate-limited",
+        });
+        write.ok(&conn, &event_id_hex, false, &refusal.message());
+        return;
+    }
+
     // Observer frames and ephemeral kinds return before ingest, so they take
     // the ban / timeout write-block here. Persistent kinds get the same check
     // in ingest, and so does NIP-43 leave (28936), which is ephemeral-range but

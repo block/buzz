@@ -9,6 +9,7 @@
 mod auth;
 mod direct;
 mod error;
+mod migration;
 mod reads;
 
 use std::sync::Arc;
@@ -64,6 +65,10 @@ pub fn router(state: Arc<crate::state::AppState>) -> Router {
         .route("/operators", get(list_operators))
         .route("/operators/{pubkey}", put(upsert_operator))
         .route("/operators/{pubkey}", delete(delete_operator))
+        .route(
+            "/migration-write-limit",
+            get(migration::get).put(migration::put),
+        )
         .route("/communities", get(reads::communities))
         .route("/members/search", get(reads::search_members))
         .route("/members/{pubkey}", get(reads::lookup_member))
