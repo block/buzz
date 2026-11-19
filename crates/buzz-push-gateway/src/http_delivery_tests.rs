@@ -8,7 +8,7 @@ use std::sync::{
 use crate::{
     apns::{DeliveryAttempt, DeliveryOutcome, PushTransport},
     app_attest::AppAttestVerifier,
-    authority::{AuthorityStore, Delegation, MemoryAuthorityStore, NewInstallation},
+    authority::{AuthorityStore, Delegation, MemoryAuthorityStore, NewInstallation, Platform},
     grant::{GrantKey, GrantKeyring},
     http::ApplicationRuntime,
     model::EndpointGrant,
@@ -57,6 +57,7 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
     authority
         .create_installation(
             NewInstallation {
+                platform: Platform::Ios,
                 id: installation_id,
                 app_attest_key_id: vec![3; 32],
                 app_attest_public_key: vec![4; 65],
@@ -110,11 +111,15 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
                 .unwrap(),
             ),
             transport: Arc::new(TestTransport(sends.clone())),
+            android: None,
         }),
         max_grant_lifetime_seconds: 600,
         max_installation_lifetime_seconds: 600,
         endpoint_quota_window_seconds: 60,
         endpoint_quota_max_deliveries: 10,
+        signed_calls: Arc::new(crate::signed_call_limiter::SignedCallLimiter::new(
+            60, 1_000,
+        )),
         now,
         accepting: Arc::new(AtomicBool::new(true)),
     });

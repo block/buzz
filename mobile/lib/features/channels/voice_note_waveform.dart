@@ -31,6 +31,7 @@ class VoiceNoteWaveform extends StatelessWidget {
     this.minimumBarHeight = 4,
     this.maximumBarHeight,
     this.colorOpacity = 1,
+    this.color,
   });
 
   final List<double> samples;
@@ -41,6 +42,7 @@ class VoiceNoteWaveform extends StatelessWidget {
   final double minimumBarHeight;
   final double? maximumBarHeight;
   final double colorOpacity;
+  final Color? color;
 
   @override
   Widget build(BuildContext context) {
@@ -50,7 +52,9 @@ class VoiceNoteWaveform extends StatelessWidget {
       painter: _VoiceNoteWaveformPainter(
         samples: samples,
         progress: progress.clamp(0.0, 1.0),
-        activeColor: colorScheme.primary.withValues(alpha: colorOpacity),
+        activeColor: (color ?? colorScheme.primary).withValues(
+          alpha: colorOpacity,
+        ),
         inactiveColor: colorScheme.onSurfaceVariant.withValues(alpha: 0.46),
         minimumBarHeight: minimumBarHeight,
         maximumBarHeight: maximumBarHeight ?? height,

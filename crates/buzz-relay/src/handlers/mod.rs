@@ -23,6 +23,8 @@ mod create_with_members_postgres_tests;
 #[cfg(test)]
 mod deletion_postgres_tests;
 #[cfg(test)]
+mod dm_growth_postgres_tests;
+#[cfg(test)]
 mod edit_metadata_postgres_tests;
 /// EVENT handler — WS dispatcher → ingest pipeline → fan-out.
 pub mod event;
@@ -56,6 +58,8 @@ mod put_user_postgres_tests;
 mod reaction_recipient_postgres_tests;
 /// NIP-43 relay membership admin command handler (kinds 9030–9032).
 pub mod relay_admin;
+#[cfg(test)]
+mod remove_user_postgres_tests;
 /// NIP-56 report (kind:1984) validation + moderation queue persistence.
 pub mod report;
 /// HTTP report-resolution orchestrations for the deployment admin API (Phase 2).
@@ -64,6 +68,9 @@ pub mod report_resolution;
 pub mod req;
 /// NIP-29 and NIP-25 side-effect handlers.
 pub mod side_effects;
+mod solo_member_role;
+#[cfg(test)]
+mod solo_member_role_postgres_tests;
 #[cfg(test)]
 mod system_channel_postgres_tests;
 /// Per-filter query scope for system channels.

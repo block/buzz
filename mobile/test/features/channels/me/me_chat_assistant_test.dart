@@ -257,7 +257,7 @@ void main() {
       );
     }
   }
-  for (final scenario in ['valid', 'revoked', 'removed']) {
+  for (final scenario in ['valid', 'revoked', 'removed', 'switched']) {
     testWidgets('parallel send checks handle $scenario recipients', (
       tester,
     ) async {
@@ -305,6 +305,7 @@ void main() {
         result,
         scenario == 'valid' ? completion(['a']) : throwsStateError,
       );
+      if (scenario == 'switched') sync.disposed = true;
       owned.complete(scenario != 'revoked');
       membership.complete(
         scenario == 'removed'
@@ -318,6 +319,71 @@ void main() {
               ],
       );
       await assertion;
+    });
+  }
+  for (final scenario in ['member', 'removed', 'switched']) {
+    testWidgets('explicit Solo mentions validate $scenario membership', (
+      tester,
+    ) async {
+      final membership = Completer<List<ChannelMember>>();
+      late WidgetRef widgetRef;
+      final sync = MeSync(
+        RelaySessionNotifier(),
+        RelayConfig(
+          baseUrl: 'https://relay.test',
+          nsec: nostr.Nip19.encode(
+            prefix: nostr.Nip19Prefix.nsec,
+            data: '0' * 63 + '1',
+          ),
+        ),
+      );
+      var ownershipReads = 0;
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            meSyncProvider.overrideWithValue(sync),
+            meAssistantOwnershipProvider.overrideWith((ref, key) async {
+              ownershipReads++;
+              return false;
+            }),
+            channelMembersProvider(
+              'chat',
+            ).overrideWith((ref) => membership.future),
+          ],
+          child: Consumer(
+            builder: (context, ref, child) {
+              widgetRef = ref;
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+      final result = meRecipients(widgetRef, 'chat', null, [
+        'person',
+        'other-agent',
+      ]);
+      final assertion = expectLater(
+        result,
+        scenario == 'member'
+            ? completion(['person', 'other-agent'])
+            : throwsStateError,
+      );
+      if (scenario == 'switched') sync.disposed = true;
+      membership.complete([
+        ChannelMember(
+          pubkey: 'other-agent',
+          role: 'bot',
+          joinedAt: DateTime(2026),
+        ),
+        if (scenario != 'removed')
+          ChannelMember(
+            pubkey: 'person',
+            role: 'member',
+            joinedAt: DateTime(2026),
+          ),
+      ]);
+      await assertion;
+      expect(ownershipReads, 0);
     });
   }
   NostrEvent message(String author, List<String> recipients, int time) =>

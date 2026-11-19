@@ -29,12 +29,12 @@ use buzz_core::kind::{
     KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
     KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
     KIND_PRESENCE_UPDATE, KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE,
-    KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE,
-    KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT,
-    KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2,
-    KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS,
-    KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
-    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT, KIND_SOLO_MEMBER_ROLE,
+    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
+    KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
+    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE,
+    KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER,
+    RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -644,7 +644,8 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_FORUM_POST
         | KIND_FORUM_VOTE
         | KIND_FORUM_COMMENT => Ok(Scope::MessagesWrite),
-        KIND_NIP29_PUT_USER | KIND_NIP29_REMOVE_USER | KIND_NIP29_DELETE_GROUP => {
+        KIND_NIP29_PUT_USER | KIND_NIP29_REMOVE_USER | KIND_NIP29_DELETE_GROUP
+        | KIND_SOLO_MEMBER_ROLE => {
             Ok(Scope::AdminChannels)
         }
         // NIP-43: relay membership admin commands (9030–9032) + Buzz
@@ -942,6 +943,7 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_NIP29_DELETE_EVENT
             | KIND_NIP29_DELETE_GROUP
             | KIND_NIP29_LEAVE_REQUEST
+            | KIND_SOLO_MEMBER_ROLE
             // Huddle lifecycle events + guidelines
             | KIND_HUDDLE_STARTED
             | KIND_HUDDLE_PARTICIPANT_JOINED
@@ -959,7 +961,7 @@ pub(crate) enum ChannelWrite {
     /// post ([`buzz_db::channel::MemberRole::can_post`]), never guests; and
     /// non-members only in an open channel with `join_role = member`.
     Post,
-    /// Membership changes (kind:9000 put-user, 9001 remove-user, 9022 leave).
+    /// Membership changes (put-user, remove-user, leave, Solo member role).
     /// Members, or anyone in an open channel. The role table does not apply
     /// here: a guest must still be able to leave, and `decide_put_user` owns
     /// who may add whom.
@@ -970,9 +972,10 @@ impl ChannelWrite {
     /// The rule for an event kind that passes the generic channel gate.
     pub(crate) fn for_kind(kind: u32) -> Self {
         match kind {
-            KIND_NIP29_PUT_USER | KIND_NIP29_REMOVE_USER | KIND_NIP29_LEAVE_REQUEST => {
-                Self::Membership
-            }
+            KIND_NIP29_PUT_USER
+            | KIND_NIP29_REMOVE_USER
+            | KIND_NIP29_LEAVE_REQUEST
+            | KIND_SOLO_MEMBER_ROLE => Self::Membership,
             _ => Self::Post,
         }
     }
@@ -3197,15 +3200,16 @@ async fn ingest_event_inner(
     }
 
     if channel_id.is_some() {
-        // kind:9002 is not checked here: its atomic write decides the
+        // Metadata edits and Solo member role changes decide the
         // archive state under the channel row lock, after its duplicate
         // check, so a resend that races the first commit is a duplicate.
-        let is_edit_metadata = kind_u32 == KIND_NIP29_EDIT_METADATA;
+        let checks_archive_in_write =
+            matches!(kind_u32, KIND_NIP29_EDIT_METADATA | KIND_SOLO_MEMBER_ROLE);
 
         // A member may still leave an archived channel by themselves.
         let is_self_departure = crate::handlers::side_effects::is_self_departure(&event);
 
-        if !is_edit_metadata && !is_self_departure {
+        if !checks_archive_in_write && !is_self_departure {
             if let Some(channel) = &channel_row {
                 if channel.archived_at.is_some() {
                     return Err(match target_denial {
@@ -3214,6 +3218,27 @@ async fn ingest_event_inner(
                     });
                 }
             }
+        }
+    }
+
+    // An event that takes its channel from its target is stored in that
+    // channel, but every read and fan-out matches its own `h` tags. One whose
+    // `h` names another channel would never be delivered, yet it would use a
+    // slot under the channel's history LIMIT, so a replay cut by the limit
+    // could look complete. Refuse it with the kind's not-found denial. This
+    // runs after the token, membership and archive gates: an earlier refusal
+    // would skip their reads, and its timing would show a sender who cannot
+    // read the target's channel whether a guessed `h` names it.
+    if let (Some(reason), Some(target_channel)) = (target_denial, channel_id) {
+        let target_channel = target_channel.to_string();
+        let mut h_tags = event
+            .tags
+            .iter()
+            .filter(|t| t.kind().to_string() == "h")
+            .peekable();
+        if h_tags.peek().is_some() && !h_tags.any(|t| t.content() == Some(target_channel.as_str()))
+        {
+            return Err(target_denied(reason));
         }
     }
 
@@ -3483,7 +3508,7 @@ async fn ingest_event_inner(
 
     validate_event_imeta(tenant, state, &event, &tenant_media_base).await?;
 
-    let thread_meta = if requires_h_channel_scope(kind_u32) {
+    let thread_meta = if kind_u32 != KIND_SOLO_MEMBER_ROLE && requires_h_channel_scope(kind_u32) {
         if let Some(ch_id) = channel_id {
             resolve_nip10_thread_meta(tenant.community(), &event, ch_id, state)
                 .await
@@ -3748,6 +3773,21 @@ async fn ingest_event_inner(
         })?;
         message = ok_message;
         (stored, inserted)
+    } else if kind_u32 == KIND_SOLO_MEMBER_ROLE {
+        super::solo_member_role::persist(tenant, state, &event).await?
+    } else if kind_u32 == KIND_NIP29_REMOVE_USER {
+        let thread_params = thread_meta.as_ref().map(|m| m.as_params());
+        crate::handlers::side_effects::persist_remove_user(tenant, &event, state, thread_params)
+            .await
+            .map_err(|e| match e.downcast_ref::<buzz_db::DbError>() {
+                Some(buzz_db::DbError::AccessDenied(reason)) => {
+                    IngestError::Rejected(format!("invalid: {reason}"))
+                }
+                Some(missing @ buzz_db::DbError::MemberNotFound(_)) => {
+                    IngestError::Rejected(format!("invalid: {missing}"))
+                }
+                _ => IngestError::Internal(format!("error: membership removal failed: {e}")),
+            })?
     } else if kind_u32 == KIND_NIP29_EDIT_METADATA {
         // One commit stores the event and applies its channel changes. A
         // failure stores nothing, so the client is told and can resend it.
@@ -3857,12 +3897,13 @@ async fn ingest_event_inner(
         });
     }
 
-    // Workflow deletion, kind 5 / 9005 deletions of `e` targets, kind:9000 and
-    // kind:9002 applied their changes in the insert's own transaction above.
+    // These commands applied their changes in the insert's own transaction.
     let persisted_atomically = workflow_deletion
         || atomic_deletion
         || kind_u32 == KIND_NIP29_PUT_USER
-        || kind_u32 == KIND_NIP29_EDIT_METADATA;
+        || kind_u32 == KIND_NIP29_REMOVE_USER
+        || kind_u32 == KIND_NIP29_EDIT_METADATA
+        || kind_u32 == KIND_SOLO_MEMBER_ROLE;
     if !persisted_atomically && crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
         if let Err(e) =
             crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)
@@ -7735,6 +7776,7 @@ mod postgres_tests {
         state: Arc<crate::state::AppState>,
         tenant: TenantContext,
         tracer: Arc<dyn buzz_conformance::Tracer>,
+        trace: Arc<VecTracer>,
         author: nostr::Keys,
         sender: nostr::Keys,
         target_channel: Uuid,
@@ -7755,7 +7797,8 @@ mod postgres_tests {
                 .expect("ensure community")
                 .id;
             let tenant = TenantContext::resolved(community, &host);
-            let tracer: Arc<dyn buzz_conformance::Tracer> = Arc::new(VecTracer::default());
+            let trace = Arc::new(VecTracer::default());
+            let tracer: Arc<dyn buzz_conformance::Tracer> = trace.clone();
             let (author, sender) = (nostr::Keys::generate(), nostr::Keys::generate());
             let mut channels = Vec::new();
             for creator in [&author, &sender] {
@@ -7801,6 +7844,7 @@ mod postgres_tests {
                 state,
                 tenant,
                 tracer,
+                trace,
                 author,
                 sender,
                 target_channel: channels[0],
@@ -7895,6 +7939,169 @@ mod postgres_tests {
         f.submit(react(f.live.id.to_hex()), f.scoped(f.target_channel))
             .await
             .expect("in-scope token reacts to the message");
+    }
+
+    /// A reaction, or a deletion of one, is stored in its target's channel. An
+    /// `h` tag naming only another channel is refused like a missing target,
+    /// and nothing is stored: such an event would never be delivered, yet it
+    /// would use a slot under the channel's history LIMIT. No `h` tag, or the
+    /// target's own among them, is accepted, and so is any `h` on a reaction
+    /// to a global event. A sender's guess still passes the membership gate
+    /// before the refusal, so its cost does not show whether it was right.
+    /// Mutations: drop the `h` check → RED; move it before the membership
+    /// gate → RED (no AuthCheck for the guess).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reaction_and_deletion_h_must_name_the_target_channel() {
+        let f = ScopedTargetFixture::new("stray-h").await;
+        // The author is a member of the target's channel, so only the h check
+        // can refuse its events. Each reaction has its own emoji: a repeated
+        // one is a duplicate the relay accepts without storing.
+        let send = |keys: &nostr::Keys, kind: u32, content: &str, target_id: &str, h: &[&Uuid]| {
+            let mut tags = vec![nostr::Tag::parse(["e", target_id]).unwrap()];
+            tags.extend(
+                h.iter()
+                    .map(|h| nostr::Tag::parse(["h", &h.to_string()]).unwrap()),
+            );
+            let event = EventBuilder::new(Kind::Custom(kind as u16), content)
+                .tags(tags)
+                .sign_with_keys(keys)
+                .expect("sign");
+            let auth = IngestAuth::Nip42 {
+                pubkey: keys.public_key(),
+                scopes: vec![Scope::MessagesWrite],
+                channel_ids: None,
+                conn_id: Uuid::new_v4(),
+            };
+            (event.id.to_hex(), f.submit(event, auth))
+        };
+        let refused = |result: Result<IngestResult, IngestError>, expected: &str| match result {
+            Err(IngestError::Rejected(msg)) => assert_eq!(msg, format!("invalid: {expected}")),
+            Err(other) => panic!("expected refusal, got {other:?}"),
+            Ok(result) => panic!("expected refusal, accepted: {}", result.message),
+        };
+        async fn stored(f: &ScopedTargetFixture, id: String) -> bool {
+            f.state
+                .db
+                .get_event_by_id_including_deleted_for_event_write(
+                    f.tenant.community(),
+                    &hex::decode(id).expect("hex id"),
+                )
+                .await
+                .expect("read event")
+                .is_some()
+        }
+        let (target, other) = (&f.target_channel, &f.other_channel);
+        let (live, global) = (f.live.id.to_hex(), f.global.id.to_hex());
+        let a = &f.author;
+
+        let (id, result) = send(a, KIND_REACTION, "+", &live, &[other]);
+        refused(result.await, REACTION_TARGET_NOT_FOUND);
+        assert!(!stored(&f, id).await, "a refused reaction is not stored");
+        let (plain, result) = send(a, KIND_REACTION, "+", &live, &[]);
+        result.await.expect("a reaction with no h is accepted");
+        let (reaction, result) = send(a, KIND_REACTION, "-", &live, &[other, target]);
+        result
+            .await
+            .expect("a reaction with the target's channel among its h tags is accepted");
+        send(a, KIND_REACTION, "+", &global, &[other])
+            .1
+            .await
+            .expect("a reaction to a global event keeps any h");
+
+        let (id, result) = send(a, KIND_DELETION, "", &reaction, &[other]);
+        refused(
+            result.await,
+            crate::handlers::side_effects::DELETION_TARGET_DENIED,
+        );
+        assert!(!stored(&f, id).await, "a refused deletion is not stored");
+        send(a, KIND_DELETION, "", &reaction, &[target])
+            .1
+            .await
+            .expect("a deletion whose h names the target's channel is accepted");
+        send(a, KIND_DELETION, "", &plain, &[])
+            .1
+            .await
+            .expect("a deletion with no h is accepted");
+
+        // The sender is not a member of the target's channel. Its guess at the
+        // wrong channel must still reach the membership gate.
+        f.trace.steps.lock().expect("trace lock").clear();
+        refused(
+            send(&f.sender, KIND_REACTION, "+", &live, &[other]).1.await,
+            REACTION_TARGET_NOT_FOUND,
+        );
+        assert!(
+            f.trace
+                .steps
+                .lock()
+                .expect("trace lock")
+                .iter()
+                .any(|step| matches!(step.action, TraceAction::AuthCheck { .. })),
+            "a wrong h must not be refused before the membership gate"
+        );
+
+        // In a private channel the sender cannot read, a right guess and a
+        // wrong guess both end at the same membership denial.
+        let private = Uuid::new_v4();
+        f.state
+            .db
+            .create_channel_with_id(
+                f.tenant.community(),
+                private,
+                &format!("stray-h-private-{}", private.simple()),
+                buzz_db::channel::ChannelType::Stream,
+                buzz_db::channel::ChannelVisibility::Private,
+                None,
+                a.public_key().to_bytes().as_slice(),
+                None,
+            )
+            .await
+            .expect("create private channel");
+        // The direct insert bypasses the membership cache, which still holds
+        // the author's snapshot from before this channel existed.
+        f.state.invalidate_membership_local(
+            f.tenant.community(),
+            private,
+            &a.public_key().to_bytes(),
+        );
+        let hidden = EventBuilder::new(Kind::Custom(9), "hidden")
+            .tags([nostr::Tag::parse(["h", &private.to_string()]).unwrap()])
+            .sign_with_keys(a)
+            .expect("sign");
+        let auth = IngestAuth::Http {
+            pubkey: a.public_key(),
+            scopes: vec![Scope::MessagesWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+        ingest_event_inner(&f.state, &f.tracer, &f.tenant, hidden.clone(), auth)
+            .await
+            .expect("store private target");
+        let hidden = hidden.id.to_hex();
+        for guess in [&private, other] {
+            f.trace.steps.lock().expect("trace lock").clear();
+            refused(
+                send(&f.sender, KIND_REACTION, "+", &hidden, &[guess])
+                    .1
+                    .await,
+                REACTION_TARGET_NOT_FOUND,
+            );
+            assert!(
+                f.trace
+                    .steps
+                    .lock()
+                    .expect("trace lock")
+                    .iter()
+                    .any(|step| matches!(
+                        step.action,
+                        TraceAction::AuthCheck {
+                            verdict: Verdict::Deny,
+                            ..
+                        }
+                    )),
+                "a guess at a private channel must end at the membership denial"
+            );
+        }
     }
 
     // ── Owner-aware ban/timeout coverage ─────────────────────────────────────
@@ -8388,9 +8595,7 @@ mod postgres_tests {
              CREATE TABLE {schema}.users (LIKE public.users INCLUDING ALL); \
              CREATE TABLE {schema}.relay_invites (LIKE public.relay_invites INCLUDING ALL); \
              CREATE TABLE {schema}.community_bans (LIKE public.community_bans INCLUDING ALL); \
-             CREATE TABLE {schema}.communities (LIKE public.communities INCLUDING ALL); \
-             CREATE FUNCTION {schema}.community_deletion_lock_key(target UUID) RETURNS BIGINT \
-             LANGUAGE SQL IMMUTABLE STRICT AS 'SELECT public.community_deletion_lock_key(target)';"
+             CREATE TABLE {schema}.communities (LIKE public.communities INCLUDING ALL);"
         )))
         .execute(&admin)
         .await

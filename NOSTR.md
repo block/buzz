@@ -52,8 +52,8 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **User profiles (kind:0)** | ✅ | NIP-01 metadata; synced to users table (display_name, avatar, about, NIP-05). NIP-05 handles must canonicalize to this relay's domain — off-domain or invalid handles are silently cleared. If a NIP-05 handle collides with another user's (UNIQUE constraint), the handle is skipped but other profile fields (display_name, avatar, about) are still synced. |
 | **Group creation (kind:9007)** | ✅ | NIP-29; include an `h` tag with the new channel id and a `name` tag, optional `visibility`, `channel_type`, label `t` and `unlisted` tags. The relay refuses a 9007 without `h`. It refuses a listed channel (open, not unlisted, stream or forum) whose name another listed channel already has, ignoring case and including archived ones: `invalid: an open channel named "<name>" already exists`. |
 | **Add user (kind:9000)** | ✅ | Open: any user, subject to target's `channel_add_policy` (`owner_only`/`nobody` can block). Private: owner/admin only. Self-add bypasses agent policy but not private-channel auth. A guest cannot add anyone. A new member with no role tag gets the channel's `join_role`; a non-member adding themselves may ask for `join_role` or a lower role. One event may name up to 100 people: one `p` tag each, with an optional role as the `p` tag's third element (NIP-29), falling back to the event's `role` tag. Each person is checked and added on their own. When the event names several people, the OK message is `members: ` followed by JSON listing the non-empty `added`, `updated` (role changed), `already_member` and `rejected` (`[{"reason", "pubkeys"}]`) results. The event is refused only when it is malformed or nobody it names may be added; then one person keeps the single-add error, and several get `invalid: members: {…}`. The event and its membership changes are stored together, so an `error:` rejection stores nothing and the same event can be resent; a resent stored event returns `duplicate:` without results. Re-adding someone at their current role posts no second `member_joined` notice. |
-| **Remove user (kind:9001)** | ✅ | Self-remove allowed (with last-owner guard). Removing others: owner/admin only. |
-| **Edit group metadata (kind:9002)** | ✅ | `name`/`about`/label `t`/`visibility`/`ttl`/`archived`/`join_role`/`unlisted` tags: owner/admin. `topic`/`purpose` tags: any member except a guest. `auto_join` tag: relay owner/admin (see [Default channels](#default-channels)). A relay operator may also send a 9002 that changes only `name` on a listed channel, archived ones included, whatever its channel role, so that duplicate names can be repaired; the channel stays archived. The relay refuses a `name`, `visibility` or `unlisted` change that leaves a listed channel with a name another listed channel already has: `invalid: an open channel named "<name>" already exists`. Buzz applies 9002 as a partial update: an absent tag leaves that setting unchanged. |
+| **Remove user (kind:9001)** | ✅ | Self-remove allowed (with last-owner guard). Removing others: owner/admin, or an active member removing their own agent. Only a channel owner may remove another channel owner. |
+| **Edit group metadata (kind:9002)** | ✅ | `name`/`about`/label `t`/`visibility`/`ttl`/`archived`/`join_role`/`unlisted` tags: owner/admin. `topic`/`purpose` tags: any member except a guest. `auto_join` tag: relay owner/admin (see [Default channels](#default-channels)). A relay operator may also send a 9002 that changes only `name` on a listed channel, archived ones included, whatever its channel role, so that duplicate names can be repaired; the channel stays archived. The relay refuses a `name`, `visibility` or `unlisted` change that leaves a listed channel with a name another listed channel already has: `invalid: an open channel named "<name>" already exists`. The relay refuses a private-to-open `visibility` change while the channel has, or once had, a member who is neither the sender nor an agent the sender owns (NIP-OA); removed members count, because their posts stay in its history: `invalid: a private channel with other members cannot be made open; create a new open channel instead`. Buzz applies 9002 as a partial update: an absent tag leaves that setting unchanged. |
 | **Admin delete event (kind:9005)** | ✅ | Event author can always delete own. Otherwise owner/admin required. Target must be in same channel. |
 | **Group deletion (kind:9008)** | ✅ | Owner only. |
 | **Leave group (kind:9022)** | ✅ | Any member. Last-owner guard prevents orphaned groups. |
@@ -121,7 +121,7 @@ What each role can do:
 | Read, leave | Yes | Yes | Yes |
 | Post, reply, edit, delete own, react, artifacts, canvas, forum, pins, typing, workflow messages, huddles | No | Yes | Yes |
 | Topic, purpose (kind:9002) | No | Yes | Yes |
-| Add people (kind:9000) | No | Yes, as member, guest or bot | Yes, any role |
+| Add people (kind:9000) | No | Yes, as member, guest or bot | Yes; only owners can grant owner |
 | Push to the channel's git repositories | No | Yes | Yes |
 | Name, about, visibility, TTL, `join_role`, `unlisted` | No | No | Yes |
 
@@ -135,7 +135,11 @@ Other rules:
   lower role. A higher role is refused.
 - Any member who can write (member, bot, owner or admin) can make a guest a
   member with kind:9000 (`role` `member`). This is the same for a person and
-  an agent. Only owners and admins can make any other role change.
+  an agent. Owners and admins can make other role changes, except that only
+  owners may grant ownership or change an owner's role. Admins cannot promote
+  themselves or anyone else to owner. Only owners may remove other owners;
+  owning an agent does not override its channel-owner role. The last-owner
+  guard still applies to owner demotion and departure.
 - The human owner of an agent can edit (kind:40003) and delete (kind:9005)
   that agent's messages, also as a guest or a non-member. This is existing
   behavior. It lets a person correct or remove what their agent posted; it
@@ -607,8 +611,8 @@ but only admins/owners can set it. Full spec:
 - **Pubkey allowlist is fail-closed.** DB errors deny the connection.
 - **API token users bypass the allowlist.** The allowlist only gates pubkey-only NIP-42.
 - **kind:9 requires `#h` tag.** Messages without a channel-scoped `#h` tag are rejected.
-- **kind:7 derives channel from target.** Reactions look up the target event's channel via `#e` — client-supplied `#h` tags are ignored. Reactions to unknown events are rejected (fail-closed).
-- **kind:5 uses `#h` if present, but doesn't require it.** Deletions validate author-match against target events via `#e` tags. Only self-authored events can be deleted (admin deletions use kind:9005).
+- **kind:7 derives channel from target.** Reactions look up the target event's channel via `#e`. An `#h` tag is optional. When the target is in a channel and the reaction has `#h` tags, one must be that channel's UUID exactly as the relay writes it (lowercase, hyphenated), or the reaction is refused as if its target were missing. A reaction to a global event is not checked. Reactions to unknown events are rejected (fail-closed).
+- **kind:5 derives channel from its `#e` target.** Deletions validate author-match against target events via `#e` tags. An `#h` follows the same rule as on a reaction; a deletion that names its target with an `#a` tag is not checked. Only self-authored events can be deleted (admin deletions use kind:9005).
 - **Client-submitted kind:44100/44101 rejected.** Membership notifications can only be signed by the relay keypair.
 
 ---

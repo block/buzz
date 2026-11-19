@@ -17,6 +17,7 @@ import 'package:buzz/shared/relay/relay_provider.dart' show RelayConfig;
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/community/community_storage.dart';
+import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -906,6 +907,38 @@ void main() {
     });
   });
 
+  test('switching and removing name the new member at once', () async {
+    final reporter = _MemberRecorder();
+    container = createContainer(
+      overrides: [diagnosticReporterProvider.overrideWithValue(reporter)],
+    );
+    await container.read(communityListProvider.future);
+    final one = nostr.Keys.generate();
+    final two = nostr.Keys.generate();
+    final ws1 = Community.create(
+      name: 'One',
+      relayUrl: 'https://one.example.com',
+      nsec: one.nsec,
+    );
+    final ws2 = Community.create(
+      name: 'Two',
+      relayUrl: 'https://two.example.com',
+      nsec: two.nsec,
+    );
+    final notifier = container.read(communityListProvider.notifier);
+    await notifier.addCommunity(ws1);
+    await notifier.addCommunity(ws2);
+
+    await notifier.switchCommunity(ws1.id);
+    expect(reporter.member, one.public);
+    await notifier.switchCommunity(ws2.id);
+    expect(reporter.member, two.public);
+    await notifier.removeCommunity(ws2.id);
+    expect(reporter.member, one.public);
+    await notifier.removeCommunity(ws1.id);
+    expect(reporter.member, isNull);
+  });
+
   group('activeCommunityProvider', () {
     test('returns null when no communities', () async {
       container = createContainer();
@@ -982,4 +1015,11 @@ class _SnapshotStore extends InMemorySharedPreferencesStore {
     await removeGate?.future;
     return removed;
   }
+}
+
+class _MemberRecorder extends NoopDiagnosticReporter {
+  String? member = 'unset';
+
+  @override
+  void setMember(String? pubkey) => member = pubkey;
 }

@@ -23,6 +23,7 @@ import 'package:http/testing.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../helpers/widget_helpers.dart';
+import '../../helpers/test_assertion.dart';
 
 /// Runs as an internal build, for example:
 /// `--dart-define=BUZZ_DISTRIBUTION=internal`
@@ -71,7 +72,7 @@ void main() {
       // The probe carried the session's assertion, which bound the new key.
       expect(
         harness.probes.last.headers['Nostr-Federated-Identity'],
-        'Bearer assertion-${first.pubkey}',
+        'Bearer ${testAssertion('assertion-${first.pubkey}')}',
       );
       expect(tenant.bound, first.pubkey);
       expect(harness.accounts.last.account, isNotNull);
@@ -220,7 +221,7 @@ void main() {
       expect(tenant.bound, expected);
       expect(
         harness.probes.single.headers['Nostr-Federated-Identity'],
-        'Bearer assertion-$expected',
+        'Bearer ${testAssertion('assertion-$expected')}',
       );
       expect(tenant.recoveries, row.backedUp ? 1 : 0);
     }, skip: skip);
@@ -296,7 +297,7 @@ class _Tenant {
         bound ??= pubkey;
         if (bound != pubkey) return http.Response('{}', 403);
         result = {
-          'assertion': 'assertion-$pubkey',
+          'assertion': testAssertion('assertion-$pubkey'),
           'expires_at': expiry.millisecondsSinceEpoch ~/ 1000,
           'nostr_pubkey': pubkey,
         };

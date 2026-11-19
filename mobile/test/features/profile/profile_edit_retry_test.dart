@@ -332,7 +332,7 @@ void main() {
                       onPrepareChanged(() async {
                         prepareCalls++;
                         return ProfileImageAvatarDraft(
-                          Uint8List.fromList([1, 2, 3]),
+                          Uint8List.fromList([0xff, 0xd8, 0xff]),
                         );
                       });
                     });
@@ -402,7 +402,7 @@ void main() {
                     WidgetsBinding.instance.addPostFrameCallback((_) {
                       onPrepareChanged(
                         () async => ProfileImageAvatarDraft(
-                          Uint8List.fromList([1, 2, 3]),
+                          Uint8List.fromList([0xff, 0xd8, 0xff]),
                         ),
                       );
                     });
@@ -467,7 +467,7 @@ void main() {
                     WidgetsBinding.instance.addPostFrameCallback((_) {
                       onPrepareChanged(
                         () async => ProfileImageAvatarDraft(
-                          Uint8List.fromList([1, 2, 3]),
+                          Uint8List.fromList([0xff, 0xd8, 0xff]),
                         ),
                       );
                     });
@@ -534,7 +534,7 @@ void main() {
                     WidgetsBinding.instance.addPostFrameCallback((_) {
                       onPrepareChanged(
                         () async => ProfileImageAvatarDraft(
-                          Uint8List.fromList([1, 2, 3]),
+                          Uint8List.fromList([0xff, 0xd8, 0xff]),
                         ),
                       );
                     });

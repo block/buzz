@@ -80,6 +80,12 @@ fn ts(v: DateTime<Utc>) -> i64 {
 fn db(_: sqlx::Error) -> AuthorityError {
     AuthorityError::Unavailable
 }
+fn platform_column(r: &sqlx::postgres::PgRow) -> Result<Platform, AuthorityError> {
+    // The CHECK constraint admits only known platforms; an unknown value means
+    // the schema is ahead of this binary, so fail instead of guessing.
+    Platform::parse(&r.try_get::<String, _>("platform").map_err(db)?)
+        .ok_or(AuthorityError::Unavailable)
+}
 fn bytes32(v: Vec<u8>) -> Result<[u8; 32], AuthorityError> {
     v.try_into().map_err(|_| AuthorityError::Unavailable)
 }
@@ -223,8 +229,8 @@ impl AuthorityStore for PostgresAuthorityStore {
                 .await
                 .map_err(db)?;
         }
-        let result = sqlx::query("INSERT INTO push_gateway_installations(id,app_attest_key_id,app_attest_public_key,assertion_counter,token_ciphertext,token_fingerprint,endpoint_epoch,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING")
-            .bind(n.id).bind(n.app_attest_key_id).bind(n.app_attest_public_key).bind(i64::from(n.assertion_counter)).bind(n.token_ciphertext).bind(n.token_fingerprint.to_vec()).bind(n.endpoint_epoch).bind(at(n.expires_at)?).execute(&mut *tx).await.map_err(db)?;
+        let result = sqlx::query("INSERT INTO push_gateway_installations(id,app_attest_key_id,app_attest_public_key,assertion_counter,token_ciphertext,token_fingerprint,endpoint_epoch,expires_at,platform) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING")
+            .bind(n.id).bind(n.app_attest_key_id).bind(n.app_attest_public_key).bind(i64::from(n.assertion_counter)).bind(n.token_ciphertext).bind(n.token_fingerprint.to_vec()).bind(n.endpoint_epoch).bind(at(n.expires_at)?).bind(n.platform.as_str()).execute(&mut *tx).await.map_err(db)?;
         if result.rows_affected() != 1 {
             return Err(AuthorityError::Conflict);
         }
@@ -235,6 +241,7 @@ impl AuthorityStore for PostgresAuthorityStore {
         let r = sqlx::query("SELECT * FROM push_gateway_installations WHERE id=$1 AND revoked_at IS NULL AND expires_at >= $2")
             .bind(id).bind(at(now)?).fetch_optional(&self.pool).await.map_err(db)?.ok_or(AuthorityError::Rejected)?;
         Ok(Installation {
+            platform: platform_column(&r)?,
             id,
             app_attest_key_id: r.try_get("app_attest_key_id").map_err(db)?,
             app_attest_public_key: r.try_get("app_attest_public_key").map_err(db)?,
@@ -263,6 +270,7 @@ impl AuthorityStore for PostgresAuthorityStore {
         .map_err(db)?
         .ok_or(AuthorityError::Rejected)?;
         Ok(Installation {
+            platform: platform_column(&r)?,
             id,
             app_attest_key_id: r.try_get("app_attest_key_id").map_err(db)?,
             app_attest_public_key: r.try_get("app_attest_public_key").map_err(db)?,
@@ -301,6 +309,7 @@ impl AuthorityStore for PostgresAuthorityStore {
             let id = r.try_get("id").map_err(db)?;
             Ok(Installation {
                 id,
+                platform: platform_column(&r)?,
                 app_attest_key_id: r.try_get("app_attest_key_id").map_err(db)?,
                 app_attest_public_key: r.try_get("app_attest_public_key").map_err(db)?,
                 assertion_counter: u32::try_from(
@@ -431,7 +440,7 @@ impl AuthorityStore for PostgresAuthorityStore {
         // Every authority mutation locks installation before delegation. Keep
         // this order here to avoid delivery-vs-refresh deadlocks.
         let i = sqlx::query(
-            "SELECT token_ciphertext,token_fingerprint,endpoint_epoch,expires_at,revoked_at
+            "SELECT platform,token_ciphertext,token_fingerprint,endpoint_epoch,expires_at,revoked_at
              FROM push_gateway_installations
              WHERE id=(SELECT installation_id FROM push_gateway_delegations WHERE id=$1)
              FOR UPDATE",
@@ -468,6 +477,7 @@ impl AuthorityStore for PostgresAuthorityStore {
         let authority = DeliveryAuthority {
             delegation_id: did,
             installation_id,
+            platform: platform_column(&i)?,
             relay_pubkey: relay.to_owned(),
 
             token_ciphertext: i.try_get("token_ciphertext").map_err(db)?,
@@ -540,23 +550,29 @@ impl AuthorityStore for PostgresAuthorityStore {
         .map_err(db)?;
         // Revoked rows are idempotency tombstones for cleanup retries, so keep
         // them for the full authority lifetime. A parent may expire before an
-        // otherwise-active child; reap every child of an expired parent first
-        // so the installation delete cannot violate the delegation FK.
-        sqlx::query(
-            "DELETE FROM push_gateway_delegations d
-             WHERE d.expires_at < $1
-                OR EXISTS (
-                    SELECT 1 FROM push_gateway_installations i
-                    WHERE i.id = d.installation_id
-                      AND i.expires_at < $1
-                )",
+        // otherwise-active child, so delete every child of an expired parent.
+        // Lock the expired parents first, as every authority mutation does:
+        // `upsert_delegation` holds this lock while it writes a child, so the
+        // next statement sees every child that was committed, and a later
+        // writer finds the parent gone.
+        let expired: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM push_gateway_installations WHERE expires_at < $1 FOR UPDATE",
         )
         .bind(at(now)?)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(db)?;
+        sqlx::query(
+            "DELETE FROM push_gateway_delegations
+             WHERE expires_at < $1 OR installation_id = ANY($2)",
+        )
+        .bind(at(now)?)
+        .bind(&expired)
         .execute(&mut *tx)
         .await
         .map_err(db)?;
-        sqlx::query("DELETE FROM push_gateway_installations WHERE expires_at < $1")
-            .bind(at(now)?)
+        sqlx::query("DELETE FROM push_gateway_installations WHERE id = ANY($1)")
+            .bind(&expired)
             .execute(&mut *tx)
             .await
             .map_err(db)?;
@@ -941,6 +957,7 @@ mod postgres_tests {
         let store = PostgresAuthorityStore::new(pool.clone());
         let now = Utc::now().timestamp();
         let installation = |id, expires_at| NewInstallation {
+            platform: Platform::Ios,
             id,
             app_attest_key_id: vec![1],
             app_attest_public_key: vec![2; 33],
@@ -1007,6 +1024,7 @@ mod postgres_tests {
         let store = PostgresAuthorityStore::new(pool.clone());
         let now = Utc::now().timestamp();
         let installation = |id| NewInstallation {
+            platform: Platform::Ios,
             id,
             app_attest_key_id: vec![1],
             app_attest_public_key: vec![2; 33],
@@ -1045,6 +1063,131 @@ mod postgres_tests {
                 .await
                 .expect("count original tombstone and replacement");
         assert_eq!(installations, 2);
+
+        pool.close().await;
+        drop_schema(&schema).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn delegation_for_missing_installation_is_rejected() {
+        let (pool, schema) = full_schema(1).await;
+        let store = PostgresAuthorityStore::new(pool.clone());
+        let now = Utc::now().timestamp();
+        let result = store
+            .upsert_delegation(Delegation {
+                id: Uuid::from_u128(DELEGATION_ID),
+                installation_id: Uuid::from_u128(1),
+                relay_pubkey: RELAY_HEX.to_owned(),
+                endpoint_epoch: 1,
+                generation: 1,
+                not_before: now,
+                expires_at: now + 1_000,
+                revoked: false,
+            })
+            .await;
+        assert_eq!(result, Err(AuthorityError::Rejected));
+        let delegations: i64 = sqlx::query_scalar("SELECT count(*) FROM push_gateway_delegations")
+            .fetch_one(&pool)
+            .await
+            .expect("count delegations");
+        assert_eq!(delegations, 0);
+        pool.close().await;
+        drop_schema(&schema).await;
+    }
+
+    // A delegation writer holds the installation lock while the reaper starts.
+    // The reaper must wait for it and then delete the new child with its
+    // expired parent, so no delegation outlives its installation.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn reaper_deletes_delegation_committed_while_it_waits() {
+        let (pool, schema) = full_schema(3).await;
+        let store = PostgresAuthorityStore::new(pool.clone());
+        let now = Utc::now();
+        let installation_id = Uuid::from_u128(1);
+        sqlx::query(
+            "INSERT INTO push_gateway_installations(id,app_attest_key_id,app_attest_public_key,assertion_counter,token_ciphertext,token_fingerprint,endpoint_epoch,expires_at)
+             VALUES ($1,$2,$3,0,$4,$5,1,$6)",
+        )
+        .bind(installation_id)
+        .bind(vec![1u8])
+        .bind(vec![2u8; 33])
+        .bind(vec![3u8])
+        .bind(vec![4u8; 32])
+        .bind(now - chrono::Duration::days(1))
+        .execute(&pool)
+        .await
+        .expect("insert expired installation");
+
+        // The same statements upsert_delegation runs, held open. The child
+        // expires before the reap time, so the parent stays expired.
+        let mut writer = pool.begin().await.expect("begin delegation writer");
+        let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *writer)
+            .await
+            .expect("read writer pid");
+        sqlx::query("SELECT id FROM push_gateway_installations WHERE id=$1 FOR UPDATE")
+            .bind(installation_id)
+            .execute(&mut *writer)
+            .await
+            .expect("lock installation");
+        sqlx::query(
+            "INSERT INTO push_gateway_delegations(id,installation_id,relay_pubkey,endpoint_epoch,generation,not_before,expires_at)
+             VALUES ($1,$2,$3,1,1,$4,$5)",
+        )
+        .bind(Uuid::from_u128(DELEGATION_ID))
+        .bind(installation_id)
+        .bind(hex::decode(RELAY_HEX).unwrap())
+        .bind(now - chrono::Duration::hours(1))
+        .bind(now - chrono::Duration::minutes(1))
+        .execute(&mut *writer)
+        .await
+        .expect("insert delegation");
+        sqlx::query(
+            "UPDATE push_gateway_installations SET expires_at=GREATEST(expires_at,$2) WHERE id=$1",
+        )
+        .bind(installation_id)
+        .bind(now - chrono::Duration::minutes(1))
+        .execute(&mut *writer)
+        .await
+        .expect("extend installation");
+
+        let commit_once_reaper_waits = async {
+            let mut waited = 0;
+            loop {
+                let blocked: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))",
+                )
+                .bind(writer_pid)
+                .fetch_one(&pool)
+                .await
+                .expect("read lock waiters");
+                if blocked > 0 {
+                    break;
+                }
+                waited += 1;
+                assert!(waited < 400, "reaper never waited for the writer");
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            writer.commit().await.expect("commit delegation writer");
+        };
+        let (reaped, ()) = tokio::join!(
+            store.reap_expired(now.timestamp()),
+            commit_once_reaper_waits
+        );
+        reaped.expect("reap expired authority");
+
+        let delegations: i64 = sqlx::query_scalar("SELECT count(*) FROM push_gateway_delegations")
+            .fetch_one(&pool)
+            .await
+            .expect("count delegations");
+        let installations: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM push_gateway_installations")
+                .fetch_one(&pool)
+                .await
+                .expect("count installations");
+        assert_eq!((delegations, installations), (0, 0));
 
         pool.close().await;
         drop_schema(&schema).await;

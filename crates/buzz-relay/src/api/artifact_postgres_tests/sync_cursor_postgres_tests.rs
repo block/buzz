@@ -114,6 +114,7 @@ async fn sync_channel_scope_limits_candidates_and_keeps_source_removals() {
             visibility: Some("private".into()),
             ..Default::default()
         },
+        &f.owner.public_key().to_bytes(),
     )
     .await
     .unwrap();

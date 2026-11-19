@@ -827,7 +827,7 @@ pub enum MessagesCmd {
 pub enum ChannelsCmd {
     /// List channels visible to the current identity
     #[command(
-        after_help = "Examples:\n  buzz channels list\n  buzz channels list --visibility open"
+        after_help = "Examples:\n  buzz channels list\n  buzz channels list --visibility open\n  buzz channels list --member --include-archived"
     )]
     List {
         /// Filter by visibility
@@ -836,6 +836,9 @@ pub enum ChannelsCmd {
         /// Only show channels where the current identity is a member
         #[arg(long, default_value_t = false)]
         member: bool,
+        /// Include archived channels in results
+        #[arg(long, default_value_t = false)]
+        include_archived: bool,
         /// Maximum number of channels to return [default: 500]
         #[arg(long)]
         limit: Option<u32>,
@@ -1343,7 +1346,8 @@ pub enum DmsCmd {
     },
     /// Open a new direct message with one or more users
     Open {
-        /// User pubkey(s) to DM (64-char hex, 1-8)
+        /// User pubkey(s) to DM (64-char hex). A DM holds at most 9 people,
+        /// you included; agents do not count.
         #[arg(long = "pubkey")]
         pubkeys: Vec<String>,
     },
@@ -1355,6 +1359,11 @@ pub enum DmsCmd {
         /// User pubkey to add (64-char hex)
         #[arg(long)]
         pubkey: String,
+        /// Add them to this DM with its history, instead of starting a new DM
+        /// of its people and them (agents stay behind). A person added to a DM of one person and their agents
+        /// always starts a new DM. Agents cannot use this.
+        #[arg(long)]
+        include_history: bool,
     },
     /// Hide a DM conversation from your DM list
     Hide {
@@ -1366,12 +1375,15 @@ pub enum DmsCmd {
 
 #[derive(Subcommand)]
 pub enum UsersCmd {
-    /// Look up user profiles by pubkey or name
+    /// Look up user profiles by pubkey or name. Where the community
+    /// advertises verified profiles, a person's relay-verified username, full
+    /// name and issuer appear in a `verified` object
     Get {
         /// User pubkey(s) to look up (64-char hex). Omit for your own profile
         #[arg(long = "pubkey")]
         pubkeys: Vec<String>,
-        /// Search by display name (case-insensitive substring match)
+        /// Search by display name (case-insensitive substring match). Where
+        /// verified profiles are advertised: profile or verified name, by word prefix
         #[arg(long = "name")]
         name: Option<String>,
         /// Scope an exact-name agent lookup to its owner (`me`, hex, or npub)

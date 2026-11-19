@@ -460,8 +460,17 @@ pub async fn handle_sync(
     // time budget and the cancellation race, so a slow reader cannot hold
     // the handler slot past the budget or get EOSE after retirement.
     let initial = async {
-        let sent =
-            send_initial_set(&sub_id, owner, &filter, &reader, &mut access, &conn, &state).await?;
+        let sent = send_initial_set(
+            &sub_id,
+            owner,
+            &filter,
+            &reader,
+            &handle,
+            &mut access,
+            &conn,
+            &state,
+        )
+        .await?;
         // A resync requested before EOSE is queued ends the sync without it.
         send_eose(&sub_id, owner, &handle, &conn).await?;
         Ok::<_, Stop>(sent)
@@ -587,11 +596,13 @@ async fn confirm(channels: &[Uuid], epoch: u64, conn: &ConnectionState, state: &
 
 /// Read and send every head in scope from one snapshot, and return their
 /// `d`. After an `Err` nothing more is sent.
+#[allow(clippy::too_many_arguments)]
 async fn send_initial_set(
     sub_id: &str,
     owner: u64,
     filter: &ArtifactSyncFilter,
     reader: &[u8],
+    handle: &SyncHandle,
     access: &mut ReadLog,
     conn: &ConnectionState,
     state: &AppState,
@@ -630,6 +641,7 @@ async fn send_initial_set(
                 owner,
                 RelayMessage::event(sub_id, &stored.event),
                 conn,
+                Some(handle),
             )
             .await?;
             access.queued_one();
@@ -647,13 +659,15 @@ async fn send_initial_set(
 /// during the initial set. The slot is reserved first and the owner checked
 /// under the lifecycle lock, so the lock is never held while waiting, and a
 /// CLOSE or replacing REQ (which retire under that lock) fences the frame.
+/// With `handle`, a pending resync fences it too.
 async fn send_owned(
     sub_id: &str,
     owner: u64,
     frame: String,
     conn: &ConnectionState,
+    handle: Option<&SyncHandle>,
 ) -> Result<(), Stop> {
-    send_reserved(sub_id, owner, frame, None, conn).await
+    send_reserved(sub_id, owner, frame, handle, conn).await
 }
 
 /// Queue `EOSE` like `send_owned`, unless the sync must resync. The pending
@@ -689,7 +703,7 @@ async fn send_reserved(
         .await
         .map_err(|_| Stop::Close("error: connection closed"))?;
     let subs = conn.subscriptions.lock().await;
-    if !super::close::owns(&subs, sub_id, owner) {
+    if conn.cancel.is_cancelled() || !super::close::owns(&subs, sub_id, owner) {
         return Err(Stop::Retired);
     }
     let pending = unless_resync.map(|handle| {
@@ -712,10 +726,15 @@ async fn try_send_owned(
     owner: u64,
     frame: String,
     conn: &ConnectionState,
+    handle: Option<&SyncHandle>,
 ) -> Result<(), Stop> {
     let subs = conn.subscriptions.lock().await;
-    if !super::close::owns(&subs, sub_id, owner) {
+    if conn.cancel.is_cancelled() || !super::close::owns(&subs, sub_id, owner) {
         return Err(Stop::Retired);
+    }
+    let pending = handle.map(|h| h.pending.lock().unwrap_or_else(PoisonError::into_inner));
+    if let Some(reason) = pending.as_ref().and_then(|p| p.resync) {
+        return Err(Stop::Close(reason));
     }
     conn.send_tx
         .try_send(WsMessage::Text(frame.into()))
@@ -785,7 +804,15 @@ async fn run_live(
             };
             #[cfg(test)]
             super::close::test_seam::pause_at(&test_seam::LIVE_SEND_PAUSE).await;
-            match try_send_owned(sub_id, owner, RelayMessage::event(sub_id, &event), conn).await {
+            match try_send_owned(
+                sub_id,
+                owner,
+                RelayMessage::event(sub_id, &event),
+                conn,
+                Some(handle),
+            )
+            .await
+            {
                 Ok(()) => {}
                 Err(Stop::Retired) => return,
                 // One lost frame breaks the copy; the slow-client grace limit
@@ -994,18 +1021,40 @@ mod tests {
     async fn live_frame_is_fenced_by_the_owner() {
         let (conn, mut rx) = conn_with_sub(1);
         assert!(matches!(
-            try_send_owned("s", 2, "x".into(), &conn).await,
+            try_send_owned("s", 2, "x".into(), &conn, None).await,
             Err(Stop::Retired)
         ));
         conn.subscriptions.lock().await.remove("s");
         assert!(matches!(
-            try_send_owned("s", 1, "x".into(), &conn).await,
+            try_send_owned("s", 1, "x".into(), &conn, None).await,
             Err(Stop::Retired)
         ));
         assert!(rx.try_recv().is_err());
         conn.subscriptions.lock().await.insert("s".into(), held(1));
-        assert!(try_send_owned("s", 1, "x".into(), &conn).await.is_ok());
+        assert!(try_send_owned("s", 1, "x".into(), &conn, None)
+            .await
+            .is_ok());
         assert!(rx.try_recv().is_ok());
+    }
+
+    /// A resync recorded after a head read (an access change or redaction
+    /// signal) fences snapshot and live frames, so nothing more reaches a
+    /// reader that must resync. Mutation: drop the pending check from
+    /// `send_reserved` or `try_send_owned` → the frame is queued → RED.
+    #[tokio::test]
+    async fn pending_resync_fences_snapshot_and_live_frames() {
+        let (conn, mut rx) = conn_with_sub(1);
+        let handle = SyncHandle::new();
+        handle.resync("resync: test");
+        assert!(matches!(
+            send_owned("s", 1, "x".into(), &conn, Some(&handle)).await,
+            Err(Stop::Close("resync: test"))
+        ));
+        assert!(matches!(
+            try_send_owned("s", 1, "x".into(), &conn, Some(&handle)).await,
+            Err(Stop::Close("resync: test"))
+        ));
+        assert!(rx.try_recv().is_err());
     }
 
     /// A frame (such as `EOSE`) waiting for queue room is checked against
@@ -1020,7 +1069,7 @@ mod tests {
                 .try_send(WsMessage::Text("fill".into()))
                 .unwrap();
         }
-        let mut waiting = std::pin::pin!(send_owned("s", 1, "eose".into(), &conn));
+        let mut waiting = std::pin::pin!(send_owned("s", 1, "eose".into(), &conn, None));
         // Polled once, the frame is now waiting in `reserve`.
         assert!(futures_util::poll!(&mut waiting).is_pending());
         // A replacing REQ takes the ID while the frame waits.

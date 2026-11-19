@@ -1755,6 +1755,18 @@ void main() {
 
         expect(_findRich('void main() {}'), findsWidgets);
         expect(find.text('dart'), findsOneWidget);
+
+        // The copy button floats over the code, as on desktop, instead of
+        // reserving a column: the scroller spans the block inside its border.
+        final scroller = find.byType(SingleChildScrollView).last;
+        final block = find
+            .ancestor(of: scroller, matching: find.byType(Container))
+            .first;
+        expect(tester.getSize(scroller).width, tester.getSize(block).width - 2);
+        expect(
+          tester.getRect(find.byIcon(BuzzIcons.copy)).right,
+          lessThan(tester.getRect(scroller).right),
+        );
       });
     });
 

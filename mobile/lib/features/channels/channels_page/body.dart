@@ -102,6 +102,7 @@ class _ChannelsBody extends StatelessWidget {
               hitTestBehavior: HitTestBehavior.translucent,
               slivers: [
                 SliverToBoxAdapter(child: SizedBox(height: barHeight)),
+                const SliverToBoxAdapter(child: _ReadStateSyncNotice()),
                 if (onInbox != null)
                   SliverPadding(
                     padding: const EdgeInsets.only(top: Grid.twelve),
@@ -265,6 +266,54 @@ class _SliverChannelsList extends HookConsumerWidget {
     final channelsExpanded = useState(true);
     final dmsExpanded = useState(true);
     final sortState = ref.watch(channelSortProvider);
+    final filters = ref.watch(channelFilterProvider);
+    useListenable(filters);
+    final selectedChannel = useState<String?>(null);
+    final clock = useState(0);
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final activity = <String, AsyncValue<int?>>{};
+    final liveFilterSectionIds = {
+      for (final section in sectionsState.store.sections) section.id,
+    };
+    String filterGroupFor(Channel channel) {
+      if (channel.isDm) return 'dms';
+      if (starredChannelIds.contains(channel.id)) return 'starred';
+      final assignment = sectionsState.store.assignments[channel.id];
+      return liveFilterSectionIds.contains(assignment)
+          ? sectionSortGroupKey(assignment!)
+          : 'channels';
+    }
+
+    var nextExpiry = 0;
+    for (final channel in visibleChannels) {
+      final group = filterGroupFor(channel);
+      if (filters?.store.modeFor(group) != ChannelFilterMode.active) continue;
+      final evidence = ref.watch(channelFilterActivityProvider(channel.id));
+      activity[channel.id] = evidence;
+      final at = evidence.asData?.value;
+      if (at == null) continue;
+      final expiry = at + filters!.store.windowFor(group);
+      if (expiry > now && (nextExpiry == 0 || expiry < nextExpiry)) {
+        nextExpiry = expiry;
+      }
+    }
+    useEffect(() {
+      if (nextExpiry == 0) return null;
+      final timer = Timer(
+        Duration(seconds: nextExpiry - now),
+        () => clock.value++,
+      );
+      return timer.cancel;
+    }, [nextExpiry, clock.value]);
+    Future<void> openFilteredChannel(Channel channel) async {
+      selectedChannel.value = channel.id;
+      try {
+        await onSelectChannel(channel);
+      } finally {
+        if (context.mounted) selectedChannel.value = null;
+      }
+    }
+
     final initialSeedComplete = useState(false);
     final seededPubkey = useRef<String?>(null);
     final seedCompleteForPubkey =
@@ -309,7 +358,10 @@ class _SliverChannelsList extends HookConsumerWidget {
     bool seeded(String channelId) =>
         seedCompleteForPubkey ||
         readState.effectiveTimestamp(channelId) != null;
-    final unreadChannelIds = highlights.unread.where(seeded).toSet();
+    final locallyForcedChannelIds = readState.locallyForcedChannelIds;
+    final unreadChannelIds = highlights.unread
+        .where((id) => seeded(id) || locallyForcedChannelIds.contains(id))
+        .toSet();
     final attentionChannelIds = highlights.attention.where(seeded).toSet();
     // Build sorted user-defined sections and compute which stream channels
     // belong to each section. Channels not assigned to any valid section fall
@@ -364,10 +416,57 @@ class _SliverChannelsList extends HookConsumerWidget {
       };
     }
 
+    bool visible(String group, Channel channel) {
+      final evidence = activity[channel.id];
+      return channelMatchesFilter(
+        mode: filters?.store.modeFor(group) ?? ChannelFilterMode.all,
+        unread:
+            unreadChannelIds.contains(channel.id) ||
+            attentionChannelIds.contains(channel.id),
+        activitySeconds: evidence?.asData?.value,
+        activityKnown: evidence?.asData != null,
+        nowSeconds: now,
+        windowSeconds:
+            filters?.store.windowFor(group) ?? defaultActiveWindowSeconds,
+        selected: selectedChannel.value == channel.id,
+      );
+    }
+
+    List<Channel> customRoster(String id) => sortChannelsForList(
+      streamChannels
+          .where(
+            (c) =>
+                sectionAssignments[c.id] == id &&
+                !starredChannelIds.contains(c.id),
+          )
+          .toList(),
+      sortState.sortModeFor(sectionSortGroupKey(id)),
+    );
+
     return SliverPadding(
       padding: EdgeInsets.zero,
       sliver: SliverMainAxisGroup(
         slivers: [
+          if (activity.values.any((value) => value.hasError))
+            SliverToBoxAdapter(
+              child: ListTile(
+                title: const Text(
+                  'Some channel activity is unavailable. Channels remain visible.',
+                ),
+                trailing: TextButton(
+                  onPressed: () {
+                    for (final entry in activity.entries) {
+                      if (entry.value.hasError) {
+                        ref.invalidate(
+                          channelFilterActivityProvider(entry.key),
+                        );
+                      }
+                    }
+                  },
+                  child: const Text('Retry'),
+                ),
+              ),
+            ),
           if (visibleChannels.isEmpty)
             const SliverToBoxAdapter(child: _EmptyState())
           else ...[
@@ -379,6 +478,7 @@ class _SliverChannelsList extends HookConsumerWidget {
                 expanded: starredExpanded.value,
                 onToggle: () => starredExpanded.value = !starredExpanded.value,
                 channels: starredStreamChannels,
+                isVisible: (c) => visible('starred', c),
                 unreadChannelIds: unreadChannelIds,
                 attentionChannelIds: attentionChannelIds,
                 mutedChannelIds: mutedChannelIds,
@@ -386,7 +486,7 @@ class _SliverChannelsList extends HookConsumerWidget {
                 emptyLabel: '',
                 sortMode: sortState.sortModeFor('starred'),
                 onSortModeChange: (mode) => setSortMode('starred', mode),
-                onSelectChannel: onSelectChannel,
+                onSelectChannel: openFilteredChannel,
               ),
             // User-defined sections for stream channels, in user-defined order.
             for (final section in userSections) ...[
@@ -396,16 +496,8 @@ class _SliverChannelsList extends HookConsumerWidget {
               _CustomChannelSection(
                 key: ValueKey(section.id),
                 section: section,
-                channels: sortChannelsForList(
-                  streamChannels
-                      .where(
-                        (c) =>
-                            sectionAssignments[c.id] == section.id &&
-                            !starredChannelIds.contains(c.id),
-                      )
-                      .toList(),
-                  sortState.sortModeFor(sectionSortGroupKey(section.id)),
-                ),
+                channels: customRoster(section.id),
+                isVisible: (c) => visible(sectionSortGroupKey(section.id), c),
                 unreadChannelIds: unreadChannelIds,
                 attentionChannelIds: attentionChannelIds,
                 mutedChannelIds: mutedChannelIds,
@@ -452,10 +544,25 @@ class _SliverChannelsList extends HookConsumerWidget {
                       ],
                     ),
                   );
-                  if (confirmed == true) {
+                  if (confirmed == true && context.mounted) {
+                    // Local section removal must work without filter-read/write
+                    // authority. Cleanup is optional for this never-reused ID.
                     ref
                         .read(channelSectionsProvider.notifier)
                         .deleteSection(section.id);
+                    try {
+                      await filters?.clearDeletedSection(section.id);
+                    } catch (_) {
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                              'Section deleted. Its saved filter could not be cleared.',
+                            ),
+                          ),
+                        );
+                      }
+                    }
                   }
                 },
                 onMoveUp: () => ref
@@ -469,22 +576,7 @@ class _SliverChannelsList extends HookConsumerWidget {
                 ),
                 onSortModeChange: (mode) =>
                     setSortMode(sectionSortGroupKey(section.id), mode),
-                onSelectChannel: onSelectChannel,
-                onMarkChannelRead: (channel) {
-                  final ts = dateTimeToUnixSeconds(channel.lastMessageAt);
-                  if (ts != null) {
-                    ref
-                        .read(readStateProvider.notifier)
-                        .markContextRead(
-                          channel.id,
-                          ts,
-                          clearForcedMessages: true,
-                        );
-                    ref
-                        .read(channelsProvider.notifier)
-                        .clearObservedUnreadCoveredByRead(channel.id, ts);
-                  }
-                },
+                onSelectChannel: openFilteredChannel,
               ),
             ],
             if (userSections.isNotEmpty || starredStreamChannels.isNotEmpty)
@@ -495,6 +587,7 @@ class _SliverChannelsList extends HookConsumerWidget {
               expanded: channelsExpanded.value,
               onToggle: () => channelsExpanded.value = !channelsExpanded.value,
               channels: ungroupedStreamChannels,
+              isVisible: (c) => visible('channels', c),
               unreadChannelIds: unreadChannelIds,
               attentionChannelIds: attentionChannelIds,
               mutedChannelIds: mutedChannelIds,
@@ -502,7 +595,7 @@ class _SliverChannelsList extends HookConsumerWidget {
               emptyLabel: 'No stream channels yet',
               sortMode: sortState.sortModeFor('channels'),
               onSortModeChange: (mode) => setSortMode('channels', mode),
-              onSelectChannel: onSelectChannel,
+              onSelectChannel: openFilteredChannel,
             ),
             const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
             _ChannelSection(
@@ -511,6 +604,7 @@ class _SliverChannelsList extends HookConsumerWidget {
               expanded: dmsExpanded.value,
               onToggle: () => dmsExpanded.value = !dmsExpanded.value,
               channels: sortedDmChannels,
+              isVisible: (c) => visible('dms', c),
               unreadChannelIds: unreadChannelIds,
               attentionChannelIds: attentionChannelIds,
               mutedChannelIds: mutedChannelIds,
@@ -518,10 +612,60 @@ class _SliverChannelsList extends HookConsumerWidget {
               emptyLabel: 'No direct messages yet',
               sortMode: sortState.sortModeFor('dms'),
               onSortModeChange: (mode) => setSortMode('dms', mode),
-              onSelectChannel: onSelectChannel,
+              onSelectChannel: openFilteredChannel,
             ),
           ],
         ],
+      ),
+    );
+  }
+}
+
+/// Says when unread status is not syncing with other devices: retries on tap,
+/// or, once the relay refused read state for the session, says how to recover.
+class _ReadStateSyncNotice extends ConsumerWidget {
+  const _ReadStateSyncNotice();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final (:failed, :unsupported) = ref.watch(
+      readStateProvider.select(
+        (state) =>
+            (failed: state.syncFailed, unsupported: state.syncUnsupported),
+      ),
+    );
+    if (!failed) return const SizedBox.shrink();
+    final text = Text(
+      unsupported
+          ? 'Unread status can’t sync with your other devices right now. Sign in again or restart Buzz to try again.'
+          : 'Unread status isn’t syncing with your other devices. Tap to retry.',
+      style: context.textTheme.bodySmall?.copyWith(
+        color: context.colors.onSurfaceVariant,
+      ),
+    );
+    if (unsupported) {
+      return Padding(
+        key: const Key('read-state-sync-notice'),
+        padding: const EdgeInsets.fromLTRB(
+          Grid.gutter,
+          Grid.xs,
+          Grid.gutter,
+          0,
+        ),
+        child: Padding(padding: const EdgeInsets.all(Grid.xs), child: text),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(Grid.gutter, Grid.xs, Grid.gutter, 0),
+      child: Semantics(
+        button: true,
+        child: InkWell(
+          key: const Key('read-state-sync-notice'),
+          borderRadius: BorderRadius.circular(Radii.lg),
+          onTap: () =>
+              unawaited(ref.read(readStateProvider.notifier).retrySync()),
+          child: Padding(padding: const EdgeInsets.all(Grid.xs), child: text),
+        ),
       ),
     );
   }

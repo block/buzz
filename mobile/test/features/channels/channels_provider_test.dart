@@ -10,6 +10,7 @@ import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/features/activity/activity_page.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
@@ -38,6 +39,7 @@ part 'channels_provider_request_path_cases.dart';
 part 'channels_provider_activity_cases.dart';
 part 'channels_provider_join_cases.dart';
 part 'channels_provider_saved_directory_cases.dart';
+part 'channels_provider_thread_interest_cases.dart';
 
 /// Tests for [ChannelsNotifier] in the pure-Nostr world.
 ///
@@ -58,6 +60,7 @@ void main() {
   _threadActivityCases();
   _confirmedJoinCases();
   _savedDirectoryCases();
+  _threadInterestCases();
   const myPk = 'me';
 
   test(
@@ -2476,6 +2479,52 @@ void main() {
     expect(members.map((member) => member.pubkey), [myPk, 'alice']);
     expect(members.every((member) => member.joinedAt == joinedAt), isTrue);
   });
+
+  test(
+    'self-authored activity invalidates filter reads without changing unread or sort time',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      final notifier = container.read(channelsProvider.notifier);
+      final before = container
+          .read(channelsProvider)
+          .requireValue
+          .single
+          .lastMessageAt;
+      final versions = <int>[];
+      final listener = container.listen(
+        channelsProvider.select((_) => notifier.activityRevisionFor(_channelA)),
+        (_, next) => versions.add(next),
+      );
+      addTearDown(listener.close);
+      session.emit(
+        const NostrEvent(
+          id: 'self-message',
+          pubkey: myPk,
+          createdAt: 20,
+          kind: EventKind.streamMessageV2,
+          tags: [
+            ['h', _channelA],
+          ],
+          content: 'my own activity',
+          sig: 'sig',
+        ),
+      );
+      await _settle();
+      expect(versions, [1]);
+      expect(notifier.latestObservedByChannel[_channelA], isNull);
+      expect(
+        container.read(channelsProvider).requireValue.single.lastMessageAt,
+        before,
+      );
+      expect(notifier.activityRevisionFor(_channelB), 0);
+    },
+  );
 
   test('live channel events update channel lastMessageAt', () async {
     final session = _FakeRelaySession(
