@@ -10,8 +10,8 @@ use std::hash::Hash;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// The newest refill in flight per key, and a lock that orders publication
-/// against invalidation. The lock is held only for cache operations, never
+/// The token shared by the refills in flight per key, and a lock that orders
+/// publication against invalidation. The lock is held only for cache operations, never
 /// across a read.
 pub(crate) struct LoadFence<K> {
     loads: moka::sync::Cache<K, Arc<()>>,
@@ -39,17 +39,16 @@ where
         }
     }
 
-    /// Starts a refill of `key`. A later refill of the same key supersedes
-    /// this one.
+    /// Starts a refill of `key`. Refills that overlap share one token, so the
+    /// first to finish publishes; only an invalidation stops them.
     pub(crate) fn begin(&self, key: &K) -> Load {
-        let load = Arc::new(());
         let _lock = self.lock();
-        self.loads.insert(key.clone(), load.clone());
-        Load(load)
+        Load(self.loads.get_with(key.clone(), || Arc::new(())))
     }
 
-    /// Runs `publish` if no invalidation of `key` and no later refill began
-    /// since `load` did.
+    /// Runs `publish` if no invalidation of `key` and no other refill's
+    /// publication happened since `load` began. Publishing drops the token,
+    /// so the refills that shared it leave the published entry alone.
     pub(crate) fn publish(&self, key: &K, load: Load, publish: impl FnOnce()) {
         let _lock = self.lock();
         if self

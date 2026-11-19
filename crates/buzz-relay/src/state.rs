@@ -4832,6 +4832,72 @@ pub(crate) mod tests {
         );
     }
 
+    /// Overlapping member reads for one key share a load token, so the first
+    /// to finish is cached even while a later miss is still reading. Main
+    /// cached every completed read; a newer miss must not stop an older one
+    /// from warming the cache under a slow writer.
+    /// Mutation: give each refill its own token in `LoadFence::begin` → RED.
+    #[tokio::test]
+    async fn overlapping_member_reads_cache_the_first_to_finish() {
+        use buzz_db::channel_members::ChannelSet;
+        let state = test_state().await;
+        let key = (
+            CommunityId::from_uuid(Uuid::from_u128(0xAAAC)),
+            vec![7u8; 32],
+        );
+        let first = ChannelSet {
+            implicit: Vec::new(),
+            named_only: vec![(Uuid::from_u128(1), "system".to_owned())],
+        };
+        let (release_a, held_a) = tokio::sync::oneshot::channel::<()>();
+        let a = {
+            let state = state.clone();
+            let key = key.clone();
+            let first = first.clone();
+            tokio::spawn(async move {
+                state
+                    .member_channels(key, async move {
+                        held_a.await.ok();
+                        Ok(read_now(first))
+                    })
+                    .await
+            })
+        };
+        until_loading(&state.member_channels_loads, &key).await;
+        let (started_b, b_started) = tokio::sync::oneshot::channel::<()>();
+        let b = {
+            let state = state.clone();
+            let key = key.clone();
+            tokio::spawn(async move {
+                state
+                    .member_channels(key, async move {
+                        started_b.send(()).ok();
+                        std::future::pending::<()>().await;
+                        Ok(read_now(ChannelSet::default()))
+                    })
+                    .await
+            })
+        };
+        b_started.await.expect("B is reading");
+        release_a.send(()).expect("A is waiting");
+        let answered = a.await.expect("join").expect("read");
+        assert_eq!(*answered, first, "A answers its request");
+        assert_eq!(
+            state
+                .member_channels_cache
+                .get(&key)
+                .map(|member| (*member.set).clone()),
+            Some(first.clone()),
+            "the first overlapping read to finish is cached"
+        );
+        b.abort();
+        let served = state
+            .member_channels(key.clone(), async { Ok(read_now(ChannelSet::default())) })
+            .await
+            .expect("read");
+        assert_eq!(*served, first, "the next lookup is a hit on A's set");
+    }
+
     /// A member snapshot is dated from its read's connection checkout, not
     /// from its insert: one already [`MEMBER_CHANNELS_MAX_AGE`] old when it
     /// is published is not served to the next lookup, so a slow read cannot
