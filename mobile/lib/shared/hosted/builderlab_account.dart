@@ -507,6 +507,7 @@ class BuilderlabAccountClient {
           '/v1/buzz/nostr-identities/current',
           credential: signedOut.credential,
           body: {},
+          signer: pubkey,
         );
         final identity = current['identity'];
         if (identity is! Map || identity['pubkey_hex'] != pubkey) {
@@ -596,12 +597,22 @@ class BuilderlabAccountClient {
     }
   }
 
+  /// [signer], or the key behind [signingKey], is the identity the request
+  /// is made for. Its reports go out only while that identity, or no one, is
+  /// the member reports name: the outbox may ask for a removed community.
   Future<Map<String, dynamic>> _request(
     String path, {
     String? credential,
     Map<String, dynamic>? body,
     String? signingKey,
+    String? signer,
   }) async {
+    signer ??= signingKey == null
+        ? null
+        : AccountIdentityStore.publicKeyForNsec(signingKey);
+    final diagnostics = signer == null
+        ? _diagnostics
+        : SignerDiagnosticReporter(_diagnostics, signer: signer);
     try {
       final request =
           http.Request(
@@ -667,7 +678,7 @@ class BuilderlabAccountClient {
           throw FormatException('account response is not an object');
         }
       } on FormatException catch (error, stackTrace) {
-        _diagnostics.reportError(
+        diagnostics.reportError(
           error,
           stackTrace,
           operation: DiagnosticOperation.accountResponse,

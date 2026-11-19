@@ -39,6 +39,7 @@ void main() {
           false,
       'invalid: policy:owner_only': false,
       'invalid: cannot remove the last owner': false,
+      'invalid: only members can add people in this channel': false,
       'duplicate: channel already exists': false,
       'restricted: access revoked': false,
       'rate-limited: quota exceeded; retry in 4s': false,
