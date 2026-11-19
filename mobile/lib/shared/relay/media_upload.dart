@@ -559,7 +559,7 @@ class MediaUploadService {
       throw Exception('unsupported file type: $mimeType');
     }
 
-    final sha256 = _sha256Hex(bytes);
+    final sha256 = await compute(_sha256Hex, bytes);
     var response = await _sendUploadRequest(
       bytes: bytes,
       mimeType: mimeType,
