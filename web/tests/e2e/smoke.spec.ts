@@ -670,8 +670,14 @@ for (const device of [
 
 test("open link forwards every navigation form", async ({ page }) => {
   const owner = "cd".repeat(32);
+  const event = "ef".repeat(32);
   for (const rest of [
     "channel/4f1c2a9e-0000-4000-8000-000000000001",
+    "channel/general",
+    `channel/general/${event}`,
+    `message?channel=general&id=${event}&thread=${event}`,
+    `message?channel=general&id=${event}&utm_source=chat`,
+    `repo?owner=${owner}&d=demo-repo&tab=commits&commit=${"a1".repeat(20)}`,
     `repo?owner=${owner}&d=demo-repo`,
     `project?owner=${owner}&d=demo-project&tab=board`,
     `pr?owner=${owner}&d=demo-repo&id=${"ef".repeat(32)}`,
@@ -685,6 +691,9 @@ test("open link forwards every navigation form", async ({ page }) => {
 });
 
 test("open link refuses links that are not navigation", async ({ page }) => {
+  const launches = await trackLaunches(page);
+  const owner = "cd".repeat(32);
+  const event = "ef".repeat(32);
   for (const path of [
     "/open/join?relay=wss%3A%2F%2Frelay.example&code=demo-code",
     "/open/connect?relay=wss%3A%2F%2Frelay.example",
@@ -694,6 +703,23 @@ test("open link refuses links that are not navigation", async ({ page }) => {
     "/open/MESSAGE?channel=general",
     "/open/message%2Fjoin?channel=general",
     "/open//join?code=demo-code",
+    "/open/message",
+    "/open/message?channel=general",
+    `/open/message?id=${event}`,
+    `/open/message?channel=&id=${event}`,
+    `/open/message?channel=general&channel=random&id=${event}`,
+    `/open/message?channel=general&id=${event}&id=${event}`,
+    `/open/message?channel=general&id=${event}&thread=${event}&thread=${event}`,
+    `/open/message/extra?channel=general&id=${event}`,
+    "/open/channel",
+    "/open/channel/",
+    `/open/channel/general/${event}/extra`,
+    "/open/repo",
+    `/open/repo?owner=${owner}`,
+    `/open/repo?owner=${owner}&d=demo-repo&tab=code&tab=commits`,
+    `/open/pr?owner=${owner}&d=demo-repo`,
+    `/open/issue?owner=${owner}&d=demo-repo&id=`,
+    `/open/issue/extra?owner=${owner}&d=demo-repo&id=${event}`,
   ]) {
     await page.goto(path);
     await expect(
@@ -704,4 +730,6 @@ test("open link refuses links that are not navigation", async ({ page }) => {
       0,
     );
   }
+  await page.waitForLoadState("networkidle");
+  expect(launches).toEqual([]);
 });
