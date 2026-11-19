@@ -32,6 +32,7 @@ import 'package:buzz/features/activity/inbox_read_state.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 part 'channels_provider_live_cases.dart';
+part 'channels_provider_huddle_cases.dart';
 part 'channels_provider_deletion_cases.dart';
 part 'channels_provider_terminal_cases.dart';
 part 'channels_provider_readiness_cases.dart';
@@ -54,6 +55,7 @@ part 'channels_provider_thread_interest_cases.dart';
 /// records [subscribe] calls so we can assert filter shapes and emit live
 /// events on demand.
 void main() {
+  _huddleNavigationCases();
   _unreadReadinessCases();
   _unreadDeletionCases();
   _requestPathCases();
@@ -3749,6 +3751,8 @@ NostrEvent _meta({
   String visibility = 'open',
   int createdAt = 1,
   int? ttlSeconds,
+  String? creator,
+  String? description,
   bool archived = false,
   bool unlisted = false,
   List<String> participants = const [],
@@ -3760,6 +3764,8 @@ NostrEvent _meta({
   tags: [
     ['d', id],
     ['name', name],
+    if (creator != null) ['P', creator],
+    if (description != null) ['about', description],
     ['t', channelType],
     [visibility == 'private' ? 'private' : 'public'],
     if (ttlSeconds != null) ['ttl', '$ttlSeconds'],
@@ -3859,6 +3865,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     this.maxMetadataPageRequests,
     this.hiddenDmEvents = const [],
     this.huddleStarts = const [],
+    this.creations = const [],
     this.recentMessages = const [],
     this.deletionChannels = const {},
     this.enforceHistoryLimits = false,
@@ -3876,6 +3883,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
   final int? maxMetadataPageRequests;
   final List<NostrEvent> hiddenDmEvents;
   final List<NostrEvent> huddleStarts;
+  final List<NostrEvent> creations;
   List<NostrEvent> recentMessages;
   final Map<String, String> deletionChannels;
   final bool enforceHistoryLimits;
@@ -4146,6 +4154,10 @@ class _FakeRelaySession extends RelaySessionNotifier {
         await paused.future;
       }
       return hiddenDmEvents;
+    }
+    if (filter.kinds.contains(9007)) {
+      final ids = filter.tags['#h'] ?? const <String>[];
+      return creations.where((e) => ids.contains(e.getTagValue('h'))).toList();
     }
     if (filter.kinds.contains(EventKind.huddleStarted)) {
       // Claim the parked slot so the newer refresh's own Huddle query runs

@@ -454,6 +454,13 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // Membership discovery already returned the full authoritative rosters.
     // Their owner roles validate Huddle links without downloading them again.
     final huddleBackingIds = huddleBackingChannelIds(huddleStarts, memberships);
+    final creations = await _fenced(
+      fence,
+      _fetchHuddleCreations(session, parsedMetas.values),
+    );
+    huddleBackingIds.addAll(
+      createdHuddleChannelIds(creations, parsedMetas.values),
+    );
     final hiddenDms = hiddenDmIds ?? _hiddenDmIds;
     final visibleMetas = parsedMetas.entries.where((entry) {
       final data = entry.value;
@@ -463,6 +470,15 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         return false;
       }
       if (data.channelType == 'dm' && hiddenDms.contains(data.id)) {
+        return false;
+      }
+      if (isGeneratedHuddleChannel(
+        id: data.id,
+        name: data.name,
+        channelType: data.channelType,
+        visibility: data.visibility,
+        ttlSeconds: data.ttlSeconds,
+      )) {
         return false;
       }
       return !(huddleBackingIds.contains(data.id) &&

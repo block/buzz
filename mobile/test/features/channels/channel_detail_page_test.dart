@@ -99,6 +99,7 @@ import 'package:buzz/shared/emoji/emoji_burst.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/huddle/huddle.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/relay/relay_author_provider.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/avatar_shape.dart';
 import 'package:buzz/shared/widgets/app_list_card.dart';
@@ -325,6 +326,7 @@ Widget _buildTestable({
   HuddleHumanCountLoader? huddleHumanCountLoader,
   List<NostrEvent> huddleLifecycle = const [],
   String? huddleCurrentPubkey,
+  String? huddleRelayAuthor,
   http.Client? mediaClient,
   Widget? home,
   Stream<MeGroups>? organization,
@@ -517,6 +519,7 @@ Widget _buildTestable({
         ),
       if (huddleHumanCountLoader != null)
         huddleHumanCountProvider.overrideWithValue(huddleHumanCountLoader),
+      relayAuthorProvider.overrideWith((ref, url) async => huddleRelayAuthor),
       huddleLifecycleProvider(
         _channelId,
       ).overrideWith((ref) async => huddleLifecycle),
@@ -8897,6 +8900,132 @@ void main() {
       expect(find.text('Huddle in progress'), findsNothing);
     });
 
+    testWidgets(
+      'Huddle card shows participants and freezes elapsed time when ended',
+      (tester) async {
+        await _loadPresenceFonts(tester);
+        if (Platform.environment['PRESENCE_SCREENSHOTS'] != null) {
+          await (FontLoader(
+            'BuzzTabler',
+          )..addFont(rootBundle.load('assets/fonts/TablerIcons.ttf'))).load();
+        }
+        final semantics = tester.ensureSemantics();
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final authority = 'f' * 64;
+        final alice = 'a' * 64;
+        final bob = 'b' * 64;
+        final start = _huddleMsg(
+          id: 'styled-huddle',
+          kind: EventKind.huddleStarted,
+          createdAt: now - 125,
+        );
+        NostrEvent participation(String key, String author, int kind) =>
+            NostrEvent(
+              id: '$key-$kind',
+              pubkey: author,
+              createdAt: now - 120,
+              kind: kind,
+              tags: [
+                ['h', _channelId],
+                ['p', key],
+              ],
+              content: jsonEncode({'ephemeral_channel_id': _huddleChannelId}),
+              sig: '',
+            );
+        final history = [
+          participation(alice, authority, EventKind.huddleParticipantJoined),
+          participation(bob, authority, EventKind.huddleParticipantJoined),
+          participation(
+            'c' * 64,
+            'untrusted',
+            EventKind.huddleParticipantJoined,
+          ),
+        ];
+        final notifier = _FakeMessagesNotifier([start]);
+        Widget page({
+          bool ended = false,
+          double scale = 1,
+          bool dark = false,
+        }) => RepaintBoundary(
+          child: _buildTestable(
+            messages: [
+              start,
+              if (ended)
+                _huddleMsg(
+                  id: 'styled-end',
+                  kind: EventKind.huddleEnded,
+                  createdAt: now + 10,
+                ),
+            ],
+            messagesNotifier: notifier,
+            darkTheme: dark,
+            huddleLifecycle: history,
+            huddleRelayAuthor: authority,
+            textScaler: TextScaler.linear(scale),
+            users: {
+              alice: UserProfile(pubkey: alice, displayName: 'Alice'),
+              bob: UserProfile(pubkey: bob, displayName: 'Bob'),
+            },
+          ),
+        );
+        await tester.pumpWidget(page());
+        await tester.pumpAndSettle();
+        final card = find.byKey(const ValueKey('huddle-card-styled-huddle'));
+        expect(
+          find.descendant(of: card, matching: find.text('Huddle in progress')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(ValueKey('huddle-card-avatar-$alice')),
+          findsOneWidget,
+        );
+        expect(find.byKey(ValueKey('huddle-card-avatar-$bob')), findsOneWidget);
+        expect(
+          find.byKey(ValueKey('huddle-card-avatar-${'c' * 64}')),
+          findsNothing,
+        );
+        expect(
+          find.bySemanticsLabel('In this Huddle: Alice, Bob'),
+          findsOneWidget,
+        );
+        expect(find.widgetWithText(FilledButton, 'Join'), findsOneWidget);
+        expect(
+          tester.getSize(find.widgetWithText(FilledButton, 'Join')).height,
+          greaterThanOrEqualTo(48),
+        );
+        expect(find.text('Foreground voice Huddle'), findsNothing);
+        await _capturePresence(tester, 'huddle-active');
+        notifier.setMessages([
+          start,
+          _huddleMsg(
+            id: 'styled-end',
+            kind: EventKind.huddleEnded,
+            createdAt: now + 10,
+          ),
+        ]);
+        await tester.pumpAndSettle();
+        expect(find.text('2:15'), findsOneWidget);
+        expect(find.widgetWithText(FilledButton, 'View'), findsOneWidget);
+        expect(
+          find.descendant(of: card, matching: find.byIcon(BuzzIcons.phoneEnd)),
+          findsOneWidget,
+        );
+        await tester.pump(const Duration(seconds: 3));
+        expect(find.text('2:15'), findsOneWidget);
+        await _capturePresence(tester, 'huddle-ended');
+        await tester.pumpWidget(page(ended: true, scale: 2));
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        await _capturePresence(tester, 'huddle-large-text');
+        await tester.pumpWidget(page(ended: true, dark: true));
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        await _capturePresence(tester, 'huddle-dark');
+        await tester.pumpWidget(const SizedBox());
+        semantics.dispose();
+      },
+    );
+
     testWidgets('offers Join for a recent desktop-started huddle', (
       tester,
     ) async {
@@ -8971,31 +9100,34 @@ void main() {
       expect(otherJoin.onPressed, isNull);
     });
 
-    testWidgets('marks an expired Huddle card as ended', (tester) async {
-      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: [
-            _huddleMsg(
-              id: 'expired-huddle',
-              kind: EventKind.huddleStarted,
-              createdAt: now - const Duration(hours: 2).inSeconds,
-            ),
-          ],
-          users: {
-            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
-          },
-        ),
-      );
-      await tester.pumpAndSettle();
+    testWidgets(
+      'keeps expired Huddle history reachable without cached membership',
+      (tester) async {
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _huddleMsg(
+                id: 'expired-huddle',
+                kind: EventKind.huddleStarted,
+                createdAt: now - const Duration(hours: 2).inSeconds,
+              ),
+            ],
+            users: {
+              'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
 
-      expect(find.text('Huddle ended'), findsOneWidget);
-      expect(find.widgetWithText(FilledButton, 'Join'), findsNothing);
-      final ended = tester.widget<FilledButton>(
-        find.widgetWithText(FilledButton, 'Ended'),
-      );
-      expect(ended.onPressed, isNull);
-    });
+        expect(find.text('Huddle ended'), findsOneWidget);
+        expect(find.widgetWithText(FilledButton, 'Join'), findsNothing);
+        final ended = tester.widget<FilledButton>(
+          find.widgetWithText(FilledButton, 'View'),
+        );
+        expect(ended.onPressed, isNotNull);
+      },
+    );
 
     testWidgets(
       'offers a new Huddle when a stale invitation is no longer joinable',
@@ -12026,20 +12158,13 @@ void main() {
     );
 
     testWidgets(
-      'views the original transcript after the matching huddle end event',
+      'views the original transcript and thread without cached room membership',
       (tester) async {
         final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
         await tester.pumpWidget(
           _buildTestable(
             signingPubkey: 'self',
-            channelsNotifier: _FakeChannelsNotifier([_testChannel])
-              ..backingMembers = [
-                ChannelMember(
-                  pubkey: 'self',
-                  role: 'member',
-                  joinedAt: DateTime(2026),
-                ),
-              ],
+            channelsNotifier: _FakeChannelsNotifier([_testChannel]),
             messages: [
               _huddleMsg(
                 id: 'ended-huddle-start',
@@ -12107,13 +12232,7 @@ void main() {
         channels.backingMembers = [];
         channels.setChannels([_testChannel]);
         await tester.pumpAndSettle();
-        expect(find.widgetWithText(FilledButton, 'View'), findsNothing);
-        expect(
-          tester
-              .widget<FilledButton>(find.widgetWithText(FilledButton, 'Ended'))
-              .onPressed,
-          isNull,
-        );
+        expect(find.widgetWithText(FilledButton, 'View'), findsOneWidget);
       },
     );
 

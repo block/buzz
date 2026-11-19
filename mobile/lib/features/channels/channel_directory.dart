@@ -1123,3 +1123,39 @@ void _sortChannels(List<Channel> channels) => channels.sort((left, right) {
   if (typeOrder != 0) return typeOrder;
   return left.name.toLowerCase().compareTo(right.name.toLowerCase());
 });
+
+/// Read immutable creation receipts through the signed-in app session. Unlike
+/// lifecycle discovery this has no recency cutoff, so renamed old rooms match.
+Future<List<NostrEvent>> _fetchHuddleCreations(
+  RelaySessionNotifier session,
+  Iterable<ChannelData> metadata,
+) async {
+  final ids = [
+    for (final channel in metadata)
+      if (channel.channelType == 'stream' && channel.visibility == 'private')
+        channel.id,
+  ];
+  final events = <NostrEvent>[];
+  for (var start = 0; start < ids.length; start += kMaxExplicitChannelValues) {
+    final batch = ids.sublist(
+      start,
+      min(start + kMaxExplicitChannelValues, ids.length),
+    );
+    try {
+      events.addAll(
+        await session.fetchHistory(
+          NostrFilter(
+            kinds: const [9007],
+            tags: {'#h': batch},
+            // One accepted creation receipt per immutable channel ID.
+            limit: batch.length,
+          ),
+        ),
+      );
+    } catch (error) {
+      // Missing evidence must leave a channel visible, not hide it by name.
+      debugPrint('[ChannelsNotifier] Huddle creation query failed: $error');
+    }
+  }
+  return events;
+}

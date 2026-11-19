@@ -14,7 +14,15 @@ extension _ChannelSnapshots on ChannelsNotifier {
           .map(Channel.fromJson)
           .where(
             (channel) =>
-                channel.isMember && !snapshot.hiddenDmIds.contains(channel.id),
+                channel.isMember &&
+                !snapshot.hiddenDmIds.contains(channel.id) &&
+                !isGeneratedHuddleChannel(
+                  id: channel.id,
+                  name: channel.name,
+                  channelType: channel.channelType,
+                  visibility: channel.visibility,
+                  ttlSeconds: channel.ttlSeconds,
+                ),
           )
           .toList();
       _hiddenDmIds = Set.unmodifiable(snapshot.hiddenDmIds);
