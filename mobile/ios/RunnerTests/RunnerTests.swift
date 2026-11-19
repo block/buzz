@@ -531,12 +531,12 @@ class RunnerTests: XCTestCase {
     let bar = factory.create(
       withFrame: CGRect(x: 0, y: 0, width: 390, height: 120), viewIdentifier: 999991,
       arguments: ["title": "Thread", "subtitle": "general", "titleEnabled": true,
-                  "subtitleNavigationLabel": "Open channel general"]
+                  "subtitleNavigationLabel": "Thread, open channel general"]
     )
     parent.view.addSubview(bar.view())
     let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
     let title = try XCTUnwrap(navigation.topViewController?.navigationItem.titleView as? NavigationTitleView)
-    XCTAssertEqual(title.accessibilityLabel, "Open channel general")
+    XCTAssertEqual(title.accessibilityLabel, "Thread, open channel general")
     XCTAssertEqual(title.accessibilityTraits, .button)
     XCTAssertTrue(title.accessibilityActivate())
     XCTAssertEqual(messenger.actions, ["title"])

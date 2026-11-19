@@ -17050,7 +17050,7 @@ void main() {
       await tester.tap(find.text('Open activity thread'));
       await tester.pumpAndSettle();
 
-      await tester.tap(find.bySemanticsLabel('Open channel general'));
+      await tester.tap(find.bySemanticsLabel('Thread, open channel general'));
       await tester.pumpAndSettle();
 
       final channelPage = tester.widget<ChannelDetailPage>(

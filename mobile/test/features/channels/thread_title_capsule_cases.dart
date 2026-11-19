@@ -62,7 +62,9 @@ void threadTitleCapsuleTests() {
       expect(params()['titleEnabled'], true);
       expect(
         params()['subtitleNavigationLabel'],
-        dm ? 'Open conversation with Alice' : 'Open channel engineering',
+        dm
+            ? 'Thread, open conversation with Alice'
+            : 'Thread, open channel engineering',
       );
       channels.setChannels([channel.copyWith(name: 'Renamed conversation')]);
       await tester.pumpAndSettle();
@@ -71,8 +73,8 @@ void threadTitleCapsuleTests() {
       expect(
         params()['subtitleNavigationLabel'],
         dm
-            ? 'Open conversation with Renamed conversation'
-            : 'Open channel Renamed conversation',
+            ? 'Thread, open conversation with Renamed conversation'
+            : 'Thread, open channel Renamed conversation',
       );
       channels.setChannels([]);
       await tester.pumpAndSettle();

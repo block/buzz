@@ -67,8 +67,8 @@ FrostedAppBar _threadAppBar(
   final channelLabel = channel == null || channelDisplayName.isEmpty
       ? null
       : channel.isDm
-      ? 'Open conversation with $channelDisplayName'
-      : 'Open channel $channelDisplayName';
+      ? 'Thread, open conversation with $channelDisplayName'
+      : 'Thread, open channel $channelDisplayName';
 
   return FrostedAppBar(
     alwaysFrosted: true,
