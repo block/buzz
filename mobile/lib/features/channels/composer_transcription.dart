@@ -100,8 +100,10 @@ ComposerTranscription useComposerTranscription({
   // delete it quietly. Never touch a file the pointer still names.
   Future<void> sweepCleanup() async {
     final journal = prefs.getString(cleanupKey);
+    final pointer = prefs.getString(key);
     if (journal == null ||
-        prefs.getString(key) == journal ||
+        pointer == journal ||
+        pointer == '$_pendingSourcePrefix$journal' ||
         pendingSources[key] == journal) {
       return;
     }

@@ -472,6 +472,21 @@ void iosControlsTests() {
         await tester.pumpWidget(composer());
         await tester.pumpAndSettle();
         expect(find.text('Retry'), findsOneWidget);
+        if (failure == 'copy') {
+          // A Discard that fails at pointer removal journals the source while
+          // the pending-source pointer still owns it: a restart keeps it.
+          prefs.rejectRemoval = true;
+          await tester.tap(find.byTooltip('Discard recording'));
+          await tester.pumpAndSettle();
+          prefs.rejectRemoval = false;
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pumpAndSettle();
+          await prefs.reload();
+          await tester.pumpWidget(composer());
+          await tester.pumpAndSettle();
+          expect(files.deleted, isNot(contains('/tmp/voice-note-test.m4a')));
+          expect(find.text('Retry'), findsOneWidget);
+        }
         files.rejectRetention = false;
         prefs.rejectRecoveryWrites = false;
         prefs.rejectRetainedWrites = false;
