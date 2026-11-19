@@ -15,7 +15,9 @@ use crate::commands::agents::fetch_archived_snapshot;
 use crate::commands::channel_templates::{self, ChannelTemplateRecord, TemplateAgentRoster};
 use crate::commands::users::presence_subject;
 use crate::error::CliError;
-use crate::validate::{parse_uuid, read_or_stdin, validate_hex64, validate_uuid};
+use crate::validate::{
+    parse_uuid, read_file_or_stdin, read_or_stdin, validate_hex64, validate_uuid,
+};
 
 /// Stable, scriptable projection of a kind:39000 channel-metadata event: the
 /// JSON object `channels list`, `get` and `search` print for each channel.
@@ -1813,10 +1815,12 @@ pub async fn cmd_delete_channel(client: &BuzzClient, channel_id: &str) -> Result
 pub async fn cmd_add_channel_member(
     client: &BuzzClient,
     channel_id: &str,
-    pubkey: &str,
+    pubkeys: &[String],
+    pubkeys_file: Option<&str>,
     role: Option<&str>,
 ) -> Result<(), CliError> {
-    validate_hex64(pubkey)?;
+    let file_text = pubkeys_file.map(read_file_or_stdin).transpose()?;
+    let pubkeys = collect_member_pubkeys(pubkeys, file_text.as_deref())?;
     let channel_uuid = parse_uuid(channel_id)?;
 
     let typed_role = match role {
@@ -1832,13 +1836,148 @@ pub async fn cmd_add_channel_member(
             )))
         }
     };
-    let builder = buzz_sdk::build_add_member(channel_uuid, pubkey, typed_role)
-        .map_err(|e| CliError::Other(format!("build_add_member failed: {e}")))?;
+    // One person keeps the single-add output and errors unchanged.
+    if let [pubkey] = pubkeys.as_slice() {
+        let resp = send_add_members(
+            client,
+            channel_uuid,
+            std::slice::from_ref(pubkey),
+            typed_role,
+        )
+        .await?;
+        println!("{}", normalize_write_response(&resp));
+        return Ok(());
+    }
 
+    // Chunks go out in order: concurrent kind:9000 writes race on the relay.
+    let mut report = AddMembersReport::default();
+    for chunk in pubkeys.chunks(buzz_sdk::MAX_MEMBERS_PER_ADD) {
+        let outcome = send_add_members(client, channel_uuid, chunk, typed_role)
+            .await
+            .map_err(|e| e.to_string());
+        report.record(chunk, outcome);
+    }
+    println!("{}", report.to_json());
+    if report.is_ok() {
+        Ok(())
+    } else {
+        Err(CliError::Other(
+            "some people were not added; see `rejected` and `failed`".into(),
+        ))
+    }
+}
+
+async fn send_add_members(
+    client: &BuzzClient,
+    channel_uuid: Uuid,
+    pubkeys: &[String],
+    role: Option<buzz_sdk::MemberRole>,
+) -> Result<String, CliError> {
+    let refs: Vec<&str> = pubkeys.iter().map(String::as_str).collect();
+    let builder = buzz_sdk::build_add_members(channel_uuid, &refs, role)
+        .map_err(|e| CliError::Other(format!("build_add_members failed: {e}")))?;
     let event = client.sign_event(builder).await?;
-    let resp = client.submit_event(event).await?;
-    println!("{}", normalize_write_response(&resp));
-    Ok(())
+    client.submit_event(event).await
+}
+
+/// Merge `--pubkey` values and `--pubkeys-file` lines (blank lines skipped)
+/// into one validated, lowercased list without duplicates, in input order.
+fn collect_member_pubkeys(
+    flags: &[String],
+    file_text: Option<&str>,
+) -> Result<Vec<String>, CliError> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    let file_lines = file_text
+        .into_iter()
+        .flat_map(str::lines)
+        .enumerate()
+        .map(|(i, line)| (Some(i + 1), line.trim()))
+        .filter(|(_, line)| !line.is_empty());
+    for (line_no, pubkey) in flags.iter().map(|p| (None, p.as_str())).chain(file_lines) {
+        validate_hex64(pubkey).map_err(|e| match line_no {
+            Some(n) => CliError::Usage(format!("--pubkeys-file line {n}: {e}")),
+            None => e,
+        })?;
+        let pubkey = pubkey.to_ascii_lowercase();
+        if seen.insert(pubkey.clone()) {
+            out.push(pubkey);
+        }
+    }
+    if out.is_empty() {
+        return Err(CliError::Usage("no pubkeys given".into()));
+    }
+    Ok(out)
+}
+
+/// The combined report of a multi-person `channels add-member` run.
+#[derive(Default)]
+struct AddMembersReport {
+    added: Vec<String>,
+    updated: Vec<String>,
+    already_member: Vec<String>,
+    /// People in a one-person chunk: the relay accepted them without saying
+    /// whether they were added, updated or already members.
+    accepted: Vec<String>,
+    rejected: Vec<serde_json::Value>,
+    failed: Vec<serde_json::Value>,
+}
+
+impl AddMembersReport {
+    /// Fold in one chunk's outcome: the relay's raw response, or the error
+    /// that kept the chunk from being applied.
+    fn record(&mut self, chunk: &[String], outcome: Result<String, String>) {
+        let raw = match outcome {
+            Ok(raw) => raw,
+            Err(error) => {
+                self.failed
+                    .push(serde_json::json!({ "error": error, "pubkeys": chunk }));
+                return;
+            }
+        };
+        let resp: serde_json::Value =
+            serde_json::from_str(&normalize_write_response(&raw)).unwrap_or_default();
+        let message = resp["message"].as_str().unwrap_or("");
+        let Some(members) = message
+            .strip_prefix("members: ")
+            .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+        else {
+            self.accepted.extend_from_slice(chunk);
+            return;
+        };
+        for (key, list) in [
+            ("added", &mut self.added),
+            ("updated", &mut self.updated),
+            ("already_member", &mut self.already_member),
+        ] {
+            list.extend(
+                members[key]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str().map(String::from)),
+            );
+        }
+        if let Some(rejected) = members["rejected"].as_array() {
+            self.rejected.extend(rejected.iter().cloned());
+        }
+    }
+
+    fn is_ok(&self) -> bool {
+        self.rejected.is_empty() && self.failed.is_empty()
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "status": if self.is_ok() { "ok" } else { "partial" },
+            "added": self.added,
+            "updated": self.updated,
+            "already_member": self.already_member,
+            "accepted": self.accepted,
+            "rejected": self.rejected,
+            "failed": self.failed,
+        })
+    }
 }
 
 pub async fn cmd_remove_channel_member(
@@ -2060,8 +2199,18 @@ pub async fn dispatch(
         ChannelsCmd::AddMember {
             channel,
             pubkey,
+            pubkeys_file,
             role,
-        } => cmd_add_channel_member(client, &channel, &pubkey, role.as_deref()).await,
+        } => {
+            cmd_add_channel_member(
+                client,
+                &channel,
+                &pubkey,
+                pubkeys_file.as_deref(),
+                role.as_deref(),
+            )
+            .await
+        }
         ChannelsCmd::RemoveMember { channel, pubkey } => {
             cmd_remove_channel_member(client, &channel, &pubkey).await
         }
@@ -5067,5 +5216,122 @@ mod unlisted_support_tests {
         .unwrap();
 
         assert_eq!(submitted.lock().unwrap().len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod add_members_tests {
+    use super::{collect_member_pubkeys, AddMembersReport};
+    use serde_json::json;
+
+    fn pk(i: usize) -> String {
+        format!("{i:064x}")
+    }
+
+    #[test]
+    fn collects_flags_and_file_in_order_without_duplicates() {
+        let flags = vec![pk(1), pk(2).to_ascii_uppercase()];
+        let file = format!("{}\n\n  {}  \n{}\n", pk(3), pk(2), pk(1));
+        let got = collect_member_pubkeys(&flags, Some(&file)).unwrap();
+        assert_eq!(got, vec![pk(1), pk(2), pk(3)]);
+    }
+
+    #[test]
+    fn reads_pubkeys_file_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keys.txt");
+        std::fs::write(&path, format!("{}\n{}\n", pk(7), pk(8))).unwrap();
+        let text = crate::validate::read_file_or_stdin(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            collect_member_pubkeys(&[], Some(&text)).unwrap(),
+            vec![pk(7), pk(8)]
+        );
+    }
+
+    #[test]
+    fn bad_file_line_names_the_line() {
+        let file = format!("{}\nnope\n", pk(1));
+        let err = collect_member_pubkeys(&[], Some(&file)).unwrap_err();
+        assert!(err.to_string().contains("line 2"), "{err}");
+    }
+
+    #[test]
+    fn empty_input_is_a_usage_error() {
+        assert!(collect_member_pubkeys(&[], Some("\n\n")).is_err());
+    }
+
+    #[test]
+    fn chunks_at_the_relay_limit() {
+        for (n, want) in [
+            (0, vec![]),
+            (100, vec![100]),
+            (101, vec![100, 1]),
+            (250, vec![100, 100, 50]),
+        ] {
+            let pubkeys: Vec<String> = (0..n).map(pk).collect();
+            let sizes: Vec<usize> = pubkeys
+                .chunks(buzz_sdk::MAX_MEMBERS_PER_ADD)
+                .map(<[String]>::len)
+                .collect();
+            assert_eq!(sizes, want, "{n} people");
+        }
+    }
+
+    fn ok_response(members: serde_json::Value) -> String {
+        json!({
+            "event_id": "e",
+            "accepted": true,
+            "message": format!("members: {members}"),
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn merges_chunks_and_keeps_going_after_a_failed_one() {
+        let mut report = AddMembersReport::default();
+        report.record(
+            &[pk(1), pk(2), pk(3)],
+            Ok(ok_response(json!({
+                "added": [pk(1)],
+                "updated": [pk(2)],
+                "already_member": [pk(3)],
+            }))),
+        );
+        report.record(&[pk(4), pk(5)], Err("relay error 403: denied".into()));
+        report.record(
+            &[pk(6), pk(7)],
+            Ok(ok_response(json!({
+                "added": [pk(6)],
+                "rejected": [{ "reason": "archived", "pubkeys": [pk(7)] }],
+            }))),
+        );
+        report.record(
+            &[pk(8)],
+            Ok(json!({ "event_id": "e", "accepted": true, "message": "" }).to_string()),
+        );
+        assert!(!report.is_ok());
+        assert_eq!(
+            report.to_json(),
+            json!({
+                "status": "partial",
+                "added": [pk(1), pk(6)],
+                "updated": [pk(2)],
+                "already_member": [pk(3)],
+                "accepted": [pk(8)],
+                "rejected": [{ "reason": "archived", "pubkeys": [pk(7)] }],
+                "failed": [{ "error": "relay error 403: denied", "pubkeys": [pk(4), pk(5)] }],
+            })
+        );
+    }
+
+    #[test]
+    fn all_chunks_applied_is_ok() {
+        let mut report = AddMembersReport::default();
+        report.record(
+            &[pk(1), pk(2)],
+            Ok(ok_response(json!({ "added": [pk(1), pk(2)] }))),
+        );
+        assert!(report.is_ok());
+        assert_eq!(report.to_json()["status"], "ok");
     }
 }
