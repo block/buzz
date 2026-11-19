@@ -5,6 +5,8 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_sections/channel_sections_provider.dart';
+import 'package:buzz/features/channels/channel_sections/workspace_layout.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/me/me_page.dart';
@@ -28,6 +30,22 @@ import 'package:shared_preferences/shared_preferences.dart';
 class _EmptyChannels extends ChannelsNotifier {
   @override
   Future<List<Channel>> build() async => [];
+}
+
+class _Sections extends ChannelSectionsNotifier {
+  @override
+  ChannelSectionsState build() => const ChannelSectionsState(isReady: true);
+
+  void lock() => state = ChannelSectionsState(
+    isReady: true,
+    workspace: WorkspaceRecord.fromJson({
+      'version': 1,
+      'sections': <Object>[],
+      'assignments': <String, Object>{},
+      'sectionOrder': <String>[],
+    }),
+    version: 2,
+  );
 }
 
 class _Relay extends RelaySessionNotifier {
@@ -184,6 +202,7 @@ void main() {
             ),
         ]);
         var agentAdded = false;
+        final sections = _Sections();
         final bridgeCalls = <MethodCall>[];
         tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(bridge, (
           call,
@@ -209,9 +228,17 @@ void main() {
               customEmojiListProvider.overrideWithValue([]),
               meSyncProvider.overrideWithValue(sync),
               relaySessionProvider.overrideWith(() => relay),
+              // The relay's Solo record no longer holds this project.
               meGroupsProvider.overrideWith(
-                (ref) => Stream.value(const MeGroups()),
+                (ref) => Stream.value(
+                  const MeGroups(
+                    groups: [
+                      {'id': 'gone', 'name': 'Gone', 'defaultTemplateId': ''},
+                    ],
+                  ),
+                ),
               ),
+              channelSectionsProvider.overrideWith(() => sections),
               meAssistantsProvider.overrideWith((ref) => directory.future),
               channelsProvider.overrideWith(_EmptyChannels.new),
               channelMembersProvider(channelId).overrideWith(
@@ -267,6 +294,18 @@ void main() {
           );
           await tester.tap(find.text('Retry'));
         } else {
+          // A project picked before desktop's unified record arrives is
+          // dropped, not checked against a Solo record desktop now owns.
+          tester
+              .widget<FrostedAppBar>(find.byType(FrostedAppBar).last)
+              .nativeActions!
+              .first
+              .children
+              .firstWhere((action) => action.label == 'Gone')
+              .onPressed!();
+          await tester.pumpAndSettle();
+          sections.lock();
+          await tester.pumpAndSettle();
           final composer = tester.widget<ComposeBar>(find.byType(ComposeBar));
           unawaited(
             composer.onSend('Mobile Solo', const []).catchError((_) {}),
@@ -375,6 +414,7 @@ void main() {
         } else {
           final pending = MeChatCreation.pending(sync)!;
           expect(pending.name, 'Mobile Solo');
+          expect(pending.project, 'gone');
           expect(pending.initialMessage?.content, 'Mobile Solo');
           expect(pending.initialMessage?.pubkey, owner.public);
           expect(

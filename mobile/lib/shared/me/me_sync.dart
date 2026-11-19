@@ -414,37 +414,50 @@ class MeSync {
     try {
       MeGroups? recovered;
       String? recoveredHead;
+      var unfiled = false;
       final pending = prefs?.getString(pendingKey);
       if (pending != null) {
         final stored = jsonDecode(pending) as Map<String, dynamic>;
         final event = NostrEvent.fromJson(
           (stored['event'] as Map<String, dynamic>?) ?? stored,
         );
-        final local = decode(event);
+        final baseEvent = stored['base'] as Map<String, dynamic>?;
+        final base = baseEvent == null
+            ? const MeGroups()
+            : decode(NostrEvent.fromJson(baseEvent));
+        var local = decode(event);
         final remote = await head();
-        if (remote != null &&
-            remote.id != event.id &&
-            meEventIsNewer(remote, event)) {
+        // A filing journaled before the lock can never be sent. Keep the
+        // chats it registered and rebase them like a superseded save, so the
+        // caller's own change can still go through.
+        unfiled =
+            mayFile?.call() == false &&
+            remote?.id != event.id &&
+            _filingsDiffer(base, local);
+        if (unfiled) {
+          local = MeGroups(
+            groups: base.groups,
+            assignments: base.assignments,
+            channels: local.channels,
+          );
+        }
+        if (unfiled ||
+            (remote != null &&
+                remote.id != event.id &&
+                meEventIsNewer(remote, event))) {
           if (!stored.containsKey('event')) {
             // Older clients did not persist a base, so a safe rebase is unknown.
             throw MeRecoveryConflict();
           }
-          recoveredHead = remote.id;
-          final baseEvent = stored['base'] as Map<String, dynamic>?;
+          recoveredHead = remote?.id;
           recovered = rebaseMeGroups(
-            baseEvent == null
-                ? const MeGroups()
-                : decode(NostrEvent.fromJson(baseEvent)),
+            base,
             local,
-            decode(remote),
+            remote == null ? const MeGroups() : decode(remote),
           );
         } else {
           if (remote?.id != event.id) {
             check();
-            final baseEvent = stored['base'] as Map<String, dynamic>?;
-            final base = baseEvent == null
-                ? const MeGroups()
-                : decode(NostrEvent.fromJson(baseEvent));
             await _publishUnlessRefused(
               event,
               pending,
@@ -470,7 +483,11 @@ class MeSync {
         );
       }
       final baseGroups = before == null ? const MeGroups() : decode(before);
-      final value = recovered ?? change(baseGroups);
+      final value = recovered == null
+          ? change(baseGroups)
+          : unfiled
+          ? change(recovered)
+          : recovered;
       bool refused() =>
           mayFile?.call() == false && _filingsDiffer(baseGroups, value);
       if (refused()) throw const MeFilingClosed();
@@ -520,7 +537,7 @@ class MeSync {
         );
       }
       await _clearConfirmedPending(pendingRecord);
-      if (recovered != null) {
+      if (recovered != null && !unfiled) {
         throw StateError(
           'Your previous Solo save was recovered alongside the desktop changes. Review your projects before making another change.',
         );

@@ -146,7 +146,7 @@ Future<Channel> _createMeChat(
   }
   final head = preflight[1] as NostrEvent?;
   (head == null ? const MeGroups() : sync.decode(head))
-      .place(channelId, group: project)
+      .place(channelId, group: filing())
       .encode(sync.community);
   return intent.complete<Channel>(
     sync,
