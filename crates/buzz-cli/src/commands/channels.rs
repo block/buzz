@@ -1819,6 +1819,8 @@ pub async fn cmd_add_channel_member(
     pubkeys_file: Option<&str>,
     role: Option<&str>,
 ) -> Result<(), CliError> {
+    // A lone `--pubkey` keeps the single-add output and errors unchanged.
+    let single_add = pubkeys.len() == 1 && pubkeys_file.is_none();
     let file_text = pubkeys_file.map(read_file_or_stdin).transpose()?;
     let pubkeys = collect_member_pubkeys(pubkeys, file_text.as_deref())?;
     let channel_uuid = parse_uuid(channel_id)?;
@@ -1836,8 +1838,7 @@ pub async fn cmd_add_channel_member(
             )))
         }
     };
-    // A lone `--pubkey` keeps the single-add output and errors unchanged.
-    if let ([pubkey], None) = (pubkeys.as_slice(), pubkeys_file) {
+    if let (true, [pubkey]) = (single_add, pubkeys.as_slice()) {
         let resp = send_add_members(
             client,
             channel_uuid,
@@ -5392,6 +5393,21 @@ mod add_members_tests {
             "326d56bc-c96c-4af0-86a1-5e804cd1b467",
             &[],
             Some(path.to_str().unwrap()),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("some people were not added"),
+            "{err}"
+        );
+
+        // Two identical `--pubkey` flags also get the bulk report.
+        let err = cmd_add_channel_member(
+            &client,
+            "326d56bc-c96c-4af0-86a1-5e804cd1b467",
+            &[pk(1), pk(1)],
+            None,
             None,
         )
         .await
