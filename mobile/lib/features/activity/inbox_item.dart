@@ -134,7 +134,10 @@ class InboxItem {
     );
   }
 
-  final category = item.categories.firstOrNull ?? item.item.category;
+  // Label the event the row displays. A group can hold an older mention and
+  // a newer plain reply; the row shows the reply, so it must not say
+  // "Mentioned in". [InboxItem.categories] still drives filtering.
+  final category = item.item.category;
   if (category == 'mention') {
     return (
       text: channelName != null ? 'Mentioned in' : 'Mentioned',

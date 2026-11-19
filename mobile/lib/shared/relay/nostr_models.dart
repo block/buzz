@@ -305,6 +305,11 @@ class ChannelData {
   /// listings and does not hold its name in the listed-name rule.
   final bool isUnlisted;
 
+  /// Whether a self-join gives the `guest` role, which cannot post. Read from
+  /// the relay's `["join_role", ...]` tag. A missing tag (an older relay)
+  /// means member; anything but a single `member` value fails closed to guest.
+  final bool joinsAsGuest;
+
   const ChannelData({
     required this.id,
     required this.name,
@@ -319,6 +324,7 @@ class ChannelData {
     this.ttlDeadline,
     this.isArchived = false,
     this.isUnlisted = false,
+    this.joinsAsGuest = false,
   });
 
   factory ChannelData.fromEvent(NostrEvent event) {
@@ -356,6 +362,15 @@ class ChannelData {
     // archived — anything else (missing tag, "false", unexpected value) means
     // active.
     final isArchived = event.getTagValue('archived') == 'true';
+    final joinRoles = [
+      for (final t in event.tags)
+        if (t.isNotEmpty && t[0] == 'join_role') t,
+    ];
+    final joinsAsGuest =
+        joinRoles.isNotEmpty &&
+        !(joinRoles.length == 1 &&
+            joinRoles.single.length == 2 &&
+            joinRoles.single[1] == 'member');
     return ChannelData(
       id: id,
       name: name,
@@ -374,6 +389,7 @@ class ChannelData {
       ttlDeadline: ttlDeadline,
       isArchived: isArchived,
       isUnlisted: event.tags.any((t) => t.isNotEmpty && t[0] == 'unlisted'),
+      joinsAsGuest: joinsAsGuest,
     );
   }
 }

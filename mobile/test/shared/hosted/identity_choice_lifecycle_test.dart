@@ -97,6 +97,8 @@ void main() {
       final choosing = flow.chooseIdentity(second.public);
       expect(flow.identityChoices, isEmpty);
       await choosing;
+      expect(flow.stage, HostedFlowStage.confirmBackup);
+      await flow.confirmBackup!();
       expect(flow.problem, HostedFlowProblem.denied);
       final completedCalls = List.of(account.calls);
       await flow.chooseIdentity(first.public);

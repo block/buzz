@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
+import 'package:buzz/shared/http/app_http_client.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:crypto/crypto.dart' as crypto;
@@ -285,7 +286,7 @@ class MediaUploadService {
        _generateVideoPoster = generateVideoPoster ?? _generatePickedVideoPoster,
        _readClipboardImage = readClipboardImage ?? _readPlatformClipboardImage,
        _now = now ?? DateTime.now,
-       _http = httpClient ?? http.Client(),
+       _http = httpClient ?? newAppHttpClient(HttpTraffic.media),
        _ownsHttpClient = httpClient == null;
 
   void dispose() {
@@ -331,6 +332,15 @@ class MediaUploadService {
     final bytes = await _readClipboardImage();
     if (bytes == null || bytes.isEmpty) return null;
     return XFile.fromData(bytes, name: 'Pasted image');
+  }
+
+  /// Extracts a local poster without starting playback or uploading the video.
+  Future<Uint8List?> prepareVideoPoster(String path) async {
+    try {
+      return await _generateVideoPoster(path);
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Opens the system gallery video picker.
@@ -703,7 +713,7 @@ class MediaUploadService {
   _PreparedUploadImage _buildPreparedUploadImage(Uint8List bytes) {
     return _PreparedUploadImage(
       bytes: bytes,
-      mimeType: _detectImageMimeType(bytes),
+      mimeType: detectImageMimeType(bytes),
     );
   }
 
@@ -794,13 +804,14 @@ String _sha256Hex(Uint8List bytes) => crypto.sha256.convert(bytes).toString();
 
 String? _tryDetectImageMimeType(Uint8List bytes) {
   try {
-    return _detectImageMimeType(bytes);
+    return detectImageMimeType(bytes);
   } on Exception {
     return null;
   }
 }
 
-String _detectImageMimeType(Uint8List bytes) {
+/// Returns the image MIME type of [bytes] from their signature.
+String detectImageMimeType(Uint8List bytes) {
   if (_startsWith(bytes, const [0xff, 0xd8, 0xff])) {
     return 'image/jpeg';
   }

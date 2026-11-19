@@ -1,10 +1,9 @@
 part of '../channels_page.dart';
 
-const _sectionMenuItemPadding = EdgeInsets.fromLTRB(Grid.xs, 0, Grid.twelve, 0);
-
 class _CustomChannelSection extends StatelessWidget {
   final ChannelSection section;
   final List<Channel> channels;
+  final bool Function(Channel) isVisible;
   final Set<String> unreadChannelIds;
   final Set<String> attentionChannelIds;
   final Set<String> mutedChannelIds;
@@ -20,11 +19,12 @@ class _CustomChannelSection extends StatelessWidget {
   final ChannelSortMode sortMode;
   final ValueChanged<ChannelSortMode> onSortModeChange;
   final Future<void> Function(Channel channel) onSelectChannel;
-  final void Function(Channel channel) onMarkChannelRead;
 
   const _CustomChannelSection({
+    super.key,
     required this.section,
     required this.channels,
+    required this.isVisible,
     required this.unreadChannelIds,
     required this.attentionChannelIds,
     required this.mutedChannelIds,
@@ -40,15 +40,13 @@ class _CustomChannelSection extends StatelessWidget {
     required this.sortMode,
     required this.onSortModeChange,
     required this.onSelectChannel,
-    required this.onMarkChannelRead,
   });
 
   @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _CustomSectionHeader(
+  Widget build(BuildContext context) => SliverMainAxisGroup(
+    slivers: [
+      SliverToBoxAdapter(
+        child: _CustomSectionHeader(
           section: section,
           expanded: expanded,
           isFirst: isFirst,
@@ -61,28 +59,24 @@ class _CustomChannelSection extends StatelessWidget {
           sortMode: sortMode,
           onSortModeChange: onSortModeChange,
         ),
-        CollapsibleSectionBody(
-          expanded: expanded,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              for (final channel in channels)
-                _ChannelTile(
-                  channel: channel,
-                  isUnread: unreadChannelIds.contains(channel.id),
-                  hasAttention: attentionChannelIds.contains(channel.id),
-                  isMuted: mutedChannelIds.contains(channel.id),
-                  currentPubkey: currentPubkey,
-                  onTap: () => onSelectChannel(channel),
-                  onMarkRead: () => onMarkChannelRead(channel),
-                  sectionId: section.id,
-                ),
-            ],
-          ),
+      ),
+      _SectionChannelsBody(
+        expanded: expanded,
+        channels: channels,
+        isVisible: isVisible,
+        buildRow: (channel) => _ChannelTile(
+          key: ValueKey(channel.id),
+          channel: channel,
+          isUnread: unreadChannelIds.contains(channel.id),
+          hasAttention: attentionChannelIds.contains(channel.id),
+          isMuted: mutedChannelIds.contains(channel.id),
+          currentPubkey: currentPubkey,
+          onTap: () => onSelectChannel(channel),
+          sectionId: section.id,
         ),
-      ],
-    );
-  }
+      ),
+    ],
+  );
 }
 
 class _CustomSectionHeader extends StatelessWidget {
@@ -114,6 +108,30 @@ class _CustomSectionHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    Future<void> openOptions(BuildContext buttonContext) async {
+      final action = await _showSectionViewSheet(
+        buttonContext,
+        title: section.name,
+        group: sectionSortGroupKey(section.id),
+        sortMode: sortMode,
+        onSort: onSortModeChange,
+        custom: true,
+        isFirst: isFirst,
+        isLast: isLast,
+      );
+      if (!buttonContext.mounted) return;
+      switch (action) {
+        case 'rename':
+          onRename();
+        case 'move_up':
+          onMoveUp();
+        case 'move_down':
+          onMoveDown();
+        case 'delete':
+          onDelete();
+      }
+    }
+
     final sectionColor = navigationHeadingForeground(context);
     return GestureDetector(
       onTap: onToggle,
@@ -134,110 +152,74 @@ class _CustomSectionHeader extends StatelessWidget {
                 color: sectionColor,
               ),
             ),
-            Builder(
-              builder: (buttonContext) => _SectionOptionsButton(
+            if (_usesNativeSectionMenu(context))
+              IosMessageCreateButton(
                 key: ValueKey('section-menu-${section.id}'),
-                tooltip: '${section.name} options',
-                icon: Icon(
-                  BuzzIcons.ellipsis,
-                  size: 14,
-                  color: navigationAccessoryForeground(context),
+                icon: 'more',
+                trailingIconSlotWidth: _kChannelIconSize,
+                accessibilityLabel: '${section.name} options',
+                width: 44,
+                height: 44,
+                plain: true,
+                iconSize: 14,
+                foregroundColor: navigationAccessoryForeground(context),
+                selectedIndex: sortMode == ChannelSortMode.recent ? 3 : 4,
+                dividerBefore: const {3, 6},
+                destructiveIndices: const {6},
+                actions: [
+                  (
+                    label: 'Rename section',
+                    symbol: 'pencil',
+                    onPressed: onRename,
+                  ),
+                  (
+                    label: 'Move up',
+                    symbol: 'arrow.up',
+                    onPressed: isFirst ? null : onMoveUp,
+                  ),
+                  (
+                    label: 'Move down',
+                    symbol: 'arrow.down',
+                    onPressed: isLast ? null : onMoveDown,
+                  ),
+                  (
+                    label: 'Sort: Recent',
+                    symbol: '',
+                    onPressed: () => onSortModeChange(ChannelSortMode.recent),
+                  ),
+                  (
+                    label: 'Sort: A–Z',
+                    symbol: '',
+                    onPressed: () => onSortModeChange(ChannelSortMode.alpha),
+                  ),
+                  (
+                    label: 'Filter…',
+                    symbol: 'line.3.horizontal.decrease',
+                    onPressed: () => openOptions(context),
+                  ),
+                  (
+                    label: 'Delete section',
+                    symbol: 'trash',
+                    onPressed: onDelete,
+                  ),
+                ],
+              )
+            else
+              Builder(
+                builder: (buttonContext) => _SectionOptionsButton(
+                  key: ValueKey('section-menu-${section.id}'),
+                  tooltip: '${section.name} options',
+                  icon: Icon(
+                    BuzzIcons.ellipsis,
+                    size: 14,
+                    color: navigationAccessoryForeground(context),
+                  ),
+                  onPressed: () => openOptions(buttonContext),
                 ),
-                onPressed: () async {
-                  final value = await showAnchoredPopover<String>(
-                    context: buttonContext,
-                    width: 216,
-                    alignment: AnchoredPopoverAlignment.end,
-                    surfaceKey: ValueKey('section-popover-${section.id}'),
-                    items: [
-                      const PopupMenuItem(
-                        value: 'rename',
-                        padding: _sectionMenuItemPadding,
-                        child: _SectionMenuItemContent(
-                          icon: BuzzIcons.pencil,
-                          label: 'Rename section',
-                        ),
-                      ),
-                      PopupMenuItem(
-                        value: 'move_up',
-                        enabled: !isFirst,
-                        padding: _sectionMenuItemPadding,
-                        child: const _SectionMenuItemContent(
-                          icon: BuzzIcons.arrowUp,
-                          label: 'Move up',
-                        ),
-                      ),
-                      PopupMenuItem(
-                        value: 'move_down',
-                        enabled: !isLast,
-                        padding: _sectionMenuItemPadding,
-                        child: const _SectionMenuItemContent(
-                          icon: BuzzIcons.arrowDown,
-                          label: 'Move down',
-                        ),
-                      ),
-                      ..._sortMenuItems(sortMode),
-                      PopupMenuItem(
-                        value: 'delete',
-                        padding: _sectionMenuItemPadding,
-                        child: _SectionMenuItemContent(
-                          icon: BuzzIcons.trash2,
-                          label: 'Delete section',
-                          color: context.colors.error,
-                        ),
-                      ),
-                    ],
-                  );
-                  switch (value) {
-                    case 'rename':
-                      onRename();
-                    case 'move_up':
-                      onMoveUp();
-                    case 'move_down':
-                      onMoveDown();
-                    case _kSortRecentMenuValue:
-                      onSortModeChange(ChannelSortMode.recent);
-                    case _kSortAlphaMenuValue:
-                      onSortModeChange(ChannelSortMode.alpha);
-                    case 'delete':
-                      onDelete();
-                  }
-                },
               ),
-            ),
           ],
         ),
       ),
-    );
-  }
-}
-
-class _SectionMenuItemContent extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final Color? color;
-
-  const _SectionMenuItemContent({
-    required this.icon,
-    required this.label,
-    this.color,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Icon(icon, size: 16, color: color),
-        const SizedBox(width: Grid.xxs),
-        Flexible(
-          child: Text(
-            label,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: color == null ? null : TextStyle(color: color),
-          ),
-        ),
-      ],
     );
   }
 }
@@ -281,48 +263,12 @@ class _SectionNameDialog extends HookWidget {
   }
 }
 
-const _kSortRecentMenuValue = 'sort_recent';
-const _kSortAlphaMenuValue = 'sort_alpha';
-
-PopupMenuItem<String> _sortMenuItem({
-  required String value,
-  required String label,
-  required bool selected,
-}) => PopupMenuItem(
-  value: value,
-  child: Row(
-    children: [
-      Expanded(child: Text(label)),
-      if (selected)
-        const Icon(BuzzIcons.check, key: ValueKey('sort-selected-check'))
-      else
-        const SizedBox(width: 24),
-    ],
-  ),
-);
-
-List<PopupMenuEntry<String>> _sortMenuItems(
-  ChannelSortMode current, {
-  bool showDivider = true,
-}) => [
-  if (showDivider) const PopupMenuDivider(),
-  _sortMenuItem(
-    value: _kSortRecentMenuValue,
-    label: 'Sort: Recent',
-    selected: current == ChannelSortMode.recent,
-  ),
-  _sortMenuItem(
-    value: _kSortAlphaMenuValue,
-    label: 'Sort: A–Z',
-    selected: current == ChannelSortMode.alpha,
-  ),
-];
-
 class _ChannelSection extends StatelessWidget {
   final String title;
   final bool expanded;
   final VoidCallback onToggle;
   final List<Channel> channels;
+  final bool Function(Channel) isVisible;
   final Set<String> unreadChannelIds;
   final Set<String> attentionChannelIds;
   final Set<String> mutedChannelIds;
@@ -333,10 +279,12 @@ class _ChannelSection extends StatelessWidget {
   final Future<void> Function(Channel channel) onSelectChannel;
 
   const _ChannelSection({
+    super.key,
     required this.title,
     required this.expanded,
     required this.onToggle,
     required this.channels,
+    required this.isVisible,
     required this.unreadChannelIds,
     required this.attentionChannelIds,
     required this.mutedChannelIds,
@@ -348,58 +296,118 @@ class _ChannelSection extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _SectionHeader(
+  Widget build(BuildContext context) => SliverMainAxisGroup(
+    slivers: [
+      SliverToBoxAdapter(
+        child: _SectionHeader(
           label: title,
           expanded: expanded,
           onToggle: onToggle,
           sortMode: sortMode,
           onSortModeChange: onSortModeChange,
         ),
-        CollapsibleSectionBody(
-          expanded: expanded,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (channels.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(
-                    left: _kChannelLabelInset,
-                    right: _kChannelSectionInset,
-                    top: Grid.half,
-                    bottom: Grid.half,
+      ),
+      _SectionChannelsBody(
+        expanded: expanded,
+        channels: channels,
+        isVisible: isVisible,
+        emptySliver: SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.only(
+              left: _kChannelLabelInset,
+              right: _kChannelSectionInset,
+              top: Grid.half,
+              bottom: Grid.half,
+            ),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                emptyLabel,
+                style: contentListBodyTextStyle.copyWith(
+                  color: context.colors.onSurfaceVariant.withValues(
+                    alpha: 0.65,
                   ),
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text(
-                      emptyLabel,
-                      style: contentListBodyTextStyle.copyWith(
-                        color: context.colors.onSurfaceVariant.withValues(
-                          alpha: 0.65,
-                        ),
-                      ),
-                    ),
-                  ),
-                )
-              else
-                for (final channel in channels)
-                  _ChannelTile(
-                    channel: channel,
-                    isUnread: unreadChannelIds.contains(channel.id),
-                    hasAttention: attentionChannelIds.contains(channel.id),
-                    isMuted: mutedChannelIds.contains(channel.id),
-                    currentPubkey: currentPubkey,
-                    onTap: () => onSelectChannel(channel),
-                    onMarkRead: null,
-                    sectionId: null,
-                  ),
-            ],
+                ),
+              ),
+            ),
           ),
         ),
-      ],
+        buildRow: (channel) => _ChannelTile(
+          key: ValueKey(channel.id),
+          channel: channel,
+          isUnread: unreadChannelIds.contains(channel.id),
+          hasAttention: attentionChannelIds.contains(channel.id),
+          isMuted: mutedChannelIds.contains(channel.id),
+          currentPubkey: currentPubkey,
+          onTap: () => onSelectChannel(channel),
+          sectionId: null,
+        ),
+      ),
+    ],
+  );
+}
+
+class _SectionChannelsBody extends HookWidget {
+  const _SectionChannelsBody({
+    required this.expanded,
+    required this.channels,
+    required this.isVisible,
+    required this.buildRow,
+    this.emptySliver,
+  });
+
+  final bool expanded;
+  final List<Channel> channels;
+  final bool Function(Channel) isVisible;
+  final Widget Function(Channel) buildRow;
+  final Widget? emptySliver;
+
+  @override
+  Widget build(BuildContext context) {
+    final visibleChannels = <Channel>[];
+    final hiddenIds = <String>[];
+    for (final channel in channels) {
+      if (isVisible(channel)) {
+        visibleChannels.add(channel);
+      } else {
+        hiddenIds.add(channel.id);
+      }
+    }
+    final hiddenCount = hiddenIds.length;
+    final reveal = useState(false);
+    useEffect(() {
+      reveal.value = false;
+      return null;
+    }, [hiddenIds.join(',')]);
+    final displayed = reveal.value ? channels : visibleChannels;
+
+    return CollapsibleSliverBody(
+      expanded: expanded,
+      sliver: channels.isEmpty && emptySliver != null
+          ? emptySliver!
+          : SliverList.builder(
+              itemCount: displayed.length + (hiddenCount == 0 ? 0 : 1),
+              findChildIndexCallback: (key) {
+                final index = displayed.indexWhere(
+                  (c) => ValueKey(c.id) == key,
+                );
+                return index < 0 ? null : index;
+              },
+              itemBuilder: (context, index) {
+                if (index < displayed.length) return buildRow(displayed[index]);
+                return Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton(
+                    onPressed: () => reveal.value = !reveal.value,
+                    child: Text(
+                      reveal.value
+                          ? 'Hide filtered channels'
+                          : 'Show hidden channels · $hiddenCount',
+                    ),
+                  ),
+                );
+              },
+            ),
     );
   }
 }
@@ -451,6 +459,16 @@ class _SectionHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    void openOptions(BuildContext buttonContext, ChannelSortMode mode) {
+      _showSectionViewSheet(
+        buttonContext,
+        title: label,
+        group: label.toLowerCase(),
+        sortMode: mode,
+        onSort: (value) => onSortModeChange?.call(value),
+      );
+    }
+
     final sectionColor = navigationHeadingForeground(context);
 
     return GestureDetector(
@@ -473,31 +491,51 @@ class _SectionHeader extends StatelessWidget {
               ),
             ),
             if (sortMode case final mode?) ...[
-              Builder(
-                builder: (buttonContext) => _SectionOptionsButton(
+              if (_usesNativeSectionMenu(context))
+                IosMessageCreateButton(
                   key: ValueKey('sort-menu-$label'),
-                  tooltip: '$label options',
-                  icon: Icon(
-                    BuzzIcons.ellipsis,
-                    size: 14,
-                    color: navigationAccessoryForeground(context),
+                  icon: 'more',
+                  trailingIconSlotWidth: _kChannelIconSize,
+                  accessibilityLabel: '$label options',
+                  width: 44,
+                  height: 44,
+                  plain: true,
+                  iconSize: 14,
+                  foregroundColor: navigationAccessoryForeground(context),
+                  selectedIndex: mode == ChannelSortMode.recent ? 0 : 1,
+                  actions: [
+                    (
+                      label: 'Sort: Recent',
+                      symbol: '',
+                      onPressed: () =>
+                          onSortModeChange?.call(ChannelSortMode.recent),
+                    ),
+                    (
+                      label: 'Sort: A–Z',
+                      symbol: '',
+                      onPressed: () =>
+                          onSortModeChange?.call(ChannelSortMode.alpha),
+                    ),
+                    (
+                      label: 'Filter…',
+                      symbol: 'line.3.horizontal.decrease',
+                      onPressed: () => openOptions(context, mode),
+                    ),
+                  ],
+                )
+              else
+                Builder(
+                  builder: (buttonContext) => _SectionOptionsButton(
+                    key: ValueKey('sort-menu-$label'),
+                    tooltip: '$label options',
+                    icon: Icon(
+                      BuzzIcons.ellipsis,
+                      size: 14,
+                      color: navigationAccessoryForeground(context),
+                    ),
+                    onPressed: () => openOptions(buttonContext, mode),
                   ),
-                  onPressed: () async {
-                    final value = await showAnchoredPopover<String>(
-                      context: buttonContext,
-                      width: 216,
-                      alignment: AnchoredPopoverAlignment.end,
-                      surfaceKey: ValueKey('sort-popover-$label'),
-                      items: _sortMenuItems(mode, showDivider: false),
-                    );
-                    if (value == _kSortRecentMenuValue) {
-                      onSortModeChange?.call(ChannelSortMode.recent);
-                    } else if (value == _kSortAlphaMenuValue) {
-                      onSortModeChange?.call(ChannelSortMode.alpha);
-                    }
-                  },
                 ),
-              ),
             ],
           ],
         ),
@@ -561,6 +599,11 @@ class _SectionChevron extends StatelessWidget {
     );
   }
 }
+
+bool _usesNativeSectionMenu(BuildContext context) =>
+    defaultTargetPlatform == TargetPlatform.iOS &&
+    (DuoToolbarScope.maybeStripOf(context) ?? FoldGeometry.of(context).strip) !=
+        null;
 
 class _SectionOptionsButton extends StatelessWidget {
   const _SectionOptionsButton({

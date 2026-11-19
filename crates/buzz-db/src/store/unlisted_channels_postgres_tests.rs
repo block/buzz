@@ -79,6 +79,7 @@ impl Fixture {
                     unlisted: Some(unlisted),
                     ..Default::default()
                 },
+                &self.owner.public_key().to_bytes(),
             )
             .await
             .expect("set unlisted")
@@ -311,6 +312,7 @@ async fn unlisted_private_channel_stays_private_and_opens_unlisted() {
                 visibility: Some("open".into()),
                 ..Default::default()
             },
+            &f.owner.public_key().to_bytes(),
         )
         .await
         .expect("open the channel");

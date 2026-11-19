@@ -101,11 +101,13 @@ class _RecentPhotoGalleryPicker extends HookConsumerWidget {
     });
 
     final selectedCount = selection.value.length;
+    final hasVideos = selection.value.any((photo) => photo.isVideo);
+    final selectionNoun = hasVideos ? 'item' : 'photo';
     final actionLabel = selectedCount == 0
         ? 'All photos'
         : selectedCount == 1
-        ? 'Add 1 photo'
-        : 'Add $selectedCount photos';
+        ? 'Add 1 $selectionNoun'
+        : 'Add $selectedCount ${selectionNoun}s';
 
     Widget buildGalleryBody() {
       if (recentSnapshot.connectionState != ConnectionState.done) {
@@ -293,12 +295,13 @@ class _RecentPhotoTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isSelected = selectionIndex >= 0;
+    final mediaName = photo.isVideo ? 'Video' : 'Photo';
     return Semantics(
       button: true,
       selected: isSelected,
       label: isSelected
-          ? 'Photo ${selectionIndex + 1} selected'
-          : 'Select photo',
+          ? '$mediaName ${selectionIndex + 1} selected'
+          : 'Select ${mediaName.toLowerCase()}',
       child: GestureDetector(
         key: ValueKey('recent-photo-${photo.id}'),
         behavior: HitTestBehavior.opaque,
@@ -314,6 +317,12 @@ class _RecentPhotoTile extends StatelessWidget {
                 gaplessPlayback: true,
               ),
             ),
+            if (photo.isVideo)
+              const Positioned(
+                left: Grid.half,
+                bottom: Grid.half,
+                child: Icon(BuzzIcons.video, color: Colors.white, size: 20),
+              ),
             AnimatedContainer(
               duration: reducedMotion
                   ? Duration.zero

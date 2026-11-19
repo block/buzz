@@ -1,7 +1,7 @@
 part of '../message_content.dart';
 
 class _MessageGalleryPrecache extends HookWidget {
-  final List<ImageProvider<Object>> providers;
+  final List<ImageProvider<Object>?> providers;
   final int focusedIndex;
 
   const _MessageGalleryPrecache({
@@ -27,7 +27,8 @@ class _MessageGalleryPrecache extends HookWidget {
         ];
         prefetch.update(context, [
           for (final i in indices)
-            if (i >= 0 && i < providers.length) providers[i],
+            if (i >= 0 && i < providers.length && providers[i] != null)
+              providers[i]!,
         ]);
       });
       return () => cancelled = true;

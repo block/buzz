@@ -189,12 +189,39 @@ fn filter_match_one(f: &Filter, ev: &StoredEvent) -> bool {
     true
 }
 
+/// Resolves a requested result limit: `default` when absent, otherwise the
+/// request saturated to `max`. `Some(0)` stays `0` (NIP-01 "no results").
+///
+/// Saturates before narrowing, so a huge `usize` limit cannot wrap to `0`
+/// through `as u32` or turn negative through `as i64`.
+pub fn clamp_limit(limit: Option<usize>, default: u32, max: u32) -> u32 {
+    limit.map_or(default, |l| u32::try_from(l).unwrap_or(u32::MAX).min(max))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_helpers::{make_event_with_keys, make_stored_event};
     use chrono::Utc;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+    #[test]
+    fn clamp_limit_table() {
+        let cases: &[(Option<usize>, u32, u32, u32)] = &[
+            (None, 20, 100, 20),
+            (Some(0), 20, 100, 0),
+            (Some(7), 20, 100, 7),
+            (Some(100), 20, 100, 100),
+            (Some(101), 20, 100, 100),
+            (Some(u32::MAX as usize), 20, 100, 100),
+            (Some(u32::MAX as usize + 1), 20, 100, 100),
+            (Some(usize::MAX), 20, 100, 100),
+            (Some(usize::MAX), 1000, u32::MAX, u32::MAX),
+        ];
+        for &(limit, default, max, want) in cases {
+            assert_eq!(clamp_limit(limit, default, max), want, "{limit:?}");
+        }
+    }
 
     fn stored_with_tag(tag: Tag) -> StoredEvent {
         let keys = Keys::generate();

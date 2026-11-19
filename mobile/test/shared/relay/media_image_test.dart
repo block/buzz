@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:async';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:buzz/shared/relay/media_auth.dart';
 import 'package:buzz/shared/relay/media_image.dart';
@@ -21,6 +22,19 @@ final _pngBytes = base64Decode(
 const _relayBase = 'https://relay.example.com';
 const _mediaUrl = '$_relayBase/media/abc123.png';
 
+// A 1x1 GIF with one frame per delay, in centiseconds.
+Uint8List _gif(List<int> delays) => Uint8List.fromList([
+  ...ascii.encode('GIF89a'),
+  1, 0, 1, 0, 0x80, 0, 0, // 1x1, two-colour global table
+  0, 0, 0, 0xff, 0xff, 0xff,
+  for (final delay in delays) ...[
+    0x21, 0xf9, 4, 0, delay & 0xff, delay >> 8, 0, 0, // frame delay
+    0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0, // 1x1 image
+    2, 2, 0x44, 1, 0, // one pixel
+  ],
+  0x3b,
+]);
+
 MediaGetAuthService _auth({String? nsec, DateTime Function()? now}) =>
     MediaGetAuthService(baseUrl: _relayBase, nsec: nsec, now: now);
 
@@ -32,6 +46,77 @@ void main() {
     MediaImageProvider.debugNow = DateTime.now;
     PaintingBinding.instance.imageCache.clear();
     PaintingBinding.instance.imageCache.clearLiveImages();
+  });
+
+  group('withBrowserFrameTiming', () {
+    Future<List<Duration>> durations(Uint8List bytes) async {
+      final codec = withBrowserFrameTiming(
+        await ui.instantiateImageCodec(bytes),
+      );
+      final result = <Duration>[];
+      for (var i = 0; i < codec.frameCount; i++) {
+        final frame = await codec.getNextFrame();
+        result.add(frame.duration);
+        frame.image.dispose();
+      }
+      codec.dispose();
+      return result;
+    }
+
+    test('shows frames of 10 ms or less for 100 ms, like browsers', () async {
+      expect(await durations(_gif([0, 1, 2, 5])), const [
+        Duration(milliseconds: 100),
+        Duration(milliseconds: 100),
+        Duration(milliseconds: 20),
+        Duration(milliseconds: 50),
+      ]);
+    });
+
+    test('leaves a still image alone', () async {
+      final codec = await ui.instantiateImageCodec(_pngBytes);
+      expect(withBrowserFrameTiming(codec), same(codec));
+      codec.dispose();
+    });
+
+    test('is applied to the frames MediaImageProvider plays', () async {
+      final binding = TestWidgetsFlutterBinding.instance;
+      final client = http_testing.MockClient(
+        (_) async => http.Response.bytes(_gif([1, 5]), 200),
+      );
+      final stream = MediaImageProvider(
+        url: '$_relayBase/media/fast.gif',
+        auth: _auth(),
+        client: client,
+      ).resolve(ImageConfiguration.empty);
+      var frames = 0;
+      final listener = ImageStreamListener((image, _) {
+        image.dispose();
+        frames += 1;
+      });
+      stream.addListener(listener);
+      addTearDown(() => stream.removeListener(listener));
+
+      // The completer shows a frame on the app frame it scheduled, once the
+      // one it asks for has been on screen for that frame's duration.
+      Future<void> appFrame(Duration at) async {
+        final deadline = DateTime.now().add(const Duration(seconds: 10));
+        while (binding.transientCallbackCount == 0) {
+          if (DateTime.now().isAfter(deadline)) fail('no app frame scheduled');
+          await Future<void>.delayed(const Duration(milliseconds: 1));
+        }
+        binding.handleBeginFrame(at);
+        binding.handleDrawFrame();
+      }
+
+      const start = Duration(seconds: 1);
+      await appFrame(start);
+      expect(frames, 1);
+      // The first frame asks for 10 ms; it shows for 100 ms, not 50.
+      await appFrame(start + const Duration(milliseconds: 50));
+      expect(frames, 1);
+      await appFrame(start + const Duration(milliseconds: 100));
+      expect(frames, 2);
+    });
   });
 
   group('MediaGetAuthService mint-per-request', () {
@@ -198,6 +283,43 @@ void main() {
         }
       },
     );
+
+    test('reports only bytes that decoded to observers', () async {
+      final client = http_testing.MockClient((request) async {
+        if (request.url.path.endsWith('broken.png')) {
+          return http.Response('<html>error</html>', 200);
+        }
+        // Opens a codec, then fails its first frame.
+        if (request.url.path.endsWith('truncated.png')) {
+          return http.Response.bytes(_pngBytes.sublist(0, 41), 200);
+        }
+        return http.Response.bytes(_pngBytes, 200);
+      });
+      final delivered = <String>[];
+      MediaImageProvider provider(String url) => MediaImageProvider(
+        url: url,
+        auth: _auth(),
+        client: client,
+        onBytesLoaded: (_) => delivered.add(url),
+      );
+      for (final name in ['broken', 'truncated']) {
+        expect(
+          await _waitError(
+            provider(
+              'https://emoji.example/$name.png',
+            ).resolve(ImageConfiguration.empty),
+          ),
+          isNotNull,
+        );
+      }
+      await _wait(
+        provider(
+          'https://emoji.example/ok.png',
+        ).resolve(ImageConfiguration.empty),
+      );
+      expect(delivered, ['https://emoji.example/ok.png']);
+      PaintingBinding.instance.imageCache.clear();
+    });
 
     test('resolves one fetch for repeated resolves of the same key', () async {
       var fetches = 0;

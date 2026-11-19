@@ -1,4 +1,3 @@
-import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../../shared/relay/relay.dart';
@@ -67,8 +66,8 @@ class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
     _manager = manager;
 
     // Resume re-read catches an EVENT a healthy socket never delivered.
-    ref.listen(appLifecycleProvider, (_, next) {
-      if (next == AppLifecycleState.resumed) manager.refreshFromRelay();
+    ref.listen(appForegroundProvider, (_, foreground) {
+      if (foreground) manager.refreshFromRelay();
     });
 
     ref.onDispose(() {
@@ -97,7 +96,12 @@ class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
   void renameSection(String sectionId, String newName) =>
       _manager?.renameSection(sectionId, newName);
 
-  void deleteSection(String sectionId) => _manager?.deleteSection(sectionId);
+  void deleteSection(String sectionId) {
+    final manager = _manager;
+    if (manager == null) return;
+    manager.deleteSection(sectionId);
+    _emitManagerState(manager);
+  }
 
   void moveSectionUp(String sectionId) => _manager?.moveSectionUp(sectionId);
 

@@ -363,8 +363,12 @@ async fn channel_create_resend_requires_exact_timestamp_and_live_community_row()
     let (db, a, b, keys) = fixture().await;
     let channel_id = Uuid::new_v4();
     let creator = keys.public_key().to_bytes();
+    // Created now: the serving writer rejects a channel event older than the
+    // `created_at` floor, and the first create must succeed. The malformed
+    // March row below still differs from it in the partition key.
+    let created_at = Timestamp::now();
     let event = EventBuilder::new(Kind::Custom(9007), "channel create")
-        .custom_created_at(Timestamp::from(JAN as u64))
+        .custom_created_at(created_at)
         .sign_with_keys(&keys)
         .unwrap();
     let channel = || NewChannel {
@@ -395,7 +399,7 @@ async fn channel_create_resend_requires_exact_timestamp_and_live_community_row()
     db.insert_event(b, &event, None).await.unwrap();
     sqlx::query("UPDATE events SET deleted_at = now() WHERE community_id = $1 AND id = $2 AND created_at = $3")
         .bind(a.as_uuid()).bind(event.id.to_bytes().to_vec())
-        .bind(DateTime::from_timestamp(JAN, 0).unwrap())
+        .bind(DateTime::from_timestamp(created_at.as_secs() as i64, 0).unwrap())
         .execute(&db.pool).await.unwrap();
     assert!(matches!(
         db.create_channel_with_event(a, channel_id, channel(), &event)

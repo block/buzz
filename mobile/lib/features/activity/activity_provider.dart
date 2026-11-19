@@ -71,7 +71,18 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
   @override
   Future<HomeFeedResponse> build() async {
     ref.watch(relayConfigProvider);
-    final sessionState = ref.watch(relaySessionProvider);
+    // Read again once per new connection, for what it missed and for live
+    // subscriptions. The socket states on the way there (disconnected,
+    // reconnecting) would each download the whole feed again.
+    ref.listen(
+      relaySessionProvider.select(
+        (session) => session.status == SessionStatus.connected,
+      ),
+      (_, connected) {
+        if (connected) ref.invalidateSelf();
+      },
+    );
+    final sessionState = ref.read(relaySessionProvider);
     // React to the DM channel set (loading → data, membership changes) so a
     // cold start where channels resolve after the first fetch still surfaces
     // DMs without a manual refresh.
@@ -739,11 +750,34 @@ final activityProvider =
 /// group by DM channel so one conversation renders as one row.
 final inboxItemsProvider = Provider<List<InboxItem>>((ref) {
   final feed = ref.watch(activityProvider).value;
-  if (feed == null) return const [];
+  final channels =
+      ref.watch(channelsProvider).asData?.value ?? const <Channel>[];
   final dmChannelIds = {
-    for (final channel
-        in ref.watch(channelsProvider).asData?.value ?? const <Channel>[])
+    for (final channel in channels)
       if (channel.isDm) channel.id,
   };
-  return buildInboxItems(feed.all, isDmChannel: dmChannelIds.contains);
+  final myPk = ref.watch(myPubkeyProvider);
+  // Channel discovery already catches up and subscribes to eligible replies.
+  // Keep that one source of truth for the dots and their Activity destination,
+  // rather than opening another set of channel subscriptions here.
+  final byId = <String, FeedItem>{
+    for (final event
+        in ref.read(channelsProvider.notifier).observedThreadReplies(channels))
+      event.id: FeedItem(
+        id: event.id,
+        kind: event.kind,
+        pubkey: event.pubkey,
+        content: event.content,
+        createdAt: event.createdAt,
+        channelId: event.channelId,
+        channelName: '',
+        tags: event.tags,
+        category: myPk != null && tagsAddress(event.tags, myPk)
+            ? 'mention'
+            : 'activity',
+      ),
+    // The addressed feed owns category precedence for overlapping events.
+    for (final item in feed?.all ?? const <FeedItem>[]) item.id: item,
+  };
+  return buildInboxItems(byId.values, isDmChannel: dmChannelIds.contains);
 });

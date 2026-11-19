@@ -1,8 +1,10 @@
 import 'message_author_visibility.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'message_swipe_reply.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
 import 'message_footer_layout.dart';
 import 'reply_summary_link.dart';
+
 import 'dart:async';
 import 'dart:math' as math;
 
@@ -743,20 +745,36 @@ class ThreadDetailPage extends HookConsumerWidget {
           1 - ((Grid.xs + navigationBottomInset) / viewportHeight) + 0.01;
       final visible = <TimelineMessage>[];
       for (final position in itemPositionsListener.itemPositions.value) {
-        if (position.itemLeadingEdge < topEdge ||
-            position.itemTrailingEdge > bottomEdge) {
-          continue;
-        }
-        if (position.index == headIndex) {
-          // The head is read like a reply. A thread opened directly, from
-          // a link or a notification, may be the only place it is seen.
-          if (!liveDeletionHidesHead) visible.add(liveHead);
-          continue;
-        }
+        // The head is read like a reply. A thread opened directly, from a
+        // link or a notification, may be the only place it is seen.
         final replyIndex = position.index - indexForReply(0);
-        if (replyIndex < 0 || replyIndex >= replies.length) continue;
-        visible.add(replies[replyIndex]);
+        final message = position.index == headIndex
+            ? (liveDeletionHidesHead ? null : liveHead)
+            : replyIndex < 0 || replyIndex >= replies.length
+            ? null
+            : replies[replyIndex];
+        if (message != null &&
+            isReadableRow(
+              position,
+              start: topEdge,
+              end: bottomEdge,
+              linked: message.id == initialMessageId,
+            )) {
+          visible.add(message);
+        }
       }
+      // The tail can sit at the scroll end while the keyboard still covers
+      // it, so it counts as the bottom only when its end is above the
+      // keyboard and composer.
+      final tailIndex = _threadTailIndex(replies.length);
+      final atBottom =
+          replies.isNotEmpty &&
+          threadTailIsVisible() &&
+          itemPositionsListener.itemPositions.value.any(
+            (position) =>
+                position.index == tailIndex &&
+                position.itemTrailingEdge <= bottomEdge,
+          );
       final isDm =
           ref.read(channelsProvider.notifier).channelById(channelId)?.isDm ??
           false;
@@ -767,9 +785,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         currentPubkey: currentPubkey,
         loaded: allMsgs,
         visible: visible,
-        bottom: replies.isNotEmpty && threadTailIsVisible()
-            ? replies.last
-            : null,
+        bottom: atBottom ? replies.last : null,
         threadRootId: queryRootId,
         isRootThread: threadHead.parentId == null,
       );
@@ -791,7 +807,8 @@ class ThreadDetailPage extends HookConsumerWidget {
           threadViewportVisible &&
           readStateReady &&
           appInUse &&
-          (ModalRoute.of(context)?.isCurrent ?? true),
+          (ModalRoute.of(context)?.isCurrent ?? true) &&
+          ConversationPaneScope.isActiveOf(context),
       onDwell: readVisibleReplies,
       keys: [threadHead.id, readingContentKey(allMsgs), navigationBottomInset],
     );
@@ -1081,6 +1098,12 @@ class ThreadDetailPage extends HookConsumerWidget {
                         hintText: 'Reply in thread\u2026',
                         threadHeadId: threadHead.id,
                         rootId: effectiveRootId,
+                        prefillScopeMessages: channel?.isDm ?? true
+                            ? null
+                            : [
+                                if (!liveDeletionHidesHead) liveHead,
+                                ...replies,
+                              ],
                         onFocusRequested: followThreadTailFromComposer,
                         onSend:
                             (

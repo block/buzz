@@ -41,12 +41,20 @@ private final class JumpToLatestGlassButton: UIButton {
 }
 
 final class NavigationGlassButton: UIButton {
+  var opensMenuAbove = false
   var hitTargetInsets = UIEdgeInsets.zero
   var pendingMenuAction: (() -> Void)?
   var menuVisibilityChanged: ((Bool) -> Void)?
   var animateMenu: ((Bool, UIContextMenuInteractionAnimating?) -> Void)?
   weak var glassPreview: UIView?
   var onHighlightChanged: ((Bool) -> Void)?
+
+  override func menuAttachmentPoint(for configuration: UIContextMenuConfiguration) -> CGPoint {
+    guard opensMenuAbove else {
+      return super.menuAttachmentPoint(for: configuration)
+    }
+    return CGPoint(x: bounds.midX, y: bounds.minY)
+  }
 
   override var isHighlighted: Bool {
     didSet {
@@ -342,10 +350,12 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
 
     if arguments?["mergingNavigation"] as? Bool == true {
       let glass = MergingNavigationGlass(frame: containerView.bounds)
+      glass.vertical = arguments?["verticalNavigation"] as? Bool ?? false
       glass.autoresizingMask = [.flexibleWidth, .flexibleHeight]
       containerView.addSubview(glass)
       navigationGlass = glass
       glass.centerSurface.contentView.addSubview(button)
+      button.opensMenuAbove = !glass.vertical && arguments?["menuAbove"] as? Bool == true
       button.glassPreview = glass.centerSurface
       button.animateMenu = { [weak glass] visible, animator in
         glass?.setMenuOpen(visible, animator: animator)
@@ -507,8 +517,11 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
             ? UIGraphicsImageRenderer(size: CGSize(width: 24, height: 24)).image { _ in }
             : NativeTabler.image($0, size: 24)
         }
+        var attributes: UIMenuElement.Attributes = []
+        if item["enabled"] as? Bool != true { attributes.insert(.disabled) }
+        if item["destructive"] as? Bool == true { attributes.insert(.destructive) }
         let action = UIAction(title: item["label"] as? String ?? "", image: symbol,
-                        attributes: item["enabled"] as? Bool == true ? [] : [.disabled],
+                        attributes: attributes,
                         state: item["checked"] as? Bool == true ? .on : .off) { [weak self] _ in
           let select = { [weak self] in
             self?.channel.invokeMethod("menuAction", arguments: item["id"])
@@ -587,7 +600,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       )
       let pointSize: CGFloat = icon == "shutter"
         ? controlSize * Self.shutterIconRatio
-        : 24
+        : (arguments?["iconSize"] as? NSNumber)?.doubleValue ?? 24
       if icon == "shutter" {
         // The shutter is a solid disc, not Tabler's outlined circle glyph.
         buttonImage = UIGraphicsImageRenderer(size: CGSize(width: pointSize, height: pointSize)).image { _ in
@@ -760,6 +773,7 @@ final class NativeSegmentedControlPlatformView: NSObject, FlutterPlatformView {
 
 /// Three native glass elements share a compositor so their surfaces merge.
 final class MergingNavigationGlass: UIView {
+  var vertical = false
   let leftSurface: UIVisualEffectView
   let centerSurface: UIVisualEffectView
   let rightSurface: UIVisualEffectView
@@ -804,21 +818,23 @@ final class MergingNavigationGlass: UIView {
     // Use bounds/center rather than frame: side views may be transformed.
     leftSurface.bounds = CGRect(x: 0, y: 0, width: 56, height: 56)
     rightSurface.bounds = leftSurface.bounds
-    centerSurface.bounds = CGRect(x: 0, y: 0, width: 112, height: 56)
-    leftSurface.center = CGPoint(x: 28, y: bounds.midY)
-    rightSurface.center = CGPoint(x: bounds.width - 28, y: bounds.midY)
+    centerSurface.bounds = CGRect(x: 0, y: 0, width: vertical ? 56 : 112, height: 56)
+    leftSurface.center = vertical ? CGPoint(x: bounds.midX, y: 28) : CGPoint(x: 28, y: bounds.midY)
+    rightSurface.center = vertical ? CGPoint(x: bounds.midX, y: bounds.height - 28) : CGPoint(x: bounds.width - 28, y: bounds.midY)
     centerSurface.center = CGPoint(x: bounds.midX, y: bounds.midY)
   }
 
   func setMenuOpen(_ open: Bool, animator: UIContextMenuInteractionAnimating?) {
     layoutIfNeeded()
-    let movement = bounds.midX - 28
+    let movement = (vertical ? bounds.midY : bounds.midX) - 28
+    let dx = vertical ? 0 : movement
+    let dy = vertical ? movement : 0
     let changes = { [weak self] in
       guard let self else { return }
       self.leftSurface.transform = open
-        ? CGAffineTransform(translationX: movement, y: 0).scaledBy(x: 0.9, y: 0.9) : .identity
+        ? CGAffineTransform(translationX: dx, y: dy).scaledBy(x: 0.9, y: 0.9) : .identity
       self.rightSurface.transform = open
-        ? CGAffineTransform(translationX: -movement, y: 0).scaledBy(x: 0.9, y: 0.9) : .identity
+        ? CGAffineTransform(translationX: -dx, y: -dy).scaledBy(x: 0.9, y: 0.9) : .identity
     }
     let opacity = { [weak self] in
       self?.leftSurface.alpha = open ? 0 : 1

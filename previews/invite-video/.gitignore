@@ -1,0 +1,7 @@
+node_modules/
+frames/
+.output/
+preview-*.png
+poster-picker.png
+previous-blue.html
+capture.cjs

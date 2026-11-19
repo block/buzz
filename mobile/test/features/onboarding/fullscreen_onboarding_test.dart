@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import '../../helpers/two_finger_double_tap.dart';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -27,6 +28,51 @@ import '../../helpers/hosted_communities_fixture.dart';
 import '../../helpers/widget_helpers.dart';
 
 void main() {
+  for (final size in [const Size(951, 669), const Size(466, 678)]) {
+    testWidgets('Duo onboarding content and side Back at $size', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = size;
+      tester.view.padding = const FakeViewPadding(right: 76, bottom: 21);
+      tester.view.viewPadding = const FakeViewPadding(right: 76, bottom: 21);
+      addTearDown(tester.view.reset);
+      var backed = false;
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            home: OnboardingStepPage(
+              title: 'Add a community',
+              onBack: () => backed = true,
+              content: const SizedBox(
+                key: Key('centered-onboarding-content'),
+                height: 40,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .getCenter(find.byKey(const Key('centered-onboarding-content')))
+            .dx,
+        (size.width - (size.width < 600 ? 76 : 0)) / 2,
+      );
+      final back = find.byKey(const ValueKey('duo-toolbar-Back'));
+      expect(back, findsOneWidget);
+      expect(tester.getRect(back).top, greaterThanOrEqualTo(110));
+      final bar = tester.widget<IosNavigationBar>(
+        find.descendant(of: back, matching: find.byType(IosNavigationBar)),
+      );
+      bar.leading!.onPressed!();
+      expect(backed, isTrue);
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
+
   testWidgets('Add uses landing input and leaves room above the keyboard', (
     tester,
   ) async {

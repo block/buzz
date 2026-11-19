@@ -1,4 +1,6 @@
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
+import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_render.dart';
 import 'package:buzz/shared/emoji/native_emoji_glyph.dart';
 import 'package:http/http.dart' as http;
@@ -30,10 +32,13 @@ import 'package:flutter/foundation.dart';
 import 'package:buzz/shared/widgets/native_message_presentation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart' show Override;
 
 import '../../helpers/widget_helpers.dart';
+import '../../helpers/test_assertion.dart';
 
 part 'reaction_row_test/combined_tests.dart';
+part 'reaction_row_test/shortcode_tests.dart';
 
 const _alice =
     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -150,6 +155,7 @@ class _RecordingReactionActions implements ChannelActions {
 
 void main() {
   combinedReactionTests();
+  shortcodeReactionTests();
 
   testWidgets('removing the sole reaction closes the sheet', (tester) async {
     final reactions = ValueNotifier<List<TimelineReaction>>([
@@ -446,7 +452,7 @@ void main() {
               ),
               '/api/goose/v1/buzz/identity/assertions' => http.Response(
                 jsonEncode({
-                  'assertion': 'token-${++issued}',
+                  'assertion': testAssertion('token-${++issued}'),
                   'nostr_pubkey': keys.public,
                   'expires_at': clock.millisecondsSinceEpoch ~/ 1000 + 120,
                 }),
@@ -462,7 +468,7 @@ void main() {
       addTearDown(auth.dispose);
       // The live socket's assertion, issued when the session connected.
       expect(await auth.headers(config), {
-        'Nostr-Federated-Identity': 'Bearer token-1',
+        'Nostr-Federated-Identity': 'Bearer ${testAssertion('token-1')}',
       });
       final payloads = <Map<Object?, Object?>>[];
       final reactionUpdates = <List<Object?>>[];
@@ -556,8 +562,14 @@ void main() {
       issuerGate.complete();
       await tester.pumpAndSettle();
       expect(issued, issuedBeforeSheet + 1);
-      expect(authOf(reactionUpdates.last.single), 'Bearer token-$issued');
-      expect(authOf(profileUpdates.last[_alice]), 'Bearer token-$issued');
+      expect(
+        authOf(reactionUpdates.last.single),
+        'Bearer ${testAssertion('token-$issued')}',
+      );
+      expect(
+        authOf(profileUpdates.last[_alice]),
+        'Bearer ${testAssertion('token-$issued')}',
+      );
       completion.complete(<String, Object?>{});
       await tester.pumpAndSettle();
 
@@ -571,7 +583,7 @@ void main() {
       expect(payloads, hasLength(2));
       expect(
         authOf((payloads.last['reactions'] as List).single),
-        'Bearer token-$issued',
+        'Bearer ${testAssertion('token-$issued')}',
       );
       expect(reactionUpdates, isEmpty);
       completion.complete(<String, Object?>{});

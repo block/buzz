@@ -489,42 +489,41 @@ All database access. Uses `sqlx::query()` (runtime, not compile-time macros) —
 - Approval tokens: `create_approval` receives the raw token and hashes it internally with SHA-256.
 - DDL injection protection in partition manager: allowlist of table names + strict suffix/date validators.
 
-### Supported Writer Contract (transition state)
+### Supported Writer Contract
 
-The repository is moving toward a **supported-writer contract** where relay-owned
-write APIs provide the only supported mutation path for tenant data. The current
-shape is an explicit transition, not a flag day:
+Relay-owned write APIs provide the supported mutation path for tenant data:
 
-- **Trajectory:** converge from trigger/function/FK-enforced fencing toward
-  application-owned transaction protocols, while keeping existing DB backstops
-  in place until coverage and fleet gates are proven.
-- **Community fence (transition foundation):** runtime admission APIs now offer
-  one shared community deletion lock per transaction, while deletion lifecycle
-  transitions take the matching exclusive lock. A supported serving transaction
-  never spans communities. Serving leases use the same application admission.
-  Startup and deletion catalog validation tolerate the universal fence objects
-  being absent; inventories still record live fences for older executors.
-  Desired-state bootstraps install only explicitly declared legacy fences.
-  New tenant-owned tables rely on application admission, without a fence trigger.
-- **Replica floor (transition foundation):** runtime now provides a shared
-  replica-floor lock helper for compliant channel-event writers, and the writer
-  probe handshake takes the exclusive counterpart before sampling `S`, scanning
-  activity, and committing the heartbeat token last. `probe_once` remains the
-  sole token/fence-wall publication path; there is no separately persisted active
-  floor cutoff. Commit-time trigger+GUC enforcement remains authoritative for all
-  paths.
-- **Dual enforcement (current):** application-owned lock+precheck paths run in
-  front of the existing trigger/function enforcement; commit-time trigger checks
-  remain authoritative during this phase. Removing those backstops is a separate
-  gated migration, after every pod tolerates their absence and no rollback below
-  that version is expected.
+- **Community fence:** supported serving writers admit each tenant transaction
+  through the runtime API, which takes one shared community deletion lock and
+  checks active, undeleted state. Deletion lifecycle transitions take the
+  matching exclusive lock. A serving transaction never spans communities.
+  The universal per-table write-fence triggers and their functions have been
+  retired after writer coverage and fleet gates. New tenant-owned tables rely
+  on this admission alone.
+- **Replica floor:** supported channel-event insertions check `created_at`
+  against `clock_timestamp()` on their admitted transaction using the shared
+  960-second floor. The ordered heartbeat handshake and activity scan retain
+  the same fence-wall calculation. Migration 0089 retires only the deferred
+  floor trigger/function; writer connections no longer arm its GUC and probe
+  startup no longer requires those objects.
+- **Floor retirement deploy gate:** phase 1 must be deployed to every writer
+  pod/job, with no rollback expected, before applying the destructive contract.
+  Drain old connections/in-flight transactions, stop out-of-band writers, and
+  hold the replica breaker closed through the drop until replay catches up.
+  Already-running old pods do not reverify the trigger on each heartbeat.
+- **Single-table guards:** channel tenant binding, community lifecycle,
+  request/approval evidence and manifest chunks are owned by application writers.
+  Serving/deletion catalog validation tolerates the five legacy guards being
+  absent. Their contract migration is gated on the writer and catalog-expand
+  release (#8320) being deployed fleet-wide.
 - **Role separation:** relay/runtime code owns admission and lock protocols;
   operator maintenance/backfill workflows must either use those protocols or run
   under explicit reviewed procedures that keep routing fences closed.
 - **Unsupported shape:** direct owner SQL that bypasses supported transaction and
   lock protocols is not a supported write path.
-- **Fleet gates and reconciliation:** startup/fence probes verify guard catalog +
-  behavior, pgschema bootstraps run reconciliation, and lock/pool metrics remain
+- **Fleet gates and reconciliation:** retained guards keep their catalog and
+  behavior checks; heartbeat/epoch and activity checks still fail closed.
+  pgschema bootstraps run reconciliation, and lock/pool metrics remain
   the operational evidence path for rollout safety.
 
 The database end state (a declarative schema source, applied out of band at
@@ -550,7 +549,7 @@ Subscriber → dedicated PubSub  → PSUBSCRIBE buzz:channel:*
 
 The subscriber uses a **dedicated** `redis::aio::PubSub` connection — not from the pool. This is intentional: pool connections cannot hold `PSUBSCRIBE` state.
 
-**Current state:** The subscriber loop is spawned in `buzz-relay/src/main.rs` and populates the broadcast channel. A dispatcher task subscribes via `pubsub.subscribe_local()` and routes each event to one of 16 delivery workers by `(community, topic)`, so one channel's events keep their order while channels deliver concurrently (`handlers/multinode_fanout.rs`). Each worker calls `sub_registry.fan_out()`, applies the access gate (one bulk membership read for the recipients the membership cache lacks), and delivers matches to local WebSocket connections via `conn_manager.send_to()`. Live delivery never drops an event silently: when a worker's bounded queue is full, an event is not delivered within 30 s of this node reading it from Redis, or the access gate still cannot check a recipient by that deadline (it re-checks with backoff until then), that event's local recipients get `CLOSED "resync: ..."` for syncs, are fenced from every further live EVENT frame as soon as the loss is detected (so a client's resume cursor stops moving), and are closed so clients catch up from their cursor; when the dispatcher itself lags the broadcast, every subscribed connection is treated the same way. Only the fence is immediate: each node closes at most 1% of its connections per second (at least one per jittered 100 ms tick), so a loss cannot become a reconnect storm. A slow delivery is delivered late rather than lost, so a database stall of a few seconds delays events instead of closing their recipients on every node at once. Clients resume from the newest `created_at` they received minus 5 s; an event delivered more than 5 s late, then lost at the deadline or by a disconnect while it waits, is replayed only if the client's cursor did not move past it by more than that slack. A dispatcher that falls behind without overflowing the broadcast detects a loss late, and dispatcher lag loses events it never sees; neither is bounded by the deadline. Multi-node fan-out is now wired end-to-end. Local-echo deduplication is implemented via `AppState.local_event_ids` — events published by the local relay instance are tracked and skipped when received via the Redis round-trip.
+**Current state:** The subscriber loop is spawned in `buzz-relay/src/main.rs` and populates the broadcast channel. A dispatcher task subscribes via `pubsub.subscribe_local()` and routes each event to one of 16 delivery workers by `(community, topic)`, so one channel's events keep their order while channels deliver concurrently (`handlers/multinode_fanout.rs`). Each worker calls `sub_registry.fan_out()`, applies the access gate (one bulk membership read for the recipients the membership cache lacks), and delivers matches to local WebSocket connections via `conn_manager.send_to()`. A slow delivery holds only its own worker and arrives late; falling behind never closes a connection, because a database stall slows every node at once and closing recipients then would send the whole fleet back to that database together. An event is dropped on this node only when its worker's bounded queue is full, one delivery attempt runs past 30 s from when the worker starts it (so a database connection that stops answering cannot hold the worker forever), or the dispatcher lags the broadcast; both are counted (`buzz_multinode_fanout_dropped_total`, `buzz_multinode_fanout_lag_total`), and the affected syncs get `CLOSED "resync: ..."` (NIP-AR Sync rule 5). A recipient the access gate cannot check misses that event. Multi-node fan-out is now wired end-to-end. Local-echo deduplication is implemented via `AppState.local_event_ids` — events published by the local relay instance are tracked and skipped when received via the Redis round-trip.
 
 **Reconnection:** exponential backoff 1s → 30s (`backoff_secs * 2`). Backoff resets to 1s only after a clean stream end, not on each reconnect attempt.
 

@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
+import 'package:buzz/shared/http/app_http_client.dart';
 
 import '../hosted/hosted_relay_auth.dart';
 import '../utils/bounded_fetch.dart';
@@ -17,7 +18,9 @@ import 'media_disk_cache.dart';
 /// so TLS connections are reused across images instead of re-handshaking per
 /// fetch. Override in tests to stub the network.
 final mediaHttpClientProvider = Provider<http.Client>((ref) {
-  final client = ref.watch(hostedHttpClientFactoryProvider)();
+  final client = ref.watch(hostedHttpClientFactoryProvider)(
+    traffic: HttpTraffic.media,
+  );
   ref.onDispose(client.close);
   return client;
 });
@@ -87,7 +90,8 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   final double scale;
   final MediaGetAuthService auth;
 
-  /// Optional observer for bytes already fetched by the foreground image path.
+  /// Optional observer for bytes the foreground image path fetched and
+  /// decoded a frame from.
   /// Excluded from equality because it is a side effect, not cache identity.
   final ValueChanged<Uint8List>? onBytesLoaded;
 
@@ -179,6 +183,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
   ) {
     final abandoned = Completer<void>();
     _SharedFetch? fetched;
+    Uint8List? loadedBytes;
     // The image cache listens to a pending load, so this fires mid-download
     // only once a consumer evicts the entry and stops listening (see
     // [abandonPendingImage]), as [MediaImage] does when it stops showing an
@@ -189,6 +194,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
         decode,
         abandoned.future,
         onFetch: (fetch) => fetched = fetch,
+        onBytes: (bytes) => loadedBytes = bytes,
       ),
       scale: key.scale,
       debugLabel: url,
@@ -199,6 +205,11 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       onSettled: (decoded) {
         fetched?.settle(decoded: decoded);
         fetched = null;
+        // Report only bytes that decoded, so observers such as the picker's
+        // bytes cache never keep an error body.
+        final bytes = loadedBytes;
+        loadedBytes = null;
+        if (decoded && bytes != null) onBytesLoaded?.call(bytes);
       },
     )..addOnLastListenerRemovedCallback(() {
       if (!abandoned.isCompleted) abandoned.complete();
@@ -210,6 +221,7 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
     ImageDecoderCallback decode,
     Future<void> abandoned, {
     required void Function(_SharedFetch) onFetch,
+    required void Function(Uint8List) onBytes,
   }) async {
     var wasAbandoned = false;
     try {
@@ -246,9 +258,9 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       }
       // Another size kept the download going, but this load's consumer left.
       if (wasAbandoned) throw StateError('Image load abandoned');
-      onBytesLoaded?.call(bytes);
+      onBytes(bytes);
       final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
-      return await decode(buffer);
+      return withBrowserFrameTiming(await decode(buffer));
     } catch (_) {
       // An abandoned load has no listener left to report to, and an error
       // would surface as an unhandled image error. The consumer already
@@ -319,29 +331,80 @@ class MediaImageProvider extends ImageProvider<MediaImageProvider> {
       if (cache.isClosed) return;
       final bytes = await _fetchBytes(cache.closed);
       // Nothing displays these bytes yet, so check they decode before they
-      // replace the saved copy. A tiny target keeps the check from
-      // allocating a full-resolution frame.
-      try {
-        final codec = await ui.instantiateImageCodec(
-          bytes,
-          targetWidth: 1,
-          targetHeight: 1,
-          allowUpscaling: false,
-        );
-        try {
-          (await codec.getNextFrame()).image.dispose();
-        } finally {
-          codec.dispose();
-        }
-      } on Object {
-        // A body that never decodes is a failed fetch: back off.
-        _cooldownUntil[_cooldownKey] = debugNow().add(_defaultCooldown);
-        rethrow;
-      }
+      // replace the saved copy.
+      await _checkDecodes(bytes);
       await cache.write(url, bytes, immutable: _isContentAddressed);
     } on Object catch (error) {
       // The stale bytes stay; the next load after the cooldown retries.
       debugPrint('[MediaImageProvider] refresh of $url failed: $error');
+    }
+  }
+
+  /// [url]'s encoded bytes for a native surface that decodes them itself,
+  /// such as the iOS emoji picker. Joins the same shared download as image
+  /// loads of [url], so it reads [diskCache] first and saves downloaded bytes
+  /// once they decode. Saved bytes that fail to decode are removed, so the
+  /// next request downloads them again. Completing [cancel] leaves the
+  /// download, which stops once no load is waiting for it.
+  Future<Uint8List> loadEncodedBytes({required Future<void> cancel}) async {
+    final fetchKey = (url, auth, isThumbnailFallback);
+    final fetch = _inFlight[fetchKey] ??= _SharedFetch(
+      _loadBytes,
+      onFinished: (fetch) {
+        if (_inFlight[fetchKey] == fetch) _inFlight.remove(fetchKey);
+      },
+    );
+    fetch.join();
+    var cancelled = false;
+    var left = false;
+    void leave() {
+      if (left) return;
+      left = true;
+      fetch.leave();
+    }
+
+    unawaited(
+      cancel.then((_) {
+        cancelled = true;
+        leave();
+      }),
+    );
+    final Uint8List bytes;
+    try {
+      bytes = await fetch.bytes;
+    } finally {
+      leave();
+    }
+    if (cancelled) throw StateError('Media bytes load cancelled');
+    try {
+      await _checkDecodes(bytes);
+    } on Object {
+      fetch.settle(decoded: false);
+      rethrow;
+    }
+    fetch.settle(decoded: true);
+    return bytes;
+  }
+
+  /// Throws, and puts [url] on cooldown, when [bytes] do not decode. A tiny
+  /// target keeps the check from allocating a full-resolution frame.
+  Future<void> _checkDecodes(Uint8List bytes) async {
+    try {
+      final codec = await ui.instantiateImageCodec(
+        bytes,
+        targetWidth: 1,
+        targetHeight: 1,
+        allowUpscaling: false,
+      );
+      try {
+        (await codec.getNextFrame()).image.dispose();
+      } finally {
+        codec.dispose();
+      }
+    } on Object {
+      // A body that never decodes is a failed fetch: back off.
+      _cooldownUntil[_cooldownKey] = debugNow().add(_defaultCooldown);
+      rethrow;
     }
   }
 
@@ -523,6 +586,47 @@ class _MediaImageStreamCompleter extends MultiFrameImageStreamCompleter {
     _listeners.remove(listener);
     super.removeListener(listener);
   }
+}
+
+/// Shows animation frames that ask for 10 ms or less for 100 ms instead, as
+/// browsers do (Firefox first, then Chromium and WebKit), so an animated
+/// emoji plays at the same speed as on desktop. Flutter uses the delay as
+/// written, so a GIF with 0 or 1 centisecond delays otherwise runs at the
+/// display refresh rate.
+@visibleForTesting
+ui.Codec withBrowserFrameTiming(ui.Codec codec) =>
+    codec.frameCount > 1 ? _BrowserFrameTimingCodec(codec) : codec;
+
+class _BrowserFrameTimingCodec implements ui.Codec {
+  _BrowserFrameTimingCodec(this._codec);
+
+  final ui.Codec _codec;
+
+  @override
+  int get frameCount => _codec.frameCount;
+
+  @override
+  int get repetitionCount => _codec.repetitionCount;
+
+  @override
+  Future<ui.FrameInfo> getNextFrame() async {
+    final frame = await _codec.getNextFrame();
+    if (frame.duration > const Duration(milliseconds: 10)) return frame;
+    return _SlowedFrame(frame.image);
+  }
+
+  @override
+  void dispose() => _codec.dispose();
+}
+
+class _SlowedFrame implements ui.FrameInfo {
+  _SlowedFrame(this.image);
+
+  @override
+  final ui.Image image;
+
+  @override
+  Duration get duration => const Duration(milliseconds: 100);
 }
 
 /// One download shared by every load of the same URL, auth scope and role

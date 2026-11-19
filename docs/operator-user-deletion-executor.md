@@ -1,9 +1,51 @@
-# Run and recover a dummy user-deletion workflow
+# Run and recover a user-deletion workflow
 
-This workflow tests orchestration using real PostgreSQL rows and dummy actions.
-It never gates a real account or deletes user data. Submit still creates an
-artificial inventory: B (participant), then C (former participant). Only `demo:`
-targets are accepted. Owned communities and production fencing are future work.
+The workflow orders account gating, media cleanup, and per-community content
+cleanup. Real requests stop at the unimplemented account gate; they cannot
+complete through placeholder handlers. Demo requests simulate all stages and
+never delete media or content.
+
+Direct `media-batches` and `content-batches` commands remain available for
+operator-controlled cleanup. Neither command installs or enforces the account
+gate. Protection against concurrent writes by the target or their agents remains
+unimplemented; neither command proves full account erasure. Use a disposable
+database and versioned storage bucket when testing. Owned-community workflow
+execution is unsupported.
+
+## Content batches
+
+`content-batches` selects the user plus agents owned by that user **in the target
+community**. Ownership in another community does not authorize cleanup here.
+The start record reports excluded agent keys with missing or conflicting local
+ownership. Every batch rechecks ownership; a change aborts the batch. Former
+membership does not prevent cleanup of historical content.
+
+The handler preserves actual reply ancestry and other users' reactions by erasing
+selected messages into structural tombstones. Plain links, quotes and unmarked
+references do not require retaining their destinations. Other authors' signed
+messages remain unchanged. Reply parent/root lookups use existing
+`thread_metadata` indexes; no new permanent index or migration is required.
+
+For replies without thread metadata, the handler probes the existing tags GIN
+index for each selected message ID in lowercase and uppercase. It then uses the
+relay's shared parser to distinguish actual replies from ordinary links. It does
+not search for all messages marked as replies. Mixed-case references without
+thread metadata may be missed; replies with thread metadata use binary IDs and
+remain covered regardless of spelling.
+
+This fallback runs during planning and before each batch that physically deletes
+events. All probes share one SQL statement with a one-second timeout and a
+10,000-match limit. A message matching several probes counts several times.
+A timeout or overflow aborts cleanup; unusually many references to the selected
+IDs may require metadata repair first. These bounds are safety limits, not
+measured production latency guarantees.
+
+Each batch installs transaction-local statement and lock timeouts before taking
+the community lock. Its planned output is written before locking; the commit
+receipt is written after commit. An output failure may leave earlier batches
+committed; retry replans the remaining records. A lost database session also
+loses the private worklist and causes execution to fail rather than continue
+with incomplete checks.
 
 ## Code map: worker, policy, and persistence
 
@@ -15,7 +57,7 @@ there is no additional service or database-side workflow function.
 | --- | --- |
 | `buzz-deletion/src/user.rs` | Parse command arguments, call the user/shared stores or worker, print results |
 | `buzz-deletion/src/user/worker.rs` | Claim, heartbeat, call transition, dispatch handler, repeat, release |
-| `buzz-deletion/src/user/handlers.rs` | Dummy actions; save start/result/failure through the shared store |
+| `buzz-deletion/src/user/handlers.rs` | Dispatch real media/content or synthetic demo actions; save outcomes through the shared store |
 | `buzz-deletion/src/user/transition.rs` | `UserDeletionTransition.get_next_stage`: recover or choose the next saved position |
 | `buzz-deletion/src/user/workflow.rs` | Allowed user stages, result-based branching, community-progress reconstruction |
 | `buzz-db/src/store/entity_deletion/mod.rs` | Shared store definition and exports; no stage policy |
@@ -25,9 +67,9 @@ there is no additional service or database-side workflow function.
 | `buzz-db/src/store/entity_deletion/stages.rs` | Save handler outcomes and commit stage transitions atomically |
 | `buzz-db/src/store/user_deletion/mod.rs` | User-specific store definition and exports |
 | `buzz-db/src/store/user_deletion/requests.rs` | Submit user requests and validate user inventory during approval |
-| `buzz-db/src/store/user_deletion/inventory.rs` | Demo target checks, B/C inventory generation, and user inventory validation |
+| `buzz-db/src/store/user_deletion/inventory.rs` | Validate approved inventory and construct handler inputs |
 
-The common store does not know the names `gate_user`, `purge_db`, or
+The common store does not know the names `gate_user`, `purge_media`, `purge_content`, or
 `purge_agents`. `UserDeletionTransition` supplies a synchronous decision function
 to `EntityDeletionStore.transition_stage`. The store locks the parent and loads
 history, invokes that function while still holding the lock, checks the returned
@@ -45,7 +87,7 @@ User submission and inventory interpretation are deliberately separate from
 common workflow storage, even though they use the same tables. User approval
 runs its inventory validator inside the common approval transaction. Future
 real PostgreSQL deletion operations belong in the user-specific database folder;
-the current handlers still perform no real deletion. Existing community deletion
+only the media handler currently performs real deletion. Existing community deletion
 continues using its existing implementation.
 
 ## The execution contract
@@ -112,8 +154,9 @@ The version-1 workflow rules are:
 
 | Stage | Allowed outcome | Runtime choice |
 | --- | --- | --- |
-| `gate_user` | Enter communities | Select the first uncovered community |
-| `purge_db` | `purge_agents` or community complete | Read saved boolean `result.has_agents` |
+| `gate_user` | `purge_media` | Enter media only after saved gate success; real gate is not implemented |
+| `purge_media` | Enter communities | After saved success, select the first uncovered community |
+| `purge_content` | `purge_agents` or community complete | Real cleanup continues to agent cleanup; demos read saved `result.has_agents` |
 | `purge_agents` | Community complete | Mark this community covered |
 
 After a community completes, select the first uncovered community in inventory
@@ -121,6 +164,13 @@ order. After all are covered, finish the request. Missing `has_agents` is an
 error, not an implicit skip. The inventory's version selects the currently
 supported rules; future versions must retain the rules needed by active requests.
 No full execution plan is created upfront.
+
+If the real `purge_db` keeps any of the user's messages in a channel, it must
+also keep the user's `channel_members` row for that channel, marked removed. The
+relay refuses to open a private channel that has or had a member other than the
+sender and the sender's own agents (kind:9002 in `NOSTR.md`), and it finds former
+members only through these rows. Without the row, the channel could be opened and
+its history, those messages included, made public.
 
 `previous_stage_id` is bookkeeping for uninterrupted execution. It must belong
 to this request. After restart pass `None`; the database current row is the
@@ -142,163 +192,131 @@ detached renewal task survives cancellation. Generation checks reject stale
 workers' status, result, transition, heartbeat, and release writes.
 
 This is one request at a time through an explicit CLI command. There is no relay
-scheduler or automatic retry daemon. Real handlers will need idempotent or
-reconciled external actions: a crash after an external action but before saving
+scheduler or automatic retry daemon. The media handler rescans on retry and treats absent versions as already removed;
+external actions still need idempotence or reconciliation: a crash after an external action but before saving
 its result may repeat that handler.
 
-## Prepare a local test
+## Run against disposable test resources
 
-Follow [the intake guide](operator-user-deletion-intake.md) to build the binary
-and migrate a fresh disposable database. The commands below use its container
-`buzz-user-deletion-intake` and database `buzz`. Keep all commands in one shell.
-These commands need PostgreSQL only, not a relay, Redis, or storage credentials.
+Build `buzz-admin`, configure `DATABASE_URL` and the `BUZZ_S3_*` variables, and
+apply the schema using the operator procedure in [database.md](database.md).
+Use a real test public key and versioned test bucket. Stop every writer before
+running with `--delete`; neither the dummy gate nor a database lease prevents
+new uploads. Never point these examples at a live account for a smoke test.
+
+The direct command uses the same media implementation without creating a workflow:
 
 ```bash
-TARGET="demo:workflow-$(date +%s)"
+./target/debug/buzz-admin user-deletions media-batches --pubkey "$TEST_PUBKEY" --read-only
+./target/debug/buzz-admin user-deletions media-batches --pubkey "$TEST_PUBKEY" --delete
+```
+
+To exercise the persisted workflow:
+
+```bash
 REQUEST_JSON=$(./target/debug/buzz-admin user-deletions submit \
-  --target "$TARGET" --requested-by operator-a)
+  --pubkey "$TEST_PUBKEY" --requested-by operator-a)
 REQUEST_ID=$(printf '%s\n' "$REQUEST_JSON" | jq -r '.id')
 INVENTORY_DIGEST=$(printf '%s\n' "$REQUEST_JSON" | jq -r '.inventory_digest')
 ./target/debug/buzz-admin user-deletions approve "$REQUEST_ID" \
   --approved-by operator-b --inventory-digest "$INVENTORY_DIGEST"
-```
-
-Expected after approval: parent `approved`, one approval, **zero stage rows**.
-
-Define a helper to inspect the actual tables after each command:
-
-```bash
-show_rows() {
-  docker exec buzz-user-deletion-intake psql -X -U buzz -d buzz -c "
-    SELECT target, status, lease_owner, lease_generation, lease_expires_at,
-           heartbeat_at, retry_count, next_attempt_at, last_error, completed_at
-    FROM entity_deletion_requests WHERE id = '$REQUEST_ID';
-    SELECT id, stage, target_community_id, status, is_current,
-           started_at, finished_at, metadata_json, last_error
-    FROM entity_deletion_stage_history WHERE request_id = '$REQUEST_ID'
-    ORDER BY started_at NULLS LAST, id;
-    SELECT approved_by, approved_at, inventory_digest
-    FROM entity_deletion_approvals WHERE request_id = '$REQUEST_ID'
-    ORDER BY approved_at, id;"
-}
-show_rows
-```
-
-## Advance one stage at a time
-
-Run the same command each time, then inspect the tables:
-
-```bash
 ./target/debug/buzz-admin user-deletions run "$REQUEST_ID" --next-step
-show_rows
+./target/debug/buzz-admin user-deletions inspect "$REQUEST_ID"
+./target/debug/buzz-admin user-deletions run "$REQUEST_ID" --next-step --delete
+./target/debug/buzz-admin user-deletions inspect "$REQUEST_ID"
+./target/debug/buzz-admin user-deletions run "$REQUEST_ID" --delete
 ```
 
-Each invocation executes one handler, processes its saved result through
-`get_next_stage`, and releases ownership. It leaves the successor pending and
-current. The final invocation marks the request completed instead.
+Approval creates no stages. A real run requires `--delete`, then refuses the
+unimplemented `gate_user` handler and leaves it pending. Repeating the run does
+not fabricate progress. Use `--target demo:example` instead of `--pubkey` at
+submission to exercise the full synthetic workflow without deletion.
 
-Starting with a newly approved request, expect:
+The routing requires saved gate success before media, and saved media success
+before community cleanup. A media failure keeps the same stage current; resume
+after the saved retry deadline using the same request ID. A saved completed
+media stage is transitioned without running media again.
 
-| Invocation | Handler completed | Current stage after the command |
-| --- | --- | --- |
-| 1 | `gate_user` | B `purge_db`, pending |
-| 2 | B `purge_db` | B `purge_agents`, pending |
-| 3 | B `purge_agents` | C `purge_db`, pending |
-| 4 | C `purge_db` | C `purge_agents`, pending |
-| 5 | C `purge_agents` | None; request completed |
+`--next-step` executes one handler, transitions, and releases the lease. Without
+it, an invocation executes up to 100 handlers. The worker prints an inspection
+JSON document; media's file report goes to stderr. The direct command prints the
+file report on stdout. Each file has its hash, filename when present,
+keep/delete decision, versions, and outcome counts; uploader lists are omitted.
 
-All earlier rows remain completed and non-current. Every command releases the
-worker lease. Re-running a completed request is read-only. If a handler fails,
-the same row remains failed and current; the command exits 1 with a saved retry
-deadline instead of advancing past the failure.
+`--fail-stage purge_content`, `--stage-delay-ms`, and `--demo-no-agents-in` exercise
+placeholder failures and branching only. Demo media success is synthetic; real requests reject these controls.
+An injected community failure preserves the same retry semantics as before.
+Ctrl-C releases the worker lease; after an abrupt kill wait for lease expiry.
 
-To finish the remaining workflow in one command, omit `--next-step`:
+## Media discovery and remaining limits
 
-```bash
-./target/debug/buzz-admin user-deletions run "$REQUEST_ID"
-show_rows
+The target set is the human and directly owned agents across communities.
+Candidate hashes come from `media_uploaders`, `media_uploaded` audit entries,
+and storage upload claims. A bounded database query combines candidate discovery
+with outside-uploader classification. Storage-only candidates receive the same
+hash-restricted database check in batches. Current membership is not a safe
+history filter: relay membership rows can be deleted on departure.
+
+Sharing checks span all communities for the selected hashes. Any outside
+uploader in either database source or an upload-record version protects the
+file. No per-file owner-list query is made.
+
+Storage discovery scans `_uploads/` for target claims, then reads candidate
+claims in a second `_uploads/` listing to protect outside claims encountered
+before a target claim. Blob and thumbnail versions are listed by `{hash}.`
+prefix, never by an empty bucket prefix. A separate `_meta/` listing covers
+sidecars, including ones whose community is absent from current membership or
+upload claims. Unrelated Git objects and unrelated blobs are not listed.
+The metadata namespace scans remain proportional to their namespace sizes.
+
+All evidence and exact version IDs are collected before deletion begins.
+Each listing is bounded to 100,000 pages of at most 1,000 entries. The disposable
+in-memory inventory has a 128 MiB accounting budget and a 250,000-entry cap
+across candidates, filenames, object versions, and listing markers. Accounting
+includes inline data, string bytes, and a conservative 256-byte tree/allocator
+allowance per entry. Individual fields and serialized version records are
+limited to 16 KiB. The budget is not a process RSS limit: bounded listing/report
+pages and database/HTTP clients allocate separately. It replaces the former
+1 GiB disk inventory, so large jobs may reach capacity sooner. Exhausting a
+limit aborts before mutation, with a capacity error; no partial inventory is
+used for deletion. Retries rebuild discovery from PostgreSQL and storage.
+Unversioned exclusive objects also abort. Upload claim objects are deleted
+last, and the target's database uploader rows are removed only after that
+file's storage processing succeeds, so a partial failure can be retried.
+
+Shared files retain storage claims and audit history, even after the target's
+uploader rows are removed. Those historical claims can protect a blob after
+both uploaders have left; claim retirement is not implemented here. A bare blob
+with no surviving attribution cannot be assigned to a user by this handler.
+The result always reports `account_erasure_complete: false`.
+
+## Index rollout
+
+Migration 0092 adds uploader/hash and hash/uploader indexes to `media_uploaders`
+and equivalent partial indexes for `media_uploaded` audit entries. Existing
+community keys remain unchanged. Apply schema before deploying the cleanup code.
+The migration builds missing indexes under a 1-second lock timeout and a
+5-second statement timeout and verifies pre-existing definitions and validity.
+It does not refuse populated tables merely because they contain rows.
+
+Large deployments with auto-migration disabled can prebuild the exact indexes
+outside a transaction, following [thread-window-deployment.md](thread-window-deployment.md):
+
+```sql
+CREATE INDEX CONCURRENTLY idx_media_uploaders_actor_hash
+  ON public.media_uploaders (pubkey, sha256);
+CREATE INDEX CONCURRENTLY idx_media_uploaders_hash_actor
+  ON public.media_uploaders (sha256, pubkey);
+CREATE INDEX CONCURRENTLY idx_audit_media_actor_hash
+  ON public.audit_log (actor_pubkey, object_id) WHERE action = 'media_uploaded';
+CREATE INDEX CONCURRENTLY idx_audit_media_hash_actor
+  ON public.audit_log (object_id, actor_pubkey) WHERE action = 'media_uploaded';
 ```
 
-Ordinary runs have an internal budget of 100 handler calls per invocation.
-There are no `--max-stages` or `--pause-after-handler` options. A crash can still
-leave a completed current row before its transition; the next run processes
-that saved result before executing the next unfinished handler.
-
-## Test runtime branching
-
-Submit and approve a new request using the first block. Then:
-
-```bash
-./target/debug/buzz-admin user-deletions run "$REQUEST_ID" \
-  --executor-id worker-a \
-  --demo-no-agents-in 00000000-0000-0000-0000-00000000000c
-show_rows
-```
-
-Expected: four completed rows: gate, B DB, B agents, C DB. C's DB result contains
-`has_agents: false`; its saved transition is `community_complete`. There is no
-C agents row. The flag simulates a runtime observation in the dummy handler; it
-does not change the saved inventory or transition map. It may be repeated.
-
-To inspect branching step by step, submit and approve another request. Run once
-with `--next-step` to finish the gate, then run with
-`--next-step --demo-no-agents-in 00000000-0000-0000-0000-00000000000b`.
-B DB completes and transitions directly to C DB. Resume without the flag: the
-saved B decision remains unchanged, and no B agents row appears.
-
-## Test failure and retry
-
-On a new approved request:
-
-```bash
-./target/debug/buzz-admin user-deletions run "$REQUEST_ID" \
-  --executor-id worker-a --fail-stage purge_db
-echo "Exit code: $?"
-show_rows
-```
-
-Expected exit 1. Gate has transitioned; B DB is failed and current. The parent
-is `retry_wait`, with error, retry count 1, and `next_attempt_at` 30 seconds later.
-The handler saved this outcome; `get_next_stage` returned `WaitUntil`, and the
-worker released ownership. An immediate retry is refused.
-
-After the saved deadline:
-
-```bash
-./target/debug/buzz-admin user-deletions run "$REQUEST_ID" --executor-id worker-b
-show_rows
-```
-
-The same B DB row resumes with its original first start time. The request
-finishes. Successful transition clears the parent retry state.
-
-## Observe heartbeat and process interruption
-
-On a new approved request:
-
-```bash
-./target/debug/buzz-admin user-deletions run "$REQUEST_ID" \
-  --executor-id worker-a --stage-delay-ms 60000
-```
-
-Inspect from another terminal using the same database/request. Heartbeat and
-expiry advance every ten seconds. A competing worker is refused. Ctrl-C stops
-execution and releases ownership; the interrupted row remains current. After
-an abrupt process kill, wait for the saved lease expiry before running another
-worker. It resumes the same unfinished row with a higher generation.
-
-## Rollout, recovery, and retained demo data
-
-Migrations 0069–0070 are additive. The serving relay does not schedule these
-requests; only an operator explicitly running the demo CLI executes them.
-
-The Helm chart defaults `migrate.autoMigrate=true`. After these migrations are
-applied, rolling back to a binary that does not contain them fails at startup
-with sqlx `VersionMissing`. For this rollout, recover by rolling forward to a
-corrected binary that retains migrations 0069–0070. Do not remove migration
-records or change their checksums to force an older binary to start. An older
-binary deployed with auto-migration disabled requires a separately verified
-schema-compatibility plan; it is not the recovery procedure assumed here.
-
-Demo request rows, approval evidence, and stage history are deliberately retained
-for inspection. This scaffold has no cleanup command or automatic retention job.
+Then apply the migration, which verifies the indexes without rebuilding them.
+A failed concurrent build must be inspected and repaired before retrying.
+These additive nonunique indexes remain compatible with old relay writes.
+The normal sqlx migration-version rollback constraints still apply: recover
+with a corrected binary retaining the migration history, rather than deleting
+migration records or changing checksums. Workflow requests and history are
+retained for inspection; this scaffold has no automatic retention job.

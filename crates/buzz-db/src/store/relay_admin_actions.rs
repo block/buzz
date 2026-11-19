@@ -170,7 +170,10 @@ pub async fn resolve_report_decision_atomic(
         return Ok(false);
     }
 
-    // Insert the decision audit row in the same transaction.
+    // Insert the decision audit row in the same transaction. A missing channel
+    // fails here, after the report-not-open outcome, and rolls the CAS back.
+    crate::store::reference_check::require_optional_channel(tx.conn(), community_id, channel_id)
+        .await?;
     sqlx::query(
         r#"
         INSERT INTO moderation_actions (
@@ -282,6 +285,11 @@ pub async fn claim_report(
     if status != "open" {
         return Ok(ClaimResult::NotOpen(status));
     }
+
+    // The decision audit row below names `channel_id`. A missing channel fails
+    // after the not-found, retry and not-open outcomes, before any write.
+    crate::store::reference_check::require_optional_channel(tx.conn(), community_id, channel_id)
+        .await?;
 
     // Insert the action record first to get its ID.
     let action_row = sqlx::query(
@@ -736,6 +744,7 @@ pub async fn execute_kick_with_marker(
         tx.rollback().await?;
         return Ok(KickWithMarkerResult::AlreadyGone);
     }
+    crate::dm::release_dm_identity(tx.conn(), community_id, channel_id, target_pubkey).await?;
 
     let marker = sqlx::query(
         r#"
@@ -1742,6 +1751,9 @@ pub async fn deploy_kick_member(
     .bind(target_pubkey)
     .execute(tx.conn())
     .await?;
+    if result.rows_affected() > 0 {
+        crate::dm::release_dm_identity(tx.conn(), community_id, channel_id, target_pubkey).await?;
+    }
     tx.commit().await?;
 
     if result.rows_affected() > 0 {
@@ -1892,6 +1904,14 @@ pub async fn claim_direct_action(
     } else {
         input.action
     };
+    // The audit row names `input.channel_id`. A missing channel fails after the
+    // idempotent-replay classification above and rolls the action row back.
+    crate::store::reference_check::require_optional_channel(
+        tx.conn(),
+        input.community_id,
+        input.channel_id,
+    )
+    .await?;
     sqlx::query(
         r#"
         INSERT INTO moderation_actions (

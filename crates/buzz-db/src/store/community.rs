@@ -486,18 +486,68 @@ impl Db {
             crate::observability::WriterOperation::EventWrite,
         )
         .await?;
-        sqlx::query(
+        let affected = sqlx::query(
             r#"
             UPDATE communities
             SET icon = $2
-            WHERE id = $1
+            WHERE id = $1 AND deletion_state = 'active' AND deleted_at IS NULL
             "#,
         )
         .bind(community_id.as_uuid())
         .bind(icon)
         .execute(&mut *connection)
-        .await?;
+        .await?
+        .rows_affected();
+        if affected != 1 {
+            return Err(DbError::AccessDenied(format!(
+                "community {community_id} is missing or write-fenced"
+            )));
+        }
         Ok(())
+    }
+
+    /// Look up an existing host for legacy operator convergence without creating.
+    ///
+    /// Matches ensure's lifecycle rules, including archived rows. Returns None
+    /// for missing hosts and rejects tombstones. No row or issuer is inserted.
+    /// Release this short transaction before calling `provision_owner`, which
+    /// acquires its own lifecycle locks in the established order.
+    #[datastore_span(name = "existing_configured_community", system = "postgresql")]
+    pub async fn existing_configured_community(
+        &self,
+        normalized_host: &str,
+    ) -> Result<Option<EnsuredCommunityRecord>> {
+        let connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Authorization,
+        )
+        .await?;
+        let mut tx = sqlx::Transaction::begin(connection, None).await?;
+        let row = sqlx::query(
+            "SELECT id, host, deletion_state, deleted_at FROM communities \
+             WHERE lower(host) = lower($1) FOR NO KEY UPDATE",
+        )
+        .bind(normalized_host)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let record = row
+            .map(|row| {
+                let state: String = row.try_get("deletion_state")?;
+                let deleted_at: Option<DateTime<Utc>> = row.try_get("deleted_at")?;
+                if state != "active" || deleted_at.is_some() {
+                    return Err(DbError::AccessDenied(format!(
+                        "community host {normalized_host:?} is permanently tombstoned"
+                    )));
+                }
+                Ok(EnsuredCommunityRecord {
+                    id: CommunityId::from_uuid(row.try_get("id")?),
+                    host: row.try_get("host")?,
+                    created: false,
+                })
+            })
+            .transpose()?;
+        tx.commit().await?;
+        Ok(record)
     }
 
     /// Ensure a configured community host exists and return its row.
@@ -818,7 +868,7 @@ impl Db {
         }
         let row = sqlx::query(
             "UPDATE communities SET archived_at = COALESCE(archived_at, now()) \
-             WHERE id = $1 RETURNING id, host, archived_at",
+             WHERE id = $1 AND deletion_state = 'active' RETURNING id, host, archived_at",
         )
         .bind(community_id)
         .fetch_one(&mut *tx)
@@ -885,10 +935,12 @@ impl Db {
             tx.rollback().await?;
             return Ok(UnarchiveCommunityResult::DeletionPending);
         }
-        sqlx::query("UPDATE communities SET archived_at = NULL WHERE id = $1")
-            .bind(community_id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "UPDATE communities SET archived_at = NULL WHERE id = $1 AND deletion_state = 'active'",
+        )
+        .bind(community_id)
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(UnarchiveCommunityResult::Unarchived(
             UnarchivedCommunityRecord {

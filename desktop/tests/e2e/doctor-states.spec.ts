@@ -180,12 +180,14 @@ test.describe("Doctor panel state screenshots", () => {
         "0px",
       );
     }
+    // The Chromium bundled with Playwright 1.65 reports `items-end` as
+    // `flow-end`; older builds report `flex-end`.
     await expect(
       page
         .getByRole("heading", { name: "Agent runtimes", exact: true })
         .locator("..")
         .locator(".."),
-    ).toHaveCSS("align-items", "flex-end");
+    ).toHaveCSS("align-items", /^(flex|flow)-end$/);
     for (const runtimeId of ["goose", "claude", "buzz-agent"]) {
       await expect(
         page.getByTestId(`doctor-runtime-menu-${runtimeId}`),

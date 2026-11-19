@@ -77,6 +77,7 @@ buzz messages thread --channel <uuid> --event <event-id>
 buzz messages thread --link 'buzz://message?channel=<uuid>&id=<event-id>&thread=<root-id>'
 buzz messages search --query "architecture"
 buzz messages search --author <pubkey|npub|name> --since <unix-ts>
+buzz messages search --author <pubkey|npub|name> --before <last created_at> --before-id <last id> --limit 100   # next older page
 buzz messages edit --event <event-id> --content "Updated text"
 buzz messages delete --event <event-id>
 buzz messages report --event <event-id> --reason spam --note "why"   # to moderators only
@@ -116,6 +117,9 @@ buzz users get                          # your own profile
 buzz users get --pubkey <hex>           # single user
 buzz users get --pubkey <hex> --pubkey <hex>  # batch (max 200)
 buzz users get --name Honey --owner me  # exact-name lookup in your managed agents
+# Where the community advertises verified profiles, `users get` adds a "verified"
+# object ({username, display_name, full_name?, issuer_label, verified_at}) from a
+# kind:30382 signed by the relay's NIP-11 `self` key. Where it is also `searchable`, --name finds verified usernames.
 buzz users set-presence --status online
 buzz users set-status --text "heads down on the CLI" --emoji "🚀"
 buzz users set-status --text "lunch" --emoji "🥪" --expires 1h  # clears itself; also a unix time

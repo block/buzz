@@ -382,5 +382,32 @@ void main() {
       );
       expect(label.text, 'Thread in');
     });
+
+    test('labels the displayed event, not an older mention in its thread', () {
+      final row = buildInboxItems([
+        item(
+          id: threadIdInboxA,
+          createdAt: 100,
+          category: 'mention',
+          tags: replyTags(threadIdInboxR, threadIdInboxP),
+        ),
+        item(
+          id: threadIdInboxB,
+          createdAt: 200,
+          category: 'activity',
+          pubkey: 'pk2',
+          tags: replyTags(threadIdInboxR, threadIdInboxA),
+        ),
+      ]).single;
+      final label = inboxTypeLabel(
+        row,
+        channelName: 'general',
+        isDm: false,
+        senderLabel: 'Bob',
+      );
+      expect(row.item.id, threadIdInboxB);
+      expect(label.text, 'Thread in');
+      expect(matchesInboxFilter(row, InboxFilter.mention), isTrue);
+    });
   });
 }
