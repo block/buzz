@@ -17627,6 +17627,89 @@ void main() {
       });
     }
 
+    testWidgets(
+      'thread header opens a new channel page over a covered thread',
+      (tester) async {
+        final root = _textMsg(
+          id: threadIdRoot,
+          pubkey: 'alice',
+          content: 'Thread root',
+        );
+        final branch = _textMsg(
+          id: threadIdParent,
+          pubkey: 'bob',
+          content: 'Nested branch',
+          createdAt: 1100,
+          extraTags: const [
+            ['e', threadIdRoot, '', 'root'],
+            ['e', threadIdRoot, '', 'reply'],
+          ],
+        );
+        final nestedReply = _textMsg(
+          id: threadIdMid,
+          pubkey: 'alice',
+          content: 'Nested reply',
+          createdAt: 1200,
+          extraTags: const [
+            ['e', threadIdRoot, '', 'root'],
+            ['e', threadIdParent, '', 'reply'],
+          ],
+        );
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [root, branch, nestedReply],
+            initialThreadRootId: threadIdRoot,
+            threadReplies: {
+              threadIdRoot: [branch, nestedReply],
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.text('Reply in thread…'));
+        await tester.pumpAndSettle();
+        tester
+            .widget<TextField>(find.byType(TextField))
+            .contentInsertionConfiguration!
+            .onContentInserted(
+              KeyboardInsertedContent(
+                mimeType: 'image/png',
+                uri: 'content://clipboard/pasted.png',
+                data: _transparentPng,
+              ),
+            );
+        await tester.pumpAndSettle();
+        final attachment = find.byTooltip('Remove attachment');
+        expect(attachment, findsOneWidget);
+
+        await tester.tap(
+          find.byKey(const ValueKey('nested-thread-summary-$threadIdParent')),
+        );
+        await tester.pumpAndSettle();
+        ThreadDetailPage shownThread() =>
+            tester.widget<ThreadDetailPage>(find.byType(ThreadDetailPage));
+        expect(shownThread().threadHead.id, threadIdParent);
+
+        await tester.tap(find.bySemanticsLabel('Thread, open channel general'));
+        await tester.pumpAndSettle();
+        expect(find.byType(ThreadDetailPage), findsNothing);
+        expect(
+          tester
+              .widget<ChannelDetailPage>(find.byType(ChannelDetailPage))
+              .initialMessageId,
+          threadIdRoot,
+        );
+
+        await tester.pageBack();
+        await tester.pumpAndSettle();
+        expect(shownThread().threadHead.id, threadIdParent);
+        await tester.pageBack();
+        await tester.pumpAndSettle();
+        expect(shownThread().threadHead.id, threadIdRoot);
+        expect(attachment, findsOneWidget);
+      },
+    );
+
     testWidgets('thread header returns to the existing channel route', (
       tester,
     ) async {

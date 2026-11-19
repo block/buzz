@@ -47,10 +47,11 @@ FrostedAppBar _threadAppBar(
       return;
     }
     final navigator = Navigator.of(context);
-    final open = ref
-        .read(openChannelRoutesProvider)
-        .latest(channel.id, navigator: navigator);
-    if (open != null) {
+    final routes = ref.read(openChannelRoutesProvider);
+    final open = routes.latest(channel.id, navigator: navigator);
+    // Popping past another thread would dispose its unsent attachments, so
+    // open a fresh channel page above this thread instead.
+    if (open != null && !routes.coversThread(open, ModalRoute.of(context)!)) {
       navigator.popUntil((route) => route == open);
       return;
     }
