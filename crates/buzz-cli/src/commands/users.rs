@@ -56,8 +56,9 @@ pub async fn cmd_get_users(
         return Err(CliError::Usage("--pubkey: maximum 200 pubkeys".into()));
     }
 
-    let profiles = get_profiles(client, pubkeys).await?;
-    let profiles = with_archived(profiles, archived_pubkeys(client).await.as_ref(), true);
+    let (profiles, archived) =
+        tokio::join!(get_profiles(client, pubkeys), archived_pubkeys(client));
+    let profiles = with_archived(profiles?, archived.as_ref(), true);
     let output = match format {
         crate::OutputFormat::Compact => {
             let compact: Vec<serde_json::Value> = profiles
@@ -78,7 +79,20 @@ pub async fn cmd_get_users(
 /// list can't be read or verified: archive filtering fails open, never
 /// failing the lookup.
 async fn archived_pubkeys(client: &BuzzClient) -> Option<HashSet<String>> {
-    match fetch_archived_snapshot(client).await {
+    archived_pubkeys_within(client, ARCHIVE_READ_DEADLINE).await
+}
+
+/// How long a lookup waits for the archive list before giving up on filtering.
+const ARCHIVE_READ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+async fn archived_pubkeys_within(
+    client: &BuzzClient,
+    deadline: std::time::Duration,
+) -> Option<HashSet<String>> {
+    let read = tokio::time::timeout(deadline, fetch_archived_snapshot(client))
+        .await
+        .unwrap_or_else(|_| Err(CliError::Other(format!("timed out after {deadline:?}"))));
+    match read {
         Ok(archived) => Some(archived.into_iter().collect()),
         Err(e) => {
             eprintln!(
@@ -1061,10 +1075,10 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        archived_pubkeys, compact_profile, find_profiles, get_profiles, lookup_profiles,
-        owned_agent_pubkeys_from_events, owner_scoped_profiles, owner_verification,
-        parse_expiration_tag, parse_expiry, presence_subject, publish_status, read_statuses,
-        search_profiles, with_archived,
+        archived_pubkeys, archived_pubkeys_within, compact_profile, find_profiles, get_profiles,
+        lookup_profiles, owned_agent_pubkeys_from_events, owner_scoped_profiles,
+        owner_verification, parse_expiration_tag, parse_expiry, presence_subject, publish_status,
+        read_statuses, search_profiles, with_archived,
     };
     use crate::client::BuzzClient;
     use crate::error::CliError;
@@ -1083,6 +1097,8 @@ mod tests {
         events: Vec<Value>,
         queries: Vec<Value>,
         raw_query_response: Option<String>,
+        /// Never answer queries for this kind.
+        held_kind: Option<u64>,
         /// Answer queries for this kind with invalid JSON.
         broken_kind: Option<u64>,
         /// NIP-11 document served at `/`.
@@ -1102,6 +1118,10 @@ mod tests {
                 "/query",
                 post(|State(relay): State<Shared>, body: Bytes| async move {
                     let filters: Vec<Value> = serde_json::from_slice(&body).unwrap();
+                    let held = relay.lock().unwrap().held_kind;
+                    if held.is_some() && filters[0]["kinds"][0].as_u64() == held {
+                        std::future::pending::<()>().await;
+                    }
                     let [filter] = filters.as_slice() else {
                         panic!("one filter expected: {filters:?}")
                     };
@@ -1569,6 +1589,16 @@ mod tests {
         assert_eq!(found.len(), 2);
         assert_eq!(found[0]["archived"], true);
         assert!(found[1].get("archived").is_none());
+    }
+
+    #[tokio::test]
+    async fn archive_filter_fails_open_when_the_list_read_hangs() {
+        let (client, relay) = setup().await;
+        let relay_keys = Keys::generate();
+        relay.lock().unwrap().info = json!({"self": relay_keys.public_key().to_hex()});
+        relay.lock().unwrap().held_kind = Some(13535);
+        let deadline = std::time::Duration::from_millis(100);
+        assert!(archived_pubkeys_within(&client, deadline).await.is_none());
     }
 
     #[tokio::test]
