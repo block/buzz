@@ -44,6 +44,8 @@ class SidebarRelay {
   NostrEvent Function(NostrEvent)? replaceNextPublish;
   Completer<void>? holdHistory;
   Completer<void>? holdWriter;
+  // Pause the response after the writer has selected its head.
+  Completer<void>? holdWriterResponse;
   Completer<void>? holdOk;
   String? rejectLive;
   bool withholdEose = false;
@@ -203,6 +205,8 @@ class SidebarRelay {
       }
       final heads = _heads(_storedByRelay[request.url.origin] ?? const []);
       final head = heads[coordinate];
+      final hold = holdWriterResponse;
+      if (hold != null) await hold.future;
       return http.Response(jsonEncode([if (head != null) head.toJson()]), 200);
     }
     expect(jsonDecode(request.body), [

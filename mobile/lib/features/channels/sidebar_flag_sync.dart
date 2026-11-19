@@ -277,7 +277,8 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
       if (remote.enabled &&
           remoteMillis <= clearMillis &&
           !_pending.containsKey(id)) {
-        _pending[id] = clear;
+        // A readback can only retire the promotion its write captured.
+        _pending[id] = _entry(clear.enabled, clear.updatedAt);
         _promotedClears.add(id);
       }
       return true;
