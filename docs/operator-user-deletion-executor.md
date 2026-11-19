@@ -270,6 +270,13 @@ allow 10,000 distinct identities including the human; account discovery allows
 Media retains every owned community for each selected agent. Ownership profiles must
 remain until all dependent cleanup completes; profile removal goes last.
 
+Media has no separate cap on `(community_id, agent_pubkey)` pairs. One agent can
+contribute a pair for every community where the human owns it, so the identity
+limit does not bound the pair count. These pairs are retained in memory, including
+the storage-matching hash set, and the full pair arrays are sent with each media
+candidate-page query. They are outside the inventory budget described below;
+memory use and query payload size grow with the number of owned agent profiles.
+
 ## Media discovery and remaining limits
 
 Every invocation and retry fetches the human's current directly owned agents

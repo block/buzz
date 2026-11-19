@@ -39,6 +39,9 @@ impl UserDeletionTargets {
 /// Missing profiles grant no agent authority, and agent ownership is not recursive.
 /// `lock` retains FOR SHARE locks until the caller ends its transaction; callers
 /// still own write admission and the offline/stopped-writer operating contract.
+/// With `community: None` and `DiscoveryLimit::TargetKeys`, callers must pass
+/// `lock: false`: this query groups profiles by agent, and PostgreSQL does not
+/// allow FOR SHARE with GROUP BY. Use community-scoped discovery for row locking.
 pub(super) async fn discover(
     conn: &mut PgConnection,
     human: &str,
