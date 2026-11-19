@@ -68,16 +68,18 @@ fn subscribe_notices(
         "kinds": [KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION],
         "#p": [reader.public_key().to_hex()],
     });
-    subscribe(state, tenant, reader, filter)
+    subscribe(state, tenant, reader, filter, None)
 }
 
 /// Register `reader` as a connected client holding one live subscription to
-/// `filter`, and return its outbound frames.
+/// `filter`, scoped to `channel` when its events are a channel's, and return
+/// its outbound frames.
 fn subscribe(
     state: &Arc<AppState>,
     tenant: &TenantContext,
     reader: &Keys,
     filter: Value,
+    channel: Option<Uuid>,
 ) -> Receiver<axum::extract::ws::Message> {
     let conn_id = Uuid::new_v4();
     let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -102,7 +104,7 @@ fn subscribe(
         conn_id,
         "live".into(),
         vec![serde_json::from_value(filter).expect("filter")],
-        None,
+        channel,
     );
     rx
 }
@@ -498,7 +500,8 @@ async fn dm_message_from_someone_else_unhides_it() {
         "the reader's own message keeps the DM hidden"
     );
 
-    let mut live = subscribe(&state, &tenant, &reader, json!({"kinds": [9], "#h": [dm]}));
+    let filter = json!({"kinds": [9], "#h": [dm]});
+    let mut live = subscribe(&state, &tenant, &reader, filter, Some(dm.parse().unwrap()));
     let message = EventBuilder::new(Kind::Custom(9), "")
         .tags([Tag::parse(["h", dm.as_str()]).unwrap()])
         .sign_with_keys(&sender)
