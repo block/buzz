@@ -790,14 +790,23 @@ void main() {
       Map readFlagCache() =>
           jsonDecode(prefs.getString(legacyCacheKey())!) as Map;
 
-      void seedAbsentClear() {
+      void seedLegacyClear({int? clearAt, int? writerClearAt}) {
         unawaited(
           prefs.setString(
             legacyCacheKey(),
-            jsonEncode(blob({'x': (false, t - 1)})),
+            jsonEncode(blob({'x': (false, clearAt ?? t - 1)})),
           ),
         );
-        relay.stored.add(relay.event(lane.dTag, blob({'y': (true, t)}), t));
+        relay.stored.add(
+          relay.event(
+            lane.dTag,
+            blob({
+              'y': (true, t),
+              if (writerClearAt != null) 'x': (false, writerClearAt),
+            }),
+            t,
+          ),
+        );
       }
 
       NostrEvent returningFlag(bool enabled, int updatedAt) => relay.event(
@@ -813,7 +822,7 @@ void main() {
         'writer read',
       ]) {
         fakeAsyncTest('a kept clear wins on $scenario', (clock) {
-          seedAbsentClear();
+          seedLegacyClear();
           start(clock);
           clock.elapse(const Duration(seconds: 6));
           expect(relay.published, isEmpty);
@@ -863,36 +872,131 @@ void main() {
         });
       }
 
-      for (final enabled in [true, false]) {
-        fakeAsyncTest(
-          'a kept clear is retired by a ${enabled ? 'newer enable' : 'confirmed clear'}',
-          (clock) {
-            seedAbsentClear();
+      for (final path in ['migration', 'live', 'writer read', 'rebuild']) {
+        fakeAsyncTest('an older clear preserves the local clear on $path', (
+          clock,
+        ) {
+          seedLegacyClear(
+            clearAt: t,
+            writerClearAt: path == 'migration' ? t - 4 : null,
+          );
+          start(clock);
+          if (path != 'migration') {
+            final oldClear = returningFlag(false, (t - 4) * 1000);
+            relay.stored.add(oldClear);
+            relay.emit(oldClear);
+            clock.elapse(const Duration(milliseconds: 20));
+          }
+          clock.elapse(const Duration(seconds: 6));
+          expect(relay.published, isEmpty);
+          expect(subject.values()['x'], isFalse);
+          expect(readFlagCache()['keptClears']['x'], {
+            lane.field: false,
+            'updatedAt': t,
+          });
+          expect(readFlagCache()['pending'], isEmpty);
+
+          if (path == 'rebuild') {
+            subject.dispose();
             start(clock);
-            final returning = returningFlag(enabled, enabled ? t : t - 2);
-            relay.stored.add(returning);
-            relay.emit(returning);
+          }
+          final staleEnable = relay.event(
+            lane.dTag,
+            blob({'y': (true, t), 'x': (true, t - 2)}),
+            t + 2,
+          );
+          relay.stored.add(staleEnable);
+          if (path == 'writer read') {
+            relay.holdOk = Completer<void>();
+            subject.set('unrelated', true);
+            clock.elapse(const Duration(seconds: 5));
+            expect(subject.values()['x'], isFalse);
+            final ok = relay.holdOk!;
+            relay.holdOk = null;
+            ok.complete();
+            clock.flushMicrotasks();
+          } else {
+            relay.emit(staleEnable);
+            clock.elapse(const Duration(milliseconds: 20));
+            expect(subject.values()['x'], isFalse);
+            clock.elapse(const Duration(seconds: 5));
+          }
+          final payload = relay.decrypt(relay.published.single) as Map;
+          expect(payload['channels']['x'], {
+            lane.field: false,
+            'updatedAt': t * 1000,
+          });
+          expect(readFlagCache().containsKey('keptClears'), isFalse);
+          expect(readFlagCache().containsKey('promotedClears'), isFalse);
+          expect(readFlagCache()['pending'], isEmpty);
+        });
+      }
+
+      for (final (name, enabled, offset) in [
+        ('newer enable', true, 0),
+        ('equal clear', false, -1),
+        ('newer clear', false, 0),
+      ]) {
+        fakeAsyncTest('a kept clear is retired by a $name', (clock) {
+          seedLegacyClear();
+          start(clock);
+          expect(readFlagCache()['keptClears']['x']['updatedAt'], t - 1);
+
+          final returning = returningFlag(enabled, (t + offset) * 1000);
+          relay.stored.add(returning);
+          relay.emit(returning);
+          clock.elapse(const Duration(seconds: 6));
+          expect(subject.values()['x'], enabled);
+          expect(readFlagCache().containsKey('keptClears'), isFalse);
+          expect(relay.published, isEmpty);
+
+          if (!enabled) {
+            final newerEnable = relay.event(
+              lane.dTag,
+              blob({'y': (true, t), 'x': (true, t + 1)}),
+              t + 2,
+            );
+            relay.stored.add(newerEnable);
+            relay.emit(newerEnable);
             clock.elapse(const Duration(seconds: 6));
-            expect(subject.values()['x'], enabled);
-            expect(readFlagCache().containsKey('keptClears'), isFalse);
+            expect(subject.values()['x'], isTrue);
             expect(relay.published, isEmpty);
+          }
+        });
+      }
+
+      for (final promoted in [false, true]) {
+        fakeAsyncTest(
+          'a tap replaces a ${promoted ? 'promoted' : 'kept'} clear',
+          (clock) {
+            final clearAt = t + 60;
+            seedLegacyClear(clearAt: clearAt);
+            start(clock);
+            expect(readFlagCache()['keptClears']['x']['updatedAt'], clearAt);
+            if (promoted) {
+              final returning = returningFlag(true, t - 2);
+              relay.stored.add(returning);
+              relay.emit(returning);
+              clock.elapse(const Duration(milliseconds: 20));
+              expect(readFlagCache()['promotedClears'], ['x']);
+            }
+            subject.set('x', true);
+            expect(readFlagCache().containsKey('keptClears'), isFalse);
+            expect(readFlagCache().containsKey('promotedClears'), isFalse);
+            clock.elapse(const Duration(seconds: 5));
+            final payload = relay.decrypt(relay.published.single) as Map;
+            expect(payload['channels']['x'], {
+              lane.field: true,
+              'updatedAt': clearAt * 1000 + 1,
+            });
           },
         );
       }
 
-      fakeAsyncTest('a tap replaces a kept clear', (clock) {
-        seedAbsentClear();
-        start(clock).set('x', true);
-        expect(readFlagCache().containsKey('keptClears'), isFalse);
-        clock.elapse(const Duration(seconds: 5));
-        final payload = relay.decrypt(relay.published.single) as Map;
-        expect(payload['channels']['x'][lane.field], isTrue);
-      });
-
       fakeAsyncTest('a kept clear is promoted when readback finds a peer', (
         clock,
       ) {
-        seedAbsentClear();
+        seedLegacyClear();
         start(clock).set('unrelated', true);
         relay.replaceNextPublish = (attempt) => relay.event(
           lane.dTag,
@@ -933,7 +1037,7 @@ void main() {
       });
 
       fakeAsyncTest('a kept clear replaces its entry at the cap', (clock) {
-        seedAbsentClear();
+        seedLegacyClear();
         start(clock);
         final full = {
           for (var i = 0; i < 499; i++) 'active-$i': (true, t),
@@ -946,6 +1050,56 @@ void main() {
         final payload = relay.decrypt(relay.published.single) as Map;
         expect(payload['channels'].keys, unorderedEquals(full.keys));
         expect(payload['channels']['x'][lane.field], isFalse);
+      });
+
+      fakeAsyncTest('preflight parks a promoted clear missing at the cap', (
+        clock,
+      ) {
+        seedLegacyClear();
+        start(clock);
+        final otherFlags = {
+          for (var i = 0; i < 499; i++) 'active-$i': (true, t),
+        };
+        final withOldEnable = {...otherFlags, 'x': (true, t - 2)};
+        final full = relay.event(lane.dTag, blob(withOldEnable), t + 1);
+        relay.stored.add(full);
+        relay.emit(full);
+        clock.elapse(const Duration(milliseconds: 20));
+        expect(readFlagCache()['promotedClears'], ['x']);
+        expect(readFlagCache()['pending']['x'][lane.field], isFalse);
+        expect(subject.values()['x'], isFalse);
+
+        subject.dispose();
+        start(clock);
+        expect(readFlagCache()['promotedClears'], ['x']);
+        final withoutX = {...otherFlags, 'replacement': (true, t + 1)};
+        relay.stored.add(relay.event(lane.dTag, blob(withoutX), t + 2));
+        clock.elapse(const Duration(seconds: 5));
+
+        expect(relay.published, isEmpty);
+        expect(subject.values().keys, unorderedEquals(withoutX.keys));
+        expect(subject.values().values, everyElement(isTrue));
+        expect(readFlagCache()['pending'], isEmpty);
+        expect(readFlagCache().containsKey('promotedClears'), isFalse);
+        expect(readFlagCache()['keptClears']['x'], {
+          lane.field: false,
+          'updatedAt': (t - 1) * 1000,
+        });
+
+        final returning = relay.event(lane.dTag, blob(withOldEnable), t + 3);
+        relay.stored.add(returning);
+        relay.emit(returning);
+        clock.elapse(const Duration(milliseconds: 20));
+        expect(subject.values()['x'], isFalse);
+        clock.elapse(const Duration(seconds: 5));
+        final payload = relay.decrypt(relay.published.single) as Map;
+        expect(payload['channels'].keys, unorderedEquals(withOldEnable.keys));
+        expect(payload['channels']['x'], {
+          lane.field: false,
+          'updatedAt': (t - 1) * 1000,
+        });
+        expect(readFlagCache().containsKey('keptClears'), isFalse);
+        expect(readFlagCache().containsKey('promotedClears'), isFalse);
       });
 
       fakeAsyncTest('an oversized migration journal drains across a rebuild', (
@@ -964,6 +1118,8 @@ void main() {
         expect(readFlagCache()['pending'].keys, ['active-500']);
 
         subject.dispose();
+        clock.elapse(const Duration(seconds: 10));
+        expect(relay.published, hasLength(1));
         start(clock);
         clock.elapse(const Duration(seconds: 5));
         expect(relay.published, hasLength(2));

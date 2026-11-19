@@ -64,6 +64,7 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
   Map<String, T> _confirmed;
   final _pending = <String, T>{};
   final _keptClears = <String, T>{};
+  final _promotedClears = <String>{};
   bool _legacyCache = false;
   NostrEvent? _head;
   bool _headNeedsWrite = false;
@@ -109,6 +110,11 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
         _decode({'version': 1, 'channels': cached['keptClears']}, false)
           ..removeWhere((_, entry) => entry.enabled),
       );
+      if (cached['promotedClears'] case List ids) {
+        _promotedClears.addAll(
+          ids.whereType<String>().where((id) => _pending[id]?.enabled == false),
+        );
+      }
     } catch (error) {
       debugPrint('[$_coordinate] cannot load cached flag overlays: $error');
     }
@@ -124,6 +130,8 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
           'pending': _encode(_pending)['channels'],
           if (_keptClears.isNotEmpty)
             'keptClears': _encode(_keptClears)['channels'],
+          if (_promotedClears.isNotEmpty)
+            'promotedClears': _promotedClears.toList(),
           if (_legacyCache) 'legacyCache': true,
         }),
       );
@@ -209,29 +217,23 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
 
     // Old caches combine confirmed entries with offline edits. At the cap,
     // an absent flag may have been evicted, so require it to postdate the
-    // snapshot's second. Keep absent clears in case an older enable returns.
+    // snapshot's second. Reconcile legacy clears against the snapshot below.
     final firstLaterMillis = head != null && snapshot.length >= maxSidebarFlags
         ? (head.createdAt + 1) * 1000
         : 0;
     for (final local in _confirmed.entries) {
-      final remote = snapshot[local.key];
-      if (remote == null && !local.value.enabled) {
-        if (!_pending.containsKey(local.key)) {
-          _keptClears[local.key] = local.value;
-        }
+      if (_pending.containsKey(local.key)) continue;
+      if (!local.value.enabled) {
+        _keptClears[local.key] = local.value;
         continue;
       }
+      final remote = snapshot[local.key];
       final localMillis = sidebarFlagTimeMillis(local.value.updatedAt);
       final changed = remote == null
           ? localMillis >= firstLaterMillis
-          : local.value.enabled != remote.enabled &&
+          : !remote.enabled &&
                 localMillis >= sidebarFlagTimeMillis(remote.updatedAt);
-      if (changed) {
-        _pending.putIfAbsent(
-          local.key,
-          () => _entry(local.value.enabled, localMillis),
-        );
-      }
+      if (changed) _pending[local.key] = _entry(true, localMillis);
     }
     _head = head;
     _headNeedsWrite = head != null;
@@ -246,14 +248,33 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
 
   void _replaceConfirmed(Map<String, T> snapshot) {
     _confirmed = snapshot;
+    // These conditional clears may only replace an existing enable. If
+    // another writer removes it or restores an older clear, park the edit.
+    _promotedClears.removeWhere((id) {
+      final clear = _pending[id]!;
+      final remote = snapshot[id];
+      if (remote != null &&
+          (remote.enabled ||
+              sidebarFlagTimeMillis(remote.updatedAt) >=
+                  sidebarFlagTimeMillis(clear.updatedAt))) {
+        return false;
+      }
+      _keptClears[id] = clear;
+      _pending.remove(id);
+      return true;
+    });
     _keptClears.removeWhere((id, clear) {
       final remote = snapshot[id];
       if (remote == null) return false;
 
       final clearMillis = sidebarFlagTimeMillis(clear.updatedAt);
+      final remoteMillis = sidebarFlagTimeMillis(remote.updatedAt);
+      if (!remote.enabled && remoteMillis < clearMillis) return false;
       if (remote.enabled &&
-          sidebarFlagTimeMillis(remote.updatedAt) <= clearMillis) {
-        _pending.putIfAbsent(id, () => _entry(false, clearMillis));
+          remoteMillis <= clearMillis &&
+          !_pending.containsKey(id)) {
+        _pending[id] = _entry(false, clearMillis);
+        _promotedClears.add(id);
       }
       return true;
     });
@@ -305,11 +326,12 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
   void setFlag(String id, bool enabled, {bool skipAbsentClear = false}) {
     if (!_active) return;
     final previous = _pending[id] ?? _confirmed[id];
-    if (previous?.enabled == enabled ||
+    if ((previous?.enabled == enabled && !_promotedClears.contains(id)) ||
         (skipAbsentClear && !enabled && previous == null)) {
       return;
     }
     final keptClear = _keptClears.remove(id);
+    _promotedClears.remove(id);
     _pending[id] = _entry(
       enabled,
       _nextTimestamp(_pending[id] ?? keptClear, _confirmed[id]),
@@ -480,15 +502,19 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
   // that the user made during a relay read or publish pending.
   Future<void> _retireEdits(Map<String, T> settled) async {
     final retired = <String, T>{};
+    final retiredPromotions = <String>{};
     for (final edit in settled.entries) {
       if (identical(_pending[edit.key], edit.value)) {
         retired[edit.key] = edit.value;
         _pending.remove(edit.key);
+        if (_promotedClears.remove(edit.key)) retiredPromotions.add(edit.key);
       }
     }
     if (!await _persist()) {
       for (final edit in retired.entries) {
-        _pending.putIfAbsent(edit.key, () => edit.value);
+        if (_pending.containsKey(edit.key)) continue;
+        _pending[edit.key] = edit.value;
+        if (retiredPromotions.contains(edit.key)) _promotedClears.add(edit.key);
       }
       throw StateError('Flag settlement was not saved');
     }

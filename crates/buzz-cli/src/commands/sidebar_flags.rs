@@ -610,6 +610,7 @@ mod tests {
             assert!(!channels.contains_key(newer_clear));
             assert!(channels.contains_key(&active));
             assert_eq!(channels[C1]["updatedAt"], json!(time + 2));
+            assert_eq!(channels[C3][spec.flag], true);
 
             // Reintroduce two clears with mixed units, with one excess entry.
             let mut channels = channels.clone();
