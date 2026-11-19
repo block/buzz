@@ -33,6 +33,7 @@ part 'channel_member_snapshots.dart';
 part 'channels_provider_lifecycle.dart';
 part 'channel_list_changes.dart';
 part 'channels_provider_joins.dart';
+part 'channels_provider_refresh.dart';
 
 const _channelTypeOrder = {'stream': 0, 'forum': 1, 'dm': 2};
 const _unreadCatchUpLimit = 1000;
@@ -355,24 +356,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     return channels;
   }
 
-  Future<List<Channel>> _fetch({
-    bool subscribeLive = false,
-    bool fetchLastMessage = true,
-    bool fetchDirectory = false,
-  }) async {
-    final channels = await _fetchChannels(
-      subscribeLive: subscribeLive,
-      fetchLastMessage: fetchLastMessage,
-      fetchDirectory: fetchDirectory,
-    );
-    _hasLoaded = true;
-    return channels;
-  }
-
   Future<List<Channel>> _fetchChannels({
     bool subscribeLive = false,
     bool fetchLastMessage = true,
     bool fetchDirectory = false,
+    bool strong = false,
   }) async {
     final myPk = ref.read(myPubkeyProvider);
     if (myPk == null) throw StateError('No signing identity available');
@@ -394,7 +382,12 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     final listChanges = _channelListChanges;
 
     // Step 1: find the channels I'm a member of via kind:39002.
-    final memberships = await _readMemberships(fence, session, myPk);
+    final memberships = await _readMemberships(
+      fence,
+      session,
+      myPk,
+      strong: strong,
+    );
     final memberChannelIds = memberships
         .map((e) => e.getTagValue('d'))
         .whereType<String>()
@@ -406,9 +399,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     final memberChannelIdList = memberChannelIds.toList();
     final memberMetasRequest = memberChannelIds.isEmpty
         ? Future.value(const <NostrEvent>[])
-        : session.fetchHistory(
-            NostrFilters.channelMetadata(memberChannelIdList),
-          );
+        : _fetchMemberMetadata(session, memberChannelIdList, strong: strong);
     final hiddenDmIdsRequest = _fetchHiddenDmIds(session, myPk);
     final huddleStartsRequest = _fetchHuddleStarts(
       session,
@@ -992,7 +983,12 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   ///
   /// Unlike background refresh, failures (including disconnection or a retired
   /// request) propagate. Cached UI state stays visible while the request runs.
-  Future<List<Channel>> fetchFresh({bool fetchDirectory = false}) async {
+  /// Set [strong] for write-influencing recovery: memberships and metadata
+  /// then use the HTTP writer pool, with no replica/WebSocket fallback.
+  Future<List<Channel>> fetchFresh({
+    bool fetchDirectory = false,
+    bool strong = false,
+  }) async {
     final generation = _buildGeneration;
     try {
       await future;
@@ -1008,6 +1004,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     final channels = await _fetch(
       subscribeLive: true,
       fetchDirectory: fetchDirectory,
+      strong: strong,
     );
     state = AsyncData(channels);
     return channels;

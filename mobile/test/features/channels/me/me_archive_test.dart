@@ -1,0 +1,961 @@
+import 'dart:async';
+import 'dart:ui' as ui;
+
+import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/channels/channel_detail_page.dart';
+import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+import 'package:buzz/shared/widgets/buzz_loading_indicator.dart';
+import 'package:buzz/features/channels/me/me_page.dart';
+import 'package:buzz/shared/me/default_agent.dart';
+import 'package:buzz/shared/me/me_assistants.dart';
+import 'package:buzz/shared/me/me_groups.dart';
+import 'package:buzz/shared/me/me_sync.dart';
+import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/theme/theme.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart' show CustomSemanticsAction;
+import 'package:flutter_test/flutter_test.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:nostr/nostr.dart' as nostr;
+import 'package:shared_preferences/shared_preferences.dart';
+
+class _Config extends RelayConfigNotifier {
+  _Config(this.config);
+  final RelayConfig config;
+  @override
+  RelayConfig build() => config;
+}
+
+// Only the relay and preference storage are faked in the archive path. The
+// real signer, ChannelActions and ChannelsNotifier submit and reconcile it.
+class _ArchiveRelay extends RelaySessionNotifier {
+  _ArchiveRelay(this.owner);
+  final String owner;
+  final submitted = <NostrEvent>[];
+  final archived = <String>{'archived'};
+  // The archive write can commit while the writer still serves the old event.
+  final withholdArchiveMetadata = <String>{};
+
+  bool metadataIsArchived(String id) =>
+      archived.contains(id) && !withholdArchiveMetadata.contains(id);
+  Completer<void>? acknowledgement;
+  bool failRefresh = false;
+  int failedRefreshes = 0;
+  VoidCallback? afterAcceptance;
+  final metadataVersions = <String, int>{};
+  final metadataReadGates = <Completer<void>>[];
+  int metadataReads = 0;
+  List<NostrEvent>? replicaMetadata;
+  bool failStrongMetadata = false;
+  bool failStrongMetadataTail = false;
+  final discoveryQueries = <Map<String, dynamic>>[];
+
+  void unarchive(String id) {
+    archived.remove(id);
+    metadataVersions[id] = (metadataVersions[id] ?? 2) + 1;
+  }
+
+  static const chats = {
+    'grouped': 'Project chat',
+    'loose': 'Loose chat',
+    'legacy': 'Legacy chat',
+    'ordinary': 'General',
+    'archived': 'Old chat',
+    'shared': 'Shared chat',
+  };
+
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  void setConnected(bool connected) {
+    state = SessionState(
+      status: connected ? SessionStatus.connected : SessionStatus.disconnected,
+    );
+  }
+
+  List<NostrEvent> events(NostrFilter filter, {bool strong = false}) {
+    if (filter.kinds.contains(39000)) {
+      if (strong &&
+          (failStrongMetadata ||
+              (failStrongMetadataTail &&
+                  filter.extensions['before_id'] != null))) {
+        throw StateError('Writer unavailable');
+      }
+      if (!strong && replicaMetadata != null) {
+        return replicaMetadata!
+            .where(
+              (e) => filter.tags['#d']?.contains(e.getTagValue('d')) == true,
+            )
+            .toList();
+      }
+    }
+    if (failRefresh && filter.kinds.contains(39002)) {
+      failedRefreshes++;
+      throw StateError('List unavailable');
+    }
+    return [
+      if (filter.kinds.contains(39002) && filter.until == null)
+        for (final id in chats.keys)
+          NostrEvent(
+            id: 'members-$id',
+            pubkey: 'relay',
+            createdAt: 1,
+            kind: 39002,
+            tags: [
+              ['d', id],
+              ['p', owner, '', id == 'shared' ? 'member' : 'owner'],
+            ],
+            content: '',
+            sig: '',
+          ),
+      if (filter.kinds.contains(39000))
+        for (final entry in chats.entries)
+          if (filter.tags['#d']?.contains(entry.key) == true)
+            NostrEvent(
+              id: 'metadata-${entry.key}-${metadataVersions[entry.key] ?? 0}-${metadataIsArchived(entry.key)}',
+              pubkey: 'relay',
+              createdAt:
+                  metadataVersions[entry.key] ??
+                  (metadataIsArchived(entry.key) ? 2 : 1),
+              kind: 39000,
+              tags: [
+                ['d', entry.key],
+                ['name', entry.value],
+                ['t', 'stream'],
+                ['private'],
+                ['P', entry.key == 'shared' ? 'someone-else' : owner],
+                if (entry.key != 'legacy' && entry.key != 'ordinary')
+                  ['t', 'buzz.solo'],
+                if (metadataIsArchived(entry.key)) ['archived', 'true'],
+              ],
+              content: '',
+              sig: '',
+            ),
+    ];
+  }
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    // WebSocket ignores consistency extensions and remains replica-routed.
+    return _read(filter);
+  }
+
+  Future<List<NostrEvent>> _read(
+    NostrFilter filter, {
+    bool strong = false,
+  }) async {
+    final snapshot = events(filter, strong: strong);
+    if (filter.kinds.contains(39000)) {
+      metadataReads++;
+      if (metadataReadGates.isNotEmpty) {
+        await metadataReadGates.removeAt(0).future;
+      }
+    }
+    return snapshot;
+  }
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    final results = <NostrEvent>[];
+    for (final filter in filters) {
+      final wire = filter.toJson();
+      if (filter.kinds.any([39000, 39002].contains)) discoveryQueries.add(wire);
+      final snapshot = await _read(
+        filter,
+        strong: wire['consistency'] == 'strong',
+      );
+      if (filter.kinds.contains(39000)) {
+        // A low server cap forces recovery through the composite cursor.
+        final before = wire['before_id'] as String?;
+        final page =
+            snapshot
+                .where(
+                  (event) =>
+                      filter.until == null ||
+                      event.createdAt < filter.until! ||
+                      (event.createdAt == filter.until &&
+                          before != null &&
+                          event.id.compareTo(before) > 0),
+                )
+                .toList()
+              ..sort(
+                (a, b) => a.createdAt == b.createdAt
+                    ? a.id.compareTo(b.id)
+                    : b.createdAt.compareTo(a.createdAt),
+              );
+        results.addAll(page.take(2));
+      } else {
+        results.addAll(snapshot);
+      }
+    }
+    return results;
+  }
+
+  @override
+  Future<void Function()> subscribe(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+  }) async => () {};
+
+  @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
+    bool resumeSince = true,
+  }) async {
+    onStatusChanged(RelaySubscriptionStatus.ready);
+    return () {};
+  }
+
+  @override
+  Future<NostrEvent> publish(
+    NostrEvent event, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    if (event.kind != 9002) return event;
+    submitted.add(event);
+    await acknowledgement?.future;
+    final channelId = event.getTagValue('h')!;
+    archived.add(channelId);
+    if (!withholdArchiveMetadata.contains(channelId)) {
+      metadataVersions[channelId] = (metadataVersions[channelId] ?? 1) + 1;
+    }
+    afterAcceptance?.call();
+    return event;
+  }
+}
+
+void main() {
+  for (final (platform, unarchiveBeforeRecovery) in [
+    for (final platform in [TargetPlatform.iOS, TargetPlatform.android])
+      for (final restore in [false, true]) (platform, restore),
+  ]) {
+    final name = 'Solo archive on $platform, restore=$unarchiveBeforeRecovery';
+    testWidgets(name, (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final owner = nostr.Keys.generate();
+      final relay = _ArchiveRelay(owner.public);
+      relay.metadataVersions['loose'] = 10;
+      final embedded = platform == TargetPlatform.android;
+      final pane = ConversationPaneController();
+      addTearDown(pane.dispose);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            relayConfigProvider.overrideWith(
+              () => _Config(
+                RelayConfig(baseUrl: 'https://relay.test', nsec: owner.nsec),
+              ),
+            ),
+            relaySessionProvider.overrideWith(() => relay),
+            defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
+            meAssistantsProvider.overrideWith((ref) async => []),
+            meGroupsProvider.overrideWith(
+              (ref) => Stream.value(
+                const MeGroups(
+                  groups: [
+                    {'id': 'project', 'name': 'App work'},
+                  ],
+                  assignments: {'grouped': 'project'},
+                  channels: ['legacy'],
+                ),
+              ),
+            ),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.light().copyWith(platform: platform),
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(context).copyWith(
+                disableAnimations: true,
+                textScaler: const TextScaler.linear(1.5),
+              ),
+              child: child!,
+            ),
+            home: ConversationPaneScope(
+              controller: pane,
+              child: embedded
+                  ? const Scaffold(
+                      body: CustomScrollView(slivers: [MePage(sliver: true)]),
+                    )
+                  : const MePage(),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final context = tester.element(find.byType(MePage));
+      final container = ProviderScope.containerOf(context);
+      final shared = find.text('Shared chat');
+      expect(shared, findsOneWidget);
+      expect(
+        find.ancestor(of: shared, matching: find.byType(Dismissible)),
+        findsNothing,
+      );
+      final sharedActions = tester
+          .getSemantics(find.bySemanticsLabel('Shared chat'))
+          .getSemanticsData()
+          .customSemanticsActionIds;
+      expect(
+        (sharedActions ?? const <int>[]).map(
+          (id) => CustomSemanticsAction.getAction(id)!.label,
+        ),
+        isNot(contains('Archive chat')),
+      );
+      await tester.drag(shared, const Offset(-700, 0));
+      await tester.pumpAndSettle();
+      expect(relay.submitted, isEmpty);
+      expect(shared.hitTestable(), findsOneWidget);
+      await tester.tap(shared);
+      await tester.pumpAndSettle();
+      expect(pane.selectedId, 'shared');
+      expect(pane.detailBuilder!(context), isA<ChannelDetailPage>());
+      pane.clear();
+      await tester.pumpAndSettle();
+      expect(shared.hitTestable(), findsOneWidget);
+      expect(find.byType(Dismissible), findsNWidgets(3));
+      expect(find.text('General'), findsNothing);
+      expect(find.text('Old chat'), findsNothing);
+
+      if (!embedded) {
+        // Ordinary pull-to-refresh keeps the cached inventory without archive
+        // recovery errors on either failed reads or a disconnected session.
+        for (final connected in [true, false]) {
+          relay.failRefresh = true;
+          relay.setConnected(connected);
+          await tester.pumpAndSettle();
+          final failedBeforePull = relay.failedRefreshes;
+          await tester.drag(
+            find.byType(CustomScrollView),
+            const Offset(0, 500),
+          );
+          await tester.pumpAndSettle();
+          expect(
+            relay.failedRefreshes,
+            connected ? greaterThan(failedBeforePull) : failedBeforePull,
+          );
+          expect(
+            find.text('Couldn’t refresh chat status. Try again.'),
+            findsNothing,
+          );
+          expect(find.text('Project chat').hitTestable(), findsOneWidget);
+          expect(relay.submitted, isEmpty);
+          relay.failRefresh = false;
+          relay.setConnected(true);
+          await tester.pumpAndSettle();
+        }
+      }
+
+      // Scrolling, a short left drag, and a right drag never archive.
+      for (final offset in [
+        const Offset(0, -60),
+        const Offset(-30, 0),
+        const Offset(500, 0),
+      ]) {
+        await tester.drag(find.text('Project chat'), offset);
+        await tester.pumpAndSettle();
+        expect(relay.submitted, isEmpty);
+        expect(find.byType(Dismissible), findsNWidgets(3));
+      }
+
+      // A full swipe only offers the existing lifecycle confirmation.
+      await tester.drag(find.text('Project chat'), const Offset(-700, 0));
+      await tester.pumpAndSettle();
+      expect(find.text('Archive #Project chat?'), findsOneWidget);
+      expect(find.text('The channel will become read-only.'), findsOneWidget);
+      expect(relay.submitted, isEmpty);
+      final confirming = tester.widget<Semantics>(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is Semantics && widget.properties.label == 'Project chat',
+        ),
+      );
+      expect(confirming.properties.liveRegion, isFalse);
+      expect(confirming.properties.customSemanticsActions, isEmpty);
+      expect(find.text('Archiving…'), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('archive-solo-grouped')),
+          matching: find.byType(BuzzLoadingIndicator),
+        ),
+        findsNothing,
+      );
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(relay.submitted, isEmpty);
+      expect(find.text('Project chat').hitTestable(), findsOneWidget);
+
+      // Keep a write in flight, reject it (including permission/offline
+      // failures), then retry the same gesture through the real action.
+      relay.acknowledgement = Completer<void>();
+      await tester.drag(find.text('Project chat'), const Offset(-700, 0));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(relay.submitted, isEmpty);
+      await tester.tap(find.widgetWithText(FilledButton, 'Archive'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(relay.submitted, hasLength(1));
+      expect(relay.submitted.single.kind, 9002);
+      expect(relay.submitted.single.tags, [
+        ['h', 'grouped'],
+        ['archived', 'true'],
+      ]);
+      expect(relay.submitted.single.sig, isNotEmpty);
+      expect(relay.archived, isNot(contains('grouped')));
+      expect(find.text('Archiving…').hitTestable(), findsOneWidget);
+      final pendingActions = tester
+          .getSemantics(find.bySemanticsLabel('Project chat, archiving'))
+          .getSemanticsData()
+          .customSemanticsActionIds;
+      expect(
+        (pendingActions ?? const <int>[]).map(
+          (id) => CustomSemanticsAction.getAction(id)!.label,
+        ),
+        isNot(contains('Archive chat')),
+      );
+      // Collapse fully disposes the row, then expand before acknowledgement.
+      await tester.tap(find.text('App work'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('archive-solo-grouped')), findsNothing);
+      await tester.tap(find.text('App work'));
+      await tester.pumpAndSettle();
+      expect(find.bySemanticsLabel('Project chat, archiving'), findsOneWidget);
+      expect(
+        tester
+            .getSemantics(find.bySemanticsLabel('Project chat, archiving'))
+            .getSemanticsData()
+            .customSemanticsActionIds,
+        isEmpty,
+      );
+      await tester.drag(
+        find.byKey(const ValueKey('archive-solo-grouped')),
+        const Offset(-700, 0),
+      );
+      await tester.pumpAndSettle();
+      expect(relay.submitted, hasLength(1));
+      await tester.tap(find.text('App work'));
+      await tester.pumpAndSettle();
+      expect(find.text('Project chat'), findsNothing);
+      relay.acknowledgement!.completeError(StateError('Relay unavailable'));
+      await tester.pumpAndSettle();
+      expect(find.text('Couldn’t archive chat. Try again.'), findsOneWidget);
+      await tester.tap(find.text('App work'));
+      await tester.pumpAndSettle();
+      expect(find.text('Project chat').hitTestable(), findsOneWidget);
+      expect(
+        container
+            .read(channelsProvider)
+            .requireValue
+            .firstWhere((channel) => channel.id == 'grouped')
+            .isArchived,
+        isFalse,
+      );
+
+      relay.acknowledgement = Completer<void>();
+      pane.open('grouped', (_) => const SizedBox());
+      await tester.drag(find.text('Project chat'), const Offset(-700, 0));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Archive'));
+      await tester.pumpAndSettle();
+      // Metadata can arrive before the write acknowledgement. That is still
+      // reconciled, and must not leave an accepted ID behind after unarchive.
+      relay.archived.add('grouped');
+      await container.read(channelsProvider.notifier).refresh();
+      await tester.pumpAndSettle();
+      expect(pane.selectedId, 'grouped');
+      relay.acknowledgement!.complete();
+      await tester.pumpAndSettle();
+      relay.acknowledgement = null;
+      expect(find.text('Project chat'), findsNothing);
+      expect(pane.selectedId, isNull);
+      expect(find.text('Loose chat'), findsOneWidget);
+      expect(
+        container
+            .read(channelsProvider)
+            .requireValue
+            .firstWhere((channel) => channel.id == 'grouped')
+            .isArchived,
+        isTrue,
+      );
+
+      // The same action is available without a drag, on exactly one labelled
+      // semantics node, and legacy Solo placement gets it too.
+      final node = tester.getSemantics(find.bySemanticsLabel('Legacy chat'));
+      final ids = node.getSemanticsData().customSemanticsActionIds!;
+      final archive = ids.singleWhere(
+        (id) => CustomSemanticsAction.getAction(id)!.label == 'Archive chat',
+      );
+      node.owner!.performAction(
+        node.id,
+        ui.SemanticsAction.customAction,
+        archive,
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Archive #Legacy chat?'), findsOneWidget);
+      expect(relay.submitted, hasLength(2));
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(relay.submitted, hasLength(2));
+      expect(find.text('Legacy chat'), findsOneWidget);
+      node.owner!.performAction(
+        node.id,
+        ui.SemanticsAction.customAction,
+        archive,
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Archive #Legacy chat?'), findsOneWidget);
+      await tester.tap(find.widgetWithText(FilledButton, 'Archive'));
+      await tester.pumpAndSettle();
+      expect(find.text('Legacy chat'), findsNothing);
+      expect(relay.archived, containsAll(['grouped', 'legacy']));
+      expect(find.text('Loose chat').hitTestable(), findsOneWidget);
+      ScaffoldMessenger.of(context).clearSnackBars();
+      await tester.pumpAndSettle();
+      // Relay acceptance plus a real list-read failure retains cached rows.
+      // It must retain accepted knowledge too: no second kind:9002, including
+      // after the section disposes/remounts. Recovery retries only the read.
+      relay.failRefresh = true;
+      // Another client can edit active metadata before our archive, without
+      // that revision ever reaching this page. Archive then becomes v12.
+      relay.metadataVersions['loose'] = 11;
+      relay.withholdArchiveMetadata.add('loose');
+      pane.open('shared', (_) => const SizedBox());
+      await tester.drag(find.text('Loose chat'), const Offset(-700, 0));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Archive'));
+      await tester.pumpAndSettle();
+      expect(relay.failedRefreshes, greaterThan(0));
+      expect(relay.archived, contains('loose'));
+      expect(relay.submitted, hasLength(4));
+      expect(find.text('Couldn’t archive chat. Try again.'), findsNothing);
+      expect(
+        find.text('Chat archived. Refresh to update the list.'),
+        findsOneWidget,
+      );
+      expect(pane.selectedId, 'shared');
+      await tester.tap(find.text('Chats'));
+      await tester.pumpAndSettle();
+      expect(find.text('Loose chat'), findsNothing);
+      await tester.tap(find.text('Chats'));
+      await tester.pumpAndSettle();
+      final acceptedNode = tester.getSemantics(
+        find.bySemanticsLabel('Loose chat, archived, awaiting refresh'),
+      );
+      final acceptedActions = acceptedNode
+          .getSemanticsData()
+          .customSemanticsActionIds!;
+      expect(
+        acceptedActions.map((id) => CustomSemanticsAction.getAction(id)!.label),
+        ['Refresh chat status'],
+      );
+      await tester.drag(find.text('Loose chat'), const Offset(-700, 0));
+      await tester.pumpAndSettle();
+      expect(find.text('Archive #Loose chat?'), findsNothing);
+      expect(relay.submitted, hasLength(4));
+      // Failed recovery must propagate as feedback and retain the marker.
+      ScaffoldMessenger.of(context).clearSnackBars();
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.descendant(
+          of: find.byKey(const ValueKey('archive-solo-loose')),
+          matching: find.widgetWithText(TextButton, 'Refresh'),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Couldn’t refresh chat status. Try again.'),
+        findsOneWidget,
+      );
+      expect(
+        find.bySemanticsLabel('Loose chat, archived, awaiting refresh'),
+        findsOneWidget,
+      );
+      expect(relay.submitted, hasLength(4));
+      ScaffoldMessenger.of(context).clearSnackBars();
+      await tester.pumpAndSettle();
+
+      // The archive committed but no new metadata was emitted. Repeated
+      // successful strong reads see the writer's active v11, which is newer
+      // than the active v10 the page had seen before confirming the archive.
+      relay.failRefresh = false;
+      for (var i = 0; i < 2; i++) {
+        relay.discoveryQueries.clear();
+        _performCustomAction(
+          tester,
+          'Loose chat, archived, awaiting refresh',
+          'Refresh chat status',
+        );
+        await tester.pumpAndSettle();
+        final channel = container
+            .read(channelsProvider)
+            .requireValue
+            .firstWhere((c) => c.id == 'loose');
+        expect(channel.createdAt.millisecondsSinceEpoch, 11000);
+        expect(channel.isArchived, isFalse);
+        expect(relay.archived, contains('loose'));
+        expect(
+          relay.discoveryQueries.any(
+            (q) =>
+                q['consistency'] == 'strong' &&
+                (q['kinds'] as List).contains(39000),
+          ),
+          isTrue,
+        );
+        final stillGuarded = tester.getSemantics(
+          find.bySemanticsLabel('Loose chat, archived, awaiting refresh'),
+        );
+        final actions = stillGuarded
+            .getSemanticsData()
+            .customSemanticsActionIds!;
+        expect(
+          actions.map((id) => CustomSemanticsAction.getAction(id)!.label),
+          ['Refresh chat status'],
+        );
+        expect(
+          find.text('Archive accepted. The chat list hasn’t confirmed it yet.'),
+          findsOneWidget,
+        );
+        await tester.drag(find.text('Loose chat'), const Offset(-700, 0));
+        await tester.pumpAndSettle();
+        expect(find.text('Archive #Loose chat?'), findsNothing);
+        expect(relay.submitted, hasLength(4));
+        ScaffoldMessenger.of(context).clearSnackBars();
+        await tester.pumpAndSettle();
+      }
+
+      // An archived snapshot from an older lifecycle is not reconciliation
+      // for this attempt, whose known active revision is already v11.
+      final metadataFilter = NostrFilters.channelMetadata(
+        _ArchiveRelay.chats.keys.toList(),
+      );
+      final staleActive = relay.events(metadataFilter);
+      relay.withholdArchiveMetadata.remove('loose');
+      relay.metadataVersions['loose'] = 9;
+      relay.replicaMetadata = relay.events(metadataFilter);
+      await container.read(channelsProvider.notifier).refresh();
+      await tester.pumpAndSettle();
+      relay.replicaMetadata = staleActive;
+      relay.metadataVersions['loose'] = 12;
+      await container.read(channelsProvider.notifier).refresh();
+      await tester.pumpAndSettle();
+      expect(
+        find.bySemanticsLabel('Loose chat, archived, awaiting refresh'),
+        findsOneWidget,
+      );
+      // Keep the replica on active v11 while writer archive v12 is available.
+
+      // A working replica is no fallback for a failed writer confirmation.
+      relay.failStrongMetadata = true;
+      relay.discoveryQueries.clear();
+      _performCustomAction(
+        tester,
+        'Loose chat, archived, awaiting refresh',
+        'Refresh chat status',
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Couldn’t refresh chat status. Try again.'),
+        findsOneWidget,
+      );
+      expect(
+        find.bySemanticsLabel('Loose chat, archived, awaiting refresh'),
+        findsOneWidget,
+      );
+      expect(relay.submitted, hasLength(4));
+      expect(
+        relay.discoveryQueries.where(
+          (q) => (q['kinds'] as List).contains(39002),
+        ),
+        hasLength(2),
+      );
+      expect(
+        relay.discoveryQueries.where(
+          (q) => (q['kinds'] as List).contains(39000),
+        ),
+        isNotEmpty,
+      );
+      expect(
+        relay.discoveryQueries.every((q) => q['consistency'] == 'strong'),
+        isTrue,
+      );
+      relay.failStrongMetadata = false;
+      ScaffoldMessenger.of(context).clearSnackBars();
+      await tester.pumpAndSettle();
+
+      // A later metadata page failure cannot install a successful prefix.
+      relay.failStrongMetadataTail = true;
+      _performCustomAction(
+        tester,
+        'Loose chat, archived, awaiting refresh',
+        'Refresh chat status',
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Couldn’t refresh chat status. Try again.'),
+        findsOneWidget,
+      );
+      expect(
+        find.bySemanticsLabel('Loose chat, archived, awaiting refresh'),
+        findsOneWidget,
+      );
+      expect(relay.submitted, hasLength(4));
+      relay.failStrongMetadataTail = false;
+      ScaffoldMessenger.of(context).clearSnackBars();
+      await tester.pumpAndSettle();
+
+      if (unarchiveBeforeRecovery) {
+        // An unarchive also looks active if the app never saw archived v12.
+        // Superseding the pending read cannot make that result conclusive.
+        relay.unarchive('loose');
+        final oldRecovery = Completer<void>();
+        relay.metadataReadGates.add(oldRecovery);
+        final readsBeforeRecovery = relay.metadataReads;
+        _performCustomAction(
+          tester,
+          'Loose chat, archived, awaiting refresh',
+          'Refresh chat status',
+        );
+        await tester.pumpAndSettle();
+        expect(relay.metadataReads, readsBeforeRecovery + 1);
+        // Start a second recovery while the first response is held.
+        _performCustomAction(
+          tester,
+          'Loose chat, archived, awaiting refresh',
+          'Refresh chat status',
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.bySemanticsLabel('Loose chat, archived, awaiting refresh'),
+          findsOneWidget,
+        );
+        expect(
+          container.read(channelsProvider).requireValue.map((c) => c.id),
+          containsAll(_ArchiveRelay.chats.keys),
+        );
+        expect(
+          relay.discoveryQueries.where(
+            (q) =>
+                (q['kinds'] as List).contains(39000) && q['before_id'] != null,
+          ),
+          isNotEmpty,
+        );
+        expect(
+          relay.discoveryQueries.every((q) => q['consistency'] == 'strong'),
+          isTrue,
+        );
+        expect(
+          container
+              .read(channelsProvider)
+              .requireValue
+              .firstWhere((c) => c.id == 'loose')
+              .createdAt
+              .millisecondsSinceEpoch,
+          13000,
+        );
+        expect(relay.submitted, hasLength(4));
+        ScaffoldMessenger.of(context).clearSnackBars();
+        await tester.pumpAndSettle();
+        oldRecovery.complete();
+        await tester.pumpAndSettle();
+        expect(
+          find.bySemanticsLabel('Loose chat, archived, awaiting refresh'),
+          findsOneWidget,
+        );
+        expect(
+          find.text('Couldn’t refresh chat status. Try again.'),
+          findsNothing,
+        );
+        expect(
+          find.text('Archive accepted. The chat list hasn’t confirmed it yet.'),
+          findsNothing,
+        );
+        expect(relay.submitted, hasLength(4));
+
+        // An external archive finally supplies an observed archive revision.
+        relay.archived.add('loose');
+        relay.metadataVersions['loose'] = 14;
+      }
+      relay.failRefresh = false;
+      _performCustomAction(
+        tester,
+        'Loose chat, archived, awaiting refresh',
+        'Refresh chat status',
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Loose chat'), findsNothing);
+      const archiveSubmissions = 4;
+      expect(relay.submitted, hasLength(archiveSubmissions));
+
+      // Successful writer recovery must survive the next ordinary routed
+      // refresh: the provider installs stale active v11, but the page keeps
+      // the archived revision and exposes neither archive input.
+      final confirmedRevision = relay.metadataVersions['loose']!;
+      relay.discoveryQueries.clear();
+      if (embedded) {
+        await container.read(channelsProvider.notifier).refresh();
+      } else {
+        await tester.drag(find.byType(CustomScrollView), const Offset(0, 500));
+      }
+      await tester.pumpAndSettle();
+      expect(
+        container
+            .read(channelsProvider)
+            .requireValue
+            .firstWhere((c) => c.id == 'loose')
+            .createdAt
+            .millisecondsSinceEpoch,
+        11000,
+      );
+      expect(find.text('Loose chat'), findsNothing);
+      expect(find.byKey(const ValueKey('archive-solo-loose')), findsNothing);
+      expect(find.bySemanticsLabel('Loose chat'), findsNothing);
+      expect(relay.submitted, hasLength(archiveSubmissions));
+      expect(
+        relay.discoveryQueries.where(
+          (q) => (q['kinds'] as List).contains(39000),
+        ),
+        isEmpty,
+      );
+
+      relay.replicaMetadata = null;
+      relay.archived.remove('loose');
+      relay.metadataVersions['loose'] = confirmedRevision;
+      await container.read(channelsProvider.notifier).refresh();
+      await tester.pumpAndSettle();
+      expect(find.text('Loose chat'), findsNothing);
+      relay.archived.add('loose');
+
+      // Keep the highest observed archived revision even when an older
+      // archived result arrives later, then reject equal/older active data.
+      relay.replicaMetadata = null;
+      for (final revision in [confirmedRevision + 2, confirmedRevision + 1]) {
+        relay.metadataVersions['loose'] = revision;
+        await container.read(channelsProvider.notifier).refresh();
+        await tester.pumpAndSettle();
+      }
+      relay.archived.remove('loose');
+      for (final revision in [confirmedRevision + 1, confirmedRevision + 2]) {
+        relay.metadataVersions['loose'] = revision;
+        await container.read(channelsProvider.notifier).refresh();
+        await tester.pumpAndSettle();
+        expect(find.text('Loose chat'), findsNothing);
+        expect(find.byKey(const ValueKey('archive-solo-loose')), findsNothing);
+        expect(relay.submitted, hasLength(archiveSubmissions));
+      }
+      relay.metadataVersions['loose'] = confirmedRevision + 3;
+      await container.read(channelsProvider.notifier).refresh();
+      await tester.pumpAndSettle();
+      expect(find.bySemanticsLabel('Loose chat'), findsOneWidget);
+      _performCustomAction(tester, 'Loose chat', 'Archive chat');
+      await tester.pumpAndSettle();
+      expect(find.text('Archive #Loose chat?'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(relay.submitted, hasLength(archiveSubmissions));
+
+      // A genuinely newer unarchive also releases a fence captured before ACK.
+      relay.unarchive('grouped');
+      await container.read(channelsProvider.notifier).refresh();
+      await tester.pumpAndSettle();
+      expect(find.bySemanticsLabel('Project chat'), findsOneWidget);
+      await tester.drag(find.text('Project chat'), const Offset(-700, 0));
+      await tester.pumpAndSettle();
+      expect(find.text('Archive #Project chat?'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(relay.submitted, hasLength(archiveSubmissions));
+
+      // An acknowledgement from a retired community cannot mutate the new
+      // scope's row state, feedback, or same-ID tablet selection.
+      relay.acknowledgement = Completer<void>();
+      await tester.drag(find.text('Project chat'), const Offset(-700, 0));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Archive'));
+      await tester.pumpAndSettle();
+      expect(relay.submitted, hasLength(archiveSubmissions + 1));
+      // A confirmed fence from the old community must not hide the same ID
+      // in the new community, even with a lower metadata revision.
+      relay.archived.remove('legacy');
+      relay.metadataVersions['legacy'] = 1;
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: 'https://other-relay.test', nsec: owner.nsec);
+      await tester.pumpAndSettle();
+      pane.open('grouped', (_) => const SizedBox());
+      relay.acknowledgement!.complete();
+      await tester.pumpAndSettle();
+      expect(pane.selectedId, 'grouped');
+      expect(find.bySemanticsLabel('Legacy chat'), findsOneWidget);
+      expect(find.bySemanticsLabel('Project chat'), findsOneWidget);
+      expect(
+        find.bySemanticsLabel('Project chat, archived, awaiting refresh'),
+        findsNothing,
+      );
+      expect(find.text('Couldn’t archive chat. Try again.'), findsNothing);
+      expect(tester.takeException(), isNull);
+    }, variant: TargetPlatformVariant.only(platform));
+  }
+  test(
+    'archive acceptance is reported before reconciliation errors propagate',
+    () async {
+      final owner = nostr.Keys.generate();
+      final relay = _ArchiveRelay(owner.public);
+      var valid = true;
+      var accepted = 0;
+      relay.afterAcceptance = () => valid = false;
+      final actionsProvider = Provider<ChannelActions>(
+        (ref) => ChannelActions(
+          ref: ref,
+          session: relay,
+          signedEventRelay: SignedEventRelay(session: relay, nsec: owner.nsec),
+          currentPubkey: owner.public,
+          isCommunityValid: () => valid,
+        ),
+      );
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      await expectLater(
+        container
+            .read(actionsProvider)
+            .archiveChannel('grouped', onAccepted: () => accepted++),
+        throwsA(isA<StateError>()),
+      );
+      expect(accepted, 1);
+      expect(relay.submitted, hasLength(1));
+      expect(relay.archived, contains('grouped'));
+
+      valid = true;
+      relay.acknowledgement = Completer<void>();
+      final rejected = container
+          .read(actionsProvider)
+          .archiveChannel('loose', onAccepted: () => accepted++);
+      final rejection = expectLater(rejected, throwsA(isA<StateError>()));
+      relay.acknowledgement!.completeError(StateError('Denied'));
+      await rejection;
+      expect(accepted, 1);
+      expect(relay.archived, isNot(contains('loose')));
+    },
+  );
+}
+
+void _performCustomAction(WidgetTester tester, String label, String action) {
+  final finder = find.bySemanticsLabel(label);
+  expect(finder, findsOneWidget);
+  final node = tester.getSemantics(finder);
+  final id = node.getSemanticsData().customSemanticsActionIds!.singleWhere(
+    (id) => CustomSemanticsAction.getAction(id)!.label == action,
+  );
+  node.owner!.performAction(node.id, ui.SemanticsAction.customAction, id);
+}

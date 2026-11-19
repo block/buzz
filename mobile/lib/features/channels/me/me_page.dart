@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart' show CustomSemanticsAction;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -35,6 +36,7 @@ import '../../../shared/widgets/frosted_scaffold.dart';
 import '../../../shared/widgets/buzz_loading_indicator.dart';
 import '../../../shared/widgets/modal_presentation.dart';
 import '../channel.dart';
+import '../channel_action_confirmation.dart';
 import '../compose_bar.dart';
 import 'me_assistant_picker_sheet.dart';
 import 'new_me_project.dart';
@@ -101,6 +103,180 @@ class MePage extends HookConsumerWidget {
         ref.watch(meOfflineSaveWarningProvider).value ?? false;
     final channels = ref.watch(channelsProvider);
     final unreadIds = ref.watch(meUnreadChannelIdsProvider);
+    // Workspace collapse disposes its rows. Keep writes and feedback with
+    // the page, scoped to the account/community that offered the action.
+    final archiveActions = ref.watch(channelActionsProvider);
+    final archives = useValueNotifier(<String, _MeArchiveOperation>{}, [
+      archiveActions,
+    ]);
+    useValueListenable(archives);
+    final archiveRecovery = useRef<Object?>(null);
+    ref.listen(channelsProvider, (_, next) {
+      final all = next.value;
+      if (all == null) return;
+      final byId = {for (final channel in all) channel.id: channel};
+      final updated = {...archives.value};
+      var changed = false;
+      for (final entry in archives.value.entries) {
+        final channel = byId[entry.key];
+        if (channel == null) continue;
+        final observed = entry.value.observe(channel);
+        if (identical(observed, entry.value)) continue;
+        changed = true;
+        if (observed == null) {
+          updated.remove(entry.key);
+        } else {
+          updated[entry.key] = observed;
+        }
+      }
+      if (changed) archives.value = updated;
+    });
+    bool isCurrentArchiveScope() =>
+        context.mounted &&
+        identical(ref.read(channelActionsProvider), archiveActions);
+    Future<void> refreshArchives() async {
+      if (!isCurrentArchiveScope()) return;
+      final recovery = Object();
+      archiveRecovery.value = recovery;
+      final accepted = {
+        for (final entry in archives.value.entries)
+          if (entry.value.needsRecovery) entry.key: entry.value,
+      };
+      if (accepted.isEmpty) {
+        await ref.read(channelsProvider.notifier).refresh();
+        return;
+      }
+      try {
+        // The listener reconciles observed archive revisions. Even a strong
+        // read can return pre-archive metadata if relay publication failed.
+        await ref.read(channelsProvider.notifier).fetchFresh(strong: true);
+        if (!context.mounted ||
+            !isCurrentArchiveScope() ||
+            !identical(archiveRecovery.value, recovery)) {
+          return;
+        }
+        final stillAwaitingArchive = accepted.entries.any((entry) {
+          final current = archives.value[entry.key];
+          return current != null &&
+              identical(current.attempt, entry.value.attempt) &&
+              current.needsRecovery;
+        });
+        if (stillAwaitingArchive) {
+          ScaffoldMessenger.of(context).showFeedbackSnackBar(
+            SnackBar(
+              content: const Text(
+                'Archive accepted. The chat list hasn’t confirmed it yet.',
+              ),
+              action: SnackBarAction(
+                label: 'Refresh',
+                onPressed: refreshArchives,
+              ),
+            ),
+            kind: ToastKind.generic,
+          );
+        }
+      } catch (_) {
+        if (context.mounted &&
+            isCurrentArchiveScope() &&
+            identical(archiveRecovery.value, recovery)) {
+          ScaffoldMessenger.of(context).showFeedbackSnackBar(
+            const SnackBar(
+              content: Text('Couldn’t refresh chat status. Try again.'),
+            ),
+            kind: ToastKind.error,
+          );
+        }
+      }
+    }
+
+    Future<void> archive(Channel channel) async {
+      final channelId = channel.id;
+      if (archives.value.containsKey(channelId)) return;
+      archives.value = {
+        ...archives.value,
+        channelId: _MeArchiveOperation(
+          _MeArchivePhase.confirming,
+          channel.createdAt,
+        ),
+      };
+      // Capture the reviewed account/community before the confirmation awaits.
+      final actions = archiveActions;
+      final pane = ConversationPaneScope.maybeOf(context);
+      var accepted = false;
+
+      void showRefreshFeedback(String message) {
+        if (!isCurrentArchiveScope()) return;
+        ScaffoldMessenger.of(context).showFeedbackSnackBar(
+          SnackBar(
+            content: Text(message),
+            action: SnackBarAction(
+              label: 'Refresh',
+              onPressed: refreshArchives,
+            ),
+          ),
+          kind: ToastKind.generic,
+        );
+      }
+
+      try {
+        final confirmed = await showChannelActionConfirmation(
+          context: Navigator.of(context, rootNavigator: true).context,
+          title: 'Archive #${channel.name}?',
+          body: 'The channel will become read-only.',
+          confirmLabel: 'Archive',
+        );
+        if (!confirmed || !isCurrentArchiveScope()) return;
+        archives.value = {
+          ...archives.value,
+          channelId: archives.value[channelId]!.withPhase(
+            _MeArchivePhase.pending,
+          ),
+        };
+        await actions.archiveChannel(
+          channelId,
+          onAccepted: () {
+            accepted = true;
+            if (!isCurrentArchiveScope()) return;
+            if (pane?.selectedId == channelId) pane!.clear();
+            final all = ref.read(channelsProvider).value;
+            final operation = archives.value[channelId]!.withPhase(
+              _MeArchivePhase.accepted,
+            );
+            final updated = {...archives.value};
+            final current = all?.where((c) => c.id == channelId).firstOrNull;
+            final observed = current == null
+                ? operation
+                : operation.observe(current);
+            if (observed == null) {
+              updated.remove(channelId);
+            } else {
+              updated[channelId] = observed;
+            }
+            archives.value = updated;
+          },
+        );
+        if (isCurrentArchiveScope() &&
+            archives.value[channelId]?.needsRecovery == true) {
+          showRefreshFeedback('Chat archived. Refresh to update the list.');
+        }
+      } catch (_) {
+        if (accepted) {
+          showRefreshFeedback('Chat archived, but couldn’t refresh the list.');
+        } else if (context.mounted && isCurrentArchiveScope()) {
+          ScaffoldMessenger.of(context).showFeedbackSnackBar(
+            const SnackBar(content: Text('Couldn’t archive chat. Try again.')),
+            kind: ToastKind.error,
+          );
+        }
+      } finally {
+        // Keep confirmed revisions for this page/scope: a routed refresh may
+        // regress to pre-archive metadata after reconciliation succeeds.
+        if (isCurrentArchiveScope() && !accepted) {
+          archives.value = {...archives.value}..remove(channelId);
+        }
+      }
+    }
+
     final busy = useState(false);
     Future<void> perform(Future<void> Function() action) async {
       if (busy.value) return;
@@ -178,6 +354,7 @@ class MePage extends HookConsumerWidget {
                   (c) =>
                       c.isMember &&
                       !c.isArchived &&
+                      archives.value[c.id]?.archivedRevision == null &&
                       c.isSoloChat(legacyChannels),
                 )
                 .toList()
@@ -190,6 +367,7 @@ class MePage extends HookConsumerWidget {
           final pane = ConversationPaneScope.maybeOf(context);
           final selected = pane?.selectedId == channel.id;
           return DecoratedBox(
+            key: ValueKey(channel.id),
             decoration: BoxDecoration(
               color: selected ? context.colors.primaryContainer : null,
               borderRadius: BorderRadius.circular(Radii.md),
@@ -200,6 +378,10 @@ class MePage extends HookConsumerWidget {
                 channelId: channel.id,
                 name: channel.name,
                 isUnread: unreadIds.contains(channel.id),
+                canArchive: channel.isPersonalChat(viewer, legacyChannels),
+                archivePhase: archives.value[channel.id]?.phase,
+                onArchive: () => archive(channel),
+                onRefresh: refreshArchives,
                 onLongPress: () => showChannelDetailsSheet(
                   context: context,
                   channel: channel,
@@ -345,7 +527,7 @@ class MePage extends HookConsumerWidget {
           edgeOffset: topSectionHeight,
           onRefresh: () async {
             ref.invalidate(meGroupsProvider);
-            await ref.read(channelsProvider.notifier).refresh();
+            await refreshArchives();
             await ref.read(meGroupsProvider.future);
           },
           child: CustomScrollView(

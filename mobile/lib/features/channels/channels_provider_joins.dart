@@ -39,8 +39,9 @@ extension ChannelsNotifierJoins on ChannelsNotifier {
   Future<List<NostrEvent>> _readMemberships(
     _ChannelRefreshFence fence,
     RelaySessionNotifier session,
-    String pubkey,
-  ) async {
+    String pubkey, {
+    bool strong = false,
+  }) async {
     Future<List<NostrEvent>> read(bool strong) async => _latestChannelEvents(
       await _fenced(
         fence,
@@ -53,7 +54,7 @@ extension ChannelsNotifierJoins on ChannelsNotifier {
         .whereType<String>()
         .toSet();
 
-    final memberships = await read(false);
+    final memberships = await read(strong);
     if (_confirmedJoins.isEmpty) return memberships;
     if (ids(memberships).containsAll(_confirmedJoins)) {
       _confirmedJoins.clear();

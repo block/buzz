@@ -21731,8 +21731,12 @@ class _FakeChannelActions extends ChannelActions {
   }
 
   @override
-  Future<void> archiveChannel(String channelId) async {
+  Future<void> archiveChannel(
+    String channelId, {
+    VoidCallback? onAccepted,
+  }) async {
     await onArchiveChannel?.call(channelId);
+    onAccepted?.call();
   }
 
   @override

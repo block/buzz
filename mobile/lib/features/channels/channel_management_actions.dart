@@ -342,8 +342,11 @@ class ChannelActions {
   }
 
   /// Archives the channel and refreshes its cached state.
-  Future<void> archiveChannel(String channelId) =>
-      _setChannelArchived(channelId, archived: true);
+  ///
+  /// [onAccepted] runs after relay acceptance, before reconciliation. A later
+  /// reconciliation or community-scope error still propagates to the caller.
+  Future<void> archiveChannel(String channelId, {VoidCallback? onAccepted}) =>
+      _setChannelArchived(channelId, archived: true, onAccepted: onAccepted);
 
   /// Unarchives the channel and refreshes its cached state.
   Future<void> unarchiveChannel(String channelId) =>
@@ -352,6 +355,7 @@ class ChannelActions {
   Future<void> _setChannelArchived(
     String channelId, {
     required bool archived,
+    VoidCallback? onAccepted,
   }) async {
     _ensureCommunityValid();
     await _signedEventRelay.submit(
@@ -359,6 +363,7 @@ class ChannelActions {
       content: '',
       tags: buildSetChannelArchivedTags(channelId, archived: archived),
     );
+    onAccepted?.call();
     _ensureCommunityValid();
     await _refreshChannelState(channelId);
   }
