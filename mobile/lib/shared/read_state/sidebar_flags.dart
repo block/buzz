@@ -1,4 +1,4 @@
-const _maxSidebarFlags = 500;
+const maxSidebarFlags = 500;
 
 /// Older clients used ten-digit Unix seconds. Leave earlier sentinel values
 /// and millisecond timestamps unchanged, including already converted entries.
@@ -20,7 +20,7 @@ void boundSidebarFlags<T extends SidebarFlagEntry>(
   Map<String, T> channels,
   Set<String> changed,
 ) {
-  final excess = channels.length - _maxSidebarFlags;
+  final excess = channels.length - maxSidebarFlags;
   if (excess <= 0) return;
 
   final evictionOrder = channels.entries.toList()

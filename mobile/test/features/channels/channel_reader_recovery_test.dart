@@ -679,11 +679,13 @@ void main() {
           ? channelStarsKey(relay.pubkey, 'https://relay.example')
           : channelMutesKey(relay.pubkey, 'https://relay.example');
 
-      fakeAsyncTest('upgrading recovers newer offline flag edits', (clock) {
+      fakeAsyncTest('upgrading recovers offline flags below the cap', (clock) {
         final local = blob({
           'offline-clear': (false, t + 1),
           'offline-add': (true, t + 2),
-          'evicted': (true, t - 10),
+          'older-absent': (true, t - 10),
+          'absent-clear': (false, t + 3),
+          'equal-clear': (false, t),
           'same-second-absent': (true, t),
           'changed-by-peer': (true, t - 2),
           'already-current': (true, t - 1),
@@ -694,6 +696,7 @@ void main() {
             lane.dTag,
             blob({
               'offline-clear': (true, (t - 1) * 1000),
+              'equal-clear': (true, t * 1000),
               'changed-by-peer': (false, t * 1000),
               'already-current': (true, t - 2),
             }),
@@ -705,13 +708,22 @@ void main() {
         expect(subject.values(), {
           'offline-clear': false,
           'offline-add': true,
+          'older-absent': true,
+          'same-second-absent': true,
+          'equal-clear': false,
           'changed-by-peer': false,
           'already-current': true,
         });
         final migrated = jsonDecode(prefs.getString(legacyCacheKey())!) as Map;
         expect(
           migrated['pending'].keys,
-          unorderedEquals(['offline-clear', 'offline-add']),
+          unorderedEquals([
+            'offline-clear',
+            'offline-add',
+            'older-absent',
+            'same-second-absent',
+            'equal-clear',
+          ]),
         );
         expect(migrated.containsKey('legacyCache'), isFalse);
 
@@ -720,9 +732,46 @@ void main() {
         expect(payload['channels'], {
           'offline-clear': {lane.field: false, 'updatedAt': (t + 1) * 1000},
           'offline-add': {lane.field: true, 'updatedAt': (t + 2) * 1000},
+          'older-absent': {lane.field: true, 'updatedAt': (t - 10) * 1000},
+          'same-second-absent': {lane.field: true, 'updatedAt': t * 1000},
+          'equal-clear': {lane.field: false, 'updatedAt': t * 1000 + 1},
           'changed-by-peer': {lane.field: false, 'updatedAt': t * 1000},
           'already-current': {lane.field: true, 'updatedAt': t - 2},
         });
+      });
+
+      fakeAsyncTest('upgrading at the cap avoids restoring evicted flags', (
+        clock,
+      ) {
+        final cached = blob({
+          'evicted': (true, t - 10),
+          'same-second-absent': (true, t),
+          'offline-add': (true, t + 2),
+          'absent-clear': (false, t + 3),
+        });
+        unawaited(prefs.setString(legacyCacheKey(), jsonEncode(cached)));
+        relay.stored.add(
+          relay.event(
+            lane.dTag,
+            blob({for (var i = 0; i < 500; i++) 'active-$i': (true, t - 2)}),
+            t,
+          ),
+        );
+
+        start(clock);
+        final cache = jsonDecode(prefs.getString(legacyCacheKey())!) as Map;
+        expect(cache['pending'].keys, ['offline-add']);
+        clock.elapse(const Duration(seconds: 5));
+        final payload = relay.decrypt(relay.published.single) as Map;
+        final channels = payload['channels'] as Map;
+        expect(channels, hasLength(500));
+        expect(channels['offline-add'], {
+          lane.field: true,
+          'updatedAt': (t + 2) * 1000,
+        });
+        expect(channels, isNot(contains('evicted')));
+        expect(channels, isNot(contains('same-second-absent')));
+        expect(channels, isNot(contains('absent-clear')));
       });
 
       fakeAsyncTest('upgrading with no writer head recovers absent flags', (
@@ -960,6 +1009,30 @@ void main() {
         expect(subject.values(), {'offline': false});
         final cache = jsonDecode(prefs.getString(legacyCacheKey())!) as Map;
         expect(cache['pending'], isEmpty);
+      });
+
+      fakeAsyncTest('a fresh tap advances past a newer observed peer', (clock) {
+        relay.stored.add(
+          relay.event(lane.dTag, blob({'flag': (true, t - 2)}), t),
+        );
+        start(clock).set('flag', false);
+        final peerTime = (t + 60) * 1000;
+        final peer = relay.event(
+          lane.dTag,
+          blob({'flag': (false, peerTime)}),
+          t + 1,
+        );
+        relay.stored.add(peer);
+        relay.emit(peer);
+        clock.elapse(const Duration(milliseconds: 20));
+
+        subject.set('flag', true);
+        clock.elapse(const Duration(seconds: 5));
+        final payload = relay.decrypt(relay.published.single) as Map;
+        expect(payload['channels']['flag'], {
+          lane.field: true,
+          'updatedAt': peerTime + 1,
+        });
       });
 
       fakeAsyncTest('a mixed batch sends only edits that still win', (clock) {

@@ -199,17 +199,19 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
     final (head, snapshot) = await _writerHead();
     if (!_legacyCache) return true;
 
-    // Old caches combine confirmed entries with offline edits. For IDs absent
-    // from the snapshot, a timestamp after the snapshot's second is evidence
-    // of an offline edit. Older absent entries may have been evicted.
-    final firstLaterMillis = head == null ? 0 : (head.createdAt + 1) * 1000;
+    // Old caches combine confirmed entries with offline edits. At the cap,
+    // an absent flag may have been evicted, so require it to postdate the
+    // snapshot's second. An absent clear already has the desired value.
+    final firstLaterMillis = head != null && snapshot.length >= maxSidebarFlags
+        ? (head.createdAt + 1) * 1000
+        : 0;
     for (final local in _confirmed.entries) {
       final remote = snapshot[local.key];
       final localMillis = sidebarFlagTimeMillis(local.value.updatedAt);
       final changed = remote == null
-          ? localMillis >= firstLaterMillis
+          ? local.value.enabled && localMillis >= firstLaterMillis
           : local.value.enabled != remote.enabled &&
-                localMillis > sidebarFlagTimeMillis(remote.updatedAt);
+                localMillis >= sidebarFlagTimeMillis(remote.updatedAt);
       if (changed) {
         _pending.putIfAbsent(
           local.key,
@@ -275,7 +277,10 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
     if (!_active) return;
     final previous = _pending[id] ?? _confirmed[id];
     if (previous?.enabled == enabled) return;
-    _pending[id] = _entry(enabled, _nextTimestamp(previous));
+    _pending[id] = _entry(
+      enabled,
+      _nextTimestamp(_pending[id], _confirmed[id]),
+    );
     // Invoke the prefs setter in this turn so a successor manager created
     // during a disconnect can see the journal immediately.
     unawaited(_persist());
@@ -285,9 +290,13 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
     _scheduleWrite();
   }
 
-  int _nextTimestamp(T? previous) => max(
+  int _nextTimestamp(T? pending, T? confirmed) => max(
     DateTime.now().millisecondsSinceEpoch,
-    sidebarFlagTimeMillis(previous?.updatedAt ?? 0) + 1,
+    max(
+          sidebarFlagTimeMillis(pending?.updatedAt ?? 0),
+          sidebarFlagTimeMillis(confirmed?.updatedAt ?? 0),
+        ) +
+        1,
   );
 
   void _scheduleWrite({Duration delay = const Duration(seconds: 5)}) {
@@ -340,6 +349,7 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
       final outgoing = Map.of(snapshot);
       for (final edit in edits.entries) {
         final latest = snapshot[edit.key];
+        var value = edit.value;
         if (latest != null) {
           final age = sidebarFlagTimeMillis(
             latest.updatedAt,
@@ -348,8 +358,16 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
             settled[edit.key] = edit.value;
             continue;
           }
+          // Break a conflicting tie for older clients that keep their local
+          // value at equal timestamps. Strictly newer writer values win.
+          if (age == 0) {
+            value = _entry(
+              value.enabled,
+              sidebarFlagTimeMillis(value.updatedAt) + 1,
+            );
+          }
         }
-        outgoing[edit.key] = edit.value;
+        outgoing[edit.key] = value;
       }
       if (settled.isNotEmpty) {
         _head = head;
