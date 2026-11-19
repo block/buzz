@@ -57,14 +57,18 @@ class RelayInvalidRequest implements Exception {
 
 /// Whether [message], a relay `OK` or `CLOSED` reason, says the app sent
 /// something invalid. Refusals the app handles as expected outcomes, an
-/// archived channel, an open channel name that is taken, an agent whose
-/// policy refuses the addition, a guest adding people, a sole owner leaving or
-/// a read-state update whose timestamp has fallen outside the relay's window,
-/// are not.
+/// archived channel, an Unarchive of a channel that is no longer archived, an
+/// open channel name that is taken, an agent whose policy refuses the
+/// addition, a guest adding people, a sole owner leaving or an event whose
+/// timestamp is outside the relay's window, are not. The timestamp refusal is
+/// left out for every event, not only read-state updates: a device clock that
+/// is off would otherwise report every publish, though this also hides a
+/// signed event retried after the window has passed.
 bool isInvalidRequestRejection(String message) {
   final normalized = message.trim().toLowerCase();
   return normalized.startsWith('invalid:') &&
       !normalized.startsWith('invalid: channel is archived') &&
+      !normalized.startsWith('invalid: channel is not archived') &&
       !normalized.startsWith('invalid: an open channel named') &&
       !normalized.startsWith('invalid: policy:') &&
       !normalized.startsWith(

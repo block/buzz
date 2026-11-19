@@ -33,6 +33,7 @@ void main() {
       'invalid: bad signature': true,
       'INVALID: malformed filter': true,
       'invalid: channel is archived': false,
+      'invalid: channel is not archived': false,
       'invalid: an open channel named "general" already exists': false,
       'invalid: event timestamp too far from server time': false,
       'invalid: policy:nobody \u2014 this agent has disabled external channel additions':

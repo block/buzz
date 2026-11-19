@@ -132,7 +132,12 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   SessionState build() {
     final config = ref.watch(relayConfigProvider);
     _relayUrl = config.baseUrl;
-    _diagnostics = ref.read(diagnosticReporterProvider);
+    // A switch names the next member before this session is rebuilt, so the
+    // old community's in-flight replies must not be filed under it.
+    _diagnostics = SignerDiagnosticReporter(
+      ref.read(diagnosticReporterProvider),
+      signer: pubkeyFromNsec(config.nsec),
+    );
     final auth = ref.watch(authProvider.select(_sessionAuthKey));
     _ageRestricted = ref.watch(ageSignalProvider) == AgeSignalState.restricted;
 
