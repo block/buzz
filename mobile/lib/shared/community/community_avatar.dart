@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+
 import '../theme/theme.dart';
 import '../widgets/avatar_image.dart';
 import 'community_icon_provider.dart';
@@ -31,7 +32,7 @@ class CommunityAvatar extends ConsumerWidget {
     return ClipRSuperellipse(
       borderRadius: BorderRadius.circular(Radii.card * size / 40),
       child: ColoredBox(
-        color: context.colors.primaryContainer,
+        color: context.controlSurface,
         child: SizedBox.square(
           dimension: size,
           child: AvatarImageContent(

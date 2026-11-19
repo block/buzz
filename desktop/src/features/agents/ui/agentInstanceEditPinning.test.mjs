@@ -361,6 +361,7 @@ test("inheritTransition_suppressesEffortWrite_evenWhenUserPickedAValue", () => {
     effortLevel: "high", // the deferred selection that used to race the save
     originalEffortLevel: null,
     inheritTransition: agentCommandUpdate === "",
+    choices: [{ value: "high" }],
   });
   assert.equal(
     submission.persist,
@@ -376,6 +377,7 @@ test("effortWrite_persistsRealChange_onNonInheritSave", () => {
     effortLevel: "high",
     originalEffortLevel: null,
     inheritTransition: false,
+    choices: [{ value: "high" }],
   });
   assert.deepEqual(submission, { persist: true, level: "high" });
 });
@@ -387,6 +389,7 @@ test("effortWrite_noOp_whenSelectionUnchanged", () => {
     effortLevel: "high",
     originalEffortLevel: "high",
     inheritTransition: false,
+    choices: [{ value: "high" }],
   });
   assert.equal(submission.persist, false);
 });
@@ -398,6 +401,18 @@ test("effortWrite_clearToAdapterDefault_persistsNull", () => {
     effortLevel: null,
     originalEffortLevel: "high",
     inheritTransition: false,
+    choices: [{ value: "high" }],
   });
   assert.deepEqual(submission, { persist: true, level: null });
+});
+
+test("effortWrite_dropped_whenSavedModelDoesNotOfferIt", () => {
+  // Stored Opus levels, user picked "max", then switched to Haiku: no choices.
+  const submission = resolveEffortSubmission({
+    effortLevel: "max",
+    originalEffortLevel: null,
+    inheritTransition: false,
+    choices: undefined,
+  });
+  assert.equal(submission.persist, false);
 });

@@ -1,6 +1,6 @@
 part of '../message_content.dart';
 
-List<MarkdownComponent> _useMessageInlineComponents({
+List<InlinePattern> _useMessageInlinePatterns({
   required String content,
   required String finalContent,
   required Map<String, String> mentionNames,
@@ -46,7 +46,7 @@ List<MarkdownComponent> _useMessageInlineComponents({
     hasMentionHandler: onMentionTap != null,
   );
 
-  // gpt_markdown compares components by identity. Recreating them on every
+  // gpt_markdown compares patterns by identity. Recreating them on every
   // parent rebuild reparses unchanged message bodies on the UI isolate.
   return useMemoized(
     () => [
@@ -60,13 +60,16 @@ List<MarkdownComponent> _useMessageInlineComponents({
         },
         agentMentionPubkeys: inputs.agentPubkeys,
         onMentionTap: inputs.hasMentionHandler ? mentionTap : null,
-      ),
-      CustomEmojiMd(inputs.customEmoji, content: finalContent, size: emojiSize),
+      ).pattern,
+      CustomEmojiMd(
+        inputs.customEmoji,
+        content: finalContent,
+        size: emojiSize,
+      ).pattern,
       _ChannelLinkMd(
         channelNames: inputs.channelNames,
         onChannelTap: channelTap,
-      ),
-      ...MarkdownComponent.inlineComponents,
+      ).pattern,
     ],
     [inputs],
   );

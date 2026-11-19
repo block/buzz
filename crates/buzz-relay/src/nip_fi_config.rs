@@ -13,6 +13,7 @@
 //! | `BUZZ_NIP_FI_ISSUERS` | If enforce | JSON array of issuer configs (see [`IssuerEnvConfig`]). |
 //! | `BUZZ_NIP_FI_COMMUNITIES` | If enforce | JSON array mapping each community's canonical URI to its authorized issuers (see [`CommunityEnvConfig`]). |
 //! | `BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS` | If enforce | Per-partition limit on session lifetime. |
+//! | `BUZZ_NIP_FI_PROVISION_BINDING` | No | JSON `{"host_suffix", "authorized_issuers"}` binding communities created one label under the suffix; read in every mode (see [`buzz_auth::ProvisionBindingPolicy`]). |
 //!
 //! Each `BUZZ_NIP_FI_ISSUERS` entry also carries the S4 command-API fields.
 //! Enforce-mode startup fails if any issuer lacks the required ones:
@@ -31,8 +32,10 @@
 //! backward-compatible until an operator explicitly enables enforcement.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::Duration;
 
+use buzz_auth::nip_fi::provision::canonical_authority;
 use buzz_auth::{
     validate_nip_fi_config, CommunityBinding, FreshnessClass, IssuerJwksConfig, IssuerPolicy,
     IssuerPolicyError, IssuerRegistry, JwksSourceContract, NipFiMode, NipFiStartupError,
@@ -61,12 +64,30 @@ const MAX_CONNECTION_LIFETIME_SECS: u64 = 30 * 24 * 3600;
 ///     "skew_seconds": 30,
 ///     "maximum_assertion_age_seconds": 3600,
 ///     "jwks_uri": "https://login.example.com/.well-known/jwks.json",
+///     "jwks_transport": "public_https",
 ///     "jwks_refresh_interval_seconds": 300,
 ///     "jwks_hard_deadline_seconds": 86400,
 ///     "maximum_command_age_seconds": 30,
 ///     "authorized_principals": ["admin-svc@login.example.com"]
 ///   }
 /// ]
+/// ```
+/// `jwks_transport` is optional and defaults to `public_https`. The `mesh`
+/// form requires an HTTP URI with a DNS hostname (not an IP literal) and no
+/// userinfo, query, fragment, or backslash. Every DNS answer is checked
+/// against the positive address allow-list in the
+/// [NIP-FI JWKS snapshot contract](../../../docs/nips/NIP-FI.md#jwks-snapshot);
+/// empty or mixed answers deny, and the first checked address is pinned.
+/// Selecting `mesh` is an operator assertion: the deployment must enforce
+/// mutual TLS peer authentication and integrity protection, authorize the
+/// JWKS endpoint, and restrict egress. The relay cannot verify those
+/// properties, and unauthenticated HTTP permits key substitution and issuer
+/// impersonation.
+///
+/// For example:
+/// ```json
+/// { "jwks_uri": "http://mesh.example.test/.well-known/jwks.json",
+///   "jwks_transport": "mesh" }
 /// ```
 /// The `require_attested_key` field is not part of this schema; S2 removed it
 /// from buzz-auth. S3 enforces key pairing structurally for every issuer.
@@ -90,8 +111,13 @@ pub(super) struct IssuerEnvConfig {
     pub skew_seconds: u64,
     /// `iat + maximum_assertion_age` residual bound in seconds.
     pub maximum_assertion_age_seconds: u64,
-    /// HTTPS endpoint serving the JWK Set for this issuer.
+    /// JWK Set endpoint for this issuer; HTTPS by default, or HTTP with the
+    /// explicitly selected mesh transport and its
+    /// [NIP-FI address allow-list](../../../docs/nips/NIP-FI.md#jwks-snapshot).
     pub jwks_uri: String,
+    /// Per-issuer JWKS transport. Unknown values are rejected during parsing.
+    #[serde(default)]
+    pub jwks_transport: JwksTransportEnvConfig,
     /// Seconds between JWKS refreshes.
     pub jwks_refresh_interval_seconds: u64,
     /// Hard deadline for accepting a JWKS snapshot in seconds.
@@ -110,6 +136,13 @@ pub(super) struct IssuerEnvConfig {
     /// [`crate::api::nip_fi::DEFAULT_DENY_SET_CAPACITY`] when absent.
     #[serde(default)]
     pub deny_set_capacity: Option<usize>,
+    /// Operator opt-in for output-only verified profiles.
+    #[serde(default)]
+    pub public_profile: bool,
+    /// Public display label, never an issuer URI.
+    pub public_issuer_label: Option<String>,
+    /// Seconds between unchanged-name refreshes (default one hour).
+    pub verified_at_refresh_seconds: Option<u32>,
 }
 
 /// Token-class discriminant in the issuer config JSON.
@@ -120,6 +153,18 @@ pub(super) enum TokenClassEnvConfig {
     DedicatedNipFi,
     #[serde(rename = "at+jwt")]
     AccessTokenAtJwt,
+}
+
+/// Transport selected for one issuer's JWKS endpoint.
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum JwksTransportEnvConfig {
+    /// Existing public HTTPS behavior; used when the field is omitted.
+    #[default]
+    PublicHttps,
+    /// HTTP whose authentication, integrity, endpoint authorization, and
+    /// egress restrictions are enforced by the deployment.
+    Mesh,
 }
 
 /// One entry in the `BUZZ_NIP_FI_COMMUNITIES` JSON array.
@@ -142,17 +187,17 @@ pub(super) struct CommunityEnvConfig {
 /// no database access. Empty unless the mode is `enforce`.
 #[derive(Debug, Clone, Default)]
 pub struct NipFiCommunities {
-    by_host: BTreeMap<String, CommunityBinding>,
+    by_host: BTreeMap<String, Arc<CommunityBinding>>,
     /// Test-only: one community served at every Host, for fixtures that
     /// exercise enforce-mode handlers on per-test unique Hosts.
     #[cfg(test)]
-    any_host: Option<CommunityBinding>,
+    any_host: Option<Arc<CommunityBinding>>,
 }
 
 impl NipFiCommunities {
     /// The community served at `raw_host`, matched after the same
     /// normalization the tenant binder applies.
-    pub fn resolve(&self, raw_host: &str) -> Option<&CommunityBinding> {
+    pub fn resolve(&self, raw_host: &str) -> Option<&Arc<CommunityBinding>> {
         #[cfg(test)]
         if let Some(binding) = &self.any_host {
             return Some(binding);
@@ -194,7 +239,7 @@ impl NipFiCommunities {
                 .map_err(|e| format!("community at index {idx}: {e}"))?;
             // One Host per canonical URI, so a unique Host also means a
             // unique `aud`.
-            if by_host.insert(host, binding).is_some() {
+            if by_host.insert(host, Arc::new(binding)).is_some() {
                 return Err(format!(
                     "community at index {idx}: canonical_uri maps to the same \
                      Host as an earlier community"
@@ -208,33 +253,18 @@ impl NipFiCommunities {
         })
     }
 
-    /// Every community `aud` that authorizes `issuer`.
-    fn audiences_authorizing(&self, issuer: &str) -> Vec<String> {
-        self.by_host
-            .values()
-            .filter(|c| c.authorizes(issuer))
-            .map(|c| c.expected_aud().to_owned())
-            .collect()
+    /// Whether any community authorizes `issuer`.
+    fn authorizes_anywhere(&self, issuer: &str) -> bool {
+        self.by_host.values().any(|c| c.authorizes(issuer))
     }
 }
 
-/// The authority of a canonical community URI, or `None` unless the URI is
-/// exactly `https://<authority>` and the URL parser reserializes that authority
-/// byte-for-byte. The round trip rejects anything the parser would repair:
-/// whitespace, control characters, backslashes, uppercase, userinfo, path,
-/// query, fragment, a redundant default `:443`, and non-canonical IPv6.
-/// The authority must also already be in `normalize_host()` form, which
-/// rejects a final trailing dot and `:80`, so the Host map key equals the
-/// `aud` authority exactly and is never empty.
-fn canonical_authority(uri: &str) -> Option<&str> {
-    let authority = uri.strip_prefix("https://")?;
-    let parsed = url::Url::parse(uri).ok()?;
-    let host = parsed.host_str()?;
-    let reserialized = match parsed.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_owned(),
-    };
-    (reserialized == authority && normalize_host(authority) == authority).then_some(authority)
+/// Parse `BUZZ_NIP_FI_PROVISION_BINDING`, independent of `BUZZ_NIP_FI_MODE`.
+/// [`buzz_auth::ProvisionBindingPolicy::from_env`] also refuses a suffix that
+/// covers a `BUZZ_NIP_FI_COMMUNITIES` host, for `buzz-admin` too.
+pub fn parse_provision_binding() -> Result<Option<buzz_auth::ProvisionBindingPolicy>, ConfigError> {
+    buzz_auth::ProvisionBindingPolicy::from_env()
+        .map_err(|e| ConfigError::InvalidValue(e.to_string()))
 }
 
 // ── Relay-level NIP-FI config ─────────────────────────────────────────────────
@@ -248,6 +278,8 @@ fn canonical_authority(uri: &str) -> Option<&str> {
 pub struct NipFiRelayConfig {
     /// The enforcement mode selected by `BUZZ_NIP_FI_MODE`.
     pub mode: NipFiMode,
+    /// Where community bindings come from (`BUZZ_NIP_FI_COMMUNITY_SOURCE`).
+    pub source: CommunitySource,
     /// Validated per-issuer assertion-policy registry.
     pub registry: IssuerRegistry,
     /// Host → community map consulted before every enforce-mode verification.
@@ -261,6 +293,8 @@ pub struct NipFiRelayConfig {
     /// Per-issuer S4 command entries: `(issuer_uri, CommandIssuerEnvConfig)`.
     /// Empty when mode is Off/DenyProtected.
     pub command_configs: Vec<(String, crate::api::nip_fi::CommandIssuerEnvConfig)>,
+    /// Output-only publication policies; independent of authorization capabilities.
+    pub profile_policies: Vec<buzz_db::verified_profiles::ProfilePolicy>,
 }
 
 impl NipFiRelayConfig {
@@ -270,15 +304,33 @@ impl NipFiRelayConfig {
     /// missing or invalid (fail-closed: no token is accepted until this passes).
     pub fn from_env() -> Result<Self, ConfigError> {
         let mode = parse_mode()?;
+        let source = parse_community_source()?;
+        if source == CommunitySource::Database
+            && !std::env::var("BUZZ_NIP_FI_COMMUNITIES")
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+        {
+            return Err(ConfigError::InvalidValue(
+                "BUZZ_NIP_FI_COMMUNITY_SOURCE=database but BUZZ_NIP_FI_COMMUNITIES is set; \
+                 database-sourced communities are read from community_nip_fi_issuers"
+                    .to_string(),
+            ));
+        }
 
-        if !mode.evaluates() {
+        // The issuer registry is required whenever admission evaluates, and
+        // with the database source in every mode: provisioning, bootstrap and
+        // the resolver's registry filter all read it.
+        if !mode.evaluates() && source == CommunitySource::Env {
             return Ok(Self {
                 mode,
+                source,
                 registry: IssuerRegistry::new(),
                 communities: NipFiCommunities::default(),
                 jwks_configs: Vec::new(),
                 max_connection_lifetime_secs: 0,
                 command_configs: Vec::new(),
+                profile_policies: Vec::new(),
             });
         }
 
@@ -320,22 +372,26 @@ impl NipFiRelayConfig {
         // duplicate that could disagree with the per-issuer value is a config-drift
         // trap — removed in this PR.
 
-        let max_connection_lifetime_secs = parse_u64_bounded(
+        let max_connection_lifetime_secs = match parse_u64_bounded(
             "BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS",
             1,
             MAX_CONNECTION_LIFETIME_SECS,
-        )?
-        .ok_or_else(|| {
-            mode_requires(
-                mode,
-                "BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS is not set; \
-                 every enforce deployment must configure a positive finite value",
-            )
-        })?;
+        )? {
+            Some(secs) => secs,
+            None if !mode.evaluates() => 0,
+            None => {
+                return Err(mode_requires(
+                    mode,
+                    "BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS is not set; \
+                     every enforce deployment must configure a positive finite value",
+                ))
+            }
+        };
 
         let mut policies = Vec::with_capacity(issuer_entries.len());
         let mut jwks_configs = Vec::with_capacity(issuer_entries.len());
         let mut command_configs = Vec::new();
+        let mut profile_policies = Vec::new();
 
         for (issuer_idx, entry) in issuer_entries.iter().enumerate() {
             let (policy, jwks_config) = build_issuer(entry).map_err(|e| {
@@ -345,6 +401,27 @@ impl NipFiRelayConfig {
                     "BUZZ_NIP_FI_ISSUERS: issuer at index {issuer_idx}: {e}"
                 ))
             })?;
+            let refresh = entry.verified_at_refresh_seconds.unwrap_or(3600);
+            if refresh > 86400 {
+                return Err(ConfigError::InvalidValue(
+                    "verified_at_refresh_seconds must be in [0, 86400]".into(),
+                ));
+            }
+            let label = entry
+                .public_issuer_label
+                .as_ref()
+                .filter(|label| {
+                    entry.public_profile
+                        && buzz_auth::nip_fi::public_profile::valid_display_name(label)
+                        && !label.contains("://")
+                        && *label != &entry.issuer
+                })
+                .cloned();
+            profile_policies.push(buzz_db::verified_profiles::ProfilePolicy {
+                issuer: entry.issuer.clone(),
+                label,
+                refresh_seconds: i64::from(refresh),
+            });
             policies.push(policy);
             jwks_configs.push(jwks_config);
 
@@ -426,35 +503,51 @@ impl NipFiRelayConfig {
             }
         }
 
-        let configured: BTreeSet<&str> = policies.iter().map(IssuerPolicy::issuer).collect();
-        let communities = parse_communities(mode, &configured)?;
-        // Fold each issuer's community allowlist into its policy ID
-        // (NIP-FI.md:145), and reject an issuer no community authorizes
-        // (NIP-FI.md:183).
         let mut registry = IssuerRegistry::new();
-        for (issuer_idx, policy) in policies.into_iter().enumerate() {
-            let audiences = communities.audiences_authorizing(policy.issuer());
-            if audiences.is_empty() {
-                return Err(ConfigError::InvalidValue(format!(
-                    "BUZZ_NIP_FI_ISSUERS: issuer at index {issuer_idx} is not \
-                     authorized by any community in BUZZ_NIP_FI_COMMUNITIES"
-                )));
+        let communities = match source {
+            CommunitySource::Env => {
+                let configured: BTreeSet<&str> =
+                    policies.iter().map(IssuerPolicy::issuer).collect();
+                let communities = parse_communities(mode, &configured)?;
+                // Reject an issuer no community authorizes (NIP-FI.md:183).
+                for (issuer_idx, policy) in policies.iter().enumerate() {
+                    if !communities.authorizes_anywhere(policy.issuer()) {
+                        return Err(ConfigError::InvalidValue(format!(
+                            "BUZZ_NIP_FI_ISSUERS: issuer at index {issuer_idx} is not \
+                             authorized by any community in BUZZ_NIP_FI_COMMUNITIES"
+                        )));
+                    }
+                }
+                communities
             }
-            registry.insert(policy.authorized_for_communities(audiences));
+            // An issuer no community row references grants nothing:
+            // authorization still needs a per-community binding.
+            CommunitySource::Database => NipFiCommunities::default(),
+        };
+        for policy in policies {
+            registry.insert(policy);
         }
 
         // Delegate final validation to buzz-auth startup gate.
-        validate_nip_fi_config(mode, &registry, &jwks_configs).map_err(
+        // The database source validates the registry in every mode, since
+        // creation paths bind against it even while admission is off.
+        let validation_mode = match source {
+            CommunitySource::Database if !mode.evaluates() => NipFiMode::Enforce,
+            _ => mode,
+        };
+        validate_nip_fi_config(validation_mode, &registry, &jwks_configs).map_err(
             |e: NipFiStartupError| ConfigError::InvalidValue(format!("NIP-FI config invalid: {e}")),
         )?;
 
         Ok(Self {
             mode,
+            source,
             registry,
             communities,
             jwks_configs,
             max_connection_lifetime_secs,
             command_configs,
+            profile_policies,
         })
     }
 }
@@ -486,6 +579,30 @@ fn parse_communities(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/// Where the Host → community bindings come from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CommunitySource {
+    /// The static `BUZZ_NIP_FI_COMMUNITIES` map (the default).
+    #[default]
+    Env,
+    /// The `community_nip_fi_issuers` table, via the snapshot resolver.
+    Database,
+}
+
+fn parse_community_source() -> Result<CommunitySource, ConfigError> {
+    match std::env::var("BUZZ_NIP_FI_COMMUNITY_SOURCE")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
+        None | Some("") | Some("env") => Ok(CommunitySource::Env),
+        Some("database") => Ok(CommunitySource::Database),
+        Some(other) => Err(ConfigError::InvalidValue(format!(
+            "BUZZ_NIP_FI_COMMUNITY_SOURCE must be \"env\" or \"database\"; got {other:?}"
+        ))),
+    }
+}
+
 fn parse_mode() -> Result<NipFiMode, ConfigError> {
     match std::env::var("BUZZ_NIP_FI_MODE")
         .ok()
@@ -503,20 +620,29 @@ fn parse_mode() -> Result<NipFiMode, ConfigError> {
     }
 }
 
-/// A missing-setting startup error naming the configured mode.
-fn mode_requires(mode: NipFiMode, missing: &str) -> ConfigError {
-    let value = match mode {
+/// Stable configured mode name for operator diagnostics and status.
+pub(crate) fn mode_name(mode: NipFiMode) -> &'static str {
+    match mode {
         NipFiMode::Enforce => "enforce",
         NipFiMode::Shadow => "shadow",
         NipFiMode::Off => "off",
         NipFiMode::DenyProtected => "deny_protected",
-    };
+    }
+}
+
+/// A missing-setting startup error naming the configured mode.
+fn mode_requires(mode: NipFiMode, missing: &str) -> ConfigError {
+    let value = mode_name(mode);
     ConfigError::InvalidValue(format!("BUZZ_NIP_FI_MODE={value} but {missing}"))
 }
 
 /// Parse an optional positive `u64` env var bounded to `[min_val, max_val]`.
 /// Returns `None` when the variable is absent or empty.
-fn parse_u64_bounded(name: &str, min_val: u64, max_val: u64) -> Result<Option<u64>, ConfigError> {
+pub(crate) fn parse_u64_bounded(
+    name: &str,
+    min_val: u64,
+    max_val: u64,
+) -> Result<Option<u64>, ConfigError> {
     match std::env::var(name) {
         Err(_) => Ok(None),
         Ok(raw) if raw.trim().is_empty() => Ok(None),
@@ -586,13 +712,20 @@ fn build_issuer(entry: &IssuerEnvConfig) -> Result<(IssuerPolicy, IssuerJwksConf
         }
     };
 
-    let jwks_contract = JwksSourceContract::new(
-        entry.jwks_uri.clone(),
-        entry.jwks_refresh_interval_seconds,
-        entry.jwks_hard_deadline_seconds,
-    )
+    let jwks_contract = match entry.jwks_transport {
+        JwksTransportEnvConfig::PublicHttps => JwksSourceContract::new(
+            entry.jwks_uri.clone(),
+            entry.jwks_refresh_interval_seconds,
+            entry.jwks_hard_deadline_seconds,
+        ),
+        JwksTransportEnvConfig::Mesh => JwksSourceContract::new_mesh(
+            entry.jwks_uri.clone(),
+            entry.jwks_refresh_interval_seconds,
+            entry.jwks_hard_deadline_seconds,
+        ),
+    }
     .ok_or_else(|| {
-        "invalid JWKS source contract (check jwks_uri is HTTPS, \
+        "invalid JWKS source contract (check jwks_transport and jwks_uri, \
              refresh_interval < hard_deadline, and both are positive)"
             .to_string()
     })?;
@@ -608,7 +741,8 @@ fn build_issuer(entry: &IssuerEnvConfig) -> Result<(IssuerPolicy, IssuerJwksConf
         None, // offline-jwt: no status age
         jwks_contract.clone(),
     )
-    .map_err(|e: IssuerPolicyError| e.to_string())?;
+    .map_err(|e: IssuerPolicyError| e.to_string())?
+    .with_public_profile(entry.public_profile, entry.public_issuer_label.clone());
 
     let jwks_config = IssuerJwksConfig {
         issuer: entry.issuer.clone(),
@@ -621,6 +755,12 @@ fn build_issuer(entry: &IssuerEnvConfig) -> Result<(IssuerPolicy, IssuerJwksConf
 // ── Duration helpers ──────────────────────────────────────────────────────────
 
 impl NipFiRelayConfig {
+    /// Only evaluating modes load FI bindings. Off starts without an FI
+    /// snapshot and cannot establish required-admission readiness.
+    pub fn builds_resolver(&self) -> bool {
+        self.source == CommunitySource::Database && self.mode.evaluates()
+    }
+
     /// Returns the configured `max_connection_lifetime` as a `Duration`.
     /// Returns `None` in `Off`/`DenyProtected` mode (sentinel value 0).
     pub fn max_connection_lifetime(&self) -> Option<Duration> {
@@ -641,12 +781,20 @@ impl NipFiRelayConfig {
 impl NipFiCommunities {
     /// One community at `canonical_uri` authorizing `issuers`.
     pub(crate) fn for_test(canonical_uri: &str, issuers: &[&str]) -> Self {
-        let entries = vec![CommunityEnvConfig {
-            canonical_uri: canonical_uri.to_owned(),
-            authorized_issuers: issuers.iter().map(|i| (*i).to_owned()).collect(),
-        }];
+        Self::for_test_many(&[canonical_uri], issuers)
+    }
+
+    /// One community per entry of `canonical_uris`, each authorizing `issuers`.
+    pub(crate) fn for_test_many(canonical_uris: &[&str], issuers: &[&str]) -> Self {
+        let entries = canonical_uris
+            .iter()
+            .map(|uri| CommunityEnvConfig {
+                canonical_uri: (*uri).to_owned(),
+                authorized_issuers: issuers.iter().map(|i| (*i).to_owned()).collect(),
+            })
+            .collect();
         Self::from_entries(entries, &issuers.iter().copied().collect())
-            .expect("valid test community")
+            .expect("valid test communities")
     }
 
     /// One community, expecting `aud` and authorizing `issuers`, served at
@@ -656,7 +804,7 @@ impl NipFiCommunities {
             CommunityBinding::new(aud.to_owned(), issuers.iter().map(|i| (*i).to_owned()))
                 .expect("valid test community");
         Self {
-            any_host: Some(binding),
+            any_host: Some(Arc::new(binding)),
             ..Self::default()
         }
     }
@@ -835,6 +983,98 @@ mod tests {
             "maximum_command_age_seconds": 30,
             "authorized_principals": ["admin@issuer.test"]
         })
+    }
+
+    #[test]
+    fn jwks_transport_defaults_to_public_and_is_per_issuer() {
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env = EnvGuard::new(NIP_FI_VARS);
+
+        let public = valid_enforce_issuer();
+        let mut mesh = valid_enforce_issuer();
+        mesh["issuer"] = "https://mesh-issuer.test".into();
+        mesh["jwks_uri"] = "http://mesh.example.test/.well-known/jwks.json".into();
+        mesh["jwks_transport"] = "mesh".into();
+
+        std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
+        std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
+        set_issuers(serde_json::json!([public, mesh]).to_string());
+        let cfg = NipFiRelayConfig::from_env().expect("mixed transport config is valid");
+
+        let public_policy = cfg
+            .registry
+            .policy_for_issuer("https://issuer.test")
+            .expect("public issuer is registered");
+        let mesh_policy = cfg
+            .registry
+            .policy_for_issuer("https://mesh-issuer.test")
+            .expect("mesh issuer is registered");
+        let public_contract = JwksSourceContract::new(
+            "https://issuer.test/.well-known/jwks.json".to_owned(),
+            300,
+            3600,
+        )
+        .expect("valid public contract");
+        let mesh_contract = JwksSourceContract::new_mesh(
+            "http://mesh.example.test/.well-known/jwks.json".to_owned(),
+            300,
+            3600,
+        )
+        .expect("valid mesh contract");
+
+        assert_eq!(public_policy.jwks_source_contract(), &public_contract);
+        assert_eq!(mesh_policy.jwks_source_contract(), &mesh_contract);
+        assert_eq!(public_policy.issuer(), "https://issuer.test");
+        assert_eq!(mesh_policy.issuer(), "https://mesh-issuer.test");
+        for policy in [public_policy, mesh_policy] {
+            assert_eq!(policy.command_audiences().len(), 1);
+            assert_eq!(policy.command_audiences()[0], "https://relay.test");
+        }
+        assert_eq!(cfg.jwks_configs.len(), 2);
+        assert_eq!(cfg.jwks_configs[0].contract, public_contract);
+        assert_eq!(cfg.jwks_configs[1].contract, mesh_contract);
+    }
+
+    #[test]
+    fn invalid_jwks_transport_is_rejected_without_echoing_uri() {
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env = EnvGuard::new(NIP_FI_VARS);
+
+        std::env::set_var("BUZZ_NIP_FI_MODE", "enforce");
+        std::env::set_var("BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS", "3600");
+
+        let mut unknown = valid_enforce_issuer();
+        unknown["jwks_uri"] = "https://sentinel-uri.example.test/jwks".into();
+        unknown["jwks_transport"] = "sentinel-unknown-transport".into();
+        set_issuers(serde_json::json!([unknown]).to_string());
+        let error = NipFiRelayConfig::from_env().expect_err("unknown transport must fail");
+        let message = error.to_string();
+        assert!(message.contains("BUZZ_NIP_FI_ISSUERS"));
+        assert!(!message.contains("sentinel-uri.example.test"));
+        assert!(!message.contains("sentinel-unknown-transport"));
+
+        let mut implicit_http = valid_enforce_issuer();
+        implicit_http["jwks_uri"] = "http://sentinel-uri.example.test/jwks".into();
+        set_issuers(serde_json::json!([implicit_http]).to_string());
+        let error = NipFiRelayConfig::from_env()
+            .expect_err("HTTP without an explicit mesh transport must fail");
+        let message = error.to_string();
+        assert!(message.contains("invalid JWKS source contract"));
+        assert!(!message.contains("sentinel-uri.example.test"));
+
+        let mut wrong_scheme = valid_enforce_issuer();
+        wrong_scheme["jwks_uri"] = "https://sentinel-uri.example.test/jwks".into();
+        wrong_scheme["jwks_transport"] = "mesh".into();
+        set_issuers(serde_json::json!([wrong_scheme]).to_string());
+        let error =
+            NipFiRelayConfig::from_env().expect_err("mesh transport must reject HTTPS scheme");
+        let message = error.to_string();
+        assert!(message.contains("invalid JWKS source contract"));
+        assert!(!message.contains("sentinel-uri.example.test"));
     }
 
     #[test]
@@ -1374,6 +1614,75 @@ mod tests {
         serde_json::json!({ "canonical_uri": uri, "authorized_issuers": issuers })
     }
 
+    /// Startup (`Config::from_env`) with `BUZZ_NIP_FI_COMMUNITIES` declaring
+    /// `a.relay.test` and a provisioning binding under `suffix`.
+    fn startup_with_provision_suffix(mode: &str, suffix: &str) -> Result<(), String> {
+        enforce_with_communities(serde_json::json!([community_entry(
+            "https://a.relay.test",
+            &["https://issuer.test", "https://issuer-b.test"]
+        )]))
+        .expect("valid enforce config");
+        std::env::set_var("BUZZ_NIP_FI_MODE", mode);
+        std::env::set_var(
+            buzz_auth::nip_fi::provision::PROVISION_BINDING_ENV,
+            serde_json::json!({
+                "host_suffix": suffix,
+                "authorized_issuers": ["https://issuer.test"],
+            })
+            .to_string(),
+        );
+        crate::config::Config::from_env()
+            .map(|cfg| assert!(cfg.nip_fi_provision_binding.is_some()))
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn provision_binding_overlap_rejects_startup_in_every_mode() {
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env = EnvGuard::new(NIP_FI_VARS);
+        let _binding = EnvGuard::new(&[buzz_auth::nip_fi::provision::PROVISION_BINDING_ENV]);
+        for mode in ["off", "enforce"] {
+            let err = startup_with_provision_suffix(mode, "relay.test")
+                .expect_err("suffix covering an enterprise host");
+            assert!(
+                err.contains("covers a BUZZ_NIP_FI_COMMUNITIES host"),
+                "{mode}: {err}"
+            );
+            startup_with_provision_suffix(mode, "communities.buzz.xyz")
+                .unwrap_or_else(|e| panic!("{mode}: disjoint suffix must start: {e}"));
+        }
+    }
+
+    #[test]
+    fn provision_binding_off_mode_refuses_unreadable_enterprise_hosts() {
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env = EnvGuard::new(NIP_FI_VARS);
+        let _binding = EnvGuard::new(&[buzz_auth::nip_fi::provision::PROVISION_BINDING_ENV]);
+        startup_with_provision_suffix("off", "communities.buzz.xyz").expect("valid start");
+        for communities in [
+            "not json".to_string(),
+            serde_json::json!([community_entry(
+                "https://A.relay.test",
+                &["https://issuer.test"]
+            )])
+            .to_string(),
+        ] {
+            std::env::set_var("BUZZ_NIP_FI_COMMUNITIES", &communities);
+            let err = crate::config::Config::from_env()
+                .map(|_| ())
+                .expect_err("unreadable enterprise hosts");
+            assert!(
+                err.to_string()
+                    .contains("BUZZ_NIP_FI_COMMUNITIES hosts are unreadable"),
+                "{communities}: {err}"
+            );
+        }
+    }
+
     #[test]
     fn enforce_communities_map_hosts_to_bindings() {
         let _guard = super::NIP_FI_ENV_LOCK
@@ -1696,6 +2005,33 @@ mod tests {
                      every enforce deployment must configure a positive finite value"
                 )
             );
+        }
+    }
+
+    // Off must not depend on an FI snapshot.
+    // Repair mode remains unconditional and needs no snapshot.
+    #[test]
+    fn database_source_builds_a_resolver_only_in_evaluating_modes() {
+        let base = {
+            let _guard = super::NIP_FI_ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _env = EnvGuard::new(NIP_FI_VARS);
+            NipFiRelayConfig::from_env().expect("off config")
+        };
+        for (mode, source, expected) in [
+            (NipFiMode::Off, CommunitySource::Database, false),
+            (NipFiMode::DenyProtected, CommunitySource::Database, false),
+            (NipFiMode::Shadow, CommunitySource::Database, true),
+            (NipFiMode::Enforce, CommunitySource::Database, true),
+            (NipFiMode::Enforce, CommunitySource::Env, false),
+        ] {
+            let config = NipFiRelayConfig {
+                mode,
+                source,
+                ..base.clone()
+            };
+            assert_eq!(config.builds_resolver(), expected, "{mode:?} {source:?}");
         }
     }
 }

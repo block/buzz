@@ -7,6 +7,8 @@ import '../../shared/relay/relay.dart';
 import 'user_status.dart';
 import 'user_status_cache_provider.dart';
 
+import 'package:buzz/shared/crypto/event_signing.dart';
+
 /// Manages the current user's own NIP-38 status (kind:30315, d=general).
 ///
 /// Fetches the existing status on build and provides [setStatus] / [clearStatus]
@@ -37,8 +39,7 @@ class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
     String pubkey;
     try {
       final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
-      final keyPair = nostr.Keys(privkeyHex);
-      pubkey = keyPair.public.toLowerCase();
+      pubkey = derivePublicKeyHex(privkeyHex);
     } catch (_) {
       return null;
     }
@@ -94,12 +95,11 @@ class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
     }
 
     final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
-    final event = nostr.Event.from(
+    final event = signNostrEvent(
       kind: EventKind.userStatus,
       content: trimmed,
       tags: tags,
       secretKey: privkeyHex,
-      verify: false,
     );
 
     final session = ref.read(relaySessionProvider.notifier);
@@ -120,8 +120,7 @@ class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
     _scheduleExpiration(newStatus);
 
     // Also update the shared cache so other UI reads stay consistent.
-    final keyPair = nostr.Keys(privkeyHex);
-    final pubkey = keyPair.public.toLowerCase();
+    final pubkey = derivePublicKeyHex(privkeyHex);
     ref.read(userStatusCacheProvider.notifier).updateStatus(pubkey, newStatus);
   }
 
@@ -165,7 +164,7 @@ class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
     if (nsec == null || nsec.isEmpty) return null;
     try {
       final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
-      return nostr.Keys(privkeyHex).public.toLowerCase();
+      return derivePublicKeyHex(privkeyHex);
     } catch (_) {
       return null;
     }

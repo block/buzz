@@ -349,44 +349,49 @@ pub(super) fn profile_needs_sync(
     }
 }
 
-/// Publish a managed agent's kind:0 profile with the authored public
-/// description as `about`, resolving the effective
-/// relay URL from the record's stored value. Returns the sync error (if any)
-/// rather than failing the caller — profile publish is best-effort in the
-/// create and snapshot-import flows that share this helper.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn publish_agent_profile_with_about(
+/// Capture authority while the creating workspace is still active, before awaits.
+pub(crate) fn creation_authority(
     state: &AppState,
-    record_relay_url: &str,
-    agent_keys: &nostr::Keys,
-    display_name: &str,
-    avatar_url: Option<&str>,
+    relay: &str,
+) -> Result<(nostr::Keys, String), String> {
+    Ok((
+        state.signing_keys()?,
+        crate::relay::effective_agent_relay_url(relay, &relay_ws_url_with_override(state)),
+    ))
+}
+
+/// Explicit owner action transfers verified bytes; reconcile has no owner signer.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn publish_created_agent_profile(
+    state: &AppState,
+    relay: &str,
+    owner: &nostr::Keys,
+    agent: &nostr::Keys,
+    name: &str,
+    avatar: Option<&str>,
     about: Option<&str>,
     auth_tag: Option<&str>,
 ) -> Option<String> {
-    let relay_url = crate::relay::effective_agent_relay_url(
-        record_relay_url,
-        &relay_ws_url_with_override(state),
-    );
-    crate::relay::sync_managed_agent_profile(
-        state,
-        &relay_url,
-        agent_keys,
-        display_name,
-        avatar_url,
-        about,
-        auth_tag,
+    if let Err(error) = crate::relay::profile_avatar::transfer_created_avatar(
+        state, relay, owner, agent, avatar, auth_tag,
     )
     .await
-    .err()
+    {
+        return Some(error);
+    }
+    crate::relay::sync_managed_agent_profile(state, relay, agent, name, avatar, about, auth_tag)
+        .await
+        .err()
 }
 
 /// Publish a fresh persona-backed agent's kind:0 profile, computing the
 /// effective public `about` from the persona itself.
 /// Shared by flows in files at the size ratchet (snapshot import).
+#[allow(clippy::too_many_arguments)] // Complete captured authority stays explicit.
 pub(crate) async fn publish_persona_profile(
     state: &AppState,
-    record_relay_url: &str,
+    relay_url: &str,
+    owner_keys: &nostr::Keys,
     agent_keys: &nostr::Keys,
     display_name: &str,
     avatar_url: Option<&str>,
@@ -394,9 +399,10 @@ pub(crate) async fn publish_persona_profile(
     auth_tag: Option<&str>,
 ) -> Option<String> {
     let about = crate::managed_agents::effective_agent_description(persona.description.as_deref());
-    publish_agent_profile_with_about(
+    publish_created_agent_profile(
         state,
-        record_relay_url,
+        relay_url,
+        owner_keys,
         agent_keys,
         display_name,
         avatar_url,

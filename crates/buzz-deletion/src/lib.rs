@@ -2,6 +2,12 @@
 #![warn(missing_docs)]
 //! Shared durable whole-community deletion engine and store adapters.
 
+/// Synthetic user-deletion request intake.
+pub mod user;
+
+/// Community submission and preparation shared by operator entry points.
+pub mod community;
+
 use std::future::Future;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,6 +25,7 @@ use buzz_media::{
     is_tenant_owned_key, tenant_prefixes, BulkDeleteOutcome, MediaStorage, ObjectVersionKind,
     ObjectVersionRef,
 };
+use buzz_pubsub::{redis_connection, RedisConnection};
 use clap::Subcommand;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -334,7 +341,7 @@ impl LoopMode {
 struct Services {
     store: DeletionStore,
     media: Arc<MediaStorage>,
-    redis: deadpool_redis::Pool,
+    redis: RedisConnection,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -458,15 +465,15 @@ async fn run_with_services(command: Command, services: Services) -> Result<i32> 
         } => {
             let relay_url = std::env::var("RELAY_URL").ok();
             let host = resolve_submit_host(host.as_deref(), relay_url.as_deref())?;
-            let request = services
-                .store
-                .submit(&host, &requested_by, reason.as_deref())
-                .await?;
-            let inventory = build_inventory(&services, &request, None).await?;
-            let request = services
-                .store
-                .freeze_inventory(request.id, &inventory)
-                .await?;
+            let request = community::submit_and_prepare(
+                &services.store,
+                &services.media,
+                Some(&host),
+                &requested_by,
+                reason.as_deref(),
+                None,
+            )
+            .await?;
             print_json(&request)?;
             Ok(0)
         }
@@ -546,17 +553,24 @@ fn resolve_submit_host(host: Option<&str>, relay_url: Option<&str>) -> Result<St
 }
 
 async fn connect_store() -> Result<DeletionStore> {
+    Ok(store(&connect_database().await?))
+}
+
+async fn connect_database() -> Result<Db> {
     let database_url = required_env("DATABASE_URL")?;
-    let db = Db::new(
-        &DbConfig {
+    // The scheduled drain starts in a fresh pod whose first connection can
+    // outlast the relay's three-second budget.
+    let db = Db::connect_cold_start(
+        DbConfig {
             database_url,
             max_connections: env_parse("BUZZ_DB_POOL_SIZE", 20),
             ..DbConfig::default()
         }
         .with_session_timeouts_from_env(),
+        "deletion",
     )
     .await?;
-    Ok(store(&db))
+    Ok(db)
 }
 
 fn resolve_s3_region(buzz_region: Option<String>, aws_region: Option<String>) -> String {
@@ -599,14 +613,7 @@ async fn connect_services_with_store(store: DeletionStore) -> Result<Services> {
     };
     let media = Arc::new(MediaStorage::new(&media_config)?);
     let redis_url = required_env("REDIS_URL")?;
-    let mut redis_config = deadpool_redis::Config::from_url(&redis_url);
-    redis_config.pool = Some(deadpool_redis::PoolConfig::new(env_parse(
-        "BUZZ_REDIS_POOL_SIZE",
-        16,
-    )));
-    let redis = redis_config
-        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-        .context("create deletion Redis pool")?;
+    let redis = redis_connection(&redis_url).context("create deletion Redis connection")?;
     Ok(Services {
         store,
         media,
@@ -693,15 +700,13 @@ fn validate_storage_ownership(request: &DeletionRequest, manifest: &StorageManif
 }
 
 async fn build_inventory(
-    services: &Services,
+    store: &DeletionStore,
+    media: &MediaStorage,
     request: &DeletionRequest,
     heartbeat_lost: Option<&CancellationToken>,
 ) -> Result<FrozenInventory> {
-    let schema = services
-        .store
-        .inventory_schema(request.community_id)
-        .await?;
-    let storage = enumerate_tenant_prefixes(services, request, heartbeat_lost, None).await?;
+    let schema = store.inventory_schema(request.community_id).await?;
+    let storage = enumerate_tenant_prefixes(store, media, request, heartbeat_lost, None).await?;
     Ok(FrozenInventory { schema, storage })
 }
 
@@ -712,12 +717,11 @@ struct ChunkSink<'a> {
     buffered: Vec<String>,
 }
 
-async fn flush_chunk(services: &Services, sink: &mut ChunkSink<'_>, prefix: &str) -> Result<()> {
+async fn flush_chunk(store: &DeletionStore, sink: &mut ChunkSink<'_>, prefix: &str) -> Result<()> {
     if sink.buffered.is_empty() {
         return Ok(());
     }
-    services
-        .store
+    store
         .append_manifest_key_chunk(sink.token, sink.next_chunk_no, prefix, &sink.buffered)
         .await?;
     sink.next_chunk_no += 1;
@@ -755,7 +759,8 @@ fn manifest_chunk_deleted_detail(
 /// (never spanning prefixes) for the destructive freeze to bind against these
 /// digests.
 async fn enumerate_tenant_prefixes(
-    services: &Services,
+    store: &DeletionStore,
+    media: &MediaStorage,
     request: &DeletionRequest,
     heartbeat_lost: Option<&CancellationToken>,
     mut sink: Option<&mut ChunkSink<'_>>,
@@ -772,8 +777,7 @@ async fn enumerate_tenant_prefixes(
             if heartbeat_lost.is_some_and(CancellationToken::is_cancelled) {
                 return Err(DeletionLeaseLost.into());
             }
-            let page = services
-                .media
+            let page = media
                 .list_prefix_versions_page(
                     &prefix,
                     key_marker.take(),
@@ -799,7 +803,7 @@ async fn enumerate_tenant_prefixes(
                 if let Some(sink) = sink.as_deref_mut() {
                     sink.buffered.push(encoded);
                     if sink.buffered.len() >= chunk_keys {
-                        flush_chunk(services, sink, &prefix).await?;
+                        flush_chunk(store, sink, &prefix).await?;
                     }
                 }
             }
@@ -814,7 +818,7 @@ async fn enumerate_tenant_prefixes(
             version_id_marker = Some(next_version_id_marker);
         }
         if let Some(sink) = sink.as_deref_mut() {
-            flush_chunk(services, sink, &prefix).await?;
+            flush_chunk(store, sink, &prefix).await?;
         }
         let (keys_digest, object_count) = digest.finish();
         prefixes.push(PrefixManifest {
@@ -950,8 +954,14 @@ async fn freeze_destructive_manifest(
         next_chunk_no: 0,
         buffered: Vec::new(),
     };
-    let manifest =
-        enumerate_tenant_prefixes(services, request, Some(heartbeat_lost), Some(&mut sink)).await?;
+    let manifest = enumerate_tenant_prefixes(
+        &services.store,
+        &services.media,
+        request,
+        Some(heartbeat_lost),
+        Some(&mut sink),
+    )
+    .await?;
     services
         .store
         .freeze_destructive_storage_manifest(token, &manifest)
@@ -1018,7 +1028,8 @@ async fn run_loop(
                 HEARTBEAT_INTERVAL,
                 |heartbeat_lost| async move {
                     build_inventory(
-                        preparation_services,
+                        &preparation_services.store,
+                        &preparation_services.media,
                         &preparation_request,
                         Some(&heartbeat_lost),
                     )
@@ -1406,6 +1417,35 @@ where
     Ok(output)
 }
 
+fn validate_approved_schema(
+    live: &buzz_db::deletion::SchemaManifest,
+    frozen: &FrozenInventory,
+) -> Result<()> {
+    // The approved catalog binds exactly, with one bounded exception: an
+    // expand migration between approval and execution may add a table listed
+    // in APPROVAL_FORWARD_TABLES, which this binary purges and verifies. The
+    // frozen manifest and its digest are never rewritten.
+    let frozen_tables = frozen
+        .schema
+        .scoped_tables
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let live_tables = live
+        .scoped_tables
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let removed = !frozen_tables.is_subset(&live_tables);
+    let unlisted_addition = live_tables
+        .difference(&frozen_tables)
+        .any(|table| !buzz_db::deletion::APPROVAL_FORWARD_TABLES.contains(&table.as_str()));
+    if removed || unlisted_addition {
+        return Err(permanent(
+            "approved structural catalog drifted before fencing",
+        ));
+    }
+    Ok(())
+}
+
 async fn execute_stage(
     services: &Services,
     claim: &ClaimedDeletion,
@@ -1464,13 +1504,7 @@ async fn execute_stage(
                 .inventory_schema(request.community_id)
                 .await?;
             let frozen = validate_frozen_inventory(request)?;
-            if live_schema.scoped_tables != frozen.schema.scoped_tables
-                || live_schema.fenced_tables != frozen.schema.fenced_tables
-            {
-                return Err(permanent(
-                    "approved structural catalog drifted before fencing",
-                ));
-            }
+            validate_approved_schema(&live_schema, &frozen)?;
             services.store.begin_quiescing(&token).await?;
             match services.store.fence(&token).await {
                 Ok(_) => {}
@@ -1666,24 +1700,24 @@ async fn verify_storage_absence(services: &Services, request: &DeletionRequest) 
 }
 
 async fn publish_disconnect_community(
-    pool: &deadpool_redis::Pool,
+    pool: &RedisConnection,
     community: buzz_core::CommunityId,
 ) -> Result<()> {
-    let mut connection = pool.get().await?;
+    let mut connection = pool.clone();
     let channel = format!("buzz:{community}:conn-control");
     let _: u64 = redis::cmd("PUBLISH")
         .arg(channel)
         .arg(r#"{"op":"DisconnectCommunity"}"#)
-        .query_async(&mut *connection)
+        .query_async(&mut connection)
         .await?;
     Ok(())
 }
 
 async fn purge_redis_namespace(
-    pool: &deadpool_redis::Pool,
+    pool: &RedisConnection,
     community: buzz_core::CommunityId,
 ) -> Result<u64> {
-    let mut connection = pool.get().await?;
+    let mut connection = pool.clone();
     let pattern = format!("buzz:{community}:*");
     let mut cursor = 0u64;
     let mut deleted = 0u64;
@@ -1694,12 +1728,12 @@ async fn purge_redis_namespace(
             .arg(&pattern)
             .arg("COUNT")
             .arg(1000)
-            .query_async(&mut *connection)
+            .query_async(&mut connection)
             .await?;
         if !keys.is_empty() {
             let count: u64 = redis::cmd("UNLINK")
                 .arg(&keys)
-                .query_async(&mut *connection)
+                .query_async(&mut connection)
                 .await?;
             deleted = deleted.saturating_add(count);
         }
@@ -1717,7 +1751,7 @@ fn scan_proves_absence(pages: &[(u64, Vec<String>)]) -> bool {
 }
 
 async fn scan_redis_namespace(
-    connection: &mut deadpool_redis::Connection,
+    connection: &mut RedisConnection,
     pattern: &str,
 ) -> Result<Vec<(u64, Vec<String>)>> {
     let mut cursor = 0u64;
@@ -1729,7 +1763,7 @@ async fn scan_redis_namespace(
             .arg(pattern)
             .arg("COUNT")
             .arg(1000)
-            .query_async(&mut **connection)
+            .query_async(connection)
             .await?;
         cursor = page.0;
         pages.push(page);
@@ -1740,10 +1774,10 @@ async fn scan_redis_namespace(
 }
 
 async fn verify_redis_absence(
-    pool: &deadpool_redis::Pool,
+    pool: &RedisConnection,
     community: buzz_core::CommunityId,
 ) -> Result<()> {
-    let mut connection = pool.get().await?;
+    let mut connection = pool.clone();
     let pattern = format!("buzz:{community}:*");
     // SCAN is weakly consistent. Two complete empty passes ensure a cursor
     // rollover or concurrent expiry cannot make one sparse pass look absent.
@@ -1872,17 +1906,60 @@ mod postgres_tests {
         }
     }
 
-    async fn claimed_test_deletion(prefix: &str) -> (Db, Services, ClaimedDeletion) {
-        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+    fn test_database_url() -> String {
+        std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
-            .expect("BUZZ_TEST_DATABASE_URL or DATABASE_URL is required");
-        let pool = sqlx::PgPool::connect(&database_url)
+            .expect("BUZZ_TEST_DATABASE_URL or DATABASE_URL is required")
+    }
+
+    async fn claimed_test_deletion(prefix: &str) -> (Db, Services, ClaimedDeletion) {
+        let pool = sqlx::PgPool::connect(&test_database_url())
             .await
             .expect("connect deletion engine test DB");
         let db = Db::from_pool(pool);
         if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
             db.migrate().await.expect("migrate deletion engine test DB");
         }
+        claimed_test_deletion_in(db, prefix).await
+    }
+
+    /// A migrated database of its own, named `{prefix}_{uuid}`, for a test
+    /// that changes the catalog: other tests would see the change as drift.
+    /// Drop it with [`drop_scratch_test_db`].
+    async fn scratch_test_db(prefix: &str) -> (Db, String) {
+        let base_url = test_database_url();
+        let name = format!("{prefix}_{}", Uuid::new_v4().simple());
+        let admin = sqlx::PgPool::connect(&base_url)
+            .await
+            .expect("connect admin database");
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
+            .execute(&admin)
+            .await
+            .expect("create scratch database");
+        admin.close().await;
+        let base = &base_url[..base_url.rfind('/').expect("db url has a path segment")];
+        let pool = sqlx::PgPool::connect(&format!("{base}/{name}"))
+            .await
+            .expect("connect scratch database");
+        let db = Db::from_pool(pool);
+        db.migrate().await.expect("migrate scratch database");
+        (db, name)
+    }
+
+    async fn drop_scratch_test_db(db: Db, name: &str) {
+        db.pool().close().await;
+        let admin = sqlx::PgPool::connect(&test_database_url())
+            .await
+            .expect("connect admin database");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
+        )))
+        .execute(&admin)
+        .await
+        .expect("drop scratch database");
+    }
+
+    async fn claimed_test_deletion_in(db: Db, prefix: &str) -> (Db, Services, ClaimedDeletion) {
         let store = db.deletion_store();
         let host = format!("{prefix}-{}.example", Uuid::new_v4().simple());
         let community = db
@@ -1890,7 +1967,7 @@ mod postgres_tests {
             .await
             .expect("create deletion engine test community");
         let request = store
-            .submit(&host, "test", None)
+            .submit(Some(&host), "test", None, None)
             .await
             .expect("submit deletion request");
         let inventory = FrozenInventory {
@@ -1934,9 +2011,8 @@ mod postgres_tests {
                 })
                 .expect("construct unused media service"),
             ),
-            redis: deadpool_redis::Config::from_url("redis://127.0.0.1:1")
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("construct unused Redis pool"),
+            redis: redis_connection("redis://127.0.0.1:1")
+                .expect("construct unused Redis connection"),
         };
         (db, services, claim)
     }
@@ -1958,8 +2034,9 @@ mod postgres_tests {
         let host = format!("{prefix}-{}.example", Uuid::new_v4().simple());
         let owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let buzz_db::CreateCommunityWithOwnerResult::Created(community) = db
-            .create_community_with_owner(&host, &owner)
+            .create_community_with_owner(&host, &owner, &nostr::Keys::generate())
             .await
+            .map(|write| write.outcome)
             .expect("create owner preparation community")
         else {
             panic!("expected fresh owner preparation community")
@@ -2004,9 +2081,8 @@ mod postgres_tests {
                 })
                 .expect("construct unused media service"),
             ),
-            redis: deadpool_redis::Config::from_url("redis://127.0.0.1:1")
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("construct unused Redis pool"),
+            redis: redis_connection("redis://127.0.0.1:1")
+                .expect("construct unused Redis connection"),
         };
         (db, services, *request, inventory)
     }
@@ -2036,7 +2112,7 @@ mod postgres_tests {
             .expect("create approved community");
         let approved = services
             .store
-            .submit(&approved_host, "manual-operator", None)
+            .submit(Some(&approved_host), "manual-operator", None, None)
             .await
             .expect("submit approved request");
         let inventory = FrozenInventory {
@@ -2122,7 +2198,7 @@ mod postgres_tests {
             .expect("create manual community");
         let manual = services
             .store
-            .submit(&operator_host, "manual-operator", None)
+            .submit(Some(&operator_host), "manual-operator", None, None)
             .await
             .expect("submit manual request");
 
@@ -2412,6 +2488,60 @@ mod postgres_tests {
             .await
             .expect("load fenced request");
         assert_eq!(fenced.stage, DeletionStage::Fenced);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn approved_legacy_fence_inventory_accepts_current_catalog() {
+        let (_, services, mut claim) = claimed_test_deletion("deletion-legacy-fences").await;
+        let mut frozen = validate_frozen_inventory(&claim.request).expect("frozen inventory");
+        frozen.schema.fenced_tables = buzz_db::deletion::EXPECTED_SCOPED_TABLES
+            .iter()
+            .map(|table| (*table).to_owned())
+            .collect();
+        claim.request.inventory_digest = Some(hex::encode(frozen.digest().expect("legacy digest")));
+        claim.request.inventory_manifest =
+            Some(serde_json::to_value(&frozen).expect("encode legacy inventory"));
+
+        let decoded =
+            validate_frozen_inventory(&claim.request).expect("legacy digest remains valid");
+        let mut live = services
+            .store
+            .inventory_schema(claim.request.community_id)
+            .await
+            .expect("live catalog");
+        // Simulate the retired catalog while retaining the legacy digest above.
+        // While the fence objects exist, inventory still reports them so
+        // executors that predate fence-optional catalogs keep validating.
+        live.fenced_tables.clear();
+        validate_approved_schema(&live, &decoded)
+            .expect("legacy fence list is no longer structural");
+
+        // Only a listed forward table may appear after approval. A required
+        // table the approval lacks is drift, and so is a removed frozen table.
+        let forward = buzz_db::deletion::APPROVAL_FORWARD_TABLES[0];
+        let mut expanded = live.clone();
+        expanded.scoped_tables.retain(|table| table != forward);
+        expanded.scoped_tables.push(forward.to_owned());
+        let mut approved_before_expand = decoded.clone();
+        approved_before_expand
+            .schema
+            .scoped_tables
+            .retain(|table| table != forward);
+        validate_approved_schema(&expanded, &approved_before_expand)
+            .expect("a listed forward table added after approval is not drift");
+        let mut lacks_required = decoded.clone();
+        lacks_required
+            .schema
+            .scoped_tables
+            .retain(|table| table != "workflows");
+        assert!(validate_approved_schema(&live, &lacks_required).is_err());
+        let mut removed = live.clone();
+        removed.scoped_tables.retain(|table| table != "workflows");
+        assert!(validate_approved_schema(&removed, &decoded).is_err());
+
+        live.scoped_tables.push("unknown_tenant_table".to_string());
+        assert!(validate_approved_schema(&live, &decoded).is_err());
     }
 
     #[tokio::test]
@@ -2716,7 +2846,148 @@ mod postgres_tests {
             .expect("empty tenant prefixes verify clean");
     }
 
+    /// A request approved before an expand migration adds the forward tables
+    /// runs to completion through the executor: the target's rows in the added
+    /// tables are purged and verified and a bystander's survive. A table added
+    /// after approval that is not listed still stops the request before fencing.
+    async fn approval_before_an_expand_migration_completes() {
+        let redis_url = std::env::var("BUZZ_TEST_REDIS_URL")
+            .or_else(|_| std::env::var("REDIS_URL"))
+            .expect("BUZZ_TEST_REDIS_URL or REDIS_URL is required");
+        let services_with_infra = |mut services: Services| {
+            services.media = deletion_test_media_storage();
+            services.redis = redis_connection(&redis_url).expect("connect Redis");
+            services
+        };
+
+        // Each step changes the catalog, which a shared database would see.
+        let (scratch, scratch_name) = scratch_test_db("deletion_expand").await;
+
+        // An unlisted addition fails before fencing.
+        let (db, services, claim) =
+            claimed_test_deletion_in(scratch.clone(), "deletion-unlisted").await;
+        let services = services_with_infra(services);
+        let request_id = claim.request.id;
+        sqlx::query("CREATE TABLE deletion_unlisted_scoped (community_id UUID NOT NULL)")
+            .execute(db.pool())
+            .await
+            .expect("create unlisted table");
+        let outcome =
+            execute_claim(&services, LoopMode::Run, claim, &CancellationToken::new()).await;
+        sqlx::query("DROP TABLE deletion_unlisted_scoped")
+            .execute(db.pool())
+            .await
+            .expect("drop unlisted table");
+        // The catalog check blocks it before the approval comparison runs.
+        let output = outcome.expect("run records the failure");
+        assert_eq!(output.stage, DeletionStage::Approved);
+        let blocked = output
+            .blocked_reason
+            .expect("an unlisted addition blocks the request");
+        assert!(
+            blocked.contains("unknown=deletion_unlisted_scoped"),
+            "{blocked}"
+        );
+        let request = db
+            .deletion_store()
+            .get(request_id)
+            .await
+            .expect("load request");
+        assert!(request.fence_generation.is_none());
+
+        // The forward tables appear after approval, with rows for the target
+        // and for a bystander.
+        let (db, services, claim) =
+            claimed_test_deletion_in(scratch.clone(), "deletion-straddle").await;
+        let services = services_with_infra(services);
+        let target = *claim.request.community_id.as_uuid();
+        let bystander = *db
+            .ensure_configured_community(&format!(
+                "deletion-bystander-{}.example",
+                Uuid::new_v4().simple()
+            ))
+            .await
+            .expect("bystander community")
+            .id
+            .as_uuid();
+        for table in buzz_db::deletion::PENDING_SCOPED_TABLES {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "CREATE TABLE {table} (community_id UUID NOT NULL)"
+            )))
+            .execute(db.pool())
+            .await
+            .expect("create forward table");
+            for community in [target, bystander] {
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "INSERT INTO {table} (community_id) VALUES ($1)"
+                )))
+                .bind(community)
+                .execute(db.pool())
+                .await
+                .expect("seed forward table");
+            }
+        }
+        let output = execute_claim(&services, LoopMode::Run, claim, &CancellationToken::new())
+            .await
+            .expect("execute deletion");
+        assert_eq!(
+            output.stage,
+            DeletionStage::RetentionPending,
+            "{:?}",
+            output.blocked_reason.or(output.last_error)
+        );
+        for table in buzz_db::deletion::PENDING_SCOPED_TABLES {
+            for (community, expected) in [(target, 0_i64), (bystander, 1)] {
+                let rows: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                    "SELECT count(*) FROM {table} WHERE community_id = $1"
+                )))
+                .bind(community)
+                .fetch_one(db.pool())
+                .await
+                .expect("count forward rows");
+                assert_eq!(rows, expected, "{table} {community}");
+            }
+        }
+
+        // An approval that froze the forward tables fails before fencing
+        // once they are gone.
+        let (db, services, claim) =
+            claimed_test_deletion_in(scratch.clone(), "deletion-removed").await;
+        let services = services_with_infra(services);
+        let request_id = claim.request.id;
+        for table in buzz_db::deletion::PENDING_SCOPED_TABLES {
+            sqlx::query(sqlx::AssertSqlSafe(format!("DROP TABLE {table}")))
+                .execute(db.pool())
+                .await
+                .expect("drop forward table");
+        }
+        let output = execute_claim(&services, LoopMode::Run, claim, &CancellationToken::new())
+            .await
+            .expect("run records the failure");
+        assert_eq!(output.stage, DeletionStage::Approved);
+        let blocked = output
+            .blocked_reason
+            .expect("a removed frozen table blocks the request");
+        assert!(
+            blocked.contains("approved structural catalog drifted"),
+            "{blocked}"
+        );
+        let request = db
+            .deletion_store()
+            .get(request_id)
+            .await
+            .expect("load request");
+        assert!(request.fence_generation.is_none());
+        drop_scratch_test_db(scratch, &scratch_name).await;
+    }
+
     mod external_infra_s3_tests {
+        #[tokio::test]
+        #[ignore = "requires Postgres, Redis and S3-compatible storage"]
+        async fn approval_before_an_expand_migration_completes() {
+            super::approval_before_an_expand_migration_completes().await;
+        }
+
         #[tokio::test]
         #[ignore = "requires Postgres and S3-compatible storage"]
         async fn approved_stage_allows_post_inventory_row_churn_before_fencing() {
@@ -2783,18 +3054,19 @@ mod postgres_tests {
             .begin_quiescing(&claim.lease)
             .await
             .expect("quiesce");
+        let error = services
+            .store
+            .acquire_serving_write_lease(
+                community,
+                "late_external",
+                "late-owner",
+                DEFAULT_LEASE_DURATION,
+            )
+            .await
+            .expect_err("quiescing must reject newly admitted work");
         assert!(
-            services
-                .store
-                .acquire_serving_write_lease(
-                    community,
-                    "late_external",
-                    "late-owner",
-                    DEFAULT_LEASE_DURATION,
-                )
-                .await
-                .is_err(),
-            "quiescing must reject newly admitted work"
+            matches!(error, buzz_db::DbError::AccessDenied(_)),
+            "{error:?}"
         );
 
         let completed = Arc::new(AtomicBool::new(false));

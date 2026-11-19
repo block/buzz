@@ -45,6 +45,23 @@ void main() {
     expect(transport.state.phase, HuddleTransportPhase.connected);
     expect(transport.state.localPeerIndex, 3);
     expect(transport.state.peers.keys, containsAll([1, 3]));
+
+    final stalled = Completer<Map<String, String>>();
+    var opened = false;
+    final waiting = HuddleTransport(
+      parameters: transport.parameters,
+      headers: () => stalled.future,
+      channelFactory: (_) {
+        opened = true;
+        return _ControlledWebSocketChannel();
+      },
+      connectTimeout: const Duration(milliseconds: 20),
+    );
+    addTearDown(waiting.dispose);
+    await expectLater(waiting.connect(), throwsA(isA<HuddleTransportError>()));
+    stalled.complete({});
+    await Future<void>.delayed(Duration.zero);
+    expect(opened, isFalse);
   });
 
   test(

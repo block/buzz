@@ -38,7 +38,9 @@ export function useChannelIntro({
   onWelcomeAddAgent,
 }: {
   activeChannel: Channel | null;
-  onAddAgent?: (options?: { beforeSend?: () => void }) => void;
+  onAddAgent?: (options?: {
+    beforeSend?: (channelId: string) => () => void;
+  }) => void;
   onAddFiles?: () => void;
   onBrowseChannels?: () => void;
   onCreateChannel?: () => void;

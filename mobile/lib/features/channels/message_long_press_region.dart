@@ -8,7 +8,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
 /// Shared hold deadline so nested reaction pills win before the message menu.
-const iosMessageLongPressDuration = Duration(milliseconds: 200);
+const iosMessageLongPressDuration = Duration(milliseconds: 500);
 const _maxMessageSnapshotDimension = 2048.0;
 
 double _messageSnapshotPixelRatio(Size size, double devicePixelRatio) {

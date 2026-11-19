@@ -13,6 +13,7 @@ class BuzzTitledSheetLayout extends HookWidget {
     required this.child,
     this.leading,
     this.trailing,
+    this.onClose,
     this.titleKey,
     this.showDragHandle = false,
     this.surfaceColor,
@@ -22,6 +23,9 @@ class BuzzTitledSheetLayout extends HookWidget {
   final Widget child;
   final Widget? leading;
   final Widget? trailing;
+
+  /// Overrides the header close action; null dismisses the current route.
+  final VoidCallback? onClose;
   final Key? titleKey;
   final bool showDragHandle;
   final Color? surfaceColor;
@@ -79,6 +83,7 @@ class BuzzTitledSheetLayout extends HookWidget {
                 titleKey: titleKey,
                 leading: leading,
                 trailing: trailing,
+                onClose: onClose,
                 showDragHandle: showDragHandle,
               ),
             ),

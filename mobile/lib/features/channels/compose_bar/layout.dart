@@ -1,16 +1,18 @@
 part of '../compose_bar.dart';
 
 class _ComposeBarLayout extends HookWidget {
+  final GlobalKey surfaceKey;
   final Widget? voiceNoteRecorder;
   final List<_PendingAttachment> attachments;
   final ValueChanged<int> onRemoveAttachment;
   final String? uploadError;
   final bool isExpanded;
-  final TextEditingController controller;
+  final _MarkdownEditingController controller;
   final FocusNode focusNode;
   final EditableTextContextMenuBuilder contextMenuBuilder;
   final ValueChanged<KeyboardInsertedContent> onContentInserted;
   final VoidCallback onSend;
+  final KeyEventResult Function(FocusNode, KeyEvent) onKeyEvent;
   final String resolvedHint;
   final _AttachmentSurface attachmentSurface;
   final ValueChanged<BuildContext> onAttachmentTap;
@@ -28,8 +30,10 @@ class _ComposeBarLayout extends HookWidget {
   final bool canSend;
   final bool hasPendingUploads;
   final bool isSending;
+  final bool readOnly;
 
   const _ComposeBarLayout({
+    required this.surfaceKey,
     required this.voiceNoteRecorder,
     required this.attachments,
     required this.onRemoveAttachment,
@@ -40,6 +44,7 @@ class _ComposeBarLayout extends HookWidget {
     required this.contextMenuBuilder,
     required this.onContentInserted,
     required this.onSend,
+    required this.onKeyEvent,
     required this.resolvedHint,
     required this.attachmentSurface,
     required this.onAttachmentTap,
@@ -57,6 +62,7 @@ class _ComposeBarLayout extends HookWidget {
     required this.canSend,
     required this.hasPendingUploads,
     required this.isSending,
+    this.readOnly = false,
   });
 
   @override
@@ -212,19 +218,19 @@ class _ComposeBarLayout extends HookWidget {
                               key: const ValueKey('standard-actions'),
                               children: [
                                 _ComposeAction(
-                                  icon: LucideIcons.atSign,
+                                  icon: BuzzIcons.atSign,
                                   onTap: onMention,
                                 ),
                                 _ComposeAction(
-                                  icon: LucideIcons.hash,
+                                  icon: BuzzIcons.hash,
                                   onTap: onChannel,
                                 ),
                                 _ComposeAction(
-                                  icon: LucideIcons.smilePlus,
+                                  icon: BuzzIcons.smilePlus,
                                   onTap: onEmoji,
                                 ),
                                 _ComposeAction(
-                                  icon: LucideIcons.aLargeSmall,
+                                  icon: BuzzIcons.aLargeSmall,
                                   onTap: onOpenFormatting,
                                 ),
                                 const Spacer(),
@@ -261,7 +267,7 @@ class _ComposeBarLayout extends HookWidget {
           opacity: animation,
           child: SizeTransition(
             sizeFactor: animation,
-            axisAlignment: 1,
+            alignment: Alignment.bottomCenter,
             child: child,
           ),
         ),
@@ -289,22 +295,25 @@ class _ComposeBarLayout extends HookWidget {
         final voiceNoteInsetProgress = hasVoiceNoteAttachment
             ? 1.0
             : recordingTransition.value;
-        final composer = Container(
-          key: const ValueKey('composer-surface'),
-          decoration: BoxDecoration(
-            color: usesIosConcentricSurface
-                ? Colors.transparent
-                : context.colors.surfaceContainerHighest,
-            borderRadius: radius,
-            border: Border.all(
-              color: Colors.black.withValues(alpha: 0.04),
-              width: 1,
+        final composer = KeyedSubtree(
+          key: surfaceKey,
+          child: Container(
+            key: const ValueKey('composer-surface'),
+            decoration: BoxDecoration(
+              color: usesIosConcentricSurface
+                  ? Colors.transparent
+                  : context.colors.surfaceContainerHighest,
+              borderRadius: radius,
+              border: Border.all(
+                color: Colors.black.withValues(alpha: 0.04),
+                width: 1,
+              ),
             ),
+            padding: EdgeInsets.all(
+              Grid.xxs + Grid.half * voiceNoteInsetProgress,
+            ),
+            child: child,
           ),
-          padding: EdgeInsets.all(
-            Grid.xxs + Grid.half * voiceNoteInsetProgress,
-          ),
-          child: child,
         );
         if (!usesIosConcentricSurface) return composer;
         return ConcentricSheetSurface(
@@ -323,9 +332,20 @@ class _ComposeBarLayout extends HookWidget {
   }
 
   Widget _buildTextField(BuildContext context) {
+    return Focus(
+      canRequestFocus: false,
+      skipTraversal: true,
+      onKeyEvent: onKeyEvent,
+      child: _buildEditableField(context),
+    );
+  }
+
+  Widget _buildEditableField(BuildContext context) {
     return TextField(
       controller: controller,
       focusNode: focusNode,
+      readOnly: readOnly,
+      inputFormatters: [_ComposerChipEditingFormatter(controller)],
       keyboardType: TextInputType.multiline,
       textInputAction: TextInputAction.newline,
       contextMenuBuilder: contextMenuBuilder,

@@ -16,6 +16,35 @@ Widget _trackActiveThreadScrollPosition(
   },
 );
 
+/// Keeps a tail-following thread at its end while content there grows.
+///
+/// A sent reply's entrance transition grows its row over several frames, and
+/// media or typing rows can grow too. The one-shot tail correction can finish
+/// before that growth does, leaving the new content under the composer. Every
+/// growth reports new scroll metrics, so move a position that was at its old
+/// end to the new one while the reader follows the tail.
+void _followThreadTailOnMetricsChange(
+  ScrollMetricsNotification notification, {
+  required ScrollPosition? activePosition,
+  required Expando<double> previousMaxExtents,
+  required bool Function() followsTail,
+}) {
+  final position = Scrollable.maybeOf(notification.context)?.position;
+  if (position == null ||
+      !identical(position, activePosition) ||
+      !position.hasContentDimensions) {
+    return;
+  }
+  final maxExtent = position.maxScrollExtent;
+  final previousMaxExtent = previousMaxExtents[position];
+  previousMaxExtents[position] = maxExtent;
+  if (previousMaxExtent == null || maxExtent <= previousMaxExtent) return;
+  final wasAtEnd =
+      position.pixels >= previousMaxExtent - _threadTailScrollTolerance;
+  if (!wasAtEnd || !followsTail()) return;
+  position.jumpTo(maxExtent);
+}
+
 bool _jumpActiveThreadScrollToTail(
   ObjectRef<ScrollPosition?> activePosition,
   bool Function()? testOverride,
@@ -152,33 +181,6 @@ class _ThreadTailIntent {
   }
 }
 
-/// Thread-scoped typing status with optional size animation.
-class _ThreadTypingIndicator extends StatelessWidget {
-  final String channelId;
-  final List<TypingEntry> entries;
-  final bool animated;
-
-  const _ThreadTypingIndicator({
-    required this.channelId,
-    required this.entries,
-    this.animated = true,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final child = entries.isEmpty
-        ? const SizedBox.shrink()
-        : ChannelTypingIndicator(channelId: channelId, entries: entries);
-    if (!animated || MediaQuery.disableAnimationsOf(context)) return child;
-    return AnimatedSize(
-      duration: const Duration(milliseconds: 180),
-      curve: Curves.easeOutCubic,
-      alignment: Alignment.bottomCenter,
-      child: child,
-    );
-  }
-}
-
 /// Display evidence while the authoritative thread query has no value (still
 /// loading, or failed on first load): the route snapshot plus live, cached
 /// and optimistic replies. The page keeps the query's loading/error status,
@@ -193,8 +195,10 @@ List<TimelineMessage> _provisionalThreadMessages(
       if (!_isDeletedBy(liveChannelEvents, message.id)) message.id: message,
     for (final message in observed) message.id: message,
   };
+  // Same order as compareThreadRepliesChronologically, so replies don't
+  // move when the query lands.
   return byId.values.toList()..sort((a, b) {
-    final order = a.createdAt.compareTo(b.createdAt);
+    final order = a.createdAtMs.compareTo(b.createdAtMs);
     return order != 0 ? order : a.id.compareTo(b.id);
   });
 }

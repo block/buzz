@@ -1,5 +1,9 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
+import 'package:buzz/shared/read_state/read_state_time.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
@@ -16,20 +20,27 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   const channelId = 'chan-1';
   const otherChannelId = 'chan-2';
+  final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
   final msgKey = msgContextKey('msg-1');
   final otherMsgKey = msgContextKey('msg-2');
 
   late ProviderContainer container;
+  late _FakeRelayConfig config;
+  late _FakeRelaySession session;
 
-  Future<ReadStateNotifier> pumpNotifier() async {
-    SharedPreferences.setMockInitialValues({});
+  Future<ReadStateNotifier> pumpNotifier({
+    Map<String, Object> Function(String pubkey)? stored,
+  }) async {
+    final keys = nostr.Keys.generate();
+    SharedPreferences.setMockInitialValues(stored?.call(keys.public) ?? {});
     final prefs = await SharedPreferences.getInstance();
-    final nsec = nostr.Keys.generate().nsec;
+    final nsec = keys.nsec;
+    config = _FakeRelayConfig(nsec);
 
     container = ProviderContainer(
       overrides: [
         savedPrefsProvider.overrideWithValue(prefs),
-        relayConfigProvider.overrideWith(() => _FakeRelayConfig(nsec)),
+        relayConfigProvider.overrideWith(() => config),
         relaySessionProvider.overrideWith(_FakeRelaySession.new),
         activeCommunityProvider.overrideWith((ref) async => null),
         appLifecycleProvider.overrideWith(_FakeAppLifecycle.new),
@@ -45,10 +56,207 @@ void main() {
       await Future<void>.delayed(Duration.zero);
     }
     expect(container.read(readStateProvider).isReady, isTrue);
+    session =
+        container.read(relaySessionProvider.notifier) as _FakeRelaySession;
     return notifier;
   }
 
   ReadStateState state() => container.read(readStateProvider);
+
+  Future<void> flushMicrotasks() async {
+    for (var i = 0; i < 10; i++) {
+      await Future<void>.delayed(Duration.zero);
+    }
+  }
+
+  Future<void> settle() async {
+    for (var i = 0; i < 10 && !state().isReady; i++) {
+      await Future<void>.delayed(Duration.zero);
+    }
+    expect(state().isReady, isTrue);
+  }
+
+  test('read marks stay with the community they were made in', () async {
+    // Recent, so the saved copy keeps message marks.
+    final readAt = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final at = unixSecondsToDateTime(readAt).toIso8601String();
+    // Upgrading from the identity-wide marks: they may be another
+    // community's, and the relay keeps the published ones, so none is taken.
+    final notifier = await pumpNotifier(
+      stored: (pubkey) => {
+        'buzz.channel-read-state.v2:$pubkey': jsonEncode({
+          channelId: at,
+          otherMsgKey: at,
+        }),
+      },
+    );
+    expect(state().contexts, isEmpty);
+    notifier.markContextRead(msgKey, readAt);
+
+    // Each community keeps its own marks, even for a channel with the same id.
+    config.switchTo('http://localhost:2');
+    container.read(readStateProvider);
+    await settle();
+    expect(state().contexts, isEmpty);
+    container
+        .read(readStateProvider.notifier)
+        .markContextRead(channelId, readAt + 5);
+
+    config.switchTo('http://localhost:1');
+    container.read(readStateProvider);
+    await settle();
+    expect(state().effectiveTimestamp(msgKey), readAt);
+    expect(state().contexts[channelId], isNull);
+    expect(state().effectiveTimestamp(channelId), state().retentionFloor);
+  });
+
+  test('a mark made before the next manager starts is kept', () async {
+    final notifier = await pumpNotifier();
+    // The switch retires this community's manager; the next one has not been
+    // built yet when the mark arrives.
+    config.switchTo('http://localhost:2');
+    notifier.markContextRead(channelId, now);
+    await settle();
+    expect(state().effectiveTimestamp(channelId), now);
+  });
+
+  test('a disconnect and reconnect keeps the manager and forced unread '
+      'flags, and resyncs once on connect', () async {
+    final notifier = await pumpNotifier();
+    // Persists on the same manager, so it survives only if that manager does.
+    notifier.markContextRead(channelId, now);
+    notifier.markContextUnread(msgKey, channelId: channelId);
+    expect(session.fetchCount, 1);
+    expect(session.subscribeCount, 1);
+    final version = state().version;
+
+    for (final status in [
+      SessionStatus.disconnected,
+      SessionStatus.connecting,
+      SessionStatus.reconnecting,
+    ]) {
+      session.setStatus(status);
+      await flushMicrotasks();
+      // No rebuild: still ready, flags kept, and nothing refetched.
+      expect(state().isReady, isTrue, reason: status.name);
+      expect(state().isForcedUnread(msgKey), isTrue, reason: status.name);
+      expect(state().effectiveTimestamp(channelId), now);
+      expect(session.fetchCount, 1, reason: status.name);
+      expect(session.subscribeCount, 1, reason: status.name);
+    }
+
+    session.setStatus(SessionStatus.connected);
+    await flushMicrotasks();
+
+    // The replayed subscription's ready rereads the snapshot on the same
+    // manager, which keeps its subscription.
+    expect(session.fetchCount, 2);
+    expect(session.subscribeCount, 1);
+    expect(session.liveSubscriptions, 1);
+    expect(state().isReady, isTrue);
+    expect(state().isForcedUnread(msgKey), isTrue);
+    expect(state().locallyForcedChannelIds, {channelId});
+    expect(state().effectiveTimestamp(channelId), now);
+    expect(state().version, greaterThanOrEqualTo(version));
+
+    // A second reconnect resyncs the same way.
+    session.setStatus(SessionStatus.disconnected);
+    session.setStatus(SessionStatus.connected);
+    await flushMicrotasks();
+    expect(session.fetchCount, 3);
+    expect(session.liveSubscriptions, 1);
+    expect(state().isForcedUnread(msgKey), isTrue);
+  });
+
+  test('a session rebuild (auth completing) keeps the manager and reopens '
+      'its live subscription on connect', () async {
+    final notifier = await pumpNotifier();
+    notifier.markContextUnread(msgKey, channelId: channelId);
+    expect(session.subscribeCount, 1);
+
+    // The manager initialized before auth. Auth completing rebuilds the
+    // session in place, which drops its live subscriptions without a CLOSED.
+    container.read(_sessionRebuildProvider.notifier).rebuild();
+    container.read(relaySessionProvider);
+    expect(session.liveSubscriptions, 0);
+
+    session.setStatus(SessionStatus.connected);
+    await flushMicrotasks();
+    expect(session.subscribeCount, 2);
+    expect(session.liveSubscriptions, 1);
+    expect(state().isForcedUnread(msgKey), isTrue);
+  });
+
+  test('a session rebuild during the live subscribe reopens it on the new '
+      'session', () async {
+    final gate = Completer<void>();
+    _subscribeGate = gate.future;
+    addTearDown(() => _subscribeGate = null);
+    final keys = nostr.Keys.generate();
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    config = _FakeRelayConfig(keys.nsec);
+    container = ProviderContainer(
+      overrides: [
+        savedPrefsProvider.overrideWithValue(prefs),
+        relayConfigProvider.overrideWith(() => config),
+        relaySessionProvider.overrideWith(_FakeRelaySession.new),
+        activeCommunityProvider.overrideWith((ref) async => null),
+        appLifecycleProvider.overrideWith(_FakeAppLifecycle.new),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.read(readStateProvider);
+    await container.read(activeCommunityProvider.future);
+    container.read(readStateProvider);
+    await flushMicrotasks();
+    session =
+        container.read(relaySessionProvider.notifier) as _FakeRelaySession;
+    expect(session.subscribeCount, 1);
+    expect(state().isReady, isFalse);
+
+    // Auth completes while the subscribe waits for ready.
+    container.read(_sessionRebuildProvider.notifier).rebuild();
+    container.read(relaySessionProvider);
+    _subscribeGate = null;
+    gate.complete();
+    await settle();
+
+    expect(session.subscribeCount, 2);
+    expect(session.liveSubscriptions, 1);
+  });
+
+  test('switching account rebuilds the manager and drops forced unread '
+      'flags', () async {
+    final notifier = await pumpNotifier();
+    notifier.markContextUnread(msgKey, channelId: channelId);
+    expect(session.fetchCount, 1);
+    final pubkey = state().pubkey;
+
+    config.switchAccount(nostr.Keys.generate().nsec);
+    container.read(readStateProvider);
+    await settle();
+
+    expect(state().pubkey, isNot(pubkey));
+    expect(state().forcedUnreadContexts, isEmpty);
+    expect(session.fetchCount, 2);
+    expect(session.subscribeCount, 2);
+    expect(session.liveSubscriptions, 1);
+  });
+
+  test('switching community rebuilds the manager and drops forced unread '
+      'flags', () async {
+    final notifier = await pumpNotifier();
+    notifier.markContextUnread(msgKey, channelId: channelId);
+
+    config.switchTo('http://localhost:2');
+    container.read(readStateProvider);
+    await settle();
+
+    expect(state().forcedUnreadContexts, isEmpty);
+    expect(session.fetchCount, 2);
+    expect(session.liveSubscriptions, 1);
+  });
 
   test('message unread → read → unread round-trips through the real '
       'notifier', () async {
@@ -61,16 +269,16 @@ void main() {
 
     // Mark read: the force flag must drop out of the production map AND the
     // marker must land in the manager's effective contexts.
-    notifier.markContextRead(msgKey, 1000);
+    notifier.markContextRead(msgKey, now);
     expect(state().isForcedUnread(msgKey), isFalse);
     expect(state().forcedUnreadContexts, isEmpty);
-    expect(state().effectiveTimestamp(msgKey), 1000);
+    expect(state().effectiveTimestamp(msgKey), now);
 
     // Force unread again: read markers are monotonic, so the flag is the
     // only mechanism — it must win even though the marker persists.
     notifier.markContextUnread(msgKey, channelId: channelId);
     expect(state().isForcedUnread(msgKey), isTrue);
-    expect(state().effectiveTimestamp(msgKey), 1000);
+    expect(state().effectiveTimestamp(msgKey), now);
   });
 
   test('explicit channel-level Mark read clears forced message entries in '
@@ -81,12 +289,12 @@ void main() {
     notifier.markContextUnread(otherMsgKey, channelId: otherChannelId);
 
     // Channel tile "Mark as read" passes clearForcedMessages: true.
-    notifier.markContextRead(channelId, 2000, clearForcedMessages: true);
+    notifier.markContextRead(channelId, now, clearForcedMessages: true);
 
     expect(state().isForcedUnread(msgKey), isFalse);
     expect(state().isForcedUnread(otherMsgKey), isTrue);
     expect(state().locallyForcedChannelIds, {otherChannelId});
-    expect(state().effectiveTimestamp(channelId), 2000);
+    expect(state().effectiveTimestamp(channelId), now);
   });
 
   test(
@@ -97,11 +305,29 @@ void main() {
       notifier.markContextUnread(msgKey, channelId: channelId);
 
       // Channel open marks the channel read without clearForcedMessages.
-      notifier.markContextRead(channelId, 3000);
+      notifier.markContextRead(channelId, now);
 
       expect(state().isForcedUnread(msgKey), isTrue);
       expect(state().locallyForcedChannelIds, {channelId});
-      expect(state().effectiveTimestamp(channelId), 3000);
+      expect(state().effectiveTimestamp(channelId), now);
+    },
+  );
+
+  test(
+    'clearing a channel force keeps its marker and message forces',
+    () async {
+      final notifier = await pumpNotifier();
+
+      notifier.markContextUnread(channelId, channelId: channelId);
+      notifier.markContextUnread(msgKey, channelId: channelId);
+
+      // Reading to the bottom ends the channel force without reading anything.
+      notifier.clearForcedUnread(channelId);
+
+      expect(state().isForcedUnread(channelId), isFalse);
+      expect(state().isForcedUnread(msgKey), isTrue);
+      expect(state().contexts[channelId], isNull);
+      expect(state().effectiveTimestamp(channelId), state().retentionFloor);
     },
   );
 
@@ -113,7 +339,7 @@ void main() {
     notifier.markContextUnread(channelId, channelId: channelId);
     notifier.markContextUnread(msgKey, channelId: channelId);
 
-    notifier.markContextRead(channelId, 4000);
+    notifier.markContextRead(channelId, now);
 
     // Opening the channel satisfies the channel-scoped force, but the
     // deliberate message-level force survives until acted on.
@@ -124,33 +350,109 @@ void main() {
 }
 
 class _FakeRelayConfig extends RelayConfigNotifier {
-  final String nsec;
+  String nsec;
 
   _FakeRelayConfig(this.nsec);
 
   @override
   RelayConfig build() => RelayConfig(baseUrl: 'http://localhost:1', nsec: nsec);
+
+  void switchTo(String baseUrl) =>
+      state = RelayConfig(baseUrl: baseUrl, nsec: nsec);
+
+  void switchAccount(String newNsec) {
+    nsec = newNsec;
+    state = RelayConfig(baseUrl: state.baseUrl, nsec: newNsec);
+  }
 }
 
-/// Relay session that never connects and returns no history, keeping the
-/// manager fully local while exercising its real code paths.
-class _FakeRelaySession extends RelaySessionNotifier {
+/// Relay session that returns no history and counts the read-state fetches
+/// and live subscriptions the manager makes, keeping it fully local while
+/// exercising its real code paths. Its status is driven by [setStatus].
+/// Stands in for auth completing, which rebuilds the session in place.
+final _sessionRebuildProvider = NotifierProvider<_SessionRebuild, int>(
+  _SessionRebuild.new,
+);
+
+class _SessionRebuild extends Notifier<int> {
   @override
-  SessionState build() =>
-      const SessionState(status: SessionStatus.disconnected);
+  int build() => 0;
+
+  void rebuild() => state++;
+}
+
+Future<void>? _subscribeGate;
+
+class _FakeRelaySession extends RelaySessionNotifier {
+  int fetchCount = 0;
+  int subscribeCount = 0;
+  int liveSubscriptions = 0;
+
+  final List<void Function(RelaySubscriptionStatus)> _open = [];
+
+  /// A connect replays each open live subscription, whose EOSE reports
+  /// ready after the connected listeners ran.
+  void setStatus(SessionStatus status) {
+    state = SessionState(status: status);
+    if (status != SessionStatus.connected) return;
+    for (final onStatusChanged in [..._open]) {
+      onStatusChanged(RelaySubscriptionStatus.ready);
+    }
+  }
 
   @override
-  Future<List<NostrEvent>> fetchHistory(
-    NostrFilter filter, {
+  SessionState build() {
+    ref.watch(_sessionRebuildProvider);
+    // Like the real session, a rebuild drops every live subscription.
+    ref.onDispose(() {
+      _open.clear();
+      liveSubscriptions = 0;
+      debugDispose();
+    });
+    return const SessionState(status: SessionStatus.disconnected);
+  }
+
+  @override
+  Future<List<NostrEvent>> fetchReadStateSnapshot({
     Duration timeout = const Duration(seconds: 8),
-  }) async => [];
+  }) async {
+    fetchCount++;
+    return [];
+  }
+
+  @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
+    bool resumeSince = true,
+  }) async {
+    final unsubscribe = await subscribe(filter, onEvent, onClosed: onClosed);
+    _open.add(onStatusChanged);
+    return () {
+      _open.remove(onStatusChanged);
+      unsubscribe();
+    };
+  }
 
   @override
   Future<void Function()> subscribe(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
-  }) async => () {};
+  }) async {
+    subscribeCount++;
+    liveSubscriptions++;
+    final dropped = liveSubscriptionOwner;
+    var open = true;
+    await _subscribeGate;
+    return () {
+      if (dropped != liveSubscriptionOwner) open = false;
+      if (open) liveSubscriptions--;
+      open = false;
+    };
+  }
 }
 
 class _FakeAppLifecycle extends AppLifecycleNotifier {

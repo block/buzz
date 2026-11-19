@@ -559,7 +559,7 @@ export function ChannelScreen({
       ? handleSendVideoReviewComment
       : undefined;
   const handleOpenAddBot = React.useCallback(
-    (options?: { beforeSend?: () => void }) =>
+    (options?: { beforeSend?: (channelId: string) => () => void }) =>
       welcomeAgentCreate.openAddAgent(() => setIsAddBotOpen(true), options),
     [welcomeAgentCreate],
   );

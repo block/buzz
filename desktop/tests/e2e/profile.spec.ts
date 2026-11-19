@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { npubEncode } from "nostr-tools/nip19";
 
 import {
@@ -138,6 +138,21 @@ async function readVisibleProfileSurface(page: Page) {
       visibleTestIds,
     };
   });
+}
+
+// The owned-agent action row conceals itself (aria-hidden + inert) once the
+// profile body scrolls. If a click lands while the panel is still settling,
+// Playwright's scroll-into-view retries scroll the body and the row never
+// becomes clickable again, so pin the body to the top before clicking.
+async function clickProfileMessageAction(page: Page) {
+  await page.getByTestId("user-profile-scroll-body").evaluate((element) => {
+    element.scrollTop = 0;
+  });
+  await expect(
+    page.getByTestId("user-profile-primary-actions"),
+  ).not.toHaveAttribute("aria-hidden", "true");
+  await waitForAnimations(page);
+  await page.getByTestId("user-profile-message").click();
 }
 
 async function readOwnedAgentProfileContract(page: Page) {
@@ -371,7 +386,7 @@ test("owned agent profile stays in parity between Agents and its DM", async ({
   await page
     .getByRole("button", { name: `${agentName} agent profile` })
     .click();
-  await page.getByTestId("user-profile-message").click();
+  await clickProfileMessageAction(page);
   await expect(page.getByTestId("chat-header-dm-avatar")).toBeVisible();
   const dmChannelId = await page.evaluate(() => {
     const match = window.location.hash.match(/\/channels\/([^?]+)/);
@@ -414,7 +429,7 @@ test("owned agent profile stays in parity between Agents and its DM", async ({
     .click();
   const agentsSurface = await readOwnedAgentProfileContract(page);
 
-  await page.getByTestId("user-profile-message").click();
+  await clickProfileMessageAction(page);
   await expect(page.getByTestId("chat-header-dm-avatar")).toBeVisible();
   await page
     .getByTestId("chat-header")
@@ -1525,27 +1540,35 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
       0,
     );
   }
-  await page.getByTestId("user-profile-duplicate-agent-row").click();
+  // The Stop and Start success toasts can stack over these rows, and a
+  // pointer over them pauses their dismissal. Press the rows with the
+  // keyboard, which the toasts cannot intercept.
+  const pressActionRow = async (row: Locator) => {
+    await expect(row).toBeEnabled();
+    await row.focus();
+    await row.press("Enter");
+  };
+  await pressActionRow(page.getByTestId("user-profile-duplicate-agent-row"));
   const duplicateDialog = page.getByTestId("persona-dialog");
   await expect(duplicateDialog).toBeVisible();
   await duplicateDialog.getByRole("button", { name: "Cancel" }).click();
-  await page.getByTestId("user-profile-export-agent-row").click();
+  await pressActionRow(page.getByTestId("user-profile-export-agent-row"));
   const exportDialog = page.getByTestId("agent-snapshot-export-dialog");
   await expect(exportDialog).toBeVisible();
   await exportDialog.getByRole("button", { name: "Cancel" }).click();
-  await page.getByTestId("user-profile-create-card-row").click();
+  await pressActionRow(page.getByTestId("user-profile-create-card-row"));
   const cardMintDialog = page.getByTestId("agent-card-mint-dialog");
   await expect(cardMintDialog).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(cardMintDialog).toHaveCount(0);
   const archiveAgentRow = page.getByTestId("user-profile-archive-agent-row");
   await expect(archiveAgentRow).toHaveText(/Archive agent/);
-  await archiveAgentRow.click();
+  await pressActionRow(archiveAgentRow);
   await expect(page.getByTestId("archive-confirm-dialog")).toBeVisible();
   await page.getByRole("button", { name: "Cancel" }).click();
   const deleteAgentRow = page.getByTestId("user-profile-delete-agent-row");
   await expect(deleteAgentRow).toHaveText("Delete agent");
-  await deleteAgentRow.click();
+  await pressActionRow(deleteAgentRow);
   await expect(page.getByTestId("agent-delete-confirm-dialog")).toBeVisible();
   await page.getByRole("button", { name: "Cancel" }).click();
   await expect(page.getByTestId("user-profile-tab-memories")).toHaveText(
@@ -1591,8 +1614,16 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
             activeTab: string | undefined;
             x: number[];
           }> = [];
-          const startedAt = performance.now();
+          // Time the window from the tab switch, not from before the click:
+          // a slow click or frame would otherwise spend it before the motion.
+          let startedAt: number | null = null;
           const sample = () => {
+            if (
+              startedAt === null &&
+              container.dataset.activeTab === "runtime"
+            ) {
+              startedAt = performance.now();
+            }
             samples.push({
               activeTab: container.dataset.activeTab,
               x: Array.from(container.children).map((child) => {
@@ -1602,7 +1633,7 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
                   : new DOMMatrixReadOnly(transform).m41;
               }),
             });
-            if (performance.now() - startedAt < 320) {
+            if (startedAt === null || performance.now() - startedAt < 320) {
               requestAnimationFrame(sample);
             } else {
               resolve(samples);

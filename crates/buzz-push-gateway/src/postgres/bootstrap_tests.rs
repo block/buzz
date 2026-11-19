@@ -76,3 +76,124 @@ async fn bootstrap_refuses_legacy_data_before_migrations_and_allows_initialized_
     .expect("remove isolated test fixture");
     pool.close().await;
 }
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn single_application_cutover_refuses_populated_v5_authority() {
+    let url = std::env::var("BUZZ_TEST_DATABASE_URL").expect("test database URL");
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .unwrap();
+    let schema = format!("cutover_{}", Uuid::new_v4().simple());
+    sqlx::raw_sql(AssertSqlSafe(format!(
+        "CREATE SCHEMA {schema}; SET search_path TO {schema}"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    migrate_gateway_through(&pool, 5).await.unwrap();
+    sqlx::query("INSERT INTO push_gateway_installations(id,app_attest_key_id,app_attest_public_key,assertion_counter,app_profile,token_ciphertext,token_fingerprint,endpoint_epoch,expires_at) VALUES($1,$2,$3,0,'buzz-ios-dogfood',$4,$5,1,now()+interval '1 day')")
+        .bind(Uuid::new_v4()).bind(vec![1_u8]).bind(vec![2_u8;33]).bind(vec![3_u8]).bind(vec![4_u8;32])
+        .execute(&pool).await.unwrap();
+    let error = PostgresAuthorityStore::apply_migrations_and_grants(&pool, "")
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("empty gateway authority store"),
+        "{error}"
+    );
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM push_gateway_installations WHERE app_profile='buzz-ios-dogfood'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1);
+    // Only the fixture deletes authority. Production refuses without mutation.
+    sqlx::query("DELETE FROM push_gateway_installations")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let error = PostgresAuthorityStore::apply_migrations_and_grants(&pool, "")
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("runtime database role"),
+        "{error}"
+    );
+    assert!(
+        sqlx::query("SELECT app_profile FROM push_gateway_installations")
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    sqlx::raw_sql(AssertSqlSafe(format!(
+        "SET search_path TO public; DROP SCHEMA {schema} CASCADE"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL"]
+async fn platform_migration_marks_existing_and_old_gateway_rows_ios() {
+    let url = std::env::var("BUZZ_TEST_DATABASE_URL").expect("test database URL");
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .unwrap();
+    let schema = format!("platform_{}", Uuid::new_v4().simple());
+    sqlx::raw_sql(AssertSqlSafe(format!(
+        "CREATE SCHEMA {schema}; SET search_path TO {schema}"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let insert = "INSERT INTO push_gateway_installations(id,app_attest_key_id,app_attest_public_key,assertion_counter,token_ciphertext,token_fingerprint,endpoint_epoch,expires_at) VALUES($1,$2,$3,0,$4,$5,1,now()+interval '1 day')";
+    migrate_gateway_through(&pool, 6).await.unwrap();
+    let existing = Uuid::new_v4();
+    sqlx::query(insert)
+        .bind(existing)
+        .bind(vec![1_u8])
+        .bind(vec![2_u8; 33])
+        .bind(vec![3_u8])
+        .bind(vec![4_u8; 32])
+        .execute(&pool)
+        .await
+        .unwrap();
+    migrate_gateway_through(&pool, 7).await.unwrap();
+    // The deployed gateway's insert omits the column and stays valid.
+    let old_gateway = Uuid::new_v4();
+    sqlx::query(insert)
+        .bind(old_gateway)
+        .bind(vec![5_u8])
+        .bind(vec![6_u8; 33])
+        .bind(vec![7_u8])
+        .bind(vec![8_u8; 32])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let platforms: Vec<String> =
+        sqlx::query_scalar("SELECT platform FROM push_gateway_installations")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(platforms, ["ios", "ios"]);
+    assert!(
+        sqlx::query("UPDATE push_gateway_installations SET platform = 'windows'")
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    sqlx::raw_sql(AssertSqlSafe(format!(
+        "SET search_path TO public; DROP SCHEMA {schema} CASCADE"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+}

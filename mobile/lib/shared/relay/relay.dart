@@ -1,6 +1,7 @@
 export 'app_lifecycle_provider.dart';
 export 'identity_scoped_prefs.dart';
 export 'media_auth.dart';
+export 'media_disk_cache.dart';
 export 'media_image.dart';
 export 'media_upload.dart';
 export 'nostr_filters.dart';
@@ -9,6 +10,7 @@ export 'relay_closed_policy.dart';
 export 'relay_client.dart';
 export 'relay_provider.dart';
 export 'relay_rate_limit_gate.dart';
+export 'relay_reconnect_policy.dart';
 export 'relay_session.dart';
 export 'relay_socket.dart';
 export 'signed_event_relay.dart';

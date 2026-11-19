@@ -1,7 +1,7 @@
 import Flutter
 import UIKit
 
-/// Owns a destructive UIKit alert until dismissal and replies exactly once.
+/// Owns a UIKit confirmation alert until dismissal and replies exactly once.
 final class NativeConfirmationDialogCoordinator: NSObject {
   private let channel: FlutterMethodChannel
   private weak var parent: UIViewController?
@@ -46,7 +46,8 @@ final class NativeConfirmationDialogCoordinator: NSObject {
     alert.addAction(UIAlertAction(title: cancelLabel, style: .cancel) { [weak self] _ in
       self?.cancel()
     })
-    alert.addAction(UIAlertAction(title: confirmLabel, style: .destructive) { [weak self] _ in
+    let destructive = data["destructive"] as? Bool ?? true
+    alert.addAction(UIAlertAction(title: confirmLabel, style: destructive ? .destructive : .default) { [weak self] _ in
       self?.finish(true)
     })
     pendingResult = result

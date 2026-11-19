@@ -13,6 +13,15 @@ class MessageAuthorMeta extends StatelessWidget {
   /// Timestamp label shown after the author metadata.
   final String timestamp;
 
+  /// Whether metadata includes the timestamp alongside the author.
+  final bool showTimestamp;
+
+  /// Whether the name and username are visible.
+  final bool showIdentity;
+
+  /// Space before the timestamp when the author is visible.
+  final double timestampGap;
+
   /// Color applied to [displayName].
   final Color nameColor;
 
@@ -40,6 +49,12 @@ class MessageAuthorMeta extends StatelessWidget {
   /// Base text style for [timestamp], with [metadataColor] applied.
   final TextStyle timestampStyle;
 
+  /// Mirrors metadata order without changing text reading direction.
+  final bool reversed;
+
+  /// Positions the metadata within the available message width.
+  final MainAxisAlignment alignment;
+
   /// Creates an inline author row with optional username and tap handling.
   const MessageAuthorMeta({
     super.key,
@@ -48,6 +63,11 @@ class MessageAuthorMeta extends StatelessWidget {
     required this.nameColor,
     required this.metadataColor,
     this.username,
+    this.alignment = MainAxisAlignment.start,
+    this.reversed = false,
+    this.showTimestamp = true,
+    this.showIdentity = true,
+    this.timestampGap = Grid.xxs,
     this.onAuthorTap,
     this.displayNameKey,
     this.usernameKey,
@@ -87,24 +107,23 @@ class MessageAuthorMeta extends StatelessWidget {
             ? constraints.maxWidth / (showUsername ? 3 : 2)
             : double.infinity;
 
-        return Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            Flexible(child: authorName),
-            if (showUsername) ...[
-              const SizedBox(width: Grid.half),
-              ConstrainedBox(
-                constraints: BoxConstraints(maxWidth: metadataMaxWidth),
-                child: Text(
-                  normalizedUsername,
-                  key: usernameKey,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: resolvedMetadataStyle,
-                ),
+        final children = <Widget>[
+          if (showIdentity) Flexible(child: authorName),
+          if (showIdentity && showUsername) ...[
+            const SizedBox(width: Grid.half),
+            ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: metadataMaxWidth),
+              child: Text(
+                normalizedUsername,
+                key: usernameKey,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: resolvedMetadataStyle,
               ),
-            ],
-            const SizedBox(width: Grid.xxs),
+            ),
+          ],
+          if (showTimestamp) ...[
+            if (showIdentity) SizedBox(width: timestampGap),
             ConstrainedBox(
               constraints: BoxConstraints(maxWidth: metadataMaxWidth),
               child: Text(
@@ -116,6 +135,14 @@ class MessageAuthorMeta extends StatelessWidget {
               ),
             ),
           ],
+        ];
+        return Semantics(
+          label: showIdentity ? null : displayName,
+          child: Row(
+            mainAxisAlignment: alignment,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: reversed ? children.reversed.toList() : children,
+          ),
         );
       },
     );

@@ -15,6 +15,8 @@ public struct PushLeaseCommunity: Codable, Equatable, Sendable {
   /// Relay NIP-11 `self` key used to verify NIP-29 channel metadata.
   public let relayMetadataPubkey: String?
   public let pubkey: String?
+  /// Identity of this local sign-in, renewed after account removal.
+  public var notificationSessionID: String?
   public let policies: [PushResolutionPolicy]
 
   public init(
@@ -23,7 +25,8 @@ public struct PushLeaseCommunity: Codable, Equatable, Sendable {
     relayUrl: String,
     relayMetadataPubkey: String? = nil,
     pubkey: String?,
-    policies: [PushResolutionPolicy]
+    policies: [PushResolutionPolicy],
+    notificationSessionID: String? = nil
   ) {
     self.id = id
     self.name = name
@@ -31,6 +34,7 @@ public struct PushLeaseCommunity: Codable, Equatable, Sendable {
     self.relayMetadataPubkey = relayMetadataPubkey
     self.pubkey = pubkey
     self.policies = policies
+    self.notificationSessionID = notificationSessionID
   }
 }
 
@@ -128,16 +132,30 @@ public enum PushLeaseMatcher {
 }
 
 extension VerifiedNostrEvent {
+  /// A relay-signed workflow message names its owner in
+  /// `["p", owner, "", "owner"]` for attribution, not as a mention. Like the
+  /// relay, `p` matching and counting skip that tag on workflow messages.
+  private var isWorkflow: Bool {
+    tags.contains { $0.count >= 2 && $0[0] == "buzz:workflow" && $0[1] == "true" }
+  }
+
+  private func countsAsTag(_ tag: [String], named name: String, workflow: Bool) -> Bool {
+    guard tag.count >= 2 && tag[0] == name else { return false }
+    return !(workflow && name == "p" && tag.count >= 4 && tag[3] == "owner")
+  }
+
   public func tagCount(named name: String) -> Int {
-    tags.reduce(into: 0) { count, tag in
-      if tag.count >= 2 && tag[0] == name { count += 1 }
+    let workflow = isWorkflow
+    return tags.reduce(into: 0) { count, tag in
+      if countsAsTag(tag, named: name, workflow: workflow) { count += 1 }
     }
   }
 
   public func hasAnyTag(named name: String, values: [String]) -> Bool {
     let expected = Set(values.map { $0.lowercased() })
+    let workflow = isWorkflow
     return tags.contains { tag in
-      tag.count >= 2 && tag[0] == name && expected.contains(tag[1].lowercased())
+      countsAsTag(tag, named: name, workflow: workflow) && expected.contains(tag[1].lowercased())
     }
   }
 }

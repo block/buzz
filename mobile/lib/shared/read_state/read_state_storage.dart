@@ -5,24 +5,40 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
+import '../theme/community_theme_preference.dart';
 import 'read_state_format.dart';
 import 'read_state_time.dart';
 
+const _contextsKeyPrefix = 'buzz.channel-read-state.v2';
+const _publishableKeyPrefix = 'buzz.channel-read-state.publishable.v1';
+const _sourceCreatedAtKeyPrefix =
+    'buzz.channel-read-state.source-created-at.v1';
 const _clientIdKeyPrefix = 'buzz.nip-rs.client-id';
 const _slotIdKeyPrefix = 'buzz.nip-rs.slot-id';
 const _uuid = Uuid();
 
-String localReadStateKey(String pubkey) => 'buzz.channel-read-state.v2:$pubkey';
+/// Read marks belong to one community, so every key is scoped by relay as
+/// well as identity. One identity can be paired with several communities.
+String _scope(String pubkey, String relayUrl) =>
+    '$pubkey:${Uri.encodeComponent(normalizeCommunityRelayUrl(relayUrl))}';
 
-String localPublishableContextKey(String pubkey) =>
-    'buzz.channel-read-state.publishable.v1:$pubkey';
+String localReadStateKey(String pubkey, String relayUrl) =>
+    '$_contextsKeyPrefix:${_scope(pubkey, relayUrl)}';
 
-String localSourceCreatedAtKey(String pubkey) =>
-    'buzz.channel-read-state.source-created-at.v1:$pubkey';
+String localPublishableContextKey(String pubkey, String relayUrl) =>
+    '$_publishableKeyPrefix:${_scope(pubkey, relayUrl)}';
 
-String clientIdKey(String pubkey) => '$_clientIdKeyPrefix:$pubkey';
+String localSourceCreatedAtKey(String pubkey, String relayUrl) =>
+    '$_sourceCreatedAtKeyPrefix:${_scope(pubkey, relayUrl)}';
 
-String slotIdKey(String pubkey) => '$_slotIdKeyPrefix:$pubkey';
+String clientIdKey(String pubkey, String relayUrl) =>
+    '$_clientIdKeyPrefix:${_scope(pubkey, relayUrl)}';
+
+String slotIdKey(String pubkey, String relayUrl) =>
+    '$_slotIdKeyPrefix:${_scope(pubkey, relayUrl)}';
+
+/// The earlier keys, shared by every community of the identity.
+String _legacyKey(String prefix, String pubkey) => '$prefix:$pubkey';
 
 class StoredReadState {
   final Map<String, int> contexts;
@@ -40,47 +56,111 @@ class StoredReadState {
 
 class ReadStateStorage {
   final SharedPreferences _prefs;
+  static final _lanes = Expando<Map<String, _JournalLane>>();
+
+  /// Claims the sole writer for this identity/community journal. A successor
+  /// fences already queued writes as well as late network acknowledgements.
+  Object claimJournal(String key) {
+    final lanes = _lanes[_prefs] ??= {};
+    final lane = lanes.putIfAbsent(key, _JournalLane.new);
+    return lane.owner = Object();
+  }
+
+  bool ownsJournal(String key, Object owner) =>
+      identical(_lanes[_prefs]?[key]?.owner, owner);
 
   ReadStateStorage(this._prefs);
 
-  String getOrCreateClientId(String pubkey) {
-    final key = clientIdKey(pubkey);
+  String getOrCreateClientId(String pubkey, String relayUrl) => _getOrCreateId(
+    clientIdKey(pubkey, relayUrl),
+    _legacyKey(_clientIdKeyPrefix, pubkey),
+    isValid: _isValidClientId,
+    generate: _uuid.v4,
+  );
+
+  String getOrCreateSlotId(String pubkey, String relayUrl) => _getOrCreateId(
+    slotIdKey(pubkey, relayUrl),
+    _legacyKey(_slotIdKeyPrefix, pubkey),
+    isValid: _isValidSlotId,
+    generate: generateReadStateSlotId,
+  );
+
+  /// Each community seeds its id from the identity-wide one when it has none,
+  /// so it keeps publishing to the slot that already exists on its relay. The
+  /// shared id stays for the other communities to seed from.
+  String _getOrCreateId(
+    String key,
+    String legacyKey, {
+    required bool Function(String?) isValid,
+    required String Function() generate,
+  }) {
     final stored = _prefs.getString(key);
-    if (_isValidClientId(stored)) {
-      return stored!;
+    if (isValid(stored)) return stored!;
+
+    final legacy = _prefs.getString(legacyKey);
+    final id = isValid(legacy) ? legacy! : generate();
+    _prefs.setString(key, id);
+    return id;
+  }
+
+  void writeSlotId(String pubkey, String relayUrl, String slotId) {
+    _prefs.setString(slotIdKey(pubkey, relayUrl), slotId);
+  }
+
+  /// The complete multi-slot journal, saved atomically as one preference.
+  Map<String, Object?>? readJournal(String pubkey) {
+    final raw = _prefs.getString('buzz.nip-rs.journal.v1:$pubkey');
+    if (raw == null) return null;
+    final journal = asStringObjectMap(jsonDecode(raw));
+    if (journal == null || journal['v'] != 1) {
+      throw const FormatException('Invalid read-state journal');
+    }
+    return journal;
+  }
+
+  Future<void> writeJournal(String pubkey, String encoded, {Object? owner}) {
+    final lane = (_lanes[_prefs] ??= {}).putIfAbsent(pubkey, _JournalLane.new);
+    Future<void> write() async {
+      if (owner != null && !identical(lane.owner, owner)) {
+        throw StateError('Read-state journal writer retired');
+      }
+      if (!await _prefs.setString('buzz.nip-rs.journal.v1:$pubkey', encoded)) {
+        throw StateError('Unable to persist read-state journal');
+      }
     }
 
-    final generated = _uuid.v4();
-    _prefs.setString(key, generated);
-    return generated;
+    // One queue across owner replacements, including a write already in I/O.
+    final result = lane.saved.then(
+      (_) => write(),
+      onError: (Object _, StackTrace _) => write(),
+    );
+    lane.saved = result.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    return result;
   }
 
-  String getOrCreateSlotId(String pubkey) {
-    final key = slotIdKey(pubkey);
-    final stored = _prefs.getString(key);
-    if (_isValidSlotId(stored)) {
-      return stored!;
+  StoredReadState read(String pubkey, String relayUrl) {
+    // The shared marks may be another community's, and the relay keeps the
+    // published ones, so drop them rather than let one community claim them.
+    for (final prefix in const [
+      _contextsKeyPrefix,
+      _publishableKeyPrefix,
+      _sourceCreatedAtKeyPrefix,
+    ]) {
+      _prefs.remove(_legacyKey(prefix, pubkey));
     }
-
-    final generated = generateReadStateSlotId();
-    _prefs.setString(key, generated);
-    return generated;
-  }
-
-  void writeSlotId(String pubkey, String slotId) {
-    _prefs.setString(slotIdKey(pubkey), slotId);
-  }
-
-  StoredReadState read(String pubkey) {
     return StoredReadState(
-      contexts: _readContexts(pubkey),
-      publishableContextIds: _readPublishableContextIds(pubkey),
-      sourceCreatedAt: _readSourceCreatedAt(pubkey),
+      contexts: _readContexts(pubkey, relayUrl),
+      publishableContextIds: _readPublishableContextIds(pubkey, relayUrl),
+      sourceCreatedAt: _readSourceCreatedAt(pubkey, relayUrl),
     );
   }
 
   void write(
     String pubkey,
+    String relayUrl,
     Map<String, int> contexts,
     Set<String> publishableContextIds,
     Map<String, int> sourceCreatedAt,
@@ -90,19 +170,19 @@ class ReadStateStorage {
       state[entry.key] = unixSecondsToDateTime(entry.value).toIso8601String();
     }
 
-    _prefs.setString(localReadStateKey(pubkey), jsonEncode(state));
+    _prefs.setString(localReadStateKey(pubkey, relayUrl), jsonEncode(state));
     _prefs.setString(
-      localPublishableContextKey(pubkey),
+      localPublishableContextKey(pubkey, relayUrl),
       jsonEncode(publishableContextIds.toList()),
     );
     _prefs.setString(
-      localSourceCreatedAtKey(pubkey),
+      localSourceCreatedAtKey(pubkey, relayUrl),
       jsonEncode(sourceCreatedAt.map((k, v) => MapEntry(k, v.toString()))),
     );
   }
 
-  Map<String, int> _readContexts(String pubkey) {
-    final raw = _prefs.getString(localReadStateKey(pubkey));
+  Map<String, int> _readContexts(String pubkey, String relayUrl) {
+    final raw = _prefs.getString(localReadStateKey(pubkey, relayUrl));
     if (raw == null || raw.isEmpty) {
       return {};
     }
@@ -133,8 +213,8 @@ class ReadStateStorage {
     return contexts;
   }
 
-  Set<String> _readPublishableContextIds(String pubkey) {
-    final raw = _prefs.getString(localPublishableContextKey(pubkey));
+  Set<String> _readPublishableContextIds(String pubkey, String relayUrl) {
+    final raw = _prefs.getString(localPublishableContextKey(pubkey, relayUrl));
     if (raw == null || raw.isEmpty) {
       return {};
     }
@@ -159,8 +239,8 @@ class ReadStateStorage {
     };
   }
 
-  Map<String, int> _readSourceCreatedAt(String pubkey) {
-    final raw = _prefs.getString(localSourceCreatedAtKey(pubkey));
+  Map<String, int> _readSourceCreatedAt(String pubkey, String relayUrl) {
+    final raw = _prefs.getString(localSourceCreatedAtKey(pubkey, relayUrl));
     if (raw == null || raw.isEmpty) return {};
 
     final Object? parsed;
@@ -205,4 +285,9 @@ bool _isValidSlotId(String? value) {
     return false;
   }
   return isValidReadStateDTag('$readStateDTagPrefix$value');
+}
+
+class _JournalLane {
+  Object? owner;
+  Future<void> saved = Future.value();
 }

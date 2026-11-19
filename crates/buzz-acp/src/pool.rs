@@ -2420,7 +2420,7 @@ pub async fn run_prompt_task(
     result_tx: mpsc::UnboundedSender<PromptResult>,
     control_rx: Option<tokio::sync::oneshot::Receiver<ControlSignal>>,
     turn_id: String,
-    prompt_dm: crate::queue::PromptDmClassification,
+    prompt_routing: crate::queue::PromptRouting,
 ) {
     // Is this a channel prompt or a heartbeat?
     let source = match &batch {
@@ -2543,7 +2543,7 @@ pub async fn run_prompt_task(
     let initial_message_pending = ctx.initial_message.is_some()
         && matches!(&source, PromptSource::Channel(scope) if !agent.state.sessions.contains_key(scope));
     if !initial_message_pending {
-        prompt_dm.record(prompt_is_dm);
+        prompt_routing.record_dm(prompt_is_dm);
     }
 
     //
@@ -3003,7 +3003,7 @@ pub async fn run_prompt_task(
         }
     }
     // Any `initial_message` setup turn is done; see `prompt_is_dm`.
-    prompt_dm.record(prompt_is_dm);
+    prompt_routing.record_dm(prompt_is_dm);
 
     // When the batch is a single slash-command message (e.g. "@Eva /goal …"),
     // `slash_command` holds the bare command. It is sent as the FIRST prompt
@@ -3104,6 +3104,11 @@ pub async fn run_prompt_task(
 
         let profile_lookup =
             fetch_prompt_profile_lookup(b, conversation_context.as_ref(), &ctx.rest_client).await;
+        prompt_routing.record_trigger_anchor(crate::queue::reply_anchor_is_trigger(
+            b,
+            is_dm,
+            profile_lookup.as_ref(),
+        ));
 
         let known_names: Vec<&str> = profile_lookup
             .iter()

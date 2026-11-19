@@ -9,7 +9,7 @@
  * Callers must cancel in-flight queries on pubkey or origin change.
  */
 
-import { getRelayWsUrl, invokeTauri } from "@/shared/api/tauri";
+import { invokeTauri } from "@/shared/api/tauri";
 import { beginChannelMembershipWrite } from "@/shared/api/channelMembershipWrites";
 import { invoke as invokeTauriRaw } from "@tauri-apps/api/core";
 
@@ -372,13 +372,15 @@ export async function resolveAdminReport(
   );
   // A kick removes the target from the report's channel. Reports are
   // deployment-wide, so only a channel in the active community is recorded.
+  // The relay has already resolved the report, so a failed host lookup counts
+  // as another community rather than throwing.
   const action = resolution.activeAction;
   if (
     action?.action === "kick" &&
     action.status === "succeeded" &&
     report.channelId &&
-    communityHostFromRelayUrl(await getRelayWsUrl()) ===
-      normalizeCommunityHost(report.communityHost)
+    (await getConnectedCommunityHost().catch(() => null)) ===
+      report.communityHost
   ) {
     record(report.channelId);
   }
@@ -570,62 +572,167 @@ export type AdminRestrictionsPage = {
 };
 
 /**
- * List one page of active bans and timeouts for the active relay's community.
- * `expectedRelay` is the relay the list loaded from; the native command
- * rejects the call if the active relay has since changed. The same applies
- * to `liftAdminBan` and `liftAdminTimeout`.
- * The native command names the community by the active relay's host, which
- * the relay resolves to its tenant. Pass the prior page's `nextCursor` to
- * continue.
+ * List one page of active bans and timeouts in `communityHost` (validated
+ * natively). `expectedRelay` is the relay the page was opened on; the native
+ * command refuses if the active relay has since changed.
  *
  * GET /api/admin/v1/members/restrictions?communityHost={host}[&cursor={token}]
  */
 export async function listAdminRestrictions(
   origin: string,
+  communityHost: string,
   expectedRelay: string,
   cursor: string | null = null,
 ): Promise<AdminRestrictionsPage> {
   return invokeTauri<AdminRestrictionsPage>("admin_list_restrictions", {
     origin,
+    communityHost,
     cursor,
     expectedRelay,
   });
 }
 
 /**
- * Lift an active ban for a member of the active relay's community.
- *
- * DELETE /api/admin/v1/members/{pubkey}/ban?communityHost={host}
- *
- * Returns normally on 204. Throws an `AdminMutationError`-shaped rejection
- * on 409 ("no active ban") or other errors.
+ * A lift as its restriction row froze it. The native command refuses before
+ * sending (`notSent`) when the active relay or signer no longer matches.
  */
-export async function liftAdminBan(
-  origin: string,
-  pubkey: string,
-  expectedRelay: string,
-): Promise<void> {
-  return invokeTauri<void>("admin_lift_ban", { origin, pubkey, expectedRelay });
-}
+export type AdminLiftIntent = {
+  origin: string;
+  communityHost: string;
+  expectedRelay: string;
+  expectedSigner: string;
+  kind: "ban" | "timeout";
+  pubkey: string;
+};
 
 /**
- * Clear an active timeout for a member of the active relay's community.
+ * DELETE /api/admin/v1/members/{pubkey}/{ban|timeout}?communityHost={host}
  *
- * DELETE /api/admin/v1/members/{pubkey}/timeout?communityHost={host}
- *
- * Returns normally on 204. Throws an `AdminMutationError`-shaped rejection
- * on 409 ("no active timeout") or other errors.
+ * Returns normally on 204; rejects with an `AdminMutationError` otherwise
+ * (409 when nothing is active).
  */
-export async function liftAdminTimeout(
-  origin: string,
-  pubkey: string,
-  expectedRelay: string,
+export async function liftAdminRestriction(
+  intent: AdminLiftIntent,
 ): Promise<void> {
-  return invokeTauri<void>("admin_lift_timeout", {
+  return invokeTauri<void>("admin_lift_restriction", { intent });
+}
+
+// ── Community reads ──────────────────────────────────────────────────────
+
+/**
+ * Rejection payload of the read commands below: the relay's status, whether
+ * its whole body was read, whether that body was empty, and its error code.
+ */
+export type AdminReadError = {
+  message: string;
+  relayStatus: number | null;
+  bodyComplete: boolean;
+  bodyEmpty: boolean;
+  code: string | null;
+};
+
+export type AdminCommunityDto = {
+  /** Community UUID. */
+  id: string;
+  host: string;
+  icon: string | null;
+};
+
+export type AdminCommunitiesPage = {
+  items: AdminCommunityDto[];
+  nextCursor: string | null;
+};
+
+/** GET /communities — host-prefix directory, keyset-paged. */
+export async function listAdminCommunities(
+  origin: string,
+  q: string,
+  cursor: string | null = null,
+): Promise<AdminCommunitiesPage> {
+  return invokeTauri<AdminCommunitiesPage>("admin_list_communities", {
     origin,
-    pubkey,
-    expectedRelay,
+    q: q || null,
+    cursor,
   });
+}
+
+export type AdminMemberSearchResult = {
+  pubkey: string;
+  displayName: string | null;
+  nip05: string | null;
+  avatarUrl: string | null;
+};
+
+/** GET /members/search — community profiles, including former members. */
+export async function searchAdminMembers(
+  origin: string,
+  communityHost: string,
+  q: string,
+): Promise<{ items: AdminMemberSearchResult[] }> {
+  return invokeTauri<{ items: AdminMemberSearchResult[] }>(
+    "admin_search_members",
+    { origin, communityHost, q },
+  );
+}
+
+export type AdminMemberDetailDto = {
+  pubkey: string;
+  profile: {
+    displayName: string | null;
+    nip05: string | null;
+    avatarUrl: string | null;
+    about: string | null;
+  } | null;
+  /** `null`: not on the community roster. */
+  role: "owner" | "admin" | "member" | null;
+  banned: boolean;
+  mutedUntil: string | null;
+  /**
+   * Deployment-level relay staff (operator or moderator). `null` when admin
+   * auth is disabled, because the relay doesn't read the staff roster then.
+   */
+  isStaff: boolean | null;
+};
+
+/** GET /members/{pubkey} — one member's state in one community. */
+export async function getAdminMember(
+  origin: string,
+  communityHost: string,
+  pubkey: string,
+): Promise<AdminMemberDetailDto> {
+  return invokeTauri<AdminMemberDetailDto>("admin_get_member", {
+    origin,
+    communityHost,
+    pubkey,
+  });
+}
+
+export type AdminEventPreviewDto = {
+  id: string;
+  authorPubkey: string;
+  kind: number;
+  content: string;
+  createdAt: string;
+  deletedAt: string | null;
+  channelId: string | null;
+};
+
+/** GET /events/{id} — the message preview before a delete. */
+export async function getAdminEvent(
+  origin: string,
+  communityHost: string,
+  id: string,
+): Promise<AdminEventPreviewDto> {
+  return invokeTauri<AdminEventPreviewDto>("admin_get_event", {
+    origin,
+    communityHost,
+    id,
+  });
+}
+
+/** The community host the active relay serves, resolved natively. */
+export async function getConnectedCommunityHost(): Promise<string> {
+  return invokeTauri<string>("admin_connected_community_host");
 }
 
 // ── Attachment ────────────────────────────────────────────────────────────
@@ -745,28 +852,4 @@ export async function directAdminAction(
   return invokeTauri<AdminDirectActionResult>("admin_direct_action", {
     intent,
   });
-}
-
-/**
- * Normalize a community host the way the relay's `normalize_host` does:
- * lowercase, no default port, no trailing root dot.
- */
-export function normalizeCommunityHost(raw: string): string {
-  return raw
-    .trim()
-    .toLowerCase()
-    .replace(/:(443|80)$/, "")
-    .replace(/\.$/, "");
-}
-
-/**
- * The community a relay URL serves is its `Host`: the URL's authority, with
- * the default port already dropped for `ws`/`wss`. Null when unparseable.
- */
-export function communityHostFromRelayUrl(relayUrl: string): string | null {
-  try {
-    return normalizeCommunityHost(new URL(relayUrl).host) || null;
-  } catch {
-    return null;
-  }
 }

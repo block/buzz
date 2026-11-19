@@ -1,4 +1,7 @@
 import 'dart:async';
+
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
 import 'dart:convert';
 
 import 'package:buzz/app.dart';
@@ -11,8 +14,10 @@ import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/huddle/huddle.dart';
 import 'package:nostr/nostr.dart' as nostr;
+
 import '../../shared/community/community_storage_test.dart'
     show FakeSecureStorage;
+
 import 'package:buzz/shared/push/push_bootstrap.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
@@ -24,6 +29,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  setUp(() => FlutterSecureStorage.setMockInitialValues({}));
   const appBadgeChannel = MethodChannel('app_badge_plus');
 
   tearDown(() {
@@ -279,7 +285,8 @@ void main() {
 
       expect(find.bySemanticsLabel('Checking age eligibility'), findsNothing);
       expect(find.byType(HomePage), findsOneWidget);
-      expect(find.byType(Navigator), findsOneWidget);
+      // Home may also host a nested conversation navigator.
+      expect(find.byType(MaterialApp), findsOneWidget);
       expect(relaySession.builds, 1);
       expect(requests, ageGatingEnabled ? 1 : 0);
       await tester.pump();
@@ -513,7 +520,12 @@ class _RecordingPairAuthNotifier extends _UnauthenticatedAuthNotifier {
   int imports = 0;
 
   @override
-  Future<void> authenticateWithCommunity(Community community) async {
+  Future<void> authenticateWithCommunity(
+    Community community, {
+    bool Function()? shouldContinue,
+    bool activate = true,
+  }) async {
+    if (shouldContinue != null && !shouldContinue()) return;
     imports += 1;
   }
 }

@@ -5,6 +5,9 @@
 //! strict NIP-98 request prevents reusable Smart HTTP credentials authorizing
 //! metadata changes (URL, method, payload and replay are all checked).
 
+// Response is the natural error type for axum handlers.
+#![allow(clippy::result_large_err)]
+
 use std::sync::Arc;
 
 use axum::{
@@ -22,7 +25,7 @@ use serde_json::{json, Value};
 use super::{
     binding::{resolve_repo_binding, RepoBinding},
     hydrate::load_pointer,
-    manifest::{is_safe_refname, pointer_key, Manifest},
+    manifest::{is_safe_refname, next_published_at, pointer_key, Manifest},
     manifest_event::{build_ref_state_event, RefStateInputs},
     store::{CasOutcome, ETag, GitStore, Precond},
     transport::{authorize_git_read, deny_banned_git_principal, validate_repo_id},
@@ -127,6 +130,10 @@ impl DefaultBranchSnapshot {
         }
         let changed = self.manifest.head != head;
         if changed {
+            self.manifest.published_at = Some(next_published_at(
+                &self.manifest,
+                nostr::Timestamp::now().as_secs(),
+            ));
             self.manifest.head = head;
             self.manifest.parent = Some(self.digest.clone());
             self.manifest.validate().map_err(backend)?;
@@ -163,6 +170,7 @@ struct SettingsAuth {
 
 async fn authenticate(
     state: &Arc<AppState>,
+    slot: &crate::access::AccessSlot,
     headers: &HeaderMap,
     path: &str,
     body: Option<&[u8]>,
@@ -185,7 +193,9 @@ async fn authenticate(
     let admission = admit_nip_fi_http_on_state(
         state,
         headers,
+        slot,
         bridge::make_nip98_closure_for_admission(
+            slot.clone(),
             headers.clone(),
             method,
             url,
@@ -193,34 +203,57 @@ async fn authenticate(
             true, // require_auth_token: always required for control-plane
             require_payload,
         ),
-    )?;
-    let pubkey = *admission.proven_pubkey();
-    let (event_id_bytes, signed_created_at) = admission.into_extra();
+    )
+    .await?;
+    let mut caller = bridge::ProvenCaller::new(admission, slot, &tenant);
+    let (pubkey, signed_created_at, token_owner) =
+        (caller.pubkey, caller.signed_at, caller.token_owner);
 
-    bridge::enforce_http_admission(state, &tenant, &pubkey)
-        .await
-        .map_err(IntoResponse::into_response)?;
-    bridge::check_nip98_replay(state, &tenant, event_id_bytes)
+    caller
+        .rate_limit_and_replay(state, &tenant)
         .await
         .map_err(IntoResponse::into_response)?;
     let tag = relay_members::extract_auth_tag_header(headers);
-    relay_members::enforce_relay_membership(
+    let membership = relay_members::enforce_relay_membership(
         state,
-        tenant.community(),
+        &tenant,
         pubkey.as_bytes(),
         tag,
         signed_created_at,
+        token_owner,
     )
-    .await
-    .map_err(IntoResponse::into_response)?;
-    deny_banned_git_principal(
+    .await;
+    caller
+        .check(membership, relay_members::MembershipRefusal::auth_result)
+        .map_err(IntoResponse::into_response)?;
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_http_ban_recheck(tenant.community()).await;
+    let ban = deny_banned_git_principal(
         &state.db,
         tenant.community(),
         &pubkey,
         tag,
         signed_created_at,
+        token_owner,
     )
-    .await?;
+    .await;
+    caller
+        .admit(ban, |refused| {
+            crate::access::AuthResult::Denied(match refused.status() {
+                StatusCode::FORBIDDEN => crate::access::AuthReason::Banned,
+                _ => crate::access::AuthReason::BanCheckUnavailable,
+            })
+        })
+        .map_err(|legacy| match token_owner {
+            // A verified agent token gets only NIP-FI's fixed denial, as smart
+            // Git transport does, so the response never shows which step refused.
+            Some(_) => crate::nip_fi_core::http_denial(if legacy.status().is_server_error() {
+                buzz_auth::DenialClass::AuthorizationUnavailable
+            } else {
+                buzz_auth::DenialClass::AuthorizationDenied
+            }),
+            None => legacy,
+        })?;
     // Admission ignores kind= restrictions by design (NIP-AA). Repository
     // management must not turn a message-only credential into write authority.
     // This HTTP operation has no event kind: only kind-unrestricted credentials
@@ -312,12 +345,13 @@ async fn authorize_management(
 
 async fn get_default_branch(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     Path((owner, repo)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, Response> {
     let path = format!("/git/{owner}/{repo}/default-branch");
     let repo_name = validate_repo_id(&owner, &repo)?;
-    let auth = authenticate(&state, &headers, &path, None).await?;
+    let auth = authenticate(&state, &slot, &headers, &path, None).await?;
     authorize_git_read(
         &state.db,
         auth.tenant.community(),
@@ -333,13 +367,14 @@ async fn get_default_branch(
 
 async fn set_default_branch(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     Path((owner, repo)): Path<(String, String)>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<Value>, Response> {
     let path = format!("/git/{owner}/{repo}/default-branch");
     let repo_name = validate_repo_id(&owner, &repo)?;
-    let auth = authenticate(&state, &headers, &path, Some(&body)).await?;
+    let auth = authenticate(&state, &slot, &headers, &path, Some(&body)).await?;
     let announcement = authorize_git_read(
         &state.db,
         auth.tenant.community(),
@@ -370,10 +405,17 @@ async fn set_default_branch(
         )
     })?;
     serving_write.verify().await.map_err(backend)?;
-    let (snapshot, changed) = serving_write
-        .protect(snapshot.set(&state.git_store, request))
+    // As in `finalize_push`, a pointer CAS that landed stands even if the lease
+    // check after it fails; the lease-guarded kind:30618 insert decides
+    // whether publication may continue.
+    let (set, lease_after_cas) = serving_write
+        .protect_landed(snapshot.set(&state.git_store, request))
         .await
-        .map_err(backend)??;
+        .map_err(backend)?;
+    let (snapshot, changed) = set?;
+    if let Err(error) = lease_after_cas {
+        tracing::warn!(%error, "serving lease check failed after the default-branch CAS landed; continuing publication");
+    }
     let publication = async {
         if changed {
             let actor = auth.caller.to_hex();
@@ -383,6 +425,7 @@ async fn set_default_branch(
                     head: &snapshot.manifest.head,
                     refs: &snapshot.manifest.refs,
                     actor_pubkey_hex: &actor,
+                    published_at: snapshot.manifest.published_at,
                 },
                 &state.relay_keypair,
             )
@@ -404,7 +447,9 @@ async fn set_default_branch(
         Ok::<(), Response>(())
     }
     .await;
-    serving_write.finish().await.map_err(backend)?;
+    if let Err(error) = serving_write.finish().await {
+        tracing::warn!(%error, "failed to release community serving lease after default-branch publication");
+    }
     // Publication failure is not mistaken for a rolled-back manifest.
     if publication.is_err() {
         return Err(error(StatusCode::INTERNAL_SERVER_ERROR, "default branch committed but notification failed; read the current default branch before retrying"));

@@ -2,12 +2,13 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:buzz/features/profile/profile_edit_page.dart';
+import 'package:buzz/features/settings/settings_page.dart';
 import 'package:buzz/features/profile/profile_avatar_draft.dart';
 import 'package:buzz/features/profile/profile_avatar_crop_page.dart';
 import 'package:buzz/features/profile/avatar_background_grid.dart';
 import 'package:buzz/features/profile/avatar_editor_option_button.dart';
 import 'package:buzz/features/profile/animated_avatar_capture.dart';
-import 'package:buzz/features/profile/emoji_avatar_tile.dart';
+import 'package:buzz/shared/widgets/emoji_avatar_tile.dart';
 import 'package:buzz/features/profile/image_avatar_capture.dart';
 import 'package:buzz/shared/widgets/immediate_page_route.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
@@ -21,6 +22,7 @@ import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/ios_native_segmented_control.dart';
+import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:buzz/shared/widgets/playing_avatar_image.dart';
 import 'package:buzz/shared/widgets/progressive_animated_avatar.dart';
@@ -234,10 +236,27 @@ void main() {
     tester,
   ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    const emoji = EmojiEntry(
+      id: 'smile',
+      name: 'Smile',
+      keywords: [],
+      native: '😊',
+      categoryId: 'people',
+    );
+    const dataset = EmojiDataset(
+      categories: [
+        EmojiCategory(id: 'people', emoji: [emoji]),
+      ],
+      all: [emoji],
+      nativeToShortcode: {'😊': ':smile:'},
+    );
 
     await tester.pumpWidget(
       WidgetHelpers.testable(
-        overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
+        overrides: [
+          profileProvider.overrideWith(_FakeProfileNotifier.new),
+          emojiDatasetOrEmptyProvider.overrideWithValue(dataset),
+        ],
         child: const ProfileEditPage(),
       ),
     );
@@ -246,6 +265,167 @@ void main() {
     await tester.pump();
 
     expect(find.byType(IosNativeSegmentedControl), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(678, 466);
+    tester.view.padding = const FakeViewPadding(right: 84);
+    tester.view.viewPadding = const FakeViewPadding(right: 84);
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          profileProvider.overrideWith(_FakeProfileNotifier.new),
+          emojiDatasetOrEmptyProvider.overrideWithValue(dataset),
+        ],
+        child: SettingsPage(
+          profileHeader: const SizedBox(),
+          identityRecoveryPageBuilder: (_) => const SizedBox(),
+          profileEditPageBuilder: (_) =>
+              const ProfileEditPage(startInPhotoEditor: true),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final photoRow = find.byKey(const ValueKey('edit-profile-photo'));
+    await tester.ensureVisible(photoRow);
+    await tester.tap(photoRow);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    final entrance = find.byKey(
+      const ValueKey('avatar-editor-entrance-transform'),
+    );
+    final enteringOffset = tester
+        .widget<Transform>(entrance)
+        .transform
+        .getTranslation()
+        .y;
+    expect(enteringOffset, lessThan(0));
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(
+      tester.widget<Transform>(entrance).transform.getTranslation().y,
+      greaterThan(enteringOffset),
+    );
+    expect(
+      tester.getRect(find.byType(IosNativeSegmentedControl)).right,
+      lessThan(594),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      tester.getRect(find.byType(IosNativeSegmentedControl)).right,
+      lessThan(594),
+    );
+    final sideOptions = find.byKey(
+      const ValueKey('avatar-editor-side-options'),
+    );
+    expect(sideOptions, findsOneWidget);
+    expect(
+      tester
+          .getRect(
+            find
+                .descendant(
+                  of: sideOptions,
+                  matching: find.byType(IosGlassNavigationButton),
+                )
+                .first,
+          )
+          .left,
+      greaterThanOrEqualTo(594),
+    );
+    expect(find.text('Camera'), findsOneWidget);
+    expect(find.text('Photo Library'), findsOneWidget);
+    tester.view.physicalSize = const Size(466, 678);
+    tester.view.padding = const FakeViewPadding(right: 76);
+    tester.view.viewPadding = const FakeViewPadding(right: 76);
+    await tester.pumpAndSettle();
+    expect(
+      tester.getRect(find.byType(IosNativeSegmentedControl)).right,
+      lessThan(390),
+    );
+    final modeControl = tester.widget<IosNativeSegmentedControl>(
+      find.byType(IosNativeSegmentedControl),
+    );
+    modeControl.onChanged!(1);
+    await tester.pumpAndSettle();
+    tester.view.physicalSize = const Size(932, 656);
+    tester.view.padding = const FakeViewPadding(right: 84);
+    tester.view.viewPadding = const FakeViewPadding(right: 84);
+    await tester.pumpAndSettle();
+    final unfoldedControl = tester.getRect(
+      find.byType(IosNativeSegmentedControl),
+    );
+    expect(unfoldedControl.left, greaterThan(280));
+    expect(unfoldedControl.right, lessThan(848));
+    expect(
+      tester
+          .widget<IosNativeSegmentedControl>(
+            find.byType(IosNativeSegmentedControl),
+          )
+          .selectedIndex,
+      1,
+    );
+    expect(
+      tester
+          .getRect(
+            find
+                .descendant(
+                  of: sideOptions,
+                  matching: find.byType(IosGlassNavigationButton),
+                )
+                .first,
+          )
+          .left,
+      greaterThanOrEqualTo(848),
+    );
+    final background = find.byKey(const ValueKey('emoji-editor-background'));
+    expect(
+      find.descendant(of: sideOptions, matching: background),
+      findsOneWidget,
+    );
+    final backgroundButton = tester.widget<AvatarEditorOptionButton>(
+      background,
+    );
+    backgroundButton.onTap!();
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('emoji-background-editor')),
+      findsOneWidget,
+    );
+    expect(find.text('Profile'), findsOneWidget);
+    tester.view.physicalSize = const Size(466, 678);
+    tester.view.padding = const FakeViewPadding(right: 76);
+    tester.view.viewPadding = const FakeViewPadding(right: 76);
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<IosNativeSegmentedControl>(
+            find.byType(IosNativeSegmentedControl),
+          )
+          .selectedIndex,
+      1,
+    );
+    final back = find.byKey(const ValueKey('duo-toolbar-Back to profile'));
+    final bar = tester.widget<IosNavigationBar>(
+      find.descendant(of: back, matching: find.byType(IosNavigationBar)),
+    );
+    bar.leading!.onPressed!();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(
+      tester.widget<Transform>(entrance).transform.getTranslation().y,
+      lessThan(0),
+    );
+    expect(find.byType(IosNativeSegmentedControl), findsOneWidget);
+    await tester.pumpAndSettle();
+    expect(photoRow, findsOneWidget);
+    tester.platformDispatcher.accessibilityFeaturesTestValue =
+        const FakeAccessibilityFeatures(disableAnimations: true);
+    addTearDown(tester.platformDispatcher.clearAccessibilityFeaturesTestValue);
+    await tester.pump();
+    await tester.ensureVisible(photoRow);
+    await tester.tap(photoRow);
+    await tester.pumpAndSettle();
+    expect(tester.widget<Transform>(entrance).transform.getTranslation().y, 0);
+    await tester.pumpWidget(const SizedBox());
     debugDefaultTargetPlatformOverride = null;
   });
 
@@ -426,14 +606,15 @@ void main() {
     await tester.tap(find.text('Photo Library'));
     await _waitForAvatarCropToLoad(tester);
     expect(find.text('Position Photo'), findsOneWidget);
+    expect(tester.getSize(find.text('Position Photo')).width, greaterThan(0));
     final cancelButton = find.ancestor(
-      of: find.text('Cancel'),
+      of: find.text('Back'),
       matching: find.byType(TextButton),
     );
     final saveButton = find.byKey(const ValueKey('avatar-crop-use-photo'));
     expect(tester.getRect(cancelButton).left, Grid.gutter);
     expect(
-      tester.getSize(find.text('Cancel')).width,
+      tester.getSize(find.text('Back')).width,
       lessThan(tester.getSize(cancelButton).width),
     );
     expect(
@@ -466,6 +647,70 @@ void main() {
 
     expect(notifier.savedAvatarUrls, ['https://relay.example/profile.png']);
     expect(uploadService.uploadCount, 1);
+    expect(uploadService.uploadedMimeType, 'image/jpeg');
+  });
+
+  Future<_FakeMediaUploadService> cropAndUpload(
+    WidgetTester tester,
+    image.Image photo,
+  ) async {
+    final notifier = _FakeProfileNotifier();
+    final uploadService = _FakeMediaUploadService(
+      galleryBytes: image.encodePng(photo),
+    );
+    addTearDown(uploadService.dispose);
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          profileProvider.overrideWith(() => notifier),
+          mediaUploadServiceProvider.overrideWithValue(uploadService),
+        ],
+        child: const ProfileEditPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Edit Photo'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Photo Library'));
+    await _waitForAvatarCropToLoad(tester);
+    await tester.tap(find.byKey(const ValueKey('avatar-crop-use-photo')));
+    await _waitForAvatarCropToClose(tester);
+    await tester.tap(find.byKey(const ValueKey('avatar-save')));
+    await tester.pumpAndSettle();
+    return uploadService;
+  }
+
+  testWidgets('uploads a transparent photo crop as PNG', (tester) async {
+    final uploadService = await cropAndUpload(
+      tester,
+      image.Image(width: 8, height: 8, numChannels: 4),
+    );
+
+    expect(uploadService.uploadedMimeType, 'image/png');
+    final uploaded = image.decodePng(uploadService.uploadedBytes!)!;
+    expect(uploaded.getPixel(0, 0).a, 0);
+  });
+
+  testWidgets('uploads only the first frame of an animated transparent crop', (
+    tester,
+  ) async {
+    final photo = image.Image(width: 8, height: 8, numChannels: 4)
+      ..addFrame(image.Image(width: 8, height: 8, numChannels: 4));
+    final uploadService = await cropAndUpload(tester, photo);
+
+    expect(uploadService.uploadedMimeType, 'image/png');
+    final uploaded = image.decodePng(uploadService.uploadedBytes!)!;
+    expect(uploaded.numFrames, 1);
+    expect(uploaded.getPixel(0, 0).a, 0);
+  });
+
+  testWidgets('uploads an opaque 16-bit photo crop as JPEG', (tester) async {
+    final uploadService = await cropAndUpload(
+      tester,
+      image.Image(width: 8, height: 8, format: image.Format.uint16),
+    );
+
+    expect(uploadService.uploadedMimeType, 'image/jpeg');
   });
 
   testWidgets('keeps a failed avatar draft visible and retries publish', (
@@ -1052,6 +1297,7 @@ class _FakeMediaUploadService extends MediaUploadService {
   _FakeMediaUploadService({
     this.delayGallery = false,
     this.failImagePreparation = false,
+    this.galleryBytes,
   }) : super(
          baseUrl: 'https://relay.example',
          nsec: null,
@@ -1059,32 +1305,27 @@ class _FakeMediaUploadService extends MediaUploadService {
          pickGalleryVideo: () async => null,
        );
 
-  var _camera = false;
   final bool delayGallery;
   final bool failImagePreparation;
+  final Uint8List? galleryBytes;
   final _gallerySelection = Completer<XFile?>();
   int uploadCount = 0;
+  Uint8List? uploadedBytes;
+  String? uploadedMimeType;
 
   XFile _image() => XFile.fromData(
-    image.encodePng(image.Image(width: 8, height: 8)),
+    galleryBytes ?? image.encodePng(image.Image(width: 8, height: 8)),
     mimeType: 'image/png',
     name: 'avatar.png',
   );
 
   @override
   Future<XFile?> pickGalleryImage() async {
-    _camera = false;
     if (delayGallery) return _gallerySelection.future;
     return _image();
   }
 
   void completeGallerySelection() => _gallerySelection.complete(_image());
-
-  @override
-  Future<XFile?> captureImage() async {
-    _camera = true;
-    return _image();
-  }
 
   @override
   Future<Uint8List> prepareImageBytes(XFile image) async {
@@ -1100,11 +1341,11 @@ class _FakeMediaUploadService extends MediaUploadService {
     UploadCancellationToken? cancellationToken,
   }) async {
     uploadCount++;
+    uploadedBytes = bytes;
+    uploadedMimeType = mimeType;
     return BlobDescriptor(
-      url: _camera
-          ? 'https://relay.example/camera.png'
-          : 'https://relay.example/profile.png',
-      sha256: _camera ? 'camera-hash' : 'hash',
+      url: 'https://relay.example/profile.png',
+      sha256: 'hash',
       size: bytes.length,
       type: mimeType,
       uploaded: 1,

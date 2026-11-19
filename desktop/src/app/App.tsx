@@ -12,6 +12,8 @@ import {
   useState,
 } from "react";
 
+import { relayClient } from "@/shared/api/relayClient";
+import { RelayEntryGate } from "./RelayEntryGate";
 import { router } from "@/app/router";
 import {
   completeCommunityViewTransition,
@@ -390,6 +392,14 @@ function CommunityApp({
   // an atomic check of both ID and stage before mutating state.
   const transactionRef = useRef(communityOnboarding.transaction);
   transactionRef.current = communityOnboarding.transaction;
+  const cancelEntryOnboarding = useCallback(() => {
+    // Address edits and switches abandon this relay's join. Fence pending
+    // profile results immediately, before React commits the cleared state.
+    transactionRef.current = null;
+    connectingTransactionRef.current = null;
+    profileCheckTransactionRef.current = null;
+    communityOnboarding.clear();
+  }, [communityOnboarding]);
   const [isCommunityChangeOpen, setIsCommunityChangeOpen] = useState(false);
   const [resumeFirstCommunityPage, setResumeFirstCommunityPage] =
     useState<FirstCommunityPage | null>(null);
@@ -632,6 +642,14 @@ function CommunityApp({
   // Tauri backend is still configured for the previous one.
   const communityApplied =
     community.isReady && community.appliedKey === communityKey;
+  // Covers the connecting/onboarding curtain too, before the shell mounts.
+  const appliedRelayKey = communityApplied ? communityKey : null;
+  useEffect(() => {
+    if (appliedRelayKey)
+      void relayClient.preconnect().catch((error) => {
+        console.error("Failed to preconnect to relay", error);
+      });
+  }, [appliedRelayKey]);
   useLayoutEffect(() => {
     if (communityApplied) {
       completeCommunityViewTransition();
@@ -678,6 +696,19 @@ function CommunityApp({
   return (
     <>
       {appContent}
+      {activeCommunity ? (
+        <RelayEntryGate
+          key={`entry-${communityKey}`}
+          relayUrl={activeCommunity.relayUrl}
+          communities={communities}
+          onRetry={reconnectCommunity}
+          onAddressChanged={cancelEntryOnboarding}
+          onSwitch={(id) => {
+            cancelEntryOnboarding();
+            void transitionCommunity(id);
+          }}
+        />
+      ) : null}
       {transaction ? (
         <div
           className={isEnteringCurtain ? "fixed inset-0 z-50" : undefined}

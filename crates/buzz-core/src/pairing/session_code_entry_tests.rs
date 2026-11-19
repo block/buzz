@@ -194,3 +194,29 @@ fn readiness_delay_and_late_scan_share_the_original_deadline() {
         Err(PairingError::SessionExpired)
     ));
 }
+
+#[test]
+fn strict_target_expiry_and_cancellation_block_every_entry_point() {
+    for cancel in [false, true] {
+        let (mut source, qr) = PairingSession::new_source("wss://relay.test".into());
+        let (mut target, offer) = PairingSession::new_target_with_desktop_code(&qr).unwrap();
+        source.handle_offer_with_confirmation(&offer).unwrap();
+        let (code, challenge) = source.start_desktop_code().unwrap();
+        target.handle_desktop_code(&challenge).unwrap();
+        let submission = target.submit_desktop_code(Zeroizing::new(code)).unwrap();
+        let (proof, _) = source.handle_target_code(&submission).unwrap();
+        if cancel {
+            target.abort(AbortReason::UserDenied).unwrap();
+        } else {
+            target.created_at = Instant::now() - target.timeout - Duration::from_secs(1);
+        }
+        assert!(target.handle_desktop_code(&challenge).is_err());
+        assert!(target
+            .submit_desktop_code(Zeroizing::new("123456".into()))
+            .is_err());
+        assert!(target.handle_code_rejected(&proof).is_err());
+        assert!(target.handle_sas_confirm(&proof).is_err());
+        assert!(target.confirm_target_sas().is_err());
+        assert!(target.send_complete_with_result(true).is_err());
+    }
+}

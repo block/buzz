@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
+import { openGeneral, pressRowAction } from "../helpers/channelHeadReady";
 
 // Regression coverage for the reported bug: the top-level timeline shows the
 // EDITED message body, but opening its thread panel shows the STALE, un-edited
@@ -59,7 +60,9 @@ test("thread head reflects the channel-window edit even before thread aux loads"
   // provably cannot land until we release it after asserting the head.
   await installMockBridge(page, { deferThreadReplies: true });
   await page.goto("/");
-  await page.getByTestId(`channel-${CHANNEL}`).click();
+  // Let the head refresh land and the timeline pin to the bottom before
+  // touching a row.
+  await openGeneral(page);
   await expect(page.getByTestId("chat-title")).toHaveText(CHANNEL);
   await waitForMockLiveSubscription(page, CHANNEL);
 
@@ -121,8 +124,7 @@ test("thread head reflects the channel-window edit even before thread aux loads"
   );
 
   // 3. Open the thread via the reply action (the flow in the bug report).
-  const replyButton = page.getByTestId(`reply-message-${rootId}`);
-  await replyButton.click({ force: true });
+  await pressRowAction(page.getByTestId(`reply-message-${rootId}`));
   const threadPanel = page.getByTestId("message-thread-panel");
   await expect(threadPanel).toBeVisible();
 

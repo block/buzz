@@ -250,6 +250,37 @@ test("loadThreadReplies aggregates events across multiple pages", async () => {
   }
 });
 
+// ── Test: fetch and live append agree on same-second order ───────────────────
+//
+// A live reply lands through mergeMessages (hooks.ts appendMessage), which
+// re-sorts the whole thread-replies cache. If the fetch stored the pages in
+// another same-second order, the fetched replies would swap on screen the
+// moment that reply arrived. Storing the pages' ascending-id order as-is fails
+// this test.
+
+test("loadThreadReplies orders same-second replies as a live append does", async () => {
+  const { loadThreadReplies } = await import("./useThreadReplies.ts");
+  const { mergeMessages } = await import("./lib/messageMerge.ts");
+
+  const at = (id, createdAt) => ({ ...fakeEvent(id), created_at: createdAt });
+  const sameSecond = [at("1".repeat(64), 100), at("2".repeat(64), 100)];
+  const fetched = await loadThreadReplies(
+    makeQueryClient(),
+    "chan-order",
+    "root-order",
+    null,
+    new Set(),
+    async () => singlePage(sameSecond),
+  );
+
+  const live = at("3".repeat(64), 101);
+  assert.deepEqual(
+    mergeMessages(fetched, live).map((e) => e.id),
+    [...fetched.map((e) => e.id), live.id],
+    "a later live reply must not reorder the fetched same-second replies",
+  );
+});
+
 // ── Test: query-fn writes exhaustion on the terminal attempt ──────────────────
 //
 // Load-bearing for the query-fn exhaustion write in useThreadReplies.

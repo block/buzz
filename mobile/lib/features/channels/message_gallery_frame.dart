@@ -11,11 +11,13 @@ class MessageGalleryFrame extends StatelessWidget {
   final int count;
   final Widget child;
   final bool loading;
+  final bool mirrored;
 
   const MessageGalleryFrame({
     required this.count,
     required this.child,
     this.loading = false,
+    this.mirrored = false,
     super.key,
   });
 
@@ -36,21 +38,28 @@ class MessageGalleryFrame extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(top: Grid.half),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: mirrored
+            ? CrossAxisAlignment.end
+            : CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (loading)
-            ExcludeSemantics(
-              child: Stack(
-                alignment: Alignment.centerLeft,
-                children: [
-                  Opacity(opacity: 0, child: label),
-                  const SkeletonBar(width: 48, height: 10),
-                ],
-              ),
-            )
-          else
-            label,
+          Padding(
+            padding: EdgeInsets.only(
+              left: mirrored ? 0 : Grid.xs,
+              right: mirrored ? Grid.xs : 0,
+            ),
+            child: loading
+                ? ExcludeSemantics(
+                    child: Stack(
+                      alignment: Alignment.centerLeft,
+                      children: [
+                        Opacity(opacity: 0, child: label),
+                        const SkeletonBar(width: 48, height: 10),
+                      ],
+                    ),
+                  )
+                : label,
+          ),
           const SizedBox(height: Grid.half + Grid.quarter),
           child,
         ],

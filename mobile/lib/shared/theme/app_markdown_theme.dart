@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 
 import 'app_theme.dart';
@@ -15,16 +16,23 @@ import 'code_style.dart';
 /// ambient headings carry the localized text geometry, which exists only once
 /// `Theme.of` has run and a `ThemeData` factory cannot see. Overriding the one
 /// field on the ambient theme is what leaves non-code Markdown untouched.
-class AppMarkdownTheme extends StatelessWidget {
+class AppMarkdownTheme extends HookWidget {
   const AppMarkdownTheme({super.key, required this.child});
 
   final Widget child;
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return GptMarkdownTheme(
-      gptThemeData: GptMarkdownTheme.of(context).copyWith(
+    final theme = Theme.of(context);
+    final outer = context
+        .dependOnInheritedWidgetOfExactType<GptMarkdownTheme>()
+        ?.gptThemeData;
+    // GptMarkdownTheme notifies by data identity, and every notification makes
+    // each GptMarkdown in the app re-parse its text. Derive new data only when
+    // what it is derived from changes.
+    final data = useMemoized(() {
+      final scheme = theme.colorScheme;
+      return GptMarkdownTheme.of(context).copyWith(
         // Inline code is otherwise drawn in gpt_markdown's own bundled face, at
         // its own size, tinted from `onSurface`. Stating the app's code style
         // gives every Markdown surface the face, size and chip colours a fenced
@@ -39,8 +47,8 @@ class AppMarkdownTheme extends StatelessWidget {
           // scale rather than the `Radii.card` a block uses.
           borderRadius: const Radius.circular(Radii.xs),
         ).resolve(scheme),
-      ),
-      child: child,
-    );
+      );
+    }, [theme, outer]);
+    return GptMarkdownTheme(gptThemeData: data, child: child);
   }
 }

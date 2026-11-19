@@ -29,10 +29,11 @@ enum NativeAttachmentPopoverAnchorLayout {
   static func sourceRect(
     anchorBounds: CGRect,
     keyboardDismissalOffset: CGFloat,
-    isExpanded: Bool
+    isExpanded: Bool,
+    horizontalOffset: CGFloat = 0
   ) -> CGRect {
     anchorBounds.offsetBy(
-      dx: 0,
+      dx: horizontalOffset,
       dy: keyboardDismissalOffset
         + (isExpanded ? expandedVerticalOffset : 0)
     )
@@ -125,7 +126,15 @@ final class NativeAttachmentPopoverCoordinator: NSObject {
         height: CGFloat(truncating: height)
       )
       DispatchQueue.main.async { [weak self] in
-        result(self?.presentPopover(sourceRect: sourceRect) ?? false)
+        let cameraCenterX = (arguments["cameraCenterX"] as? NSNumber).map {
+          CGFloat(truncating: $0)
+        }
+        result(
+          self?.presentPopover(
+            sourceRect: sourceRect,
+            cameraCenterX: cameraCenterX
+          ) ?? false
+        )
       }
     case "dismiss":
       DispatchQueue.main.async { [weak self] in
@@ -146,7 +155,7 @@ final class NativeAttachmentPopoverCoordinator: NSObject {
   }
 
   @MainActor
-  private func presentPopover(sourceRect: CGRect) -> Bool {
+  private func presentPopover(sourceRect: CGRect, cameraCenterX: CGFloat?) -> Bool {
     guard #available(iOS 26.0, *) else { return false }
     guard presentedController == nil else { return true }
     let rootViewController =
@@ -199,7 +208,8 @@ final class NativeAttachmentPopoverCoordinator: NSObject {
     )
     let controller = NativeAttachmentPopoverViewController(
       channel: channel,
-      expandedWidth: availableWidth
+      expandedWidth: availableWidth,
+      cameraHorizontalOffset: cameraCenterX.map { $0 - sourceRect.midX } ?? 0
     )
     controller.modalPresentationStyle = .popover
     controller.preferredTransition = .zoom { [weak anchorView] _ in
@@ -265,7 +275,7 @@ final class NativeAttachmentPopoverCoordinator: NSObject {
 }
 
 enum NativeAttachmentMenuLayout {
-  static let itemCount: CGFloat = 5
+  static let itemCount: CGFloat = 4
   static let contentPadding: CGFloat = 16
   static let minimumItemHeight: CGFloat = 52
   static let itemSpacing: CGFloat = 8
@@ -381,15 +391,8 @@ func makeNativeAttachmentMenuButton(
   )
   button.accessibilityLabel = title
 
-  let symbolConfiguration = UIImage.SymbolConfiguration(
-    pointSize: 18,
-    weight: .regular
-  )
   let iconView = UIImageView(
-    image: UIImage(
-      systemName: symbol,
-      withConfiguration: symbolConfiguration
-    )
+    image: NativeTabler.image(symbol, size: 18)
   )
   iconView.tintColor = .label
   iconView.contentMode = .center

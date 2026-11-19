@@ -2602,13 +2602,8 @@ impl BrokerClient for DoubleBroker {
 fn block_on<F: std::future::Future>(future: F) -> F::Output {
     // A hand-rolled park-free executor: the double's future is always ready, so
     // one poll suffices and pulling in a runtime would be the heavier choice.
-    use std::task::{Context, Poll, Wake, Waker};
-    struct NoopWake;
-    impl Wake for NoopWake {
-        fn wake(self: std::sync::Arc<Self>) {}
-    }
-    let waker = Waker::from(std::sync::Arc::new(NoopWake));
-    let mut context = Context::from_waker(&waker);
+    use std::task::{Context, Poll, Waker};
+    let mut context = Context::from_waker(Waker::noop());
     let mut future = Box::pin(future);
     match future.as_mut().poll(&mut context) {
         Poll::Ready(output) => output,

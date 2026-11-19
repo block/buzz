@@ -53,6 +53,33 @@ final class PushLeaseTests: XCTestCase {
     XCTAssertFalse(PushLeaseMatcher.matches(event: hellthread, policy: suppressed))
   }
 
+  func testWorkflowOwnerAttributionIsNotAMentionOrCounted() {
+    let workflow = ["buzz:workflow", "true"]
+    let attribution = ["p", mine, "", "owner"]
+    let mentions = PushResolutionPolicy(
+      filter: PushLeaseFilter(kinds: [9], pTags: [mine])
+    )
+    XCTAssertFalse(
+      PushLeaseMatcher.matches(
+        event: makeEvent(kind: 9, tags: [attribution, workflow]), policy: mentions))
+    XCTAssertTrue(
+      PushLeaseMatcher.matches(
+        event: makeEvent(kind: 9, tags: [attribution, workflow, ["p", mine]]),
+        policy: mentions))
+    XCTAssertTrue(
+      PushLeaseMatcher.matches(event: makeEvent(kind: 9, tags: [attribution]), policy: mentions))
+
+    let atLimit = makeEvent(
+      kind: 9,
+      tags: [attribution, workflow] + (0..<20).map { ["p", String(format: "%064x", $0)] }
+    )
+    let suppressed = PushResolutionPolicy(
+      filter: PushLeaseFilter(kinds: [9], authors: [other]),
+      suppress: PushLeaseSuppression(pTagsMax: 20)
+    )
+    XCTAssertTrue(PushLeaseMatcher.matches(event: atLimit, policy: suppressed))
+  }
+
   func testDecodesSnapshotContractFromDartShape() throws {
     let json = """
       {"communities":[{"id":"origin","name":"Team","relayUrl":"https://relay.example.com","pubkey":"\(mine)","policies":[{"filter":{"kinds":[9],"#p":["\(mine)"]},"ignore":[{"kinds":[9],"authors":["\(mine)"]}],"suppress":{"p_tags_max":20}}]}]}

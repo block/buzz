@@ -10,17 +10,22 @@
 mod deletion;
 pub use deletion::WorkflowDeletionOutcome;
 
+#[cfg(test)]
+#[path = "workflow/reference_tests.rs"]
+mod reference_postgres_tests;
+
 use std::fmt;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
-use sqlx::{PgConnection, PgPool, Row};
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use buzz_core::CommunityId;
 
 use crate::error::{DbError, Result};
+use crate::store::reference_check;
 use crate::Db;
 use buzz_datastore_tracing::datastore_span;
 
@@ -192,6 +197,48 @@ pub struct WorkflowRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// What caused a workflow run, recorded when the run is created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunCause {
+    /// A signed event: the message, reaction or diff signer's pubkey.
+    Event(Vec<u8>),
+    /// A cron or interval timer.
+    Schedule,
+    /// A webhook call. The caller is unknown.
+    Webhook,
+    /// A manual trigger: the invoking pubkey.
+    Manual(Vec<u8>),
+}
+
+impl RunCause {
+    fn source(&self) -> &'static str {
+        match self {
+            Self::Event(_) => "event",
+            Self::Schedule => "schedule",
+            Self::Webhook => "webhook",
+            Self::Manual(_) => "manual",
+        }
+    }
+
+    fn pubkey(&self) -> Option<&[u8]> {
+        match self {
+            Self::Event(pubkey) | Self::Manual(pubkey) => Some(pubkey),
+            Self::Schedule | Self::Webhook => None,
+        }
+    }
+
+    /// Rebuild a stored cause. Missing or inconsistent values give `None`.
+    fn from_columns(source: Option<&str>, pubkey: Option<Vec<u8>>) -> Option<Self> {
+        match (source?, pubkey) {
+            ("event", Some(pubkey)) => Some(Self::Event(pubkey)),
+            ("manual", Some(pubkey)) => Some(Self::Manual(pubkey)),
+            ("schedule", None) => Some(Self::Schedule),
+            ("webhook", None) => Some(Self::Webhook),
+            _ => None,
+        }
+    }
+}
+
 /// A single execution of a workflow.
 #[derive(Debug, Clone)]
 pub struct WorkflowRunRecord {
@@ -217,6 +264,8 @@ pub struct WorkflowRunRecord {
     /// Serialized `TriggerContext` captured at workflow start.
     /// NULL for runs created before this column was added (backwards-compatible).
     pub trigger_context: Option<serde_json::Value>,
+    /// What caused this run. `None` for runs created before causes were recorded.
+    pub cause: Option<RunCause>,
     /// When execution began.
     pub started_at: Option<DateTime<Utc>>,
     /// When execution finished (success or failure).
@@ -274,10 +323,31 @@ pub struct ApprovalRecord {
     pub created_at: DateTime<Utc>,
 }
 
+// -- Reference checks ---------------------------------------------------------
+//
+// Every workflow-table reference is checked in the writing transaction with the
+// shared helpers in `store/reference_check.rs`. A concurrent delete of the
+// parent (which locks it `FOR UPDATE` first, see `workflow/deletion.rs`) either
+// waits for this transaction or runs first and makes the check fail.
+
+/// Check the parents a `workflows` row references: its owner, then its channel.
+async fn require_workflow_parents(
+    conn: &mut sqlx::PgConnection,
+    community_id: CommunityId,
+    owner_pubkey: &[u8],
+    channel_id: Option<Uuid>,
+) -> Result<()> {
+    reference_check::require_user(conn, community_id, owner_pubkey, "workflow owner user").await?;
+    reference_check::require_optional_channel(conn, community_id, channel_id).await
+}
+
 // -- Workflow CRUD ------------------------------------------------------------
 
 /// Insert a new workflow record. Returns the new workflow's UUID.
 /// New workflows start as `active` and `enabled = TRUE`.
+///
+/// The owner (`users`) and the channel, when set, must exist in `community_id`;
+/// otherwise this returns [`DbError::NotFound`] and writes nothing.
 ///
 /// NOTE: see the cache-invalidation note on [`update_workflow`]. The relay's
 /// creation path is [`upsert_workflow`] via event ingest. (No current callers.)
@@ -290,8 +360,15 @@ pub async fn create_workflow(
     definition_json: &str,
     definition_hash: &[u8],
 ) -> Result<Uuid> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let id = Uuid::new_v4();
 
+    require_workflow_parents(tx.conn(), community_id, owner_pubkey, channel_id).await?;
     sqlx::query(
         r#"
         INSERT INTO workflows
@@ -306,8 +383,9 @@ pub async fn create_workflow(
     .bind(channel_id)
     .bind(definition_json)
     .bind(definition_hash)
-    .execute(pool)
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
 
     Ok(id)
 }
@@ -317,6 +395,10 @@ pub async fn create_workflow(
 /// Updates are allowed only when the existing row has the same owner and
 /// channel. That keeps a learned workflow UUID from becoming a cross-user or
 /// cross-channel overwrite primitive while still making retries idempotent.
+///
+/// The owner (`users`) and the channel, when set, must exist in `community_id`
+/// or this returns [`DbError::NotFound`] and writes nothing. That check runs
+/// first, so a missing parent wins over the owner/channel mismatch rejection.
 #[allow(clippy::too_many_arguments)]
 pub async fn upsert_workflow(
     pool: &PgPool,
@@ -328,6 +410,13 @@ pub async fn upsert_workflow(
     definition_json: &str,
     definition_hash: &[u8],
 ) -> Result<()> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    require_workflow_parents(tx.conn(), community_id, owner_pubkey, channel_id).await?;
     let row = sqlx::query(
         r#"
         INSERT INTO workflows
@@ -350,8 +439,9 @@ pub async fn upsert_workflow(
     .bind(channel_id)
     .bind(definition_json)
     .bind(definition_hash)
-    .fetch_optional(pool)
+    .fetch_optional(tx.conn())
     .await?;
+    tx.commit().await?;
 
     if row.is_none() {
         return Err(DbError::AccessDenied(format!(
@@ -501,18 +591,32 @@ pub async fn list_all_enabled_workflows(pool: &PgPool) -> Result<Vec<WorkflowRec
 /// would fan a single claim across every community holding that UUID. Binding
 /// `(community_id, id)` confines the claim — and its `SELECT`/`INSERT` row — to
 /// exactly the intended tenant.
+///
+/// The `SELECT` locks the workflow row `FOR KEY SHARE`, the lock a foreign key
+/// check takes on insert. A workflow delete locks the row `FOR UPDATE` before it
+/// removes the workflow's fires, so a claim either commits first (and the delete
+/// removes its fire) or waits for the delete and then finds no workflow, so it
+/// inserts nothing and returns `None`. Without the lock the claim could insert
+/// after the delete removed the fires, leaving an orphan fire row.
 pub async fn claim_scheduled_workflow_fire(
     pool: &PgPool,
     community_id: CommunityId,
     workflow_id: Uuid,
     scheduled_for: DateTime<Utc>,
 ) -> Result<Option<ScheduledWorkflowFireClaim>> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let row = sqlx::query(
         r#"
         INSERT INTO scheduled_workflow_fires (community_id, workflow_id, scheduled_for)
         SELECT w.community_id, w.id, $3
         FROM workflows w
         WHERE w.community_id = $1 AND w.id = $2
+        FOR KEY SHARE OF w
         ON CONFLICT (community_id, workflow_id, scheduled_for) DO NOTHING
         RETURNING community_id, workflow_id, scheduled_for, claimed_at
         "#,
@@ -520,8 +624,9 @@ pub async fn claim_scheduled_workflow_fire(
     .bind(community_id.as_uuid())
     .bind(workflow_id)
     .bind(scheduled_for)
-    .fetch_optional(pool)
+    .fetch_optional(tx.conn())
     .await?;
+    tx.commit().await?;
 
     row.map(|row| {
         let community_id: Uuid = row.try_get("community_id")?;
@@ -568,6 +673,12 @@ pub async fn latest_scheduled_workflow_fire(
 /// boundary. If run creation succeeds, callers should attach the run id before
 /// spawning execution. If run creation fails, leaving `workflow_run_id` NULL is
 /// intentional: the schedule instant was claimed and must not duplicate later.
+///
+/// Returns `false` when no unlinked claim matches, or the run is missing or
+/// belongs to another workflow. A link stays inside one workflow, so workflow
+/// delete, which removes that workflow's fires and runs together, never leaves
+/// a fire naming a deleted run (and, while the fire→run foreign key exists,
+/// never trips it).
 pub async fn attach_scheduled_workflow_run(
     pool: &PgPool,
     community_id: CommunityId,
@@ -575,6 +686,12 @@ pub async fn attach_scheduled_workflow_run(
     scheduled_for: DateTime<Utc>,
     workflow_run_id: Uuid,
 ) -> Result<bool> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let result = sqlx::query(
         r#"
         UPDATE scheduled_workflow_fires
@@ -583,14 +700,19 @@ pub async fn attach_scheduled_workflow_run(
           AND workflow_id = $2
           AND scheduled_for = $3
           AND workflow_run_id IS NULL
+          AND EXISTS (
+              SELECT 1 FROM workflow_runs
+              WHERE community_id = $1 AND workflow_id = $2 AND id = $4
+          )
         "#,
     )
     .bind(community_id.as_uuid())
     .bind(workflow_id)
     .bind(scheduled_for)
     .bind(workflow_run_id)
-    .execute(pool)
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
 
     Ok(result.rows_affected() == 1)
 }
@@ -606,18 +728,31 @@ pub async fn prune_scheduled_workflow_fires_before(
     pool: &PgPool,
     older_than: DateTime<Utc>,
 ) -> Result<u64> {
-    let result = sqlx::query(
-        r#"
-        DELETE FROM scheduled_workflow_fires
-        WHERE claimed_at < $1
-          AND community_write_allowed(community_id)
-        "#,
+    let communities: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT DISTINCT community_id FROM scheduled_workflow_fires WHERE claimed_at < $1",
     )
     .bind(older_than)
-    .execute(pool)
+    .fetch_all(pool)
     .await?;
-
-    Ok(result.rows_affected())
+    let deleted = crate::sweep_admitted_communities(
+        pool,
+        communities,
+        crate::observability::WriterOperation::Maintenance,
+        "scheduled_workflow_fire_prune",
+        |id, mut tx| async move {
+            let result = sqlx::query(
+                "DELETE FROM scheduled_workflow_fires WHERE community_id = $1 AND claimed_at < $2",
+            )
+            .bind(id)
+            .bind(older_than)
+            .execute(tx.conn())
+            .await?;
+            tx.commit().await?;
+            Ok(result.rows_affected())
+        },
+    )
+    .await;
+    Ok(deleted.into_iter().sum())
 }
 
 /// Update a workflow's name, definition, and definition_hash.
@@ -634,6 +769,12 @@ pub async fn update_workflow(
     definition_json: &str,
     definition_hash: &[u8],
 ) -> Result<()> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let affected = sqlx::query(
         r#"
         UPDATE workflows
@@ -646,9 +787,10 @@ pub async fn update_workflow(
     .bind(definition_hash)
     .bind(community_id.as_uuid())
     .bind(id)
-    .execute(pool)
+    .execute(tx.conn())
     .await?
     .rows_affected();
+    tx.commit().await?;
 
     if affected == 0 {
         return Err(DbError::NotFound(format!("workflow {id}")));
@@ -666,6 +808,12 @@ pub async fn update_workflow_status(
     id: Uuid,
     status: WorkflowStatus,
 ) -> Result<()> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let affected = sqlx::query(
         r#"
         UPDATE workflows
@@ -676,9 +824,10 @@ pub async fn update_workflow_status(
     .bind(status.to_string())
     .bind(community_id.as_uuid())
     .bind(id)
-    .execute(pool)
+    .execute(tx.conn())
     .await?
     .rows_affected();
+    tx.commit().await?;
 
     if affected == 0 {
         return Err(DbError::NotFound(format!("workflow {id}")));
@@ -696,6 +845,12 @@ pub async fn set_workflow_enabled(
     id: Uuid,
     enabled: bool,
 ) -> Result<()> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let affected = sqlx::query(
         r#"
         UPDATE workflows
@@ -706,9 +861,10 @@ pub async fn set_workflow_enabled(
     .bind(enabled)
     .bind(community_id.as_uuid())
     .bind(id)
-    .execute(pool)
+    .execute(tx.conn())
     .await?
     .rows_affected();
+    tx.commit().await?;
 
     if affected == 0 {
         return Err(DbError::NotFound(format!("workflow {id}")));
@@ -729,6 +885,12 @@ pub async fn disable_workflows_for_owner_in_channel(
     channel_id: Uuid,
     owner_pubkey: &[u8],
 ) -> Result<u64> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let affected = sqlx::query(
         r#"
         UPDATE workflows
@@ -739,9 +901,10 @@ pub async fn disable_workflows_for_owner_in_channel(
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .bind(owner_pubkey)
-    .execute(pool)
+    .execute(tx.conn())
     .await?
     .rows_affected();
+    tx.commit().await?;
 
     Ok(affected)
 }
@@ -753,11 +916,16 @@ pub async fn disable_workflows_for_owner_in_channel(
 /// so the disable executes on the fence's own connection, avoiding a second
 /// pool acquisition while the fence holds one connection.
 pub async fn disable_workflows_for_owner_in_channel_on_conn(
-    conn: &mut PgConnection,
+    tx: &mut crate::AdmittedTx,
     community_id: CommunityId,
     channel_id: Uuid,
     owner_pubkey: &[u8],
 ) -> Result<u64> {
+    if tx.community() != community_id {
+        return Err(DbError::AccessDenied(
+            "workflow write community mismatch".into(),
+        ));
+    }
     let affected = sqlx::query(
         r#"
         UPDATE workflows
@@ -768,61 +936,11 @@ pub async fn disable_workflows_for_owner_in_channel_on_conn(
     .bind(community_id.as_uuid())
     .bind(channel_id)
     .bind(owner_pubkey)
-    .execute(&mut *conn)
+    .execute(tx.conn())
     .await?
     .rows_affected();
 
     Ok(affected)
-}
-
-/// Delete a workflow and all its runs/approvals (CASCADE).
-///
-/// NOTE: see the cache-invalidation note on [`update_workflow`]. The relay's
-/// deletion path uses [`delete_workflow_for_owner`], which returns the
-/// `channel_id` needed for invalidation. (No current callers.)
-pub async fn delete_workflow(pool: &PgPool, community_id: CommunityId, id: Uuid) -> Result<()> {
-    let affected = sqlx::query("DELETE FROM workflows WHERE community_id = $1 AND id = $2")
-        .bind(community_id.as_uuid())
-        .bind(id)
-        .execute(pool)
-        .await?
-        .rows_affected();
-
-    if affected == 0 {
-        return Err(DbError::NotFound(format!("workflow {id}")));
-    }
-    Ok(())
-}
-
-/// Delete a workflow only when it belongs to `owner_pubkey`.
-///
-/// Used by event-driven deletion paths where the workflow UUID is attacker
-/// controlled. Keeping the owner predicate in the DELETE statement avoids a
-/// check-then-delete race and ensures a caller cannot delete another user's
-/// workflow just by learning its UUID.
-///
-/// Returns the deleted workflow's `channel_id` so the caller can invalidate
-/// the per-channel trigger cache without a separate lookup.
-pub async fn delete_workflow_for_owner(
-    pool: &PgPool,
-    community_id: CommunityId,
-    id: Uuid,
-    owner_pubkey: &[u8],
-) -> Result<Option<Uuid>> {
-    let row = sqlx::query(
-        "DELETE FROM workflows WHERE community_id = $1 AND id = $2 AND owner_pubkey = $3 \
-         RETURNING channel_id",
-    )
-    .bind(community_id.as_uuid())
-    .bind(id)
-    .bind(owner_pubkey)
-    .fetch_optional(pool)
-    .await?;
-
-    match row {
-        Some(row) => Ok(row.try_get("channel_id")?),
-        None => Err(DbError::NotFound(format!("workflow {id}"))),
-    }
 }
 
 // -- Workflow Run CRUD --------------------------------------------------------
@@ -832,20 +950,32 @@ pub async fn delete_workflow_for_owner(
 /// `trigger_context` is the serialized `TriggerContext` for this run. It is stored
 /// so that post-approval resume steps can restore the original trigger data and
 /// correctly resolve `{{trigger.*}}` template variables.
+///
+/// The workflow must exist in `community_id`; otherwise this returns
+/// [`DbError::NotFound`] and writes nothing.
 pub async fn create_workflow_run(
     pool: &PgPool,
     community_id: CommunityId,
     workflow_id: Uuid,
     trigger_event_id: Option<&[u8]>,
     trigger_context: Option<&serde_json::Value>,
+    cause: &RunCause,
 ) -> Result<Uuid> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let id = Uuid::new_v4();
 
+    reference_check::require_workflow(tx.conn(), community_id, workflow_id).await?;
     sqlx::query(
         r#"
         INSERT INTO workflow_runs
-            (community_id, id, workflow_id, status, trigger_event_id, current_step, execution_trace, trigger_context)
-        VALUES ($1, $2, $3, 'pending', $4, 0, '[]', $5)
+            (community_id, id, workflow_id, status, trigger_event_id, current_step, execution_trace,
+             trigger_context, cause_source, cause_pubkey)
+        VALUES ($1, $2, $3, 'pending', $4, 0, '[]', $5, $6, $7)
         "#,
     )
     .bind(community_id.as_uuid())
@@ -853,8 +983,11 @@ pub async fn create_workflow_run(
     .bind(workflow_id)
     .bind(trigger_event_id)
     .bind(trigger_context)
-    .execute(pool)
+    .bind(cause.source())
+    .bind(cause.pubkey())
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
 
     Ok(id)
 }
@@ -868,7 +1001,8 @@ pub async fn get_workflow_run(
     let row = sqlx::query(
         r#"
         SELECT community_id, id, workflow_id, status::text AS status, trigger_event_id, current_step,
-               execution_trace, trigger_context, started_at, completed_at, error_message, error_code, created_at
+               execution_trace, trigger_context, cause_source, cause_pubkey, started_at, completed_at,
+               error_message, error_code, created_at
         FROM workflow_runs
         WHERE community_id = $1 AND id = $2
         "#,
@@ -900,7 +1034,8 @@ pub async fn list_workflow_runs_page(
     let rows = sqlx::query(
         r#"
         SELECT community_id, id, workflow_id, status::text AS status, trigger_event_id, current_step,
-               execution_trace, trigger_context, started_at, completed_at, error_message, error_code, created_at
+               execution_trace, trigger_context, cause_source, cause_pubkey, started_at, completed_at,
+               error_message, error_code, created_at
         FROM workflow_runs
         WHERE community_id = $1 AND workflow_id = $2
           AND (
@@ -957,6 +1092,12 @@ pub async fn update_workflow_run(
     trace: &serde_json::Value,
     failure: Option<WorkflowRunFailure<'_>>,
 ) -> Result<()> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let status_str = status.to_string();
     let (error_code, error) = failure
         .map(|failure| (Some(failure.code), Some(failure.message)))
@@ -985,9 +1126,10 @@ pub async fn update_workflow_run(
     .bind(&status_str) // for completed_at CASE
     .bind(community_id.as_uuid())
     .bind(id)
-    .execute(pool)
+    .execute(tx.conn())
     .await?
     .rows_affected();
+    tx.commit().await?;
 
     if affected == 0 {
         return Err(DbError::NotFound(format!("workflow_run {id}")));
@@ -1021,6 +1163,9 @@ pub struct CreateApprovalParams<'a> {
 ///
 /// The `token` parameter is the raw (plaintext) token. It is hashed with
 /// SHA-256 before storage so the DB never holds the raw value.
+///
+/// Both the workflow and the run must exist in `community_id`; otherwise this
+/// returns [`DbError::NotFound`] and writes nothing.
 pub async fn create_approval(pool: &PgPool, params: CreateApprovalParams<'_>) -> Result<()> {
     let CreateApprovalParams {
         community_id,
@@ -1033,7 +1178,15 @@ pub async fn create_approval(pool: &PgPool, params: CreateApprovalParams<'_>) ->
         expires_at,
     } = params;
     let token_hash = hash_approval_token(token);
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
 
+    reference_check::require_workflow(tx.conn(), community_id, workflow_id).await?;
+    reference_check::require_workflow_run(tx.conn(), community_id, run_id).await?;
     sqlx::query(
         r#"
         INSERT INTO workflow_approvals
@@ -1049,8 +1202,9 @@ pub async fn create_approval(pool: &PgPool, params: CreateApprovalParams<'_>) ->
     .bind(step_index)
     .bind(approver_spec)
     .bind(expires_at)
-    .execute(pool)
+    .execute(tx.conn())
     .await?;
+    tx.commit().await?;
 
     Ok(())
 }
@@ -1170,6 +1324,12 @@ pub async fn update_approval_by_stored_hash(
     approver_pubkey: Option<&[u8]>,
     note: Option<&str>,
 ) -> Result<bool> {
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let status_str = status.to_string();
     let affected = sqlx::query(
         r#"
@@ -1189,9 +1349,10 @@ pub async fn update_approval_by_stored_hash(
     .bind(&status_str) // for denied_at CASE
     .bind(community_id.as_uuid())
     .bind(token_hash)
-    .execute(pool)
+    .execute(tx.conn())
     .await?
     .rows_affected();
+    tx.commit().await?;
 
     Ok(affected > 0)
 }
@@ -1241,6 +1402,10 @@ fn row_to_run_record(row: sqlx::postgres::PgRow) -> Result<WorkflowRunRecord> {
         current_step: row.try_get("current_step")?,
         execution_trace: row.try_get("execution_trace")?,
         trigger_context: row.try_get("trigger_context")?,
+        cause: RunCause::from_columns(
+            row.try_get::<Option<String>, _>("cause_source")?.as_deref(),
+            row.try_get("cause_pubkey")?,
+        ),
         started_at: row.try_get("started_at")?,
         completed_at: row.try_get("completed_at")?,
         error_message: row.try_get("error_message")?,
@@ -1311,6 +1476,7 @@ impl Db {
         workflow_id: Uuid,
         trigger_event_id: Option<&[u8]>,
         trigger_context: Option<&serde_json::Value>,
+        cause: &RunCause,
     ) -> Result<Uuid> {
         crate::workflow::create_workflow_run(
             &self.pool,
@@ -1318,6 +1484,7 @@ impl Db {
             workflow_id,
             trigger_event_id,
             trigger_context,
+            cause,
         )
         .await
     }
@@ -1684,24 +1851,6 @@ impl Db {
         .await
     }
 
-    /// Delete a workflow and all its runs/approvals.
-    #[datastore_span(name = "delete_workflow", system = "postgresql")]
-    pub async fn delete_workflow(&self, community_id: CommunityId, id: Uuid) -> Result<()> {
-        crate::workflow::delete_workflow(&self.pool, community_id, id).await
-    }
-
-    /// Delete a workflow only when it belongs to the provided owner.
-    /// Returns the deleted workflow's `channel_id`.
-    #[datastore_span(name = "delete_workflow_for_owner", system = "postgresql")]
-    pub async fn delete_workflow_for_owner(
-        &self,
-        community_id: CommunityId,
-        id: Uuid,
-        owner_pubkey: &[u8],
-    ) -> Result<Option<Uuid>> {
-        crate::workflow::delete_workflow_for_owner(&self.pool, community_id, id, owner_pubkey).await
-    }
-
     /// Find a workflow by owner pubkey and name within a community. Used for
     /// NIP-09 a-tag deletion where the d-tag is the workflow name (not UUID).
     #[datastore_span(name = "find_workflow_by_owner_and_name", system = "postgresql")]
@@ -1719,6 +1868,30 @@ impl Db {
 
 #[cfg(test)]
 mod postgres_tests {
+    #[test]
+    fn stored_cause_requires_a_consistent_source_and_pubkey() {
+        let pubkey = vec![1u8; 32];
+        assert_eq!(
+            RunCause::from_columns(Some("event"), Some(pubkey.clone())),
+            Some(RunCause::Event(pubkey.clone()))
+        );
+        assert_eq!(
+            RunCause::from_columns(Some("schedule"), None),
+            Some(RunCause::Schedule)
+        );
+        for (source, key) in [
+            (Some("event"), None),
+            (Some("manual"), None),
+            (Some("schedule"), Some(pubkey.clone())),
+            (Some("webhook"), Some(pubkey.clone())),
+            (Some("unknown"), None),
+            (None, Some(pubkey.clone())),
+            (None, None),
+        ] {
+            assert_eq!(RunCause::from_columns(source, key), None, "{source:?}");
+        }
+    }
+
     use super::*;
     use chrono::TimeZone;
 
@@ -1961,6 +2134,7 @@ mod postgres_tests {
                 { "step": "s1", "status": "completed" }
             ]),
             trigger_context: None,
+            cause: None,
             started_at: Some(now),
             completed_at: None,
             error_message: None,
@@ -1990,6 +2164,7 @@ mod postgres_tests {
             current_step: 0,
             execution_trace: serde_json::json!([]),
             trigger_context: None,
+            cause: None,
             started_at: None,
             completed_at: None,
             error_message: None,
@@ -2014,6 +2189,7 @@ mod postgres_tests {
             current_step: 1,
             execution_trace: serde_json::json!([]),
             trigger_context: None,
+            cause: None,
             started_at: Some(now),
             completed_at: Some(now),
             error_message: Some("step timeout exceeded".to_owned()),
@@ -2046,6 +2222,7 @@ mod postgres_tests {
             current_step: 2,
             execution_trace: trace.clone(),
             trigger_context: None,
+            cause: None,
             started_at: Some(now),
             completed_at: Some(now),
             error_message: None,
@@ -2069,6 +2246,7 @@ mod postgres_tests {
             current_step: 0,
             execution_trace: serde_json::json!([]),
             trigger_context: None,
+            cause: None,
             started_at: None,
             completed_at: None,
             error_message: None,
@@ -2412,9 +2590,16 @@ mod postgres_tests {
             .expect("claim wins");
 
         // Create the run the won claim is responsible for, then attach it.
-        let run_id = create_workflow_run(&pool, community, workflow_id, None, None)
-            .await
-            .expect("create run ok");
+        let run_id = create_workflow_run(
+            &pool,
+            community,
+            workflow_id,
+            None,
+            None,
+            &RunCause::Schedule,
+        )
+        .await
+        .expect("create run ok");
 
         let attached =
             attach_scheduled_workflow_run(&pool, community, workflow_id, scheduled_for, run_id)
@@ -2441,9 +2626,16 @@ mod postgres_tests {
 
         // A second attach is a no-op: the `workflow_run_id IS NULL` guard means
         // an already-linked claim is never re-pointed to a different run.
-        let other_run = create_workflow_run(&pool, community, workflow_id, None, None)
-            .await
-            .expect("create second run ok");
+        let other_run = create_workflow_run(
+            &pool,
+            community,
+            workflow_id,
+            None,
+            None,
+            &RunCause::Schedule,
+        )
+        .await
+        .expect("create second run ok");
         let reattached =
             attach_scheduled_workflow_run(&pool, community, workflow_id, scheduled_for, other_run)
                 .await
@@ -2452,6 +2644,50 @@ mod postgres_tests {
             !reattached,
             "attach must not overwrite an already-linked claim row"
         );
+    }
+
+    /// A claim for workflow B cannot point at A's run. Such a link has a valid
+    /// run FK but would block A's explicit run delete with no FK action.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn attach_rejects_run_from_another_workflow() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let (workflow_a, _) = make_workflow_in(&pool, community).await;
+        let (workflow_b, _) = make_workflow_in(&pool, community).await;
+        let scheduled_for = Utc.with_ymd_and_hms(2026, 6, 27, 0, 3, 0).unwrap();
+        claim_scheduled_workflow_fire(&pool, community, workflow_b, scheduled_for)
+            .await
+            .expect("claim B")
+            .expect("claim wins");
+        let run_a = create_workflow_run(
+            &pool,
+            community,
+            workflow_a,
+            None,
+            None,
+            &RunCause::Schedule,
+        )
+        .await
+        .expect("create A run");
+
+        assert!(
+            !attach_scheduled_workflow_run(&pool, community, workflow_b, scheduled_for, run_a)
+                .await
+                .expect("reject cross-workflow link"),
+            "B's fire must not reference A's run"
+        );
+        let linked: Option<Uuid> = sqlx::query_scalar(
+            "SELECT workflow_run_id FROM scheduled_workflow_fires \
+             WHERE community_id = $1 AND workflow_id = $2 AND scheduled_for = $3",
+        )
+        .bind(community.as_uuid())
+        .bind(workflow_b)
+        .bind(scheduled_for)
+        .fetch_one(&pool)
+        .await
+        .expect("read B fire");
+        assert_eq!(linked, None);
     }
 
     /// Documents the retention-vs-interval coupling Sami flagged for §5c:
@@ -2656,9 +2892,9 @@ mod postgres_tests {
     }
 
     /// Issue 4 (workflow lifecycle): deleting `A/id` must not delete `B/id`
-    /// when both communities hold the same workflow UUID. Pre-fix
-    /// `delete_workflow` predicated only on `id`, so a NIP-09 a-tag deletion in
-    /// one community would erase the colliding workflow in every community.
+    /// when both communities hold the same workflow UUID. Pre-fix the workflow
+    /// delete predicated only on `id`, so a NIP-09 a-tag deletion in one
+    /// community would erase the colliding workflow in every community.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn workflow_delete_is_confined_to_its_community() {
@@ -2684,7 +2920,13 @@ mod postgres_tests {
         )
         .await;
 
-        delete_workflow(&pool, community_a, shared_workflow_id)
+        crate::Db::from_pool(pool.clone())
+            .delete_workflow_by_coordinate(
+                community_a,
+                &[0xb2; 32],
+                &shared_workflow_id.to_string(),
+                chrono::Utc::now().timestamp(),
+            )
             .await
             .expect("delete A's workflow");
 
@@ -2722,12 +2964,26 @@ mod postgres_tests {
         insert_workflow_with_ids(&pool, community_a, workflow_id, channel_id, "wf-A").await;
         insert_workflow_with_ids(&pool, community_b, workflow_id, Uuid::new_v4(), "wf-B").await;
 
-        let run_a = create_workflow_run(&pool, community_a, workflow_id, None, None)
-            .await
-            .expect("run A");
-        let run_b = create_workflow_run(&pool, community_b, workflow_id, None, None)
-            .await
-            .expect("run B");
+        let run_a = create_workflow_run(
+            &pool,
+            community_a,
+            workflow_id,
+            None,
+            None,
+            &RunCause::Schedule,
+        )
+        .await
+        .expect("run A");
+        let run_b = create_workflow_run(
+            &pool,
+            community_b,
+            workflow_id,
+            None,
+            None,
+            &RunCause::Schedule,
+        )
+        .await
+        .expect("run B");
 
         let token = "shared-approval-token";
         let expires = Utc::now() + chrono::Duration::hours(1);

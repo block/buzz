@@ -14,22 +14,33 @@ pub use flags::{BooleanFlag, IntegerFlag};
 /// LaunchDarkly-backed evaluator adapter.
 pub mod launchdarkly;
 
-/// Stable targeting context for one Buzz community and an optional actor.
+/// Stable targeting context: one Buzz community and an optional actor, or the
+/// relay process itself.
 ///
-/// Community is always required because the same Nostr identity can participate
-/// in multiple isolated Buzz communities. Community-only contexts support
-/// background and system evaluations that have no actor.
+/// Community contexts are the norm, because the same Nostr identity can
+/// participate in multiple isolated Buzz communities. Community-only contexts
+/// support background and system evaluations that have no actor. The process
+/// context is for settings that belong to the relay process rather than to any
+/// community, such as concurrency caps shared by every community it serves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EvaluationContext {
-    community: CommunityId,
+    community: Option<CommunityId>,
     actor_pubkey: Option<PublicKey>,
 }
 
 impl EvaluationContext {
+    /// Construct the context for process-wide settings: no community, no actor.
+    pub const fn for_process() -> Self {
+        Self {
+            community: None,
+            actor_pubkey: None,
+        }
+    }
+
     /// Construct a community-only evaluation context.
     pub const fn for_community(community: CommunityId) -> Self {
         Self {
-            community,
+            community: Some(community),
             actor_pubkey: None,
         }
     }
@@ -37,13 +48,13 @@ impl EvaluationContext {
     /// Construct an evaluation context for an actor within one community.
     pub const fn for_actor(community: CommunityId, actor_pubkey: PublicKey) -> Self {
         Self {
-            community,
+            community: Some(community),
             actor_pubkey: Some(actor_pubkey),
         }
     }
 
-    /// Community that owns this evaluation.
-    pub const fn community(&self) -> CommunityId {
+    /// Community that owns this evaluation; `None` for the process context.
+    pub const fn community(&self) -> Option<CommunityId> {
         self.community
     }
 
@@ -128,7 +139,7 @@ mod tests {
 
         impl FlagEvaluator for CommunityEvaluator {
             fn evaluate_bool(&self, flag: BooleanFlag, context: &EvaluationContext) -> bool {
-                if context.community() == self.enabled_community {
+                if context.community() == Some(self.enabled_community) {
                     true
                 } else {
                     flag.default()
@@ -136,7 +147,7 @@ mod tests {
             }
 
             fn evaluate_int(&self, flag: IntegerFlag, context: &EvaluationContext) -> i64 {
-                if context.community() == self.enabled_community {
+                if context.community() == Some(self.enabled_community) {
                     41
                 } else {
                     flag.default()
@@ -186,7 +197,7 @@ mod tests {
             }
 
             fn evaluate_int(&self, flag: IntegerFlag, context: &EvaluationContext) -> i64 {
-                if context.community() == self.enabled_community
+                if context.community() == Some(self.enabled_community)
                     && context.actor_pubkey() == Some(&self.expected_actor)
                 {
                     99

@@ -26,6 +26,7 @@ class ConcentricSheetSurface extends HookWidget {
     ),
     this.providesSheetSurface = true,
     this.usesGlass = false,
+    this.capsule = false,
     this.glassTintColor,
     this.minimumRadius = Radii.dialog,
     this.contentClipRadius,
@@ -41,6 +42,9 @@ class ConcentricSheetSurface extends HookWidget {
   final bool providesSheetSurface;
   final bool usesGlass;
 
+  /// Rounds the native surface into a capsule independent of screen corners.
+  final bool capsule;
+
   /// Optional tint applied to the native Liquid Glass material.
   final Color? glassTintColor;
   final double minimumRadius;
@@ -54,6 +58,7 @@ class ConcentricSheetSurface extends HookWidget {
 
   static const _surfaceChannel = MethodChannel('buzz/concentric_sheet_surface');
   static const _nativeContentClipRadius = Radii.dialog * 2;
+  static const sheetTopRadius = _nativeContentClipRadius - Grid.xxs;
 
   BorderRadius _borderRadius(double radius) => switch (corners) {
     ConcentricSurfaceCorners.all => BorderRadius.circular(radius),
@@ -101,6 +106,7 @@ class ConcentricSheetSurface extends HookWidget {
     try {
       await channel.invokeMethod<void>('updateGeometry', <String, Object>{
         'minimumRadius': minimumRadius,
+        'capsule': capsule,
         'brightness': brightness.name,
       });
     } on MissingPluginException {
@@ -124,6 +130,58 @@ class ConcentricSheetSurface extends HookWidget {
     final surfaceColor = color ?? context.colors.surface;
     final brightness = context.theme.brightness;
     final nativeSurfaceChannel = useState<MethodChannel?>(null);
+    final nativeCornerRadius = useState<BorderRadius?>(null);
+    useEffect(() {
+      final channel = nativeSurfaceChannel.value;
+      if (channel == null) return null;
+      var active = true;
+      void updateRadii(dynamic value) {
+        if (!active || value is! Map) return;
+        double? radius(String key) {
+          final number = value[key];
+          return number is num && number.isFinite && number >= 0
+              ? number.toDouble()
+              : null;
+        }
+
+        final topLeft = radius('topLeft');
+        final topRight = radius('topRight');
+        final bottomLeft = radius('bottomLeft');
+        final bottomRight = radius('bottomRight');
+        if (topLeft == null ||
+            topRight == null ||
+            bottomLeft == null ||
+            bottomRight == null) {
+          return;
+        }
+        nativeCornerRadius.value = BorderRadius.only(
+          topLeft: Radius.circular(topLeft),
+          topRight: Radius.circular(topRight),
+          bottomLeft: Radius.circular(bottomLeft),
+          bottomRight: Radius.circular(bottomRight),
+        );
+      }
+
+      channel.setMethodCallHandler((call) async {
+        if (call.method == 'cornerRadiiChanged') updateRadii(call.arguments);
+      });
+      // The platform view can lay out before Flutter installs its handler.
+      Future<void> readInitialRadii() async {
+        try {
+          updateRadii(await channel.invokeMethod<dynamic>('getCornerRadii'));
+        } on MissingPluginException {
+          // Retain the fallback clip when the native view is unavailable.
+        } on PlatformException {
+          // A subsequent native layout can supply the geometry.
+        }
+      }
+
+      unawaited(readInitialRadii());
+      return () {
+        active = false;
+        channel.setMethodCallHandler(null);
+      };
+    }, [nativeSurfaceChannel.value]);
     useEffect(
       () {
         final channel = nativeSurfaceChannel.value;
@@ -172,6 +230,7 @@ class ConcentricSheetSurface extends HookWidget {
         nativeSurfaceSupported,
         nativeSurfaceChannel.value,
         minimumRadius,
+        capsule,
         brightness,
       ],
     );
@@ -189,28 +248,34 @@ class ConcentricSheetSurface extends HookWidget {
           if (nativeSurfaceSupported)
             Positioned.fill(
               child: ExcludeSemantics(
-                child: IgnorePointer(
-                  child: UiKitView(
-                    viewType: 'buzz/concentric_sheet_surface',
-                    hitTestBehavior: PlatformViewHitTestBehavior.transparent,
-                    onPlatformViewCreated: (viewId) {
-                      nativeSurfaceChannel.value = MethodChannel(
-                        'buzz/concentric_sheet_surface/$viewId',
-                      );
-                    },
-                    creationParams: <String, Object>{
-                      'color': surfaceColor.toARGB32(),
-                      if (backdropColor case final color?)
-                        'backdropColor': color.toARGB32(),
-                      'minimumRadius': minimumRadius,
-                      'corners': corners.name,
-                      'usesGlass': usesGlass,
-                      if (glassTintColor case final tint?)
-                        'glassTintColor': tint.toARGB32(),
-                      'brightness': brightness.name,
-                    },
-                    creationParamsCodec: const StandardMessageCodec(),
-                  ),
+                child: UiKitView(
+                  viewType: 'buzz/concentric_sheet_surface',
+                  // Keep the platform view in gesture arbitration. Excluding
+                  // it with IgnorePointer leaves UIKit intercepting touches
+                  // over Flutter controls after the native surface appears.
+                  hitTestBehavior: PlatformViewHitTestBehavior.translucent,
+                  onPlatformViewCreated: (viewId) {
+                    nativeSurfaceChannel.value = MethodChannel(
+                      'buzz/concentric_sheet_surface/$viewId',
+                    );
+                  },
+                  creationParams: <String, Object>{
+                    'color': surfaceColor.toARGB32(),
+                    if (backdropColor case final color?)
+                      'backdropColor': color.toARGB32(),
+                    'minimumRadius': minimumRadius,
+                    'capsule': capsule,
+                    'corners': corners.name,
+                    'independentCorners': providesSheetSurface,
+                    if (providesSheetSurface &&
+                        corners == ConcentricSurfaceCorners.all)
+                      'topRadius': sheetTopRadius,
+                    'usesGlass': usesGlass,
+                    if (glassTintColor case final tint?)
+                      'glassTintColor': tint.toARGB32(),
+                    'brightness': brightness.name,
+                  },
+                  creationParamsCodec: const StandardMessageCodec(),
                 ),
               ),
             )
@@ -224,17 +289,20 @@ class ConcentricSheetSurface extends HookWidget {
             ),
           ClipRSuperellipse(
             key: const ValueKey('concentric-sheet-content-clip'),
-            // UIKit's container-concentric corner resolves substantially
-            // larger than its minimum radius on an edge-inset iOS sheet. Keep
-            // the Flutter content inside that continuous outline; a 24pt
-            // circular clip still lets scrolling rows show through the native
-            // corner cutouts.
-            borderRadius: _borderRadius(
-              contentClipRadius ??
-                  (nativeSurfaceSupported
-                      ? _nativeContentClipRadius
-                      : minimumRadius),
-            ),
+            // Match each resolved UIKit corner, including asymmetric display
+            // corners and changes when folding or rotating the device.
+            borderRadius: contentClipRadius != null
+                ? _borderRadius(contentClipRadius!)
+                : nativeSurfaceSupported
+                ? (nativeCornerRadius.value ??
+                      (providesSheetSurface &&
+                              corners == ConcentricSurfaceCorners.all
+                          ? const BorderRadius.vertical(
+                              top: Radius.circular(sheetTopRadius),
+                              bottom: Radius.circular(_nativeContentClipRadius),
+                            )
+                          : _borderRadius(_nativeContentClipRadius)))
+                : fallbackBorderRadius,
             clipBehavior: Clip.antiAlias,
             child: providesSheetSurface
                 ? _ConcentricSheetSurfaceScope(

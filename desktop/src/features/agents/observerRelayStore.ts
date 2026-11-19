@@ -520,8 +520,10 @@ function processLiveObserverEvents(
       }
     }
     if (parsed.kind === "session_config_captured") {
-      void putAgentSessionConfig(agentPubkey, parsed.payload);
-      onSessionConfigCaptured?.(agentPubkey);
+      // Refresh only after the store settles, so readers see the new options.
+      void putAgentSessionConfig(agentPubkey, parsed.payload)
+        .catch((error) => console.warn("Session config not stored:", error))
+        .then(() => onSessionConfigCaptured?.(agentPubkey));
     } else if (parsed.kind === "control_result") {
       // Thread the envelope's channelId into the frame so the ModelPicker can
       // count a terminal switch result once per distinct channel.

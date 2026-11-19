@@ -18,6 +18,20 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   group('artifact without a gateway define', () {
+    setUp(() => Env.debugPushGatewayUrlOverride = '');
+    tearDown(() => Env.debugPushGatewayUrlOverride = 'https://push.example');
+
+    test(
+      'reads the gateway only from its define, with no built-in default',
+      () {
+        Env.debugPushGatewayUrlOverride = null;
+        expect(
+          Env.pushGatewayUrl,
+          const String.fromEnvironment('BUZZ_PUSH_GATEWAY_URL'),
+        );
+      },
+    );
+
     test(
       'does not discover push capability or enter the opted-in lifecycle',
       () async {
@@ -73,43 +87,53 @@ void main() {
       expect(calls, isEmpty);
     });
 
-    testWidgets('Settings hides notifications without push capability', (
-      tester,
-    ) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-      addTearDown(() => debugDefaultTargetPlatformOverride = null);
-      SharedPreferences.setMockInitialValues({});
-      final prefs = await SharedPreferences.getInstance();
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            savedPrefsProvider.overrideWithValue(prefs),
-            activeCommunityProvider.overrideWith(
-              (ref) async => Community.create(
-                name: 'Team',
-                relayUrl: 'wss://relay.example',
+    for (final enabled in [true, false]) {
+      testWidgets(
+        'Settings preserves preference $enabled without push capability',
+        (tester) async {
+          debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+          addTearDown(() => debugDefaultTargetPlatformOverride = null);
+          SharedPreferences.setMockInitialValues({});
+          final prefs = await SharedPreferences.getInstance();
+          await tester.pumpWidget(
+            ProviderScope(
+              overrides: [
+                savedPrefsProvider.overrideWithValue(prefs),
+                activeCommunityProvider.overrideWith(
+                  (ref) async => Community.create(
+                    name: 'Team',
+                    relayUrl: 'wss://relay.example',
+                  ).copyWith(pushNotificationsEnabled: enabled),
+                ),
+              ],
+              child: MaterialApp(
+                theme: AppTheme.light(),
+                home: SettingsPage(
+                  profileHeader: const SizedBox.shrink(),
+                  identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+                ),
               ),
             ),
-            buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
-              () async =>
-                  throw StateError('must not query notification permission'),
-            ),
-          ],
-          child: MaterialApp(
-            theme: AppTheme.light(),
-            home: SettingsPage(
-              profileHeader: const SizedBox.shrink(),
-              identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
-            ),
-          ),
-        ),
+          );
+          await tester.pumpAndSettle();
+          expect(
+            find.text('Notifications'),
+            enabled ? findsOneWidget : findsNothing,
+          );
+          expect(find.text('Push notifications'), findsNothing);
+          if (enabled) {
+            await tester.tap(find.text('Notifications'));
+            await tester.pumpAndSettle();
+            final toggle = tester.widget<Switch>(find.byType(Switch));
+            expect(toggle.value, isTrue);
+            expect(toggle.onChanged, isNotNull);
+          } else {
+            expect(find.byType(Switch), findsNothing);
+          }
+          expect(tester.takeException(), isNull);
+          debugDefaultTargetPlatformOverride = null;
+        },
       );
-      await tester.pumpAndSettle();
-      expect(find.text('Notifications'), findsNothing);
-      expect(find.text('Push notifications'), findsNothing);
-      expect(find.byType(Switch), findsNothing);
-      expect(tester.takeException(), isNull);
-      debugDefaultTargetPlatformOverride = null;
-    });
-  }, skip: Env.pushGatewayConfigured);
+    }
+  });
 }

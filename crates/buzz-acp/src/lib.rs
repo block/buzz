@@ -96,8 +96,8 @@ fn current_working_directory() -> Result<String> {
 
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
-/// Ephemeral kinds (20000-29999) are rejected by the HTTP bridge, so presence
-/// updates must be routed through the WS path.
+/// The HTTP bridge rejects presence (kind:20001); typing (kind:20002) is the
+/// only ephemeral kind it accepts. Presence updates must use the WS path.
 ///
 /// Content is a bare status string (`"online"`, `"away"`, `"offline"`) matching
 /// the desktop client's format. The relay stores this in Redis and synthesizes
@@ -170,24 +170,80 @@ fn resolve_agent_owner(config: &Config) -> Option<String> {
     config.agent_owner.clone()
 }
 
+/// Base delay before re-consulting the relay about an author whose last
+/// sibling lookup was [`SiblingVerdict::Indeterminate`]. Doubles per
+/// consecutive indeterminate result up to [`SIBLING_RETRY_MAX`].
+///
+/// The lookup awaits inline in the sole inbound-event loop (2s timeout), so an
+/// unthrottled retry-per-event under a persistent `/query` outage would let a
+/// chatty sibling stall ingress for the owner too. With this backoff a dead
+/// relay costs at most one inline lookup per author per minute.
+const SIBLING_RETRY_BASE: Duration = Duration::from_secs(5);
+/// Ceiling for the indeterminate-lookup retry backoff.
+const SIBLING_RETRY_MAX: Duration = Duration::from_secs(60);
+
+/// One author's entry in the sibling cache.
+#[derive(Debug, Clone, Copy)]
+enum SiblingEntry {
+    /// Relay-proven verdict; immutable for the process lifetime.
+    Proven(bool),
+    /// Last lookup was indeterminate: denied without a relay call until
+    /// `retry_at`. `failures` counts consecutive indeterminate results and
+    /// drives the exponential backoff.
+    Indeterminate {
+        retry_at: std::time::Instant,
+        failures: u32,
+    },
+}
+
+/// What the cache can say about an author before any relay call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SiblingCacheState {
+    /// Relay-proven verdict.
+    Proven(bool),
+    /// An indeterminate verdict is still inside its retry deadline: deny
+    /// this event without consulting the relay.
+    Throttled,
+    /// Never seen, or the retry deadline has passed: consult the relay.
+    Unknown,
+}
+
 /// Cache for the agent's owner pubkey.
 ///
 /// Owner is now provided via `--agent-owner` config flag (no REST lookup).
 /// Cache for the agent's owner pubkey + sibling lookups.
 ///
 /// Siblings are other agents whose NIP-OA auth tag proves the same owner.
-/// Lookup results are cached for the process lifetime (attestations are immutable).
+/// Only *proven* verdicts are cached for the process lifetime (attestations
+/// are immutable). A lookup that failed because the relay was unreachable is
+/// [`SiblingVerdict::Indeterminate`]: it is remembered only as a bounded retry
+/// deadline ([`SiblingEntry::Indeterminate`]) — never as a verdict — so one
+/// relay blip cannot make this agent ignore a same-owner sibling until
+/// restart, and a persistent outage cannot turn every sibling event into an
+/// inline relay round-trip.
 struct OwnerCache {
     pubkey: Option<String>,
-    /// author_hex → is_sibling (true = same owner, false = not)
-    siblings: std::sync::Mutex<HashMap<String, bool>>,
+    siblings: std::sync::Mutex<HashMap<String, SiblingEntry>>,
+    retry_base: Duration,
+    retry_max: Duration,
 }
 
 impl OwnerCache {
     fn new(initial: Option<String>) -> Self {
+        Self::with_retry_backoff(initial, SIBLING_RETRY_BASE, SIBLING_RETRY_MAX)
+    }
+
+    /// Construct with an explicit indeterminate-retry backoff (tests shorten it).
+    fn with_retry_backoff(
+        initial: Option<String>,
+        retry_base: Duration,
+        retry_max: Duration,
+    ) -> Self {
         Self {
             pubkey: initial,
             siblings: std::sync::Mutex::new(HashMap::new()),
+            retry_base,
+            retry_max,
         }
     }
 
@@ -196,27 +252,134 @@ impl OwnerCache {
         self.pubkey.as_deref()
     }
 
-    /// Check if author is a known sibling (cached result).
-    fn is_known_sibling(&self, author: &str) -> Option<bool> {
-        self.siblings.lock().ok()?.get(author).copied()
-    }
-
-    /// Cache a sibling lookup result.
-    fn cache_sibling(&self, author: String, is_sibling: bool) {
-        if let Ok(mut map) = self.siblings.lock() {
-            // Cap at 256 entries to prevent unbounded growth.
-            if map.len() >= 256 {
-                map.clear();
+    /// What is known about `author` right now, without touching the relay.
+    fn sibling_state(&self, author: &str) -> SiblingCacheState {
+        let Ok(map) = self.siblings.lock() else {
+            return SiblingCacheState::Unknown;
+        };
+        match map.get(author) {
+            None => SiblingCacheState::Unknown,
+            Some(SiblingEntry::Proven(is_sibling)) => SiblingCacheState::Proven(*is_sibling),
+            Some(SiblingEntry::Indeterminate { retry_at, .. }) => {
+                if std::time::Instant::now() < *retry_at {
+                    SiblingCacheState::Throttled
+                } else {
+                    SiblingCacheState::Unknown
+                }
             }
-            map.insert(author, is_sibling);
         }
     }
+
+    /// The relay-proven verdict for `author`, if one has been cached.
+    #[cfg(test)]
+    fn proven_verdict(&self, author: &str) -> Option<bool> {
+        match self.sibling_state(author) {
+            SiblingCacheState::Proven(is_sibling) => Some(is_sibling),
+            _ => None,
+        }
+    }
+
+    /// Cache a proven sibling verdict.
+    fn cache_sibling(&self, author: String, is_sibling: bool) {
+        self.insert(author, SiblingEntry::Proven(is_sibling));
+    }
+
+    /// Record an indeterminate lookup for `author` and return the backoff
+    /// during which further events from them are denied without a relay call.
+    fn note_indeterminate(&self, author: &str) -> Duration {
+        let failures = match self
+            .siblings
+            .lock()
+            .ok()
+            .and_then(|map| map.get(author).copied())
+        {
+            Some(SiblingEntry::Indeterminate { failures, .. }) => failures.saturating_add(1),
+            _ => 1,
+        };
+        let backoff = self
+            .retry_base
+            .saturating_mul(1u32 << (failures - 1).min(16))
+            .min(self.retry_max);
+        self.insert(
+            author.to_string(),
+            SiblingEntry::Indeterminate {
+                retry_at: std::time::Instant::now() + backoff,
+                failures,
+            },
+        );
+        backoff
+    }
+
+    /// Number of cached authors at the eviction threshold.
+    const SIBLING_CACHE_CAP: usize = 256;
+
+    /// Insert or replace `author`'s entry under the bounded-size policy.
+    ///
+    /// Replacing an author already present never evicts anything — a retry
+    /// deadline being re-armed at capacity must not wipe the other entries,
+    /// or a saturated cache under a `/query` outage would collapse every
+    /// sibling back to a serial inline lookup per event. A previously absent
+    /// author at capacity evicts exactly one entry — the space the newcomer
+    /// needs: the longest-expired retry record if there is one, else an
+    /// arbitrary entry. Expired records are not purged wholesale because their
+    /// `failures` counter is the author's backoff tier; dropping it would
+    /// restart every affected author at the base delay after its next failed
+    /// lookup and multiply serial relay calls during the same outage.
+    fn insert(&self, author: String, entry: SiblingEntry) {
+        let Ok(mut map) = self.siblings.lock() else {
+            return;
+        };
+        if !map.contains_key(&author) && map.len() >= Self::SIBLING_CACHE_CAP {
+            let now = std::time::Instant::now();
+            let victim = map
+                .iter()
+                .filter_map(|(cached, existing)| match existing {
+                    SiblingEntry::Indeterminate { retry_at, .. } if *retry_at <= now => {
+                        Some((cached, *retry_at))
+                    }
+                    _ => None,
+                })
+                .min_by_key(|(_, retry_at)| *retry_at)
+                .map(|(cached, _)| cached.clone())
+                .or_else(|| map.keys().next().cloned());
+            if let Some(victim) = victim {
+                map.remove(&victim);
+            }
+        }
+        map.insert(author, entry);
+    }
+
+    /// Number of authors currently cached (proven or throttled).
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.siblings.lock().map(|map| map.len()).unwrap_or(0)
+    }
+}
+
+/// Outcome of one sibling profile verification attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SiblingVerdict {
+    /// kind:0 fetched and its NIP-OA auth tag cryptographically proves the
+    /// same owner.
+    Sibling,
+    /// The relay returned the author's profile and it does not prove the
+    /// same owner.
+    NotSibling,
+    /// Nothing was attested either way: the relay could not be consulted
+    /// (timeout, network, or HTTP error), answered with a malformed body, or
+    /// has no kind:0 for the author yet — a sibling's profile may simply not
+    /// have been published or replicated, so its absence is not a verdict.
+    Indeterminate,
 }
 
 /// Check if `author` is the owner OR a sibling (same owner via NIP-OA).
 ///
 /// For unknown authors, queries their kind:0 profile to extract the NIP-OA
-/// auth tag and verify the owner matches. Result is cached.
+/// auth tag and verify the owner matches. Only proven verdicts are cached as
+/// verdicts; an [`SiblingVerdict::Indeterminate`] lookup fails closed for the
+/// current event and arms a bounded retry deadline, so a transient relay
+/// outage cannot poison a sibling for the process lifetime and a persistent
+/// one cannot turn every sibling event into an inline relay round-trip.
 async fn is_owner_or_sibling(
     author: &str,
     owner_cache: &OwnerCache,
@@ -233,14 +396,39 @@ async fn is_owner_or_sibling(
     }
 
     // Check sibling cache.
-    if let Some(cached) = owner_cache.is_known_sibling(author) {
-        return cached;
+    match owner_cache.sibling_state(author) {
+        SiblingCacheState::Proven(is_sibling) => return is_sibling,
+        SiblingCacheState::Throttled => {
+            tracing::debug!(
+                author,
+                "sibling check throttled after an indeterminate lookup — denying without a relay query"
+            );
+            return false;
+        }
+        SiblingCacheState::Unknown => {}
     }
 
     // Query the author's kind:0 profile to check for NIP-OA auth tag.
-    let is_sibling = check_sibling_via_profile(author, my_owner, rest_client).await;
-    owner_cache.cache_sibling(author.to_string(), is_sibling);
-    is_sibling
+    match check_sibling_via_profile(author, my_owner, rest_client).await {
+        SiblingVerdict::Sibling => {
+            owner_cache.cache_sibling(author.to_string(), true);
+            true
+        }
+        SiblingVerdict::NotSibling => {
+            owner_cache.cache_sibling(author.to_string(), false);
+            false
+        }
+        SiblingVerdict::Indeterminate => {
+            let backoff = owner_cache.note_indeterminate(author);
+            tracing::warn!(
+                author,
+                retry_after_secs = backoff.as_secs(),
+                "sibling check indeterminate — relay profile query failed; \
+                 dropping this event without a proven verdict, retrying after backoff"
+            );
+            false
+        }
+    }
 }
 
 /// Return the workflow owner attributed by a relay-signed workflow message.
@@ -550,7 +738,10 @@ mod inbound_author_gate {
                 )
                 .await;
             if !decision.allowed {
-                tracing::debug!(
+                // INFO, not debug: under owner-only fleets a dropped event is
+                // the whole story of "the agent never answered", and the
+                // default log filter hides debug.
+                tracing::info!(
                     channel_id = %buzz_event.channel_id,
                     raw_author = %buzz_event.event.pubkey.to_hex(),
                     effective_author = %decision.effective_author,
@@ -848,16 +1039,22 @@ pub(crate) async fn is_dm_channel(
 
 /// Query an author's kind:0 profile and check if their NIP-OA auth tag
 /// proves the same owner as us.
+///
+/// Only a *fetched* profile yields a verdict the caller may cache: a
+/// profile with no verifying tag is definitively [`SiblingVerdict::NotSibling`],
+/// while a failed query or a missing profile is
+/// [`SiblingVerdict::Indeterminate`] and retried under the bounded backoff.
 async fn check_sibling_via_profile(
     author: &str,
     expected_owner: &str,
     rest_client: &relay::RestClient,
-) -> bool {
+) -> SiblingVerdict {
     let filter = nostr::Filter::new()
         .kind(nostr::Kind::Metadata)
         .author(match nostr::PublicKey::from_hex(author) {
             Ok(pk) => pk,
-            Err(_) => return false,
+            // A malformed author key can never verify — definitively not a sibling.
+            Err(_) => return SiblingVerdict::NotSibling,
         })
         .limit(1);
 
@@ -865,28 +1062,39 @@ async fn check_sibling_via_profile(
         .await
     {
         Ok(Ok(v)) => v,
-        _ => return false, // timeout or error — fail closed
+        Ok(Err(e)) => {
+            tracing::debug!(author, "sibling profile query failed: {e}");
+            return SiblingVerdict::Indeterminate;
+        }
+        Err(_) => {
+            tracing::debug!(author, "sibling profile query timed out");
+            return SiblingVerdict::Indeterminate;
+        }
     };
 
     // Look for an "auth" tag in the profile event.
     let events = match resp.as_array() {
         Some(arr) => arr,
-        None => return false,
+        // Non-array body is a server anomaly, not proof of absence.
+        None => return SiblingVerdict::Indeterminate,
     };
     let event = match events.first() {
         Some(e) => e,
-        None => return false,
+        // No kind:0 yet — not published, or not replicated to this relay.
+        // Not a verdict: the bounded backoff retries it, so a profile that
+        // appears later is picked up without a restart.
+        None => return SiblingVerdict::Indeterminate,
     };
     let tags = match event.get("tags").and_then(|t| t.as_array()) {
         Some(t) => t,
-        None => return false,
+        None => return SiblingVerdict::NotSibling,
     };
 
     // Find ["auth", owner_pk, conditions, sig] and verify the Schnorr signature.
     // Don't trust the relay — verify ourselves.
     let agent_pk = match nostr::PublicKey::from_hex(author) {
         Ok(pk) => pk,
-        Err(_) => return false,
+        Err(_) => return SiblingVerdict::NotSibling,
     };
 
     for tag in tags {
@@ -910,7 +1118,7 @@ async fn check_sibling_via_profile(
         match buzz_sdk::nip_oa::verify_auth_tag(&tag_json, &agent_pk) {
             Ok(_) => {
                 tracing::debug!(author, expected_owner, "sibling verified via NIP-OA");
-                return true;
+                return SiblingVerdict::Sibling;
             }
             Err(e) => {
                 tracing::debug!(author, "NIP-OA auth tag verification failed: {e}");
@@ -918,7 +1126,7 @@ async fn check_sibling_via_profile(
         }
     }
 
-    false
+    SiblingVerdict::NotSibling
 }
 
 /// Observer frames are published at a global rate of AT MOST ONE relay frame
@@ -1013,8 +1221,7 @@ impl ObserverPublishQueue {
         // Pre-trim at enqueue so (a) byte accounting reflects what will ship
         // and (b) one oversized leaf cannot force every frame it touches into
         // whole-envelope elision downstream.
-        fit_observer_event_to_budget(&mut event);
-        let bytes = serialized_len(&event);
+        let bytes = fit_observer_event_to_budget(&mut event);
         self.pending_bytes += bytes;
         self.events.push_back((bytes, source_events, event));
     }
@@ -1097,21 +1304,29 @@ impl ObserverPublishQueue {
         let channel = self.events.front()?.2.channel_id.clone();
 
         let mut picked: Vec<observer::ObserverEvent> = Vec::new();
+        let mut picked_bytes = 0;
         let mut kept: VecDeque<(usize, u64, observer::ObserverEvent)> =
             VecDeque::with_capacity(self.events.len());
         let mut gathering = true;
         while let Some((bytes, source_events, event)) = self.events.pop_front() {
             if gathering && event.channel_id == channel {
-                picked.push(event);
-                if picked.len() > 1
-                    && serialized_len(&batch_envelope(&picked)) > OBSERVER_MAX_PLAINTEXT_LEN
+                // The empty envelope already includes the array brackets.
+                // Add cached event sizes and one comma per preceding event;
+                // only the newest event's envelope metadata needs measuring.
+                if !picked.is_empty()
+                    && serialized_len(&empty_batch_envelope(&event))
+                        .saturating_add(picked_bytes)
+                        .saturating_add(bytes)
+                        .saturating_add(picked.len())
+                        > OBSERVER_MAX_PLAINTEXT_LEN
                 {
                     // Frame full: the overflow event stays queued and leads
                     // its channel's next slot.
-                    let event = picked.pop().expect("len > 1");
                     kept.push_back((bytes, source_events, event));
                     gathering = false;
                 } else {
+                    picked.push(event);
+                    picked_bytes += bytes;
                     self.pending_bytes -= bytes;
                 }
             } else {
@@ -1145,6 +1360,12 @@ fn batch_envelope(events: &[observer::ObserverEvent]) -> observer::ObserverEvent
     let last = events
         .last()
         .expect("batch envelope needs at least 1 event");
+    let mut envelope = empty_batch_envelope(last);
+    envelope.payload["events"] = serde_json::to_value(events).unwrap_or_default();
+    envelope
+}
+
+fn empty_batch_envelope(last: &observer::ObserverEvent) -> observer::ObserverEvent {
     observer::ObserverEvent {
         seq: last.seq,
         timestamp: last.timestamp.clone(),
@@ -1154,9 +1375,7 @@ fn batch_envelope(events: &[observer::ObserverEvent]) -> observer::ObserverEvent
         session_id: last.session_id.clone(),
         turn_id: last.turn_id.clone(),
         started_at: last.started_at.clone(),
-        payload: serde_json::json!({
-            "events": serde_json::to_value(events).unwrap_or_default(),
-        }),
+        payload: serde_json::json!({ "events": [] }),
     }
 }
 
@@ -1430,44 +1649,55 @@ const OBSERVER_LEAF_RETAIN_BYTES: usize = 3_000;
 /// byte-identical.
 ///
 /// The cap is measured in SERIALIZED bytes (JSON escaping makes serialized
-/// length differ from raw), so the stop condition is always a full reserialize
-/// of the whole frame: that counts the envelope, the variable `Option<String>`
-/// IDs, and any elision markers exactly. No separate margin constant is needed.
+/// length differ from raw). For small leaves, subtract the old serialized
+/// size and add the replacement's size. JSON delimiters and the envelope stay
+/// unchanged, so this accounting is exact. For a dominant leaf, recount the
+/// fitted frame instead of traversing the large original leaf again.
 ///
 /// Termination is provable: each iteration elides the largest string leaf that
-/// would STRICTLY shrink the serialized frame, then reserializes. Shrinkability
-/// is re-evaluated against each leaf's CURRENT value, so a leaf already at its
-/// retained floor can never be re-elided — the loop strictly decreases the
-/// serialized length each pass and is bounded by the leaf count. When no leaf
-/// can shrink the frame and it still overflows, the payload is replaced with a
-/// tiny stub, which trivially fits. Monotone decrease, bounded below by the stub.
+/// would STRICTLY shrink the serialized frame, then updates its size.
+/// Shrinkability is re-evaluated against each leaf's CURRENT value: a shorter
+/// removed-byte count can shorten an existing marker once more. Every pass
+/// strictly decreases serialized length, so the loop terminates. When no leaf
+/// can shrink the frame and it still overflows, replace the payload with a
+/// small stub. Callers must still reject an oversized metadata envelope.
 ///
-/// **Signature choice (`&mut`, double-serialize accepted):** on the common
-/// under-budget path this serializes the frame once to decide it fits, then
-/// `encrypt_observer_payload` serializes it again — one extra `to_string` of an
-/// already-small frame. Reusing that string would mean changing buzz-core's
-/// `encrypt_observer_payload` signature or adding a parallel encrypt path; both
-/// are out of this change's scope (buzz-core stays untouched). The clean `&mut`
-/// signature with one cheap redundant serialize is the deliberate tradeoff.
-fn fit_observer_event_to_budget(event: &mut observer::ObserverEvent) {
-    if serialized_len(event) <= OBSERVER_MAX_PLAINTEXT_LEN {
-        return;
+/// Returns the fitted serialized size so retention can account for bytes
+/// without another traversal. Counting writes avoid allocating a second copy
+/// of a potentially multi-megabyte source frame just to measure its size.
+fn fit_observer_event_to_budget(event: &mut observer::ObserverEvent) -> usize {
+    let mut bytes = serialized_len(event);
+    if bytes <= OBSERVER_MAX_PLAINTEXT_LEN {
+        return bytes;
     }
 
-    // Raw size of the payload we are about to trim, captured before mutation so
-    // the stub's `originalBytes` reports source bytes discarded, not serialized
-    // overflow — consistent with the per-leaf marker's raw byte count.
-    let original_payload_bytes = serde_json::to_string(&event.payload)
-        .map(|s| s.len())
-        .unwrap_or(0);
+    // Derive the original payload size from the measured frame and its small
+    // envelope, avoiding a second traversal of the oversized source payload.
+    // JSON null occupies four bytes in the temporary envelope.
+    let payload = event.payload.take();
+    let envelope_bytes = serialized_len(event).saturating_sub(4);
+    event.payload = payload;
+    let original_payload_bytes = bytes.saturating_sub(envelope_bytes);
 
-    // Elide the largest shrinkable leaf, reserialize, repeat. Each successful
-    // elision strictly shrinks the serialized frame, and a floored leaf can
-    // never be re-elided, so the loop is bounded by the leaf count.
+    // Each successful elision strictly shrinks the serialized frame, so the
+    // loop terminates even when a shortened marker permits another elision.
     while let Some(leaf) = largest_shrinkable_leaf(&mut event.payload) {
-        elide_leaf(leaf);
-        if serialized_len(event) <= OBSERVER_MAX_PLAINTEXT_LEN {
-            return;
+        // A JSON string uses at most six bytes per source byte (\u0000),
+        // plus quotes. Use deltas only when even that upper bound is small
+        // relative to the frame; otherwise recount the now-smaller frame.
+        let leaf_bound = leaf
+            .as_str()
+            .map_or(0, |s| s.len().saturating_mul(6).saturating_add(2));
+        if leaf_bound < bytes / 2 {
+            let old_leaf_bytes = serialized_len(leaf);
+            elide_leaf(leaf);
+            bytes = bytes - old_leaf_bytes + serialized_len(leaf);
+        } else {
+            elide_leaf(leaf);
+            bytes = serialized_len(event);
+        }
+        if bytes <= OBSERVER_MAX_PLAINTEXT_LEN {
+            return bytes;
         }
     }
 
@@ -1477,10 +1707,27 @@ fn fit_observer_event_to_budget(event: &mut observer::ObserverEvent) {
         "elided": format!("{} payload too large", event.kind),
         "originalBytes": original_payload_bytes,
     });
+    serialized_len(event)
 }
 
-fn serialized_len(event: &observer::ObserverEvent) -> usize {
-    serde_json::to_string(event).map(|s| s.len()).unwrap_or(0)
+fn serialized_len(value: &impl serde::Serialize) -> usize {
+    let mut counter = ObserverByteCounter(0);
+    serde_json::to_writer(&mut counter, value)
+        .map(|()| counter.0)
+        .unwrap_or(usize::MAX)
+}
+
+struct ObserverByteCounter(usize);
+
+impl std::io::Write for ObserverByteCounter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(bytes.len());
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Find the longest string leaf that would STRICTLY shrink if elided, returning
@@ -3790,6 +4037,7 @@ async fn run_harness(
                     &mut respawn_tasks,
                     observer.clone(),
                     Some(&ctx.rest_client),
+                    &mut last_activity,
                 ) == LoopAction::Exit
                 {
                     break;
@@ -4883,9 +5131,9 @@ fn dispatch_pending(
             .state
             .set_scope_owner_generation(scope.clone(), owner_generation);
 
-        // The prompt task records how it classified the channel, for the
+        // The prompt task records how it routed replies, for the
         // native-steer guard (`EventQueue::in_flight_accepts_steer`).
-        let prompt_dm = queue.in_flight_prompt_dm(&scope).unwrap_or_default();
+        let prompt_routing = queue.in_flight_prompt_routing(&scope).unwrap_or_default();
         let abort_handle = pool.join_set.spawn(async move {
             pool::run_prompt_task(
                 agent,
@@ -4895,7 +5143,7 @@ fn dispatch_pending(
                 result_tx,
                 Some(control_rx),
                 task_turn_id,
-                prompt_dm,
+                prompt_routing,
             )
             .await;
         });
@@ -5045,7 +5293,14 @@ fn handle_prompt_result(
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
     rest_client: Option<&relay::RestClient>,
+    last_activity: &mut tokio::time::Instant,
 ) -> LoopAction {
+    // Start a full idle interval when channel work settles, before releasing
+    // its in-flight guard. Heartbeats must not keep an otherwise idle pool alive.
+    match &result.source {
+        PromptSource::Channel(_) => *last_activity = tokio::time::Instant::now(),
+        PromptSource::Heartbeat => {}
+    }
     let before = pool.task_map().len();
     let agent_index = result.agent.index;
     let successful_steer_deliveries = pool
@@ -6262,6 +6517,10 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
         args: vec![],
         env: {
             let mut env = vec![
+                EnvVar {
+                    name: "BUZZ_OUTPUT_FORMAT".into(),
+                    value: config::agent_output_format(&config.persona_env_vars),
+                },
                 EnvVar {
                     name: "BUZZ_RELAY_URL".into(),
                     value: config.relay_url.clone(),
@@ -8321,6 +8580,384 @@ mod author_gate_tests {
         );
     }
 
+    // ── sibling verdict caching ───────────────────────────────────────────
+    //
+    // A sibling lookup that failed because the relay was unreachable is
+    // Indeterminate: it fails closed for that one event but must NOT be
+    // cached, or a single relay blip makes this agent silently ignore a
+    // same-owner sibling until the process restarts.
+
+    /// Serve one JSON body for every request on a loopback port, as the
+    /// `/query` endpoint the sibling check consults.
+    async fn sibling_query_server(
+        body: serde_json::Value,
+    ) -> (relay::RestClient, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind sibling query server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let body = body.to_string();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = vec![0; 8192];
+                let _ = socket.read(&mut request).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        let rest = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: nostr::Keys::generate(),
+            auth_tag_json: None,
+        };
+        (rest, server)
+    }
+
+    #[tokio::test]
+    async fn test_sibling_indeterminate_relay_failure_is_not_cached() {
+        let owner = nostr::Keys::generate().public_key().to_hex();
+        let author = nostr::Keys::generate().public_key().to_hex();
+        let cache = OwnerCache::new(Some(owner));
+        assert!(
+            !is_owner_or_sibling(&author, &cache, &dummy_rest_client()).await,
+            "an unverifiable author must fail closed for this event"
+        );
+        assert_eq!(
+            cache.proven_verdict(&author),
+            None,
+            "a relay failure must not be cached as a permanent non-sibling verdict"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sibling_absent_profile_is_indeterminate_and_throttled() {
+        let owner = nostr::Keys::generate().public_key().to_hex();
+        let author = nostr::Keys::generate().public_key().to_hex();
+        let cache = OwnerCache::new(Some(owner));
+        let (rest, server) = sibling_query_server(serde_json::json!([])).await;
+        assert!(!is_owner_or_sibling(&author, &cache, &rest).await);
+        assert_eq!(
+            cache.proven_verdict(&author),
+            None,
+            "a missing kind:0 is not a verdict — the profile may not exist or replicate yet"
+        );
+        assert_eq!(
+            cache.sibling_state(&author),
+            SiblingCacheState::Throttled,
+            "a missing profile is retried under the bounded backoff, not per event"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_sibling_profile_without_matching_tag_is_cached_negative() {
+        let owner = nostr::Keys::generate().public_key().to_hex();
+        let author = nostr::Keys::generate().public_key().to_hex();
+        let cache = OwnerCache::new(Some(owner));
+        let (rest, server) = sibling_query_server(serde_json::json!([{ "tags": [] }])).await;
+        assert!(!is_owner_or_sibling(&author, &cache, &rest).await);
+        assert_eq!(
+            cache.proven_verdict(&author),
+            Some(false),
+            "a fetched profile with no verifying owner attestation is definitive"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_sibling_valid_auth_tag_is_verified_and_cached() {
+        let owner_keys = nostr::Keys::generate();
+        let agent_keys = nostr::Keys::generate();
+        let author = agent_keys.public_key().to_hex();
+        let tag_json =
+            buzz_sdk::nip_oa::compute_auth_tag(&owner_keys, &agent_keys.public_key(), "")
+                .expect("compute auth tag");
+        let tag: serde_json::Value = serde_json::from_str(&tag_json).expect("tag json");
+        let profile = serde_json::json!([{ "tags": [tag] }]);
+        let cache = OwnerCache::new(Some(owner_keys.public_key().to_hex()));
+        let (rest, server) = sibling_query_server(profile).await;
+        assert!(
+            is_owner_or_sibling(&author, &cache, &rest).await,
+            "a kind:0 carrying a valid owner attestation must verify as a sibling"
+        );
+        assert_eq!(cache.proven_verdict(&author), Some(true));
+        server.abort();
+    }
+
+    /// A `/query` stand-in that counts requests and answers HTTP 500 (a
+    /// non-retriable status, so the harness sees an immediate error rather
+    /// than the 2s timeout) until `healthy` is flipped, after which it answers
+    /// `200 [{"tags":[]}]` — a fetched profile with no owner attestation, i.e.
+    /// a definitive `NotSibling`.
+    async fn flaky_sibling_query_server() -> (
+        relay::RestClient,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind flaky sibling query server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = std::sync::Arc::new(AtomicUsize::new(0));
+        let healthy = std::sync::Arc::new(AtomicBool::new(false));
+        let (server_requests, server_healthy) = (requests.clone(), healthy.clone());
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = vec![0; 8192];
+                let _ = socket.read(&mut request).await;
+                server_requests.fetch_add(1, Ordering::SeqCst);
+                let response = if server_healthy.load(Ordering::SeqCst) {
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\nConnection: close\r\n\r\n[{\"tags\":[]}]".to_string()
+                } else {
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+                };
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        let rest = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: nostr::Keys::generate(),
+            auth_tag_json: None,
+        };
+        (rest, requests, healthy, server)
+    }
+
+    #[tokio::test]
+    async fn test_sibling_indeterminate_retry_is_throttled_then_recovers() {
+        use std::sync::atomic::Ordering;
+
+        let owner = nostr::Keys::generate().public_key().to_hex();
+        let author = nostr::Keys::generate().public_key().to_hex();
+        let cache = OwnerCache::with_retry_backoff(
+            Some(owner),
+            Duration::from_millis(80),
+            Duration::from_millis(400),
+        );
+        let (rest, requests, healthy, server) = flaky_sibling_query_server().await;
+
+        // First contact during the outage: one relay call, denied, not proven.
+        assert!(!is_owner_or_sibling(&author, &cache, &rest).await);
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert_eq!(cache.proven_verdict(&author), None);
+        assert_eq!(cache.sibling_state(&author), SiblingCacheState::Throttled);
+
+        // A burst of further events inside the retry deadline must be denied
+        // WITHOUT another inline relay round-trip — this is what keeps a
+        // chatty sibling from stalling the inbound loop during an outage.
+        for _ in 0..5 {
+            assert!(!is_owner_or_sibling(&author, &cache, &rest).await);
+        }
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "events inside the retry deadline must not re-query the relay"
+        );
+
+        // Once the deadline passes the lookup is retried (still failing).
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(!is_owner_or_sibling(&author, &cache, &rest).await);
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            2,
+            "deadline expiry re-arms the lookup"
+        );
+        assert_eq!(cache.sibling_state(&author), SiblingCacheState::Throttled);
+
+        // Relay recovers: after the (now doubled) deadline the retry lands a
+        // proven verdict, which is cached and ends the throttling entirely.
+        healthy.store(true, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(220)).await;
+        assert!(!is_owner_or_sibling(&author, &cache, &rest).await);
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            cache.proven_verdict(&author),
+            Some(false),
+            "a relay-confirmed verdict replaces the retry deadline"
+        );
+        assert!(!is_owner_or_sibling(&author, &cache, &rest).await);
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            3,
+            "a proven verdict is served from cache with no further relay calls"
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn test_sibling_indeterminate_backoff_doubles_to_cap() {
+        let cache = OwnerCache::with_retry_backoff(
+            Some("00".into()),
+            Duration::from_secs(5),
+            Duration::from_secs(12),
+        );
+        let observed: Vec<u64> = (0..5)
+            .map(|_| cache.note_indeterminate("author").as_secs())
+            .collect();
+        assert_eq!(
+            observed,
+            vec![5, 10, 12, 12, 12],
+            "consecutive indeterminate lookups back off exponentially up to the cap"
+        );
+        assert_eq!(cache.sibling_state("author"), SiblingCacheState::Throttled);
+        // A proven verdict clears the backoff state.
+        cache.cache_sibling("author".into(), true);
+        assert_eq!(
+            cache.sibling_state("author"),
+            SiblingCacheState::Proven(true)
+        );
+        assert_eq!(
+            cache.note_indeterminate("fresh").as_secs(),
+            5,
+            "backoff is tracked per author"
+        );
+    }
+
+    /// A cache whose retry deadlines expire almost immediately, filled to the
+    /// eviction threshold with proven verdicts for `authors`.
+    fn saturated_cache_with_proven(authors: &[String]) -> OwnerCache {
+        let cache = OwnerCache::with_retry_backoff(
+            Some("00".into()),
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+        );
+        for author in authors {
+            cache.cache_sibling(author.clone(), true);
+        }
+        cache
+    }
+
+    #[test]
+    fn test_sibling_cache_replacing_an_author_at_capacity_keeps_the_rest() {
+        let authors: Vec<String> = (0..OwnerCache::SIBLING_CACHE_CAP)
+            .map(|i| format!("author-{i}"))
+            .collect();
+        let cache = saturated_cache_with_proven(&authors);
+        assert_eq!(cache.len(), OwnerCache::SIBLING_CACHE_CAP);
+
+        // Re-arming one author's retry deadline at capacity — first arming,
+        // then re-arming after it expired — replaces that entry only.
+        cache.note_indeterminate(&authors[0]);
+        std::thread::sleep(Duration::from_millis(5));
+        cache.note_indeterminate(&authors[0]);
+
+        assert_eq!(
+            cache.len(),
+            OwnerCache::SIBLING_CACHE_CAP,
+            "replacing an existing author must not evict anything"
+        );
+        for author in &authors[1..] {
+            assert_eq!(
+                cache.sibling_state(author),
+                SiblingCacheState::Proven(true),
+                "re-arming {} at capacity must keep {author}'s proven verdict",
+                authors[0]
+            );
+        }
+    }
+
+    #[test]
+    fn test_sibling_cache_new_author_at_capacity_evicts_expired_deadlines_first() {
+        let proven: Vec<String> = (1..OwnerCache::SIBLING_CACHE_CAP)
+            .map(|i| format!("proven-{i}"))
+            .collect();
+        let cache = saturated_cache_with_proven(&proven);
+        cache.note_indeterminate("expired");
+        assert_eq!(cache.len(), OwnerCache::SIBLING_CACHE_CAP);
+        std::thread::sleep(Duration::from_millis(5));
+
+        // A new author at capacity displaces the one expired deadline, nothing else.
+        cache.cache_sibling("newcomer".into(), false);
+        assert_eq!(cache.len(), OwnerCache::SIBLING_CACHE_CAP);
+        assert_eq!(
+            cache.sibling_state("newcomer"),
+            SiblingCacheState::Proven(false)
+        );
+        for author in &proven {
+            assert_eq!(
+                cache.sibling_state(author),
+                SiblingCacheState::Proven(true),
+                "an expired deadline must be evicted before any proven verdict"
+            );
+        }
+
+        // With no expired deadlines left, one more new author evicts exactly
+        // one entry — never the whole map.
+        cache.cache_sibling("newcomer-2".into(), false);
+        assert_eq!(cache.len(), OwnerCache::SIBLING_CACHE_CAP);
+        assert_eq!(
+            cache.sibling_state("newcomer-2"),
+            SiblingCacheState::Proven(false)
+        );
+        let retained = proven
+            .iter()
+            .chain(std::iter::once(&"newcomer".to_string()))
+            .filter(|author| cache.sibling_state(author) != SiblingCacheState::Unknown)
+            .count();
+        assert_eq!(
+            retained,
+            OwnerCache::SIBLING_CACHE_CAP - 1,
+            "a full cache evicts a single entry for a new author"
+        );
+    }
+
+    #[test]
+    fn test_sibling_cache_evicts_one_expired_record_and_keeps_other_backoff_tiers() {
+        let cache = OwnerCache::with_retry_backoff(
+            Some("00".into()),
+            Duration::from_millis(1),
+            Duration::from_millis(64),
+        );
+        // "old" expires first at the base tier; "tiered" has failed three
+        // times and climbed to a 4ms deadline.
+        assert_eq!(cache.note_indeterminate("old").as_millis(), 1);
+        for _ in 0..3 {
+            cache.note_indeterminate("tiered");
+        }
+        let proven: Vec<String> = (2..OwnerCache::SIBLING_CACHE_CAP)
+            .map(|i| format!("proven-{i}"))
+            .collect();
+        for author in &proven {
+            cache.cache_sibling(author.clone(), true);
+        }
+        assert_eq!(cache.len(), OwnerCache::SIBLING_CACHE_CAP);
+        std::thread::sleep(Duration::from_millis(10)); // both deadlines expired
+
+        // The newcomer takes exactly one slot: the longest-expired record.
+        cache.cache_sibling("newcomer".into(), false);
+        assert_eq!(cache.len(), OwnerCache::SIBLING_CACHE_CAP);
+        for author in &proven {
+            assert_eq!(cache.sibling_state(author), SiblingCacheState::Proven(true));
+        }
+        assert_eq!(
+            cache.note_indeterminate("tiered").as_millis(),
+            8,
+            "the surviving expired record must keep its backoff tier (3 failures → 8ms next)"
+        );
+        assert_eq!(
+            cache.note_indeterminate("old").as_millis(),
+            1,
+            "only the longest-expired record was evicted, so it restarts at the base tier"
+        );
+    }
+
     // ── is_dm_channel resolution ──────────────────────────────────────────
 
     fn resolver(startup: HashMap<Uuid, relay::ChannelInfo>) -> pool::ChannelInfoResolver {
@@ -8545,626 +9182,7 @@ mod observer_snapshot_race_tests {
 }
 
 #[cfg(test)]
-mod observer_publish_queue_tests {
-    use super::*;
-
-    fn event(seq: u64, kind: &str, channel: Option<&str>) -> observer::ObserverEvent {
-        observer::ObserverEvent {
-            seq,
-            timestamp: format!("2026-04-29T04:00:{:02}Z", seq.min(59)),
-            kind: kind.to_string(),
-            agent_index: Some(0),
-            channel_id: channel.map(ToOwned::to_owned),
-            session_id: Some("session-1".to_string()),
-            turn_id: Some("turn-1".to_string()),
-            started_at: None,
-            payload: serde_json::json!({ "seq": seq }),
-        }
-    }
-
-    fn queue_of(events: Vec<observer::ObserverEvent>) -> ObserverPublishQueue {
-        let mut queue = ObserverPublishQueue::default();
-        for event in events {
-            queue.ingest(event);
-        }
-        queue
-    }
-
-    /// Collect every frame the queue will produce, one publish slot at a time.
-    fn drain_frames(queue: &mut ObserverPublishQueue) -> Vec<observer::ObserverEvent> {
-        let mut frames = Vec::new();
-        while !queue.is_empty() {
-            frames.push(queue.next_frame().expect("queue not empty"));
-        }
-        frames
-    }
-
-    /// Inner seqs of a frame, whether it is an envelope or an unwrapped
-    /// singleton.
-    fn frame_seqs(frame: &observer::ObserverEvent) -> Vec<u64> {
-        match frame.payload.get("events").and_then(|v| v.as_array()) {
-            Some(inner) => inner.iter().map(|e| e["seq"].as_u64().unwrap()).collect(),
-            None => vec![frame.seq],
-        }
-    }
-
-    /// Retained bytes computed by WALKING the entries, independently of the
-    /// queue's own accumulator. Cap regressions must assert on this, not on
-    /// `total_pending_bytes()` — asserting the counter against itself passed
-    /// while the process retained ~2x the budget (Sami/Max round 3: each
-    /// pending coalescer entry holds the first chunk's text twice, in the
-    /// serialized skeleton AND the extracted `text` copy).
-    fn walked_retained_bytes(queue: &ObserverPublishQueue) -> usize {
-        let fifo: usize = queue
-            .events
-            .iter()
-            .map(|(_, _, event)| serialized_len(event))
-            .sum();
-        let coalescer: usize = queue
-            .coalescer
-            .pending
-            .iter()
-            .map(|pending| serialized_len(&pending.event) + pending.text.len())
-            .sum();
-        fifo + coalescer
-    }
-
-    /// The walker above is itself an instrument, and every cap test asks it
-    /// only for `<= CAP` — a blinded walker (missing an arm, or returning 0)
-    /// would satisfy all of them while hiding exactly the 2x overshoot it was
-    /// added to catch (Sami round 5, M17-M20). Pin it two-sided: it must SEE
-    /// the double retention, and it must agree with the accumulator EXACTLY
-    /// while both stores are non-empty — neither may drift.
-    #[test]
-    fn walked_retained_bytes_agrees_with_the_accumulator_exactly() {
-        fn chunk(seq: u64, message_id: &str, text: &str) -> observer::ObserverEvent {
-            let mut e = event(seq, "acp_read", Some("chan-a"));
-            e.payload = serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "session/update",
-                "params": {
-                    "sessionId": "session-1",
-                    "update": {
-                        "sessionUpdate": "agent_message_chunk",
-                        "messageId": message_id,
-                        "content": { "type": "text", "text": text },
-                    },
-                },
-            });
-            e
-        }
-
-        let text = "w".repeat(7_000);
-        let mut queue = ObserverPublishQueue::default();
-        // One pending chunk: its text lives in the serialized skeleton AND
-        // the extracted copy, so a walker blind to either arm reads short.
-        queue.ingest(chunk(1, "message-a", &text));
-        assert!(
-            walked_retained_bytes(&queue) >= 2 * text.len(),
-            "the walker must SEE the first chunk's text twice \
-             (skeleton + extracted copy), got {}",
-            walked_retained_bytes(&queue)
-        );
-
-        // Populate BOTH stores: the non-chunk event flushes message-a into
-        // the FIFO and queues itself; fresh pending keys (plus a same-key
-        // append) rebuild the coalescer side.
-        queue.ingest(event(2, "tool_call", Some("chan-a")));
-        queue.ingest(chunk(3, "message-b", &text));
-        queue.ingest(chunk(4, "message-b", &text));
-        queue.ingest(chunk(5, "message-c", &text));
-        assert!(
-            !queue.events.is_empty() && !queue.coalescer.pending.is_empty(),
-            "both arms must be non-empty for the agreement check to bind"
-        );
-        assert_eq!(
-            queue.total_pending_bytes(),
-            walked_retained_bytes(&queue),
-            "accumulator and entry-walk must agree exactly: neither may drift"
-        );
-    }
-
-    /// Two or more pending events for one channel ship as a single batch
-    /// envelope whose payload carries every inner event in arrival order.
-    #[test]
-    fn multiple_events_ship_as_one_envelope_in_order() {
-        let mut queue = queue_of(vec![
-            event(1, "turn_started", Some("chan-a")),
-            event(2, "acp_read", Some("chan-a")),
-            event(3, "acp_write", Some("chan-a")),
-        ]);
-
-        let frame = queue.next_frame().expect("one frame");
-        assert!(queue.is_empty(), "one channel, one publish slot");
-        assert_eq!(frame.kind, OBSERVER_BATCH_KIND);
-        assert_eq!(frame.seq, 3, "envelope mirrors the last inner event");
-        assert_eq!(frame_seqs(&frame), [1, 2, 3], "arrival order preserved");
-        let inner = frame.payload["events"].as_array().expect("events array");
-        assert_eq!(inner[1]["kind"], "acp_read", "inner events keep their kind");
-    }
-
-    /// A single pending event is published unwrapped — no envelope, so
-    /// consumers that predate batching still understand quiet periods.
-    #[test]
-    fn a_single_event_stays_unwrapped() {
-        let mut queue = queue_of(vec![event(7, "turn_started", Some("chan-a"))]);
-        let frame = queue.next_frame().expect("one frame");
-        assert!(queue.is_empty());
-        assert_eq!(frame.kind, "turn_started");
-        assert_eq!(frame.seq, 7);
-    }
-
-    /// An empty queue yields no frame — a tick with nothing pending must not
-    /// publish anything.
-    #[test]
-    fn empty_queue_yields_no_frame() {
-        let mut queue = ObserverPublishQueue::default();
-        assert!(queue.next_frame().is_none());
-        assert!(queue.is_empty());
-    }
-
-    /// Frames never mix channels, and each channel's events keep their FIFO
-    /// order. Gathering is QUEUE-WIDE: the front event's channel collects its
-    /// events from anywhere in the queue (that is what keeps the drain rate
-    /// in bytes per slot under interleaving), so cross-channel frame order
-    /// MAY differ from arrival order — but a null-channel event is a barrier
-    /// nothing gathers across.
-    #[test]
-    fn frames_never_mix_channels_and_gather_queue_wide() {
-        let mut queue = queue_of(vec![
-            event(1, "acp_read", Some("chan-a")),
-            event(2, "acp_write", Some("chan-a")),
-            event(3, "acp_read", Some("chan-b")),
-            event(4, "acp_read", Some("chan-a")),
-            event(5, "acp_read", None),
-        ]);
-
-        let frames = drain_frames(&mut queue);
-        assert_eq!(
-            frames.len(),
-            3,
-            "gathered: [1,2,4]@a, [3]@b, [5]@None — one frame each"
-        );
-        for frame in &frames {
-            let channels: HashSet<Option<String>> = match frame.payload.get("events") {
-                Some(serde_json::Value::Array(inner)) => inner
-                    .iter()
-                    .map(|e| e["channelId"].as_str().map(ToOwned::to_owned))
-                    .collect(),
-                _ => std::iter::once(frame.channel_id.clone()).collect(),
-            };
-            assert_eq!(channels.len(), 1, "a frame never mixes channels");
-        }
-        assert_eq!(
-            frame_seqs(&frames[0]),
-            [1, 2, 4],
-            "chan-a gathers queue-wide, FIFO within the channel"
-        );
-        assert_eq!(frames[0].channel_id.as_deref(), Some("chan-a"));
-        assert_eq!(frames[1].kind, "acp_read", "singleton stays unwrapped");
-        assert_eq!(frames[1].channel_id.as_deref(), Some("chan-b"));
-        assert_eq!(frames[2].channel_id, None);
-    }
-
-    /// A NULL-channel event is a barrier: channel events queued BEHIND it
-    /// must not gather into a frame ahead of it, so causally-global events
-    /// (`agent_panic`-class) keep their exact order against every channel.
-    /// The null event itself ships only its contiguous front run.
-    #[test]
-    fn null_channel_events_are_gather_barriers() {
-        let mut queue = queue_of(vec![
-            event(1, "acp_read", Some("chan-a")),
-            event(2, "acp_read", Some("chan-b")),
-            event(3, "agent_panic", None),
-            event(4, "acp_write", Some("chan-a")),
-        ]);
-
-        let frames = drain_frames(&mut queue);
-        let published: Vec<Vec<u64>> = frames.iter().map(frame_seqs).collect();
-        assert_eq!(
-            published,
-            [vec![1], vec![2], vec![3], vec![4]],
-            "seq 4 must not gather past the null barrier into frame 1"
-        );
-    }
-
-    /// The drain-rate regression Sami measured: with two channels strictly
-    /// alternating, a front-run packer degrades to ONE event per slot
-    /// (~275 B/s regardless of the 64KB frame budget). Queue-wide gathering
-    /// must drain an interleaved backlog in ~ceil(events / per-frame-fit)
-    /// slots per channel, not one slot per event.
-    #[test]
-    fn interleaved_channels_drain_at_bytes_per_slot_not_events_per_slot() {
-        let mut events = Vec::new();
-        for i in 0..100u64 {
-            events.push(event(2 * i + 1, "acp_read", Some("chan-a")));
-            events.push(event(2 * i + 2, "acp_read", Some("chan-b")));
-        }
-        let mut queue = queue_of(events);
-
-        let frames = drain_frames(&mut queue);
-        assert!(
-            frames.len() <= 4,
-            "200 tiny alternating events must gather into a few full frames, \
-             got {} (front-run packing would need 200 slots)",
-            frames.len()
-        );
-        for frame in &frames {
-            assert!(serialized_len(frame) <= OBSERVER_MAX_PLAINTEXT_LEN);
-        }
-        // Within each channel, FIFO order survives the gather.
-        let mut seqs_a = Vec::new();
-        let mut seqs_b = Vec::new();
-        for frame in &frames {
-            match frame.channel_id.as_deref() {
-                Some("chan-a") => seqs_a.extend(frame_seqs(frame)),
-                Some("chan-b") => seqs_b.extend(frame_seqs(frame)),
-                other => panic!("unexpected channel {other:?}"),
-            }
-        }
-        assert!(seqs_a.windows(2).all(|w| w[0] < w[1]), "chan-a FIFO");
-        assert!(seqs_b.windows(2).all(|w| w[0] < w[1]), "chan-b FIFO");
-        assert_eq!(seqs_a.len() + seqs_b.len(), 200, "nothing lost");
-    }
-
-    /// A same-channel backlog that cannot fit one 64KB frame splits across
-    /// SUCCESSIVE publish slots — never multiple frames from one slot — with
-    /// every frame under the cap and no event lost or reordered.
-    #[test]
-    fn oversized_backlogs_split_across_publish_slots_under_the_cap() {
-        let big_text = "x".repeat(30_000);
-        let mut queue = queue_of(
-            (1..=6)
-                .map(|seq| {
-                    let mut e = event(seq, "acp_read", Some("chan-a"));
-                    e.payload = serde_json::json!({ "seq": seq, "text": big_text });
-                    e
-                })
-                .collect(),
-        );
-
-        let frames = drain_frames(&mut queue);
-        assert!(
-            frames.len() > 1,
-            "six 30KB events cannot fit one 64KB frame"
-        );
-        let mut seen = Vec::new();
-        for frame in &frames {
-            assert!(
-                serialized_len(frame) <= OBSERVER_MAX_PLAINTEXT_LEN,
-                "every emitted frame must fit the plaintext cap"
-            );
-            seen.extend(frame_seqs(frame));
-        }
-        assert_eq!(
-            seen,
-            [1, 2, 3, 4, 5, 6],
-            "no event lost or reordered by splitting"
-        );
-    }
-
-    /// The queue preserves the coalescer's ordering rule: a non-chunk event
-    /// force-flushes pending chunk text ahead of itself, so merged chunks can
-    /// never leapfrog a tool call that arrived after them.
-    #[test]
-    fn non_chunk_events_flush_pending_chunks_ahead_of_themselves() {
-        fn chunk(seq: u64, text: &str) -> observer::ObserverEvent {
-            let mut e = event(seq, "acp_read", Some("chan-a"));
-            e.payload = serde_json::json!({
-                "params": { "update": {
-                    "sessionUpdate": "agent_message_chunk",
-                    "messageId": "m1",
-                    "content": { "text": text },
-                }}
-            });
-            e
-        }
-
-        let mut queue = ObserverPublishQueue::default();
-        queue.ingest(chunk(1, "hello "));
-        queue.ingest(chunk(2, "world"));
-        queue.ingest(event(3, "tool_call", Some("chan-a")));
-
-        let frame = queue.next_frame().expect("one frame");
-        assert!(queue.is_empty());
-        let inner = frame.payload["events"].as_array().expect("batch of 2");
-        assert_eq!(inner.len(), 2, "two chunks coalesce into one event");
-        assert_eq!(
-            inner[0]["payload"]["params"]["update"]["content"]["text"], "hello world",
-            "chunk text merged before the tool call"
-        );
-        assert_eq!(inner[1]["kind"], "tool_call");
-        assert!(inner[0]["seq"].as_u64() < inner[1]["seq"].as_u64());
-    }
-
-    /// Chunks still pending inside the coalescer (no non-chunk flushed them)
-    /// are picked up by the publish slot itself, not stranded.
-    #[test]
-    fn a_publish_slot_flushes_pending_coalesced_chunks() {
-        let mut e = event(1, "acp_read", Some("chan-a"));
-        e.payload = serde_json::json!({
-            "params": { "update": {
-                "sessionUpdate": "agent_message_chunk",
-                "messageId": "m1",
-                "content": { "text": "buffered" },
-            }}
-        });
-        let mut queue = ObserverPublishQueue::default();
-        queue.ingest(e);
-        assert!(!queue.is_empty(), "pending chunk counts as queued work");
-
-        let frame = queue.next_frame().expect("chunk must ship");
-        assert!(queue.is_empty());
-        assert_eq!(
-            frame.payload["params"]["update"]["content"]["text"],
-            "buffered"
-        );
-    }
-
-    /// Sami's ceiling assertion: when sustained input outruns the one-frame
-    /// drain budget for longer than the queue's byte budget, the OLDEST events
-    /// drop with accounting — never silently — and everything that survives
-    /// publishes in order with nothing else lost.
-    #[test]
-    fn over_budget_floods_drop_oldest_with_accounting() {
-        let big_text = "y".repeat(10_000);
-        let total = 500usize; // ~5MB of ~10KB events > 4MiB budget
-        let mut queue = ObserverPublishQueue::default();
-        for seq in 1..=total as u64 {
-            let mut e = event(seq, "acp_read", Some("chan-a"));
-            e.payload = serde_json::json!({ "seq": seq, "text": big_text });
-            queue.ingest(e);
-        }
-
-        assert!(
-            queue.dropped_events > 0,
-            "a 5MB backlog must overflow the 4MiB budget"
-        );
-        assert!(
-            walked_retained_bytes(&queue) <= OBSERVER_PENDING_QUEUE_MAX_BYTES,
-            "eviction must restore the byte budget (entry-walked), got {}",
-            walked_retained_bytes(&queue)
-        );
-
-        let frames = drain_frames(&mut queue);
-        let published: Vec<u64> = frames.iter().flat_map(frame_seqs).collect();
-        let expected: Vec<u64> = (queue.dropped_events + 1..=total as u64).collect();
-        assert_eq!(
-            published, expected,
-            "exactly the oldest `dropped_events` events are missing; the rest \
-             publish in order"
-        );
-        assert_eq!(
-            published.len() as u64 + queue.dropped_events,
-            total as u64,
-            "accounting: published + dropped == ingested"
-        );
-    }
-
-    /// Max's coalescer-bypass regression: a flood of chunks with DISTINCT
-    /// messageIds never flushes on its own, so every chunk sits in the
-    /// coalescer's pending buffer. TRUE retained bytes — walked from the
-    /// entries, never the queue's own accumulator — MUST respect the byte
-    /// budget with event-level drop accounting. Pre-fix this retained ~25MB
-    /// against the 4 MiB cap with `pending_bytes == 0` and zero drops; the
-    /// round-3 refinement (Sami/Max) caught the accumulator itself reading
-    /// under cap while true retention was 1.99x over.
-    #[test]
-    fn distinct_key_chunk_floods_are_bounded_by_the_byte_budget() {
-        let big_text = "z".repeat(50_000);
-        let total = 500u64; // ~25MB pending chunk text vs a 4MiB budget
-        let mut queue = ObserverPublishQueue::default();
-        for seq in 1..=total {
-            let mut e = event(seq, "acp_read", Some("chan-a"));
-            e.payload = serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "session/update",
-                "params": {
-                    "sessionId": "session-1",
-                    "update": {
-                        "sessionUpdate": "agent_message_chunk",
-                        "messageId": format!("message-{seq}"),
-                        "content": { "type": "text", "text": big_text },
-                    },
-                },
-            });
-            queue.ingest(e);
-        }
-
-        let walked = walked_retained_bytes(&queue);
-        assert!(
-            walked <= OBSERVER_PENDING_QUEUE_MAX_BYTES,
-            "TRUE retained bytes (walked from entries) must respect the cap, \
-             got {walked}"
-        );
-        assert!(
-            queue.total_pending_bytes() >= walked,
-            "the accumulator must never under-count true retention \
-             (accumulator {} < walked {walked})",
-            queue.total_pending_bytes()
-        );
-        assert!(
-            queue.dropped_events > 0,
-            "a ~25MB distinct-key chunk flood must record drops"
-        );
-        // Event-level accounting: everything that survives publishes, and
-        // survivors + dropped == ingested.
-        let frames = drain_frames(&mut queue);
-        let survived: u64 = frames.iter().map(|f| frame_seqs(f).len() as u64).sum();
-        assert_eq!(
-            survived + queue.dropped_events,
-            total,
-            "accounting: published + dropped == ingested"
-        );
-        // The survivors are the NEWEST events (drop-oldest).
-        let last_frame_seqs = frame_seqs(frames.last().expect("frames"));
-        assert_eq!(*last_frame_seqs.last().expect("seqs"), total);
-    }
-
-    /// Max's merged-chunk accounting regression: one coalescer entry can
-    /// represent MANY generated observer events (same-messageId chunks merge
-    /// in place), so evicting it must charge every merged source event to
-    /// `dropped_events`, not 1 per retained entry. Pre-fix, evicting an entry
-    /// that merged 50 chunks recorded `dropped_events == 1` and 49 generated
-    /// events vanished from the accounting.
-    #[test]
-    fn evicting_a_merged_chunk_entry_accounts_every_source_event() {
-        fn chunk(seq: u64, message_id: &str, text: &str) -> observer::ObserverEvent {
-            let mut e = event(seq, "acp_read", Some("chan-a"));
-            e.payload = serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "session/update",
-                "params": {
-                    "sessionId": "session-1",
-                    "update": {
-                        "sessionUpdate": "agent_message_chunk",
-                        "messageId": message_id,
-                        "content": { "type": "text", "text": text },
-                    },
-                },
-            });
-            e
-        }
-
-        let mut queue = ObserverPublishQueue::default();
-        // 50 × 1KB chunks under ONE messageId merge into a single pending
-        // coalescer entry — the oldest item anywhere in the queue.
-        let merged_text = "m".repeat(1_000);
-        let merged_sources = 50u64;
-        for seq in 1..=merged_sources {
-            queue.ingest(chunk(seq, "message-merged", &merged_text));
-        }
-        // Flood with distinct-key 50KB chunks until the byte budget evicts
-        // the oldest entries — the merged entry goes first.
-        let flood_text = "f".repeat(50_000);
-        let flood = 100u64;
-        for seq in 1..=flood {
-            queue.ingest(chunk(
-                merged_sources + seq,
-                &format!("message-{seq}"),
-                &flood_text,
-            ));
-        }
-
-        assert!(
-            walked_retained_bytes(&queue) <= OBSERVER_PENDING_QUEUE_MAX_BYTES,
-            "eviction must restore the byte budget (entry-walked), got {}",
-            walked_retained_bytes(&queue)
-        );
-        let frames = drain_frames(&mut queue);
-        assert!(
-            !frames
-                .iter()
-                .flat_map(frame_seqs)
-                .any(|seq| seq <= merged_sources),
-            "the merged entry (globally oldest) must have been evicted"
-        );
-        // Every survivor is an unmerged distinct-key chunk (1 source each),
-        // so source-event accounting must close exactly: the merged entry's
-        // eviction charges all 50 sources.
-        let survived: u64 = frames.iter().map(|f| frame_seqs(f).len() as u64).sum();
-        assert_eq!(
-            survived + queue.dropped_events,
-            merged_sources + flood,
-            "accounting: published sources + dropped sources == ingested"
-        );
-    }
-
-    /// Sami's M13 / Max's forced-flush probe: the OTHER eviction arm. A
-    /// merged entry FLUSHED into the publish FIFO (by a non-chunk event) must
-    /// still charge every absorbed source on eviction — the FIFO stores the
-    /// per-entry count precisely so the ledger survives flush. The
-    /// coalescer-side regression above never exercises this arm; mutating the
-    /// FIFO eviction to `dropped += 1` survived all 687 tests until this one.
-    #[test]
-    fn evicting_a_flushed_merged_entry_from_the_fifo_accounts_every_source_event() {
-        fn chunk(seq: u64, message_id: &str, text: &str) -> observer::ObserverEvent {
-            let mut e = event(seq, "acp_read", Some("chan-a"));
-            e.payload = serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "session/update",
-                "params": {
-                    "sessionId": "session-1",
-                    "update": {
-                        "sessionUpdate": "agent_message_chunk",
-                        "messageId": message_id,
-                        "content": { "type": "text", "text": text },
-                    },
-                },
-            });
-            e
-        }
-
-        let mut queue = ObserverPublishQueue::default();
-        // 50 × 1KB chunks merge under one messageId in the coalescer…
-        let merged_text = "m".repeat(1_000);
-        let merged_sources = 50u64;
-        for seq in 1..=merged_sources {
-            queue.ingest(chunk(seq, "message-merged", &merged_text));
-        }
-        // …then a non-chunk event force-flushes the merged entry into the
-        // publish FIFO. From here eviction happens on the FIFO arm.
-        queue.ingest(event(merged_sources + 1, "tool_call", Some("chan-a")));
-        assert!(
-            queue.coalescer.pending.is_empty(),
-            "the non-chunk event must have flushed the merged entry"
-        );
-        assert_eq!(
-            queue.events.front().expect("flushed entry queued").1,
-            merged_sources,
-            "the FIFO front must carry the merged source count"
-        );
-
-        // Distinct-key flood forces byte-budget eviction of the FIFO front.
-        let flood_text = "f".repeat(50_000);
-        let flood = 100u64;
-        for seq in 1..=flood {
-            queue.ingest(chunk(
-                merged_sources + 1 + seq,
-                &format!("message-{seq}"),
-                &flood_text,
-            ));
-        }
-
-        assert!(
-            walked_retained_bytes(&queue) <= OBSERVER_PENDING_QUEUE_MAX_BYTES,
-            "eviction must restore the byte budget (entry-walked), got {}",
-            walked_retained_bytes(&queue)
-        );
-        let frames = drain_frames(&mut queue);
-        assert!(
-            !frames
-                .iter()
-                .flat_map(frame_seqs)
-                .any(|seq| seq <= merged_sources),
-            "the flushed merged entry (globally oldest) must have been evicted"
-        );
-        // Ledger in source units: survivors are unmerged (1 source each), the
-        // evicted merged FIFO entry must charge all 50 sources.
-        let survived: u64 = frames.iter().map(|f| frame_seqs(f).len() as u64).sum();
-        let ingested = merged_sources + 1 + flood;
-        assert_eq!(
-            survived + queue.dropped_events,
-            ingested,
-            "accounting: published sources + dropped sources == ingested"
-        );
-    }
-
-    /// Under the byte budget the queue is lossless: every ingested event
-    /// publishes exactly once.
-    #[test]
-    fn under_budget_backlogs_are_lossless() {
-        let mut queue = queue_of(
-            (1..=200)
-                .map(|seq| event(seq, "acp_read", Some("chan-a")))
-                .collect(),
-        );
-        let frames = drain_frames(&mut queue);
-        let published: Vec<u64> = frames.iter().flat_map(frame_seqs).collect();
-        assert_eq!(published, (1..=200).collect::<Vec<u64>>());
-        assert_eq!(queue.dropped_events, 0);
-    }
-}
+mod observer_publish_queue_tests;
 
 #[cfg(test)]
 mod observer_publish_cadence_tests {
@@ -9793,6 +9811,46 @@ mod build_mcp_servers_tests {
     }
 
     #[test]
+    fn session_new_mcp_server_uses_effective_output_format() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let inherited = std::env::var_os("BUZZ_OUTPUT_FORMAT");
+        for (operator, persona, expected) in [
+            (None, vec![], "agent"),
+            (None, vec!["json"], "json"),
+            (None, vec!["json", "compact"], "compact"),
+            (Some("compact"), vec![], "compact"),
+            (Some("json"), vec!["compact"], "json"),
+            (Some(""), vec!["json"], ""),
+        ] {
+            match operator {
+                Some(value) => std::env::set_var("BUZZ_OUTPUT_FORMAT", value),
+                None => std::env::remove_var("BUZZ_OUTPUT_FORMAT"),
+            }
+            let mut config = test_config();
+            config.persona_env_vars = persona
+                .iter()
+                .map(|value| ("BUZZ_OUTPUT_FORMAT".into(), (*value).into()))
+                .collect();
+            let servers = build_mcp_servers(&config);
+            match &inherited {
+                Some(value) => std::env::set_var("BUZZ_OUTPUT_FORMAT", value),
+                None => std::env::remove_var("BUZZ_OUTPUT_FORMAT"),
+            }
+            let formats: Vec<_> = servers[0]
+                .env
+                .iter()
+                .filter(|entry| entry.name == "BUZZ_OUTPUT_FORMAT")
+                .map(|entry| entry.value.as_str())
+                .collect();
+            assert_eq!(
+                formats,
+                vec![expected],
+                "operator={operator:?}, persona={persona:?}"
+            );
+        }
+    }
+
+    #[test]
     fn session_new_mcp_server_forwards_buzz_auth_tag() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("BUZZ_AUTH_TAG", "test-attestation-tag");
@@ -10069,8 +10127,8 @@ mod edit_native_steer_tests {
     /// Drive `incoming` through the listener's steer decision while a turn
     /// for `running_event` is in flight in the same conversation session
     /// (the channel policy, or any DM). `prompt_is_dm` is how the running
-    /// turn's prompt classified the channel; `None` means the prompt has not
-    /// been formatted yet.
+    /// turn's prompt classified the channel, recorded with a thread-shared
+    /// reply anchor; `None` means the prompt has not been formatted yet.
     fn steer_into_running_turn(
         is_dm: bool,
         prompt_is_dm: Option<bool>,
@@ -10098,10 +10156,11 @@ mod edit_native_steer_tests {
         queue.flush_next().expect("running turn");
         assert!(queue.is_scope_in_flight(&scope));
         if let Some(prompt_is_dm) = prompt_is_dm {
-            queue
-                .in_flight_prompt_dm(&scope)
-                .expect("in-flight turn records its prompt classification")
-                .record(prompt_is_dm);
+            let routing = queue
+                .in_flight_prompt_routing(&scope)
+                .expect("in-flight turn records its prompt routing");
+            routing.record_dm(prompt_is_dm);
+            routing.record_trigger_anchor(false);
         }
 
         let mut pool = AgentPool::from_slots(vec![]);
@@ -10238,6 +10297,7 @@ mod edit_native_steer_tests {
         hold_at: HoldAt,
         running_event: nostr::Event,
         incoming: nostr::Event,
+        profiles: &[nostr::Event],
     ) -> (Option<pool::SteerRequest>, Option<ControlSignal>) {
         let channel_id = Uuid::new_v4();
         let is_dm = channel_type == "dm";
@@ -10291,23 +10351,32 @@ mod edit_native_steer_tests {
                 .insert(scope.clone(), "live-session".into());
         }
         // The relay has no newer metadata, project, or history: every query
-        // returns no events, so the turn keeps the startup channel metadata.
+        // except a profile lookup returns no events, so the turn keeps the
+        // startup channel metadata.
         let relay = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind relay fixture");
         let base_url = format!("http://{}", relay.local_addr().unwrap());
+        let profiles = Arc::new(serde_json::to_string(profiles).expect("profiles json"));
         let relay = tokio::spawn(async move {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             loop {
                 let (mut socket, _) = relay.accept().await.expect("accept relay query");
+                let profiles = Arc::clone(&profiles);
                 tokio::spawn(async move {
                     let mut request = [0; 16384];
-                    let _ = socket.read(&mut request).await;
-                    let _ = socket
-                        .write_all(
-                            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]",
-                        )
-                        .await;
+                    let read = socket.read(&mut request).await.unwrap_or(0);
+                    let body =
+                        if String::from_utf8_lossy(&request[..read]).contains("\"kinds\":[0]") {
+                            profiles.as_str()
+                        } else {
+                            "[]"
+                        };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
                 });
             }
         });
@@ -10386,9 +10455,15 @@ mod edit_native_steer_tests {
     /// top-level follow-up must be steered natively.
     #[tokio::test]
     async fn dispatched_dm_turn_records_classification_for_native_steer() {
-        let (steer, control) =
-            steer_into_dispatched_turn("dm", None, HoldAt::Prompt, message(None), message(None))
-                .await;
+        let (steer, control) = steer_into_dispatched_turn(
+            "dm",
+            None,
+            HoldAt::Prompt,
+            message(None),
+            message(None),
+            &[],
+        )
+        .await;
 
         assert!(steer.is_some(), "DM follow-up is sent as a native steer");
         assert_eq!(
@@ -10408,6 +10483,7 @@ mod edit_native_steer_tests {
             HoldAt::SessionNew,
             message(None),
             message(None),
+            &[],
         )
         .await;
 
@@ -10429,6 +10505,7 @@ mod edit_native_steer_tests {
             HoldAt::SessionNew,
             message(None),
             message(None),
+            &[],
         )
         .await;
 
@@ -10439,12 +10516,11 @@ mod edit_native_steer_tests {
         assert_eq!(control, Some(ControlSignal::Steer));
     }
 
-    /// A known channel's prompt is never rendered as a DM, so a same-thread
-    /// follow-up is steered natively before the turn's classification is
-    /// recorded, as before DM steering existed: here the prompt task is
-    /// still waiting on `session/new` ahead of an `initial_message`.
+    /// Until a thread turn's prompt is formatted, its reply anchor is
+    /// unknown: an agent↔agent turn anchors to its own trigger. A same-thread
+    /// follow-up during `session/new` therefore takes the cancel+merge path.
     #[tokio::test]
-    async fn channel_same_thread_follow_up_during_setup_steers_natively() {
+    async fn channel_same_thread_follow_up_during_setup_cancels_and_merges() {
         let root = "ab".repeat(32);
         let (steer, control) = steer_into_dispatched_turn(
             "stream",
@@ -10452,6 +10528,30 @@ mod edit_native_steer_tests {
             HoldAt::SessionNew,
             message(Some(&root)),
             message(Some(&root)),
+            &[],
+        )
+        .await;
+
+        assert!(
+            steer.is_none(),
+            "no native steer before the anchor is known"
+        );
+        assert_eq!(control, Some(ControlSignal::Steer));
+    }
+
+    /// A human-facing thread turn anchors to the thread root, which every
+    /// same-thread message shares, so a follow-up is steered natively once
+    /// the prompt has recorded that anchor.
+    #[tokio::test]
+    async fn channel_same_thread_follow_up_during_prompt_steers_natively() {
+        let root = "ab".repeat(32);
+        let (steer, control) = steer_into_dispatched_turn(
+            "stream",
+            None,
+            HoldAt::Prompt,
+            message(Some(&root)),
+            message(Some(&root)),
+            &[],
         )
         .await;
 
@@ -10460,6 +10560,45 @@ mod edit_native_steer_tests {
             control, None,
             "native steer must not cancel the running turn"
         );
+    }
+
+    /// An agent↔agent thread turn replies under its own trigger. A human's
+    /// message in that thread must reply at the thread root, so it takes the
+    /// cancel+merge path, whose re-prompt carries its own `<context>`.
+    #[tokio::test]
+    async fn human_follow_up_to_agent_thread_turn_cancels_and_merges() {
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        let root = "ab".repeat(32);
+        let agent = Keys::generate();
+        let other_agent = Keys::generate();
+        let agent_profile = |keys: &Keys| {
+            EventBuilder::new(Kind::Metadata, "{}")
+                .tags([Tag::parse(["auth", &"cd".repeat(32), "", &"ef".repeat(64)]).unwrap()])
+                .sign_with_keys(keys)
+                .unwrap()
+        };
+        let running = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            "agent asks",
+        )
+        .tags([
+            Tag::parse(["e", root.as_str(), "", "reply"]).unwrap(),
+            Tag::parse(["p", other_agent.public_key().to_hex().as_str()]).unwrap(),
+        ])
+        .sign_with_keys(&agent)
+        .unwrap();
+        let (steer, control) = steer_into_dispatched_turn(
+            "stream",
+            None,
+            HoldAt::Prompt,
+            running,
+            message(Some(&root)),
+            &[agent_profile(&agent), agent_profile(&other_agent)],
+        )
+        .await;
+
+        assert!(steer.is_none(), "no native steer into an agent-only turn");
+        assert_eq!(control, Some(ControlSignal::Steer));
     }
 
     /// A DM thread reply needs a `--reply-to` the running top-level turn's
@@ -10633,6 +10772,114 @@ mod error_outcome_emission_tests {
         agent.state.set_scope_owner_generation(scope, generation);
     }
 
+    // Exercise result handling and both production idle decisions with a fake clock.
+    // No relay or provider is used; cat supplies only an owned process handle.
+    async fn assert_completion_idle_window(channel_turn: bool) {
+        let channel_id = Uuid::new_v4();
+        let scope = scope::SessionScope::Conversation { channel_id };
+        let mut agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        if channel_turn {
+            bind_agent_scope_owner(&mut pool, &mut agent, scope.clone());
+        }
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: channel_turn.then_some(channel_id),
+                scope: channel_turn.then_some(scope.clone()),
+                turn_id: "idle-window".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = !channel_turn;
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let bound = Duration::from_secs(30);
+        let mut last_activity = tokio::time::Instant::now();
+        tokio::time::advance(bound * 2).await;
+        let completed_at = tokio::time::Instant::now();
+        let result = PromptResult {
+            agent,
+            source: if channel_turn {
+                PromptSource::Channel(scope)
+            } else {
+                PromptSource::Heartbeat
+            },
+            turn_id: "idle-window".into(),
+            outcome: PromptOutcome::Ok(crate::acp::StopReason::EndTurn),
+            batch: None,
+        };
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &HashSet::new(),
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+            &mut last_activity,
+        );
+        // Match the main loop: consume finished prompt tasks before the idle check.
+        while pool.join_set.join_next().await.is_some() {}
+        assert!(pool.task_map().is_empty());
+        assert!(!heartbeat_in_flight);
+        assert!(!queue.has_undispatched_work());
+        let sleep_due = |now| {
+            idle_pool_sleep_due(
+                true,
+                last_activity,
+                now,
+                bound,
+                heartbeat_in_flight,
+                !pool.join_set.is_empty(),
+                queue.has_undispatched_work(),
+                any_respawn_in_flight(&crash_history),
+            )
+        };
+        assert_eq!(sleep_due(completed_at), !channel_turn);
+        assert_eq!(
+            inactivity_expired(last_activity, completed_at, bound, false),
+            !channel_turn
+        );
+        if channel_turn {
+            assert_eq!(last_activity, completed_at);
+            assert!(!sleep_due(completed_at + bound - Duration::from_millis(1)));
+        }
+        assert!(sleep_due(completed_at + bound));
+        assert!(inactivity_expired(
+            last_activity,
+            completed_at + bound,
+            bound,
+            false
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn completed_channel_turn_gets_a_full_bounded_idle_window() {
+        assert_completion_idle_window(true).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn completed_heartbeat_does_not_extend_the_idle_window() {
+        assert_completion_idle_window(false).await;
+    }
+
     #[tokio::test]
     async fn successful_native_steer_is_transferred_to_live_session_delivery_state() {
         let channel_id = Uuid::new_v4();
@@ -10704,6 +10951,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             None,
             None,
+            &mut tokio::time::Instant::now(),
         );
 
         let returned = pool.agents_mut()[0].as_ref().expect("returned agent");
@@ -10784,6 +11032,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             None,
             None,
+            &mut tokio::time::Instant::now(),
         );
 
         let returned = pool.agents_mut()[0].as_ref().expect("returned agent");
@@ -10905,6 +11154,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             None,
             None,
+            &mut tokio::time::Instant::now(),
         );
 
         let returned = pool.agents_mut()[0].as_ref().expect("returned agent");
@@ -10974,6 +11224,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             None,
+            &mut tokio::time::Instant::now(),
         );
 
         let turn_errors: Vec<_> = observer
@@ -11243,6 +11494,7 @@ mod error_outcome_emission_tests {
                 &mut respawn_tasks,
                 Some(observer.clone()),
                 None,
+                &mut tokio::time::Instant::now(),
             );
             let events = observer.snapshot();
             let turn_error = events.iter().find(|e| e.kind == "turn_error").unwrap();
@@ -11338,6 +11590,7 @@ mod error_outcome_emission_tests {
                 &mut respawn_tasks,
                 None,
                 None,
+                &mut tokio::time::Instant::now(),
             );
             (
                 queue.pending_channels(),
@@ -11447,6 +11700,7 @@ mod error_outcome_emission_tests {
                 &mut respawn_tasks,
                 None,
                 None,
+                &mut tokio::time::Instant::now(),
             );
             (
                 queue.pending_channels(),
@@ -11542,6 +11796,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             None,
+            &mut tokio::time::Instant::now(),
         );
 
         let events = observer.snapshot();
@@ -11639,6 +11894,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             None,
+            &mut tokio::time::Instant::now(),
         );
 
         let events = observer.snapshot();
@@ -11760,6 +12016,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             None,
+            &mut tokio::time::Instant::now(),
         );
 
         // Batch preserved as a cancelled merge, not dead-lettered — same
@@ -11896,6 +12153,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             None,
+            &mut tokio::time::Instant::now(),
         );
 
         // No batch to merge — the queue has nothing pending for any channel.
@@ -12027,6 +12285,7 @@ mod error_outcome_emission_tests {
                 &mut respawn_tasks,
                 None,
                 None,
+                &mut tokio::time::Instant::now(),
             ),
             LoopAction::Continue
         ));
@@ -12179,6 +12438,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             None,
             None,
+            &mut tokio::time::Instant::now(),
         );
 
         // The batch must not be requeued: pending_channels returns 0.
@@ -12287,6 +12547,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             Some(&rest),
+            &mut tokio::time::Instant::now(),
         );
 
         // The batch must not be requeued: pending_channels returns 0.
@@ -12558,6 +12819,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             None,
             None,
+            &mut tokio::time::Instant::now(),
         );
 
         // Non-auth application error: batch IS requeued (first attempt, retry budget > 0).
@@ -12738,6 +13000,38 @@ mod observer_payload_trim_tests {
             20_000,
             "the smaller leaf is left untouched once the frame fits"
         );
+
+        // Many escaped leaves exercise incremental size accounting; enough
+        // shrink to fit while untouched leaves and section order survive.
+        for text in ["x", "\n\"\\", "🐝\u{0}"] {
+            let leaf = format!(
+                "{}{}{}",
+                "x".repeat(3_000),
+                text.repeat(4_000),
+                "y".repeat(3_000)
+            );
+            let mut event = event_with_payload(
+                "acp_read",
+                serde_json::json!({"items": vec![leaf.clone(); 9], "small": "keep"}),
+            );
+            let fitted_bytes = fit_observer_event_to_budget(&mut event);
+            assert_eq!(fitted_bytes, serialized(&event).len());
+            assert!(fitted_bytes <= OBSERVER_MAX_PLAINTEXT_LEN);
+            let items = event.payload["items"]
+                .as_array()
+                .expect("trimmed sections survive");
+            assert_eq!(items.len(), 9);
+            assert_eq!(event.payload["small"], "keep");
+            let mut saw_untouched = false;
+            for item in items {
+                if item == &leaf {
+                    saw_untouched = true;
+                } else {
+                    assert!(!saw_untouched, "equal-size leaves elide in traversal order");
+                    assert!(item.as_str().unwrap().contains("…[elided"));
+                }
+            }
+        }
     }
 
     #[test]
@@ -12789,6 +13083,19 @@ mod observer_payload_trim_tests {
             "fell back to the stub"
         );
         assert!(event.payload.get("originalBytes").is_some());
+
+        // An escaped leaf just above its retained floor is small relative to
+        // a non-shrinkable numeric array. Delta accounting must include the
+        // replacement, or it would incorrectly accept this oversized frame.
+        let mut event = event_with_payload(
+            "acp_read",
+            serde_json::json!({"numbers": vec![0; 18_500], "edge": "\u{0}".repeat(6_100)}),
+        );
+        let original_payload_bytes = serialized_len(&event.payload);
+        let fitted_bytes = fit_observer_event_to_budget(&mut event);
+        assert_eq!(fitted_bytes, serialized(&event).len());
+        assert!(fitted_bytes <= OBSERVER_MAX_PLAINTEXT_LEN);
+        assert_eq!(event.payload["originalBytes"], original_payload_bytes);
     }
 
     #[test]

@@ -25,8 +25,7 @@ abstract final class CodeStyle {
   static final fontSizeFactor = fontSize / messageBodyTextStyle.fontSize!;
 
   /// Fill behind a code surface.
-  static Color background(ColorScheme scheme) =>
-      scheme.surfaceContainerHighest.withValues(alpha: 0.6);
+  static Color background(ColorScheme scheme) => scheme.surfaceContainerHighest;
 
   /// Outline around a code surface.
   static Color border(ColorScheme scheme) =>

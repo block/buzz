@@ -1,7 +1,10 @@
+import 'package:buzz/shared/widgets/buzz_toast.dart';
+
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui' show ImageFilter;
 
+import 'package:duo_kit/duo_kit.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
@@ -9,7 +12,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:video_player/video_player.dart';
 
@@ -18,8 +21,10 @@ import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/concentric_sheet_surface.dart';
 import '../../shared/widgets/page_indicator.dart';
+import '../../shared/widgets/duo_toolbar.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/ios_navigation_bar.dart';
+import '../../shared/widgets/navigation_backdrop.dart';
 import 'media_viewer_hero.dart';
 
 export 'media_viewer_hero.dart';
@@ -82,6 +87,7 @@ PageRoute<void> buildImageViewerRoute({
   double? aspectRatio,
   List<MediaViewerImage>? galleryItems,
   int initialIndex = 0,
+  ValueChanged<int>? onSelectionChanged,
   VoidCallback? onReply,
   MediaViewerMoreAction? onMore,
   bool disableAnimations = false,
@@ -112,6 +118,7 @@ PageRoute<void> buildImageViewerRoute({
           semanticLabel: semanticLabel,
           galleryItems: images,
           initialIndex: safeInitialIndex,
+          onSelectionChanged: onSelectionChanged,
           onReply: onReply,
           onMore: onMore,
         ),
@@ -129,6 +136,7 @@ void openImageViewer(
   double? aspectRatio,
   List<MediaViewerImage>? galleryItems,
   int initialIndex = 0,
+  ValueChanged<int>? onSelectionChanged,
   VoidCallback? onReply,
   MediaViewerMoreAction? onMore,
 }) {
@@ -141,6 +149,7 @@ void openImageViewer(
       aspectRatio: aspectRatio,
       galleryItems: galleryItems,
       initialIndex: initialIndex,
+      onSelectionChanged: onSelectionChanged,
       onReply: onReply,
       onMore: onMore,
       disableAnimations: MediaQuery.disableAnimationsOf(context),
@@ -180,6 +189,9 @@ class MediaImageViewerPage extends HookConsumerWidget {
   final String? semanticLabel;
   final List<MediaViewerImage>? galleryItems;
   final int initialIndex;
+
+  /// Reports the visible photo immediately, including before any exit path.
+  final ValueChanged<int>? onSelectionChanged;
   final VoidCallback? onReply;
   final MediaViewerMoreAction? onMore;
 
@@ -190,6 +202,7 @@ class MediaImageViewerPage extends HookConsumerWidget {
     this.semanticLabel,
     this.galleryItems,
     this.initialIndex = 0,
+    this.onSelectionChanged,
     this.onReply,
     this.onMore,
   });
@@ -293,6 +306,7 @@ class MediaImageViewerPage extends HookConsumerWidget {
       }
       _precacheViewerImages(context, images, index);
       currentIndex.value = index;
+      onSelectionChanged?.call(index);
       isTransformed.value = _hasImageTransform(
         transformationControllers[index].value,
       );
@@ -454,6 +468,13 @@ class MediaImageViewerPage extends HookConsumerWidget {
       onMore?.call(context, images[currentIndex.value].url);
     }
 
+    final toolbarScope = DuoToolbarScope.maybeOf(context);
+    final strip = defaultTargetPlatform == TargetPlatform.iOS
+        ? (toolbarScope == null
+              ? FoldGeometry.of(context).strip
+              : toolbarScope.strip)
+        : null;
+    final inRail = strip != null;
     final viewportHeight = MediaQuery.sizeOf(context).height;
     final dragProgress = (dragOffset.value / viewportHeight).clamp(0.0, 1.0);
     final imageScale = 1 - (dragProgress * 0.1);
@@ -476,7 +497,37 @@ class MediaImageViewerPage extends HookConsumerWidget {
           ),
         ),
         body: Stack(
+          fit: StackFit.expand,
           children: [
+            Theme(
+              data: ThemeData.dark(),
+              child: DuoToolbarPortal(
+                strip: strip,
+                active:
+                    (toolbarScope?.active ?? true) &&
+                    (ModalRoute.isCurrentOf(context) ?? true),
+                actions: [
+                  IosNavigationAction(
+                    label: 'Close image viewer',
+                    symbol: 'xmark',
+                    onPressed: () => unawaited(dismiss()),
+                  ),
+                  if (onReply != null)
+                    IosNavigationAction(
+                      label: 'Reply in thread',
+                      symbol: 'arrowshape.turn.up.left',
+                      onPressed: () => unawaited(replyInThread()),
+                    ),
+                  if (onMore != null)
+                    IosNavigationAction(
+                      label: 'More image actions',
+                      symbol: 'ellipsis',
+                      onPressed: showMoreActions,
+                    ),
+                ],
+                child: const SizedBox.shrink(),
+              ),
+            ),
             Positioned.fill(
               child: Transform.translate(
                 offset: Offset(0, dragOffset.value),
@@ -493,7 +544,9 @@ class MediaImageViewerPage extends HookConsumerWidget {
                     itemBuilder: (context, index) {
                       final image = images[index];
                       return Padding(
-                        padding: _mediaViewerPadding(context),
+                        padding: inRail
+                            ? EdgeInsets.zero
+                            : _mediaViewerPadding(context),
                         child: LayoutBuilder(
                           builder: (context, constraints) {
                             final viewerSize = _imageViewerSize(
@@ -554,7 +607,7 @@ class MediaImageViewerPage extends HookConsumerWidget {
                                           errorBuilder: (_, _, _) =>
                                               const _MediaLoadFailure(
                                                 message: 'Failed to load image',
-                                                icon: LucideIcons.imageOff,
+                                                icon: BuzzIcons.imageOff,
                                               ),
                                         ),
                                       ),
@@ -579,6 +632,7 @@ class MediaImageViewerPage extends HookConsumerWidget {
                 opacity: chromeOpacity,
                 child: SafeArea(
                   child: _MediaViewerBottomControls(
+                    showActions: !inRail,
                     images: images,
                     currentIndex: currentIndex.value,
                     onSelect: (index) {
@@ -601,7 +655,9 @@ class MediaImageViewerPage extends HookConsumerWidget {
                 ),
               ),
             ),
-            if (defaultTargetPlatform == TargetPlatform.iOS)
+            if (inRail)
+              const SizedBox.shrink()
+            else if (defaultTargetPlatform == TargetPlatform.iOS)
               Positioned(
                 top: 0,
                 left: 0,
@@ -627,16 +683,33 @@ class MediaImageViewerPage extends HookConsumerWidget {
                 ),
               )
             else
-              PositionedDirectional(
+              Positioned(
                 top: 0,
-                end: Grid.sm,
+                left: 0,
+                right: 0,
                 child: Opacity(
                   opacity: chromeOpacity,
-                  child: SafeArea(
-                    child: _MediaViewerCloseButton(
-                      key: const ValueKey('message-media-image-viewer-close'),
-                      tooltip: 'Close image viewer',
-                      onPressed: () => unawaited(dismiss()),
+                  child: Theme(
+                    data: ThemeData.dark(),
+                    child: NavigationBackdrop(
+                      child: SafeArea(
+                        bottom: false,
+                        child: Align(
+                          alignment: AlignmentDirectional.centerEnd,
+                          child: Padding(
+                            padding: const EdgeInsetsDirectional.only(
+                              end: Grid.sm,
+                            ),
+                            child: _MediaViewerCloseButton(
+                              key: const ValueKey(
+                                'message-media-image-viewer-close',
+                              ),
+                              tooltip: 'Close image viewer',
+                              onPressed: () => unawaited(dismiss()),
+                            ),
+                          ),
+                        ),
+                      ),
                     ),
                   ),
                 ),

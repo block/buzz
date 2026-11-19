@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -8,7 +9,13 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../relay/relay.dart';
+import '../theme/mobile_appearance.dart';
+import '../theme/theme_extensions.dart';
+import '../animated_avatar.dart';
 import 'avatar_image.dart';
+import 'dm_header_portrait.dart';
+import 'dm_header_cluster.dart';
+import 'app_route_observer.dart';
 import 'ios_navigation_metrics.dart';
 export 'ios_navigation_metrics.dart';
 
@@ -17,6 +24,7 @@ class IosNavigationAction {
   const IosNavigationAction({
     required this.label,
     this.symbol,
+    this.icon,
     this.imageUrl,
     this.avatarInitial,
     this.avatarIdentity,
@@ -30,10 +38,18 @@ class IosNavigationAction {
     this.avatarHidden = false,
 
     this.plain = false,
+    this.sharesBackground = true,
+    this.keepInHeaderOnDuo = false,
   });
+
+  /// Keeps list controls beside their content when a Duo rail is present.
+  final bool keepInHeaderOnDuo;
 
   final String label;
   final String? symbol;
+
+  /// Custom font artwork rendered as a native template image.
+  final IconData? icon;
   final String? imageUrl;
   final String? avatarInitial;
   final String? avatarIdentity;
@@ -53,12 +69,16 @@ class IosNavigationAction {
   /// Omits the shared Liquid Glass background for a text-only action.
   final bool plain;
 
+  /// Whether this action can share its glass background with adjacent actions.
+  final bool sharesBackground;
+
   Map<String, Object?> _encode(String id) => {
     'id': id,
     'label': label,
     'symbol': avatarInitial == null ? symbol : null,
     'avatarInitial': avatarInitial,
     'avatarIsAgent': avatarIsAgent,
+    'avatarArtwork': avatarIsAgent && usesInsetAgentArtwork(imageUrl),
     'activityColor': activityColor?.toARGB32(),
     'activityLabel': activityLabel,
     'imageUrl': imageUrl,
@@ -68,6 +88,8 @@ class IosNavigationAction {
     'avatarHidden': avatarHidden,
 
     'plain': plain,
+    'sharesBackground': sharesBackground,
+    'keepInHeaderOnDuo': keepInHeaderOnDuo,
     'children': [
       for (var i = 0; i < children.length; i++) children[i]._encode('$id.$i'),
     ],
@@ -113,10 +135,20 @@ class IosNavigationBar extends HookConsumerWidget {
     this.subtitle,
     this.ephemeralLabel,
     this.titleAvatar,
+    this.titleAvatars = const [],
+    this.titleMaxWidth,
     this.titlePresenceColor,
+    this.titleRefreshing = false,
     this.onTitlePressed,
     this.largeTitle = false,
     this.alwaysFrosted = false,
+    this.backdropOnly = false,
+    this.standaloneControl = false,
+    this.standaloneLargeTitle = false,
+    this.horizontalControls = false,
+    this.centerTitleInPane = false,
+    this.titleInsets = EdgeInsets.zero,
+    this.alignCollapsedTitleToLeading = false,
     this.leading,
     this.actions = const [],
     this.onBack,
@@ -130,12 +162,36 @@ class IosNavigationBar extends HookConsumerWidget {
   final String? subtitle;
   final String? ephemeralLabel;
   final IosNavigationAction? titleAvatar;
+
+  /// Floating DM portraits above the existing glass title capsule.
+  final List<IosNavigationAction> titleAvatars;
+  final double? titleMaxWidth;
   final Color? titlePresenceColor;
+
+  /// Shows a refresh bar along the bottom of the subtitled title capsule.
+  final bool titleRefreshing;
   final VoidCallback? onTitlePressed;
   final bool largeTitle;
 
   /// Keeps the navigation backdrop visible before the first scroll update.
   final bool alwaysFrosted;
+
+  /// Paints only the native edge beneath custom Flutter header controls.
+  final bool backdropOnly;
+
+  /// Renders one glass control without navigation-bar overflow or safe areas.
+  final bool standaloneControl;
+
+  /// A wrapping native large title for a static title pane.
+  final bool standaloneLargeTitle;
+  final bool horizontalControls;
+
+  /// Centers compact titles within a pane that already excludes the Duo rail.
+  final bool centerTitleInPane;
+
+  /// Content-area insets for a title whose backdrop spans the whole window.
+  final EdgeInsets titleInsets;
+  final bool alignCollapsedTitleToLeading;
   final IosNavigationAction? leading;
   final List<IosNavigationAction> actions;
   final VoidCallback? onBack;
@@ -160,6 +216,7 @@ class IosNavigationBar extends HookConsumerWidget {
     };
     final auth = ref.watch(mediaGetAuthServiceProvider);
     final client = ref.watch(mediaHttpClientProvider);
+    final diskCache = ref.watch(mediaDiskCacheProvider);
     final colors = Theme.of(context).colorScheme;
     String imageKey(IosNavigationAction action) => jsonEncode([
       action.avatarIdentity,
@@ -181,10 +238,19 @@ class IosNavigationBar extends HookConsumerWidget {
               url: entry.value.imageUrl,
               initial: entry.value.avatarInitial!,
               isAgent: entry.value.avatarIsAgent,
-              background: colors.primaryContainer,
+              circular: !entry.key.startsWith('titlePortrait'),
+              background:
+                  entry.value.avatarIsAgent &&
+                      usesInsetAgentArtwork(entry.value.imageUrl)
+                  ? Colors.transparent
+                  : colors.primaryContainer,
               foreground: colors.onPrimaryContainer,
-              networkImage: (url) =>
-                  MediaImageProvider(url: url, auth: auth, client: client),
+              networkImages: (url) => smallMediaImageProviders(
+                url: url,
+                auth: auth,
+                client: client,
+                diskCache: diskCache,
+              ),
             ).then(
               (bytes) {
                 if (!active || !context.mounted || bytes == null) return;
@@ -208,38 +274,121 @@ class IosNavigationBar extends HookConsumerWidget {
         avatarKey,
         auth,
         client,
+        diskCache,
         colors.primaryContainer,
         colors.onPrimaryContainer,
       ],
     );
+    final iconImages = useState(<String, String>{});
+    final icons = <String, IconData>{
+      if (leading?.icon != null) 'leading': leading!.icon!,
+      for (var i = 0; i < actions.length; i++)
+        if (actions[i].icon != null) '$i': actions[i].icon!,
+    };
+    final iconKey = jsonEncode([
+      for (final entry in icons.entries)
+        [
+          entry.key,
+          entry.value.codePoint,
+          entry.value.fontFamily,
+          entry.value.fontPackage,
+        ],
+    ]);
+    useEffect(() {
+      if (icons.isEmpty) return null;
+      var active = true;
+      unawaited(
+        Future.microtask(() async {
+          final rendered = <String, String>{};
+          for (final entry in icons.entries) {
+            final recorder = ui.PictureRecorder();
+            final painter = TextPainter(
+              text: TextSpan(
+                text: String.fromCharCode(entry.value.codePoint),
+                style: TextStyle(
+                  fontFamily: entry.value.fontFamily,
+                  package: entry.value.fontPackage,
+                  fontSize: 22,
+                  color: const Color(0xff000000),
+                ),
+              ),
+              textDirection: TextDirection.ltr,
+            )..layout();
+            final canvas = Canvas(recorder)..scale(3);
+            painter.paint(
+              canvas,
+              Offset((24 - painter.width) / 2, (24 - painter.height) / 2),
+            );
+            final picture = recorder.endRecording();
+            final image = await picture.toImage(72, 72);
+            final bytes = await image.toByteData(
+              format: ui.ImageByteFormat.png,
+            );
+            if (bytes != null) {
+              rendered[entry.key] = base64Encode(bytes.buffer.asUint8List());
+            }
+            image.dispose();
+            picture.dispose();
+            painter.dispose();
+          }
+          if (active && context.mounted) iconImages.value = rendered;
+        }),
+      );
+      return () => active = false;
+    }, [iconKey]);
     Map<String, Object?> encodeAction(IosNavigationAction action, String id) {
       final key = imageKey(action);
       final retained = avatarImages.value[id];
       return {
         ...action._encode(id),
+        if (iconImages.value[id] != null) 'iconData': iconImages.value[id],
         'avatarBackground': colors.primaryContainer.toARGB32(),
         'avatarForeground': colors.onPrimaryContainer.toARGB32(),
         if (retained?.key == key) 'imageData': retained!.data,
       };
     }
 
+    final portraitTopPadding = centerTitleInPane ? 12.0 : 0.0;
     final payload = <String, Object?>{
       'title': title,
+      'titleMaxWidth': titleMaxWidth,
+      'portraitTopPadding': portraitTopPadding,
+      'titleHasAnimatedPortrait':
+          titleAvatars.length == 1 &&
+          DmHeaderPortrait.playsAnimation(
+            titleAvatars.first.imageUrl,
+            titleAvatars.first.avatarIsAgent,
+          ),
+      'safeTop': MediaQuery.viewPaddingOf(context).top,
       'subtitle': subtitle,
       'ephemeralLabel': ephemeralLabel,
       'titleAvatar': titleAvatar == null
           ? null
           : encodeAction(titleAvatar!, 'titleAvatar'),
+      'titleAvatars': [
+        for (final avatar in titleAvatars) avatar._encode('portrait'),
+      ],
       'titlePresenceColor': titlePresenceColor?.toARGB32(),
+      'titleRefreshing': titleRefreshing,
+      'titleRefreshColor': ChatColors.of(context).outgoing.toARGB32(),
       'titleEnabled': onTitlePressed != null,
       'largeTitle': largeTitle,
       'alwaysFrosted': alwaysFrosted,
+      'backdropOnly': backdropOnly,
+      'standaloneControl': standaloneControl,
+      'standaloneLargeTitle': standaloneLargeTitle,
+      'horizontalControls': horizontalControls,
+      'centerTitleInPane': centerTitleInPane,
+      'titleInsetLeft': titleInsets.left,
+      'titleInsetRight': titleInsets.right,
+      'alignCollapsedTitleToLeading': alignCollapsedTitleToLeading,
       'back': onBack != null,
       'leading': leading == null ? null : encodeAction(leading!, 'leading'),
       'actions': [
         for (var i = 0; i < actions.length; i++) encodeAction(actions[i], '$i'),
       ],
       'background': colors.surface.toARGB32(),
+      'controlBackground': context.controlSurface.toARGB32(),
       'dark': Theme.of(context).brightness == Brightness.dark,
       'foreground': (foregroundColor ?? Theme.of(context).colorScheme.onSurface)
           .toARGB32(),
@@ -250,6 +399,15 @@ class IosNavigationBar extends HookConsumerWidget {
       final current = channel.value;
       if (current == null) return null;
       current.setMethodCallHandler((call) async {
+        if (call.method == 'railGeometry') {
+          if (context.mounted) {
+            IosNavigationMetrics.updateRail(
+              context,
+              call.arguments as Map<Object?, Object?>,
+            );
+          }
+          return;
+        }
         if (call.method == 'avatarBounds') {
           final values = call.arguments as Map<Object?, Object?>;
           final box = viewKey.currentContext?.findRenderObject();
@@ -326,13 +484,15 @@ class IosNavigationBar extends HookConsumerWidget {
     }, [channel.value, signature]);
 
     useEffect(() {
+      // UIKit owns its collapse range. Send real page depth so a changed native
+      // inset cannot leave a deeply scrolled page short of the collapse point.
       void sync() {
         final current = channel.value;
         if (current != null) {
           unawaited(
             current.invokeMethod<void>(
               'scroll',
-              (offset?.value ?? 0).clamp(0.0, collapseRange),
+              (offset?.value ?? 0).clamp(0.0, double.infinity),
             ),
           );
         }
@@ -343,7 +503,57 @@ class IosNavigationBar extends HookConsumerWidget {
       return () => offset?.removeListener(sync);
     }, [channel.value, offset, collapseRange]);
 
-    return UiKitView(
+    final route = ModalRoute.of(context);
+    useEffect(() {
+      var active = true;
+      Future<void> restoreOnReveal() async {
+        final current = channel.value;
+        if (!active ||
+            !context.mounted ||
+            route?.isCurrent != true ||
+            current == null) {
+          return;
+        }
+        try {
+          // Home stays mounted while another route covers its platform view.
+          // Returning does not emit a scroll notification, so replay the live
+          // depth before asking UIKit to lay out the revealed navigation bar.
+          await current.invokeMethod<void>(
+            'scroll',
+            (offset?.value ?? 0).clamp(0.0, double.infinity),
+          );
+          if (!active || route?.isCurrent != true) return;
+          await current.invokeMethod<void>('prepareForReveal');
+        } on PlatformException catch (error) {
+          debugPrint('Native navigation reveal failed: $error');
+        }
+      }
+
+      void scheduleRestore() {
+        // Restore at reveal and again after the covering route exits. Route
+        // transforms can change UIKit's safe-area layout during transitions.
+        // The initial didPopNext alone runs before that transform has settled.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          unawaited(restoreOnReveal());
+        });
+        WidgetsBinding.instance.ensureVisualUpdate();
+      }
+
+      final observer = _NavigationRevealObserver(scheduleRestore);
+      if (route != null) {
+        appRouteObserver.subscribe(observer, route);
+        appRouteObserver.addRevealListener(route, scheduleRestore);
+      }
+      return () {
+        active = false;
+        appRouteObserver.unsubscribe(observer);
+        if (route != null) {
+          appRouteObserver.removeRevealListener(route, scheduleRestore);
+        }
+      };
+    }, [channel.value, offset, collapseRange, route]);
+
+    final nativeBar = UiKitView(
       key: viewKey,
       viewType: viewType,
       creationParams: payload,
@@ -352,5 +562,48 @@ class IosNavigationBar extends HookConsumerWidget {
         channel.value = MethodChannel('$viewType/$id');
       },
     );
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        nativeBar,
+        if (titleAvatars.isNotEmpty)
+          Positioned(
+            top:
+                MediaQuery.viewPaddingOf(context).top +
+                portraitTopPadding -
+                (payload['titleHasAnimatedPortrait'] == true ? 4 : 0),
+            left: 0,
+            right: 0,
+            child: Center(
+              child: ExcludeSemantics(
+                child: GestureDetector(
+                  key: const ValueKey('navigation-header-avatar-settings'),
+                  behavior: HitTestBehavior.opaque,
+                  onTap: onTitlePressed,
+                  child: DmHeaderCluster(
+                    count: titleAvatars.length,
+                    builder: (i, size) => DmHeaderPortrait(
+                      imageUrl: titleAvatars[i].imageUrl,
+                      isAgent: titleAvatars[i].avatarIsAgent,
+                      initial: titleAvatars[i].avatarInitial ?? '?',
+                      size: size,
+                      standalone: titleAvatars.length == 1,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
   }
+}
+
+class _NavigationRevealObserver extends RouteAware {
+  _NavigationRevealObserver(this.onReveal);
+
+  final VoidCallback onReveal;
+
+  @override
+  void didPopNext() => onReveal();
 }

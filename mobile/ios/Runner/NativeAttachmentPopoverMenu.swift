@@ -64,15 +64,6 @@ extension NativeAttachmentPopoverViewController {
     )
     stack.addArrangedSubview(
       makeNativeAttachmentMenuButton(
-        title: "Video",
-        symbol: "video",
-        action: { [weak self] in
-          self?.finish(method: "pickVideo")
-        }
-      )
-    )
-    stack.addArrangedSubview(
-      makeNativeAttachmentMenuButton(
         title: "Voice note",
         symbol: "mic",
         action: { [weak self] in
@@ -111,7 +102,7 @@ extension NativeAttachmentPopoverViewController {
       configuration.baseBackgroundColor = .black
     }
     if let symbol {
-      configuration.image = UIImage(systemName: symbol)
+      configuration.image = NativeTabler.image(symbol)
     }
     configuration.imagePadding = 8
     configuration.baseForegroundColor = .white

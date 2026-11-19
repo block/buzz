@@ -782,6 +782,7 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
         spawnAfterCreate: input.spawnAfterCreate,
         startOnAppLaunch: input.startOnAppLaunch,
         backend: input.backend,
+        effortLevel: input.effortLevel,
         respondTo: input.respondTo,
         respondToAllowlist: input.respondToAllowlist,
         relayMesh: input.relayMesh,
@@ -1061,4 +1062,10 @@ export const setPreventSleepActive = (active: boolean) =>
  *  Tauri's updater cannot swap the binary. */
 export function isAutoUpdateSupported(): Promise<boolean> {
   return invokeTauri<boolean>("is_auto_update_supported");
+}
+
+/** Returns this install's key in the new Buzz app's installer manifest
+ *  (e.g. `macos-arm64`), or null when no installer is published for it. */
+export function getNewAppInstallerTarget(): Promise<string | null> {
+  return invokeTauri<string | null>("new_app_installer_target");
 }

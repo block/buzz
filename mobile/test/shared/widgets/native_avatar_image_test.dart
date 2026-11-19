@@ -1,10 +1,16 @@
 import 'dart:ui' as ui;
 import 'dart:convert';
+import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:buzz/shared/emoji/emoji_avatar.dart';
+import 'package:buzz/shared/relay/media_auth.dart';
+import 'package:buzz/shared/relay/media_image.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart' as http_testing;
 
 void main() {
   testWidgets('bounds remote avatar decoding before painting the native PNG', (
@@ -26,7 +32,7 @@ void main() {
         initial: 'A',
         background: Colors.white,
         foreground: Colors.black,
-        networkImage: (_) => provider,
+        networkImages: (_) => [provider],
       );
       expect(png, isNotNull);
       expect(provider.decodedWidth, lessThanOrEqualTo(72));
@@ -34,6 +40,165 @@ void main() {
       expect(provider.decodedWidth, greaterThan(0));
     });
   });
+
+  testWidgets('native relay avatars load only thumbnails, like MediaImage', (
+    tester,
+  ) async {
+    await tester.runAsync(() async {
+      MediaImage.debugResetMissingThumbnails();
+      final recorder = ui.PictureRecorder();
+      Canvas(recorder).drawColor(Colors.blue, BlendMode.src);
+      final picture = recorder.endRecording();
+      final image = await picture.toImage(8, 8);
+      final blue = (await image.toByteData(
+        format: ui.ImageByteFormat.png,
+      ))!.buffer.asUint8List();
+      image.dispose();
+      picture.dispose();
+
+      const relay = 'https://relay.example';
+      final jpegOnly = '$relay/media/${'a1' * 32}.png';
+      final missing = '$relay/media/${'b2' * 32}.png';
+      final broken = '$relay/media/${'c3' * 32}.png';
+      String thumb(String url, String ext) =>
+          url.replaceFirst('.png', '.thumb.$ext');
+      final requested = <String>[];
+      final auth = MediaGetAuthService(baseUrl: relay, nsec: null);
+      final client = http_testing.MockClient((request) async {
+        final url = request.url.toString();
+        requested.add(url);
+        if (url == thumb(jpegOnly, 'jpg')) {
+          return http.Response.bytes(blue, 200);
+        }
+        if (url == thumb(broken, 'webp')) return http.Response('', 500);
+        return http.Response('', 404);
+      });
+      Future<bool> paintsImage(String url) async {
+        final png = await nativeAvatarImage(
+          url: url,
+          initial: 'A',
+          background: Colors.black,
+          foreground: Colors.white,
+          networkImages: (url) =>
+              smallMediaImageProviders(url: url, auth: auth, client: client),
+        );
+        final codec = await ui.instantiateImageCodec(png!);
+        final frame = await codec.getNextFrame();
+        final pixels = (await frame.image.toByteData())!;
+        frame.image.dispose();
+        codec.dispose();
+        // Left of center, clear of the initial: blue artwork or black.
+        return pixels.getUint8((36 * 72 + 10) * 4 + 2) > 200;
+      }
+
+      // A 404 moves to the JPEG thumbnail; the original is never fetched.
+      expect(await paintsImage(jpegOnly), isTrue);
+      expect(requested, [thumb(jpegOnly, 'webp'), thumb(jpegOnly, 'jpg')]);
+      // With no thumbnail at all, the initials show.
+      requested.clear();
+      expect(await paintsImage(missing), isFalse);
+      expect(requested, [thumb(missing, 'webp'), thumb(missing, 'jpg')]);
+      // Known-missing thumbnails are skipped on the next rasterization.
+      requested.clear();
+      expect(await paintsImage(missing), isFalse);
+      expect(requested, isEmpty);
+      // Any other failure stops at the initials.
+      expect(await paintsImage(broken), isFalse);
+      expect(requested, [thumb(broken, 'webp')]);
+    });
+  });
+
+  for (final scenario in [
+    'cancel',
+    'timeout then cancel',
+    'timeout then finish',
+    'timeout without owner',
+  ]) {
+    testWidgets('native avatar $scenario', (tester) async {
+      final started = Completer<void>();
+      final aborted = Completer<void>();
+      final response = Completer<http.StreamedResponse>();
+      final cancelled = ValueNotifier(false);
+      var requests = 0;
+      final client = _StreamingClient((request) async {
+        requests++;
+        (request as http.AbortableRequest).abortTrigger!.then((_) {
+          if (!response.isCompleted) {
+            if (!aborted.isCompleted) aborted.complete();
+            response.completeError(http.RequestAbortedException(request.url));
+          }
+        });
+        if (!started.isCompleted) started.complete();
+        return response.future;
+      });
+      final provider = MediaImageProvider(
+        url: 'https://relay.example/media/held-$scenario.png',
+        auth: MediaGetAuthService(baseUrl: 'https://relay.example', nsec: null),
+        client: client,
+      );
+      Future<Uint8List?> render() => nativeAvatarImage(
+        url: provider.url,
+        cancelled: scenario == 'timeout without owner' ? null : cancelled,
+        initial: 'A',
+        background: Colors.black,
+        foreground: Colors.white,
+        networkImages: (_) => [provider],
+      );
+      final pending = render();
+      await tester.pump();
+      expect(started.isCompleted, isTrue);
+      if (scenario != 'cancel') {
+        await tester.pump(const Duration(seconds: 11));
+        expect(aborted.isCompleted, isFalse);
+      }
+      if (scenario.contains('cancel')) {
+        cancelled.value = true;
+        await tester.pump();
+        expect(aborted.isCompleted, isTrue);
+        await tester.runAsync(() async {
+          await pending;
+        });
+      } else {
+        await tester.runAsync(() async {
+          await pending;
+        });
+        var loaded = false;
+        final stream = ResizeImage(
+          provider,
+          width: 72,
+          height: 72,
+          policy: ResizeImagePolicy.fit,
+        ).resolve(ImageConfiguration.empty);
+        final listener = ImageStreamListener((_, _) {
+          loaded = true;
+        });
+        stream.addListener(listener);
+        final bytes = base64Decode(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAA'
+          'AAYAAjCB0C8AAAAASUVORK5CYII=',
+        );
+        response.complete(http.StreamedResponse(Stream.value(bytes), 200));
+        // Drain engine decode events and the test zone's microtasks until the
+        // real image stream settles, without advancing the request's timeout.
+        while (!loaded) {
+          await tester.runAsync(() => Future<void>(() {}));
+          await tester.pump();
+        }
+        stream.removeListener(listener);
+        await tester.runAsync(() async {
+          expect(await render(), isNotNull);
+          expect(await render(), isNotNull);
+        });
+        expect(requests, 1);
+        expect(aborted.isCompleted, isFalse);
+        cancelled.value = true;
+        await tester.pump();
+        expect(aborted.isCompleted, isFalse);
+      }
+      cancelled.dispose();
+      client.close();
+    });
+  }
 
   for (final size in [const Size(1440, 720), const Size(720, 1440)]) {
     testWidgets('bounds inline raster decode at $size before native painting', (
@@ -66,7 +231,7 @@ void main() {
             initial: 'A',
             background: Colors.white,
             foreground: Colors.black,
-            networkImage: (_) => throw StateError('Unexpected network image'),
+            networkImages: (_) => throw StateError('Unexpected network image'),
           );
           expect(png, isNotNull);
           // The first image is the codec frame, before the final 72px canvas.
@@ -92,7 +257,7 @@ void main() {
           initial: 'K',
           background: Colors.black,
           foreground: Colors.white,
-          networkImage: (_) => throw StateError('Unexpected network image'),
+          networkImages: (_) => throw StateError('Unexpected network image'),
         );
         expect(png, isNotNull);
         final codec = await ui.instantiateImageCodec(png!);
@@ -149,4 +314,12 @@ class _RecordingImage extends MemoryImage {
     frame.image.dispose();
     return codec;
   }
+}
+
+class _StreamingClient extends http.BaseClient {
+  _StreamingClient(this.onSend);
+  final Future<http.StreamedResponse> Function(http.BaseRequest) onSend;
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) =>
+      onSend(request);
 }
