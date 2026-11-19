@@ -17,7 +17,7 @@ PostgreSQL stores data. The application owns behavior.
 |---|---|---|
 | Schema source of truth | Two parallel sources: ordered sqlx migrations in `migrations/` and the desired-state manifest in `schema/` | The declarative desired state in `schema/tables/public/` is the source of truth. Deployments that apply schema out of band plan each change from it, with the tool of their choice. `migrations/` stays, because auto-migration stays supported (next row). Each app owns its own migrations and declarative schema: the relay's copies of the push gateway's tables are debt to remove (Rule 4). |
 | Who applies DDL | Startup migrations when `BUZZ_AUTO_MIGRATE` is on (binary default off, Helm chart default on), `buzz-admin migrate`, the push gateway's pre-upgrade Helm Job, and partition creation at relay startup and on a schedule | Both modes stay supported. Deployments at scale, including Block's hosted deployment, apply schema changes out of band through a reviewed workflow before deploying, and their serving relay runs no DDL. Smaller and self-hosted deployments MAY keep auto-migration on. Still open: how the two modes share one schema source, how auto-migration orders a release whose expand, backfill, and contract steps arrive in one upgrade, and how an operator recovers after a contract migration fails at boot (Rule 5). Monthly partition creation is planned to move out of the relay. Changes to partitioned tables (`events`, `delivery_log`) are outside the out-of-band envelope (Rule 6): attaching a partition to a live parent and building an index on a partitioned parent need their own reviewed procedure. |
-| Integrity between tables | Some foreign keys, including `ON DELETE CASCADE` and `ON DELETE SET NULL` | None in the database. The owning application transaction checks references and performs deletes explicitly. |
+| Integrity between tables | None in the database (migrations `0102`-`0104` dropped the last foreign keys) | None in the database. The owning application transaction checks references and performs deletes explicitly. |
 | Guards and follow-up writes | Triggers and PL/pgSQL functions (`schema/functions/`, `schema/triggers/`) | None in the database. Guards run in the owning writer's transaction; follow-up work is recorded in the same transaction and processed as durable, retryable application work. |
 | Data repair | Some historical repair embedded in migrations | Backfill definitions in application code, run by the durable framework in [data-backfills.md](data-backfills.md). |
 | Rollout | Effectively schema and code together | Expand, then deploy, then backfill, then contract. Each step is applied and verified on its own. |
@@ -48,10 +48,9 @@ adds to them moves away from the target.
   or recovery. The backfill framework exists to provide those properties.
 
 The move to declarative, out-of-band schema changes is in progress. Until it
-finishes, existing triggers, functions, and foreign keys stay in place as
-backstops. They are removed one at a time, after their application replacement
-has shipped and been verified. They are not removed early, and new ones are not
-added.
+finishes, any remaining trigger or function stays in place as a backstop. Each
+is removed on its own, after its application replacement has shipped and been
+verified. None is removed early, and no new one is added.
 
 ## Rules for changes now
 
@@ -413,6 +412,14 @@ parity assertion on the table for that window.
    notes name the step-1 release as a required stop (Rule 5).
 3. Removing a guard requires a falsifiable test showing that the application
    path enforces what the guard enforced.
+
+pgschema cannot drop a trigger or foreign key from a partitioned table: it
+plans a drop for each partition's copy, which PostgreSQL refuses (`2BP01`) or
+which the parent's drop already removed (`42704`). A deployment that applies
+`schema/` with pgschema applies the dropping migration first, under that
+migration's lock budgets, then runs pgschema. For the trigger drops see
+[trigger-retirement-deployment.md](trigger-retirement-deployment.md); for the
+foreign keys on `events` and `delivery_log`, apply `0104`.
 
 ### 6. Bound every lock and statement
 

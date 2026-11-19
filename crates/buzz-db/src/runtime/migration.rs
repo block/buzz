@@ -879,7 +879,19 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 101);
+        assert_eq!(migrations.len(), 104);
+        assert_eq!(migrations[103].version, 104);
+        let event_table_drops = strip_sql_comments(migrations[103].sql.as_str());
+        assert!(event_table_drops
+            .contains("LOCK TABLE events, delivery_log, communities IN ACCESS EXCLUSIVE MODE;"));
+        assert!(event_table_drops.contains("DROP CONSTRAINT events_community_id_fkey;"));
+        assert_eq!(migrations[102].version, 103);
+        assert!(strip_sql_comments(migrations[102].sql.as_str())
+            .contains("ALTER TABLE users DROP CONSTRAINT users_community_id_fkey;"));
+        assert_eq!(migrations[101].version, 102);
+        assert!(strip_sql_comments(migrations[101].sql.as_str()).contains(
+            "ALTER TABLE join_policy_acceptances DROP CONSTRAINT join_policy_acceptances_community_id_pubkey_fkey;"
+        ));
         assert_eq!(migrations[100].version, 101);
         assert!(strip_sql_comments(migrations[100].sql.as_str())
             .contains("DROP CONSTRAINT IF EXISTS push_gateway_delegations_installation_id_fkey"));
@@ -1843,6 +1855,23 @@ mod postgres_tests {
         );
     }
 
+    /// pgschema cannot drop a foreign key from a partitioned table, so the
+    /// launcher that reuses its database drops those keys before apply.
+    #[test]
+    fn partitioned_foreign_key_drop_runs_before_reused_apply() {
+        let launcher = include_str!("../../../../scripts/start-relay-for-tests.sh");
+        let drop_at = launcher
+            .find("scripts/drop-partitioned-foreign-keys.sql")
+            .expect("start-relay-for-tests.sh runs scripts/drop-partitioned-foreign-keys.sql");
+        let apply_at = launcher
+            .find("./bin/pgschema apply")
+            .expect("start-relay-for-tests.sh runs pgschema apply");
+        assert!(
+            drop_at < apply_at,
+            "start-relay-for-tests.sh must drop the partitioned foreign keys before pgschema apply"
+        );
+    }
+
     /// The reconcile script repairs `events_pkey` after every apply, and
     /// `start-relay-for-tests.sh` runs the same repair before apply so a reused
     /// database reconciled before the repair existed can still be applied.
@@ -2440,6 +2469,41 @@ mod postgres_tests {
             strings
         }
 
+        /// Drop foreign-key elements and inline `REFERENCES` clauses from a
+        /// normalized `CREATE TABLE`.
+        fn without_foreign_keys(table: &str) -> String {
+            let open = table.find('(').expect("table body");
+            let close = find_matching_paren(table, open).expect("table body end");
+            let elements: Vec<String> = split_top_level_csv(&table[open + 1..close])
+                .into_iter()
+                .filter(|element| !element.starts_with("foreign key"))
+                .map(|element| {
+                    let Some(start) = element.find(" references ") else {
+                        return element;
+                    };
+                    let paren = start + element[start..].find('(').expect("referenced columns");
+                    let mut end = find_matching_paren(&element, paren).expect("columns end") + 1;
+                    for action in [
+                        " on delete cascade",
+                        " on delete set null",
+                        " on delete restrict",
+                        " on delete no action",
+                    ] {
+                        if element[end..].starts_with(action) {
+                            end += action.len();
+                        }
+                    }
+                    format!("{}{}", &element[..start], &element[end..])
+                })
+                .collect();
+            format!(
+                "{}({}){}",
+                &table[..open],
+                elements.join(", "),
+                &table[close + 1..]
+            )
+        }
+
         fn surface(sql: &str) -> DeletionSurface {
             let mut surface = DeletionSurface::default();
             for statement in split_sql_statements(sql) {
@@ -2511,9 +2575,11 @@ mod postgres_tests {
                 .tables
                 .get(table)
                 .unwrap_or_else(|| panic!("schema.sql is missing deletion table {table}"));
+            // 0102-0104 dropped every foreign key; the rest must not drift.
             if table != "community_deletion_requests" && table != "community_deletion_approvals" {
                 assert_eq!(
-                    in_schema, definition,
+                    without_foreign_keys(in_schema),
+                    without_foreign_keys(definition),
                     "schema.sql definition of {table} drifted from migration 0029"
                 );
             }
@@ -2526,19 +2592,15 @@ mod postgres_tests {
             .tables
             .get("community_deletion_approvals")
             .expect("schema.sql approval table");
-        for invariant in [
-            "inventory_digest bytea not null check (length(inventory_digest) = 32)",
-            "foreign key (request_id, community_id, inventory_digest) references community_deletion_requests(id, community_id, inventory_digest) on delete restrict",
-        ] {
-            assert!(
-                migration_approval_table.contains(invariant),
-                "0029 deletion approvals are missing {invariant}"
-            );
-            assert!(
-                schema_approval_table.contains(invariant),
-                "schema.sql deletion approvals are missing {invariant}"
-            );
-        }
+        let invariant = "inventory_digest bytea not null check (length(inventory_digest) = 32)";
+        assert!(
+            migration_approval_table.contains(invariant),
+            "0029 deletion approvals are missing {invariant}"
+        );
+        assert!(
+            schema_approval_table.contains(invariant),
+            "schema.sql deletion approvals are missing {invariant}"
+        );
         let migration_request_table = migration
             .tables
             .get("community_deletion_requests")
@@ -2668,13 +2730,17 @@ mod postgres_tests {
             .as_str();
         assert!(through_message.contains("DROP COLUMN threads_through_timestamp"));
         for (table, definition) in personal.tables {
+            // `without_foreign_keys` also normalizes spacing, so apply it to both.
             let in_schema = schema.tables.get(&table).map(|schema_definition| {
+                let schema_definition = without_foreign_keys(schema_definition);
                 if table == "personal_read_accounts" {
                     schema_definition.replacen(started_at_column, "", 1)
                 } else {
-                    schema_definition.clone()
+                    schema_definition
                 }
             });
+            // 0102 dropped the foreign keys that 0056 created.
+            let definition = without_foreign_keys(&definition);
             let definition = if table == "personal_read_frontiers" {
                 definition.replacen(threads_through_column, through_message_column, 1)
             } else {
@@ -3152,6 +3218,30 @@ mod postgres_tests {
                  migration and schema.sql must both use a representable shape."
             );
         }
+        // docs/database.md Rule 2: 0102-0104 dropped every foreign key, and
+        // schema/ declares none, so neither bootstrap path has one.
+        async fn foreign_keys(pool: &PgPool) -> Vec<(String, String)> {
+            sqlx::query_as(
+                "SELECT con.conrelid::regclass::text, con.conname::text \
+                 FROM pg_constraint con \
+                 JOIN pg_namespace n ON n.oid = con.connamespace \
+                 WHERE n.nspname = 'public' AND con.contype = 'f' \
+                 ORDER BY 1, 2",
+            )
+            .fetch_all(pool)
+            .await
+            .expect("read foreign keys")
+        }
+        assert_eq!(
+            foreign_keys(&desired).await,
+            Vec::new(),
+            "desired state has a foreign key"
+        );
+        assert_eq!(
+            foreign_keys(&migrated).await,
+            Vec::new(),
+            "migrations leave a foreign key"
+        );
         async fn media_edit_index(pool: &PgPool) -> (String, String, String) {
             sqlx::query_as("SELECT pg_get_indexdef(indexrelid),indoption::text,pg_get_expr(indexprs,indrelid) FROM pg_index WHERE indexrelid='public.idx_events_media_edit_target'::regclass AND indisvalid AND indisready AND indislive")
                 .fetch_one(pool).await.expect("valid media edit index")

@@ -5,7 +5,7 @@
 -- A row may be ban-only, timeout-only, or both over its lifetime.
 
 CREATE TABLE community_bans (
-    community_id    UUID NOT NULL REFERENCES communities(id),
+    community_id    UUID NOT NULL,
     pubkey          BYTEA NOT NULL CHECK (length(pubkey) = 32),
     banned          BOOLEAN NOT NULL DEFAULT false,
     -- NULL + banned=true ⇒ permanent.

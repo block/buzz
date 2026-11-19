@@ -3,7 +3,7 @@
 -- attribution; child of subscriptions.
 
 CREATE TABLE delivery_log (
-    community_id    UUID NOT NULL REFERENCES communities(id),
+    community_id    UUID NOT NULL,
     id              BIGINT GENERATED ALWAYS AS IDENTITY,
     subscription_id VARCHAR(255),
     event_id        BYTEA,

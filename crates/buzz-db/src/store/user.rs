@@ -382,9 +382,8 @@ async fn set_agent_owner_with_operation(
     // Lock order: admission, then the agent row, then the owner row. The agent
     // row is read `FOR NO KEY UPDATE` (the lock the UPDATE below takes), so the
     // outcomes below are decided on a row nothing else can change, and the
-    // owner is checked before the UPDATE: with the owner foreign key still
-    // installed the UPDATE itself would fail on a missing owner with a foreign
-    // key error instead of the `NotFound` this function promises.
+    // owner is checked before the UPDATE, so a missing owner is the `NotFound`
+    // this function promises.
     let locked: Option<Option<Vec<u8>>> = sqlx::query_scalar(
         "SELECT agent_owner_pubkey FROM users \
          WHERE community_id = $1 AND pubkey = $2 FOR NO KEY UPDATE",

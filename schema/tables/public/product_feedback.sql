@@ -1,6 +1,6 @@
 CREATE TABLE product_feedback (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    community_id UUID REFERENCES communities(id) ON DELETE SET NULL,
+    community_id UUID,
     event_id BYTEA NOT NULL CHECK (length(event_id) = 32),
     submitter_pubkey BYTEA NOT NULL CHECK (length(submitter_pubkey) = 32),
     category TEXT CHECK (category IN ('bug', 'praise', 'needs-work')),
