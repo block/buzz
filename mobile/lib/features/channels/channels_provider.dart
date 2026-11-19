@@ -25,6 +25,7 @@ import 'unread_badge/observed_unread_event.dart';
 import 'unread_badge/should_notify_for_event.dart';
 
 part 'channel_directory.dart';
+part 'huddle_creation_receipts.dart';
 part 'channel_lookup.dart';
 part 'channel_unread_deletions.dart';
 part 'channel_unread_catch_up.dart';
@@ -130,10 +131,14 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   String? _memberSnapshotRelayBaseUrl;
   String? _memberSnapshotPubkey;
   Map<String, List<ChannelMember>> _memberSnapshotsByChannelId = const {};
+  bool _hasAuthoritativeMemberships = false;
   List<NostrEvent> _directoryMetas = const [];
   // The scope and read times of [_directoryMetas]; a switch resets them.
   final _savedDirectory = _SavedDirectory();
   Set<String> _hiddenDmIds = const {};
+  final Set<String> _verifiedHuddleIds = {};
+  final Set<String> _checkedHuddleReceiptIds = {};
+  bool _huddleReceiptsReading = false;
 
   /// Fences directory responses to the relay and identity that requested them.
   late final _ChannelRefreshCoordinator _refreshCoordinator =
@@ -216,6 +221,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   @override
   Future<List<Channel>> build() async {
     final buildGeneration = ++_buildGeneration;
+    _huddleReceiptsReading = false;
     _backgroundRefreshInFlight = false;
     _backgroundRefreshQueued = false;
     _refreshCoordinator.retireInFlight();
@@ -231,9 +237,12 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _memberSnapshotRelayBaseUrl = relayBaseUrl;
       _memberSnapshotPubkey = pubkey;
       _memberSnapshotsByChannelId = const {};
+      _hasAuthoritativeMemberships = false;
       _directoryMetas = const [];
       _savedDirectory.reset();
       _hiddenDmIds = const {};
+      _verifiedHuddleIds.clear();
+      _checkedHuddleReceiptIds.clear();
       _confirmedJoins.clear();
       // Retire any in-flight directory request: its response describes the
       // previous relay or identity and must not reach this scope's state.
@@ -454,13 +463,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // Membership discovery already returned the full authoritative rosters.
     // Their owner roles validate Huddle links without downloading them again.
     final huddleBackingIds = huddleBackingChannelIds(huddleStarts, memberships);
-    final creations = await _fenced(
-      fence,
-      _fetchHuddleCreations(session, parsedMetas.values),
-    );
-    huddleBackingIds.addAll(
-      createdHuddleChannelIds(creations, parsedMetas.values),
-    );
+    huddleBackingIds.addAll(_verifiedHuddleIds);
     final hiddenDms = hiddenDmIds ?? _hiddenDmIds;
     final visibleMetas = parsedMetas.entries.where((entry) {
       final data = entry.value;
@@ -520,6 +523,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // Name resolution may return without a fenced read; check before writing.
     fence.ensureCurrent();
     _cacheMemberSnapshots(memberships, replaceAll: true);
+    _hasAuthoritativeMemberships = true;
     // Without the hidden-DM response, keep the DMs hidden before. The read is
     // then incomplete, so it stays counted as unread and is retried.
     if (hiddenDmIds != null) _hiddenDmIds = Set.unmodifiable(hiddenDmIds);
@@ -654,7 +658,24 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     } else {
       _channelListChanges++;
     }
+    channels.removeWhere(
+      (channel) =>
+          channel.channelType == 'stream' &&
+          channel.visibility == 'private' &&
+          _verifiedHuddleIds.contains(channel.id),
+    );
     saveSnapshot?.call(channels, _hiddenDmIds);
+    // Publish the list before optional immutable receipt reconciliation.
+    final generation = _buildGeneration;
+    unawaited(
+      Future(
+        () => _reconcileHuddleReceipts(
+          session,
+          parsedMetas.values.toList(),
+          generation,
+        ),
+      ),
+    );
     return channels;
   }
 

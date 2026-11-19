@@ -285,6 +285,12 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       unawaited(_fillNotices());
     } catch (e, st) {
       if (!_isCurrentInit(initVersion)) return;
+      if (isRelayAccessDenied(e)) {
+        _lastKnownMessages = null;
+        _initInFlight = false;
+        state = AsyncError(e, st);
+        return;
+      }
       final fallbackMessages = state.value ?? _lastKnownMessages;
       if (fallbackMessages != null) {
         debugPrint(

@@ -39,11 +39,25 @@ class _HuddleCardSummary extends HookConsumerWidget {
         }).toList()..sort((a, b) {
           final time = a.createdAt.compareTo(b.createdAt);
           if (time != 0) return time;
-          final kind = a.kind.compareTo(b.kind);
-          return kind != 0 ? kind : a.id.compareTo(b.id);
+          int phase(int kind) => kind == EventKind.huddleStarted
+              ? 0
+              : kind == EventKind.huddleEnded
+              ? 2
+              : 1;
+          final kind = phase(a.kind).compareTo(phase(b.kind));
+          if (kind != 0) return kind;
+          final left = jsonDecode(a.content) as Map;
+          final right = jsonDecode(b.content) as Map;
+          final ar = left['roster_revision'];
+          final br = right['roster_revision'];
+          if (ar is int && br is int && ar != br) return ar.compareTo(br);
+          return a.id.compareTo(b.id);
         });
     int? endedAt;
     final people = <String>{};
+    final admissions = <String, Map<String, NostrEvent>>{};
+    String? generation;
+
     for (final event in events) {
       if (event.kind == EventKind.huddleEnded &&
           (event.pubkey == authority || event.pubkey == message.pubkey)) {
@@ -53,8 +67,41 @@ class _HuddleCardSummary extends HookConsumerWidget {
           event.pubkey == authority) {
         final key = event.getTagValue('p');
         if (key == null || !RegExp(r'^[0-9a-f]{64}$').hasMatch(key)) continue;
-        if (event.kind == EventKind.huddleParticipantJoined) people.add(key);
-        if (event.kind == EventKind.huddleParticipantLeft) people.remove(key);
+        if (event.kind != EventKind.huddleParticipantJoined &&
+            event.kind != EventKind.huddleParticipantLeft) {
+          continue;
+        }
+        final body = jsonDecode(event.content) as Map;
+        final nextGeneration = body['generation'];
+        if (nextGeneration is String) {
+          if (generation != null && generation != nextGeneration) {
+            if (event.kind == EventKind.huddleParticipantLeft) continue;
+            admissions.clear();
+          }
+          generation = nextGeneration;
+        }
+        final rawAdmission = body['admission_id'];
+        final admission = rawAdmission is String ? rawAdmission : 'legacy';
+        final roster = admissions.putIfAbsent(key, () => {});
+        final previous = roster[admission];
+        if (previous != null) {
+          final previousBody = jsonDecode(previous.content) as Map;
+          final revision = body['roster_revision'];
+          final previousRevision = previousBody['roster_revision'];
+          if (revision is int &&
+              previousRevision is int &&
+              revision < previousRevision) {
+            continue;
+          }
+        }
+        roster[admission] = event;
+      }
+    }
+    for (final entry in admissions.entries) {
+      if (entry.value.values.any(
+        (event) => event.kind == EventKind.huddleParticipantJoined,
+      )) {
+        people.add(entry.key);
       }
     }
     for (final row in allMessages) {

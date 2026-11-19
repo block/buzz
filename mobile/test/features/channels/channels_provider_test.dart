@@ -3884,6 +3884,9 @@ class _FakeRelaySession extends RelaySessionNotifier {
   final List<NostrEvent> hiddenDmEvents;
   final List<NostrEvent> huddleStarts;
   final List<NostrEvent> creations;
+  Completer<void>? creationGate;
+  int creationReads = 0;
+  bool failCreations = false;
   List<NostrEvent> recentMessages;
   final Map<String, String> deletionChannels;
   final bool enforceHistoryLimits;
@@ -4156,6 +4159,9 @@ class _FakeRelaySession extends RelaySessionNotifier {
       return hiddenDmEvents;
     }
     if (filter.kinds.contains(9007)) {
+      creationReads++;
+      await creationGate?.future;
+      if (failCreations) throw Exception('receipt unavailable');
       final ids = filter.tags['#h'] ?? const <String>[];
       return creations.where((e) => ids.contains(e.getTagValue('h'))).toList();
     }

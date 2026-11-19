@@ -110,12 +110,7 @@ abstract final class NostrFilters {
 
   /// Huddle lifecycle state for one parent channel, independent of timeline paging.
   static NostrFilter huddleLifecycle(String channelId) => NostrFilter(
-    kinds: [
-      EventKind.huddleStarted,
-      EventKind.huddleParticipantJoined,
-      EventKind.huddleParticipantLeft,
-      EventKind.huddleEnded,
-    ],
+    kinds: [EventKind.huddleStarted, EventKind.huddleEnded],
     tags: {
       '#h': [channelId],
     },

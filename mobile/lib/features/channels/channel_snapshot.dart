@@ -10,11 +10,13 @@ extension _ChannelSnapshots on ChannelsNotifier {
     final snapshot = storage?.read(pubkey, relay);
     if (snapshot == null) return null;
     try {
+      _verifiedHuddleIds.addAll(snapshot.verifiedHuddleIds);
       final channels = snapshot.channels
           .map(Channel.fromJson)
           .where(
             (channel) =>
                 channel.isMember &&
+                !_verifiedHuddleIds.contains(channel.id) &&
                 !snapshot.hiddenDmIds.contains(channel.id) &&
                 !isGeneratedHuddleChannel(
                   id: channel.id,
@@ -58,6 +60,7 @@ extension _ChannelSnapshots on ChannelsNotifier {
             if (channel.isMember) channel.toJson(),
         ],
         hiddenDmIds: hiddenDmIds,
+        verifiedHuddleIds: Set.of(_verifiedHuddleIds),
       );
       unawaited(
         storage

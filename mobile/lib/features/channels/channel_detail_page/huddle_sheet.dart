@@ -363,7 +363,10 @@ class _HuddleJoinSurface extends HookConsumerWidget {
     final historyState = (ended || stale) && !isThisSession;
     // Like desktop, keep the conversation reachable before the membership
     // cache loads. The history read still enforces the relay's access rules.
-    final viewHistory = historyState;
+    final historyMembership = ref.watch(
+      huddleHistoryMembershipProvider(ephemeralChannelId),
+    );
+    final viewHistory = historyState && historyMembership != false;
     final label = viewHistory
         ? 'View'
         : unavailable

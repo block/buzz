@@ -1,6 +1,33 @@
 part of 'channels_provider_test.dart';
 
 void _huddleNavigationCases() {
+  test('receipt batches stop after switching communities', () async {
+    final ids = List.generate(129, (i) => 'private-$i');
+    final session = _FakeRelaySession(
+      memberships: [for (final id in ids) _membership(id, 'me')],
+      metadata: [
+        for (final id in ids) _meta(id: id, name: id, visibility: 'private'),
+      ],
+    );
+    final gate = session.creationGate = Completer<void>();
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+    expect(await container.read(channelsProvider.future), hasLength(129));
+    await _settle();
+    expect(session.creationReads, 1);
+    session.memberships = [_membership(_channelA, 'me')];
+    session.metadata = [_meta(id: _channelA, name: 'new community')];
+    container
+        .read(relayConfigProvider.notifier)
+        .update(baseUrl: 'https://other.example');
+    await container.read(channelsProvider.future);
+    gate.complete();
+    await _settle();
+    expect(session.creationReads, 1);
+    expect(container.read(channelsProvider).requireValue.single.id, _channelA);
+    expect(container.read(huddleHistoryMembershipProvider(_channelB)), isFalse);
+  });
+
   test(
     'old named rooms require creator-matched Huddle creation evidence',
     () async {
@@ -58,9 +85,16 @@ void _huddleNavigationCases() {
           ],
           creations: variant == 'description only' ? [] : [receipt],
         );
+        session.creationGate = Completer<void>();
         final container = _buildContainer(session: session);
         try {
-          final channels = await container.read(channelsProvider.future);
+          final initial = await container.read(channelsProvider.future);
+          expect(initial.any((c) => c.id == _channelA), isTrue);
+          expect(initial.any((c) => c.id == _channelB), isTrue);
+          session.creationGate!.complete();
+          await Future<void>(() {});
+          await container.pump();
+          final channels = container.read(channelsProvider).requireValue;
           final hidden = variant == 'valid' || variant == 'renamed';
           expect(
             channels.any((c) => c.id == _channelB),
@@ -71,7 +105,9 @@ void _huddleNavigationCases() {
             container.read(channelViewerIsMemberProvider(_channelB)),
             isTrue,
           );
+          session.failCreations = true;
           await container.read(channelsProvider.notifier).refresh();
+          expect(session.creationReads, 1);
           expect(
             container
                 .read(channelsProvider)

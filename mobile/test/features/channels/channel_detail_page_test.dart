@@ -522,7 +522,7 @@ Widget _buildTestable({
       relayAuthorProvider.overrideWith((ref, url) async => huddleRelayAuthor),
       huddleLifecycleProvider(
         _channelId,
-      ).overrideWith((ref) async => huddleLifecycle),
+      ).overrideWith((ref) => Stream.value(huddleLifecycle)),
       if (huddleCurrentPubkey != null)
         currentPubkeyProvider.overrideWith((ref) => huddleCurrentPubkey),
       appLifecycleProvider.overrideWith(_TestAppLifecycleNotifier.new),
@@ -8919,21 +8919,50 @@ void main() {
           kind: EventKind.huddleStarted,
           createdAt: now - 125,
         );
-        NostrEvent participation(String key, String author, int kind) =>
-            NostrEvent(
-              id: '$key-$kind',
-              pubkey: author,
-              createdAt: now - 120,
-              kind: kind,
-              tags: [
-                ['h', _channelId],
-                ['p', key],
-              ],
-              content: jsonEncode({'ephemeral_channel_id': _huddleChannelId}),
-              sig: '',
-            );
+        NostrEvent participation(
+          String key,
+          String author,
+          int kind, {
+          int revision = 1,
+          String admission = 'first',
+        }) => NostrEvent(
+          id: '$key-$kind-$revision',
+          pubkey: author,
+          createdAt: now - 120,
+          kind: kind,
+          tags: [
+            ['h', _channelId],
+            ['p', key],
+          ],
+          content: jsonEncode({
+            'ephemeral_channel_id': _huddleChannelId,
+            'roster_revision': revision,
+            'admission_id': admission,
+            'generation': '1',
+          }),
+          sig: '',
+        );
         final history = [
           participation(alice, authority, EventKind.huddleParticipantJoined),
+          participation(
+            alice,
+            authority,
+            EventKind.huddleParticipantLeft,
+            revision: 2,
+          ),
+          participation(
+            alice,
+            authority,
+            EventKind.huddleParticipantJoined,
+            revision: 3,
+            admission: 'rejoin',
+          ),
+          participation(
+            alice,
+            authority,
+            EventKind.huddleParticipantLeft,
+            revision: 4,
+          ),
           participation(bob, authority, EventKind.huddleParticipantJoined),
           participation(
             'c' * 64,
@@ -12160,10 +12189,12 @@ void main() {
     testWidgets(
       'views the original transcript and thread without cached room membership',
       (tester) async {
+        final relay = _IdentityUpdateRelaySession();
         final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
         await tester.pumpWidget(
           _buildTestable(
             signingPubkey: 'self',
+            relaySessionNotifier: relay,
             channelsNotifier: _FakeChannelsNotifier([_testChannel]),
             messages: [
               _huddleMsg(
@@ -12233,6 +12264,16 @@ void main() {
         channels.setChannels([_testChannel]);
         await tester.pumpAndSettle();
         expect(find.widgetWithText(FilledButton, 'View'), findsOneWidget);
+        // Reopening must check access before showing the already cached rows.
+        relay.huddleHistoryError = Exception('restricted: not a member');
+        await tester.tap(find.widgetWithText(FilledButton, 'View'));
+        await tester.pumpAndSettle();
+        expect(
+          find.text('You no longer have access to this Huddle.'),
+          findsOneWidget,
+        );
+        expect(find.text('The transcript remains available.'), findsNothing);
+        expect(find.widgetWithText(FilledButton, 'Retry'), findsNothing);
       },
     );
 
@@ -21299,6 +21340,7 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
 class _IdentityUpdateRelaySession extends RelaySessionNotifier {
   _IdentityUpdateRelaySession({this.profileRefresh});
 
+  Object? huddleHistoryError;
   final Future<List<NostrEvent>>? profileRefresh;
   NostrFilter? identityFilter;
   NostrFilter? directIdentityFilter;
@@ -21318,6 +21360,10 @@ class _IdentityUpdateRelaySession extends RelaySessionNotifier {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
+    if (filter.tags['#h']?.contains(_huddleChannelId) == true &&
+        huddleHistoryError != null) {
+      throw huddleHistoryError!;
+    }
     if (filter.kinds.length == 1 && filter.kinds.single == 0) {
       return profileRefresh ?? const [];
     }
