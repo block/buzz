@@ -1,3 +1,4 @@
+import 'bestie_transcription_status.dart';
 import '../../shared/widgets/duo_toolbar.dart';
 import 'composer_geometry.dart';
 import 'message_author_visibility.dart';
@@ -928,6 +929,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      BestieTranscriptionStatus(channelId: channel.id),
                       ?assistant.pendingNotice,
                       ComposeBar(
                         channelId: channel.id,
