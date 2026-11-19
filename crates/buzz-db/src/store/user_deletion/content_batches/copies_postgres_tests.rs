@@ -3,6 +3,81 @@ use super::*;
 use crate::user_deletion::ExecutionMode;
 use nostr::{EventBuilder, Kind};
 
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn event_batch_deletion_preserves_large_unrelated_delivery_history() {
+    let (db, c, _, alice, _) = setup().await;
+    for n in 0..100 {
+        let event = EventBuilder::new(Kind::Custom(1063), format!("personal metadata {n}"))
+            .sign_with_keys(&alice)
+            .unwrap();
+        db.insert_event(c, &event, None).await.unwrap();
+    }
+    // Event IDs have no delivery-log index. A per-event dependency probe scans
+    // this unrelated history 100 times and exceeds the executor's 3s timeout.
+    sqlx::query(
+        "INSERT INTO delivery_log(community_id,subscription_id,event_id,error_message)
+         SELECT $1,'unrelated',decode(md5(g::text)||md5(g::text),'hex'),repeat('x',128)
+         FROM generate_series(1,500000) g",
+    )
+    .bind(c.as_uuid())
+    .execute(db.pool())
+    .await
+    .unwrap();
+    // Many tiny tenants make generic-plan estimates underestimate this tenant.
+    // A plain IN semi join can compare every log to every event after ANALYZE.
+    sqlx::query(
+        "WITH tenants AS (
+             INSERT INTO communities(id,host)
+             SELECT gen_random_uuid(),'delivery-'||g||'.example'
+             FROM generate_series(1,9999) g RETURNING id
+         ) INSERT INTO delivery_log(community_id,event_id)
+         SELECT id,decode(repeat('ff',32),'hex') FROM tenants",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+    sqlx::query("ANALYZE delivery_log")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_with(
+            (*db.pool().connect_options())
+                .clone()
+                .options([("plan_cache_mode", "force_generic_plan")]),
+        )
+        .await
+        .unwrap();
+    let db = crate::Db::from_pool(pool);
+    let mut opts = options(c, &alice);
+    opts.batch_size = 100;
+    for (mode, expected) in [
+        (ExecutionMode::ReadOnly, 100),
+        (ExecutionMode::Delete, 100),
+        (ExecutionMode::Delete, 0),
+    ] {
+        let result = db
+            .user_deletion_store()
+            .run_message_batches(&opts, mode, None, &mut Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(result.items, expected);
+    }
+    let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id=$1")
+        .bind(c.as_uuid())
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(events, 0);
+    let logs: i64 = sqlx::query_scalar("SELECT count(*) FROM delivery_log WHERE community_id=$1")
+        .bind(c.as_uuid())
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(logs, 500_000);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Postgres"]
 async fn historical_file_publications_and_late_delivery_copies_follow_source_scope() {

@@ -149,8 +149,7 @@ async fn children(
     let dependent = match table {
         "subscriptions" => "EXISTS(SELECT 1 FROM delivery_log WHERE community_id=$1 AND subscription_id=w.row_key->>'id')",
         "push_leases" => "EXISTS(SELECT 1 FROM push_wake_outbox WHERE community_id=$1 AND author=decode(w.row_key->>'author','hex') AND installation_id=w.row_key->>'installation_id')",
-        "events" => "EXISTS(SELECT 1 FROM delivery_log WHERE community_id=$1 AND event_id=decode(w.row_key->>'id','hex'))
-            OR EXISTS(SELECT 1 FROM event_mentions WHERE community_id=$1 AND event_id=decode(w.row_key->>'id','hex'))
+        "events" => "EXISTS(SELECT 1 FROM event_mentions WHERE community_id=$1 AND event_id=decode(w.row_key->>'id','hex'))
             OR EXISTS(SELECT 1 FROM push_match_queue WHERE community_id=$1 AND event_id=decode(w.row_key->>'id','hex'))
             OR EXISTS(SELECT 1 FROM push_wake_outbox WHERE community_id=$1 AND event_id=decode(w.row_key->>'id','hex'))
             OR EXISTS(SELECT 1 FROM operator_listener_outbox WHERE community_id=$1 AND event_id=decode(w.row_key->>'id','hex'))",
@@ -168,6 +167,23 @@ async fn children(
         .bind(number)
         .fetch_one(&mut *conn)
         .await?;
+    // Delivery logs have no event-ID index. Probe the whole batch as a set so
+    // unrelated history is not scanned again for every selected event. IS TRUE
+    // keeps membership as a hashed subplan instead of a nested-loop semi join
+    // when tenant or temporary-worklist estimates are too small.
+    let remains = remains
+        || (table == "events"
+            && sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM delivery_log d
+                 WHERE d.community_id=$1 AND (d.event_id IN (
+                     SELECT decode(w.row_key->>'id','hex') FROM content_batch_work w
+                     WHERE w.table_name=$2 AND w.batch=$3)) IS TRUE)",
+            )
+            .bind(community)
+            .bind(table)
+            .bind(number)
+            .fetch_one(&mut *conn)
+            .await?);
     if remains {
         return Err(invalid(
             "new dependent records appeared; current batch rolled back; rerun to plan them",
