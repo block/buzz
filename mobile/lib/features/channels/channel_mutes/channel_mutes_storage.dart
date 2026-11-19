@@ -44,19 +44,6 @@ class ChannelMuteStore {
     'channels': {for (final e in channels.entries) e.key: e.value.toJson()},
   };
 
-  /// Converts legacy timestamps and bounds the outgoing record.
-  ChannelMuteStore forPublish(Set<String> changed) {
-    final bounded = {
-      for (final entry in channels.entries)
-        entry.key: ChannelMuteEntry(
-          muted: entry.value.muted,
-          updatedAt: sidebarFlagTimeMillis(entry.value.updatedAt),
-        ),
-    };
-    boundSidebarFlags(bounded, changed);
-    return ChannelMuteStore(channels: bounded);
-  }
-
   factory ChannelMuteStore.fromJson(
     Map<String, dynamic> json, {
     bool strict = false,
@@ -81,21 +68,6 @@ class ChannelMuteStore {
     }
     return ChannelMuteStore(version: 1, channels: channels);
   }
-}
-
-ChannelMuteStore mergeStores(ChannelMuteStore local, ChannelMuteStore remote) {
-  // Per-channel max-updatedAt merge:
-  // For each channel ID in the union, keep the entry with the highest updatedAt.
-  final merged = <String, ChannelMuteEntry>{...local.channels};
-  for (final entry in remote.channels.entries) {
-    final existing = merged[entry.key];
-    if (existing == null ||
-        sidebarFlagTimeMillis(entry.value.updatedAt) >
-            sidebarFlagTimeMillis(existing.updatedAt)) {
-      merged[entry.key] = entry.value;
-    }
-  }
-  return ChannelMuteStore(channels: merged);
 }
 
 class ChannelMutesStorage {
@@ -125,10 +97,4 @@ class ChannelMutesStorage {
       return const ChannelMuteStore();
     }
   }
-
-  Future<bool> write(String pubkey, String relayUrl, ChannelMuteStore store) =>
-      _prefs.setString(
-        channelMutesKey(pubkey, relayUrl),
-        jsonEncode(store.toJson()),
-      );
 }

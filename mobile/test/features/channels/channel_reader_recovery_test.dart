@@ -68,7 +68,7 @@ final _lanes = [
       },
       set: (c, v) => v ? m.starChannel(c) : m.unstarChannel(c),
       refresh: m.refreshFromRelay,
-      dispose: () => m.dispose(flushPending: false),
+      dispose: m.dispose,
     );
   }),
   _Lane('channel-mutes', 'muted', (prefs, relay) {
@@ -89,7 +89,7 @@ final _lanes = [
       },
       set: (c, v) => v ? m.muteChannel(c) : m.unmuteChannel(c),
       refresh: m.refreshFromRelay,
-      dispose: () => m.dispose(flushPending: false),
+      dispose: m.dispose,
     );
   }),
 ];
@@ -452,13 +452,24 @@ void main() {
 
     group(lane.dTag, () {
       late SidebarRelay relay;
+      late ProviderContainer container;
       late _Subject subject;
       late int t;
       setUp(() {
         relay = SidebarRelay();
+        container = ProviderContainer(
+          overrides: [
+            relayConfigProvider.overrideWith(() => _Config(relay.keys.nsec)),
+            relaySessionProvider.overrideWith(() => relay.session),
+          ],
+        );
+        container.read(relaySessionProvider);
         t = nowSeconds();
       });
-      tearDown(() => subject.dispose());
+      tearDown(() {
+        subject.dispose();
+        container.dispose();
+      });
 
       _Subject start(FakeAsync clock, {SharedPreferences? store}) {
         subject = lane.build(store ?? prefs, relay);
@@ -473,7 +484,7 @@ void main() {
           const low =
               '0000000000000000000000000000000000000000000000000000000000000000';
           if (priorHead) {
-            relay.stored.add(relay.event(lane.dTag, blob({}), t + 30, id: low));
+            relay.stored.add(relay.event(lane.dTag, blob({}), t + 30));
           }
           start(clock).set('mine', true);
           clock.elapse(const Duration(seconds: 5));
@@ -502,7 +513,7 @@ void main() {
             );
           }
           clock.elapse(const Duration(milliseconds: 20));
-          expect(subject.values(), {'mine': true, 'peer': true});
+          expect(subject.values(), {'peer': true});
         });
       }
 
@@ -583,8 +594,8 @@ void main() {
 
         final payload = relay.decrypt(relay.published.single) as Map;
         expect(payload['channels'], {
-          'mixed': {lane.field: false, 'updatedAt': (t - 100) * 1000},
-          'other': {lane.field: true, 'updatedAt': (t - 90) * 1000},
+          'mixed': {lane.field: false, 'updatedAt': t - 100},
+          'other': {lane.field: true, 'updatedAt': t - 90},
           'toggled': {lane.field: false, 'updatedAt': (t + 90) * 1000 + 1},
         });
         expect(subject.values(), {
@@ -598,7 +609,7 @@ void main() {
         clock,
       ) {
         final active = {
-          for (var i = 0; i < 498; i++) 'active-$i': (true, t - 1000),
+          for (var i = 0; i < 498; i++) 'active-$i': (true, t - 70),
         };
         relay.stored.add(
           relay.event(
@@ -619,7 +630,7 @@ void main() {
         final channels = payload['channels'] as Map;
         expect(channels, hasLength(500));
         expect(channels, isNot(contains('older-clear')));
-        expect(channels['newer-clear']['updatedAt'], (t - 90) * 1000);
+        expect(channels['newer-clear']['updatedAt'], t - 90);
         expect(channels['active-0'][lane.field], isFalse);
         expect(channels['active-1'][lane.field], isTrue);
         expect(subject.values(), hasLength(500));
@@ -639,7 +650,7 @@ void main() {
         fakeAsyncTest('does not publish after ${head.key}', (clock) {
           start(clock);
           if (head.value == null) {
-            relay.historyFailures = 1;
+            relay.writerFailures = 1;
           } else {
             relay.stored.add(relay.event(lane.dTag, head.value!, t));
           }
@@ -649,15 +660,220 @@ void main() {
           expect(subject.values(), {'kept-local': true});
 
           relay.stored.clear();
-          subject.set('next-edit', true);
-          clock.elapse(const Duration(seconds: 5));
+          if (head.value == null) {
+            clock.elapse(const Duration(seconds: 4));
+          } else {
+            final valid = relay.event(lane.dTag, blob({}), t + 1);
+            relay.stored.add(valid);
+            relay.emit(valid);
+            clock.elapse(const Duration(seconds: 6));
+          }
           final payload = relay.decrypt(relay.published.single) as Map;
-          expect(
-            (payload['channels'] as Map).keys,
-            containsAll(['kept-local', 'next-edit']),
-          );
+          expect((payload['channels'] as Map).keys, ['kept-local']);
         });
       }
+
+      fakeAsyncTest(
+        'a stale writer read retries without replacing newer flags',
+        (clock) {
+          final old = relay.event(lane.dTag, blob({'old': (true, t - 2)}), t);
+          final recent = relay.event(
+            lane.dTag,
+            blob({'recent': (true, t)}),
+            t + 1,
+          );
+          relay.stored.add(recent);
+          start(clock).set('pending', true);
+          relay.stored
+            ..clear()
+            ..add(old);
+          clock.elapse(const Duration(seconds: 5));
+          expect(relay.published, isEmpty);
+          expect(subject.values(), {'recent': true, 'pending': true});
+
+          relay.stored.add(recent);
+          clock.elapse(const Duration(seconds: 4));
+          final payload = relay.decrypt(relay.published.single) as Map;
+          expect(
+            payload['channels'].keys,
+            unorderedEquals(['recent', 'pending']),
+          );
+        },
+      );
+
+      fakeAsyncTest('an unrelated publish preserves a legacy writer toggle', (
+        clock,
+      ) {
+        relay.stored.add(
+          relay.event(lane.dTag, blob({'legacy': (true, t - 2)}), t),
+        );
+        start(clock).set('unrelated', true);
+        clock.elapse(const Duration(seconds: 5));
+        final sent = relay.published.single;
+        final payload = relay.decrypt(sent) as Map;
+        final flags = payload['channels'] as Map;
+        expect(flags['legacy']['updatedAt'], t - 2);
+        // An old client compares raw timestamps.
+        expect(t > flags['legacy']['updatedAt'], isTrue);
+        final old = relay.event(lane.dTag, {
+          ...payload,
+          'channels': {
+            ...flags,
+            'legacy': {lane.field: false, 'updatedAt': t},
+          },
+        }, sent.createdAt + 1);
+        relay.stored.add(old);
+        subject.refresh();
+        clock.flushMicrotasks();
+        expect(subject.values(), {'legacy': false, 'unrelated': true});
+      });
+
+      fakeAsyncTest('a returning phone cannot resurrect an evicted clear', (
+        clock,
+      ) {
+        relay.stored.add(
+          relay.event(
+            lane.dTag,
+            blob({for (var i = 0; i < 500; i++) 'flag-$i': (true, t - 2)}),
+            t,
+          ),
+        );
+        final returningPhone = start(clock);
+        final peer = lane.build(SidebarDevicePrefs(), relay);
+        peer.init();
+        clock.flushMicrotasks();
+        peer.set('flag-0', false);
+        clock.elapse(const Duration(seconds: 5));
+        peer.set('new', true);
+        clock.elapse(const Duration(seconds: 5));
+        expect(peer.values()['flag-0'], isFalse);
+        expect(returningPhone.values()['flag-0'], isTrue);
+
+        // Once the clear ages out of the latest retained head, the returning
+        // device still has its old star. It must only send its current edit.
+        final sent = relay.published.last;
+        relay.stored.add(
+          relay.event(
+            lane.dTag,
+            blob({
+              for (final entry in peer.values().entries)
+                if (entry.key != 'flag-0') entry.key: (entry.value, t + 10),
+              // A later writer can have an earlier clock. A stale-cache
+              // union would evict this flag and leave flag-0 in the record.
+              'another': (true, t - 100),
+            }),
+            sent.createdAt + 1,
+          ),
+        );
+        returningPhone.set('flag-2', false);
+        clock.elapse(const Duration(seconds: 5));
+        final payload = relay.decrypt(relay.published.last) as Map;
+        expect(payload['channels'], isNot(contains('flag-0')));
+        expect(payload['channels']['flag-2'][lane.field], isFalse);
+        expect(payload['channels']['another'][lane.field], isTrue);
+        expect(returningPhone.values(), isNot(contains('flag-0')));
+        peer.dispose();
+      });
+
+      fakeAsyncTest('a pending clear survives manager replacement at the cap', (
+        clock,
+      ) {
+        relay.stored.add(
+          relay.event(
+            lane.dTag,
+            blob({
+              'pending': (true, t - 10),
+              for (var i = 0; i < 499; i++) 'active-$i': (true, t + 60),
+            }),
+            t,
+          ),
+        );
+        start(clock).set('pending', false);
+        relay.writerFailures = 1;
+        clock.elapse(const Duration(seconds: 5));
+        expect(relay.published, isEmpty);
+        subject.dispose();
+        start(clock);
+        expect(subject.values()['pending'], isFalse);
+        subject.set('new', true);
+        clock.elapse(const Duration(seconds: 5));
+        final payload = relay.decrypt(relay.published.single) as Map;
+        final channels = payload['channels'] as Map;
+        expect(channels, hasLength(500));
+        expect(channels['pending'][lane.field], isFalse);
+        expect(channels['new'][lane.field], isTrue);
+      });
+
+      fakeAsyncTest('a duplicate OK retries from the actual winning head', (
+        clock,
+      ) {
+        start(clock).set('pending', true);
+        relay.replaceNextPublish = (sent) => relay.event(
+          lane.dTag,
+          blob({'peer': (true, t - 1)}),
+          sent.createdAt + 1,
+        );
+        clock.elapse(const Duration(seconds: 5));
+        expect(relay.published, hasLength(1));
+        expect(subject.values(), {'pending': true, 'peer': true});
+        clock.elapse(const Duration(seconds: 4));
+        expect(relay.published, hasLength(2));
+        expect(relay.writerQueries, List.filled(4, lane.dTag));
+        final payload = relay.decrypt(relay.published.last) as Map;
+        expect(payload['channels'].keys, unorderedEquals(['peer', 'pending']));
+      });
+
+      fakeAsyncTest('a confirmed clear loses eviction priority at the cap', (
+        clock,
+      ) {
+        relay.stored.add(
+          relay.event(
+            lane.dTag,
+            blob({
+              'cleared': (true, t - 10),
+              for (var i = 0; i < 499; i++) 'active-$i': (true, t + 300),
+            }),
+            t,
+          ),
+        );
+        final ok = relay.holdOk = Completer<void>();
+        start(clock).set('cleared', false);
+        clock.elapse(const Duration(seconds: 5));
+        relay.emit(relay.published.single);
+        clock.elapse(const Duration(milliseconds: 20));
+        subject.set('cleared', false);
+        subject.set('new', true);
+
+        relay.holdOk = null;
+        ok.complete();
+        clock.flushMicrotasks();
+        clock.elapse(const Duration(seconds: 2));
+        final payload = relay.decrypt(relay.published.last) as Map;
+        expect(relay.published, hasLength(2));
+        expect(payload['channels'], hasLength(500));
+        expect(payload['channels'], isNot(contains('cleared')));
+        expect(payload['channels']['active-0'][lane.field], isTrue);
+        expect(payload['channels']['new'][lane.field], isTrue);
+      });
+
+      fakeAsyncTest('confirmation preserves a newer edit to the same flag', (
+        clock,
+      ) {
+        relay.holdOk = Completer<void>();
+        start(clock).set('flag', true);
+        clock.elapse(const Duration(seconds: 5));
+        expect(relay.published, hasLength(1));
+        subject.set('flag', false);
+        final ok = relay.holdOk!;
+        relay.holdOk = null;
+        ok.complete();
+        clock.flushMicrotasks();
+        expect(subject.values(), {'flag': false});
+        clock.elapse(const Duration(seconds: 2));
+        final payload = relay.decrypt(relay.published.last) as Map;
+        expect(relay.published, hasLength(2));
+        expect(payload['channels']['flag'][lane.field], isFalse);
+      });
 
       fakeAsyncTest('resume adopts a head the healthy socket missed', (clock) {
         relay.stored.add(relay.event(lane.dTag, blob({'a': (true, t)}), t));

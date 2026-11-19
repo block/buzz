@@ -44,19 +44,6 @@ class ChannelStarStore {
     'channels': {for (final e in channels.entries) e.key: e.value.toJson()},
   };
 
-  /// Converts legacy timestamps and bounds the outgoing record.
-  ChannelStarStore forPublish(Set<String> changed) {
-    final bounded = {
-      for (final entry in channels.entries)
-        entry.key: ChannelStarEntry(
-          starred: entry.value.starred,
-          updatedAt: sidebarFlagTimeMillis(entry.value.updatedAt),
-        ),
-    };
-    boundSidebarFlags(bounded, changed);
-    return ChannelStarStore(channels: bounded);
-  }
-
   factory ChannelStarStore.fromJson(
     Map<String, dynamic> json, {
     bool strict = false,
@@ -81,21 +68,6 @@ class ChannelStarStore {
     }
     return ChannelStarStore(version: 1, channels: channels);
   }
-}
-
-ChannelStarStore mergeStores(ChannelStarStore local, ChannelStarStore remote) {
-  // Per-channel max-updatedAt merge:
-  // For each channel ID in the union, keep the entry with the highest updatedAt.
-  final merged = <String, ChannelStarEntry>{...local.channels};
-  for (final entry in remote.channels.entries) {
-    final existing = merged[entry.key];
-    if (existing == null ||
-        sidebarFlagTimeMillis(entry.value.updatedAt) >
-            sidebarFlagTimeMillis(existing.updatedAt)) {
-      merged[entry.key] = entry.value;
-    }
-  }
-  return ChannelStarStore(channels: merged);
 }
 
 class ChannelStarsStorage {
@@ -125,10 +97,4 @@ class ChannelStarsStorage {
       return const ChannelStarStore();
     }
   }
-
-  Future<bool> write(String pubkey, String relayUrl, ChannelStarStore store) =>
-      _prefs.setString(
-        channelStarsKey(pubkey, relayUrl),
-        jsonEncode(store.toJson()),
-      );
 }

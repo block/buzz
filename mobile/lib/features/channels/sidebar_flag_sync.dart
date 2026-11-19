@@ -1,0 +1,367 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
+
+import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../../shared/crypto/event_signing.dart';
+import '../../shared/read_state/read_state_time.dart';
+import '../../shared/read_state/sidebar_flags.dart';
+import '../../shared/relay/relay.dart';
+
+/// Synchronizes one authoritative flag snapshot and a durable overlay of edits.
+class SidebarFlagSync<T extends SidebarFlagEntry> {
+  SidebarFlagSync({
+    required this.pubkey,
+    required this.relayUrl,
+    required String coordinate,
+    required SharedPreferences prefs,
+    required String cacheKey,
+    required Map<String, T> cachedFlags,
+    required Map<String, T> Function(Map<String, dynamic>, bool strict) decode,
+    required Map<String, dynamic> Function(Map<String, T>) encode,
+    required T Function(bool, int) entry,
+    required String Function(String) decrypt,
+    required String Function(String) encrypt,
+    required RelaySessionNotifier? relaySession,
+    required SignedEventRelay? signedEventRelay,
+    required bool remoteEnabled,
+    required VoidCallback onChanged,
+    required Duration startupRetryBaseDelay,
+  }) : _coordinate = coordinate,
+       _prefs = prefs,
+       _cacheKey = cacheKey,
+       _confirmed = cachedFlags,
+       _decode = decode,
+       _encode = encode,
+       _entry = entry,
+       _decrypt = decrypt,
+       _encrypt = encrypt,
+       _relay = relaySession,
+       _signer = signedEventRelay,
+       _remoteEnabled = remoteEnabled,
+       _onChanged = onChanged,
+       _startupRetryBaseDelay = startupRetryBaseDelay {
+    _pending = _readPending();
+  }
+
+  final String pubkey;
+  final String relayUrl;
+  final String _coordinate;
+  final String _cacheKey;
+  final SharedPreferences _prefs;
+  final Map<String, T> Function(Map<String, dynamic>, bool) _decode;
+  final Map<String, dynamic> Function(Map<String, T>) _encode;
+  final T Function(bool, int) _entry;
+  final String Function(String) _decrypt;
+  final String Function(String) _encrypt;
+  final RelaySessionNotifier? _relay;
+  final SignedEventRelay? _signer;
+  final bool _remoteEnabled;
+  final VoidCallback _onChanged;
+  final Duration _startupRetryBaseDelay;
+  Map<String, T> _confirmed;
+  late final Map<String, T> _pending;
+  NostrEvent? _head;
+  bool _headNeedsWrite = false;
+  Timer? _writeTimer;
+  Timer? _startupTimer;
+  void Function()? _unsubscribe;
+  static const _maxWriteFailures = 5;
+  int _writeFailures = 0;
+  int _startupAttempts = 0;
+  bool _headLoaded = false;
+  bool _liveSettled = false;
+  bool _writing = false;
+  bool _disposed = false;
+
+  /// The local view includes unsent changes across reconnects and restarts.
+  Map<String, T> get values => {..._confirmed, ..._pending};
+
+  bool get _active =>
+      !_disposed && (_relay?.relayUrl == null || _relay?.relayUrl == relayUrl);
+
+  NostrFilter _filter({bool writer = false}) => NostrFilter(
+    kinds: const [EventKind.readState],
+    authors: [pubkey],
+    tags: {
+      '#d': [_coordinate],
+    },
+    limit: 1,
+    extensions: writer ? const {'consistency': 'strong'} : const {},
+  );
+
+  Map<String, T> _readPending() {
+    try {
+      final raw = _prefs.getString(_cacheKey);
+      if (raw == null) return {};
+      final cached = jsonDecode(raw) as Map<String, dynamic>;
+      return _decode({'version': 1, 'channels': cached['pending']}, false);
+    } catch (error) {
+      debugPrint('[$_coordinate] cannot load pending flags: $error');
+      return {};
+    }
+  }
+
+  Future<bool> _persist() async {
+    if (!_active) return false;
+    try {
+      return await _prefs.setString(
+        _cacheKey,
+        jsonEncode({
+          ..._encode(_confirmed),
+          'pending': _encode(_pending)['channels'],
+        }),
+      );
+    } catch (error) {
+      debugPrint('[$_coordinate] cannot save flag state: $error');
+      return false;
+    }
+  }
+
+  /// Start the read lanes and resume any journaled edits.
+  Future<void> initialize() async {
+    if (!_remoteEnabled || !_active || _relay == null) return;
+    await _startReadLanes();
+    _scheduleWrite();
+  }
+
+  Future<void> _startReadLanes() async {
+    if (!_active) return;
+    if (!_headLoaded) _headLoaded = await _recoverHead();
+    if (!_active) return;
+    if (!_liveSettled) {
+      try {
+        final unsubscribe = await _relay!.subscribe(
+          _filter(),
+          (event) => unawaited(_acceptRead(event)),
+          onClosed: (_) => _liveSettled = true,
+        );
+        if (!_active) {
+          unsubscribe();
+          return;
+        }
+        _unsubscribe = unsubscribe;
+        _liveSettled = true;
+      } catch (error) {
+        debugPrint('[$_coordinate] flag subscription failed: $error');
+      }
+    }
+    if ((!_headLoaded || !_liveSettled) && _active) {
+      final delay = min(
+        _startupRetryBaseDelay.inMilliseconds << min(_startupAttempts++, 5),
+        30000,
+      );
+      _startupTimer = Timer(
+        Duration(milliseconds: delay),
+        () => unawaited(_startReadLanes()),
+      );
+    }
+  }
+
+  /// Refresh the view and give any pending save another chance on resume.
+  void refreshFromRelay() {
+    if (!_remoteEnabled || !_active || _relay == null) return;
+    unawaited(_resume());
+  }
+
+  Future<void> _resume() async {
+    if (_pending.isEmpty && !_writing) await _recoverHead();
+    if (_writeTimer?.isActive == true || _writing) return;
+    _writeFailures = 0;
+    _scheduleWrite();
+  }
+
+  Future<bool> _recoverHead() async {
+    try {
+      final events = await _relay!.fetchHistory(_filter());
+      if (!_active) return false;
+      if (events.isEmpty) return true;
+      return await _acceptRead(events.single);
+    } catch (error) {
+      debugPrint('[$_coordinate] flag history failed: $error');
+      return false;
+    }
+  }
+
+  bool _matches(NostrEvent event) =>
+      event.kind == EventKind.readState &&
+      event.pubkey == pubkey &&
+      event.getTagValue('d') == _coordinate;
+
+  Map<String, T> _decodeEvent(NostrEvent event) => _decode(
+    jsonDecode(_decrypt(event.content)) as Map<String, dynamic>,
+    true,
+  );
+
+  Future<bool> _acceptRead(NostrEvent event) async {
+    if (!_active || !_matches(event)) return false;
+    final head = _head;
+    if (head != null && !_isNewer(event, head)) {
+      if (!_headNeedsWrite || head.id != event.id) return true;
+    }
+    final Map<String, T> confirmed;
+    try {
+      confirmed = _decodeEvent(event);
+    } catch (error) {
+      debugPrint('[$_coordinate] unreadable flag snapshot: $error');
+      return true;
+    }
+    _head = event;
+    _headNeedsWrite = true;
+    _confirmed = confirmed;
+    if (!await _persist() || !_active) return false;
+    if (identical(_head, event)) _headNeedsWrite = false;
+    _onChanged();
+    if (_writeFailures >= _maxWriteFailures) {
+      _writeFailures = 0;
+      _scheduleWrite();
+    }
+    return true;
+  }
+
+  bool _isNewer(NostrEvent candidate, NostrEvent head) =>
+      candidate.createdAt > head.createdAt ||
+      (candidate.createdAt == head.createdAt &&
+          candidate.id.compareTo(head.id) < 0);
+
+  /// Keep the pending change locally until the writer confirms it.
+  void setFlag(String id, bool enabled) {
+    if (!_active) return;
+    final previous = _pending[id] ?? _confirmed[id];
+    if (previous?.enabled == enabled) return;
+    _pending[id] = _entry(enabled, _nextTimestamp(previous));
+    // Invoke the prefs setter in this turn so a successor manager created
+    // during a disconnect can see the journal immediately.
+    unawaited(_persist());
+    _onChanged();
+    _writeFailures = 0;
+    _writeTimer?.cancel();
+    _scheduleWrite();
+  }
+
+  int _nextTimestamp(T? previous) => max(
+    DateTime.now().millisecondsSinceEpoch,
+    sidebarFlagTimeMillis(previous?.updatedAt ?? 0) + 1,
+  );
+
+  void _scheduleWrite({Duration delay = const Duration(seconds: 5)}) {
+    if (!_remoteEnabled ||
+        !_active ||
+        _relay == null ||
+        _signer == null ||
+        _pending.isEmpty ||
+        _writing ||
+        _writeTimer?.isActive == true) {
+      return;
+    }
+    _writeTimer = Timer(delay, () {
+      _writeTimer = null;
+      unawaited(_writePending());
+    });
+  }
+
+  Future<(NostrEvent?, Map<String, T>)> _writerHead() async {
+    final events = await _relay!.queryRelay([_filter(writer: true)]);
+    if (!_active) throw StateError('Flag query belongs to a retired session');
+    if (events.isEmpty) return (null, <String, T>{});
+    final event = events.single;
+    if (!_matches(event)) throw const FormatException('Unexpected flag record');
+    try {
+      verifiedNostrEventFromJson(jsonEncode(event.toJson()));
+      return (event, _decodeEvent(event));
+    } catch (_) {
+      throw const FormatException('Unreadable writer flag record');
+    }
+  }
+
+  Future<void> _writePending() async {
+    if (!_active || _pending.isEmpty) return;
+    _writing = true;
+    final headAtStart = _head;
+    try {
+      final edits = Map.of(_pending);
+      if (!await _persist()) throw StateError('Flag edit is not journaled');
+      if (!_active) return;
+      final (head, snapshot) = await _writerHead();
+      final observed = _head;
+      if (observed != null && (head == null || _isNewer(observed, head))) {
+        throw StateError(
+          'Writer flag snapshot is older than the observed head',
+        );
+      }
+      final outgoing = Map.of(snapshot);
+      for (final edit in edits.entries) {
+        final latest = snapshot[edit.key];
+        outgoing[edit.key] =
+            sidebarFlagTimeMillis(latest?.updatedAt ?? 0) < edit.value.updatedAt
+            ? edit.value
+            : _entry(edit.value.enabled, _nextTimestamp(latest));
+      }
+      boundSidebarFlags(outgoing, edits.keys.toSet());
+      if (!edits.keys.every(outgoing.containsKey)) {
+        throw StateError('Too many pending edits for one flag record');
+      }
+      final result = await _signer!.submit(
+        kind: EventKind.readState,
+        content: _encrypt(jsonEncode(_encode(outgoing))),
+        tags: [
+          ['d', _coordinate],
+          ['t', _coordinate],
+        ],
+        createdAt: max(currentUnixSeconds(), (head?.createdAt ?? 0) + 1),
+        mayPublish: () async => _active,
+      );
+      final (retained, confirmed) = await _writerHead();
+      if (retained != null && (_head == null || !_isNewer(_head!, retained))) {
+        _head = retained;
+        _confirmed = confirmed;
+      }
+      if (retained?.id != result.id) {
+        await _persist();
+        if (_active) _onChanged();
+        throw StateError('Flag write was superseded');
+      }
+      final acknowledged = <String, T>{};
+      for (final edit in edits.entries) {
+        if (identical(_pending[edit.key], edit.value)) {
+          acknowledged[edit.key] = edit.value;
+          _pending.remove(edit.key);
+        }
+      }
+      if (!await _persist()) {
+        for (final edit in acknowledged.entries) {
+          _pending.putIfAbsent(edit.key, () => edit.value);
+        }
+        throw StateError('Flag confirmation was not saved');
+      }
+      if (_active) _onChanged();
+      _writeFailures = 0;
+    } on FormatException catch (error) {
+      // A malformed head needs a new valid snapshot or a resume, not polling.
+      _writeFailures = identical(_head, headAtStart) ? _maxWriteFailures : 1;
+      debugPrint(
+        '[$_coordinate] flag publish waiting for a valid head: $error',
+      );
+    } catch (error) {
+      _writeFailures++;
+      debugPrint('[$_coordinate] flag publish pending: $error');
+    } finally {
+      _writing = false;
+      // Reconnect, resume or another edit also re-arms the bounded retry.
+      if (_writeFailures < _maxWriteFailures) {
+        _scheduleWrite(delay: Duration(seconds: 2 << _writeFailures));
+      }
+    }
+  }
+
+  /// Retire this manager. Its successor reads any pending edits from disk.
+  void dispose() {
+    if (_disposed) return;
+    _disposed = true;
+    _startupTimer?.cancel();
+    _writeTimer?.cancel();
+    _unsubscribe?.call();
+  }
+}

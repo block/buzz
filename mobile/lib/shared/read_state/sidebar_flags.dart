@@ -13,8 +13,9 @@ abstract interface class SidebarFlagEntry {
   int get updatedAt;
 }
 
-/// Evict old clears before active flags. Keep changes from the current write
-/// ahead of existing entries so an unstar or unmute can still reach peers.
+/// Bound the record by age, keeping edits in this write and preferring to
+/// evict a clear over an active flag of the same age. New clears must survive
+/// older active flags so clients with stale caches can observe them.
 void boundSidebarFlags<T extends SidebarFlagEntry>(
   Map<String, T> channels,
   Set<String> changed,
@@ -22,17 +23,18 @@ void boundSidebarFlags<T extends SidebarFlagEntry>(
   final excess = channels.length - _maxSidebarFlags;
   if (excess <= 0) return;
 
-  int priority(MapEntry<String, T> entry) =>
-      changed.contains(entry.key) ? 2 : (entry.value.enabled ? 1 : 0);
-
   final evictionOrder = channels.entries.toList()
     ..sort((a, b) {
-      final byPriority = priority(a).compareTo(priority(b));
-      if (byPriority != 0) return byPriority;
+      final byEdit = (changed.contains(a.key) ? 1 : 0).compareTo(
+        changed.contains(b.key) ? 1 : 0,
+      );
+      if (byEdit != 0) return byEdit;
       final byTime = sidebarFlagTimeMillis(
         a.value.updatedAt,
       ).compareTo(sidebarFlagTimeMillis(b.value.updatedAt));
-      return byTime != 0 ? byTime : a.key.compareTo(b.key);
+      if (byTime != 0) return byTime;
+      if (a.value.enabled != b.value.enabled) return a.value.enabled ? 1 : -1;
+      return a.key.compareTo(b.key);
     });
   for (final entry in evictionOrder.take(excess)) {
     channels.remove(entry.key);

@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:buzz/shared/crypto/nip44.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/relay/read_state_snapshot.dart';
+import 'package:buzz/shared/relay/relay_query_response.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:fake_async/fake_async.dart';
@@ -38,6 +39,9 @@ class SidebarRelay {
   final snapshotHosts = <String>[];
   final _liveSubIds = <String?, String>{};
   int historyFailures = 0;
+  int writerFailures = 0;
+  final writerQueries = <String>[];
+  NostrEvent Function(NostrEvent)? replaceNextPublish;
   Completer<void>? holdHistory;
   Completer<void>? holdOk;
   String? rejectLive;
@@ -110,8 +114,15 @@ class SidebarRelay {
       final event = NostrEvent.fromJson(message[1] as Map<String, dynamic>);
       published.add(event);
       publishedTo.add(session.relayUrl);
-      stored.add(event);
-      final ok = ['OK', event.id, true, ''];
+      final replace = replaceNextPublish;
+      replaceNextPublish = null;
+      stored.add(replace == null ? event : replace(event));
+      final ok = [
+        'OK',
+        event.id,
+        true,
+        replace == null ? '' : 'duplicate: newer event already stored',
+      ];
       final hold = holdOk;
       hold == null
           ? scheduleMicrotask(() => _reply(ok))
@@ -174,6 +185,24 @@ class SidebarRelay {
     expect(request.method, 'POST');
     expect(request.url.path, '/query');
     expect(request.headers['Authorization'], isNotNull);
+    final filter = (jsonDecode(request.body) as List).single as Map;
+    if (filter['#d'] case [final String coordinate]) {
+      expect(filter, {
+        'kinds': [30078],
+        'authors': [pubkey],
+        '#d': [coordinate],
+        'limit': 1,
+        'consistency': 'strong',
+      });
+      writerQueries.add(coordinate);
+      if (writerFailures > 0) {
+        writerFailures--;
+        return http.Response('error: overloaded', 503);
+      }
+      final heads = _heads(_storedByRelay[request.url.origin] ?? const []);
+      final head = heads[coordinate];
+      return http.Response(jsonEncode([if (head != null) head.toJson()]), 200);
+    }
     expect(jsonDecode(request.body), [
       {
         'kinds': [30078],
@@ -191,6 +220,20 @@ class SidebarRelay {
       historyFailures--;
       return http.Response('error: overloaded', 503);
     }
+    return http.Response(
+      jsonEncode({
+        'read_state_snapshot': 1,
+        'complete': true,
+        'community_id': community,
+        'pubkey': pubkey,
+        'snapshot_id': 'a' * 64,
+        'events': [for (final e in _heads(source).values) e.toJson()],
+      }),
+      200,
+    );
+  }
+
+  Map<String, NostrEvent> _heads(List<NostrEvent> source) {
     final heads = <String, NostrEvent>{};
     final own =
         source.where((e) => e.kind == 30078 && e.pubkey == pubkey).toList()
@@ -202,17 +245,7 @@ class SidebarRelay {
     for (final event in own) {
       heads.putIfAbsent(event.getTagValue('d') ?? '', () => event);
     }
-    return http.Response(
-      jsonEncode({
-        'read_state_snapshot': 1,
-        'complete': true,
-        'community_id': community,
-        'pubkey': pubkey,
-        'snapshot_id': 'a' * 64,
-        'events': [for (final e in heads.values) e.toJson()],
-      }),
-      200,
-    );
+    return heads;
   }
 
   void _reply(List<dynamic> message) => session.debugHandleMessage(message);
@@ -224,7 +257,13 @@ class SidebarRelay {
 
 class ConnectedRelaySession extends RelaySessionNotifier {
   ConnectedRelaySession({super.httpClient})
-    : super(snapshotDecoder: (input) async => validateReadStateSnapshot(input));
+    : super(
+        snapshotDecoder: (input) async => validateReadStateSnapshot(input),
+        queryDecoder: (response) async => parseRelayQueryEvents(
+          response.bodyBytes,
+          response.headers['content-type'],
+        ),
+      );
 
   @override
   SessionState build() {
@@ -285,3 +324,23 @@ int nowSeconds() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
 void fakeAsyncTest(String name, void Function(FakeAsync clock) body) =>
     test(name, () => fakeAsync(body));
+
+/// An independent preferences cache for a second device using the same relay.
+class SidebarDevicePrefs extends Fake implements SharedPreferences {
+  final _strings = <String, String>{};
+
+  @override
+  String? getString(String key) => _strings[key];
+
+  @override
+  Future<bool> remove(String key) async {
+    _strings.remove(key);
+    return true;
+  }
+
+  @override
+  Future<bool> setString(String key, String value) async {
+    _strings[key] = value;
+    return true;
+  }
+}

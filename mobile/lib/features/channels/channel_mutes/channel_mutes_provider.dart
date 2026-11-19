@@ -26,7 +26,7 @@ class ChannelMutesNotifier extends Notifier<ChannelMutesState> {
 
   @override
   ChannelMutesState build() {
-    _manager?.dispose(flushPending: false);
+    _manager?.dispose();
     _manager = null;
     _isInitialized = false;
 

@@ -32,7 +32,7 @@ pub(crate) struct Spec {
     collection: &'static str,
     flag: &'static str,
     ids: Ids,
-    /// Oldest clears, then oldest active flags, are evicted past this many.
+    /// Oldest flags are evicted past this many, with clears first at equal age.
     max_entries: Option<usize>,
 }
 
@@ -121,19 +121,22 @@ fn valid_entry(spec: &Spec, key: &str, value: &Value) -> Option<Entry> {
     }
     let object = value.as_object()?;
     let updated_at = object.get("updatedAt")?.as_f64().filter(|n| *n >= 0.0)?;
-    // Older channel flag writers used ten-digit Unix seconds.
-    let updated_at = if matches!(spec.ids, Ids::Channels) && (1e9..1e10).contains(&updated_at) {
-        updated_at * 1000.0
-    } else {
-        updated_at
-    };
     Some(Entry {
         on: object.get(spec.flag)?.as_bool()?,
         updated_at,
     })
 }
 
-/// Keep the current edit and discard older clears before active flags.
+// Preserve wire timestamps for untouched entries and compare in one unit.
+fn timestamp_millis(spec: &Spec, updated_at: f64) -> f64 {
+    if matches!(spec.ids, Ids::Channels) && (1e9..1e10).contains(&updated_at) {
+        updated_at * 1000.0
+    } else {
+        updated_at
+    }
+}
+
+/// Keep the current edit and preserve clears newer than active flags.
 fn bound(spec: &Spec, store: &mut Store, keep: &[String]) {
     let Some(max) = spec.max_entries else { return };
     if store.len() <= max {
@@ -141,17 +144,14 @@ fn bound(spec: &Spec, store: &mut Store, keep: &[String]) {
     }
     let keep: BTreeSet<_> = keep.iter().collect();
     let mut entries: Vec<_> = std::mem::take(store).into_iter().collect();
-    let priority = |id: &String, entry: &Entry| {
-        if keep.contains(id) {
-            2
-        } else {
-            u8::from(entry.on)
-        }
-    };
     entries.sort_by(|(left_id, left), (right_id, right)| {
-        priority(left_id, left)
-            .cmp(&priority(right_id, right))
-            .then_with(|| left.updated_at.total_cmp(&right.updated_at))
+        keep.contains(left_id)
+            .cmp(&keep.contains(right_id))
+            .then_with(|| {
+                timestamp_millis(spec, left.updated_at)
+                    .total_cmp(&timestamp_millis(spec, right.updated_at))
+            })
+            .then_with(|| left.on.cmp(&right.on))
             .then_with(|| left_id.cmp(right_id))
     });
     store.extend(entries.split_off(entries.len() - max));
@@ -248,7 +248,7 @@ fn canonical_ids(spec: &Spec, ids: &[String]) -> Result<Vec<String>, CliError> {
 /// it replaces so the edit wins every client's merge. Returns the changed ids;
 /// an id already in the requested state, or absent when switching off, is left
 /// alone.
-fn set_flags(store: &mut Store, ids: &[String], on: bool) -> Vec<String> {
+fn set_flags(spec: &Spec, store: &mut Store, ids: &[String], on: bool) -> Vec<String> {
     let clock = now().as_millis() as f64;
     let mut changed = Vec::new();
     for id in ids {
@@ -256,7 +256,9 @@ fn set_flags(store: &mut Store, ids: &[String], on: bool) -> Vec<String> {
         if current.map_or(!on, |entry| entry.on == on) {
             continue;
         }
-        let updated_at = current.map_or(clock, |entry| clock.max(entry.updated_at + 1.0));
+        let updated_at = current.map_or(clock, |entry| {
+            clock.max(timestamp_millis(spec, entry.updated_at) + 1.0)
+        });
         store.insert(id.clone(), Entry { on, updated_at });
         changed.push(id.clone());
     }
@@ -287,13 +289,13 @@ pub(crate) async fn run(
         Action::Set { ids, on } => {
             let ids = canonical_ids(spec, &ids)?;
             let (head_created_at, mut store) = fetch_store(spec, client).await?;
-            let changed = set_flags(&mut store, &ids, on);
+            let changed = set_flags(spec, &mut store, &ids, on);
             let before_pruning = store.len();
-            bound(spec, &mut store, &ids);
+            let required = if on { &ids } else { &changed };
+            bound(spec, &mut store, required);
             if changed.is_empty() && store.len() == before_pruning {
                 return Ok(sidebar_sync::unchanged());
             }
-            let required = if on { &ids } else { &changed };
             if required.iter().any(|id| !store.contains_key(id)) {
                 return Err(CliError::Usage(format!(
                     "{} keeps at most {MAX_ENTRIES} entries; pass fewer ids",
@@ -497,6 +499,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unrelated_publish_keeps_a_seconds_writer_compatible() {
+        for spec in [&STARS, &MUTES] {
+            let (client, relay) = setup().await;
+            let seconds = now().as_secs();
+            seed(
+                &client,
+                &relay,
+                spec,
+                json!({"version": 1, "channels": {C1: {spec.flag: true, "updatedAt": seconds - 1}}}),
+                seconds,
+            );
+            run(spec, set(&[C2], true), &client).await.unwrap();
+            let (published_event, mut doc) = published(&client, &relay);
+            let original = doc["channels"][C1]["updatedAt"].as_u64().unwrap();
+            assert_eq!(original, seconds - 1);
+            assert!(seconds > original, "a seconds writer must be able to win");
+            doc["channels"][C1] = json!({spec.flag: false, "updatedAt": seconds});
+            seed(
+                &client,
+                &relay,
+                spec,
+                doc,
+                published_event.created_at.as_secs() + 1,
+            );
+            run(spec, set(&[C3], true), &client).await.unwrap();
+            let (_, doc) = published(&client, &relay);
+            assert_eq!(
+                doc["channels"][C1],
+                json!({spec.flag: false, "updatedAt": seconds})
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn keeps_the_newest_500_entries() {
         let (client, relay) = setup().await;
         seed(
@@ -544,7 +580,7 @@ mod tests {
             let time = now().as_secs() - 100;
             let older_clear = "old-clear";
             let newer_clear = "new-clear";
-            let mut channels = entries(499, spec.flag, (time - 1000) * 1000)
+            let mut channels = entries(499, spec.flag, (time + 10) * 1000)
                 .as_object()
                 .unwrap()
                 .clone();
@@ -574,7 +610,7 @@ mod tests {
             assert!(!channels.contains_key(older_clear));
             assert!(!channels.contains_key(newer_clear));
             assert!(channels.contains_key(&active));
-            assert_eq!(channels[C1]["updatedAt"], json!((time + 2) * 1000));
+            assert_eq!(channels[C1]["updatedAt"], json!(time + 2));
 
             // Reintroduce two clears with mixed units, with one excess entry.
             let mut channels = channels.clone();
@@ -599,8 +635,49 @@ mod tests {
             let channels = doc["channels"].as_object().unwrap();
             assert_eq!(channels.len(), 500);
             assert!(!channels.contains_key(older_clear));
-            assert_eq!(channels[newer_clear]["updatedAt"], json!((time + 1) * 1000));
+            assert_eq!(channels[newer_clear]["updatedAt"], json!(time + 1));
             assert_eq!(channels[C1][spec.flag], json!(false));
+        }
+    }
+
+    #[tokio::test]
+    async fn preserves_a_new_clear_and_does_not_protect_an_unchanged_clear() {
+        for spec in [&STARS, &MUTES] {
+            let (client, relay) = setup().await;
+            let time = now().as_secs();
+            let mut channels = entries(500, spec.flag, (time + 60) * 1000)
+                .as_object()
+                .unwrap()
+                .clone();
+            channels.insert(C1.into(), json!({spec.flag: false, "updatedAt": time - 1}));
+            seed(
+                &client,
+                &relay,
+                spec,
+                json!({"version": 1, "channels": channels}),
+                time,
+            );
+            run(spec, set(&[C1], false), &client).await.unwrap();
+            let (head, doc) = published(&client, &relay);
+            let mut channels = doc["channels"].as_object().unwrap().clone();
+            assert_eq!(channels.len(), 500);
+            assert!(channels.values().all(|entry| entry[spec.flag] == true));
+
+            // The new clear is older than every competing flag in this
+            // skewed snapshot. The current edit must survive anyway.
+            channels.insert(C1.into(), json!({spec.flag: true, "updatedAt": time - 1}));
+            seed(
+                &client,
+                &relay,
+                spec,
+                json!({"version": 1, "channels": channels}),
+                head.created_at.as_secs() + 1,
+            );
+            run(spec, set(&[C1], false), &client).await.unwrap();
+            let (_, doc) = published(&client, &relay);
+            let channels = doc["channels"].as_object().unwrap();
+            assert_eq!(channels.len(), 500);
+            assert_eq!(channels[C1][spec.flag], false);
         }
     }
 
