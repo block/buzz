@@ -131,7 +131,9 @@ Places that drop custom schemes (GitHub and Slack markdown, terminals) can
 use the relay's HTTPS front instead: `{relay-origin}/open/<rest>` is a
 public page that opens `buzz://<rest>`, keeping the path and query byte for
 byte, and offers an **Open in Buzz** button and a download link if the app
-doesn't open. It forwards only the navigation forms `message`, `channel`,
+doesn't open. Desktop browsers open the app on load; phones and tablets wait
+for a tap on the button, since their browsers show an error for a scheme no
+app handles. It forwards only the navigation forms `message`, `channel`,
 `repo`, `project`, `pr` and `issue`; invite, authorization and install links get "This
 link doesn't work". For example,
 `https://relay.example/open/message?channel=<uuid>&id=<event>` opens

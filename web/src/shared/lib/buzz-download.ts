@@ -92,12 +92,17 @@ function normalizeArchitecture(
   return "unknown";
 }
 
+const userAgentDataOf = (navigatorValue: Navigator) =>
+  (navigatorValue as Navigator & { userAgentData?: UserAgentData })
+    .userAgentData;
+
+export const detectBuzzOperatingSystem = (navigatorValue: Navigator) =>
+  normalizeOperatingSystem(navigatorValue, userAgentDataOf(navigatorValue));
+
 export async function detectBuzzDownloadPlatform(
   navigatorValue: Navigator,
 ): Promise<BuzzDownloadPlatform> {
-  const userAgentData = (
-    navigatorValue as Navigator & { userAgentData?: UserAgentData }
-  ).userAgentData;
+  const userAgentData = userAgentDataOf(navigatorValue);
   const operatingSystem = normalizeOperatingSystem(
     navigatorValue,
     userAgentData,
