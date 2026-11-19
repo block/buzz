@@ -77,6 +77,35 @@ void _messageActionsScrollTests() {
           expect(sheet, findsOneWidget);
           expect(animation.value, 1);
           expect(position.pixels, 0);
+          // The menu opens at the top, so the first touch can scroll down to
+          // the lower actions and flick back across the top without lifting.
+          // Content it scrolled keeps velocity from dismissing it too.
+          final touch = await tester.startGesture(
+            Offset(start.dx, viewport.bottom - 40),
+          );
+          for (var i = 1; i <= 6; i++) {
+            await touch.moveBy(
+              const Offset(0, -25),
+              timeStamp: Duration(milliseconds: 40 * i),
+            );
+          }
+          await tester.pump();
+          final scrolled = position.pixels;
+          expect(scrolled, greaterThan(100));
+          for (var i = 1; i <= 8; i++) {
+            await touch.moveBy(
+              Offset(0, (scrolled + 60) / 8),
+              timeStamp: Duration(milliseconds: 240 + 8 * i),
+            );
+          }
+          await tester.pump();
+          expect(position.pixels, 0);
+          expect(animation.value, inExclusiveRange(0.5, 1));
+          await touch.up(timeStamp: const Duration(milliseconds: 304));
+          await tester.pumpAndSettle();
+          expect(sheet, findsOneWidget);
+          expect(animation.value, 1);
+          expect(position.pixels, 0);
           await tester.drag(
             find.byKey(const ValueKey('quick-reaction-👍')),
             const Offset(-120, 0),
@@ -94,8 +123,10 @@ void _messageActionsScrollTests() {
           await pull.up();
           await tester.pumpAndSettle();
           expect(animation.value, 1);
-          // The same short pull released as a fling from the top dismisses.
-          await tester.flingFrom(start, const Offset(0, 84), 2000);
+          // After all of those pointer gestures an action still takes a tap
+          // and closes the menu with it. Fling dismissal from the top is
+          // pinned by the shared pointer-flick test on both platforms.
+          await tester.tap(find.text('Copy link').hitTestable());
           await tester.pumpAndSettle();
           expect(sheet, findsNothing);
         } finally {

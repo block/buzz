@@ -21,10 +21,13 @@ deliberate differences. As in the stock sheet, downward velocity strictly above
 700 logical px/s closes, and otherwise progress strictly below 0.5 of the sheet
 height closes. The differences:
 
-- The velocity rule applies only to a gesture that began with content at its
-  leading edge. A gesture that began mid-content closes on progress alone, so a
-  fast flick back to the top that carries the sheet a little way settles open
-  with content at the top instead of dismissing the menu.
+- The velocity rule applies only to a gesture that never scrolled content.
+  Content away from its leading edge at any update, whether the gesture began
+  mid-content or scrolled down from the top and back in the same touch, leaves
+  the gesture closing on progress alone. A fast flick back to the top that
+  carries the sheet a little way then settles open with content at the top
+  instead of dismissing the menu. Content within the scroll physics distance
+  tolerance of the leading edge counts as at the top.
 - A raw upward velocity strictly below -700 vetoes the progress rule.
 
 A parity test releases the same pointer gestures through the stock sheet drag
@@ -60,9 +63,9 @@ flutter test test/features/channels/message_actions_test.dart \
 
 The message-action journey uses a 375×667 viewport, 2× text, management
 permissions, and reminder/thread actions on iOS and Android settings. The
-shared tests cover the release boundaries, stock parity, interruptions,
-bouncing offsets, carried momentum, layout changes, short bodies, reduced
-motion, and nested scrolling.
+shared tests cover the release boundaries, scrolled-gesture releases, the
+leading-edge tolerance, stock parity, interruptions, bouncing offsets, carried
+momentum, layout changes, short bodies, reduced motion, and nested scrolling.
 
 ## Manual native checklist
 
@@ -76,10 +79,15 @@ message. Increase text size until the lower actions start offscreen.
 3. From the top, flick the body down: the menu closes.
 4. Scroll down, then flick back up the list so the sheet moves slightly: the
    menu stays open, settled at the top.
-5. Cross the top without lifting, then reverse: the sheet reopens fully before
+5. From the top, in one touch, drag up to scroll the list, then flick back
+   down without lifting so the sheet moves slightly: the menu stays open,
+   settled at the top.
+6. Drag the list back to the top by finger and lift, then flick the body down:
+   the menu closes on the first flick.
+7. Cross the top without lifting, then reverse: the sheet reopens fully before
    content scrolls, and it follows the finger throughout.
-6. Pull the sheet down, then release with a strong upward flick: it stays open.
-7. Compare the same drags on the handle; check barrier tap and system back.
-8. Settling open leaves composer focus alone; dismissing restores it. The draft
-   survives both.
-9. Repeat on a thread message and on the short system-message reaction menu.
+8. Pull the sheet down, then release with a strong upward flick: it stays open.
+9. Compare the same drags on the handle; check barrier tap and system back.
+10. Settling open leaves composer focus alone; dismissing restores it. The
+    draft survives both.
+11. Repeat on a thread message and on the short system-message reaction menu.
