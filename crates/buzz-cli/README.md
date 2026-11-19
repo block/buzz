@@ -191,8 +191,13 @@ CLI run or another client can overwrite each other, and the last publish wins.
 sidebar lists the same way: one head read and one publish per command, and
 `"message": "unchanged"` when nothing changes. `remove` keeps a `false` entry
 (as desktop does) so the change syncs; removing an id that is not set changes
-nothing. Stars and mutes keep the newest 500 entries; a command that would
-evict its own ids fails. Project addresses are `30621:<owner-pubkey>:<d-tag>`.
+nothing. Stars and mutes cap each saved record at 500 entries. They keep
+the current edit and drop the oldest entries, preferring cleared flags at
+equal timestamps. New changes use milliseconds and untouched entries keep
+their original units. A command that cannot keep its own changes fails.
+An add also fails if legacy desktop would trim it after merging a full cache.
+An edit also repairs an oversized record. Project addresses are
+`30621:<owner-pubkey>:<d-tag>`.
 Pass the same ids in any case; channel UUIDs and project owners are stored in
 lowercase. If the relay reports a newer update (exit 5), run the command again.
 
