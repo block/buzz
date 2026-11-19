@@ -23,6 +23,7 @@ import '../../shared/emoji/native_emoji_glyph.dart';
 import '../../shared/emoji/emoji_data_provider.dart';
 import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/modal_presentation.dart';
+import '../../shared/widgets/modal_scroll_handoff.dart';
 import '../../shared/reminders/remind_me_later_sheet.dart';
 import '../../shared/reminders/reminder_service.dart';
 import 'channel_management_provider.dart';
@@ -107,7 +108,7 @@ Future<void> showMessageActions({
           constraints: BoxConstraints(
             maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.7,
           ),
-          child: SingleChildScrollView(
+          child: ModalScrollHandoff(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(
                 Grid.gutter,
