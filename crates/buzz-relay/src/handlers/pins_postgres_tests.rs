@@ -239,7 +239,8 @@ fn refusal(result: Result<IngestResult, IngestError>) -> String {
 /// one relay-signed list with the newest pin first, announces each pin that
 /// changes it, and sends every new list to `#h` subscribers.
 /// Mutation: drop `dispatch_list` from `pins::persist` → RED (no live list);
-/// answer a stored command like a new one → RED (no `duplicate:`).
+/// answer a stored command like a new one → RED (no `duplicate:`); drop
+/// `command_event_id` from the notice → RED (re-pins share one notice).
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
 async fn members_pin_and_unpin_through_one_relay_signed_list() {
@@ -252,7 +253,17 @@ async fn members_pin_and_unpin_through_one_relay_signed_list() {
     let mut live = LiveLists::open(&f, &other, channel).await;
 
     // An open channel lets anyone who may post pin, not only its creator.
-    assert_eq!(f.pin(&other, channel, &first).await, "");
+    // Elements after a tag's value, such as a relay hint, carry no meaning.
+    let hinted = signed(
+        &other,
+        KIND_PIN_MESSAGE,
+        "",
+        &[
+            &["h", &channel.to_string(), "wss://relay.example.org"],
+            &["e", &first, "wss://relay.example.org"],
+        ],
+    );
+    assert_eq!(f.accept(&other, hinted.clone()).await, "");
     let again = command(&owner, KIND_PIN_MESSAGE, channel, &second);
     assert_eq!(f.accept(&owner, again.clone()).await, "");
     assert_eq!(
@@ -285,7 +296,7 @@ async fn members_pin_and_unpin_through_one_relay_signed_list() {
     assert!(list.verify().is_ok());
 
     // A resend is a duplicate; a new pin of a pinned message changes nothing.
-    assert_eq!(f.accept(&owner, again).await, "duplicate:");
+    assert_eq!(f.accept(&owner, again.clone()).await, "duplicate:");
     assert_eq!(f.pin(&owner, channel, &first).await, "");
     assert_eq!(
         f.unpin(&owner, channel, &f.message(&owner, channel).await)
@@ -294,9 +305,9 @@ async fn members_pin_and_unpin_through_one_relay_signed_list() {
     );
     let mut notices = [
         json!({"type": "message_pinned", "actor": other.public_key().to_hex(),
-               "target_event_id": first}),
+               "target_event_id": first, "command_event_id": hinted.id.to_hex()}),
         json!({"type": "message_pinned", "actor": owner.public_key().to_hex(),
-               "target_event_id": second}),
+               "target_event_id": second, "command_event_id": again.id.to_hex()}),
     ];
     notices.sort_by_key(|notice| notice["target_event_id"].to_string());
     assert_eq!(
@@ -309,15 +320,24 @@ async fn members_pin_and_unpin_through_one_relay_signed_list() {
     assert_eq!(f.unpin(&owner, channel, &first).await, "");
     assert_eq!(f.pins(&owner, channel).await, Some(Vec::new()));
     assert_eq!(f.notices(&owner, channel).await.len(), 2, "no unpin notice");
-    assert_eq!(
-        live.delivered(),
-        [
-            vec![first.clone()],
-            vec![second.clone(), first.clone()],
-            vec![first],
-            Vec::new(),
-        ]
-    );
+
+    // Each pin has its own notice, however quickly the same member pins the
+    // same message again.
+    for _ in 0..3 {
+        assert_eq!(f.pin(&owner, channel, &first).await, "");
+        assert_eq!(f.unpin(&owner, channel, &first).await, "");
+    }
+    assert_eq!(f.notices(&owner, channel).await.len(), 5);
+    let mut delivered = vec![
+        vec![first.clone()],
+        vec![second.clone(), first.clone()],
+        vec![first.clone()],
+        Vec::new(),
+    ];
+    for _ in 0..3 {
+        delivered.extend([vec![first.clone()], Vec::new()]);
+    }
+    assert_eq!(live.delivered(), delivered);
 }
 
 /// Only those who can read a channel get its pin list, by `#d` or by `#h`,

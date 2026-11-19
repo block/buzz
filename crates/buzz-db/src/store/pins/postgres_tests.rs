@@ -307,7 +307,8 @@ async fn a_pin_needs_a_live_message_of_the_channel() {
 /// was removed without the list being told do not count, and leave the list
 /// the next time it changes.
 /// Mutation: skip `live_messages(pins)` before the limit check → RED (the
-/// pin after the erasure is refused).
+/// pin after the erasure is refused); check the target only when it is not
+/// listed → RED (the erased message is pinned again).
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn the_pin_limit_counts_live_messages_only() {
@@ -331,6 +332,13 @@ async fn the_pin_limit_counts_live_messages_only() {
         .execute(&f.db.pool)
         .await
         .expect("erase a pinned message");
+    // Still listed, but no longer a message that can be pinned.
+    let again = event(KIND_PIN_MESSAGE, f.channel, Some(&messages[0]));
+    assert_eq!(
+        denied(f.apply(&again, &messages[0]).await),
+        "target is not a message in this channel"
+    );
+    assert!(!f.is_stored(&again).await);
     assert!(f
         .pin(&over)
         .await
@@ -389,4 +397,65 @@ async fn deleting_a_pinned_message_unpins_it() {
     let other = event(9005, f.channel, Some(&unpinned));
     assert!(f.delete(&other, &unpinned).await.is_empty());
     assert_eq!(f.list().await, (after, ids(&[&b])));
+}
+
+/// Account erasure leaves the ID and timestamp of a recent command. The next
+/// command in the channel removes those an hour old, and only those.
+/// Mutation: drop the `DELETE` from `apply_pin_command` → RED; drop its
+/// `kind` or `pubkey` predicate → RED (a message or a command is removed).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn erased_command_records_expire_after_an_hour() {
+    let f = fixture().await;
+    let message = f.message().await;
+    let command = event(KIND_PIN_MESSAGE, f.channel, Some(&message));
+    f.apply(&command, &message).await.expect("pin");
+
+    // (kind, age in minutes, erased, kept)
+    let rows = [
+        (KIND_PIN_MESSAGE, 61, true, false),
+        (KIND_UNPIN_MESSAGE, 61, true, false),
+        (KIND_PIN_MESSAGE, 59, true, true),
+        (KIND_PIN_MESSAGE, 61, false, true),
+        (9, 61, true, true),
+    ];
+    let mut ids = Vec::new();
+    for (kind, minutes, erased, _) in rows {
+        let id = Uuid::new_v4().as_bytes().repeat(2);
+        let author: &[u8] = if erased { &[] } else { &[7; 32] };
+        sqlx::query(
+            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, \
+             channel_id, deleted_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $3, $8, $9)",
+        )
+        .bind(f.community.as_uuid())
+        .bind(&id)
+        .bind(author)
+        .bind(chrono::Utc::now() - chrono::Duration::minutes(minutes))
+        .bind(kind as i32)
+        .bind(sqlx::types::Json(Vec::<Vec<String>>::new()))
+        .bind("")
+        .bind(f.channel)
+        .bind(chrono::Utc::now())
+        .execute(&f.db.pool)
+        .await
+        .expect("record");
+        ids.push(id);
+    }
+
+    f.unpin(&message).await.expect("the next command");
+    for ((kind, minutes, erased, kept), id) in rows.into_iter().zip(ids) {
+        let stored: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM events WHERE community_id = $1 AND id = $2)",
+        )
+        .bind(f.community.as_uuid())
+        .bind(&id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("row");
+        assert_eq!(
+            stored, kept,
+            "kind {kind}, {minutes} minutes old, erased: {erased}"
+        );
+    }
+    assert!(f.is_stored(&command).await, "a live command stays");
 }
