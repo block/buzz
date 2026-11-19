@@ -1265,6 +1265,7 @@ pub(crate) struct ChannelSettingsWriter<'tx> {
     channel_id: Uuid,
     admission: bool,
     ttl: TtlLock,
+    previous_name: String,
     previous_visibility: String,
     archived: bool,
     listed: bool,
@@ -1377,9 +1378,9 @@ async fn lock_channel_row(
     // every other settings write and a huddle join, but not against a
     // `KEY SHARE` lock on the channel (a membership INSERT's foreign key while
     // it exists, `insert_auto_membership`'s channel check).
-    let (previous_visibility, archived, listed): (String, bool, bool) =
+    let (previous_name, previous_visibility, archived, listed): (String, String, bool, bool) =
         sqlx::query_as(sqlx::AssertSqlSafe(format!(
-            "SELECT visibility::text, archived_at IS NOT NULL, {LISTED_CHANNEL_SQL} FROM channels \
+            "SELECT name, visibility::text, archived_at IS NOT NULL, {LISTED_CHANNEL_SQL} FROM channels \
              WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL FOR NO KEY UPDATE"
         )))
         .bind(community_id.as_uuid())
@@ -1392,6 +1393,7 @@ async fn lock_channel_row(
         channel_id,
         admission,
         ttl,
+        previous_name,
         previous_visibility,
         archived,
         listed,
@@ -1748,6 +1750,8 @@ pub struct ChannelMetadataWrite {
     pub inserted: bool,
     /// The channel's visibility before this event (`"open"` or `"private"`).
     pub previous_visibility: String,
+    /// Relay-signed notices stored in the transaction and ready for fan-out.
+    pub system_messages: Vec<nostr::Event>,
 }
 
 /// The refusal of a private-to-open change on a channel that holds, or once
@@ -1785,7 +1789,7 @@ pub(crate) async fn apply_channel_metadata_event(
     channel_id: Uuid,
     event: &nostr::Event,
     edit: ChannelMetadataEdit,
-    system_messages: &[nostr::Event],
+    build_system_messages: impl FnOnce(Option<(&str, &str)>) -> Result<Vec<nostr::Event>> + Send,
 ) -> Result<ChannelMetadataWrite> {
     let mut tx = crate::begin_community_event_write_transaction(
         pool,
@@ -1814,6 +1818,7 @@ pub(crate) async fn apply_channel_metadata_event(
             stored,
             inserted,
             previous_visibility,
+            system_messages: Vec::new(),
         });
     }
     // Decide the archive state and an operator's right to rename here,
@@ -1868,6 +1873,12 @@ pub(crate) async fn apply_channel_metadata_event(
         operator_rename: _,
         channel_authority: _,
     } = edit;
+    let changed_name = columns
+        .name
+        .as_deref()
+        .map(buzz_core::channel::canonical_channel_name)
+        .filter(|name| *name != locked.previous_name.as_str())
+        .map(str::to_owned);
     let actor = event.pubkey.to_bytes();
     if !columns.is_empty() {
         update_channel_on(&mut locked, columns, &actor).await?;
@@ -1881,8 +1892,12 @@ pub(crate) async fn apply_channel_metadata_event(
     if let Some(archive) = archived {
         set_archived_on(&mut locked, archive).await?;
     }
+    let rename = changed_name
+        .as_deref()
+        .map(|name| (locked.previous_name.as_str(), name));
+    let system_messages = build_system_messages(rename)?;
     // The same writes as `Db::insert_event`.
-    for message in system_messages {
+    for message in &system_messages {
         let (_, message_inserted) =
             crate::event::insert_event_in_transaction(locked.tx(), message, Some(channel_id))
                 .await?;
@@ -1895,6 +1910,7 @@ pub(crate) async fn apply_channel_metadata_event(
         stored,
         inserted,
         previous_visibility,
+        system_messages,
     })
 }
 
@@ -2147,8 +2163,10 @@ impl Db {
     }
 
     /// Stores the kind:9002 `event` for `channel_id`, applies `edit`, and
-    /// stores the relay-signed `system_messages` that announce it, all in one
-    /// transaction. If any write fails, nothing is stored, so a client can
+    /// stores the relay-signed notices returned by `build_system_messages`, all
+    /// in one transaction. The builder receives the old and canonical new name
+    /// only when the name changed under the row lock. If any write fails,
+    /// nothing is stored, so a client can
     /// resend the same event. A resend of a stored event changes nothing and
     /// returns `inserted: false`.
     #[datastore_span(name = "apply_channel_metadata_event", system = "postgresql")]
@@ -2158,7 +2176,7 @@ impl Db {
         channel_id: Uuid,
         event: &nostr::Event,
         edit: ChannelMetadataEdit,
-        system_messages: &[nostr::Event],
+        build_system_messages: impl FnOnce(Option<(&str, &str)>) -> Result<Vec<nostr::Event>> + Send,
     ) -> Result<ChannelMetadataWrite> {
         apply_channel_metadata_event(
             &self.pool,
@@ -2167,7 +2185,7 @@ impl Db {
             channel_id,
             event,
             edit,
-            system_messages,
+            build_system_messages,
         )
         .await
     }

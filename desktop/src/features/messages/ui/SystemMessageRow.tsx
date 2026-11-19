@@ -33,6 +33,7 @@ import {
 import {
   addedActionPrefix,
   addedByActionPrefix,
+  describeChannelNameChange,
   describeChannelTextFieldChange,
   toInlineName,
 } from "../lib/systemEventCopy";
@@ -610,6 +611,18 @@ function describeSystemEvent(
       return {
         title: actorName,
         action: describeChannelTextFieldChange("purpose", payload.purpose),
+      };
+    case "name_changed":
+      if (
+        typeof payload.name !== "string" ||
+        (payload.previous_name !== undefined &&
+          typeof payload.previous_name !== "string")
+      ) {
+        return null;
+      }
+      return {
+        title: actorName,
+        action: describeChannelNameChange(payload.previous_name, payload.name),
       };
     case "channel_created":
       return {

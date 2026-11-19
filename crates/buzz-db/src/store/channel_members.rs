@@ -4865,7 +4865,7 @@ mod postgres_tests {
                                 columns: updates,
                                 ..Default::default()
                             },
-                            &[],
+                            |_| Ok(Vec::new()),
                         )
                         .await?;
                         assert!(write.inserted, "the kind:9002 event must be stored");

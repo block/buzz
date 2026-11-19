@@ -2310,6 +2310,22 @@ pub(crate) async fn persist_remove_user(
     Ok((stored, true))
 }
 
+fn channel_name_change_content(
+    actor: &str,
+    previous_name: &str,
+    name: &str,
+    source_event_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "name_changed",
+        "actor": actor,
+        "name": name,
+        "previous_name": previous_name,
+        // Distinguish two identical rename notices within the same second.
+        "source_event_id": source_event_id,
+    })
+}
+
 /// Persist an authorized kind:9002 event and the channel changes it names.
 ///
 /// One transaction stores the event, applies every change and stores the
@@ -2445,7 +2461,7 @@ pub(crate) async fn persist_edit_metadata(
         })),
         None => {}
     }
-    let system_messages = notices
+    let mut system_messages = notices
         .into_iter()
         .map(|content| sign_system_message(state, channel_id, content, now))
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -2455,13 +2471,20 @@ pub(crate) async fn persist_edit_metadata(
     let unarchived = edit.archived == Some(false);
     let write = state
         .db
-        .apply_channel_metadata_event(
-            tenant.community(),
-            channel_id,
-            event,
-            edit,
-            &system_messages,
-        )
+        .apply_channel_metadata_event(tenant.community(), channel_id, event, edit, |rename| {
+            if let Some((previous_name, name)) = rename {
+                let content = channel_name_change_content(
+                    &actor_hex,
+                    previous_name,
+                    name,
+                    &event.id.to_hex(),
+                );
+                let message = sign_system_message(state, channel_id, content, now)
+                    .map_err(|error| buzz_db::DbError::InvalidData(error.to_string()))?;
+                system_messages.push(message);
+            }
+            Ok(system_messages)
+        })
         .await?;
     if !write.inserted {
         return Ok((write.stored, false));
@@ -2490,7 +2513,7 @@ pub(crate) async fn persist_edit_metadata(
             }
         }
     }
-    for message in &system_messages {
+    for message in &write.system_messages {
         fan_out_system_message(tenant, state, channel_id, message).await;
     }
     if unarchived {
@@ -5054,6 +5077,17 @@ mod tests {
                 && fields[1] == late_pubkey
                 && fields[3] == "owner"
         }));
+    }
+
+    #[test]
+    fn channel_name_change_carries_actor_and_both_names() {
+        let content = channel_name_change_content("actor", "old-name", "new-name", "edit-id");
+
+        assert_eq!(content["type"], "name_changed");
+        assert_eq!(content["actor"], "actor");
+        assert_eq!(content["previous_name"], "old-name");
+        assert_eq!(content["name"], "new-name");
+        assert_eq!(content["source_event_id"], "edit-id");
     }
 
     #[test]
