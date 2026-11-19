@@ -3608,6 +3608,20 @@ async fn ingest_event_inner(
 
     let workflow_deletion = crate::handlers::side_effects::is_workflow_deletion(&event);
     let atomic_deletion = crate::handlers::side_effects::is_atomic_deletion(kind_u32, &event);
+    // A new message in a DM resurfaces it for members who hid it.
+    let dm_message = match (channel_id, &channel_row) {
+        (Some(ch_id), Some(channel))
+            if channel.channel_type == "dm"
+                && matches!(
+                    kind_u32,
+                    KIND_STREAM_MESSAGE | KIND_STREAM_MESSAGE_V2 | KIND_STREAM_MESSAGE_DIFF
+                ) =>
+        {
+            Some(ch_id)
+        }
+        _ => None,
+    };
+    let mut dm_snapshots = Vec::new();
     let mut message = String::new();
     let (stored_event, was_inserted) = if let Some(create) = channel_create.as_ref() {
         let creator = event.pubkey.to_bytes();
@@ -3789,6 +3803,30 @@ async fn ingest_event_inner(
             buzz_db::ChannelHeadWriteStatus::Inserted => (stored_event, true),
             buzz_db::ChannelHeadWriteStatus::Duplicate => (stored_event, false),
         }
+    } else if let Some(dm) = dm_message {
+        // One commit stores the message and resurfaces the DM, so a failure
+        // stores neither and the client's resend is not a duplicate.
+        let thread_params = thread_meta.as_ref().map(|m| m.as_params());
+        let (stored_event, inserted, snapshots) =
+            crate::handlers::side_effects::persist_dm_message(
+                tenant,
+                state,
+                &event,
+                dm,
+                thread_params,
+            )
+            .await
+            .map_err(|e| {
+                error!(event_id = %event_id_hex, "DM message write failed: {e}");
+                match e.downcast_ref::<buzz_db::DbError>() {
+                    Some(db) => {
+                        IngestError::Internal(format!("error: database error: {}", db.kind()))
+                    }
+                    None => IngestError::Internal("error: database error".into()),
+                }
+            })?;
+        dm_snapshots = snapshots;
+        (stored_event, inserted)
     } else {
         let thread_params = thread_meta.as_ref().map(|m| m.as_params());
         match state
@@ -3858,6 +3896,13 @@ async fn ingest_event_inner(
         );
     }
 
+    // The DM's resurfacing snapshots committed with the message, so a read
+    // made on the message already sees the DM. Live subscribers get them too.
+    for snapshot in &dm_snapshots {
+        crate::handlers::side_effects::dispatch_dm_visibility_snapshot(tenant, state, snapshot)
+            .await;
+    }
+
     let pubkey_hex = auth.pubkey().to_hex();
     // Spec WriteInsert (line 514) / WriteInsertGlobal (line 559) /
     // WriteDuplicate (line 606): emit the abstract write at the trailing
@@ -3887,6 +3932,10 @@ async fn ingest_event_inner(
             },
         };
         emit(tracer, action, state_for_request(tenant, auth.pubkey()));
+    }
+    #[cfg(test)]
+    if let Some(dm) = dm_message {
+        crate::handlers::side_effects::notice_barrier::reached(dm, &event.pubkey.to_bytes()).await;
     }
     dispatch_persistent_event(
         tenant,
