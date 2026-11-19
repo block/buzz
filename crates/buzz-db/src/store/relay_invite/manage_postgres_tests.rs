@@ -319,7 +319,7 @@ async fn restriction_that_wins_admission_refuses_the_revoke() {
 
     // A restriction writer holds the admission lock and bans the actor.
     let mut restriction = pool.begin().await.unwrap();
-    lock_admission(&mut *restriction, community).await.unwrap();
+    lock_admission(&mut restriction, community).await.unwrap();
     let (revoking, name) = queued_revoke(community, &admin, invite.invite_id).await;
     wait_for_lock(&pool, &name, "advisory", &revoking).await;
     sqlx::query(
