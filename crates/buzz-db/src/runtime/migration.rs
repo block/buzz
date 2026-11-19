@@ -879,7 +879,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 97);
+        assert_eq!(migrations.len(), 98);
         assert_eq!(migrations[89].version, 90);
         assert!(migrations[89]
             .sql
@@ -924,6 +924,11 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("SET LOCAL lock_timeout = '5s'"));
+        // 0098 undoes 0097's community artifact expand.
+        assert_eq!(migrations[97].version, 98);
+        let unexpand = strip_sql_comments(migrations[97].sql.as_str());
+        assert!(unexpand.contains("ALTER TABLE artifact_heads ALTER COLUMN channel_id SET NOT NULL;"));
+        assert!(unexpand.contains("ALTER TABLE communities DROP COLUMN artifact_type_policies;"));
         assert!(migrations[79]
             .sql
             .as_str()
@@ -3630,6 +3635,18 @@ mod postgres_tests {
             .await
             .expect("populated small database auto-migrates");
         assert_boots_through_every_migration(&pool).await;
+        // 0097 relaxed channel_id and 0098 restores NOT NULL; the channel head
+        // written before both must survive with its channel.
+        let surviving_heads: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM artifact_heads \
+             WHERE community_id = $1 AND artifact_id = $2 AND channel_id IS NOT NULL",
+        )
+        .bind(community_id)
+        .bind(artifact_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read surviving artifact head");
+        assert_eq!(surviving_heads, 1, "0097 and 0098 keep channel artifact heads");
         assert_eq!(
             valid_indexes(
                 &pool,
