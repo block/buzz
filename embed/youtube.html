@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YouTube</title>
+<style>
+  html, body, iframe { display: block; margin: 0; width: 100%; height: 100%; border: 0; background: black; }
+</style>
+<body>
+<script type="module">
+  const params = new URLSearchParams(location.search);
+  const video = params.get('v');
+  const playlist = params.get('list');
+  const start = params.get('start');
+  const autoplay = params.get('autoplay');
+  const mute = params.get('mute');
+  const fields = [video, playlist, start, autoplay, mute].filter(value => value !== null);
+  if ((video || playlist) && [...params].length === fields.length &&
+      (video === null || /^[A-Za-z0-9_-]{11}$/.test(video)) &&
+      (playlist === null || /^[A-Za-z0-9_-]{1,128}$/.test(playlist)) &&
+      (start === null || /^[0-9]+$/.test(start)) && (autoplay === null || autoplay === '1') &&
+      (mute === null || mute === '1')) {
+    const url = new URL('https://www.youtube-nocookie.com/embed/' + (video || 'videoseries'));
+    url.search = 'playsinline=1&rel=0';
+    if (playlist) url.searchParams.set('list', playlist);
+    if (start) url.searchParams.set('start', start);
+    if (autoplay) url.searchParams.set('autoplay', autoplay);
+    if (mute) url.searchParams.set('mute', mute);
+    const frame = document.createElement('iframe');
+    frame.title = 'YouTube';
+    frame.referrerPolicy = 'origin';
+    frame.allow = 'autoplay; encrypted-media; picture-in-picture; fullscreen';
+    frame.allowFullscreen = true;
+    frame.src = url.href;
+    document.body.append(frame);
+  }
+</script>
+</body>
+</html>
