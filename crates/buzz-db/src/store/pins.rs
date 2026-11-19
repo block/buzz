@@ -5,11 +5,11 @@
 //! unpin commands of a channel, and the deletes that remove a pinned message,
 //! apply one at a time.
 
-use buzz_core::kind::{
-    KIND_CHANNEL_PINS, KIND_PIN_MESSAGE, KIND_UNPIN_MESSAGE, MAX_CHANNEL_PINS, PINNABLE_KINDS,
-};
+use buzz_core::channel::MAX_CHANNEL_PINS;
+use buzz_core::kind::{KIND_CHANNEL_PINS, KIND_PIN_MESSAGE, KIND_UNPIN_MESSAGE, PINNABLE_KINDS};
 use buzz_core::{CommunityId, StoredEvent};
 use buzz_datastore_tracing::datastore_span;
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::error::{DbError, Result};
@@ -26,8 +26,8 @@ const REPLAY_RECORD_SECS: i64 = 60 * 60;
 /// than removing it: a pin or unpin command young enough to be sent again.
 pub(crate) fn keeps_replay_record(
     kind: i32,
-    created_at: chrono::DateTime<chrono::Utc>,
-    now: chrono::DateTime<chrono::Utc>,
+    created_at: DateTime<Utc>,
+    now: DateTime<Utc>,
 ) -> bool {
     COMMAND_KINDS.contains(&kind)
         && created_at > now - chrono::Duration::seconds(REPLAY_RECORD_SECS)
@@ -93,7 +93,7 @@ async fn lock_recorded_pins(
 ) -> Result<Vec<Vec<u8>>> {
     let kind = KIND_CHANNEL_PINS as i32;
     crate::replaceable::take_replacement_lock(tx, kind, relay_pubkey, Some(channel_id)).await?;
-    let head: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+    let head: Option<DateTime<Utc>> = sqlx::query_scalar(
         "SELECT created_at FROM parameterized_event_watermarks \
          WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4",
     )
@@ -191,7 +191,7 @@ async fn replace_pins(
         ));
     }
     let created_at_secs = stored.event.created_at.as_secs() as i64;
-    let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0)
+    let created_at = DateTime::from_timestamp(created_at_secs, 0)
         .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
     sqlx::query(
         "INSERT INTO parameterized_event_watermarks \
@@ -244,10 +244,7 @@ pub(crate) async fn unpin_deleted_messages(
 const ERASED: &[u8] = &[];
 
 /// Remove the community's erased command records from `cutoff` and before.
-async fn delete_erased_command_records(
-    tx: &mut AdmittedTx,
-    cutoff: chrono::DateTime<chrono::Utc>,
-) -> Result<u64> {
+async fn delete_erased_command_records(tx: &mut AdmittedTx, cutoff: DateTime<Utc>) -> Result<u64> {
     let result = sqlx::query(
         "DELETE FROM events WHERE community_id = $1 AND kind = ANY($2) \
          AND pubkey = $3 AND created_at <= $4",
@@ -360,7 +357,7 @@ impl Db {
     /// not the relay accepts pins.
     #[datastore_span(name = "reap_expired_pin_command_records", system = "postgresql")]
     pub async fn reap_expired_pin_command_records(&self) -> Result<u64> {
-        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(REPLAY_RECORD_SECS);
+        let cutoff = Utc::now() - chrono::Duration::seconds(REPLAY_RECORD_SECS);
         let mut connection = crate::observability::acquire_writer(
             &self.pool,
             crate::observability::WriterOperation::Maintenance,

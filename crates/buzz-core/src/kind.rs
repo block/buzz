@@ -552,7 +552,8 @@ pub const KIND_STREAM_MESSAGE: u32 = 9;
 pub const KIND_STREAM_MESSAGE_V2: u32 = 40002;
 /// V1 used kind:10004 (replaceable range + NIP-51 collision — wrong).
 pub const KIND_STREAM_MESSAGE_EDIT: u32 = 40003;
-/// A stream message that has been pinned in a channel.
+/// A stream message that has been pinned in a channel. Not a NIP-PM pin:
+/// see [`KIND_PIN_MESSAGE`].
 pub const KIND_STREAM_MESSAGE_PINNED: u32 = 40004;
 /// A stream message that has been bookmarked by a user.
 pub const KIND_STREAM_MESSAGE_BOOKMARKED: u32 = 40005;
@@ -574,8 +575,6 @@ pub const PINNABLE_KINDS: [u32; 5] = [
     KIND_FORUM_POST,
     KIND_FORUM_COMMENT,
 ];
-/// NIP-PM: the most messages one channel can pin.
-pub const MAX_CHANNEL_PINS: usize = 250;
 /// Canvas (shared document) for a channel.
 pub const KIND_CANVAS: u32 = 40100;
 /// System message for channel state changes (join, leave, rename, etc.).

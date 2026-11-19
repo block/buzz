@@ -426,7 +426,7 @@ async fn the_list_is_read_like_the_channel() {
 
 /// Each refusal stores nothing and leaves the list alone.
 /// Mutation: drop any one check in `pins::persist`, or the
-/// `pins_enabled` arm in ingest → RED for its row.
+/// `pins_enabled` check in ingest → RED for its row.
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
 async fn refused_commands_change_nothing() {
