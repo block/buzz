@@ -5,10 +5,11 @@ use crate::client::{extract_d_tag, normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::validate_hex64;
 
+use super::agents::fetch_archived_snapshot;
 use super::verified_profiles::{
     discover_authority, fetch_verified_profiles, verified_profiles_from_events, VerifiedProfile,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Longest query `POST /profiles/search` accepts, in characters.
 const PROFILE_SEARCH_MAX_CHARS: usize = 100;
@@ -23,11 +24,16 @@ const PROFILE_SEARCH_MAX_CHARS: usize = 100;
 ///
 /// Where the community advertises NIP-FI verified profiles, each person with a
 /// valid relay-signed kind:30382 also carries a `verified` object.
+///
+/// A person on the relay's NIP-IA archive list is marked `"archived": true`.
+/// A name search leaves them out unless `include_archived`; a pubkey lookup
+/// always returns them, since whoever has the key is not discovering anyone.
 pub async fn cmd_get_users(
     client: &BuzzClient,
     pubkeys: &[String],
     name: Option<&str>,
     owner: Option<&str>,
+    include_archived: bool,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     if let Some(query) = name {
@@ -36,7 +42,7 @@ pub async fn cmd_get_users(
                 "--name and --pubkey are mutually exclusive".into(),
             ));
         }
-        return search_by_name(client, query, owner, format).await;
+        return search_by_name(client, query, owner, include_archived, format).await;
     }
 
     if owner.is_some() {
@@ -51,10 +57,13 @@ pub async fn cmd_get_users(
     }
 
     let profiles = get_profiles(client, pubkeys).await?;
+    let profiles = with_archived(profiles, archived_pubkeys(client).await.as_ref(), true);
     let output = match format {
         crate::OutputFormat::Compact => {
-            let compact: Vec<serde_json::Value> =
-                profiles.iter().map(|p| compact_profile(p, &[])).collect();
+            let compact: Vec<serde_json::Value> = profiles
+                .iter()
+                .map(|p| compact_profile(p, &["archived"]))
+                .collect();
             serde_json::to_string(&compact).unwrap_or_default()
         }
         crate::OutputFormat::Json | crate::OutputFormat::Agent => {
@@ -63,6 +72,52 @@ pub async fn cmd_get_users(
     };
     println!("{output}");
     Ok(())
+}
+
+/// The relay's archived pubkeys, or `None` with a stderr warning when the
+/// list can't be read or verified: archive filtering fails open, never
+/// failing the lookup.
+async fn archived_pubkeys(client: &BuzzClient) -> Option<HashSet<String>> {
+    match fetch_archived_snapshot(client).await {
+        Ok(archived) => Some(archived.into_iter().collect()),
+        Err(e) => {
+            eprintln!(
+                "{}",
+                serde_json::json!({"warning": format!(
+                    "archived-identities list unavailable, results not filtered: {e}"
+                )})
+            );
+            None
+        }
+    }
+}
+
+/// Marks each profile on the `archived` list `"archived": true`, dropping it
+/// unless `keep_archived`. With no list, profiles pass through unmarked.
+fn with_archived(
+    profiles: Vec<serde_json::Value>,
+    archived: Option<&HashSet<String>>,
+    keep_archived: bool,
+) -> Vec<serde_json::Value> {
+    let Some(archived) = archived else {
+        return profiles;
+    };
+    profiles
+        .into_iter()
+        .filter_map(|mut profile| {
+            let pubkey = profile.get("pubkey")?.as_str()?.to_ascii_lowercase();
+            if !archived.contains(&pubkey) {
+                return Some(profile);
+            }
+            if !keep_archived {
+                return None;
+            }
+            if let Some(obj) = profile.as_object_mut() {
+                obj.insert("archived".to_string(), serde_json::json!(true));
+            }
+            Some(profile)
+        })
+        .collect()
 }
 
 /// kind:0 profiles for `pubkeys` (our own when empty), each with its verified
@@ -520,6 +575,7 @@ async fn search_by_name(
     client: &BuzzClient,
     query: &str,
     owner: Option<&str>,
+    include_archived: bool,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     if query.trim().is_empty() {
@@ -553,11 +609,21 @@ async fn search_by_name(
     } else {
         search_profiles(client, query).await?
     };
+    let profiles = with_archived(
+        profiles,
+        archived_pubkeys(client).await.as_ref(),
+        include_archived,
+    );
     let output = match format {
         crate::OutputFormat::Compact => {
             let compact: Vec<serde_json::Value> = profiles
                 .iter()
-                .map(|p| compact_profile(p, &["owner_pubkey", "owned_by_me", "verification"]))
+                .map(|p| {
+                    compact_profile(
+                        p,
+                        &["owner_pubkey", "owned_by_me", "verification", "archived"],
+                    )
+                })
                 .collect();
             serde_json::to_string(&compact).unwrap_or_default()
         }
@@ -944,7 +1010,18 @@ pub async fn dispatch(
             pubkeys,
             name,
             owner,
-        } => cmd_get_users(client, &pubkeys, name.as_deref(), owner.as_deref(), format).await,
+            include_archived,
+        } => {
+            cmd_get_users(
+                client,
+                &pubkeys,
+                name.as_deref(),
+                owner.as_deref(),
+                include_archived,
+                format,
+            )
+            .await
+        }
         UsersCmd::SetProfile {
             name,
             avatar,
@@ -984,10 +1061,10 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_profile, find_profiles, get_profiles, lookup_profiles,
+        archived_pubkeys, compact_profile, find_profiles, get_profiles, lookup_profiles,
         owned_agent_pubkeys_from_events, owner_scoped_profiles, owner_verification,
         parse_expiration_tag, parse_expiry, presence_subject, publish_status, read_statuses,
-        search_profiles,
+        search_profiles, with_archived,
     };
     use crate::client::BuzzClient;
     use crate::error::CliError;
@@ -1456,6 +1533,66 @@ mod tests {
             "issuer_label": "Example",
             "verified_at": 100,
         })
+    }
+
+    /// Seeds the relay's kind:13535 archive list, signed by `signer`.
+    fn seed_archive_list(relay: &Shared, signer: &Keys, archived: &[&Keys]) {
+        let hexes: Vec<String> = archived.iter().map(|k| k.public_key().to_hex()).collect();
+        let mut tags = vec![vec!["-"]];
+        tags.extend(hexes.iter().map(|h| vec!["p", h.as_str()]));
+        seed(relay, signer, 13535, "", tags, 100);
+    }
+
+    fn rows(keys: &[&Keys]) -> Vec<Value> {
+        keys.iter()
+            .map(|k| json!({"pubkey": k.public_key().to_hex(), "name": "Tanuj"}))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn archive_filter_reads_the_relay_signed_list() {
+        let (client, relay) = setup().await;
+        let relay_keys = Keys::generate();
+        let (old, new) = (Keys::generate(), Keys::generate());
+        relay.lock().unwrap().info = json!({"self": relay_keys.public_key().to_hex()});
+        seed_archive_list(&relay, &relay_keys, &[&old]);
+
+        let archived = archived_pubkeys(&client).await.expect("list readable");
+        let profiles = rows(&[&old, &new]);
+
+        // Name search: excluded by default.
+        let found = with_archived(profiles.clone(), Some(&archived), false);
+        assert_eq!(found, rows(&[&new]));
+
+        // --include-archived (and --pubkey): kept and marked.
+        let found = with_archived(profiles, Some(&archived), true);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0]["archived"], true);
+        assert!(found[1].get("archived").is_none());
+    }
+
+    #[tokio::test]
+    async fn archive_filter_fails_open_when_the_list_is_unreadable() {
+        // No relay `self`, and a list signed by someone other than the relay.
+        for forged in [false, true] {
+            let (client, relay) = setup().await;
+            let old = Keys::generate();
+            if forged {
+                let relay_keys = Keys::generate();
+                relay.lock().unwrap().info = json!({"self": relay_keys.public_key().to_hex()});
+                let impostor = Keys::generate();
+                seed_archive_list(&relay, &impostor, &[&old]);
+                // The query asks for the relay's author; make the impostor's event answer it.
+                relay.lock().unwrap().events[0]["pubkey"] = json!(relay_keys.public_key().to_hex());
+            }
+            let archived = archived_pubkeys(&client).await;
+            assert!(archived.is_none(), "forged={forged}");
+            let profiles = rows(&[&old]);
+            assert_eq!(
+                with_archived(profiles.clone(), archived.as_ref(), false),
+                profiles
+            );
+        }
     }
 
     #[tokio::test]
