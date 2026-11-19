@@ -30,6 +30,31 @@ void main() {
       isEmpty,
     );
   });
+  test('a label ends at the composer suffix boundary', () {
+    // Punctuation, either apostrophe, a hyphen or a slash follow the name as
+    // text; a letter, mark, digit or underscore continues it (`@Bobby`).
+    for (final suffix in ["'s idea", '’s idea', '-bot', '/Alice', '.', '_']) {
+      final found = mentionOccurrences('@Scout$suffix', ['Scout']);
+      if (suffix == '_') {
+        expect(found, isEmpty, reason: 'after $suffix');
+      } else {
+        expect(found.single.end, 6, reason: 'after $suffix');
+      }
+    }
+    for (final text in ['@Scouty', '@Scout1', '@Scoutē']) {
+      expect(mentionOccurrences(text, ['Scout']), isEmpty, reason: text);
+    }
+    // A reservation suffix ends at the same boundary, so the shorter label
+    // still never claims `@Scout (<key>) 2's`.
+    expect(
+      mentionOccurrences("@Scout ($second) 2's", ['Scout ($second)']),
+      isEmpty,
+    );
+    expect(
+      mentionOccurrences('@Scout ($second) 2x', ['Scout ($second)']).single.end,
+      '@Scout ($second)'.length,
+    );
+  });
   // Historical plain denial and both tag orders run through channel/thread UI.
   test('ordinary ambiguity and qualification require signed authority', () {
     expect(

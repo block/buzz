@@ -1,8 +1,15 @@
+/// A letter, mark, digit or underscore directly after a label continues the
+/// name, so `@Bobby` holds no `Bob`. Anything else ends it: punctuation, a
+/// straight or curly apostrophe, a hyphen or a slash (`@Bob's`, `@Bob-bot`,
+/// `@Bob/Alice`). Same rule as the composer's `mentionEndsAtBoundary`.
+const _nameCharacter = r'[\p{L}\p{M}\p{N}_]';
+
 /// Longest literal ranges win, including labels containing another @ sign.
 /// Recognition precedes eligibility: ambiguous labels still block shorter ones.
 /// A label opens where a query does (portable mention rules, section 2): at
 /// the start, after whitespace, `(`, `[` or `{`, or after a Markdown
-/// delimiter, so a mention picked after a bracket keeps its recipient.
+/// delimiter, so a mention picked after a bracket keeps its recipient. It
+/// ends at the composer's suffix boundary, [_nameCharacter].
 List<({int start, int end, String label})> mentionOccurrences(
   String text,
   Iterable<String> labels,
@@ -14,11 +21,12 @@ List<({int start, int end, String label})> mentionOccurrences(
     // candidate binds it. Never fall back to a shorter, different recipient.
     final suffix =
         RegExp(r' \([0-9a-f]{64}\)$', caseSensitive: false).hasMatch(label)
-        ? r'(?! (?:[2-9]|[1-9][0-9]+)(?=[\s,;.!?:)\]}*_]|$))'
+        ? '(?! (?:[2-9]|[1-9][0-9]+)(?!$_nameCharacter))'
         : '';
     final pattern = RegExp(
-      '(?:^|[\\s(\\[{]|[*_]{1,3}|\\|\\|)(@${RegExp.escape(label)})(?! \\([0-9a-f]{64}\\))$suffix(?=\\|\\||[\\s,;.!?:)\\]}*_]|\$)',
+      '(?:^|[\\s(\\[{]|[*_]{1,3}|\\|\\|)(@${RegExp.escape(label)})(?! \\([0-9a-f]{64}\\))$suffix(?!$_nameCharacter)',
       caseSensitive: false,
+      unicode: true,
     );
     for (final match in pattern.allMatches(text)) {
       final start = match.end - match.group(1)!.length;

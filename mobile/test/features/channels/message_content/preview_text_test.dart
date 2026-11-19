@@ -140,6 +140,26 @@ void main() {
       );
     });
 
+    test('a bound mention keeps its chip before a suffix', () {
+      expect(
+        _pieces(
+          "@alice's idea",
+          mentionBindings: {
+            'alice': {_alice},
+          },
+          mentionNames: {_alice: 'Alice'},
+        ),
+        [
+          const PreviewMention(
+            pubkey: _alice,
+            label: 'Alice',
+            semanticsLabel: 'Alice',
+          ),
+          const PreviewText("'s idea"),
+        ],
+      );
+    });
+
     test('an ambiguous mention stays text', () {
       expect(
         _pieces(

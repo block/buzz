@@ -31,6 +31,62 @@ void main() {
     expect(tapped, 'c' * 64);
   });
 
+  testWidgets('a tagged mention keeps its pill before a suffix', (
+    tester,
+  ) async {
+    final bob = 'd' * 64;
+    // The composer keeps Bob's recipient when punctuation, an apostrophe, a
+    // hyphen or a slash follows the chip; the bubble draws the same pill with
+    // the suffix as plain text after it. A letter continues the name.
+    for (final (content, suffix) in [
+      ("@Bob's idea", "'s idea"),
+      ('@Bob’s idea', '’s idea'),
+      ('@Bob-bot', '-bot'),
+      ('@Bob/Alice', '/Alice'),
+      ('@Bob.', '.'),
+    ]) {
+      String? tapped;
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          child: MessageContent(
+            content: content,
+            mentionNames: {bob: 'Bob'},
+            tags: [
+              ['p', bob],
+            ],
+            onMentionTap: (key) => tapped = key,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Bob'), findsOneWidget, reason: content);
+      expect(
+        find.textContaining(suffix, findRichText: true),
+        findsOneWidget,
+        reason: content,
+      );
+      await tester.tap(find.text('Bob'));
+      expect(tapped, bob, reason: content);
+    }
+    String? tapped;
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: MessageContent(
+          content: '@Bobby',
+          mentionNames: {bob: 'Bob'},
+          tags: [
+            ['p', bob],
+          ],
+          onMentionTap: (key) => tapped = key,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Bob'), findsNothing);
+    await tester.tap(find.text('Bobby'));
+    expect(tapped, isNull);
+  });
+
   for (final tagged in [false, true]) {
     testWidgets(
       'qualified chips preserve authority and narrow layout: $tagged',
