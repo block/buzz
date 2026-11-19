@@ -106,13 +106,13 @@ impl Fixture {
         read(&self.state, &self.tenant, reader, filter).await
     }
 
-    /// The pinned IDs `reader` gets when it reads `channel`'s list by `#d`.
+    /// The pinned IDs `reader` gets when it reads `channel`'s list by `#h`.
     /// `None` when the relay returns no list.
     async fn pins(&self, reader: &Keys, channel: Uuid) -> Option<Vec<String>> {
         let mut lists = self
             .read(
                 reader,
-                json!({"kinds": [KIND_CHANNEL_PINS], "#d": [channel.to_string()]}),
+                json!({"kinds": [KIND_CHANNEL_PINS], "#h": [channel.to_string()]}),
             )
             .await;
         assert!(lists.len() <= 1, "a channel has one pin list");
@@ -289,6 +289,7 @@ async fn members_pin_and_unpin_through_one_relay_signed_list() {
             .collect::<Vec<_>>(),
         [
             vec!["d".to_owned(), channel.to_string()],
+            vec!["h".to_owned(), channel.to_string()],
             vec!["e".to_owned(), second.clone()],
             vec!["e".to_owned(), first.clone()],
         ]
@@ -340,8 +341,9 @@ async fn members_pin_and_unpin_through_one_relay_signed_list() {
     assert_eq!(live.delivered(), delivered);
 }
 
-/// Only those who can read a channel get its pin list, by `#d` or by `#h`,
-/// stored or live. A DM is a channel like any other.
+/// Only those who can read a channel get its pin list, by `#h` or by `#d`,
+/// stored or live. A DM is a channel like any other. `#h` names the channel,
+/// so it also reads an unlisted channel the reader has not joined.
 /// Mutation: store the list without its channel → RED (an outsider reads a
 /// private channel's pins).
 #[tokio::test]
@@ -373,19 +375,28 @@ async fn the_list_is_read_like_the_channel() {
         let mut live = LiveLists::open(&f, &outsider, channel).await;
         let message = f.message(&owner, channel).await;
         assert_eq!(f.pin(&owner, channel, &message).await, "");
+        let by_d = json!({"kinds": [KIND_CHANNEL_PINS], "#d": [channel.to_string()]});
         for reader in readers {
             assert_eq!(f.pins(reader, channel).await, Some(vec![message.clone()]));
-            let by_h = json!({"kinds": [KIND_CHANNEL_PINS], "#h": [channel.to_string()]});
-            assert_eq!(f.read(reader, by_h).await.len(), 1);
+            assert_eq!(f.read(reader, by_d.clone()).await.len(), 1);
         }
         assert_eq!(f.pins(&outsider, channel).await, None);
-        let by_h = json!({"kinds": [KIND_CHANNEL_PINS], "#h": [channel.to_string()]});
-        assert!(f.read(&outsider, by_h).await.is_empty());
+        assert!(f.read(&outsider, by_d).await.is_empty());
         assert!(live.delivered().is_empty());
 
         let refused = command(&outsider, KIND_PIN_MESSAGE, channel, &message);
         refusal(f.send(&outsider, refused).await);
     }
+
+    let unlisted = create_channel(&f.state, &f.tenant, &owner, &[&["unlisted", "true"]]).await;
+    let message = f.message(&owner, unlisted).await;
+    assert_eq!(f.pin(&owner, unlisted, &message).await, "");
+    assert_eq!(f.pins(&outsider, unlisted).await, Some(vec![message]));
+    let by_d = json!({"kinds": [KIND_CHANNEL_PINS], "#d": [unlisted.to_string()]});
+    assert!(
+        f.read(&outsider, by_d).await.is_empty(),
+        "`#d` does not name a channel for this kind"
+    );
 }
 
 /// Each refusal stores nothing and leaves the list alone.

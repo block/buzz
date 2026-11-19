@@ -117,12 +117,15 @@ async fn replace_pins(
     ids: &[Vec<u8>],
     relay_signer: &nostr::Keys,
 ) -> Result<StoredEvent> {
-    let mut tags = vec![nostr::Tag::identifier(channel_id.to_string())];
+    let tag = |name: &str, value: &str| {
+        nostr::Tag::parse([name, value]).map_err(|error| DbError::InvalidData(error.to_string()))
+    };
+    let channel = channel_id.to_string();
+    // `d` addresses the list; `h` lets a `#h` filter, which names the channel
+    // (NIP-CL), match it.
+    let mut tags = vec![tag("d", &channel)?, tag("h", &channel)?];
     for id in ids {
-        tags.push(
-            nostr::Tag::parse(["e", &hex::encode(id)])
-                .map_err(|error| DbError::InvalidData(error.to_string()))?,
-        );
+        tags.push(tag("e", &hex::encode(id))?);
     }
     let (stored, inserted) = crate::channel::replace_signed_group_state_under_lock(
         tx,

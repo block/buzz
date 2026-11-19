@@ -3875,7 +3875,10 @@ mod postgres_tests {
                 .iter()
                 .map(|tag| tag.as_slice().to_vec())
                 .collect::<Vec<_>>(),
-            [vec!["d".to_owned(), channel.to_string()]]
+            [
+                vec!["d".to_owned(), channel.to_string()],
+                vec!["h".to_owned(), channel.to_string()],
+            ]
         );
     }
 
