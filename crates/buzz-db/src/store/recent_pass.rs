@@ -38,10 +38,11 @@
 //! partitions than it needs. It walks fixed two-month windows forward from a
 //! literal floor, the start of the month of the read's earliest possible row,
 //! and stops at the first window that completes the page. A regular-kind read
-//! stops at the same ceiling; any other read ends with one open window. The
-//! earliest possible row is the cursor after the first page. The first page
-//! has no cursor, so a channel read uses [`channel_floor`]. A read with
-//! neither plans every partition below the ceiling.
+//! stops at the same ceiling; any other read ends with one open window. For a
+//! channel read the earliest possible row is [`channel_floor`], or the cursor
+//! when that is later, so a page walks at most one window per two months of
+//! the channel's life. A read without a floor plans every partition below the
+//! ceiling in one window.
 //!
 //! The walk locks one more partition set per window it reads, and the locks
 //! stay until the read's transaction ends, so a read that must reach the
@@ -258,17 +259,21 @@ fn regular_only(kinds: Option<&[i32]>) -> bool {
 }
 
 /// The channel's earliest possible row: the instant it was created, less the
-/// floor the write path tolerates ([`CREATED_AT_FLOOR_SECS`]). Every write of a
-/// channel row checks `created_at` against the database clock, and the channel
-/// exists before its first row, so no row of it is older. Its month starts the
-/// walk of a channel's first oldest-first page.
+/// floor the write path tolerates ([`CREATED_AT_FLOOR_SECS`]). `created_at` is
+/// the database's `NOW()` when the channel row was inserted
+/// (`schema/tables/public/channels.sql`), every write of a channel row checks
+/// its `created_at` against the database clock, and the channel exists before
+/// its first row, so no row of it is older. A write that bypasses that check
+/// (see [`crate::replica_fence`]) can store older rows, and oldest-first reads
+/// skip those in earlier months than the floor's. Its month starts the walk of
+/// an oldest-first channel page.
 pub(crate) fn channel_floor(channel_created_at: DateTime<Utc>) -> DateTime<Utc> {
     channel_created_at - Duration::seconds(CREATED_AT_FLOOR_SECS)
 }
 
 /// The first window of an oldest-first page read. `earliest` is a lower bound
-/// on the read's rows: the cursor of a later page, else [`channel_floor`]
-/// (`None`: the read has no bound and its first window is unbounded below).
+/// on the read's rows: [`channel_floor`], or the page's cursor when that is
+/// later (`None`: the read has no bound and its first window is unbounded below).
 /// `kinds` are the read's kinds (`None`: any).
 pub(crate) fn oldest_for(
     now: DateTime<Utc>,

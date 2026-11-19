@@ -685,20 +685,20 @@ pub(crate) async fn get_channel_window_on(
                 .map_or(Range::All, Range::Recent)
         }
         Direction::Newer => {
-            // The head page has no cursor to start its walk from; the
-            // channel's creation does. Without the row (no floor), the walk
-            // is unbounded below, as before.
-            let earliest = match cursor_ts {
-                Some(ts) => Some(ts),
-                None => sqlx::query_scalar::<_, DateTime<Utc>>(
-                    "SELECT created_at FROM channels WHERE community_id = $1 AND id = $2",
-                )
-                .bind(community_id.as_uuid())
-                .bind(channel_id)
-                .fetch_optional(&mut *conn)
-                .await?
-                .map(crate::store::recent_pass::channel_floor),
-            };
+            // Every page walks from the month of the channel's creation floor,
+            // or of its cursor when that is later: no row is older than the
+            // floor, so a cursor below it would only walk empty windows. Without the
+            // channel's row there is no floor, and one window unbounded below
+            // reads the page.
+            let floor = sqlx::query_scalar::<_, DateTime<Utc>>(
+                "SELECT created_at FROM channels WHERE community_id = $1 AND id = $2",
+            )
+            .bind(community_id.as_uuid())
+            .bind(channel_id)
+            .fetch_optional(&mut *conn)
+            .await?
+            .map(crate::store::recent_pass::channel_floor);
+            let earliest = floor.map(|floor| cursor_ts.map_or(floor, |ts| ts.max(floor)));
             Range::Forward(crate::store::recent_pass::oldest_for(
                 Utc::now(),
                 kinds.as_deref(),
@@ -2919,6 +2919,63 @@ mod postgres_tests {
             "a page that needs the June window must fail on its lock, got {:?}",
             failed.map(|w| (w.rows.len(), w.has_more))
         );
+        unlock(locker, &mut conn).await;
+    }
+
+    /// The head page reads rows written up to the write path's tolerance
+    /// before the channel was created, here in the month before it.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_window_newer_head_reads_rows_older_than_the_channel_within_the_floor() {
+        let pool = setup_pool().await;
+        let (channel, community, oldest_first) = dated_channel(
+            &pool,
+            &Keys::generate(),
+            "2026-03-01T00:05:00Z",
+            &[unix("2026-02-28T23:58:00Z"), unix("2026-03-02T00:00:00Z")],
+        )
+        .await;
+        let mut conn = pool.acquire().await.expect("acquire");
+        let window = newer_page(&mut conn, community, channel, 10, None)
+            .await
+            .expect("head page");
+        let expected: Vec<_> = oldest_first.iter().map(|e| e.id).collect();
+        assert_eq!(row_ids(&window), expected);
+        assert!(!window.has_more);
+    }
+
+    /// A cursor older than the channel starts the walk at the channel's
+    /// floor, as the head page does, so the partitions below it are never
+    /// planned.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_window_newer_cursor_below_the_floor_walks_from_the_floor() {
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let (channel, community, oldest_first) = dated_channel(
+            &pool,
+            &author,
+            "2026-01-10T00:00:00Z",
+            &[unix("2026-01-12T00:00:00Z"), unix("2026-03-10T12:00:00Z")],
+        )
+        .await;
+        // A row of another channel names a partition below the floor.
+        let (_, _, below) = dated_channel(
+            &pool,
+            &author,
+            "2025-05-15T00:00:00Z",
+            &[unix("2025-06-01T00:00:00Z")],
+        )
+        .await;
+        let mut conn = pool.acquire().await.expect("acquire");
+        let [below, _first] = distinct_partitions(&pool, [below[0].id, oldest_first[0].id]).await;
+        let locker = lock(&pool, &mut conn, [below]).await;
+        let epoch = Some((DateTime::<Utc>::UNIX_EPOCH, vec![0u8; 32]));
+        let window = newer_page(&mut conn, community, channel, 10, epoch)
+            .await
+            .expect("a cursor below the floor never plans the partitions below it");
+        let expected: Vec<_> = oldest_first.iter().map(|e| e.id).collect();
+        assert_eq!(row_ids(&window), expected);
         unlock(locker, &mut conn).await;
     }
 

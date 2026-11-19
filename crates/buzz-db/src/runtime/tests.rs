@@ -996,6 +996,14 @@ async fn channel_window_routes_head_to_writer_and_cursor_pages_to_replica() {
 
     // Shared history (both databases): m1 < m2 < m3.
     let base = 1_700_000_000u64;
+    for pool in [&writer, &replica] {
+        sqlx::query("UPDATE channels SET created_at = $1 WHERE id = $2")
+            .bind(chrono::DateTime::from_timestamp(base as i64 - 3600, 0).unwrap())
+            .bind(channel)
+            .execute(pool)
+            .await
+            .expect("date the channel before its history");
+    }
     let m1 = signed_event_at(&author, "m1", base);
     let m2 = signed_event_at(&author, "m2", base + 10);
     let m3 = signed_event_at(&author, "m3", base + 20);
