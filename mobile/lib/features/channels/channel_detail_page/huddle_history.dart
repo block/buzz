@@ -6,10 +6,23 @@ final _huddleHistoryAccessProvider = FutureProvider.autoDispose
     .family<bool, String>((ref, channelId) async {
       ref.watch(relayConfigProvider);
       ref.watch(myPubkeyProvider);
-      ref.watch(channelMembershipUpdateProvider(channelId));
+      ref.watch(
+        channelMembershipUpdateProvider(
+          channelId,
+        ).select((update) => update.version),
+      );
       final membership = ref.watch(huddleHistoryMembershipProvider(channelId));
       if (membership == false) return false;
-      final status = ref.watch(relaySessionProvider.select((s) => s.status));
+      // Keep this open route's successful authorization through a transient
+      // disconnect. Reopening still requires a fresh check; reconnecting
+      // revalidates before showing any retained private history.
+      ref.listen(relaySessionProvider, (previous, next) {
+        if (next.status == SessionStatus.connected &&
+            previous?.status != SessionStatus.connected) {
+          ref.invalidateSelf();
+        }
+      });
+      final status = ref.read(relaySessionProvider).status;
       if (status != SessionStatus.connected) throw StateError('Not connected');
       try {
         await ref

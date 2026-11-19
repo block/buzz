@@ -12238,6 +12238,12 @@ void main() {
         await tester.tap(find.widgetWithText(FilledButton, 'View'));
         await tester.pumpAndSettle();
         expect(find.text('The transcript remains available.'), findsOneWidget);
+        relay.setConnectionStatus(SessionStatus.reconnecting);
+        await tester.pumpAndSettle();
+        expect(find.text('The transcript remains available.'), findsOneWidget);
+        relay.setConnectionStatus(SessionStatus.connected);
+        await tester.pumpAndSettle();
+        expect(find.text('The transcript remains available.'), findsOneWidget);
         expect(find.widgetWithText(FilledButton, 'Join'), findsNothing);
         expect(find.byType(TextField), findsNothing);
         await tester.tap(
@@ -21339,6 +21345,10 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
 
 class _IdentityUpdateRelaySession extends RelaySessionNotifier {
   _IdentityUpdateRelaySession({this.profileRefresh});
+
+  void setConnectionStatus(SessionStatus status) {
+    state = SessionState(status: status);
+  }
 
   Object? huddleHistoryError;
   final Future<List<NostrEvent>>? profileRefresh;
