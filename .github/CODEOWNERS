@@ -1,2 +1,8 @@
 * @block/buzz-oss-team
 /VISION_MOBILE.md @brow
+
+# Relay database migrations and desired-state schema.
+/migrations/ @TheSentinel454
+/schema/ @TheSentinel454
+/scripts/reconcile-schema-after-pgschema.sql @TheSentinel454
+/.pgschemaignore @TheSentinel454
