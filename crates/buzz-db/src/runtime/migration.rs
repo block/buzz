@@ -927,7 +927,9 @@ mod postgres_tests {
         // 0098 undoes 0097's community artifact expand.
         assert_eq!(migrations[97].version, 98);
         let unexpand = strip_sql_comments(migrations[97].sql.as_str());
-        assert!(unexpand.contains("ALTER TABLE artifact_heads ALTER COLUMN channel_id SET NOT NULL;"));
+        assert!(
+            unexpand.contains("ALTER TABLE artifact_heads ALTER COLUMN channel_id SET NOT NULL;")
+        );
         assert!(unexpand.contains("ALTER TABLE communities DROP COLUMN artifact_type_policies;"));
         assert!(migrations[79]
             .sql
@@ -3646,7 +3648,10 @@ mod postgres_tests {
         .fetch_one(&pool)
         .await
         .expect("read surviving artifact head");
-        assert_eq!(surviving_heads, 1, "0097 and 0098 keep channel artifact heads");
+        assert_eq!(
+            surviving_heads, 1,
+            "0097 and 0098 keep channel artifact heads"
+        );
         assert_eq!(
             valid_indexes(
                 &pool,
