@@ -684,6 +684,7 @@ void main() {
           'offline-clear': (false, t + 1),
           'offline-add': (true, t + 2),
           'evicted': (true, t - 10),
+          'same-second-absent': (true, t),
           'changed-by-peer': (true, t - 2),
           'already-current': (true, t - 1),
         });
@@ -721,6 +722,19 @@ void main() {
           'offline-add': {lane.field: true, 'updatedAt': (t + 2) * 1000},
           'changed-by-peer': {lane.field: false, 'updatedAt': t * 1000},
           'already-current': {lane.field: true, 'updatedAt': t - 2},
+        });
+      });
+
+      fakeAsyncTest('upgrading with no writer head recovers absent flags', (
+        clock,
+      ) {
+        final cached = blob({'offline-add': (true, t - 10)});
+        unawaited(prefs.setString(legacyCacheKey(), jsonEncode(cached)));
+        start(clock);
+        clock.elapse(const Duration(seconds: 5));
+        final payload = relay.decrypt(relay.published.single) as Map;
+        expect(payload['channels'], {
+          'offline-add': {lane.field: true, 'updatedAt': (t - 10) * 1000},
         });
       });
 
@@ -850,18 +864,18 @@ void main() {
         // Once the clear ages out of the latest retained head, the returning
         // device still has its old star. It must only send its current edit.
         final sent = relay.published.last;
+        final retained = relay.decrypt(sent) as Map;
+        final flags = Map.of(retained['channels'] as Map)..remove('flag-0');
         relay.stored.add(
-          relay.event(
-            lane.dTag,
-            blob({
-              for (final entry in peer.values().entries)
-                if (entry.key != 'flag-0') entry.key: (entry.value, t + 10),
+          relay.event(lane.dTag, {
+            'version': 1,
+            'channels': {
+              ...flags,
               // A later writer can have an earlier clock. A stale-cache
               // union would evict this flag and leave flag-0 in the record.
-              'another': (true, t - 100),
-            }),
-            sent.createdAt + 1,
-          ),
+              'another': {lane.field: true, 'updatedAt': t - 100},
+            },
+          }, sent.createdAt + 1),
         );
         returningPhone.set('flag-2', false);
         clock.elapse(const Duration(seconds: 5));
@@ -919,7 +933,84 @@ void main() {
         expect(relay.writerQueries, List.filled(4, lane.dTag));
         final payload = relay.decrypt(relay.published.last) as Map;
         expect(payload['channels'].keys, unorderedEquals(['peer', 'pending']));
+        final attempted = relay.decrypt(relay.published.first) as Map;
+        expect(
+          payload['channels']['pending'],
+          attempted['channels']['pending'],
+        );
       });
+
+      fakeAsyncTest('a newer writer flag supersedes an offline edit', (clock) {
+        start(clock).set('offline', true);
+        relay.writerFailures = 1;
+        clock.elapse(const Duration(seconds: 5));
+        expect(relay.published, isEmpty);
+        subject.dispose();
+
+        // The peer wrote in seconds after the phone's millisecond edit.
+        final newer = relay.event(
+          lane.dTag,
+          blob({'offline': (false, t + 60)}),
+          t + 1,
+        );
+        relay.stored.add(newer);
+        start(clock);
+        clock.elapse(const Duration(seconds: 5));
+        expect(relay.published, isEmpty);
+        expect(subject.values(), {'offline': false});
+        final cache = jsonDecode(prefs.getString(legacyCacheKey())!) as Map;
+        expect(cache['pending'], isEmpty);
+      });
+
+      fakeAsyncTest('a mixed batch sends only edits that still win', (clock) {
+        start(clock).set('offline', true);
+        subject.set('untouched-by-peer', true);
+        final cache = jsonDecode(prefs.getString(legacyCacheKey())!) as Map;
+        final originalEdit = cache['pending']['untouched-by-peer'];
+        final remoteTime = (t + 60) * 1000;
+        relay.stored.add(
+          relay.event(lane.dTag, blob({'offline': (false, remoteTime)}), t + 1),
+        );
+        clock.elapse(const Duration(seconds: 5));
+        final payload = relay.decrypt(relay.published.single) as Map;
+        expect(payload['channels'], {
+          'offline': {lane.field: false, 'updatedAt': remoteTime},
+          'untouched-by-peer': originalEdit,
+        });
+        final saved = jsonDecode(prefs.getString(legacyCacheKey())!) as Map;
+        expect(saved['pending'], isEmpty);
+      });
+
+      for (final peerEdited in [false, true]) {
+        fakeAsyncTest(
+          'losing readback retires a flag ${peerEdited ? 'superseded by a peer' : 'already retained'}',
+          (clock) {
+            final ok = relay.holdOk = Completer<void>();
+            start(clock).set('clicked', true);
+            clock.elapse(const Duration(seconds: 5));
+            final sent = relay.published.single;
+            relay.holdOk = null;
+            relay.writerFailures = 1;
+            ok.complete();
+            clock.flushMicrotasks();
+
+            if (peerEdited) {
+              relay.stored.add(
+                relay.event(
+                  lane.dTag,
+                  blob({'clicked': (false, (t + 60) * 1000)}),
+                  sent.createdAt + 1,
+                ),
+              );
+            }
+            clock.elapse(const Duration(seconds: 4));
+            expect(relay.published, [sent]);
+            expect(subject.values(), {'clicked': !peerEdited});
+            final cache = jsonDecode(prefs.getString(legacyCacheKey())!) as Map;
+            expect(cache['pending'], isEmpty);
+          },
+        );
+      }
 
       fakeAsyncTest('a confirmed clear loses eviction priority at the cap', (
         clock,

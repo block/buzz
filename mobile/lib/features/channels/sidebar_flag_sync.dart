@@ -336,13 +336,34 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
           'Writer flag snapshot is older than the observed head',
         );
       }
+      final settled = <String, T>{};
       final outgoing = Map.of(snapshot);
       for (final edit in edits.entries) {
         final latest = snapshot[edit.key];
-        outgoing[edit.key] =
-            sidebarFlagTimeMillis(latest?.updatedAt ?? 0) < edit.value.updatedAt
-            ? edit.value
-            : _entry(edit.value.enabled, _nextTimestamp(latest));
+        if (latest != null) {
+          final age = sidebarFlagTimeMillis(
+            latest.updatedAt,
+          ).compareTo(sidebarFlagTimeMillis(edit.value.updatedAt));
+          if (age > 0 || (age == 0 && latest.enabled == edit.value.enabled)) {
+            settled[edit.key] = edit.value;
+            continue;
+          }
+        }
+        outgoing[edit.key] = edit.value;
+      }
+      if (settled.isNotEmpty) {
+        _head = head;
+        _confirmed = snapshot;
+        await _retireEdits(settled);
+        edits.removeWhere((id, _) => settled.containsKey(id));
+        if (!_active) return;
+        if (edits.isEmpty) {
+          _writeFailures = 0;
+          return;
+        }
+        if (_head?.id != head?.id) {
+          throw StateError('Flag head changed while settling pending edits');
+        }
       }
       boundSidebarFlags(outgoing, edits.keys.toSet());
       if (!edits.keys.every(outgoing.containsKey)) {
@@ -368,20 +389,7 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
         if (_active) _onChanged();
         throw StateError('Flag write was superseded');
       }
-      final acknowledged = <String, T>{};
-      for (final edit in edits.entries) {
-        if (identical(_pending[edit.key], edit.value)) {
-          acknowledged[edit.key] = edit.value;
-          _pending.remove(edit.key);
-        }
-      }
-      if (!await _persist()) {
-        for (final edit in acknowledged.entries) {
-          _pending.putIfAbsent(edit.key, () => edit.value);
-        }
-        throw StateError('Flag confirmation was not saved');
-      }
-      if (_active) _onChanged();
+      await _retireEdits(edits);
       _writeFailures = 0;
     } on FormatException catch (error) {
       // A malformed head needs a new valid snapshot or a resume, not polling.
@@ -399,6 +407,25 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
         _scheduleWrite(delay: Duration(seconds: 2 << _writeFailures));
       }
     }
+  }
+
+  // Retire exact intents that the writer reflects or supersedes, leaving edits
+  // that the user made during a relay read or publish pending.
+  Future<void> _retireEdits(Map<String, T> settled) async {
+    final retired = <String, T>{};
+    for (final edit in settled.entries) {
+      if (identical(_pending[edit.key], edit.value)) {
+        retired[edit.key] = edit.value;
+        _pending.remove(edit.key);
+      }
+    }
+    if (!await _persist()) {
+      for (final edit in retired.entries) {
+        _pending.putIfAbsent(edit.key, () => edit.value);
+      }
+      throw StateError('Flag settlement was not saved');
+    }
+    if (_active) _onChanged();
   }
 
   /// Retire this manager. Its successor reads any pending edits from disk.
