@@ -57,7 +57,7 @@ Global mode and community mode are mutually exclusive.
 | Community | Target-owned tokens, created invitations, all channel/community memberships (including removed rows), policy acceptances, allowlist entries, read frontiers and read-account rows. Existing nullable attribution clears preserve other owners' records and revocation/removal state. |
 | Community feedback | Delete the target's submitted feedback in that community, including its body and tags. |
 | Personal events | Delete all stored versions, including soft-deleted revisions, of directly authored kinds **3, 10000, 10001, 10002, 10003, 10030, 30000, 30003, 30315, 30078**. These cover contacts, mute/pin/bookmark/follow lists, relay preferences, personal emoji lists, status and application/read state. |
-| Personal-event copies | Before deleting source events, delete matching mention-index rows, push-match jobs, push-wake outbox rows, listener outbox rows and delivery logs in the same community. Other people's signed references and reactions are preserved. |
+| Personal-event copies | Before deleting source events, delete matching mention-index rows, push-match jobs, push-wake outbox rows and listener outbox rows in the same community. Other people's signed references and reactions are preserved. |
 | Global | Delete the selected key's database operator/moderator role, listener registrations in either listener or target position, and submitted feedback across communities and with NULL community. |
 
 Role revocation and its audit row commit together using the existing roster
@@ -128,7 +128,7 @@ relay-signed membership notices, infer device ownership, or prove repository
 owner/delegated access has been revoked. It does not delete shared emoji sets,
 profiles, messages, repository events or unknown personal event kinds. Those
 require their named handler or an attribution/reconciliation implementation.
-Target notification subscriptions and push leases belong to content cleanup;
+Target push leases belong to content cleanup;
 capture any device attribution before that handler removes the source links.
 
 The existing `archived_identities.replaced_by` clear is still present; moving it

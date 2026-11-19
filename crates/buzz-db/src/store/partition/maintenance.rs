@@ -1,4 +1,4 @@
-//! Serialized, bounded partition DDL for `events` and `delivery_log`.
+//! Serialized, bounded partition DDL for `events`.
 //!
 //! The manager issues only two kinds of change: creating a month that no
 //! partition covers, and replacing an empty right-edge catch-all with

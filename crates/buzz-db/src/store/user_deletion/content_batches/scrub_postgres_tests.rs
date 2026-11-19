@@ -99,7 +99,7 @@ async fn batch_crossing_selection_pages_removes_side_rows_before_events() {
     let before = row(&db, c, &survivor).await;
     // This item offsets the event batches by one. Batch two starts with the
     // last event of page one, followed by page two's side row and event.
-    sqlx::query("INSERT INTO subscriptions (community_id,id,owner_pubkey) VALUES ($1,'offset',$2)")
+    sqlx::query("INSERT INTO push_leases (community_id,author,installation_id,source_event_id,source_created_at,generation,active,expires_at) VALUES ($1,$2,'offset',decode(repeat('00',32),'hex'),0,1,false,0)")
         .bind(c.as_uuid())
         .bind(alice.public_key().as_bytes().as_slice())
         .execute(db.pool())

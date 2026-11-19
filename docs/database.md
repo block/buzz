@@ -148,6 +148,19 @@ executes after it, and still purges the new table's rows. A table that is not
 on the list is not covered by an older approval, even when it is in
 `EXPECTED_SCOPED_TABLES`.
 
+#### Retiring a tenant-owned table
+
+Before a contract migration drops a table with a `community_id` column, ship a
+release that removes every reader and writer of it and moves it from
+`EXPECTED_SCOPED_TABLES` and `PURGE_SCOPED_TABLES` to
+`RETIRING_SCOPED_TABLES` (`crates/buzz-db/src/store/deletion.rs`), and deploy it
+to every relay, deletion executor and operator CLI. The catalog then accepts
+the table present or absent, the purge deletes its rows only while it exists,
+and an approval that froze it still executes after the drop
+(`validate_approved_schema` tolerates a frozen `RETIRING_SCOPED_TABLES` entry
+that is gone, and nothing else). Run the drop migration after that release
+is everywhere, and remove the entry once no pre-drop approval remains.
+
 #### Checklist: adding a provenance-only table
 
 A table whose `community_id` only records which community a row came from, and

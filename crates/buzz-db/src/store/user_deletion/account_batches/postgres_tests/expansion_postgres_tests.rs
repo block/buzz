@@ -174,18 +174,11 @@ async fn personal_events_revisions_copies_and_community_feedback_are_removed() {
     .await
     .unwrap();
     sqlx::query("INSERT INTO operator_listener_outbox(listener_pubkey,target_pubkey,community_id,event_id,event_kind,event_created_at) SELECT decode($1,'hex'),pubkey,community_id,id,kind,created_at FROM events").bind(ACTOR).execute(&f.pool).await.unwrap();
-    sqlx::query(
-        "INSERT INTO delivery_log(community_id,event_id) SELECT community_id,id FROM events",
-    )
-    .execute(&f.pool)
-    .await
-    .unwrap();
     let tables = [
         "events",
         "event_mentions",
         "push_match_queue",
         "operator_listener_outbox",
-        "delivery_log",
         "product_feedback",
         "parameterized_event_watermarks",
     ];

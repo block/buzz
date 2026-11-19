@@ -410,7 +410,7 @@ mod postgres_tests {
     };
     use crate::test_support::ScratchDb;
 
-    /// The repaired incident layout for both managed parents, optionally with
+    /// The repaired incident layout for the managed parent, optionally with
     /// outgoing foreign keys to a `communities` counterpart.
     async fn seed_repaired_layout(pool: &PgPool, with_foreign_keys: bool) {
         seed_parents(pool).await;
@@ -621,7 +621,6 @@ mod postgres_tests {
                 "GRANT INSERT, SELECT (id) ON events TO {}",
                 quote_identifier(&writer)
             ),
-            "GRANT SELECT ON delivery_log TO PUBLIC".to_string(),
             "CREATE TABLE unrelated (id BIGINT)".to_string(),
         ] {
             execute_ddl(&mut pool.acquire().await.unwrap(), statement)
@@ -670,17 +669,11 @@ mod postgres_tests {
         for privilege in ["INSERT", "UPDATE", "SELECT WITH GRANT OPTION"] {
             assert!(!can(reader.clone(), "events_p2026_09".into(), privilege).await);
         }
-        for relation in [
-            "events_p2026_09",
-            "events_p_past",
-            "delivery_log_p_past",
-            "unrelated",
-        ] {
+        for relation in ["events_p2026_09", "events_p_past", "unrelated"] {
             assert!(!can(writer.clone(), relation.into(), "SELECT").await);
         }
         assert!(!can(reader.clone(), "events_p_past".into(), "SELECT").await);
         assert!(!can(reader.clone(), "unrelated".into(), "SELECT").await);
-        assert!(can(writer.clone(), "delivery_log_p2026_09".into(), "SELECT").await);
 
         // The next rotation uses the current parent ACL, not a cached reader list.
         for statement in [
@@ -708,10 +701,6 @@ mod postgres_tests {
             assert!(can(writer.clone(), relation.into(), "SELECT").await);
             assert!(!can(writer.clone(), relation.into(), "INSERT").await);
             assert!(!can(reader.clone(), relation.into(), "SELECT").await);
-        }
-        for relation in ["delivery_log_p2026_10", "delivery_log_p_future"] {
-            assert!(can(reader.clone(), relation.into(), "SELECT").await);
-            assert!(!can(reader.clone(), relation.into(), "INSERT").await);
         }
         let before = catalog_snapshot(&pool).await;
         maintain_partitions_at(&pool, 1, ADVANCE, fixed_now())
@@ -784,8 +773,7 @@ mod postgres_tests {
         assert!(
             matches!(result, Err(DbError::InvalidData(ref message))
                 if message.contains("events operator_required")
-                    && message.contains("events_p_future_next contains rows")
-                    && !message.contains("delivery_log")),
+                    && message.contains("events_p_future_next contains rows")),
             "{result:?}"
         );
         assert!(elapsed < std::time::Duration::from_secs(1), "{elapsed:?}");
@@ -819,11 +807,10 @@ mod postgres_tests {
 
         assert!(
             matches!(result, Err(DbError::InvalidData(ref message))
-                if message.contains("events lock_timeout")
-                    && message.contains("delivery_log lock_timeout")),
+                if message.contains("events lock_timeout")),
             "{result:?}"
         );
-        // NOWAIT: no 2s wait per table while a counterpart writer is active.
+        // NOWAIT: no 2s wait while a counterpart writer is active.
         assert!(elapsed < std::time::Duration::from_secs(1), "{elapsed:?}");
         assert_eq!(catalog_snapshot(&pool).await, before);
 
@@ -975,8 +962,7 @@ mod postgres_tests {
             matches!(result, Err(DbError::InvalidData(ref message))
                 if message.contains("events lock_timeout")
                     && message.contains("could not obtain lock on relation")
-                    && message.contains(r#".reviewers""#)
-                    && !message.contains("delivery_log")),
+                    && message.contains(r#".reviewers""#)),
             "{result:?}"
         );
 
@@ -995,8 +981,7 @@ mod postgres_tests {
     fn refused_events_only(result: &Result<PartitionAudit>, reason: &str) -> bool {
         matches!(result, Err(DbError::InvalidData(message))
             if message.contains("events operator_required")
-                && message.contains(reason)
-                && !message.contains("delivery_log"))
+                && message.contains(reason))
     }
 
     #[tokio::test]
@@ -1139,13 +1124,17 @@ mod postgres_tests {
     async fn deadlock_victim_is_classified_as_a_lock_timeout() {
         let (pool, _scratch) = scratch_pool().await;
         seed_parents(&pool).await;
+        sqlx::query("CREATE TABLE deadlock_peer (id BIGINT)")
+            .execute(&pool)
+            .await
+            .expect("create deadlock peer");
         let mut first = hold_lock(&pool, "LOCK TABLE ONLY events IN ACCESS EXCLUSIVE MODE").await;
         let mut second = hold_lock(
             &pool,
-            "LOCK TABLE ONLY delivery_log IN ACCESS EXCLUSIVE MODE",
+            "LOCK TABLE ONLY deadlock_peer IN ACCESS EXCLUSIVE MODE",
         )
         .await;
-        let first_waits = sqlx::query("LOCK TABLE ONLY delivery_log IN ACCESS EXCLUSIVE MODE")
+        let first_waits = sqlx::query("LOCK TABLE ONLY deadlock_peer IN ACCESS EXCLUSIVE MODE")
             .execute(&mut *first);
         let second_waits = async {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1175,9 +1164,10 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn parent_contention_times_out_without_blocking_the_other_table() {
+    async fn parent_contention_times_out_and_leaves_the_catalog_unchanged() {
         let (pool, _scratch) = scratch_pool().await;
         seed_repaired_layout(&pool, true).await;
+        let before = catalog_snapshot(&pool).await;
         let holder = hold_lock(&pool, "LOCK TABLE ONLY events IN ACCESS SHARE MODE").await;
 
         let result = maintain(&pool).await;
@@ -1185,9 +1175,10 @@ mod postgres_tests {
 
         assert!(
             matches!(result, Err(DbError::InvalidData(ref message))
-                if message.contains("events lock_timeout") && !message.contains("delivery_log")),
+                if message.contains("events lock_timeout")),
             "{result:?}"
         );
+        assert_eq!(catalog_snapshot(&pool).await, before);
         let audit = audit_partition_catalog_at(&pool, PARTITION_MANAGER_MONTHS_AHEAD, fixed_now())
             .await
             .expect("audit");
@@ -1196,16 +1187,8 @@ mod postgres_tests {
             .children
             .iter()
             .any(|child| child.name == "events_p_future_next"));
-        let delivery_log = audit
-            .tables
-            .iter()
-            .filter(|t| t.table == "delivery_log")
-            .cloned()
-            .collect::<Vec<_>>();
-        assert_advanced(&PartitionAudit {
-            audited_at: audit.audited_at,
-            tables: delivery_log,
-        });
+
+        assert_advanced(&maintain(&pool).await.expect("advance after release"));
     }
 
     #[tokio::test]
@@ -1348,8 +1331,7 @@ mod postgres_tests {
         assert!(
             matches!(result, Err(DbError::InvalidData(ref message))
                 if message.contains("events operator_required")
-                    && message.contains("child-only triggers (catch_all_only)")
-                    && !message.contains("delivery_log")),
+                    && message.contains("child-only triggers (catch_all_only)")),
             "{result:?}"
         );
         let after = catalog_snapshot(&pool).await;
@@ -1560,7 +1542,7 @@ mod postgres_tests {
         assert!(after
             .iter()
             .any(|(name, ..)| name == "events_p_future_next"));
-        assert_ne!(after, before, "delivery_log still advances");
+        assert_eq!(after, before, "a refused events layout is left untouched");
     }
 
     /// Audits taken in a freshly migrated database before and after its first passes.

@@ -2751,18 +2751,16 @@ mod tests {
         assert_eq!(aggregate_audit_failures(&counters), 1);
         // Each per-table attempt, including the one inside maintenance, still has
         // its own error outcome.
-        for table in ["events", "delivery_log"] {
-            let errors: u64 = counters
-                .iter()
-                .filter(|(name, labels, _)| {
-                    name == "buzz_partition_audit_runs_total"
-                        && labels.contains(&("table".to_string(), table.to_string()))
-                        && labels.contains(&("outcome".to_string(), "error".to_string()))
-                })
-                .map(|(_, _, value)| value)
-                .sum();
-            assert_eq!(errors, 2, "{table}");
-        }
+        let errors: u64 = counters
+            .iter()
+            .filter(|(name, labels, _)| {
+                name == "buzz_partition_audit_runs_total"
+                    && labels.contains(&("table".to_string(), "events".to_string()))
+                    && labels.contains(&("outcome".to_string(), "error".to_string()))
+            })
+            .map(|(_, _, value)| value)
+            .sum();
+        assert_eq!(errors, 2, "events");
     }
 
     #[test]
