@@ -50,6 +50,7 @@ final notificationReplySenderProvider = Provider<void>((ref) {
               sent: result.outcome == NotificationReplyOutcome.sent,
               unknown: result.outcome == NotificationReplyOutcome.unknown,
               draftThreadRootId: result.draftThreadRootId,
+              draftKept: result.outcome != NotificationReplyOutcome.lost,
             );
           } catch (error) {
             // Unreported, it stays journaled: iOS gives up on it at its own
@@ -83,9 +84,12 @@ const _markReadDeadline = Duration(seconds: 3);
 enum NotificationReplyOutcome {
   sent,
 
-  /// Never published, or refused by the relay; its text is kept as a draft,
-  /// unless its community is gone.
+  /// Never published, or refused by the relay; its text is kept as a draft.
   notSent,
+
+  /// Like [notSent], but its community is gone, so no draft is kept. Its
+  /// "Reply not sent" notification is the only place its text stays.
+  lost,
 
   /// Published, but no answer came from the relay, so it may have gone out.
   /// No draft is kept, so resending can't post it twice.
@@ -121,10 +125,7 @@ Future<NotificationReplyResult> sendNotificationReply(
         draftThreadRootId: null,
       );
     }
-    return (
-      outcome: NotificationReplyOutcome.notSent,
-      draftThreadRootId: await _keepDraft(ref, reply),
-    );
+    return _notSent(ref, reply);
   }
   // Publishing starts early enough to hear the OK, mark read and report
   // before the deadline. The cutoff comes from the deadline itself, so a
@@ -135,10 +136,7 @@ Future<NotificationReplyResult> sendNotificationReply(
   final publishWindow = publishDeadline.difference(clock.now());
   final left = publishWindow + _publishTimeout;
   if (publishWindow <= Duration.zero) {
-    return (
-      outcome: NotificationReplyOutcome.notSent,
-      draftThreadRootId: await _keepDraft(ref, reply),
-    );
+    return _notSent(ref, reply);
   }
   // The background grace period would otherwise disconnect mid-reply.
   final release = ref
@@ -182,10 +180,7 @@ Future<NotificationReplyResult> sendNotificationReply(
       }
       // A send still preparing must not publish after this.
       tooLate = true;
-      return (
-        outcome: NotificationReplyOutcome.notSent,
-        draftThreadRootId: await _keepDraft(ref, reply),
-      );
+      return await _notSent(ref, reply);
     } finally {
       publishBy.cancel();
     }
@@ -267,6 +262,22 @@ Future<void> _send(
 String? _replyHead(BuzzNotificationReply reply, Channel channel) =>
     channel.isSolo ? null : reply.replyRootId ?? reply.link.messageId;
 
+/// The result for a reply that wasn't published: [NotificationReplyOutcome.notSent]
+/// with its draft's thread, or [NotificationReplyOutcome.lost] when its
+/// community is gone.
+Future<NotificationReplyResult> _notSent(
+  Ref ref,
+  BuzzNotificationReply reply,
+) async {
+  final draft = await _keepDraft(ref, reply);
+  return draft == null
+      ? (outcome: NotificationReplyOutcome.lost, draftThreadRootId: null)
+      : (
+          outcome: NotificationReplyOutcome.notSent,
+          draftThreadRootId: draft.threadRootId,
+        );
+}
+
 /// Keeps the reply's text as a draft, after any draft already there, in the
 /// reply's own community, and returns the thread it's in once it's saved, or
 /// throws: the reply then stays with iOS until a later launch saves it, as it
@@ -275,7 +286,10 @@ String? _replyHead(BuzzNotificationReply reply, Channel channel) =>
 /// goes where the reply would have gone: the subthread under the notified
 /// message, or a Solo chat itself. Whether it's a Solo chat comes from the
 /// loaded channel, or else from the notification.
-Future<String?> _keepDraft(Ref ref, BuzzNotificationReply reply) async {
+Future<({String? threadRootId})?> _keepDraft(
+  Ref ref,
+  BuzzNotificationReply reply,
+) async {
   final link = reply.link;
   final channel =
       ref.read(activeCommunityProvider).value?.id == link.communityId
@@ -311,5 +325,5 @@ Future<String?> _keepDraft(Ref ref, BuzzNotificationReply reply) async {
         threadHeadId: threadHeadId,
         text: reply.text,
       );
-  return threadHeadId;
+  return (threadRootId: threadHeadId);
 }

@@ -184,12 +184,15 @@ Future<bool> markBuzzNotificationReplyPublishing(String id) async {
 /// Reports whether a notification reply was sent, so iOS clears the
 /// conversation's notifications or shows that it wasn't. [unknown] means it
 /// may have gone out; [draftThreadRootId] is the thread holding its draft,
-/// which the "Reply not sent" notification opens.
+/// which the "Reply not sent" notification opens. Without [draftKept], iOS
+/// shows the unsent text in a notification even for a reply an earlier
+/// launch was given.
 Future<void> completeBuzzNotificationReply(
   String id, {
   required bool sent,
   bool unknown = false,
   String? draftThreadRootId,
+  bool draftKept = true,
 }) async {
   if (defaultTargetPlatform != TargetPlatform.iOS) return;
   try {
@@ -198,6 +201,7 @@ Future<void> completeBuzzNotificationReply(
       'sent': sent,
       if (unknown) 'unknown': true,
       'draftThreadRootId': ?draftThreadRootId,
+      if (!draftKept) 'noDraft': true,
     });
   } on MissingPluginException {
     // Flutter tests and non-Runner embeddings do not install the native bridge.

@@ -132,8 +132,9 @@ void main() {
         // kept as a draft, or, if it may have gone out then, left alone.
         {..._reply('14'), 'recovered': 'true'},
         {..._reply('15'), 'recovered': 'true', 'publishing': 'true'},
-        // A community that's gone can't keep its draft; it's settled anyway,
-        // so it isn't retried on every launch.
+        // A community that's gone can't keep its draft, so iOS is told to
+        // show its text in a notification instead; it's settled, so it isn't
+        // retried on every launch.
         {..._reply('16', communityId: 'gone'), 'recovered': 'true'},
 
         // One whose community this build hides stays with iOS for a build
@@ -160,6 +161,8 @@ void main() {
                 ? 'unknown'
                 : args['sent'] == true
                 ? 'sent'
+                : args['noDraft'] == true
+                ? 'no draft'
                 : 'draft in ${args['draftThreadRootId']}';
           case 'markNotificationReplyPublishing':
             log.add('may publish ${call.arguments}');
@@ -230,7 +233,7 @@ void main() {
         '13': 'draft in null',
         '14': 'draft in $_message',
         '15': 'unknown',
-        '16': 'draft in null',
+        '16': 'no draft',
         '18': 'draft in $_message',
       });
       // iOS knows a reply may go out before anything is published.

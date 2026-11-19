@@ -256,11 +256,14 @@ final class BuzzNotificationReplyBridge {
           : .notSent(draftThreadRootID: arguments["draftThreadRootId"] as? String)
       // The app reports only after the reply is sent, may have been sent, has
       // its draft saved, or has no community left to keep one in.
+      let draftKept = arguments["noDraft"] as? Bool != true
       let recorded = journal.recorded(id: id)
       if buffer.complete(id: id, outcome: outcome) {
         journal.settle(id: id)
       } else {
-        finishUnbuffered(id: id, outcome: outcome, recorded: recorded) { [journal] in
+        finishUnbuffered(
+          id: id, outcome: outcome, draftKept: draftKept, recorded: recorded
+        ) { [journal] in
           journal.settle(id: id)
         }
       }
@@ -285,24 +288,25 @@ final class BuzzNotificationReplyBridge {
   /// given, or one that expired first. One that may have gone out gets its
   /// "Reply may not have sent" notification, which an earlier launch never
   /// posted; one that went out after all clears the notice its expiry posted.
-  /// Settles it once its notice is posted.
+  /// One whose community is gone keeps no draft, so it gets a "Reply not
+  /// sent" notification with its text; its expiry's notice has the same
+  /// identifier, so the text shows once. Settles it once its notice is posted.
   private func finishUnbuffered(
-    id: String, outcome: BuzzNotificationReplyOutcome, recorded: [String: String]?,
-    settle: @escaping () -> Void
+    id: String, outcome: BuzzNotificationReplyOutcome, draftKept: Bool,
+    recorded: [String: String]?, settle: @escaping () -> Void
   ) {
     switch outcome {
     case .sent:
       UNUserNotificationCenter.current().removeDeliveredNotifications(
         withIdentifiers: [Self.replyNotSentIdentifier(id)])
-    case .unknown:
+    case .unknown, .notSent where !draftKept:
       if let request = recorded.flatMap(BuzzNotificationReplyRequest.init(journalArguments:)) {
         Self.finish(
-          request, outcome: .unknown, notificationID: "", center: .current(), done: settle)
+          request, outcome: outcome, notificationID: "", center: .current(), done: settle)
         return
       }
     case .notSent:
-      // Its draft is saved, where its notice (if any) already points, unless
-      // its community is gone.
+      // Its draft is saved, where its notice (if any) already points.
       break
     }
     settle()
