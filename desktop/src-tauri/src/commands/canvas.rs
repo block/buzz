@@ -3,7 +3,10 @@ use tauri::State;
 use crate::{
     app_state::AppState,
     events,
-    relay::{query_relay, submit_event},
+    relay::{
+        assert_expected_relay_scope, assert_expected_signer, query_relay, query_relay_at_with_keys,
+        submit_event_at_with_keys,
+    },
 };
 
 /// Read the most recent canvas event (kind:40100) for a channel.
@@ -39,10 +42,21 @@ pub async fn set_canvas(
     channel_id: String,
     content: String,
     expected_revision: Option<String>,
+    expected_relay_url: Option<String>,
+    expected_signer_pubkey: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let uuid = uuid::Uuid::parse_str(&channel_id)
         .map_err(|_| format!("invalid channel UUID: {channel_id}"))?;
+
+    // Bind the workspace scope once so a switch during any of the reads
+    // cannot redirect this write or change the signing identity.
+    let (keys, relay_base) = state.signing_and_relay_scope()?;
+    assert_expected_relay_scope(expected_relay_url.as_deref(), &relay_base)?;
+    assert_expected_signer(
+        expected_signer_pubkey.as_deref(),
+        &keys.public_key().to_hex(),
+    )?;
 
     // Advisory optimistic-concurrency check (client-side, two-stage). A
     // conflict-checked save asserts the revision the editor loaded. Stage one:
@@ -64,7 +78,7 @@ pub async fn set_canvas(
     // also refuses a head timestamped far in the future, so a poisoned timeline
     // fails loudly here rather than being silently extended. The no-head /
     // unconditional-append case has no floor and keeps the default `now`.
-    let head = current_canvas_head(&state, &channel_id).await?;
+    let head = current_canvas_head(&state, &channel_id, &relay_base, &keys).await?;
     let prior_head_created_at = check_canvas_precondition(expected_revision.as_deref(), head)?;
 
     let mut builder = events::build_set_canvas(uuid, &content, expected_revision.as_deref())?;
@@ -73,7 +87,7 @@ pub async fn set_canvas(
             buzz_sdk_pkg::canvas_write_created_at(floor as u64).map_err(|e| e.to_string())?,
         ));
     }
-    let result = submit_event(builder, &state).await?;
+    let result = submit_event_at_with_keys(builder, &state, &relay_base, &keys).await?;
 
     // Post-write supersession detection (only for conflict-checked writes). The
     // precondition above closes the stale-edit case; this closes the narrower
@@ -87,7 +101,7 @@ pub async fn set_canvas(
     // (frozen conflict marker); our head or a descendant is verified success.
     let mut verified = true;
     if expected_revision.is_some() {
-        let ancestry = current_canvas_head_ancestry(&state, &channel_id).await;
+        let ancestry = current_canvas_head_ancestry(&state, &channel_id, &relay_base, &keys).await;
         verified = classify_post_write(&result.event_id, ancestry)?;
     }
 
@@ -244,8 +258,17 @@ fn canvas_ancestry_filter(channel_id: &str) -> serde_json::Value {
 async fn current_canvas_head(
     state: &AppState,
     channel_id: &str,
+    relay_base: &str,
+    keys: &nostr::Keys,
 ) -> Result<Option<(String, i64)>, String> {
-    let events = query_relay(state, &[canvas_head_filter(channel_id)]).await?;
+    let events = query_relay_at_with_keys(
+        state,
+        relay_base,
+        &[canvas_head_filter(channel_id)],
+        keys,
+        None,
+    )
+    .await?;
     Ok(events
         .first()
         .map(|event| (event.id.to_hex(), event.created_at.as_secs() as i64)))
@@ -262,8 +285,17 @@ async fn current_canvas_head(
 async fn current_canvas_head_ancestry(
     state: &AppState,
     channel_id: &str,
+    relay_base: &str,
+    keys: &nostr::Keys,
 ) -> Result<Vec<(String, Option<String>)>, String> {
-    let events = query_relay(state, &[canvas_ancestry_filter(channel_id)]).await?;
+    let events = query_relay_at_with_keys(
+        state,
+        relay_base,
+        &[canvas_ancestry_filter(channel_id)],
+        keys,
+        None,
+    )
+    .await?;
     Ok(events
         .iter()
         .map(|event| {

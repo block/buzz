@@ -112,19 +112,6 @@ export function AppShell() {
   useTauriWindowDrag();
   useWebviewScrollBoundaryLock();
   const communitiesHook = useCommunities();
-  // Each committed community lifetime gets a distinct token. An old callback
-  // keeps its token after unmount (or A -> B -> A), which cleanup invalidates.
-  const createScopeRef = React.useRef({ active: false });
-  React.useLayoutEffect(() => {
-    const scope = { active: true };
-    createScopeRef.current = scope;
-    return () => {
-      scope.active = false;
-    };
-  }, [
-    communitiesHook.activeCommunity?.id,
-    communitiesHook.activeCommunity?.relayUrl,
-  ]);
 
   const {
     handleHuddleCompanionOpen,
@@ -206,6 +193,27 @@ export function AppShell() {
     : DEFAULT_SETTINGS_SECTION;
   const startupReady = useDeferredStartup();
   const identityQuery = useIdentityQuery();
+  // Each committed community and signer lifetime gets a distinct token.
+  const createScopeRef = React.useRef<{
+    active: boolean;
+    expectedRelayUrl?: string;
+    expectedSignerPubkey?: string;
+  }>({ active: false });
+  React.useLayoutEffect(() => {
+    const scope = {
+      active: true,
+      expectedRelayUrl: communitiesHook.activeCommunity?.relayUrl,
+      expectedSignerPubkey: identityQuery.data?.pubkey,
+    };
+    createScopeRef.current = scope;
+    return () => {
+      scope.active = false;
+    };
+  }, [
+    communitiesHook.activeCommunity?.id,
+    communitiesHook.activeCommunity?.relayUrl,
+    identityQuery.data?.pubkey,
+  ]);
   const { mutedChannelIds, muteChannel, unmuteChannel } = useChannelMutes(
     identityQuery.data?.pubkey,
     communitiesHook.activeCommunity?.relayUrl,
@@ -581,7 +589,7 @@ export function AppShell() {
       });
       if (!isCurrent()) return;
 
-      await applyCanvas(templateId, createdChannel.id, name);
+      await applyCanvas(templateId, createdChannel.id, name, scope);
       if (!isCurrent()) return;
       await goChannel(createdChannel.id);
       if (!isCurrent()) return;
@@ -592,7 +600,6 @@ export function AppShell() {
     [
       applyAgents,
       applyCanvas,
-      communitiesHook.activeCommunity?.id,
       createChannelMutation,
       goChannel,
     ],
@@ -623,7 +630,7 @@ export function AppShell() {
       });
       if (!isCurrent()) return;
 
-      await applyCanvas(templateId, createdForum.id, name);
+      await applyCanvas(templateId, createdForum.id, name, scope);
       if (!isCurrent()) return;
       await goChannel(createdForum.id);
       if (!isCurrent()) return;
@@ -632,7 +639,6 @@ export function AppShell() {
     [
       applyAgents,
       applyCanvas,
-      communitiesHook.activeCommunity?.id,
       createForumMutation,
       goChannel,
     ],

@@ -84,6 +84,7 @@ const upsertCachedChannel = (current = [], channel) => [...current, channel];
 ${mutation}
 return function Harness({ community, sinks, ready }) {
   const communitiesHook = { activeCommunity: community };
+  const identityQuery = { data: { pubkey: community.pubkey } };
   const createChannelMutation = useCreateChannelMutation();
   const createForumMutation = useCreateChannelMutation();
   const { applyCanvas, goChannel, applyAgents } = sinks;
@@ -121,7 +122,9 @@ for (const type of ["stream", "forum"]) {
           },
         );
         const sinks = {
-          applyCanvas: async () => {
+          applyCanvas: async (_template, _channel, _name, scope) => {
+            assert.equal(scope.expectedRelayUrl, "https://a.example");
+            assert.equal(scope.expectedSignerPubkey, "same-signer");
             calls.push("canvas");
             if (phase === "canvas") await pending.promise;
           },

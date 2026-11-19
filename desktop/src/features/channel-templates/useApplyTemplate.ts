@@ -13,6 +13,7 @@ import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRunti
 import { resolveTeamPersonas } from "@/features/agents/lib/teamPersonas";
 import { useLastRuntime } from "@/features/agents/lib/useLastRuntime";
 import { useChannelTemplatesQuery } from "@/features/channel-templates/hooks";
+import type { SetCanvasInput } from "@/shared/api/canvasTypes";
 import { setCanvas } from "@/shared/api/tauri";
 import type { ChannelTemplate } from "@/shared/api/types";
 
@@ -38,6 +39,10 @@ export function useApplyTemplate() {
     templateId: string | undefined,
     channelId: string,
     channelName: string,
+    { expectedRelayUrl, expectedSignerPubkey }: Pick<
+      SetCanvasInput,
+      "expectedRelayUrl" | "expectedSignerPubkey"
+    > = {},
   ) {
     if (!templateId) return;
     const template = channelTemplatesQuery.data?.find(
@@ -48,7 +53,12 @@ export function useApplyTemplate() {
       .replace(/\{channel\.name\}/g, channelName)
       .replace(/\{template\.name\}/g, template.name);
     try {
-      await setCanvas({ channelId, content });
+      await setCanvas({
+        channelId,
+        content,
+        expectedRelayUrl,
+        expectedSignerPubkey,
+      });
     } catch {
       // Canvas is best-effort — don't block navigation
     }
