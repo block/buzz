@@ -97,7 +97,7 @@ ComposerTranscription useComposerTranscription({
       .read(_pendingStopsProvider)
       .putIfAbsent(key, () => ValueNotifier(false));
   useListenable(pendingStop);
-  final ownsStop = useMemoized(() => ObjectRef(false), [scope]);
+  final ownsStop = useMemoized(() => ObjectRef<Object?>(null), [scope]);
   final cleanupOperations = ref.read(_cleanupOperationsProvider);
   final error = useState<String?>(null);
   final generation = useRef(0);
@@ -189,7 +189,9 @@ ComposerTranscription useComposerTranscription({
 
   useEffect(() {
     void changed() {
-      if (!pendingStop.value && !ownsStop.value && !busy.value) restore();
+      if (!pendingStop.value && ownsStop.value == null && !busy.value) {
+        restore();
+      }
     }
 
     pendingStop.addListener(changed);
@@ -270,7 +272,10 @@ ComposerTranscription useComposerTranscription({
     }
   });
 
-  Future<void> transcribe([VoiceNoteRecording? recording]) async {
+  Future<void> transcribe([
+    VoiceNoteRecording? recording,
+    VoidCallback? handedOff,
+  ]) async {
     // Stop may finish after the original editor was removed or changed scope.
     // Its captured storage dependencies still own recovery; no UI/ref access.
     if (recording != null && (!context.mounted || owner.value != scope)) {
@@ -328,6 +333,8 @@ ComposerTranscription useComposerTranscription({
           }
         }
       }
+      // The recording is in recovery now; recognition no longer holds Stop.
+      handedOff?.call();
       if (!current(ticket)) return;
       final drafts = ref.read(composeDraftsProvider.notifier);
       if (drafts.draftFor(draftKey)?.transcriptionId != path) {
@@ -443,21 +450,29 @@ ComposerTranscription useComposerTranscription({
           )
         : null,
     (recording) => unawaited(() async {
-      try {
-        await transcribe(recording);
-      } finally {
+      // Release only this Stop's hold, so a late completion cannot clear a
+      // newer Stop's.
+      final stop = ownsStop.value;
+      void release() {
+        if (stop == null || !identical(ownsStop.value, stop)) return;
         pendingStop.value = false;
-        ownsStop.value = false;
+        ownsStop.value = null;
+      }
+
+      try {
+        await transcribe(recording, release);
+      } finally {
+        release();
       }
     }()),
     () => factory().isAvailable(),
     () {
-      ownsStop.value = true;
+      ownsStop.value = Object();
       pendingStop.value = true;
     },
     () {
       pendingStop.value = false;
-      ownsStop.value = false;
+      ownsStop.value = null;
     },
     pendingStop,
   );

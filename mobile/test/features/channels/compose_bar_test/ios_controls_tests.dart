@@ -703,8 +703,10 @@ void iosControlsTests() {
       nsec: nostr.Keys.generate().nsec,
     );
     final speech = _ComposerSpeech();
-    final files = _ComposerSpeechFiles()..finishRetention = Completer<void>();
+    final files = _ComposerSpeechFiles();
     final recorder = _DeferredStopDictationRecorder();
+    final recorders = <VoiceNoteRecorder>[_FakeVoiceNoteRecorder(), recorder];
+    final sent = <String>[];
     final visible = ValueNotifier(true);
     addTearDown(visible.dispose);
     Widget composer() => _buildComposeBar(
@@ -714,8 +716,8 @@ void iosControlsTests() {
       ),
       relayConfig: () => _SwitchableRelayConfigNotifier(identity),
       uploadService: _FakeVoiceNoteUploadService(),
-      onSend: (_, _, {mediaTags = const []}) async {},
-      voiceNoteRecorderFactory: () => recorder,
+      onSend: (text, _, {mediaTags = const []}) async => sent.add(text),
+      voiceNoteRecorderFactory: () => recorders.removeAt(0),
       overrides: [
         composerTranscriptionFilesProvider.overrideWithValue(files),
         deviceTranscriptionProvider.overrideWithValue(() => speech),
@@ -723,6 +725,27 @@ void iosControlsTests() {
     );
     await tester.pumpWidget(composer());
     await tester.pumpAndSettle();
+    // Discard during recognition gives the editor back before the cancelled
+    // recognition replies.
+    await _tapComposerControl(tester, 'Dictate');
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Stop recording'));
+    await tester.pump();
+    await tester.pump();
+    expect(speech.started.isCompleted, isTrue);
+    final stale = speech.result;
+    await tester.tap(find.byTooltip('Discard recording'));
+    await tester.pumpAndSettle();
+    expect(find.text('Saving recording…'), findsNothing);
+    await tester.tap(find.text('Message'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'Typed after discarding.');
+    await tester.pumpAndSettle();
+    await _tapComposerControl(tester, 'Send');
+    await tester.pumpAndSettle();
+    expect(sent, ['Typed after discarding.']);
+    speech.reset();
+    files.finishRetention = Completer<void>();
     await _tapComposerControl(tester, 'Dictate');
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Stop recording'));
@@ -744,12 +767,18 @@ void iosControlsTests() {
     expect(find.text('Saving recording…'), findsOneWidget);
     expect(find.byTooltip('Dictate'), findsNothing);
     expect(find.byTooltip('Stop recording'), findsNothing);
+    // The discarded recognition's late reply must not release this Stop.
+    stale.complete('Stale reply');
+    await tester.pumpAndSettle();
+    expect(find.text('Saving recording…'), findsOneWidget);
+    expect(find.byTooltip('Dictate'), findsNothing);
+    expect(find.byTooltip('Stop recording'), findsNothing);
     recorder.finishStop.complete();
     await tester.pumpAndSettle();
     expect(find.text('Saving recording…'), findsOneWidget);
     files.finishRetention!.complete();
     await tester.pumpAndSettle();
-    expect(files.retainCalls, 1);
+    expect(files.retainCalls, 2);
     expect(speech.started.isCompleted, isFalse);
     expect(find.text('Retry'), findsOneWidget);
     await tester.tap(find.text('Retry'));
