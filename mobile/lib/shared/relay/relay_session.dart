@@ -439,7 +439,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     final generation = _connectionGeneration;
     if (_rateLimitGate.isActive) await _rateLimitGate.wait();
     bool connected() => _isActiveConnection(generation) && _socketConnected;
-    if (!connected()) throw StateError('Relay session is not connected');
+    if (!connected()) throw RelayNotConnectedError();
     if ((mayPublish != null && !await mayPublish()) || !connected()) {
       throw StateError('Event no longer wanted');
     }
@@ -449,7 +449,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       final pending = _pendingEvents.remove(event.id);
       if (pending != null && !pending.completer.isCompleted) {
         pending.completer.completeError(
-          TimeoutException(
+          RelayAckTimeoutError(
             'Event ${event.id} not acknowledged within $timeout',
           ),
         );
@@ -1158,7 +1158,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     for (final entry in _pendingEvents.values) {
       entry.timeout.cancel();
       if (!entry.completer.isCompleted) {
-        entry.completer.completeError(error ?? Exception('Connection lost'));
+        entry.completer.completeError(RelayAckLostError(error));
       }
     }
     _pendingEvents.clear();
