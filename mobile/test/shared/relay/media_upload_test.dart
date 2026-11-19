@@ -1218,6 +1218,35 @@ void main() {
       expect(descriptor.size, bytes.length);
     });
 
+    test(
+      'hashes in bounded worker chunks without copying the payload',
+      () async {
+        final bytes = Uint8List.fromList(
+          List.generate(2 * 1024 * 1024 + 123, (i) => (i * 31 + 7) & 0xff),
+        );
+        final calls = <(int, int)>[];
+
+        final digest = await sha256HexInWorker(
+          bytes,
+          onChunkSent: (sent, acked) => calls.add((sent, acked)),
+        );
+
+        expect(digest, crypto.sha256.convert(bytes).toString());
+        expect(calls, hasLength(3));
+        expect(calls.last.$1, bytes.length);
+        for (final (sent, acked) in calls) {
+          expect(sent - acked, lessThanOrEqualTo(1024 * 1024));
+        }
+      },
+    );
+
+    test('hashes an empty payload in the worker', () async {
+      expect(
+        await sha256HexInWorker(Uint8List(0)),
+        crypto.sha256.convert(const <int>[]).toString(),
+      );
+    });
+
     test('sanitizes generic filenames to relay imeta constraints', () async {
       final service = MediaUploadService(
         baseUrl: 'https://relay.example',
