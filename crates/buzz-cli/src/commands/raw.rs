@@ -625,23 +625,23 @@ mod tests {
 
     #[tokio::test]
     async fn cli_exits_nonzero_when_the_relay_refuses_a_raw_publish() {
+        // Parse real CLI arguments and dispatch them, then map the error the
+        // way `run_from_args` does. Credentials come from the test client, so
+        // the caller's BUZZ_* environment cannot change the outcome.
         let (url, captured) = fake_relay_acking("[]", false).await;
-        let key = Keys::generate().secret_key().to_secret_hex();
-        let code = crate::run_from_args([
-            "buzz",
-            "--relay",
-            url.as_str(),
-            "--private-key",
-            key.as_str(),
-            "raw",
-            "publish",
-            "--kind",
-            "7",
-            "--content",
-            "+",
-        ])
-        .await;
-        assert_eq!(code, 2, "a refused publish is a relay error");
+        let Cmd::Raw(sub) =
+            Cli::try_parse_from(["buzz", "raw", "publish", "--kind", "7", "--content", "+"])
+                .unwrap()
+                .command
+        else {
+            panic!("expected raw publish");
+        };
+        let err = dispatch(sub, &client(&url)).await.unwrap_err();
+        assert_eq!(
+            crate::error::exit_code(&err),
+            2,
+            "a refused publish is a relay error: {err:?}"
+        );
         assert_eq!(captured.events.lock().unwrap().len(), 1);
     }
 }
