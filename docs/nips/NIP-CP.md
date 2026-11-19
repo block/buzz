@@ -31,7 +31,7 @@ This NIP defines how members pin and unpin messages in a channel. A member signs
 }
 ```
 
-A command MUST have exactly one `h` tag and exactly one `e` tag. The `e` value MUST be a 64-character lowercase hex event ID. `content` MUST be empty. Other tags carry no meaning.
+A command MUST have exactly one `h` tag and exactly one `e` tag. The `e` value MUST be a 64-character lowercase hex event ID. `content` MUST be empty. Other tags, and elements after a tag value, carry no meaning.
 
 ## Pin list
 
@@ -93,10 +93,15 @@ A relay MAY remove messages in bulk, for example when it erases an account, with
 When a pin changes the list, the relay posts a `kind:40099` system message in the channel:
 
 ```jsonc
-{ "type": "message_pinned", "actor": "<member pubkey>", "target_event_id": "<message id>" }
+{
+  "type": "message_pinned",
+  "actor": "<member pubkey>",
+  "target_event_id": "<message id>",
+  "command_event_id": "<pin command id>"
+}
 ```
 
-It never carries the message content. An unpin posts no notice. Clients MUST NOT count the notice as unread, and relays MUST NOT send a push notification for it.
+`command_event_id` gives each pin its own notice, even when a member pins the same message twice. The notice never carries the message content. An unpin posts no notice. Clients MUST NOT count the notice as unread, and relays MUST NOT send a push notification for it.
 
 ## Reading
 
