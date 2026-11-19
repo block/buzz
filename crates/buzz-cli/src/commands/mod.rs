@@ -22,6 +22,7 @@ pub mod project_channel;
 pub mod projects;
 pub mod reactions;
 pub(crate) mod read_state;
+pub mod reminders;
 mod repo_default_branch;
 pub mod repos;
 pub(crate) mod sent_from_thread;
