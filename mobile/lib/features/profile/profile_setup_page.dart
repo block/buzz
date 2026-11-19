@@ -7,7 +7,6 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/hosted/hosted_flow.dart';
-import '../../shared/emoji/emoji_avatar.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 // Retain the named entry point used by the native sheet's editor engine.
@@ -17,7 +16,6 @@ import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/onboarding_step_page.dart';
 import '../../shared/widgets/onboarding_route.dart';
 import 'profile_avatar_draft.dart';
-import '../../shared/widgets/playing_avatar_image.dart';
 import 'profile_setup_avatar_editor.dart';
 import 'profile_setup_empty_avatar.dart';
 
@@ -128,19 +126,12 @@ class ProfileSetupPage extends HookConsumerWidget {
               avatar.value = decodeProfileAvatarDraft(
                 (call.arguments as Map)['draft'] as Map?,
               );
-              final emoji = avatar.value is ProfileUrlAvatarDraft
-                  ? parseEmojiAvatarDataUrl(
-                      (avatar.value as ProfileUrlAvatarDraft).url,
-                    )
-                  : null;
               return {
                 'avatar': switch (avatar.value) {
                   ProfileImageAvatarDraft(:final bytes) => bytes,
                   ProfileAnimatedAvatarDraft(:final poster) => poster,
                   _ => null,
                 },
-                'emoji': emoji?.emoji,
-                'emojiColor': emoji?.colorValue,
               };
             case 'save':
               name = ((call.arguments as Map)['name'] as String? ?? '').trim();
@@ -166,17 +157,10 @@ class ProfileSetupPage extends HookConsumerWidget {
               ProfileAnimatedAvatarDraft(:final poster) => poster,
               _ => null,
             };
-            final emoji = avatar.value is ProfileUrlAvatarDraft
-                ? parseEmojiAvatarDataUrl(
-                    (avatar.value as ProfileUrlAvatarDraft).url,
-                  )
-                : null;
             final action = await _channel.invokeMethod<String>('present', {
               'session': session,
               'name': name,
               'avatar': bytes,
-              'emoji': emoji?.emoji,
-              'emojiColor': emoji?.colorValue,
               ...currentAppearance.value,
             });
             if (!current()) return;

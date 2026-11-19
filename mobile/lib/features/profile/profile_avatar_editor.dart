@@ -148,7 +148,6 @@ class ProfileAvatarEditor extends HookConsumerWidget {
     final error = useState<String?>(null);
     final modeTransitionDirection = useRef(1.0);
     final retainedPreview = useRef<Widget?>(null);
-    final retainedPreviewTop = useRef(0.0);
     final currentPreviewTop = useRef<double?>(null);
     final modeStartPreviewTop = useRef<double?>(null);
     final modeTransitionController = useAnimationController(
@@ -228,10 +227,6 @@ class ProfileAvatarEditor extends HookConsumerWidget {
       closeImageCamera();
     }
 
-    final previewUrl = switch (draft) {
-      ProfileUrlAvatarDraft(:final url) => url,
-      _ => currentAvatarUrl,
-    };
     final fixedPreviewContent = switch (mode) {
       ProfileAvatarMode.image when draft is ProfileImageAvatarDraft =>
         CircleAvatar(
@@ -241,11 +236,12 @@ class ProfileAvatarEditor extends HookConsumerWidget {
             (draft as ProfileImageAvatarDraft).bytes,
           ),
         ),
-      ProfileAvatarMode.image when previewUrl == null && emptyPreview != null =>
+      ProfileAvatarMode.image
+          when currentAvatarUrl == null && emptyPreview != null =>
         SizedBox.square(dimension: _previewSize, child: emptyPreview),
       ProfileAvatarMode.image => PlayingAvatarImage(
         key: const ValueKey('avatar-editor-fixed-preview'),
-        imageUrl: previewUrl,
+        imageUrl: currentAvatarUrl,
         radius: _previewSize / 2,
         backgroundColor: context.controlSurface,
         fallback: Text(
@@ -336,9 +332,6 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                       modeTransitionProgress
             : targetPreviewTop;
         currentPreviewTop.value = displayedPreviewTop;
-        if (mode != ProfileAvatarMode.animated) {
-          retainedPreviewTop.value = displayedPreviewTop;
-        }
         final modeHeight = max(0.0, viewportHeight - controlsBottom - modeTop);
         final contentHeight = modeHeight;
         final modeContent = switch (mode) {
@@ -592,12 +585,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                 right: Grid.gutter,
                 top: anchoredPreview != null
                     ? displayedPreviewTop
-                    : retainedPreviewTop.value +
-                          ((anchoredPreview == null
-                                      ? basePreviewTop
-                                      : previewTop) -
-                                  retainedPreviewTop.value) *
-                              modeTransitionProgress,
+                    : basePreviewTop,
                 height: anchoredPreview?.height ?? _previewBlockSize,
                 child: IgnorePointer(
                   child: Opacity(

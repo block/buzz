@@ -24,7 +24,6 @@ void runProfileEditMotionAndAccessibilityTests() {
       findsOneWidget,
     );
 
-    expect(find.text('Emoji'), findsNothing);
     await tester.drag(
       find.byKey(const ValueKey('avatar-editor-scroll-view')),
       const Offset(0, 1000),
@@ -118,7 +117,28 @@ void runProfileEditMotionAndAccessibilityTests() {
       find.byKey(const ValueKey('avatar-editor-fixed-preview')),
       findsOneWidget,
     );
-    expect(find.text('Emoji'), findsNothing);
+  });
+
+  testWidgets('retains the preview while animated mode initializes', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
+        child: const ProfileEditPage(startInPhotoEditor: true),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final imageCenter = tester
+        .getCenter(find.byKey(const ValueKey('avatar-editor-fixed-preview')))
+        .dy;
+    await tester.tap(find.text('Animated'));
+    await tester.pump();
+    final retained = find.byKey(const ValueKey('avatar-mode-retained-preview'));
+    expect(retained, findsOneWidget);
+    expect(tester.getCenter(retained).dy, closeTo(imageCenter, 0.01));
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(retained, findsNothing);
   });
 
   testWidgets('plays an animated avatar on the profile and image editor', (
@@ -234,31 +254,6 @@ void runProfileEditMotionAndAccessibilityTests() {
     );
     expect(selectedSemantics.properties.button, isTrue);
     expect(selectedSemantics.properties.selected, isTrue);
-  });
-
-  testWidgets('exposes the selected emoji tile', (tester) async {
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        child: EmojiAvatarTile(
-          emoji: '😊',
-          label: 'Smiling Face',
-          tileId: 'smile',
-          isSelected: true,
-          onTap: () {},
-        ),
-      ),
-    );
-
-    final selectedTile = tester.widget<Semantics>(
-      find.byWidgetPredicate(
-        (widget) =>
-            widget is Semantics &&
-            widget.properties.label == 'Smiling Face' &&
-            widget.child is ExcludeSemantics,
-      ),
-    );
-    expect(selectedTile.properties.button, isTrue);
-    expect(selectedTile.properties.selected, isTrue);
   });
 
   testWidgets('uses liquid-glass avatar rail icons on iOS', (tester) async {

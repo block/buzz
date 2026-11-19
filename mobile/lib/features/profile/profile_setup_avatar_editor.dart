@@ -184,9 +184,7 @@ class ProfileSetupAvatarEditor extends HookConsumerWidget {
                     anchoredPreview: previewBounds.value,
                     previewKey: previewKey,
                     previewOpacity: previewVisible.value ? 1 : 0,
-                    currentAvatarUrl: initialDraft is ProfileUrlAvatarDraft
-                        ? (initialDraft as ProfileUrlAvatarDraft).url
-                        : null,
+                    currentAvatarUrl: null,
                     fallbackInitial: '+',
                     emptyPreview: const ProfileSetupEmptyAvatar(),
                     returningToEmpty: returningToEmpty.value,
@@ -264,9 +262,7 @@ class ProfileSetupAvatarEditor extends HookConsumerWidget {
                         previewKey: previewKey,
                         headerGap: Grid.lg,
                         previewOpacity: previewVisible.value ? 1 : 0,
-                        currentAvatarUrl: initialDraft is ProfileUrlAvatarDraft
-                            ? (initialDraft as ProfileUrlAvatarDraft).url
-                            : null,
+                        currentAvatarUrl: null,
                         fallbackInitial: '+',
                         emptyPreview: const ProfileSetupEmptyAvatar(),
                         draft: draft.value,
