@@ -1,4 +1,4 @@
-import 'channel_permissions.dart';
+import 'dart:async';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -8,6 +8,7 @@ import '../channels/channel_management_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import 'channel.dart';
+import 'channel_permissions.dart';
 import 'me/me_messages_provider.dart';
 import 'channel_messages_provider.dart';
 import 'message_mention_pubkeys.dart';
@@ -68,6 +69,8 @@ class SendMessage {
     List<String>? mentionPubkeys,
     Channel? channel,
     List<List<String>> mediaTags = const [],
+    FutureOr<void> Function(NostrEvent)? beforePublish,
+    void Function()? validateDelivery,
     Future<bool> Function()? mayPublish,
   }) async {
     void ensureAllowed() {
@@ -135,8 +138,10 @@ class SendMessage {
         kind: EventKind.streamMessage,
         content: content,
         tags: tags,
-        onSigned: (event) {
+        onSigned: (event) async {
+          if (beforePublish != null) await beforePublish(event);
           ensureAllowed();
+          validateDelivery?.call();
           localMessage = event;
           _markLocalMessageForAnimation(channelId, event.id);
           _addLocalMessage(channelId, event);

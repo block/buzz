@@ -49,6 +49,48 @@ void main() {
   );
 
   test(
+    'revoking reply permission during journaling prevents publication',
+    () async {
+      final session = _PendingPublishRelaySession();
+      unawaited(session.published.then((_) => session.accept()));
+      final signed = Completer<NostrEvent>();
+      final journalWrite = Completer<void>();
+      var allowed = true;
+      var localCount = 0;
+      final send = SendMessage(
+        signedEventRelay: SignedEventRelay(
+          session: session,
+          nsec: nostr.Keys.generate().nsec,
+        ),
+        fetchMembers: (_) async => const [],
+        readUserCache: () => const {},
+        canSend: (_, reply, _) => reply && allowed,
+        addLocalMessage: (_, _) => localCount++,
+        completeLocalMessage: (_, _) {},
+        removeLocalMessage: (_, _) {},
+      );
+
+      final pending = send(
+        channelId: _channelId,
+        content: 'Reply',
+        parentEventId: 'root',
+        beforePublish: (event) {
+          signed.complete(event);
+          return journalWrite.future;
+        },
+      );
+      expect((await signed.future).content, 'Reply');
+      expect(session.hasPublished, isFalse);
+      allowed = false;
+      journalWrite.complete();
+
+      await expectLater(pending, throwsStateError);
+      expect(localCount, 0);
+      expect(session.hasPublished, isFalse);
+    },
+  );
+
+  test(
     'adds the signed message locally before relay acknowledgement',
     () async {
       final session = _PendingPublishRelaySession();
@@ -304,6 +346,7 @@ class _PendingPublishRelaySession extends RelaySessionNotifier {
   late NostrEvent event;
 
   Future<void> get published => _published.future;
+  bool get hasPublished => _published.isCompleted;
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);

@@ -21,8 +21,6 @@
 //! The shared [`RedisConnection`] handles all other commands.
 //! Lagged receivers get `RecvError::Lagged`.
 
-/// Compact tenant-scoped artifact change signals.
-pub mod artifact_signal;
 /// Cross-pod cache-key invalidation over Redis pub/sub.
 pub mod cache_invalidation;
 /// Cross-pod connection-control commands over Redis pub/sub.
@@ -139,7 +137,6 @@ pub struct PubSubManager {
     /// Coalesced wake-up: reconcile desired topics with the live Redis link.
     subscription_changed: Arc<Notify>,
     broadcast_tx: broadcast::Sender<ChannelEvent>,
-    artifact_tx: broadcast::Sender<artifact_signal::ScopedArtifactSignal>,
     cache_invalidation_tx: broadcast::Sender<ScopedCacheInvalidation>,
     conn_control_tx: broadcast::Sender<ScopedConnControl>,
     nip_fi_disconnect_tx: broadcast::Sender<NipFiDisconnect>,
@@ -158,7 +155,6 @@ impl PubSubManager {
         pool: crate::RedisConnection,
     ) -> Result<Self, PubSubError> {
         let (broadcast_tx, _) = broadcast::channel(4096);
-        let (artifact_tx, _) = broadcast::channel(4096);
         let (cache_invalidation_tx, _) = broadcast::channel(4096);
         let (conn_control_tx, _) = broadcast::channel(4096);
         let (nip_fi_disconnect_tx, _) = broadcast::channel(4096);
@@ -173,7 +169,6 @@ impl PubSubManager {
             subscription_rx: Mutex::new(Some(subscription_rx)),
             subscription_changed: Arc::new(Notify::new()),
             broadcast_tx,
-            artifact_tx,
             cache_invalidation_tx,
             conn_control_tx,
             nip_fi_disconnect_tx,
@@ -194,7 +189,6 @@ impl PubSubManager {
         subscriber::run_subscriber(
             self.redis_url.clone(),
             self.broadcast_tx.clone(),
-            self.artifact_tx.clone(),
             self.desired_topics.clone(),
             subscription_rx,
             self.subscription_changed.clone(),
@@ -244,22 +238,6 @@ impl PubSubManager {
     /// Returns a new broadcast receiver for locally-published channel events.
     pub fn subscribe_local(&self) -> broadcast::Receiver<ChannelEvent> {
         self.broadcast_tx.subscribe()
-    }
-
-    /// Receive compact signals from the same subscriber and loss epoch as events.
-    pub fn subscribe_artifacts(
-        &self,
-    ) -> broadcast::Receiver<artifact_signal::ScopedArtifactSignal> {
-        self.artifact_tx.subscribe()
-    }
-
-    /// Publish a compact artifact signal, without using ordinary event fan-out.
-    pub async fn publish_artifact(
-        &self,
-        tenant: &TenantContext,
-        signal: &artifact_signal::ArtifactSignal,
-    ) -> Result<i64, PubSubError> {
-        artifact_signal::publish(&self.pool, tenant, signal).await
     }
 
     /// Retain local interest in a scoped Redis event topic.
@@ -538,7 +516,7 @@ mod tests {
     use super::*;
     use crate::test_util::make_test_pool;
     use buzz_core::{CommunityId, TenantContext};
-    use nostr::{EventBuilder, JsonUtil, Keys, Kind};
+    use nostr::{EventBuilder, Keys, Kind};
     use uuid::Uuid;
 
     async fn make_manager() -> Arc<PubSubManager> {
@@ -561,8 +539,8 @@ mod tests {
         let mut rx = manager.subscribe_local();
 
         let manager_clone = manager.clone();
-        let subscriber = tokio::spawn(async move { manager_clone.run_subscriber().await });
-        manager.link_state().wait_for(|link| link.up).await.unwrap();
+        tokio::spawn(async move { manager_clone.run_subscriber().await });
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
         let ctx = ctx(0xaaaa, "a.example");
         let channel_id = Uuid::new_v4();
@@ -576,10 +554,6 @@ mod tests {
         manager
             .retain_topic(&ctx, EventTopic::Channel(channel_id))
             .await;
-        manager
-            .confirm_topic(&ctx, EventTopic::Channel(channel_id))
-            .await
-            .unwrap();
 
         manager
             .publish_event(&ctx, EventTopic::Channel(channel_id), &event)
@@ -594,53 +568,6 @@ mod tests {
         assert_eq!(received.community_id, ctx.community());
         assert_eq!(received.topic, EventTopic::Channel(channel_id));
         assert_eq!(received.event.id, event_id);
-        let mut signals = manager.subscribe_artifacts();
-        manager
-            .retain_topic(&ctx, EventTopic::CommunityArtifact)
-            .await;
-        let epoch = manager
-            .confirm_topic(&ctx, EventTopic::CommunityArtifact)
-            .await
-            .unwrap();
-        let signal = artifact_signal::ArtifactSignal {
-            d: Uuid::new_v4(),
-            artifact_type: "example.settings".into(),
-            cause: artifact_signal::ArtifactChange::Changed,
-        };
-        manager.publish_artifact(&ctx, &signal).await.unwrap();
-        let received = tokio::time::timeout(Duration::from_secs(2), signals.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(received.community_id, ctx.community());
-        assert_eq!(received.signal, signal);
-        assert!(
-            rx.try_recv().is_err(),
-            "typed signal cannot enter ordinary event fan-out"
-        );
-        // A signed event on the signal topic is a decode loss, never a fake
-        // signal. Existing epoch observers must resync their exact copies.
-        let key = EventTopicKey::from_context(&ctx, EventTopic::CommunityArtifact).redis_channel();
-        let mut link = manager.link_state();
-        redis::cmd("PUBLISH")
-            .arg(key)
-            .arg(event.as_json())
-            .query_async::<i64>(&mut manager.pool.clone())
-            .await
-            .unwrap();
-        tokio::time::timeout(
-            Duration::from_secs(2),
-            link.wait_for(|link| link.epoch != epoch),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert!(signals.try_recv().is_err());
-        assert!(rx.try_recv().is_err());
-        manager
-            .release_topic(&ctx, EventTopic::CommunityArtifact)
-            .await;
-        subscriber.abort();
     }
 
     #[tokio::test]
