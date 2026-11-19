@@ -23,7 +23,9 @@ String activityContextKey(String channelId) => 'activity:$channelId';
 String threadActivityContextKey(String rootId) => 'thread-activity:$rootId';
 
 /// Whether `activity:<channel>` reads a message: an ordinary top-level
-/// message, not a reply, mention, broadcast or DM.
+/// message, not a reply, mention, broadcast or DM. Callers pass a message
+/// with the broadcast tag as [isReply], with or without a parent:
+/// [highPriority] means only a mention of the reader.
 bool readByChannelCatchUp({
   required bool isDm,
   required bool isReply,

@@ -62,6 +62,14 @@ Iterable<FeedItem> _groupedEvents(InboxItem item) => {
   for (final event in [item.item, ...item.groupItems]) event.id: event,
 }.values;
 
+/// Whether marking a channel row read reads [event] only by its own `msg:`
+/// mark: an unmentioned reply also sent to the channel. The channel's unread
+/// registry reads it by that mark alone, and the channel marker would also
+/// read every older message in the channel. A mention keeps the channel
+/// marker path it had before these replies joined Activity.
+bool readsByOwnMark(FeedItem event) =>
+    event.category != 'mention' && isChannelSentReply(event.tags);
+
 /// All event ids identified with the row — desktop's `getGroupedInboxItemIds`.
 List<String> groupedInboxItemIds(InboxItem item) {
   return {item.id, item.item.id, ...item.groupItems.map((i) => i.id)}.toList();
@@ -70,7 +78,8 @@ List<String> groupedInboxItemIds(InboxItem item) {
 /// The channel-level timestamp that marking a thread row read should also
 /// advance — desktop's `getGroupedChannelReadTimestamp`. Only top-level
 /// (non-thread-reply) grouped events count, so marking a thread read cannot
-/// swallow unrelated channel messages.
+/// swallow unrelated channel messages. Replies that [readsByOwnMark] get
+/// their own marks instead.
 ({String channelId, int timestamp})? groupedChannelReadTimestamp(
   InboxItem item,
 ) {
@@ -79,7 +88,9 @@ List<String> groupedInboxItemIds(InboxItem item) {
 
   int? timestamp;
   for (final groupItem in item.groupItems) {
-    if (groupItem.channelId != channelId || isThreadReply(groupItem.tags)) {
+    if (groupItem.channelId != channelId ||
+        isThreadReply(groupItem.tags) ||
+        readsByOwnMark(groupItem)) {
       continue;
     }
     if (timestamp == null || groupItem.createdAt > timestamp) {

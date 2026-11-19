@@ -237,6 +237,7 @@ class ActivityPage extends HookConsumerWidget {
       final rootId = isDmRow ? null : item.threadRootId;
       bool inContext(FeedItem e) =>
           e.channelId == channelId &&
+          (isDmRow || !readsByOwnMark(e)) &&
           (rootId == null ||
               (isThreadReply(e.tags) &&
                   threadReferenceOf(e.tags).rootId == rootId));
@@ -256,14 +257,19 @@ class ActivityPage extends HookConsumerWidget {
         }
         cap = e.createdAt;
       }
-      if (cap != null) {
+      // With no shown event in context, the row holds only replies read by
+      // their own marks, and no watermark is due.
+      final watermark = shown.values.any(inContext) ? cap : null;
+      if (watermark != null) {
         notifier.markContextRead(
           rootId == null ? channelId : threadContextKey(rootId),
-          cap,
+          watermark,
         );
       }
       for (final e in shown.values) {
-        if (inContext(e) && cap != null && e.createdAt <= cap) continue;
+        if (inContext(e) && watermark != null && e.createdAt <= watermark) {
+          continue;
+        }
         notifier.markContextRead(msgContextKey(e.id), e.createdAt);
       }
     }
@@ -279,13 +285,31 @@ class ActivityPage extends HookConsumerWidget {
         markPartialRowRead(item, partialChannelId, isDmRow: isDmRow);
         return;
       }
+      // Replies also sent to the channel are read by their own marks; the
+      // remaining events take the thread or channel marker as before.
+      var latestRemaining = item.latestActivityAt;
+      if (!isDmRow) {
+        final events = {
+          for (final e in [item.item, ...item.groupItems]) e.id: e,
+        }.values;
+        int? latest;
+        for (final e in events) {
+          if (readsByOwnMark(e)) {
+            notifier.markContextRead(msgContextKey(e.id), e.createdAt);
+          } else if (latest == null || e.createdAt > latest) {
+            latest = e.createdAt;
+          }
+        }
+        if (latest == null) return;
+        latestRemaining = latest;
+      }
       // A DM row can group replies under several thread roots; its channel
       // marker reads all of them.
       final threadRootId = isDmRow ? null : item.threadRootId;
       if (threadRootId != null) {
         notifier.markContextRead(
           threadContextKey(threadRootId),
-          item.latestActivityAt,
+          latestRemaining,
         );
         final channelRead = groupedChannelReadTimestamp(item);
         if (channelRead != null) {
@@ -298,10 +322,10 @@ class ActivityPage extends HookConsumerWidget {
       }
       final channelId = item.item.channelId;
       if (channelId != null) {
-        notifier.markContextRead(channelId, item.latestActivityAt);
+        notifier.markContextRead(channelId, latestRemaining);
         ref
             .read(channelsProvider.notifier)
-            .clearObservedUnreadCoveredByRead(channelId, item.latestActivityAt);
+            .clearObservedUnreadCoveredByRead(channelId, latestRemaining);
         return;
       }
       ref.read(inboxLocalStateProvider.notifier).markDone(item.id);
@@ -378,7 +402,10 @@ class ActivityPage extends HookConsumerWidget {
         (event) => isInboxEventRead(event, markerOf: markerOf),
       );
       final thread = threadReferenceOf(target.tags);
-      final threadRootId = isBroadcastReply(target.tags)
+      // A reply also sent to the channel opens in its thread when the row is
+      // a thread row, so the row's ordinary replies stay in view.
+      final threadRootId =
+          isBroadcastReply(target.tags) && item.threadRootId == null
           ? null
           : thread.parentId;
 
