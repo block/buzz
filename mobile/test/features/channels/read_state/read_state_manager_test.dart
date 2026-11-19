@@ -201,7 +201,12 @@ void main() {
         crypto: crypto,
         clientId: 'web-client',
         slotId: 'web-slot',
-        contexts: {'channel-1': 100, 'activity:channel-1': 120, 'msg:a': 110},
+        contexts: {
+          'channel-1': 100,
+          'activity:channel-1': 120,
+          'msg:a': 110,
+          'seen:channel-1': 130,
+        },
         createdAt: 100,
       ),
     ];
@@ -213,6 +218,8 @@ void main() {
     // The web app may prune `msg:a` once `activity:` reads it, so this
     // device must not bring it back. It still reads it locally.
     expect(manager.getEffectiveTimestamp('msg:a'), 110);
+    expect(manager.getEffectiveTimestamp('seen:channel-1'), 130);
+    expect(manager.getEffectiveTimestamp('channel-1'), 100);
     final published = decodeReadStateBlob(
       crypto.decrypt(relay.contents.last),
     )!.contexts;

@@ -1,6 +1,7 @@
 part of '../message_content.dart';
 
 List<InlinePattern> _useMessageInlinePatterns({
+  required bool ownBubble,
   required String content,
   required String finalContent,
   required Map<String, String> mentionNames,
@@ -51,6 +52,7 @@ List<InlinePattern> _useMessageInlinePatterns({
   return useMemoized(
     () => [
       _MentionMd(
+        ownBubble: ownBubble,
         mentionNames: inputs.mentionNames,
         mentionLabels: inputs.mentionLabels,
         bindings: inputs.bindings,
@@ -71,7 +73,7 @@ List<InlinePattern> _useMessageInlinePatterns({
         onChannelTap: channelTap,
       ).pattern,
     ],
-    [inputs],
+    [inputs, ownBubble],
   );
 }
 

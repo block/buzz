@@ -358,6 +358,52 @@ enum Cmd {
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
+    /// Escape hatch: run any Nostr filter or publish any event with the CLI's own credentials
+    #[command(subcommand)]
+    Raw(RawCmd),
+}
+
+/// `buzz raw` subcommands: query or publish any Nostr event with the CLI's
+/// own credentials, for reads and writes no purpose-built command covers.
+#[derive(Subcommand)]
+pub enum RawCmd {
+    /// Query events with one Nostr filter or an array of filters (POST /query).
+    ///
+    /// Prints the relay's JSON response as-is: usually an array of events,
+    /// signatures included, but some filters return an object. The relay
+    /// bounds each response, so pass your own `limit`.
+    #[command(
+        after_help = "Examples:\n  buzz raw query '{\"kinds\":[39002],\"#p\":[\"<hex pubkey>\"]}'\n  buzz raw query '[{\"kinds\":[0],\"authors\":[\"<hex>\"]},{\"kinds\":[3],\"limit\":1}]'\n  echo '{\"ids\":[\"<hex>\"]}' | buzz raw query -"
+    )]
+    Query {
+        /// Filter JSON: one object or an array of objects. Use `-` to read it from stdin.
+        filter: String,
+    },
+    /// Build, sign, and publish any event.
+    ///
+    /// Give `--kind` with optional `--tag` and `--content`, or a full unsigned
+    /// template with `--event-json` (fields: kind, content, tags, created_at).
+    /// The CLI signs with its own identity and attaches its NIP-OA auth tag;
+    /// an `auth` tag in the input is rejected, and so are gift wraps (kind 1059).
+    /// Replaceable and addressable kinds replace the whole stored event; use the
+    /// dedicated commands to change part of a profile or list.
+    #[command(
+        after_help = "Examples:\n  buzz raw publish --kind 1 --content 'hello'\n  buzz raw publish --kind 9 --tag '[\"h\",\"<channel uuid>\"]' --content 'hi'\n  buzz raw publish --event-json '{\"kind\":1,\"content\":\"hi\",\"tags\":[]}'"
+    )]
+    Publish {
+        /// Event kind.
+        #[arg(long, conflicts_with = "event_json")]
+        kind: Option<u16>,
+        /// Tag as a JSON array of strings, e.g. '["p","<hex>"]'. May be repeated.
+        #[arg(long = "tag", conflicts_with = "event_json")]
+        tag: Vec<String>,
+        /// Event content. Use `-` to read it from stdin.
+        #[arg(long, conflicts_with = "event_json")]
+        content: Option<String>,
+        /// Unsigned event template as JSON. Use `-` to read it from stdin.
+        #[arg(long)]
+        event_json: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2713,6 +2759,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
+        Cmd::Raw(sub) => commands::raw::dispatch(sub, &client).await,
         Cmd::Pack(_) | Cmd::Auth(_) => unreachable!("handled above"),
     }
 }
@@ -3000,6 +3047,7 @@ mod tests {
             "patches",
             "pr",
             "projects",
+            "raw",
             "reactions",
             "repos",
             "sidebar",
@@ -3183,6 +3231,7 @@ mod tests {
         assert_eq!(names(&cmd, "media"), vec!["get"]);
         assert_eq!(names(&cmd, "upload"), vec!["file"]);
         assert_eq!(names(&cmd, "pack"), vec!["inspect", "validate"]);
+        assert_eq!(names(&cmd, "raw"), vec!["publish", "query"]);
         assert_eq!(
             names(&cmd, "moderation"),
             vec![
@@ -3215,6 +3264,7 @@ mod tests {
             ("patches", 4),
             ("pr", 5),
             ("projects", 8),
+            ("raw", 2),
             ("reactions", 3),
             ("repos", 6),
             ("social", 7),
