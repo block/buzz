@@ -4,10 +4,17 @@ import "@/features/invite/ui/invite-page.css";
 import { buzzLinkFromOpenUrl } from "@/features/open/open-link";
 import {
   BUZZ_RELEASES_URL,
+  detectBuzzOperatingSystem,
   resolveBuzzDownloadUrl,
 } from "@/shared/lib/buzz-download";
 import { Button } from "@/shared/ui/button";
 import * as React from "react";
+
+/**
+ * Desktop browsers ignore a scheme no app handles. Mobile browsers show an
+ * error for one, so elsewhere the page waits for a tap.
+ */
+const OPENS_ON_LOAD = new Set(["macos", "windows", "linux"]);
 
 /** Landing page for `/open/<rest>`: hands `buzz://<rest>` to the app. */
 export function OpenLinkPage() {
@@ -15,14 +22,17 @@ export function OpenLinkPage() {
     window.location.pathname,
     window.location.search,
   );
+  const [opensOnLoad] = React.useState(() =>
+    OPENS_ON_LOAD.has(detectBuzzOperatingSystem(navigator)),
+  );
   const launched = React.useRef(false);
   const [downloadUrl, setDownloadUrl] = React.useState(BUZZ_RELEASES_URL);
 
   React.useEffect(() => {
-    if (!link || launched.current) return;
+    if (!link || !opensOnLoad || launched.current) return;
     launched.current = true;
     window.location.href = link;
-  }, [link]);
+  }, [link, opensOnLoad]);
 
   React.useEffect(() => {
     if (!link) return;
@@ -43,9 +53,11 @@ export function OpenLinkPage() {
         <div className="invite-card">
           {link ? (
             <>
-              <h1>Opening Buzz…</h1>
+              <h1>{opensOnLoad ? "Opening Buzz…" : "Open in Buzz"}</h1>
               <p className="invite-intro">
-                If Buzz doesn&apos;t open, use the button below.
+                {opensOnLoad
+                  ? "If Buzz doesn't open, use the button below."
+                  : "Tap the button below to open this link in Buzz."}
               </p>
               <div className="invite-actions">
                 <Button

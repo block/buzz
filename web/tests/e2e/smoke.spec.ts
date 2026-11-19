@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 import {
   BUZZ_ANDROID_PLAY_STORE_URL,
   BUZZ_IOS_APP_STORE_URL,
@@ -580,14 +580,21 @@ test("invite swarm follows width and height changes with reduced motion", async 
   }
 });
 
-test("open link hands the buzz:// link to the app", async ({ page }) => {
-  const query = `?channel=4f1c2a9e-0000-4000-8000-000000000001&id=${"ab".repeat(32)}`;
+async function trackLaunches(page: Page) {
   const launches: string[] = [];
   const cdp = await page.context().newCDPSession(page);
   cdp.on("Page.frameRequestedNavigation", ({ url }) => {
     if (url.startsWith("buzz:")) launches.push(url);
   });
   await cdp.send("Page.enable");
+  return launches;
+}
+
+const openQuery = `?channel=4f1c2a9e-0000-4000-8000-000000000001&id=${"ab".repeat(32)}`;
+
+test("open link hands the buzz:// link to the app", async ({ page }) => {
+  const query = openQuery;
+  const launches = await trackLaunches(page);
 
   await page.goto(`/open/message${query}`);
 
@@ -599,6 +606,67 @@ test("open link hands the buzz:// link to the app", async ({ page }) => {
   ).toHaveAttribute("href", `buzz://message${query}`);
   await expect.poll(() => launches).toEqual([`buzz://message${query}`]);
 });
+
+for (const device of [
+  {
+    name: "iPhone",
+    platform: "iPhone",
+    userAgent:
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15",
+  },
+  {
+    name: "iPadOS desktop mode",
+    platform: "MacIntel",
+    userAgent:
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) AppleWebKit/605.1.15",
+  },
+  {
+    name: "Android",
+    platform: "Linux armv8l",
+    userAgent:
+      "Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 Mobile",
+  },
+]) {
+  test(`open link on ${device.name} waits for a tap`, async ({ browser }) => {
+    const context = await browser.newContext({ userAgent: device.userAgent });
+    await context.addInitScript((platform) => {
+      Object.defineProperties(navigator, {
+        platform: { configurable: true, value: platform },
+        maxTouchPoints: { configurable: true, value: 5 },
+        userAgentData: {
+          configurable: true,
+          value: { platform, mobile: true },
+        },
+      });
+    }, device.platform);
+    const page = await context.newPage();
+    await page.route("https://api.github.com/**", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: "[]",
+      }),
+    );
+    const launches = await trackLaunches(page);
+
+    await page.goto(`/open/message${openQuery}`);
+    await expect(
+      page.getByRole("heading", { name: "Open in Buzz" }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Tap the button below to open this link in Buzz."),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "Download Buzz" }),
+    ).toBeVisible();
+    await page.waitForLoadState("networkidle");
+    expect(launches).toEqual([]);
+
+    await page.getByRole("link", { name: "Open in Buzz" }).click();
+    await expect.poll(() => launches).toEqual([`buzz://message${openQuery}`]);
+    await context.close();
+  });
+}
 
 test("open link forwards every navigation form", async ({ page }) => {
   const owner = "cd".repeat(32);
