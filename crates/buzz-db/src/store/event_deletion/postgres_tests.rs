@@ -565,7 +565,7 @@ async fn production_known_target_deletion_locks_one_partition() {
         .expect("admit deletion");
         // Known-target select, purge and soft delete all run on the production
         // path (read-state events are retention-free).
-        let deleted = soft_delete_event_and_update_thread_in_tx(
+        let (deleted, _) = soft_delete_event_and_update_thread_in_tx(
             &mut tx,
             ev.id.as_bytes(),
             Some(timestamp(&ev)),

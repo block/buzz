@@ -617,9 +617,12 @@ async fn late_legacy_references_block_deletion_for_lower_and_upper_hex() {
 /// Erasure removes the pin and unpin commands of an account. One under an
 /// hour old keeps its ID and timestamp and nothing else, so sending it again
 /// cannot pin a message another member has unpinned since.
+/// Another member's command names its target, not a reply parent, so it keeps
+/// no tombstone of an erased message.
 /// Mutation: drop `keeps_replay_record` from the plan → RED (the resend pins
 /// again); drop the command kinds from the scrub tag filter → RED (the record
-/// keeps the target).
+/// keeps the target); drop them from the legacy reply scan → RED (the erased
+/// message stays as a tombstone).
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn erased_pin_commands_keep_only_a_replay_record() {
@@ -650,17 +653,34 @@ async fn erased_pin_commands_keep_only_a_replay_record() {
     let (db, c, ch, alice, bob) = setup().await;
     let relay = Keys::generate();
     let pinned = message(&db, c, ch, &bob, "pinned", None).await;
-    let command = |kind: u16, author: &Keys, age_secs: u64| {
+    let own = message(&db, c, ch, &alice, "own", None).await;
+    let command_for = |target: &nostr::Event, kind: u16, author: &Keys, age_secs: u64| {
         EventBuilder::new(Kind::Custom(kind), "")
             .tags([
                 Tag::parse(["h", &ch.to_string()]).unwrap(),
                 // Scrubbing keeps a marked reference like this on a message.
-                Tag::parse(["e", &pinned.id.to_hex(), "", "reply"]).unwrap(),
+                Tag::parse(["e", &target.id.to_hex(), "", "reply"]).unwrap(),
             ])
             .custom_created_at(Timestamp::from(Timestamp::now().as_secs() - age_secs))
             .sign_with_keys(author)
             .unwrap()
     };
+    let command =
+        |kind: u16, author: &Keys, age_secs: u64| command_for(&pinned, kind, author, age_secs);
+    let exists = |event: &nostr::Event| {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE community_id=$1 AND id=$2)",
+        )
+        .bind(c.as_uuid())
+        .bind(event.id.as_bytes().to_vec())
+        .fetch_one(db.pool())
+    };
+    assert!(
+        apply(&db, c, ch, &relay, &command_for(&own, 40010, &bob, 0), &own)
+            .await
+            .list
+            .is_some()
+    );
 
     // The relay stores no command this old, so it was stored back then.
     let old = command(40011, &alice, 2 * 60 * 60);
@@ -695,14 +715,14 @@ async fn erased_pin_commands_keep_only_a_replay_record() {
         .await
         .unwrap();
     assert_eq!(erased.scrubbed_events, 1);
-    let old_remains: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM events WHERE community_id=$1 AND id=$2)")
-            .bind(c.as_uuid())
-            .bind(old.id.as_bytes().as_slice())
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
-    assert!(!old_remains, "a command too old to resend is removed");
+    assert!(
+        !exists(&old).await.unwrap(),
+        "a command too old to resend is removed"
+    );
+    assert!(
+        !exists(&own).await.unwrap(),
+        "a message only a command names is removed"
+    );
     let record = row(&db, c, &pin).await;
     assert_eq!(record["pubkey"], "\\x");
     assert_eq!(record["sig"], "\\x");

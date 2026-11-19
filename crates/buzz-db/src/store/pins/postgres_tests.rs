@@ -154,22 +154,25 @@ impl Fixture {
         .expect("event row")
     }
 
-    /// Delete `target` the way a kind:5 or kind:9005 does.
-    async fn delete(&self, deletion: &Event, target: &Event) -> Vec<StoredEvent> {
-        let target = crate::event::DeletionTarget {
-            event_id: target.id.as_bytes(),
-            created_at: chrono::DateTime::from_timestamp(target.created_at.as_secs() as i64, 0)
-                .expect("timestamp"),
-            parent_event_id: None,
-            root_event_id: None,
-        };
+    /// Delete `targets` the way a kind:5 or kind:9005 does.
+    async fn delete(&self, deletion: &Event, targets: &[&Event]) -> Vec<StoredEvent> {
+        let targets: Vec<_> = targets
+            .iter()
+            .map(|target| crate::event::DeletionTarget {
+                event_id: target.id.as_bytes(),
+                created_at: chrono::DateTime::from_timestamp(target.created_at.as_secs() as i64, 0)
+                    .expect("timestamp"),
+                parent_event_id: None,
+                root_event_id: None,
+            })
+            .collect();
         self.db
             .insert_deletion_event(
                 self.community,
                 deletion,
                 Some(self.channel),
                 None,
-                &[target],
+                &targets,
                 &self.relay,
             )
             .await
@@ -294,7 +297,7 @@ async fn a_pin_needs_a_live_message_of_the_channel() {
     let f = fixture().await;
     let elsewhere = channel(&f.db.pool, *f.community.as_uuid()).await;
     let deleted = f.message().await;
-    f.delete(&event(5, f.channel, Some(&deleted)), &deleted)
+    f.delete(&event(5, f.channel, Some(&deleted)), &[&deleted])
         .await;
     for (case, target) in [
         ("another channel", f.message_in(elsewhere, 9).await),
@@ -384,7 +387,7 @@ async fn concurrent_pins_all_land() {
 
 /// Deleting a pinned message rewrites the list in the deletion's own
 /// transaction; a resend, or the deletion of an unpinned message, does not.
-/// Mutation: drop the `unpin_deleted_message` call from
+/// Mutation: drop the `unpin_deleted_messages` call from
 /// `insert_deletion_event` → RED.
 #[tokio::test]
 #[ignore = "requires Postgres"]
@@ -396,17 +399,91 @@ async fn deleting_a_pinned_message_unpins_it() {
     let before = f.list().await.0;
 
     let deletion = event(5, f.channel, Some(&a));
-    let lists = f.delete(&deletion, &a).await;
+    let lists = f.delete(&deletion, &[&a]).await;
     assert_eq!(lists.len(), 1);
     assert_eq!(lists[0].event.pubkey, f.relay.public_key());
     let (after, list) = f.list().await;
     assert_eq!(list, ids(&[&b]));
     assert!(after > before);
 
-    assert!(f.delete(&deletion, &a).await.is_empty(), "a resend");
+    assert!(f.delete(&deletion, &[&a]).await.is_empty(), "a resend");
     let other = event(9005, f.channel, Some(&unpinned));
-    assert!(f.delete(&other, &unpinned).await.is_empty());
+    assert!(f.delete(&other, &[&unpinned]).await.is_empty());
     assert_eq!(f.list().await, (after, ids(&[&b])));
+}
+
+/// One deletion of several pinned messages deletes them all, then takes the
+/// list lock and rewrites the list once. A delete that waited for a message
+/// while it held the list lock could deadlock with a delete of that message.
+/// Mutation: update the list after each target in `insert_deletion_event` →
+/// RED (the second message is not deleted when the delete waits for the lock).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_delete_takes_the_list_lock_after_its_messages() {
+    let f = fixture().await;
+    let (a, b, kept) = (f.message().await, f.message().await, f.message().await);
+    for message in [&a, &b, &kept] {
+        f.pin(message).await.expect("pin");
+    }
+
+    let key = crate::replaceable::event_replacement_lock_key(
+        f.community,
+        KIND_CHANNEL_PINS as i32,
+        &f.relay.public_key().to_bytes(),
+        Some(f.channel.as_bytes().as_slice()),
+    );
+    let mut holder = f.db.pool.begin().await.expect("holder");
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(key)
+        .execute(&mut *holder)
+        .await
+        .expect("hold the list lock");
+
+    let deleter = Fixture {
+        db: Db::from_pool(f.db.pool.clone()),
+        community: f.community,
+        channel: f.channel,
+        relay: f.relay.clone(),
+    };
+    let (first, second) = (a.clone(), b.clone());
+    let delete = tokio::spawn(async move {
+        let deletion = event(5, deleter.channel, None);
+        deleter.delete(&deletion, &[&first, &second]).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' \
+                 AND NOT granted AND (classid::bigint << 32) | objid::bigint = $1)",
+            )
+            .bind(key)
+            .fetch_one(&mut *holder)
+            .await
+            .expect("lock wait");
+            if waiting {
+                break;
+            }
+            assert!(!delete.is_finished(), "the delete took no list lock");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the delete waits for the list lock");
+    let unlocked: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM (SELECT 1 FROM events WHERE community_id = $1 \
+         AND id = ANY($2) FOR UPDATE SKIP LOCKED) message",
+    )
+    .bind(f.community.as_uuid())
+    .bind(vec![a.id.as_bytes().to_vec(), b.id.as_bytes().to_vec()])
+    .fetch_one(&mut *holder)
+    .await
+    .expect("message locks");
+    assert_eq!(unlocked, 0, "both messages are deleted before the lock");
+    holder.rollback().await.expect("release the list lock");
+
+    let lists = delete.await.expect("join");
+    assert_eq!(lists.len(), 1, "one new list for both messages");
+    assert_eq!(f.list().await.1, ids(&[&kept]));
 }
 
 /// Account erasure leaves the ID and timestamp of a recent command. The sweep

@@ -3024,9 +3024,9 @@ impl Db {
             crate::insert_mentions_in_transaction(&mut tx, event, channel_id).await?;
         }
         let mut deleted = Vec::with_capacity(targets.len());
-        let mut pin_lists = Vec::new();
+        let mut messages = Vec::new();
         for target in targets {
-            deleted.push(
+            let (was_deleted, channel_id) =
                 crate::event::soft_delete_event_and_update_thread_in_tx(
                     &mut tx,
                     target.event_id,
@@ -3034,12 +3034,12 @@ impl Db {
                     target.parent_event_id,
                     target.root_event_id,
                 )
-                .await?,
-            );
-            pin_lists.extend(
-                crate::pins::unpin_deleted_message(&mut tx, target.event_id, relay_signer).await?,
-            );
+                .await?;
+            deleted.push(was_deleted);
+            messages.extend(channel_id.map(|channel_id| (channel_id, target.event_id)));
         }
+        let pin_lists =
+            crate::pins::unpin_deleted_messages(&mut tx, &messages, relay_signer).await?;
         tx.commit().await?;
         Ok((stored, inserted, deleted, pin_lists))
     }

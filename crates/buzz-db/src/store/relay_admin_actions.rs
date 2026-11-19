@@ -845,8 +845,9 @@ pub async fn execute_delete_with_marker(
     // Canonical delete + thread_metadata counters, fenced by this transaction.
     // Counters move only when the row transitions to deleted, so a second
     // action against an already-deleted target leaves them unchanged.
+    let mut message = None;
     if let Some((_, created_at)) = target {
-        crate::event::soft_delete_event_and_update_thread_in_tx(
+        let (_, channel_id) = crate::event::soft_delete_event_and_update_thread_in_tx(
             &mut tx,
             target_event_id,
             Some(created_at),
@@ -854,9 +855,11 @@ pub async fn execute_delete_with_marker(
             root_event_id,
         )
         .await?;
+        message = channel_id.map(|channel_id| (channel_id, target_event_id));
     }
-    let pin_list =
-        crate::pins::unpin_deleted_message(&mut tx, target_event_id, relay_signer).await?;
+    let pin_list = crate::pins::unpin_deleted_messages(&mut tx, message.as_slice(), relay_signer)
+        .await?
+        .pop();
 
     let marker = sqlx::query(
         r#"
@@ -3822,8 +3825,10 @@ mod postgres_tests {
     }
 
     /// A relay admin's delete of a pinned message takes it out of the
-    /// channel's NIP-PM pin list in the same transaction.
-    /// Mutation: drop the `unpin_deleted_message` call → RED.
+    /// channel's NIP-PM pin list in the same transaction. The list itself is
+    /// not an admin's to delete.
+    /// Mutation: drop the `unpin_deleted_messages` call → RED; drop the pin
+    /// list check from the shared soft delete → RED.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn admin_delete_unpins_the_message() {
@@ -3858,10 +3863,23 @@ mod postgres_tests {
             )
             .await
             .expect("pin");
-        assert!(pinned.list.is_some());
+        let list = pinned.list.expect("the pin writes the list");
 
         let lease_until = Utc::now() + chrono::Duration::seconds(60);
         let (action_id, token) = enforcing_action(&pool, community_id, lease_until).await;
+        let refused = execute_delete_with_marker(
+            &pool,
+            action_id,
+            token,
+            cid,
+            list.event.id.as_bytes(),
+            None,
+            None,
+            &relay,
+        )
+        .await
+        .expect_err("the list is not deleted");
+        assert!(refused.to_string().contains("pin list"), "{refused}");
         let (committed, list) =
             execute_delete_with_marker(&pool, action_id, token, cid, &root, None, None, &relay)
                 .await

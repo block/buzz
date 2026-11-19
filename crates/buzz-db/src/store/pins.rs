@@ -143,36 +143,32 @@ async fn replace_pins(
     Ok(stored)
 }
 
-/// Remove the deleted message `event_id` from its channel's pin list, on the
-/// transaction that deleted it. Returns the new list when the message was
-/// pinned.
-pub(crate) async fn unpin_deleted_message(
+/// Remove deleted messages from their channels' pin lists, on the transaction
+/// that deleted them. `deleted` holds each message's channel and ID. Returns
+/// each list that held one of them, rewritten once.
+///
+/// The caller deletes every message first. A delete then never waits for a
+/// message while it holds a list lock, and takes the list locks in one order,
+/// so two deletes cannot wait on each other.
+pub(crate) async fn unpin_deleted_messages(
     tx: &mut AdmittedTx,
-    event_id: &[u8],
+    deleted: &[(Uuid, &[u8])],
     relay_signer: &nostr::Keys,
-) -> Result<Option<StoredEvent>> {
-    // Only a message of a channel can be pinned, so a deleted reaction or
-    // edit never takes the list lock.
-    let channel_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT channel_id FROM events WHERE community_id = $1 AND id = $2 \
-         AND kind = ANY($3) AND deleted_at IS NOT NULL AND channel_id IS NOT NULL",
-    )
-    .bind(tx.community().as_uuid())
-    .bind(event_id)
-    .bind(PINNABLE_KINDS.map(|kind| kind as i32).as_slice())
-    .fetch_optional(tx.conn())
-    .await?;
-    let Some(channel_id) = channel_id else {
-        return Ok(None);
-    };
-    let pins = lock_pins(tx, channel_id, &relay_signer.public_key().to_bytes()).await?;
-    if !pins.iter().any(|id| id == event_id) {
-        return Ok(None);
+) -> Result<Vec<StoredEvent>> {
+    let mut channels: std::collections::BTreeMap<Uuid, Vec<&[u8]>> = Default::default();
+    for (channel_id, event_id) in deleted {
+        channels.entry(*channel_id).or_default().push(event_id);
     }
-    let pins = live_messages(tx, channel_id, pins).await?;
-    Ok(Some(
-        replace_pins(tx, channel_id, &pins, relay_signer).await?,
-    ))
+    let mut lists = Vec::new();
+    for (channel_id, event_ids) in channels {
+        let pins = lock_pins(tx, channel_id, &relay_signer.public_key().to_bytes()).await?;
+        if !pins.iter().any(|id| event_ids.contains(&id.as_slice())) {
+            continue;
+        }
+        let pins = live_messages(tx, channel_id, pins).await?;
+        lists.push(replace_pins(tx, channel_id, &pins, relay_signer).await?);
+    }
+    Ok(lists)
 }
 
 /// The author column of a command record that account erasure scrubbed.
