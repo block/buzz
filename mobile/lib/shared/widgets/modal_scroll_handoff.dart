@@ -160,8 +160,11 @@ class _HandoffPosition extends ScrollPositionWithSingleContext {
 
   // Within the physics tolerance content counts as resting at the top, so a
   // finger-placed fraction of a pixel does not disable the velocity close.
+  // Only the in-range offset counts: trailing bounce on content too short to
+  // scroll is not scrolled content.
   bool get _awayFromLeadingEdge =>
-      pixels - minScrollExtent > physics.toleranceFor(this).distance;
+      math.min(pixels, maxScrollExtent) - minScrollExtent >
+      physics.toleranceFor(this).distance;
 
   @override
   void applyUserOffset(double delta) {

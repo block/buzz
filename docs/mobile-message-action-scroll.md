@@ -27,7 +27,9 @@ height closes. The differences:
   the gesture closing on progress alone. A fast flick back to the top that
   carries the sheet a little way then settles open with content at the top
   instead of dismissing the menu. Content within the scroll physics distance
-  tolerance of the leading edge counts as at the top.
+  tolerance of the leading edge counts as at the top. Only the in-range offset
+  counts, so the trailing bounce of a menu too short to scroll (iOS) is not
+  scrolled content; a long menu bounced past its last action still is.
 - A raw upward velocity strictly below -700 vetoes the progress rule.
 
 A parity test releases the same pointer gestures through the stock sheet drag

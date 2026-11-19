@@ -290,6 +290,62 @@ void main() {
     },
   );
 
+  testWidgets('trailing bounce counts as scrolled content only when content '
+      'can scroll', (tester) async {
+    // A short menu under bouncing physics overscrolls on an upward drag
+    // although nothing scrolled, so a downward flick still closes on velocity:
+    // in the same touch, and in a new touch during the spring-back. A long
+    // menu overscrolled past its trailing edge is away from the top.
+    for (final (scenario, closes) in [
+      ('short, same-touch nudge', true),
+      ('short, spring-back', true),
+      ('long, trailing overscroll', false),
+    ]) {
+      final h = _Harness();
+      await h.open(tester, short: scenario.startsWith('short'));
+      h.bouncing.value = true;
+      await tester.pumpAndSettle();
+      final position = h.position(tester);
+      final tolerance = position.physics.toleranceFor(position).distance;
+      var drag = _start(position);
+      switch (scenario) {
+        case 'short, same-touch nudge':
+          _move(drag, -80);
+        case 'short, spring-back':
+          _move(drag, -80);
+          _end(drag, 0);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 16));
+          drag = _start(position);
+        case 'long, trailing overscroll':
+          drag.cancel();
+          position.jumpTo(position.maxScrollExtent + 40);
+          drag = _start(position);
+      }
+      expect(
+        position.pixels - position.maxScrollExtent,
+        greaterThan(tolerance),
+        reason: scenario,
+      );
+      // One update repays the bounce and any content, then moves the sheet.
+      _move(drag, position.pixels + 60);
+      expect(position.pixels, 0, reason: scenario);
+      expect(
+        h.animation(tester).value,
+        inExclusiveRange(0.5, 1),
+        reason: scenario,
+      );
+      _end(drag, 700.01);
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Handoff'),
+        closes ? findsNothing : findsOneWidget,
+        reason: scenario,
+      );
+      await h.close(tester);
+    }
+  });
+
   testWidgets('a displaced release cannot zero a later gesture ballistic', (
     tester,
   ) async {
