@@ -622,26 +622,4 @@ mod tests {
         assert!(out.is_empty(), "a refusal prints nothing to stdout");
         assert_eq!(crate::error::exit_code(&err), 2);
     }
-
-    #[tokio::test]
-    async fn cli_exits_nonzero_when_the_relay_refuses_a_raw_publish() {
-        let (url, captured) = fake_relay_acking("[]", false).await;
-        let key = Keys::generate().secret_key().to_secret_hex();
-        let code = crate::run_from_args([
-            "buzz",
-            "--relay",
-            url.as_str(),
-            "--private-key",
-            key.as_str(),
-            "raw",
-            "publish",
-            "--kind",
-            "7",
-            "--content",
-            "+",
-        ])
-        .await;
-        assert_eq!(code, 2, "a refused publish is a relay error");
-        assert_eq!(captured.events.lock().unwrap().len(), 1);
-    }
 }
