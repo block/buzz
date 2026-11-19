@@ -28,7 +28,7 @@ const KINDS: &[i32] = &[
     // Signer-owned definitions, including shared publications. Project membership
     // grants no ownership over its repositories; their events remain excluded.
     30175, 30176, 30178, 30030, 30180, 30621,
-    // NIP-CP pin and unpin commands. A recent one keeps its ID and timestamp
+    // NIP-PM pin and unpin commands. A recent one keeps its ID and timestamp
     // (`crate::pins::keeps_replay_record`).
     40010, 40011,
 ];

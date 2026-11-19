@@ -778,7 +778,7 @@ pub async fn execute_kick_with_marker(
 /// The delete is idempotent: if the event is already deleted the marker is still
 /// committed (soft-delete is already-done = success).
 ///
-/// A pinned target leaves its channel's NIP-CP pin list in the same
+/// A pinned target leaves its channel's NIP-PM pin list in the same
 /// transaction; the list is re-signed with `relay_signer`. Returns whether
 /// this call committed the marker, and the pin list it rewrote.
 #[allow(clippy::too_many_arguments)]
@@ -2220,7 +2220,7 @@ impl crate::Db {
 
     /// Atomically execute a soft-delete mutation and commit the step marker.
     /// Returns `true` if this driver committed the marker, `false` if already marked or lease lost,
-    /// and the NIP-CP pin list the delete rewrote.
+    /// and the NIP-PM pin list the delete rewrote.
     #[datastore_span(name = "execute_delete_with_marker", system = "postgresql")]
     #[allow(clippy::too_many_arguments)]
     pub async fn execute_delete_with_marker(
@@ -3822,7 +3822,7 @@ mod postgres_tests {
     }
 
     /// A relay admin's delete of a pinned message takes it out of the
-    /// channel's NIP-CP pin list in the same transaction.
+    /// channel's NIP-PM pin list in the same transaction.
     /// Mutation: drop the `unpin_deleted_message` call → RED.
     #[tokio::test]
     #[ignore = "requires Postgres"]

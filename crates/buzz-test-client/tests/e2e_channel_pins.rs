@@ -1,4 +1,4 @@
-//! End-to-end test for NIP-CP channel pins against a running relay: the
+//! End-to-end test for NIP-PM channel pins against a running relay: the
 //! NIP-11 capability, the `OK` answer to each command, the relay-signed list
 //! over a live subscription and a fresh read, and the list after a delete.
 //!

@@ -1,4 +1,4 @@
-//! NIP-CP channel pins.
+//! NIP-PM channel pins.
 //!
 //! A channel's pins are one relay-signed kind:30623 event. Every writer takes
 //! that event's replacement lock before it reads the list, so the pin and
@@ -33,7 +33,7 @@ pub(crate) fn keeps_replay_record(
         && created_at > now - chrono::Duration::seconds(REPLAY_RECORD_SECS)
 }
 
-/// What a NIP-CP command does to its target message.
+/// What a NIP-PM command does to its target message.
 pub enum PinChange<'a> {
     /// Pin the target. `notice` is the relay-signed kind:40099 system message
     /// that announces it, stored only when the pin changes the list.
@@ -45,7 +45,7 @@ pub enum PinChange<'a> {
     Unpin,
 }
 
-/// What storing one NIP-CP command did.
+/// What storing one NIP-PM command did.
 pub struct PinCommandWrite {
     /// The command.
     pub stored: StoredEvent,
@@ -173,7 +173,7 @@ pub(crate) async fn unpin_deleted_message(
 }
 
 impl Db {
-    /// Store a NIP-CP pin (kind:40010) or unpin (kind:40011) command and
+    /// Store a NIP-PM pin (kind:40010) or unpin (kind:40011) command and
     /// apply it to `channel_id`'s pin list, in one transaction.
     ///
     /// Pinning a message that is already pinned, or unpinning one that is

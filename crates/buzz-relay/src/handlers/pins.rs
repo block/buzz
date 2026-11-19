@@ -1,4 +1,4 @@
-//! Transport-neutral ingest for the NIP-CP pin and unpin commands.
+//! Transport-neutral ingest for the NIP-PM pin and unpin commands.
 
 use std::sync::Arc;
 

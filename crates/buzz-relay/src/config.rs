@@ -189,7 +189,7 @@ pub struct Config {
     pub membership_snapshot_enabled: bool,
     /// Opt-in NIP-CL public memberships, independent of self discovery.
     pub membership_public_enabled: bool,
-    /// Whether the relay accepts NIP-CP pin and unpin commands and advertises
+    /// Whether the relay accepts NIP-PM pin and unpin commands and advertises
     /// `buzz-pins`. Off by default. Stored pin lists are served, and lose
     /// deleted messages, either way.
     pub pins_enabled: bool,

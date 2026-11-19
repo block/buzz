@@ -1,4 +1,4 @@
-//! NIP-CP pin list writes through the production entry points.
+//! NIP-PM pin list writes through the production entry points.
 
 use super::*;
 use buzz_core::kind::{KIND_PIN_MESSAGE, KIND_SYSTEM_MESSAGE, KIND_UNPIN_MESSAGE};
