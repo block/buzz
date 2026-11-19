@@ -30,8 +30,9 @@ pub struct AndroidConfig {
     pub signing_cert_digests: Vec<[u8; 32]>,
     /// Firebase project that owns the app's FCM registration tokens.
     pub fcm_project_id: String,
-    /// Mounted service account key JSON the gateway uses to call FCM HTTP v1.
-    pub fcm_service_account_path: PathBuf,
+    /// Mounted Google credential JSON (service account key or AWS workload
+    /// identity federation config) the gateway uses to call FCM HTTP v1.
+    pub fcm_credentials_path: PathBuf,
     /// Verified boot keys (SHA-256 digests) accepted when the hardware reports
     /// a SelfSigned boot state. Empty, the default, accepts stock Android only.
     pub boot_key_digests: Vec<[u8; 32]>,
@@ -178,7 +179,7 @@ const ANDROID_SETTINGS: [&str; 4] = [
     "BUZZ_PUSH_ANDROID_PACKAGE_NAME",
     "BUZZ_PUSH_ANDROID_SIGNING_CERT_DIGESTS",
     "BUZZ_PUSH_FCM_PROJECT_ID",
-    "BUZZ_PUSH_FCM_SERVICE_ACCOUNT_PATH",
+    "BUZZ_PUSH_FCM_CREDENTIALS_PATH",
 ];
 
 const ANDROID_OPTIONAL_SETTINGS: [&str; 3] = [
@@ -257,7 +258,7 @@ fn parse_android(e: &HashMap<String, String>) -> Result<Option<AndroidConfig>, C
         package_name: package_name.to_owned(),
         signing_cert_digests,
         fcm_project_id: required(ANDROID_SETTINGS[2])?.to_owned(),
-        fcm_service_account_path: PathBuf::from(required(ANDROID_SETTINGS[3])?),
+        fcm_credentials_path: PathBuf::from(required(ANDROID_SETTINGS[3])?),
         boot_key_digests,
         attestation_roots_path: e
             .get(ANDROID_OPTIONAL_SETTINGS[1])
@@ -549,8 +550,8 @@ mod tests {
             ),
             ("BUZZ_PUSH_FCM_PROJECT_ID".into(), "example-project".into()),
             (
-                "BUZZ_PUSH_FCM_SERVICE_ACCOUNT_PATH".into(),
-                "/fcm/service-account.json".into(),
+                "BUZZ_PUSH_FCM_CREDENTIALS_PATH".into(),
+                "/fcm/credentials.json".into(),
             ),
         ]);
         env

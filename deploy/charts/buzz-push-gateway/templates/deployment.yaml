@@ -62,7 +62,7 @@ spec:
             - { name: BUZZ_PUSH_ANDROID_BOOT_KEY_DIGESTS, value: {{ join "," .Values.android.bootKeyDigests | quote }} }
             - { name: BUZZ_PUSH_ANDROID_REVOCATION_GRACE_SECONDS, value: {{ .Values.android.revocationGraceSeconds | int64 | quote }} }
             - { name: BUZZ_PUSH_FCM_PROJECT_ID, value: {{ .Values.android.fcmProjectId | quote }} }
-            - { name: BUZZ_PUSH_FCM_SERVICE_ACCOUNT_PATH, value: /run/buzz/fcm/service-account.json }
+            - { name: BUZZ_PUSH_FCM_CREDENTIALS_PATH, value: /run/buzz/fcm/credentials.json }
             {{- if .Values.android.attestationRoots.secretName }}
             - { name: BUZZ_PUSH_ANDROID_ATTESTATION_ROOTS_PATH, value: /run/buzz/android-attestation/roots.pem }
             {{- end }}
@@ -91,7 +91,7 @@ spec:
           secret: { secretName: {{ .Values.application.apnsCert.secretName }}, defaultMode: 0400, items: [{ key: {{ .Values.application.apnsCert.secretKey }}, path: identity.pem }] }
         {{- if .Values.android.enabled }}
         - name: fcm
-          secret: { secretName: {{ .Values.android.fcmServiceAccount.secretName }}, defaultMode: 0400, items: [{ key: {{ .Values.android.fcmServiceAccount.secretKey }}, path: service-account.json }] }
+          secret: { secretName: {{ .Values.android.fcmCredentials.secretName }}, defaultMode: 0400, items: [{ key: {{ .Values.android.fcmCredentials.secretKey }}, path: credentials.json }] }
         {{- with .Values.android.attestationRoots }}
         {{- if .secretName }}
         - name: android-attestation-roots

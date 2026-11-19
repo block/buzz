@@ -44,7 +44,29 @@ sees it.
 | `BUZZ_PUSH_ANDROID_PACKAGE_NAME` | Exact Android application package, for example `com.example.buzz`. |
 | `BUZZ_PUSH_ANDROID_SIGNING_CERT_DIGESTS` | Comma-separated SHA-256 digests (64 hex characters each) of the app's accepted signing certificates. |
 | `BUZZ_PUSH_FCM_PROJECT_ID` | Firebase project that owns the app's registration tokens, for example `example-project`. |
-| `BUZZ_PUSH_FCM_SERVICE_ACCOUNT_PATH` | Read-only mounted service account key JSON the gateway uses to call FCM. Never commit it. |
+| `BUZZ_PUSH_FCM_CREDENTIALS_PATH` | Read-only mounted Google credential JSON the gateway uses to call FCM, dispatched on its `type`: `service_account` (a key file) or `external_account` (keyless, see below). Never commit it. |
+
+### Keyless FCM credentials
+
+Projects that forbid service account keys use Google workload identity
+federation from AWS. Point `BUZZ_PUSH_FCM_CREDENTIALS_PATH` at the standard
+`external_account` config for an AWS provider (`gcloud iam
+workload-identity-pools create-cred-config` writes it, with
+`--service-account` so it carries `service_account_impersonation_url`, which is
+required). Only the AWS credential source (`environment_id` `aws1`) is
+supported; the file's instance metadata fields are ignored.
+
+The pod also needs `AWS_REGION` (or `AWS_DEFAULT_REGION`) and one source of AWS
+credentials: IAM roles for service accounts (`AWS_ROLE_ARN` and
+`AWS_WEB_IDENTITY_TOKEN_FILE`), EKS Pod Identity
+(`AWS_CONTAINER_CREDENTIALS_FULL_URI` and optionally
+`AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`), or static `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`. If several are present, static
+keys win, then web identity, then Pod Identity. EC2
+instance metadata is not used. Startup validates the file and these settings but
+calls neither AWS nor Google; the first token mint logs whether it worked. The
+pod must reach the regional STS endpoint, Google's STS and IAM Credentials
+APIs, and (for Pod Identity) the agent.
 
 The wake is a high-priority, data-only FCM message with a compiled-in payload,
 one constant collapse key and a time to live taken from the delivery's expiry.
@@ -96,7 +118,7 @@ get no push; there is no software fallback.
 
 With the Helm chart, set `android.enabled=true` together with
 `android.packageName`, `android.signingCertDigests`, `android.fcmProjectId` and
-the Secret holding the service account key. `android.bootKeyDigests` and
+the Secret holding the Google credential JSON. `android.bootKeyDigests` and
 `android.revocationGraceSeconds` map to the settings above. To replace the
 built-in roots, name a Secret holding the PEM bundle in
 `android.attestationRoots.secretName` (and its key in `secretKey`); the chart
