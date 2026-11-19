@@ -7,7 +7,12 @@ extension _HuddleCreationReceipts on ChannelsNotifier {
     int generation,
   ) async {
     bool current() => _lifecycleRef.mounted && generation == _buildGeneration;
-    if (!current() || _huddleReceiptsReading) return;
+    if (!current()) return;
+    if (_huddleReceiptsReading) {
+      // Keep only the newest same-scope list while the current pass drains.
+      _pendingHuddleReceiptMetadata = metadata;
+      return;
+    }
     _huddleReceiptsReading = true;
     final ids = [
       for (final channel in metadata)
@@ -61,7 +66,14 @@ extension _HuddleCreationReceipts on ChannelsNotifier {
         }
       }
     } finally {
-      if (current()) _huddleReceiptsReading = false;
+      if (current()) {
+        _huddleReceiptsReading = false;
+        final pending = _pendingHuddleReceiptMetadata;
+        _pendingHuddleReceiptMetadata = null;
+        if (pending != null) {
+          unawaited(_reconcileHuddleReceipts(session, pending, generation));
+        }
+      }
     }
   }
 }

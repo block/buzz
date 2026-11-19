@@ -1,6 +1,57 @@
 part of 'channels_provider_test.dart';
 
 void _huddleNavigationCases() {
+  test(
+    'a newer receipt snapshot is reconciled after the pending pass',
+    () async {
+      const roomC = '33333333-3333-4333-8333-333333333333';
+      final creator = 'a' * 64;
+      NostrEvent receipt(String id) => NostrEvent(
+        id: 'receipt-$id',
+        pubkey: creator,
+        createdAt: 1,
+        kind: 9007,
+        sig: '',
+        content: '',
+        tags: [
+          ['h', id],
+          ['visibility', 'private'],
+          ['channel_type', 'stream'],
+          ['about', 'Buzz Huddle (buzz.huddles/v1)\nparent:$_channelA'],
+        ],
+      );
+      NostrEvent meta(String id) => _meta(
+        id: id,
+        name: 'Renamed room',
+        visibility: 'private',
+        creator: creator,
+      );
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelB, 'me')],
+        metadata: [meta(_channelB)],
+        creations: [receipt(_channelB), receipt(roomC)],
+      );
+      final gate = session.creationGate = Completer<void>();
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      await _settle();
+      expect(session.creationReads, 1);
+      session.memberships = [
+        _membership(_channelB, 'me'),
+        _membership(roomC, 'me'),
+      ];
+      session.metadata = [meta(_channelB), meta(roomC)];
+      await container.read(channelsProvider.notifier).refresh();
+      await _settle();
+      expect(container.read(channelsProvider).requireValue, hasLength(2));
+      gate.complete();
+      await _settle();
+      expect(container.read(channelsProvider).requireValue, isEmpty);
+      expect(session.creationReads, 2);
+    },
+  );
+
   test('receipt batches stop after switching communities', () async {
     final ids = List.generate(129, (i) => 'private-$i');
     final session = _FakeRelaySession(

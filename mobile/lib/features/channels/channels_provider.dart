@@ -139,6 +139,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   final Set<String> _verifiedHuddleIds = {};
   final Set<String> _checkedHuddleReceiptIds = {};
   bool _huddleReceiptsReading = false;
+  List<ChannelData>? _pendingHuddleReceiptMetadata;
 
   /// Fences directory responses to the relay and identity that requested them.
   late final _ChannelRefreshCoordinator _refreshCoordinator =
@@ -222,6 +223,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   Future<List<Channel>> build() async {
     final buildGeneration = ++_buildGeneration;
     _huddleReceiptsReading = false;
+    _pendingHuddleReceiptMetadata = null;
     _backgroundRefreshInFlight = false;
     _backgroundRefreshQueued = false;
     _refreshCoordinator.retireInFlight();
