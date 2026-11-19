@@ -120,8 +120,6 @@ class ComposeBar extends HookConsumerWidget {
       inputTool: inputTool,
       scope: '$draftIdentity:$draftKey',
       draftKey: draftKey,
-      channelId: channelId,
-      threadHeadId: threadHeadId,
       context: context,
       ref: ref,
       focusNode: focusNode,
