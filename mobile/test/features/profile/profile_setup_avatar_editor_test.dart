@@ -99,7 +99,7 @@ void main() {
   testWidgets('discarding a new avatar crossfades to the empty circle', (
     tester,
   ) async {
-    for (final mode in ProfileAvatarMode.values) {
+    for (final mode in [ProfileAvatarMode.image, ProfileAvatarMode.animated]) {
       await tester.pumpWidget(
         ProviderScope(
           child: MaterialApp(
@@ -121,12 +121,7 @@ void main() {
       await send('reveal');
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 200));
-      await tester.tap(
-        find.text(switch (mode) {
-          ProfileAvatarMode.image => 'Image',
-          ProfileAvatarMode.animated => 'Animated',
-        }).first,
-      );
+      await tester.tap(find.text(mode.label).first);
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 200));
       if (mode == ProfileAvatarMode.image) {

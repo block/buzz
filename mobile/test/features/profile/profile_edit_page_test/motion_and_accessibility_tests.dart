@@ -121,6 +121,28 @@ void runProfileEditMotionAndAccessibilityTests() {
     expect(find.text('Emoji'), findsNothing);
   });
 
+  testWidgets('retains the preview while animated mode initializes', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
+        child: const ProfileEditPage(startInPhotoEditor: true),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final imageCenter = tester
+        .getCenter(find.byKey(const ValueKey('avatar-editor-fixed-preview')))
+        .dy;
+    await tester.tap(find.text('Animated'));
+    await tester.pump();
+    final retained = find.byKey(const ValueKey('avatar-mode-retained-preview'));
+    expect(retained, findsOneWidget);
+    expect(tester.getCenter(retained).dy, closeTo(imageCenter, 0.01));
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(retained, findsNothing);
+  });
+
   testWidgets('plays an animated avatar on the profile and image editor', (
     tester,
   ) async {
