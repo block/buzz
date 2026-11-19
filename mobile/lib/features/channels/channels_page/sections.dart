@@ -156,6 +156,7 @@ class _CustomSectionHeader extends StatelessWidget {
               IosMessageCreateButton(
                 key: ValueKey('section-menu-${section.id}'),
                 icon: 'more',
+                trailingIconSlotWidth: _kChannelIconSize,
                 accessibilityLabel: '${section.name} options',
                 width: 44,
                 height: 44,
@@ -494,6 +495,7 @@ class _SectionHeader extends StatelessWidget {
                 IosMessageCreateButton(
                   key: ValueKey('sort-menu-$label'),
                   icon: 'more',
+                  trailingIconSlotWidth: _kChannelIconSize,
                   accessibilityLabel: '$label options',
                   width: 44,
                   height: 44,
