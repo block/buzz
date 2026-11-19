@@ -6,6 +6,7 @@ class _ComposerVoiceNote {
     required this.startTranscription,
     required this.transcriptionPanel,
     required this.isDictating,
+    required this.transcription,
     required this.onKeyboardHidden,
     required this.onDraftIdentityChanged,
     required this.insertedTranscriptionId,
@@ -20,6 +21,7 @@ class _ComposerVoiceNote {
   final VoidCallback startTranscription;
   final Widget? transcriptionPanel;
   final bool isDictating;
+  final ComposerTranscription transcription;
   final VoidCallback onKeyboardHidden;
   final VoidCallback onDraftIdentityChanged;
 
@@ -39,7 +41,11 @@ class _ComposerVoiceNote {
               isDictation: isDictating,
               onCancel: () => _isRecording.value = false,
               onRecorded: _onRecorded,
+              onStopping: isDictating ? transcription.stopping : null,
+              onStopFailed: isDictating ? transcription.stopFailed : null,
             )
+          : transcription.pendingStop.value
+          ? Semantics(liveRegion: true, child: const Text('Saving recording…'))
           : null);
 }
 
@@ -48,6 +54,7 @@ bool _voiceNoteFullWidth(
   List<_PendingAttachment> attachments,
 ) =>
     voiceNote.transcriptionPanel != null ||
+    voiceNote.transcription.pendingStop.value ||
     voiceNote.isPreparing ||
     voiceNote.isRecording ||
     attachments.any((item) => item.kind == _PendingAttachmentKind.voiceNote);
@@ -115,7 +122,10 @@ _ComposerVoiceNote _useComposerVoiceNote({
   }
 
   void start({bool transcribe = false}) {
-    if (transcript.panel != null || isPreparing.value || isRecording.value) {
+    if (transcript.pendingStop.value ||
+        transcript.panel != null ||
+        isPreparing.value ||
+        isRecording.value) {
       return;
     }
     availabilityCheck.value = null;
@@ -139,7 +149,7 @@ _ComposerVoiceNote _useComposerVoiceNote({
   }
 
   Future<void> startTranscription() async {
-    if (availabilityCheck.value != null) return;
+    if (availabilityCheck.value != null || transcript.pendingStop.value) return;
     final request = Object();
     availabilityCheck.value = request;
     var available = false;
@@ -183,6 +193,7 @@ _ComposerVoiceNote _useComposerVoiceNote({
     startTranscription: () => unawaited(startTranscription()),
     transcriptionPanel: transcript.panel,
     isDictating: dictating.value,
+    transcription: transcript,
     onKeyboardHidden: beginRecording,
     onDraftIdentityChanged: resetForDraftIdentityChange,
     insertedTranscriptionId: insertedTranscriptionId,

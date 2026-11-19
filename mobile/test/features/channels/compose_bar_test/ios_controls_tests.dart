@@ -703,9 +703,15 @@ void iosControlsTests() {
       nsec: nostr.Keys.generate().nsec,
     );
     final speech = _ComposerSpeech();
-    final files = _ComposerSpeechFiles();
+    final files = _ComposerSpeechFiles()..finishRetention = Completer<void>();
     final recorder = _DeferredStopDictationRecorder();
+    final visible = ValueNotifier(true);
+    addTearDown(visible.dispose);
     Widget composer() => _buildComposeBar(
+      wrapPage: (page) => ValueListenableBuilder<bool>(
+        valueListenable: visible,
+        builder: (_, show, _) => show ? page : const SizedBox.shrink(),
+      ),
       relayConfig: () => _SwitchableRelayConfigNotifier(identity),
       uploadService: _FakeVoiceNoteUploadService(),
       onSend: (_, _, {mediaTags = const []}) async {},
@@ -730,15 +736,21 @@ void iosControlsTests() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.pumpWidget(const SizedBox.shrink());
+    visible.value = false;
+    navigator.pop();
     await tester.pumpAndSettle();
+    visible.value = true;
+    await tester.pumpAndSettle();
+    expect(find.text('Saving recording…'), findsOneWidget);
+    expect(find.byTooltip('Dictate'), findsNothing);
+    expect(find.byTooltip('Stop recording'), findsNothing);
     recorder.finishStop.complete();
+    await tester.pumpAndSettle();
+    expect(find.text('Saving recording…'), findsOneWidget);
+    files.finishRetention!.complete();
     await tester.pumpAndSettle();
     expect(files.retainCalls, 1);
     expect(speech.started.isCompleted, isFalse);
-    await _testPrefs.reload();
-    await tester.pumpWidget(composer());
-    await tester.pumpAndSettle();
     expect(find.text('Retry'), findsOneWidget);
     await tester.tap(find.text('Retry'));
     await tester.pump();
@@ -789,8 +801,12 @@ void iosControlsTests() {
       final cleanupKey = _testPrefs.getKeys().singleWhere(
         (key) => key.startsWith('composer_transcription_cleanup:'),
       );
-      final audio = _testPrefs.getString(cleanupKey)!;
+      final audio =
+          (jsonDecode(_testPrefs.getString(cleanupKey)!) as List).single
+              as String;
       expect(files.deleted, isNot(contains(audio)));
+      // Also cover migration of an older installation's single-path journal.
+      await _testPrefs.setString(cleanupKey, audio);
       // Restart with deletion still failing: the journal stays, quietly.
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pumpAndSettle();
@@ -802,21 +818,40 @@ void iosControlsTests() {
       expect(find.text('Text is already saved.'), findsOneWidget);
       expect(_testPrefs.getString(cleanupKey), audio);
       expect(speech.started.isCompleted, isFalse);
-      // Once deletion works, the next mount removes the file and the journal.
+      // Send remains available, and a second failed deletion must not replace
+      // the first recording's durable cleanup entry.
+      await _tapComposerControl(tester, 'Send');
+      await tester.pumpAndSettle();
+      speech.reset();
+      await _tapComposerControl(tester, 'Dictate');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Stop recording'));
+      await tester.pump();
+      speech.result.complete('Second recording.');
+      await tester.pumpAndSettle();
+      await _testPrefs.reload();
+      final queued = (jsonDecode(_testPrefs.getString(cleanupKey)!) as List)
+          .cast<String>();
+      expect(queued, hasLength(2));
+      expect(queued, contains(audio));
+      expect(editorText(), 'Second recording.');
+      expect(find.text('Retry'), findsNothing);
+      speech.reset();
+      // Once deletion works, the next mount removes both files and the journal.
       files.rejectDeletion = false;
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pumpAndSettle();
       await _testPrefs.reload();
       await tester.pumpWidget(composer());
       await tester.pumpAndSettle();
-      expect(files.deleted, contains(audio));
+      expect(files.deleted, containsAll(queued));
       await _testPrefs.reload();
       expect(_testPrefs.getString(cleanupKey), isNull);
       expect(speech.started.isCompleted, isFalse);
-      expect(find.text('Text is already saved.'), findsOneWidget);
+      expect(find.text('Second recording.'), findsOneWidget);
       await _tapComposerControl(tester, 'Send');
       await tester.pumpAndSettle();
-      expect(sent, ['Text is already saved.']);
+      expect(sent, ['Text is already saved.', 'Second recording.']);
       // The file deletes but its journal removal fails: the transcript still
       // lands in the editor, and a later mount removes the journal.
       prefs.rejectCleanupRemoval = true;

@@ -29,9 +29,13 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
     required this.onCancel,
     required this.onRecorded,
     this.isDictation = false,
+    this.onStopping,
+    this.onStopFailed,
   });
 
   final bool isDictation;
+  final VoidCallback? onStopping;
+  final VoidCallback? onStopFailed;
   final VoidCallback onCancel;
   final ValueChanged<VoiceNoteRecording> onRecorded;
 
@@ -88,6 +92,7 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
     Future<void> finish() async {
       if (!isStarted.value || isStopping.value || error.value != null) return;
       isStopping.value = true;
+      onStopping?.call();
       unawaited(HapticFeedback.mediumImpact());
       try {
         final recording = await recorder.stop();
@@ -98,6 +103,7 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
           await deleteDroppedVoiceNoteRecording(recording.file.path);
         }
       } catch (_) {
+        onStopFailed?.call();
         if (context.mounted) {
           error.value = 'Buzz could not finish the voice note.';
           isStopping.value = false;

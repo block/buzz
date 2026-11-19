@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -44,8 +45,18 @@ final composerTranscriptionFilesProvider = Provider<ComposerTranscriptionFiles>(
 
 /// Controls and completion callback for one composer’s dictation workflow.
 class ComposerTranscription {
-  const ComposerTranscription(this.panel, this.complete, this.isAvailable);
+  const ComposerTranscription(
+    this.panel,
+    this.complete,
+    this.isAvailable,
+    this.stopping,
+    this.stopFailed,
+    this.pendingStop,
+  );
   final Widget? panel;
+  final VoidCallback stopping;
+  final VoidCallback stopFailed;
+  final ValueNotifier<bool> pendingStop;
   final ValueChanged<VoiceNoteRecording> complete;
   final Future<bool> Function() isAvailable;
 }
@@ -58,6 +69,10 @@ final _pendingTranscriptionSourcesProvider = Provider(
 final _retentionOperationsProvider = Provider(
   (ref) => <String, Future<String>>{},
 );
+final _pendingStopsProvider = Provider(
+  (ref) => <String, ValueNotifier<bool>>{},
+);
+final _cleanupOperationsProvider = Provider((ref) => <String, Future<void>>{});
 const _pendingSourcePrefix = 'pending-source:';
 
 /// Recognition owns only a local recording; it never publishes a message.
@@ -78,6 +93,12 @@ ComposerTranscription useComposerTranscription({
   final retained = useRef(false);
   final pendingSources = ref.read(_pendingTranscriptionSourcesProvider);
   final retentionOperations = ref.read(_retentionOperationsProvider);
+  final pendingStop = ref
+      .read(_pendingStopsProvider)
+      .putIfAbsent(key, () => ValueNotifier(false));
+  useListenable(pendingStop);
+  final ownsStop = useMemoized(() => ObjectRef(false), [scope]);
+  final cleanupOperations = ref.read(_cleanupOperationsProvider);
   final error = useState<String?>(null);
   final generation = useRef(0);
   final speech = useRef<DeviceTranscription?>(null);
@@ -96,30 +117,61 @@ ComposerTranscription useComposerTranscription({
     }
   }
 
-  // A journaled path whose pointer is gone has no decision left for the user;
-  // delete it quietly. Never touch a file the pointer still names.
-  Future<void> sweepCleanup() async {
+  // Serialize journal read/modify/write with sweeps from other mounts.
+  Future<void> cleanupTransaction(Future<void> Function() action) {
+    final previous = cleanupOperations[key] ?? Future<void>.value();
+    final operation = previous.then((_) => action());
+    final settled = operation.then<void>((_) {}, onError: (Object _) {});
+    cleanupOperations[key] = settled;
+    unawaited(
+      settled.then((_) {
+        if (identical(cleanupOperations[key], settled)) {
+          cleanupOperations.remove(key);
+        }
+      }),
+    );
+    return operation;
+  }
+
+  List<String> cleanupPaths() {
     final journal = prefs.getString(cleanupKey);
-    final pointer = prefs.getString(key);
-    if (journal == null ||
-        pointer == journal ||
-        pointer == '$_pendingSourcePrefix$journal' ||
-        pendingSources[key] == journal) {
-      return;
-    }
+    if (journal == null) return [];
+    // Older versions stored one absolute path, without JSON encoding.
+    if (!journal.startsWith('[')) return [journal];
+    return (jsonDecode(journal) as List).cast<String>();
+  }
+
+  Future<void> saveCleanup(List<String> paths) async {
+    final saved = paths.isEmpty
+        ? await prefs.remove(cleanupKey)
+        : await prefs.setString(cleanupKey, jsonEncode(paths));
+    if (!saved) throw StateError('Could not schedule recording cleanup.');
+  }
+
+  Future<void> sweepCleanup() => cleanupTransaction(() async {
     try {
-      await files.delete(journal);
-      if (prefs.getString(cleanupKey) == journal) {
-        await prefs.remove(cleanupKey);
+      final paths = cleanupPaths();
+      for (final path in [...paths]) {
+        final pointer = prefs.getString(key);
+        if (pointer == path ||
+            pointer == '$_pendingSourcePrefix$path' ||
+            pendingSources[key] == path) {
+          continue;
+        }
+        try {
+          await files.delete(path);
+        } catch (_) {
+          continue; // Keep every failed deletion for a later mount.
+        }
+        paths.remove(path);
+        await saveCleanup(paths);
       }
     } catch (_) {
       await prefs.reload();
-      // The journal stays; a later mount retries.
     }
-  }
+  });
 
-  useEffect(() {
-    unawaited(sweepCleanup());
+  void restore() {
     final stored = prefs.getString(key);
     final source =
         pendingSources[key] ??
@@ -128,14 +180,28 @@ ComposerTranscription useComposerTranscription({
             : null);
     savedPath.value = source ?? stored;
     retained.value = source == null;
-    busy.value = false;
-    retaining.value = false;
-    discarding.value = false;
     error.value = savedPath.value == null
         ? null
         : retained.value
         ? 'Recording ready to transcribe.'
         : 'Recording not safely saved. Retry before closing the app.';
+  }
+
+  useEffect(() {
+    void changed() {
+      if (!pendingStop.value && !ownsStop.value && !busy.value) restore();
+    }
+
+    pendingStop.addListener(changed);
+    return () => pendingStop.removeListener(changed);
+  }, [scope, pendingStop]);
+
+  useEffect(() {
+    unawaited(sweepCleanup());
+    restore();
+    busy.value = false;
+    retaining.value = false;
+    discarding.value = false;
     return () {
       generation.value++;
       unawaited(cancelNative());
@@ -179,17 +245,13 @@ ComposerTranscription useComposerTranscription({
     }
   }
 
-  Future<void> clear(String path) async {
-    // remove() mutates the cache even when the platform write fails. Always
-    // attempt the durable removal; never use cache absence as proof of success.
-    final older = prefs.getString(cleanupKey);
-    if (older != null && older != path) await sweepCleanup();
+  Future<void> clear(String path) => cleanupTransaction(() async {
+    List<String> paths;
     try {
-      // Keep a cleanup journal until both pointer removal and file deletion
-      // succeed, including a process exit between those steps.
-      if (!await prefs.setString(cleanupKey, path)) {
-        throw StateError('Could not schedule recording cleanup.');
-      }
+      paths = cleanupPaths();
+      if (!paths.contains(path)) paths.add(path);
+      await saveCleanup(paths);
+      // Cache absence is not proof that pointer removal reached storage.
       if (!await prefs.remove(key)) {
         throw StateError('Could not clear the saved recording.');
       }
@@ -200,18 +262,13 @@ ComposerTranscription useComposerTranscription({
     pendingSources.remove(key);
     try {
       await files.delete(path);
+      paths.remove(path);
+      await saveCleanup(paths);
     } catch (_) {
-      // The journal is the durable retry record; a later mount sweeps it.
-      return;
-    }
-    // The pointer and file are gone; a leftover journal is swept on a later
-    // mount, so it must not hold the editor behind the panel.
-    try {
-      if (!await prefs.remove(cleanupKey)) await prefs.reload();
-    } catch (_) {
+      // The durable queue owns cleanup; keep the editor usable.
       await prefs.reload();
     }
-  }
+  });
 
   Future<void> transcribe([VoiceNoteRecording? recording]) async {
     // Stop may finish after the original editor was removed or changed scope.
@@ -385,7 +442,23 @@ ComposerTranscription useComposerTranscription({
             ),
           )
         : null,
-    (recording) => unawaited(transcribe(recording)),
+    (recording) => unawaited(() async {
+      try {
+        await transcribe(recording);
+      } finally {
+        pendingStop.value = false;
+        ownsStop.value = false;
+      }
+    }()),
     () => factory().isAvailable(),
+    () {
+      ownsStop.value = true;
+      pendingStop.value = true;
+    },
+    () {
+      pendingStop.value = false;
+      ownsStop.value = false;
+    },
+    pendingStop,
   );
 }
