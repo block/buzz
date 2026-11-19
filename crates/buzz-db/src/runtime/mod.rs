@@ -267,6 +267,9 @@ pub struct Db {
     /// Shared across clones; media authorization may use at most a quarter of
     /// the writer pool (capped at eight), leaving capacity for ordinary writes.
     pub(crate) media_authorization_slots: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Long-lived community snapshots leave writer capacity for fresh enqueue
+    /// authorization. Shared across clones; one-connection pools refuse snapshots.
+    pub(crate) community_artifact_snapshots: std::sync::Arc<tokio::sync::Semaphore>,
     /// Optional bounded post-commit producer, shared across handle clones.
     pub(crate) push_enqueue: Option<push_enqueue::PushEnqueue>,
     /// Maximum connections configured for this pool (from [`DbConfig::max_connections`]).
@@ -843,6 +846,12 @@ impl Db {
             .push_enabled
             .then(|| push_enqueue::PushEnqueue::new(&pool));
         Ok(Self {
+            community_artifact_snapshots: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                pool.options()
+                    .get_max_connections()
+                    .saturating_sub(1)
+                    .min(8) as usize,
+            )),
             media_authorization_slots: media_authorization_slots(&pool),
             push_enqueue,
             pool,
@@ -1390,6 +1399,12 @@ impl Db {
     /// that need push must use [`Db::new`] with `push_enabled` instead.
     pub fn from_pool(pool: PgPool) -> Self {
         Self {
+            community_artifact_snapshots: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                pool.options()
+                    .get_max_connections()
+                    .saturating_sub(1)
+                    .min(8) as usize,
+            )),
             media_authorization_slots: media_authorization_slots(&pool),
             push_enqueue: None,
             max_connections: pool.options().get_max_connections(),
@@ -1413,6 +1428,12 @@ impl Db {
     /// [`Db::fence`]).
     pub fn from_pools(pool: PgPool, read_pool: PgPool) -> Self {
         Self {
+            community_artifact_snapshots: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                pool.options()
+                    .get_max_connections()
+                    .saturating_sub(1)
+                    .min(8) as usize,
+            )),
             media_authorization_slots: media_authorization_slots(&pool),
             push_enqueue: None,
             max_connections: pool.options().get_max_connections(),

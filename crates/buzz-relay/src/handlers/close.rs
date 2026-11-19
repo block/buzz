@@ -259,6 +259,12 @@ pub(crate) async fn release_scope_topics(
     tenant: &TenantContext,
     scope: &SubscriptionScope,
 ) {
+    if scope.is_community_artifact() {
+        state
+            .pubsub
+            .release_topic(tenant, EventTopic::CommunityArtifact)
+            .await;
+    }
     if scope.is_global() {
         state.pubsub.release_topic(tenant, EventTopic::Global).await;
     }
