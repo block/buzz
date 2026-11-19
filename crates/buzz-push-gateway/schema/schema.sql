@@ -6,9 +6,8 @@
 -- binary applies at startup.
 -- `src/postgres/desired_schema_postgres_tests.rs` proves that, applied through
 -- `pgschema`, the two produce the same `public` tables, columns, table options,
--- constraints, and indexes. That is not full SchemaBot support: the inline FK
--- in `push_gateway_delegations.sql` must be revisited before SchemaBot adopts
--- this schema.
+-- constraints, and indexes. Like the migrated schema, it holds no foreign
+-- keys (docs/database.md Rule 2).
 --
 -- `tables/public/<table>.sql` declares one table per file: its CREATE TABLE
 -- and the CREATE INDEX statements on it, the one-table-per-file shape SchemaBot
@@ -25,8 +24,8 @@
 -- against the working directory instead, so run it from here:
 -- `cd crates/buzz-push-gateway/schema && psql -f schema.sql`.
 --
--- Adding a table: add `tables/public/<table>.sql` and include it below after
--- the tables it references. This file holds only `\i` lines. The layout
+-- Adding a table: add `tables/public/<table>.sql` and include it below.
+-- This file holds only `\i` lines. The layout
 -- test in `src/postgres/desired_schema_postgres_tests.rs` enforces both.
 
 \i tables/public/push_gateway_challenges.sql

@@ -1,8 +1,10 @@
 -- An installation's delegation to one relay signing key. Installations may
--- authorize multiple relay deployments, one row per relay key.
+-- authorize multiple relay deployments, one row per relay key. No foreign key
+-- to the installation (docs/database.md Rule 2): the gateway checks it in the
+-- writing transaction.
 CREATE TABLE push_gateway_delegations (
     id UUID PRIMARY KEY,
-    installation_id UUID NOT NULL REFERENCES push_gateway_installations(id),
+    installation_id UUID NOT NULL,
     relay_pubkey BYTEA NOT NULL CHECK (length(relay_pubkey) = 32),
     endpoint_epoch BIGINT NOT NULL CHECK (endpoint_epoch > 0),
     generation BIGINT NOT NULL CHECK (generation > 0),

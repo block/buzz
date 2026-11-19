@@ -1,4 +1,5 @@
--- App Attest-bound device installations and their encrypted APNs tokens.
+-- Attested device installations and their encrypted push tokens. platform
+-- names the push service (APNs or FCM) that delivers the installation's wakes.
 -- Revoked installations remain as retry tombstones until authority expiry, so
 -- ownership uniqueness covers live rows only: a replacement can enroll without
 -- deleting the old installation's idempotency state.
@@ -13,7 +14,8 @@ CREATE TABLE push_gateway_installations (
     expires_at TIMESTAMPTZ NOT NULL,
     revoked_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    platform TEXT NOT NULL DEFAULT 'ios' CHECK (platform IN ('ios', 'android'))
 );
 
 CREATE INDEX push_gateway_installations_expiry ON push_gateway_installations (expires_at) WHERE revoked_at IS NULL;
