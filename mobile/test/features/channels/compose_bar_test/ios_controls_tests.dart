@@ -12,6 +12,7 @@ class _TrayPickerService extends _FakeVoiceNoteUploadService {
 class _ComposerSpeechFiles extends ComposerTranscriptionFiles {
   int nextId = 0;
   bool rejectRetention = false;
+  bool rejectDeletion = false;
   int retainCalls = 0;
   Completer<void>? finishRetention;
   final deleted = <String>[];
@@ -24,7 +25,21 @@ class _ComposerSpeechFiles extends ComposerTranscriptionFiles {
   }
 
   @override
-  Future<void> delete(String path) async => deleted.add(path);
+  Future<void> delete(String path) async {
+    if (rejectDeletion && path.endsWith('.saved')) {
+      throw StateError('Delete failed');
+    }
+    deleted.add(path);
+  }
+}
+
+class _DeferredStopDictationRecorder extends _FakeVoiceNoteRecorder {
+  final finishStop = Completer<void>();
+  @override
+  Future<VoiceNoteRecording> stop() async {
+    await finishStop.future;
+    return super.stop();
+  }
 }
 
 class _ComposerSpeechPrefs extends Fake implements SharedPreferences {
@@ -632,6 +647,121 @@ void iosControlsTests() {
       expect(files.deleted, contains(audio));
       await prefs.reload();
       expect(prefs.getString(key), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
+
+  testWidgets('stopped dictation survives route cover and editor disposal', (
+    tester,
+  ) async {
+    final identity = RelayConfig(
+      baseUrl: 'http://localhost:3000',
+      nsec: nostr.Keys.generate().nsec,
+    );
+    final speech = _ComposerSpeech();
+    final files = _ComposerSpeechFiles();
+    final recorder = _DeferredStopDictationRecorder();
+    Widget composer() => _buildComposeBar(
+      relayConfig: () => _SwitchableRelayConfigNotifier(identity),
+      uploadService: _FakeVoiceNoteUploadService(),
+      onSend: (_, _, {mediaTags = const []}) async {},
+      voiceNoteRecorderFactory: () => recorder,
+      overrides: [
+        composerTranscriptionFilesProvider.overrideWithValue(files),
+        deviceTranscriptionProvider.overrideWithValue(() => speech),
+      ],
+    );
+    await tester.pumpWidget(composer());
+    await tester.pumpAndSettle();
+    await _tapComposerControl(tester, 'Dictate');
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Stop recording'));
+    await tester.pump();
+    final navigator = Navigator.of(tester.element(find.byType(ComposeBar)));
+    unawaited(
+      navigator.push(
+        MaterialPageRoute<void>(
+          builder: (_) => const Scaffold(body: Text('Covered')),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpAndSettle();
+    recorder.finishStop.complete();
+    await tester.pumpAndSettle();
+    expect(files.retainCalls, 1);
+    expect(speech.started.isCompleted, isFalse);
+    await _testPrefs.reload();
+    await tester.pumpWidget(composer());
+    await tester.pumpAndSettle();
+    expect(find.text('Retry'), findsOneWidget);
+    await tester.tap(find.text('Retry'));
+    await tester.pump();
+    speech.result.complete('Saved after leaving.');
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      'Saved after leaving.',
+    );
+    await tester.pumpWidget(const SizedBox.shrink());
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+  testWidgets(
+    'failed audio deletion survives restart and retries only cleanup',
+    (tester) async {
+      final identity = RelayConfig(
+        baseUrl: 'http://localhost:3000',
+        nsec: nostr.Keys.generate().nsec,
+      );
+      final speech = _ComposerSpeech();
+      final files = _ComposerSpeechFiles()..rejectDeletion = true;
+      Widget composer() => _buildComposeBar(
+        relayConfig: () => _SwitchableRelayConfigNotifier(identity),
+        uploadService: _FakeVoiceNoteUploadService(),
+        onSend: (_, _, {mediaTags = const []}) async {},
+        voiceNoteRecorderFactory: _FakeVoiceNoteRecorder.new,
+        overrides: [
+          composerTranscriptionFilesProvider.overrideWithValue(files),
+          deviceTranscriptionProvider.overrideWithValue(() => speech),
+        ],
+      );
+      await tester.pumpWidget(composer());
+      await tester.pumpAndSettle();
+      await _tapComposerControl(tester, 'Dictate');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Stop recording'));
+      await tester.pump();
+      speech.result.complete('Text is already saved.');
+      await tester.pumpAndSettle();
+      final cleanupKey = _testPrefs.getKeys().singleWhere(
+        (key) => key.startsWith('composer_transcription_cleanup:'),
+      );
+      final audio = _testPrefs.getString(cleanupKey)!;
+      expect(files.deleted, isNot(contains(audio)));
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+      await _testPrefs.reload();
+      speech.reset();
+      await tester.pumpWidget(composer());
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Retry'));
+      await tester.pumpAndSettle();
+      expect(speech.started.isCompleted, isFalse);
+      expect(_testPrefs.getString(cleanupKey), audio);
+      files.rejectDeletion = false;
+      await tester.tap(find.text('Retry'));
+      await tester.pumpAndSettle();
+      expect(files.deleted, contains(audio));
+      await _testPrefs.reload();
+      expect(_testPrefs.getString(cleanupKey), isNull);
+      expect(
+        ProviderScope.containerOf(
+          tester.element(find.byType(ComposeBar)),
+        ).read(composeDraftsProvider.notifier).textFor('channel-1'),
+        'Text is already saved.',
+      );
       await tester.pumpWidget(const SizedBox.shrink());
     },
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),

@@ -70,6 +70,7 @@ ComposerTranscription useComposerTranscription({
 }) {
   final prefs = ref.read(savedPrefsProvider);
   final key = 'composer_transcription:$scope';
+  final cleanupKey = 'composer_transcription_cleanup:$scope';
   final savedPath = useState<String?>(null);
   final busy = useState(false);
   final retaining = useState(false);
@@ -102,13 +103,15 @@ ComposerTranscription useComposerTranscription({
         (stored?.startsWith(_pendingSourcePrefix) == true
             ? stored!.substring(_pendingSourcePrefix.length)
             : null);
-    savedPath.value = source ?? stored;
+    savedPath.value = source ?? stored ?? prefs.getString(cleanupKey);
     retained.value = source == null;
     busy.value = false;
     retaining.value = false;
     discarding.value = false;
     error.value = savedPath.value == null
         ? null
+        : prefs.getString(cleanupKey) != null
+        ? 'Recording cleanup pending.'
         : retained.value
         ? 'Recording ready to transcribe.'
         : 'Recording not safely saved. Retry before closing the app.';
@@ -121,10 +124,49 @@ ComposerTranscription useComposerTranscription({
   bool current(int ticket) =>
       context.mounted && owner.value == scope && generation.value == ticket;
 
+  Future<String> retainSource(String source) async {
+    // A previous mount may have completed retention since this hook read
+    // the source journal. Adopt its copy instead of copying deleted audio.
+    final stored = prefs.getString(key);
+    if (stored != null && !stored.startsWith(_pendingSourcePrefix)) {
+      return stored;
+    }
+    pendingSources[key] = source;
+    try {
+      if (!await prefs.setString(key, '$_pendingSourcePrefix$source')) {
+        throw StateError('Could not save the recording.');
+      }
+      final copy = await files.retain(source);
+      try {
+        if (!await prefs.setString(key, copy)) {
+          throw StateError('Could not save the recording.');
+        }
+      } catch (_) {
+        await files.delete(copy);
+        rethrow;
+      }
+      pendingSources.remove(key);
+      try {
+        await files.delete(source);
+      } catch (_) {
+        /* The retained copy owns recovery. */
+      }
+      return copy;
+    } catch (_) {
+      await prefs.reload();
+      rethrow;
+    }
+  }
+
   Future<void> clear(String path) async {
     // remove() mutates the cache even when the platform write fails. Always
     // attempt the durable removal; never use cache absence as proof of success.
     try {
+      // Keep a cleanup journal until both pointer removal and file deletion
+      // succeed, including a process exit between those steps.
+      if (!await prefs.setString(cleanupKey, path)) {
+        throw StateError('Could not schedule recording cleanup.');
+      }
       if (!await prefs.remove(key)) {
         throw StateError('Could not clear the saved recording.');
       }
@@ -136,11 +178,41 @@ ComposerTranscription useComposerTranscription({
     try {
       await files.delete(path);
     } catch (_) {
-      // The draft owns the text now; a failed local file cleanup cannot reinsert it.
+      throw StateError(
+        'Could not remove the recording. Retry to finish cleanup.',
+      );
+    }
+    try {
+      if (!await prefs.remove(cleanupKey)) {
+        throw StateError('Could not finish recording cleanup.');
+      }
+    } catch (_) {
+      await prefs.reload();
+      rethrow;
     }
   }
 
   Future<void> transcribe([VoiceNoteRecording? recording]) async {
+    // Stop may finish after the original editor was removed or changed scope.
+    // Its captured storage dependencies still own recovery; no UI/ref access.
+    if (recording != null && (!context.mounted || owner.value != scope)) {
+      final source = recording.file.path;
+      pendingSources[key] = source;
+      final operation = retentionOperations.putIfAbsent(
+        key,
+        () => retainSource(source),
+      );
+      try {
+        await operation;
+      } catch (_) {
+        // The source journal (or session fallback) keeps this retryable.
+      } finally {
+        if (identical(retentionOperations[key], operation)) {
+          retentionOperations.remove(key);
+        }
+      }
+      return;
+    }
     if (busy.value) return;
     final ticket = ++generation.value;
     busy.value = true;
@@ -154,41 +226,13 @@ ComposerTranscription useComposerTranscription({
         pendingSources[key] = path;
       }
       if (path == null || !current(ticket)) return;
+      if (prefs.getString(cleanupKey) == path) {
+        await clear(path);
+        if (current(ticket)) savedPath.value = null;
+        return;
+      }
       if (!retained.value) {
         retaining.value = true;
-        Future<String> retainSource(String source) async {
-          // A previous mount may have completed retention since this hook read
-          // the source journal. Adopt its copy instead of copying deleted audio.
-          final stored = prefs.getString(key);
-          if (stored != null && !stored.startsWith(_pendingSourcePrefix)) {
-            return stored;
-          }
-          pendingSources[key] = source;
-          try {
-            if (!await prefs.setString(key, '$_pendingSourcePrefix$source')) {
-              throw StateError('Could not save the recording.');
-            }
-            final copy = await files.retain(source);
-            try {
-              if (!await prefs.setString(key, copy)) {
-                throw StateError('Could not save the recording.');
-              }
-            } catch (_) {
-              await files.delete(copy);
-              rethrow;
-            }
-            pendingSources.remove(key);
-            try {
-              await files.delete(source);
-            } catch (_) {
-              /* The retained copy owns recovery. */
-            }
-            return copy;
-          } catch (_) {
-            await prefs.reload();
-            rethrow;
-          }
-        }
 
         final operation = retentionOperations.putIfAbsent(
           key,

@@ -91,7 +91,8 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
       unawaited(HapticFeedback.mediumImpact());
       try {
         final recording = await recorder.stop();
-        if (context.mounted) {
+        if (context.mounted || isDictation) {
+          // Dictation completion owns recovery independently of this recorder.
           onRecorded(recording);
         } else {
           await deleteDroppedVoiceNoteRecording(recording.file.path);

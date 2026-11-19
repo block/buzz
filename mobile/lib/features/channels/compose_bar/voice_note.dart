@@ -67,6 +67,7 @@ _ComposerVoiceNote _useComposerVoiceNote({
   required ObjectRef<int> draftRevision,
   required ValueNotifier<List<_PendingAttachment>> attachments,
 }) {
+  final owner = useRef(scope)..value = scope;
   final isPreparing = useState(false);
   final isRecording = useState(false);
   final dictating = useState(false);
@@ -162,11 +163,6 @@ _ComposerVoiceNote _useComposerVoiceNote({
   }
 
   void complete(VoiceNoteRecording recording) {
-    if (dictating.value) {
-      transcript.complete(recording);
-      isRecording.value = false;
-      return;
-    }
     draftRevision.value += 1;
     uploadError.value = null;
     attachments.value = [
@@ -192,6 +188,13 @@ _ComposerVoiceNote _useComposerVoiceNote({
     insertedTranscriptionId: insertedTranscriptionId,
     isPreparing: isPreparing,
     isRecording: isRecording,
-    onRecorded: complete,
+    onRecorded: dictating.value
+        ? (recording) {
+            transcript.complete(recording);
+            if (context.mounted && owner.value == scope) {
+              isRecording.value = false;
+            }
+          }
+        : complete,
   );
 }
