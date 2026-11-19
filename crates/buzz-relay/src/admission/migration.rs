@@ -1,5 +1,6 @@
 //! A deployment-wide budget for signed events labeled as migration writes.
 
+use buzz_core::kind::{event_kind_u32, KIND_NIP29_CREATE_GROUP, KIND_NIP29_PUT_USER};
 use buzz_pubsub::RedisConnection;
 use nostr::Event;
 use redis::{RedisResult, Script};
@@ -52,20 +53,22 @@ redis.call('HSET', KEYS[1], 'last_admitted_us', string.format('%.0f', now),
 return 0
 "#;
 
+/// A verified, authorized migration write that cannot proceed.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Refusal {
+pub enum Refusal {
+    /// The shared budget is exhausted. The value is the retry delay in seconds.
     Throttled(u64),
+    /// Operators have set the limit to zero.
     Paused,
+    /// The relay cannot check the shared budget.
     Unavailable,
-    InvalidEvent(String),
 }
 
 impl Refusal {
-    pub(crate) fn retry_after(&self) -> Option<u64> {
+    pub(crate) fn retry_after(&self) -> u64 {
         match self {
-            Self::Throttled(seconds) => Some(*seconds),
-            Self::Paused | Self::Unavailable => Some(RETRY_AFTER_SECS),
-            Self::InvalidEvent(_) => None,
+            Self::Throttled(seconds) => *seconds,
+            Self::Paused | Self::Unavailable => RETRY_AFTER_SECS,
         }
     }
 
@@ -74,7 +77,6 @@ impl Refusal {
             Self::Throttled(_) => "quota",
             Self::Paused => "paused",
             Self::Unavailable => "unavailable",
-            Self::InvalidEvent(_) => "invalid",
         }
     }
 
@@ -84,7 +86,6 @@ impl Refusal {
             Self::Throttled(seconds) => quota_message(*seconds),
             Self::Paused => quota_message(RETRY_AFTER_SECS),
             Self::Unavailable => "rate-limited: shared admission unavailable".to_owned(),
-            Self::InvalidEvent(reason) => format!("invalid: {reason}"),
         }
     }
 }
@@ -125,35 +126,28 @@ pub(crate) async fn set_limit(redis: &RedisConnection, events_per_minute: u32) -
         .await
 }
 
-fn is_labeled(event: &Event) -> bool {
+pub(crate) fn is_labeled(event: &Event) -> bool {
     event.tags.iter().any(
         |tag| matches!(tag.as_slice(), [name, source] if name == "migration" && !source.is_empty()),
     )
 }
 
-pub(crate) async fn check_event(
+pub(crate) fn validate_kind(event: &Event) -> Result<(), &'static str> {
+    if matches!(
+        event_kind_u32(event),
+        KIND_NIP29_CREATE_GROUP | KIND_NIP29_PUT_USER
+    ) || !is_labeled(event)
+    {
+        Ok(())
+    } else {
+        Err("invalid: migration tags require a channel create or membership add")
+    }
+}
+
+pub(crate) async fn admit_authorized_write(
     redis: &RedisConnection,
-    event: &Event,
     transport: &'static str,
 ) -> Result<(), Refusal> {
-    if !is_labeled(event) {
-        return Ok(());
-    }
-
-    // Verify the signed label before spending the fleet-wide permit. Accepted
-    // events still take the regular validation and authorization path.
-    let candidate = event.clone();
-    match tokio::task::spawn_blocking(move || buzz_core::verification::verify_event(&candidate))
-        .await
-    {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => return Err(Refusal::InvalidEvent(error.to_string())),
-        Err(error) => {
-            tracing::error!(%error, "migration event verification task failed");
-            return Err(Refusal::Unavailable);
-        }
-    }
-
     let result = Script::new(ADMIT_SCRIPT)
         .key(KEY)
         .arg(DEFAULT_EVENTS_PER_MINUTE)

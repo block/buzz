@@ -436,6 +436,10 @@ pub fn sanitized_reason_for(err: &crate::handlers::ingest::IngestError) -> Sanit
         E::CanvasConflict(_) => SanitizedReason::Invalid,
         E::AuthFailed(_) => SanitizedReason::Restricted,
         E::Internal(_) => SanitizedReason::ServerError,
+        E::Migration(crate::admission::migration::Refusal::Unavailable) => {
+            SanitizedReason::ServerError
+        }
+        E::Migration(_) => SanitizedReason::Restricted,
         // A ban refusal is sanitized as the error every transport sees.
         E::Ban { legacy, .. } => sanitized_reason_for(legacy),
     }

@@ -496,6 +496,8 @@ pub enum IngestError {
     AuthFailed(String),
     /// Server error — WS: OK false, HTTP: 500.
     Internal(String),
+    /// Shared migration admission refusal. HTTP returns 429 or 503 with Retry-After.
+    Migration(crate::admission::migration::Refusal),
     /// A durable community-ban refusal, or the failed lookup that decides
     /// one. This is an admission refusal, so HTTP answers a verified agent
     /// token with NIP-FI's fixed denial. WS and token-less HTTP get `legacy`
@@ -3390,6 +3392,18 @@ async fn ingest_event_inner(
                 _ => {} // open — OK
             }
         }
+    }
+
+    // Labeled writes reach here only for channel creation and membership adds.
+    // Both have completed their write checks. Charge the shared budget before
+    // any persistence, roster rebuild, or fan-out.
+    if matches!(kind_u32, KIND_NIP29_CREATE_GROUP | KIND_NIP29_PUT_USER)
+        && crate::admission::migration::is_labeled(&event)
+    {
+        let transport = if auth.is_http() { "http" } else { "websocket" };
+        crate::admission::migration::admit_authorized_write(&state.redis_pool, transport)
+            .await
+            .map_err(IngestError::Migration)?;
     }
 
     if kind_u32 == super::push_lease::KIND_PUSH_LEASE {

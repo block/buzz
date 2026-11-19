@@ -6,7 +6,7 @@ use axum::{
     Router,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
-use buzz_core::kind::{KIND_NIP29_CREATE_GROUP, KIND_NIP29_PUT_USER};
+use buzz_core::kind::{KIND_NIP29_CREATE_GROUP, KIND_NIP29_PUT_USER, KIND_TYPING_INDICATOR};
 use futures_util::{SinkExt, StreamExt};
 use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, Tag};
 use serde_json::{json, Value};
@@ -212,6 +212,7 @@ async fn migration_write_limit_controls_http_and_ws_across_relay_instances() {
     let moderator = Keys::generate();
     let owner_a = Keys::generate();
     let owner_b = Keys::generate();
+    let channel_member = Keys::generate();
     let mut config = Config::for_test();
     config.require_auth_token = false;
     config.require_relay_membership = false;
@@ -247,7 +248,13 @@ async fn migration_write_limit_controls_http_and_ws_across_relay_instances() {
     let tenant_a = community(&state_a, "migration-a").await;
     let tenant_b = community(&state_b, "migration-b").await;
     let channel_a = Uuid::new_v4();
-    let channel_b = create_channel(&state_b, &tenant_b, &owner_b, &[]).await;
+    let channel_b = create_channel(
+        &state_b,
+        &tenant_b,
+        &owner_b,
+        &[&["p", &channel_member.public_key().to_hex()]],
+    )
+    .await;
     let app_a = super::build_router(Arc::clone(&state_a));
     let app_b = super::build_router(Arc::clone(&state_b));
     let (mut socket, server) = start_ws(app_b.clone(), tenant_b.host(), &owner_b).await;
@@ -310,6 +317,47 @@ async fn migration_write_limit_controls_http_and_ws_across_relay_instances() {
     assert_eq!(
         admin(&app_a, Method::PUT, Some(&operator), Some(1)).await.0,
         StatusCode::OK
+    );
+
+    // A member passes channel membership but cannot grant ownership. Neither
+    // ingress may charge this rejected write against the two available permits.
+    let denied_add = EventBuilder::new(Kind::Custom(KIND_NIP29_PUT_USER as u16), "")
+        .tags([
+            Tag::parse(["h", &channel_b.to_string()]).unwrap(),
+            Tag::parse(["p", &Keys::generate().public_key().to_hex(), "owner"]).unwrap(),
+            Tag::parse(["migration", "example-import"]).unwrap(),
+        ])
+        .sign_with_keys(&channel_member)
+        .unwrap();
+    let (status, _, body) =
+        add_over_http(&app_b, tenant_b.host(), &channel_member, &denied_add).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (mut member_socket, member_server) =
+        start_ws(app_b.clone(), tenant_b.host(), &channel_member).await;
+    let denied = send_event(&mut member_socket, "EVENT", &denied_add).await;
+    assert_eq!(denied[2], false);
+    assert_eq!(denied[3], body["error"]);
+    assert!(denied[3].as_str().unwrap().contains("owners"));
+    drop(member_socket);
+    member_server.abort();
+
+    // The HTTP typing bridge and WebSocket ephemeral path bypass ingest.
+    // They must refuse a labeled write outside the supported migration kinds.
+    let labeled_typing = EventBuilder::new(Kind::Custom(KIND_TYPING_INDICATOR as u16), "")
+        .tags([
+            Tag::parse(["h", &channel_b.to_string()]).unwrap(),
+            Tag::parse(["migration", "example-import"]).unwrap(),
+        ])
+        .sign_with_keys(&owner_b)
+        .unwrap();
+    let (status, _, body) = add_over_http(&app_b, tenant_b.host(), &owner_b, &labeled_typing).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let denied = send_event(&mut socket, "EVENT", &labeled_typing).await;
+    assert_eq!(denied[2], false);
+    assert_eq!(denied[3], body["error"]);
+    assert_eq!(
+        denied[3],
+        "invalid: migration tags require a channel create or membership add"
     );
 
     // The importer sends the create and first batch back-to-back. A one-event

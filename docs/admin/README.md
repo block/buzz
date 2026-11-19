@@ -242,15 +242,15 @@ NIP-98 payload tag.
 The limit is a whole number from 0 to 60,000 signed events per minute. It
 defaults to 12, which refills one permit every five seconds. Idle time can
 accumulate at most two permits. This lets an importer create a channel and send
-its first membership batch back-to-back. Each eligible, correctly signed
-attempt uses one permit, even if later validation rejects it. A batch of
-membership changes in one kind 9000 event uses one permit. The relay queues
-no writes.
+its first membership batch back-to-back. The relay checks the signature and
+write authorization before taking a permit. A channel create or a batch of
+membership changes uses one permit. The relay queues no writes.
 
 Importers label every event they send with a signed tag of the form
-`["migration","example-import"]`. Any exact two-element `migration` tag
-with a nonempty source label uses the same budget. This includes channel
-creation and each membership batch. WebSocket `EVENT` and HTTP
+`["migration","example-import"]`. Channel creation (kind 9007) and each
+membership batch (kind 9000) with this exact two-element tag and a nonempty
+source label share the budget. The relay rejects the tag on other event kinds.
+WebSocket `EVENT` and HTTP
 `POST /events` share the budget across communities, channels, senders,
 and relay replicas. The tag classifies workload. Usual signature,
 membership, and scope rules still apply. Unsigned API bodies, relay-generated

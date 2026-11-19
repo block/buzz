@@ -764,14 +764,9 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         return;
     }
 
-    if let Err(refusal) =
-        crate::admission::migration::check_event(&state.redis_pool, &event, "websocket").await
-    {
-        reject(match refusal {
-            crate::admission::migration::Refusal::InvalidEvent(_) => "invalid",
-            _ => "rate-limited",
-        });
-        write.ok(&conn, &event_id_hex, false, &refusal.message());
+    if let Err(message) = crate::admission::migration::validate_kind(&event) {
+        reject("invalid");
+        write.ok(&conn, &event_id_hex, false, message);
         return;
     }
 
@@ -788,7 +783,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         {
             let (message, reason) = match e.into_legacy() {
                 // `into_legacy` never returns `Ban`; it would fail closed here.
-                IngestError::Internal(_) | IngestError::Ban { .. } => (
+                IngestError::Internal(_) | IngestError::Migration(_) | IngestError::Ban { .. } => (
                     "error: internal error checking restriction state".to_string(),
                     "error",
                 ),
@@ -929,6 +924,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                     IngestError::CanvasConflict(message) => (message, "invalid"),
                     IngestError::AuthFailed(message) => (message, "auth"),
                     IngestError::Internal(message) => (message, "error"),
+                    IngestError::Migration(refusal) => (refusal.message(), "rate-limited"),
                     // `into_legacy` never returns `Ban`; it would fail closed here.
                     IngestError::Ban { .. } => {
                         ("error: internal server error".to_string(), "error")
@@ -1001,6 +997,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                 IngestError::Rejected(m) => (m.clone(), "invalid"),
                 IngestError::CanvasConflict(m) => (m.clone(), "invalid"),
                 IngestError::AuthFailed(m) => (m.clone(), "auth"),
+                IngestError::Migration(refusal) => (refusal.message(), "rate-limited"),
                 // `into_legacy` never returns `Ban`; it would fail closed here.
                 IngestError::Internal(_) | IngestError::Ban { .. } => {
                     ("error: internal server error".to_string(), "error")

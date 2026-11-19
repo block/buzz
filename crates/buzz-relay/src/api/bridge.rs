@@ -1470,16 +1470,10 @@ async fn submit_event_authed(
         };
     }
 
-    // Mismatched signers still take the normal rejection path and cannot
-    // spend the migration budget.
-    if event.pubkey == pubkey {
-        if let Err(refusal) =
-            crate::admission::migration::check_event(&state.redis_pool, &event, "http").await
-        {
-            return SubmitOutcome::Err {
-                response: migration_refusal_response(refusal),
-            };
-        }
+    if let Err(message) = crate::admission::migration::validate_kind(&event) {
+        return SubmitOutcome::Err {
+            response: api_error(StatusCode::BAD_REQUEST, message).into_response(),
+        };
     }
 
     let auth = IngestAuth::Http {
@@ -1577,6 +1571,9 @@ async fn submit_event_authed(
                 response: e.into_response(),
             }
         }
+        Err(IngestError::Migration(refusal)) => SubmitOutcome::Err {
+            response: migration_refusal_response(refusal),
+        },
         // `into_legacy` never returns `Ban`; it would fail closed here.
         Err(IngestError::Ban { .. }) => {
             crate::handlers::ingest::reject_with_transport("http", "error");
@@ -1607,15 +1604,14 @@ fn migration_refusal_response(refusal: crate::admission::migration::Refusal) -> 
             Json(serde_json::json!({"error": message, "sent": false})),
         )
             .into_response(),
-        Refusal::InvalidEvent(_) => api_error(StatusCode::BAD_REQUEST, &message).into_response(),
-        _ => api_error(StatusCode::TOO_MANY_REQUESTS, &message).into_response(),
+        Refusal::Throttled(_) | Refusal::Paused => {
+            api_error(StatusCode::TOO_MANY_REQUESTS, &message).into_response()
+        }
     };
-    if let Some(seconds) = refusal.retry_after() {
-        response.headers_mut().insert(
-            axum::http::header::RETRY_AFTER,
-            axum::http::HeaderValue::from(seconds),
-        );
-    }
+    response.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        axum::http::HeaderValue::from(refusal.retry_after()),
+    );
     response
 }
 
