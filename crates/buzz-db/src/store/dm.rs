@@ -1150,7 +1150,8 @@ pub async fn unhide_dm(
 /// has it hidden. A hide takes the lock exclusively, so it commits before
 /// this read or after the message, never in between; messages do not wait on
 /// each other. A removal takes the lock before its thread-counter writes and
-/// a reopen before the channel row, so the message takes it before both.
+/// a channel settings write before the channel row, so the message takes it
+/// before both.
 pub async fn lock_dm_for_unhide(
     tx: &mut AdmittedTx,
     channel_id: Uuid,
