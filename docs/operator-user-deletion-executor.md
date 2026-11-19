@@ -288,9 +288,43 @@ placeholder failures and branching only. Demo media success is synthetic; real r
 An injected community failure preserves the same retry semantics as before.
 Ctrl-C releases the worker lease; after an abrupt kill wait for lease expiry.
 
+## Shared agent discovery
+
+Media, content, account, and profile cleanup use the same discovery utility in
+`buzz-db/src/store/user_deletion/agent_ownership.rs`, including account scope
+capture. It normalizes the human key, reads current direct ownership from
+`users`, and retains `(community_id, agent_pubkey)` pairs. It does not infer
+ownership from membership, recurse through agents, or exclude deactivated
+profiles. A missing profile grants no agent cleanup authority.
+
+Every invocation and retry discovers again. Content, account, and profile
+handlers use the utility inside their existing batch transactions with row
+locks when rechecking ownership. Profile cleanup compares against the identities
+that remain after its own committed batches. Media discovers once per invocation
+and uses that snapshot through inventory and deletion. Writers must remain
+stopped throughout the operation.
+
+Discovery preserves each caller's existing limits: media, content and profile
+allow 10,000 distinct identities including the human; account discovery allows
+10,000 agents. Account scope capture retains its existing total-key bound.
+Media retains every owned community for each selected agent. Ownership profiles must
+remain until all dependent cleanup completes; profile removal goes last.
+
+Media has no separate cap on `(community_id, agent_pubkey)` pairs. One agent can
+contribute a pair for every community where the human owns it, so the identity
+limit does not bound the pair count. These pairs are retained in memory, including
+the storage-matching hash set, and the full pair arrays are sent with each media
+candidate-page query. They are outside the inventory budget described below;
+memory use and query payload size grow with the number of owned agent profiles.
+
 ## Media discovery and remaining limits
 
-The target set is the human and directly owned agents across communities.
+Every invocation and retry fetches the human's current directly owned agents
+from `users`, retaining each `(community_id, agent_pubkey)` pair. The human's
+own uploads are global targets; an agent's uploads are targets only in communities
+where that human currently owns it. A missing profile or a different owner in
+another community does not authorize cleanup there. Ownership rows must remain
+until media and other dependent handlers finish.
 Candidate hashes come from `media_uploaders`, `media_uploaded` audit entries,
 and storage upload claims. A bounded database query combines candidate discovery
 with outside-uploader classification. Storage-only candidates receive the same
@@ -299,7 +333,9 @@ history filter: relay membership rows can be deleted on departure.
 
 Sharing checks span all communities for the selected hashes. Any outside
 uploader in either database source or an upload-record version protects the
-file. No per-file owner-list query is made.
+file, including the same agent's uploads in an unowned community. No per-file
+owner-list query is made. The report retains its deduplicated `target_pubkeys`;
+community ownership is used internally for every media decision.
 
 Storage discovery scans `_uploads/` for target claims, then reads candidate
 claims in a second `_uploads/` listing to protect outside claims encountered

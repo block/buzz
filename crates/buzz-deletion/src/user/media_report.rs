@@ -1,5 +1,5 @@
 //! One JSON document, streamed from bounded inventory pages even for large files.
-use super::{Database, Inventory, Storage};
+use super::{Database, Inventory, Storage, UserDeletionTargets};
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::io::Write;
@@ -7,7 +7,7 @@ use std::io::Write;
 pub(super) async fn execute(
     db: &impl Database,
     media: &impl Storage,
-    pubkeys: &[String],
+    pubkeys: &UserDeletionTargets,
     delete: bool,
     inventory: &mut Inventory,
     output: &mut impl Write,
@@ -17,7 +17,7 @@ pub(super) async fn execute(
         output,
         "{{\n  \"mode\": \"{mode}\",\n  \"target_pubkeys\": "
     )?;
-    serde_json::to_writer(&mut *output, pubkeys)?;
+    serde_json::to_writer(&mut *output, &pubkeys.pubkeys())?;
     write!(output, ",\n  \"files\": [")?;
     let (mut selected, mut kept, mut deleted_versions) = (0usize, 0usize, 0usize);
     let mut after = String::new();

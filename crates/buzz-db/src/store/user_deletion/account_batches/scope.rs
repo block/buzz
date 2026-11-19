@@ -3,7 +3,7 @@ use super::*;
 use serde::Deserialize;
 use std::collections::BTreeSet;
 
-const MAX_TARGETS: usize = 10_000;
+use super::super::agent_ownership::{self, MAX_TARGETS};
 
 /// Saved account cleanup inputs. Agent keys are a discovery snapshot only;
 /// each handler fetches current ownership. Keep ownership rows until cleanup ends.
@@ -87,12 +87,15 @@ impl UserDeletionStore {
         if communities.len() > super::super::MAX_COMMUNITIES {
             return Err(invalid("account scope exceeds community limit"));
         }
-        let agents: Vec<(Uuid, String)> = sqlx::query_as(
-            "SELECT community_id,encode(pubkey,'hex') FROM users WHERE agent_owner_pubkey=decode($1,'hex') AND pubkey<>decode($1,'hex') ORDER BY community_id,pubkey LIMIT $2")
-            .bind(&target).bind((MAX_TARGETS + 1) as i64).fetch_all(&mut *tx).await?;
-        if agents.len() > MAX_TARGETS {
-            return Err(invalid("account scope exceeds target limit"));
-        }
+        let agents = agent_ownership::discover(
+            &mut tx,
+            &target,
+            None,
+            false,
+            agent_ownership::DiscoveryLimit::AgentRows,
+        )
+        .await?
+        .agents;
         let scope = AccountScope {
             version: 1,
             target: target.clone(),

@@ -442,7 +442,7 @@ async fn target_discovery_handles_no_agents_and_rejects_overflow_without_output(
             .run_message_batches(&options, mode, None, &mut output)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("target key limit"));
+        assert!(error.to_string().contains("ownership exceeds target limit"));
         assert!(output.is_empty());
     }
     assert_eq!(snapshot_rows(&pool, community, "users").await.len(), 10001);
