@@ -57,6 +57,7 @@ import 'channel_management_provider.dart';
 import 'channels_provider.dart';
 import 'timeline_message.dart';
 import '../../shared/emoji/emoji_picker.dart';
+import 'message_content/markdown_link_mentions.dart';
 import 'mentions/mention_candidates.dart';
 import 'mentions/mention_candidates_provider.dart';
 import 'mentions/mention_ranking.dart';

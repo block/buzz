@@ -102,11 +102,11 @@ class _MarkdownEditingController extends TextEditingController {
       if (_history.isEmpty) _recordHistory(value.text);
       if (_historyDirection == 0) {
         _carryMentions(value, newValue);
-        _mentions = _outsideCode(text, _mentions);
+        _mentions = _inProse(text, _mentions);
         _recordHistory(text);
       } else if (!_restoreHistory(text)) {
         _carryMentions(value, newValue);
-        _mentions = _outsideCode(text, _mentions);
+        _mentions = _inProse(text, _mentions);
       }
     }
     super.value = _snapSelectionToChips(newValue);
@@ -173,22 +173,35 @@ class _MarkdownEditingController extends TextEditingController {
     ]);
   }
 
-  /// The [mentions] outside the code spans and blocks drawn in [text]. Code
-  /// is literal text: a name inside it draws no chip and notifies nobody, so
-  /// a binding that lands in code is dropped, whether the Code button
-  /// wrapped a chip, backticks were typed around it or a saved draft held
-  /// it. Taking the code away again leaves a typed name. Text without a
-  /// backtick holds no code and costs one search for it.
-  List<_ComposerMention> _outsideCode(
+  /// The [mentions] that sit in the prose of [text]: outside the code spans
+  /// and blocks drawn in it, and outside every Markdown link, image and URL
+  /// ([mentionsInsideMarkdownLinks]). Code and link text are literal: a name
+  /// there draws no pill in the bubble and notifies nobody, so a binding
+  /// that lands there is dropped, whether a command wrapped a chip, the
+  /// syntax was typed around it, a pick was made inside it or a saved draft
+  /// or edited message held it. Taking the syntax away again leaves a typed
+  /// name. Text without a backtick, a `]` or a `://` costs three searches.
+  List<_ComposerMention> _inProse(
     String text,
     List<_ComposerMention> mentions,
   ) {
-    if (mentions.isEmpty || !text.contains('`')) return mentions;
-    final code = _styledCodeRanges(text);
+    if (mentions.isEmpty) return mentions;
+    var kept = mentions;
+    if (text.contains('`')) {
+      final code = _styledCodeRanges(text);
+      kept = [
+        for (final mention in mentions)
+          if (!code.any((c) => c.start < mention.start && mention.end < c.end))
+            mention,
+      ];
+    }
+    final linked = mentionsInsideMarkdownLinks(text, [
+      for (final mention in kept) mention.range,
+    ]);
+    if (linked.isEmpty && identical(kept, mentions)) return mentions;
     return List.unmodifiable([
-      for (final mention in mentions)
-        if (!code.any((c) => c.start < mention.start && mention.end < c.end))
-          mention,
+      for (var i = 0; i < kept.length; i++)
+        if (!linked.contains(i)) kept[i],
     ]);
   }
 
@@ -202,7 +215,7 @@ class _MarkdownEditingController extends TextEditingController {
     bool mentionsInvalid = false,
   }) {
     if (_history.isEmpty) _recordHistory(value.text);
-    _mentions = _outsideCode(
+    _mentions = _inProse(
       newValue.text,
       List.unmodifiable(
         mentions.toList()..sort((a, b) => a.start.compareTo(b.start)),

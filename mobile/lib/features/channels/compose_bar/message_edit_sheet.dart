@@ -8,7 +8,9 @@ part of '../compose_bar.dart';
 /// tag. Each chip is saved in the body as an identity link to its exact key
 /// (`[@Name](nostr:npub1…)`, buzz-app's edit rule; project recommendation
 /// 9), which the bubble draws as that person's pill. The message's existing
-/// mentions and identity links open as chips.
+/// mentions and identity links open as chips, except a name inside code or
+/// inside another Markdown link, which stays the text it was; a pick made
+/// there stays text too, so no link is ever written inside a link.
 void showMessageEditSheet({
   required BuildContext context,
   required TimelineMessage message,
@@ -75,7 +77,7 @@ class _MessageEditSheet extends HookConsumerWidget {
     // profile still loading), so the chips are brought up to date only
     // while the draft is still exactly what was last seeded: a field the
     // user cleared or changed is never filled again.
-    final seed = _editedMessageDraft(
+    final parsed = _editedMessageDraft(
       message,
       names: _editedMentionNames(
         ref,
@@ -91,6 +93,13 @@ class _MessageEditSheet extends HookConsumerWidget {
       agentPubkeys: ref.watch(agentMentionPubkeysProvider(channelId)),
       members: memberCandidates(),
       code: controller._styledCodeRanges(message.content),
+    );
+    // A name inside code or a web link (`[@Bob](https://example.org)`) is
+    // that code's or link's own text: it opens as text, so saving leaves it
+    // exactly as written.
+    final seed = (
+      text: parsed.text,
+      mentions: controller._inProse(parsed.text, parsed.mentions),
     );
     final seeded = useRef<_EditedDraft?>(null);
     _EditedDraft currentDraft() => (

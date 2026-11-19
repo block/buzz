@@ -331,6 +331,93 @@ void main() {
     },
   );
 
+  testWidgets('a mention inside a web link stays that link\'s text', (
+    tester,
+  ) async {
+    // Review of #9699 (editing a message with a mention inside a web link):
+    // the `@Bob` of a link's label is the link's text. It opens as text,
+    // and saving leaves the link exactly as it was written.
+    const webLink = '[@Bob](https://example.org/bob)';
+    var actions = await _openEditSheet(
+      tester,
+      message: _message('$webLink has notes', mentions: [_bob]),
+    );
+    expect(controllerOf(tester).text, '$webLink has notes');
+    expect(personChip, findsNothing);
+    // Unchanged, it saves nothing.
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect(actions.edits, isEmpty);
+    actions = await _openEditSheet(
+      tester,
+      message: _message('$webLink has notes', mentions: [_bob]),
+    );
+    await tester.enterText(field, '$webLink has the notes');
+    await tester.pumpAndSettle();
+    expect(personChip, findsNothing);
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect(actions.edits.single.content, '$webLink has the notes');
+
+    // A plain `@Bob` beside the link is still his chip, saved as an
+    // identity link; the web link is untouched. Titles, images and
+    // destinations are link text as well.
+    const linked =
+        '$webLink ![@Bob](https://example.org/bob.png) '
+        '[site](https://example.org "by @Bob")';
+    actions = await _openEditSheet(
+      tester,
+      message: _message('$linked and @Bob', mentions: [_bob]),
+    );
+    expect(controllerOf(tester).text, '$linked and @Bob');
+    expect(personChip, findsOneWidget);
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect(actions.edits, isEmpty);
+    actions = await _openEditSheet(
+      tester,
+      message: _message('$linked and @Bob', mentions: [_bob]),
+    );
+    await tester.enterText(field, '$linked and @Bob too');
+    await tester.pumpAndSettle();
+    expect(personChip, findsOneWidget);
+
+    // A pick made inside a link's label stays text, so no link is written
+    // inside a link.
+    await tester.enterText(field, '$linked and @Bob too [ask @al');
+    await tester.pumpAndSettle();
+    await tester.tap(row('Alice'));
+    await tester.pumpAndSettle();
+    expect(controllerOf(tester).text, '$linked and @Bob too [ask @Alice ');
+    expect(personChip, findsNWidgets(2));
+    await tester.enterText(
+      field,
+      '$linked and @Bob too [ask @Alice ](https://example.org/ask)',
+    );
+    await tester.pumpAndSettle();
+    expect(personChip, findsOneWidget);
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    final edit = actions.edits.single;
+    final saved =
+        '$linked and ${_link('@Bob', _bob)} too '
+        '[ask @Alice ](https://example.org/ask)';
+    expect(edit.content, saved);
+    expect(edit.tags.where((tag) => tag.first == 'p'), isEmpty);
+
+    // Reopened, the identity link is Bob's chip again and the web links are
+    // text; unchanged, it saves nothing.
+    final again = await _openEditSheet(tester, message: _message(saved));
+    expect(
+      controllerOf(tester).text,
+      '$linked and @Bob too [ask @Alice ](https://example.org/ask)',
+    );
+    expect(personChip, findsOneWidget);
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect(again.edits, isEmpty);
+  });
+
   testWidgets('two picked namesakes save as links and never as raw keys', (
     tester,
   ) async {

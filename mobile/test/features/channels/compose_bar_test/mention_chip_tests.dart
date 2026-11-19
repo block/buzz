@@ -527,6 +527,35 @@ void mentionChipTests() {
     await send();
     expect(sent, [bob]);
 
+    // Review of #9699 (mention inside a web link): a link's label is the
+    // link's own text, where the bubble draws no pill. A chip that ends up
+    // inside one stops being a chip, as in code: nobody is notified, a
+    // person outside the channel raises no prompt, and the label is sent as
+    // written. A chip beside the link keeps its recipient.
+    for (final name in ['Bob', 'Quinn']) {
+      sent = sentTags = null;
+      await pickRow('[see @${name.toLowerCase()}', row(name));
+      expect(controller.text, '[see @$name ');
+      expect(personChip, findsOneWidget, reason: name);
+      await tester.enterText(field, '[see @$name ](https://example.org)');
+      await tester.pump();
+      expect(personChip, findsNothing, reason: name);
+      expect(saved(), isEmpty, reason: name);
+      await send();
+      expect(find.byType(AlertDialog), findsNothing, reason: name);
+      expect(sentText, '[see @$name ](https://example.org)', reason: name);
+      expect(sent, isEmpty, reason: name);
+      expect(sentTags, isEmpty, reason: name);
+    }
+    sent = null;
+    await pickRow('[see @Bob](https://example.org) and @bo', row('Bob'));
+    expect(controller.text, '[see @Bob](https://example.org) and @Bob ');
+    expect(personChip, findsOneWidget);
+    expect(saved(), [ComposeDraftMention(start: 36, end: 40, pubkey: bob)]);
+    await send();
+    expect(sentText, '[see @Bob](https://example.org) and @Bob');
+    expect(sent, [bob]);
+
     // Review of #9699 (chip suffix): `-bot` typed against Bob's chip spells
     // the member Bob-bot, who is picked too. The two read alike in the
     // draft; the sent text qualifies the chip whose suffix made the longer
