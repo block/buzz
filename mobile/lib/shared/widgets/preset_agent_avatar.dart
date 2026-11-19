@@ -75,24 +75,44 @@ class PresetAgentAvatar extends HookWidget {
       [videoUrl, isAndroid],
     );
     final ready = useState<VideoPlayerController?>(null);
-    final presented = useState<VideoPlayerController?>(null);
-    useListenable(
-      isIos && posterPlaceholder != null && presented.value != controller
-          ? controller
-          : null,
-    );
+    final videoShown =
+        showNativeVideo && controller != null && ready.value == controller;
+    // A fresh AVPlayerLayer draws nothing until its first frame arrives, so
+    // keep the poster under it until playback advances in this showing. The
+    // baseline is read from the player, and the controller's last polled
+    // position is kept beside it: while paused that value lags the player,
+    // so it differs from the baseline until a poll in this showing.
+    final shownFrom = useState<(Duration, Duration)?>(null);
     useEffect(() {
-      if (isIos &&
-          posterPlaceholder != null &&
-          controller != null &&
-          ready.value == controller &&
-          controller.value.position > Duration.zero) {
-        presented.value = controller;
+      shownFrom.value = null;
+      if (!videoShown) return null;
+      var active = true;
+      unawaited(
+        controller.position
+            .then((position) {
+              if (active) {
+                shownFrom.value = (
+                  position ?? Duration.zero,
+                  controller.value.position,
+                );
+              }
+            })
+            .catchError((Object _) {}),
+      );
+      return () => active = false;
+    }, [videoShown, controller]);
+    final presented = useState(false);
+    useListenable(isIos && videoShown && !presented.value ? controller : null);
+    useEffect(() {
+      if (!videoShown) {
+        presented.value = false;
+      } else if (shownFrom.value case (final fresh, final polled)
+          when controller.value.position != fresh &&
+              controller.value.position != polled) {
+        presented.value = true;
       }
       return null;
-    }, [controller, controller?.value.position]);
-    final hasPlaybackFrame =
-        controller != null && presented.value == controller;
+    }, [videoShown, controller, shownFrom.value, controller?.value.position]);
     final lifecycle = useAppLifecycleState();
     final playing =
         showNativeVideo &&
@@ -135,6 +155,18 @@ class PresetAgentAvatar extends HookWidget {
       return null;
     }, [controller, ready.value, playing]);
 
+    // Keyed by URL so a new character never shows the previous one's poster
+    // while its own loads.
+    final posterImage = KeyedSubtree(
+      key: ValueKey(poster),
+      child:
+          posterPlaceholder ??
+          AvatarImageContent(
+            imageUrl: poster,
+            preferThumbnail: true,
+            fallback: fallback,
+          ),
+    );
     return SizedBox.square(
       dimension: size,
       child: AvatarClip(
@@ -146,41 +178,39 @@ class PresetAgentAvatar extends HookWidget {
                   key: ValueKey(videoUrl),
                   url: videoUrl,
                   playing: playing,
-                  fallback:
-                      posterPlaceholder ??
-                      AvatarImageContent(
-                        imageUrl: poster,
-                        preferThumbnail: true,
-                        fallback: fallback,
-                      ),
+                  fallback: posterImage,
                 )
-              : showNativeVideo &&
-                    controller != null &&
-                    ready.value == controller
-              ? posterPlaceholder == null || !isIos
+              : !isIos
+              ? videoShown
                     ? VideoPlayer(controller)
-                    : Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          Opacity(
-                            opacity: hasPlaybackFrame ? 1 : 0,
-                            child: VideoPlayer(controller),
-                          ),
-                          IgnorePointer(
-                            child: AnimatedOpacity(
-                              opacity: hasPlaybackFrame ? 0 : 1,
-                              duration: const Duration(milliseconds: 160),
-                              child: posterPlaceholder!,
-                            ),
-                          ),
-                        ],
-                      )
-              : posterPlaceholder ??
-                    AvatarImageContent(
-                      imageUrl: poster,
-                      preferThumbnail: true,
-                      fallback: fallback,
+                    : posterImage
+              : Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    // The poster stays below the native layer, in Flutter's
+                    // base layer: an overlay above it costs a blank frame.
+                    // It stays mounted under the video so the next showing
+                    // covers at once instead of reloading it.
+                    IgnorePointer(
+                      key: const ValueKey('preset-poster'),
+                      child: AnimatedOpacity(
+                        opacity: videoShown && presented.value ? 0 : 1,
+                        // Cover a hidden player at once; fade only onto
+                        // video.
+                        duration: videoShown && presented.value
+                            ? const Duration(milliseconds: 160)
+                            : Duration.zero,
+                        child: posterImage,
+                      ),
                     ),
+                    if (videoShown)
+                      Opacity(
+                        key: const ValueKey('preset-video'),
+                        opacity: presented.value ? 1 : 0,
+                        child: VideoPlayer(controller),
+                      ),
+                  ],
+                ),
         ),
       ),
     );

@@ -27,6 +27,27 @@ abstract interface class DiagnosticReporter {
 
   /// The member later reports and counts name, as last given to [setMember].
   String? get member;
+
+  /// Whether this build has a reporting destination. Only then does Settings
+  /// offer the checks below.
+  bool get reporting;
+
+  /// Sends a [DiagnosticTestError], to check a build's reporting end to end.
+  void sendTestReport();
+
+  /// Crashes the app in native code, to check native crash reports.
+  void crashForTest();
+}
+
+/// The error a test report carries, so it is easy to tell apart.
+///
+/// Not const: each report needs its own instance, or the destination's
+/// deduplication drops every report after the first.
+class DiagnosticTestError implements Exception {
+  DiagnosticTestError();
+
+  @override
+  String toString() => 'DiagnosticTestError';
 }
 
 /// Where an explicit error report comes from.
@@ -38,6 +59,7 @@ enum DiagnosticOperation {
   pushGatewayResponse,
   storedData,
   eventSubscriber,
+  testReport,
 }
 
 /// The operation a networking event belongs to.
@@ -114,6 +136,15 @@ class NoopDiagnosticReporter implements DiagnosticReporter {
 
   @override
   String? get member => null;
+
+  @override
+  bool get reporting => false;
+
+  @override
+  void sendTestReport() {}
+
+  @override
+  void crashForTest() {}
 }
 
 /// Reports from work signed by [signer], such as a one-shot socket for a
@@ -154,6 +185,15 @@ class SignerDiagnosticReporter implements DiagnosticReporter {
 
   @override
   String? get member => reporter.member;
+
+  @override
+  bool get reporting => reporter.reporting;
+
+  @override
+  void sendTestReport() => reporter.sendTestReport();
+
+  @override
+  void crashForTest() => reporter.crashForTest();
 }
 
 /// The reporter chosen at startup. The root scope overrides it; tests
