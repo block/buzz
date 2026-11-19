@@ -1,3 +1,4 @@
+import 'native_route_controls.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -80,12 +81,7 @@ class IosMessageCreateButton extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final route = ModalRoute.of(context);
-    final coveringProgress = useAnimation(
-      route?.secondaryAnimation ?? kAlwaysDismissedAnimation,
-    );
-    final nativeControlsVisible =
-        (route?.isCurrent ?? true) && coveringProgress == 0;
+    final nativeControlsVisible = useNativeRouteControlsVisible(context);
 
     final brightness = context.theme.brightness;
     final foreground = (foregroundColor ?? context.colors.onSurface).toARGB32();

@@ -1,3 +1,4 @@
+import 'native_route_controls.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'dart:async';
 
@@ -120,6 +121,7 @@ class IosGlassNavigationButton extends HookWidget {
   @override
   Widget build(BuildContext context) {
     assert(defaultTargetPlatform == TargetPlatform.iOS);
+    final nativeControlsVisible = useNativeRouteControlsVisible(context);
     final nativeChannel = useState<MethodChannel?>(null);
     final highlighted = useState(false);
     final onPressedRef = useRef(onPressed)..value = onPressed;
@@ -339,6 +341,12 @@ class IosGlassNavigationButton extends HookWidget {
           ),
         ],
       );
+    }
+
+    // UIKit glass can paint above an incoming Flutter route. Remove the
+    // platform view while covered, retaining its layout space.
+    if (!nativeControlsVisible) {
+      return SizedBox(width: width, height: height);
     }
 
     return Tooltip(
