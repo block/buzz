@@ -76,6 +76,23 @@ pub fn event_id(value: &str) -> Result<Vec<u8>, &'static str> {
     }
     hex::decode(value).map_err(|_| "invalid event ID")
 }
+/// Validate a namespaced artifact type: at most 128 bytes of dot-separated
+/// components, at least two, each starting with a lowercase letter and
+/// otherwise using lowercase letters, digits, `_` or `-`.
+pub fn validate_type(artifact_type: &str) -> Result<(), &'static str> {
+    if artifact_type.len() > 128
+        || !artifact_type.contains('.')
+        || !artifact_type.split('.').all(|c| {
+            !c.is_empty()
+                && c.as_bytes()[0].is_ascii_lowercase()
+                && c.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+        })
+    {
+        return Err("invalid namespaced artifact type");
+    }
+    Ok(())
+}
 /// Validate the complete envelope, leaving auth-tag verification to the relay.
 pub fn validate(event: &Event) -> Result<ArtifactEnvelope, &'static str> {
     if event.kind.as_u16() != 45010 {
@@ -122,17 +139,7 @@ pub fn validate(event: &Event) -> Result<ArtifactEnvelope, &'static str> {
     let id = canonical_uuid(field("d")?)?;
     let home = canonical_uuid(field("h")?)?;
     let artifact_type = field("type")?;
-    if artifact_type.len() > 128
-        || !artifact_type.contains('.')
-        || !artifact_type.split('.').all(|c| {
-            !c.is_empty()
-                && c.as_bytes()[0].is_ascii_lowercase()
-                && c.bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
-        })
-    {
-        return Err("invalid namespaced artifact type");
-    }
+    validate_type(artifact_type)?;
     let op = ArtifactOp::parse(field("op")?).ok_or("invalid artifact operation")?;
     let prev = fields.get("prev").map(|s| event_id(s)).transpose()?;
     if (op == ArtifactOp::Create) != prev.is_none() {

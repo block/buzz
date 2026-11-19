@@ -12,11 +12,16 @@
 //! The caller signs with their own keys: `builder.sign_with_keys(&keys)?`.
 //! No keys are held here. No network calls are made.
 
+pub mod artifact;
 pub mod broker;
 pub mod builders;
 pub mod mentions;
 pub mod nip_oa;
 
+pub use artifact::{
+    build_artifact_revision, derive_artifact_id, ArtifactOp, ArtifactRevision,
+    ARTIFACT_TITLE_MAX_BYTES,
+};
 pub use builders::*;
 
 /// Re-export kind constants so consumers don't need buzz-core directly.
