@@ -7,7 +7,11 @@ type NavigationForm = {
   required: readonly string[];
   /** Query keys that may appear at most once. */
   optional: readonly string[];
+  /** Whether Buzz mobile opens it; it opens channel links without an event only. */
+  mobile: boolean;
 };
+
+export type OpenLink = { href: string; opensInMobileApp: boolean };
 
 /**
  * `buzz://` navigation hosts and the fields each needs. Each opens a
@@ -18,16 +22,41 @@ type NavigationForm = {
 const NAVIGATION_HOSTS = new Map<string, NavigationForm>([
   [
     "message",
-    { path: "none", required: ["channel", "id"], optional: ["thread"] },
+    {
+      path: "none",
+      required: ["channel", "id"],
+      optional: ["thread"],
+      mobile: true,
+    },
   ],
-  ["channel", { path: "ids", required: [], optional: [] }],
+  ["channel", { path: "ids", required: [], optional: [], mobile: true }],
   [
     "repo",
-    { path: "none", required: ["owner", "d"], optional: ["tab", "commit"] },
+    {
+      path: "none",
+      required: ["owner", "d"],
+      optional: ["tab", "commit"],
+      mobile: false,
+    },
   ],
-  ["project", { path: "none", required: [], optional: [] }],
-  ["pr", { path: "none", required: ["owner", "d", "id"], optional: [] }],
-  ["issue", { path: "none", required: ["owner", "d", "id"], optional: [] }],
+  [
+    "pr",
+    {
+      path: "none",
+      required: ["owner", "d", "id"],
+      optional: [],
+      mobile: false,
+    },
+  ],
+  [
+    "issue",
+    {
+      path: "none",
+      required: ["owner", "d", "id"],
+      optional: [],
+      mobile: false,
+    },
+  ],
 ]);
 
 function pathFits(form: NavigationForm, segments: string[]) {
@@ -58,15 +87,18 @@ function queryFits(form: NavigationForm, search: string) {
  * links, nor links the app would ignore. Unknown query keys pass through, as
  * the desktop app ignores them.
  */
-export function buzzLinkFromOpenUrl(
+export function openLinkFromUrl(
   pathname: string,
   search: string,
-): string | null {
+): OpenLink | null {
   if (!pathname.startsWith(OPEN_PREFIX)) return null;
   const rest = pathname.slice(OPEN_PREFIX.length);
   const [host = "", ...segments] = rest.split("/");
   const form = NAVIGATION_HOSTS.get(host);
   if (!form || !pathFits(form, segments) || !queryFits(form, search))
     return null;
-  return `buzz://${rest}${search}`;
+  return {
+    href: `buzz://${rest}${search}`,
+    opensInMobileApp: form.mobile && segments.length <= 1,
+  };
 }

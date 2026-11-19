@@ -658,8 +658,9 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
             );
             let _ = app.emit("deep-link-add-community", payload);
         }
-        // Navigation hosts (channel, message, repo, project, pr, issue): keep
-        // NAVIGATION_HOSTS in web/src/features/open/open-link.ts in sync.
+        // Navigation hosts (channel, message, repo, pr, issue): keep
+        // NAVIGATION_HOSTS in web/src/features/open/open-link.ts in sync. It
+        // leaves out project, which the apps treat as a removed link.
         Some("channel") => {
             let Some(payload) = parse_channel_deep_link(&url) else {
                 eprintln!("buzz-desktop: channel deep link missing/invalid channel: {url_str}");
