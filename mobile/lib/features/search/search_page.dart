@@ -153,6 +153,14 @@ class SearchPage extends HookConsumerWidget {
     final toolbar = DuoToolbarScope.maybeOf(context);
     final hasStrip = toolbar?.strip != null;
     final compactDuo = hasStrip && isCompactDuoWindow(context);
+    final expandedIos =
+        nativeIos &&
+        usesConversationPanes(
+          context,
+          strip: toolbar?.strip,
+          windowSize:
+              View.of(context).physicalSize / View.of(context).devicePixelRatio,
+        );
     return DuoToolbarPortal(
       strip: toolbar?.strip,
       active:
@@ -192,7 +200,11 @@ class SearchPage extends HookConsumerWidget {
                       Padding(
                         padding: EdgeInsets.fromLTRB(
                           Grid.gutter,
-                          compactDuo ? Grid.xs : Grid.half,
+                          expandedIos
+                              ? Grid.twelve
+                              : compactDuo
+                              ? Grid.xs
+                              : Grid.half,
                           Grid.gutter,
                           Grid.xxs,
                         ),

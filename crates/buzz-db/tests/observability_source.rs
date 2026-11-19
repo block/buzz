@@ -196,7 +196,16 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
     assert!(soft_delete_discovery.contains("execute(tx.conn())"));
 
     let side_effects = include_str!("../../buzz-relay/src/handlers/side_effects.rs");
-    assert!(side_effects.contains("query_events_for_event_write"));
+    // The DM visibility snapshot reads its prior version in its write transaction.
+    let dm_snapshot = side_effects
+        .split_once("async fn write_dm_visibility_snapshot(")
+        .expect("side effects must write DM visibility snapshots")
+        .1
+        .split_once("\n}\n")
+        .expect("the DM snapshot writer must end")
+        .0;
+    assert!(dm_snapshot.contains("tx: &mut buzz_db::AdmittedTx"));
+    assert!(dm_snapshot.contains("buzz_db::dm::lock_dm_visibility(tx,"));
     assert!(side_effects.contains("query_events_for_bootstrap"));
     assert!(side_effects.contains(".list_channels_for_bootstrap("));
 

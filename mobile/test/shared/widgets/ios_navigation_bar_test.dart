@@ -795,6 +795,73 @@ void main() {
     },
   );
 
+  testWidgets('retained header artwork follows the current action glyph', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final messenger = tester.binding.defaultBinaryMessenger;
+    final channels = <MethodChannel>[];
+    messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
+      call,
+    ) async {
+      if (call.method == 'create') {
+        final channel = MethodChannel(
+          '${IosNavigationBar.viewType}/${(call.arguments as Map)['id']}',
+        );
+        channels.add(channel);
+        messenger.setMockMethodCallHandler(channel, (_) async => null);
+      }
+      return null;
+    });
+    addTearDown(() {
+      messenger.setMockMethodCallHandler(SystemChannels.platform_views, null);
+      for (final channel in channels) {
+        messenger.setMockMethodCallHandler(channel, null);
+      }
+    });
+    Widget page(IosNavigationAction action) => _testApp(
+      home: IosNavigationBar(title: 'Chat', actions: [action]),
+    );
+    Map action() =>
+        ((tester.widget<UiKitView>(find.byType(UiKitView)).creationParams
+                        as Map)['actions']
+                    as List)
+                .single
+            as Map;
+    await tester.pumpWidget(
+      page(const IosNavigationAction(label: 'More', icon: Icons.more_horiz)),
+    );
+    final native = tester.element(find.byType(UiKitView));
+    await tester.runAsync(() async {
+      for (
+        var attempt = 0;
+        attempt < 100 && action()['iconData'] == null;
+        attempt++
+      ) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        await tester.pump();
+      }
+    });
+    expect(action()['iconData'], isNotNull);
+    await tester.pumpWidget(
+      page(const IosNavigationAction(label: 'Huddle', symbol: 'headphones')),
+    );
+    expect(tester.element(find.byType(UiKitView)), same(native));
+    expect(action()['symbol'], 'headphones');
+    expect(action()['iconData'], isNull);
+    await tester.pumpWidget(
+      page(const IosNavigationAction(label: 'Add', icon: Icons.add)),
+    );
+    expect(
+      action()['iconData'],
+      isNull,
+      reason: 'old artwork must not appear while the new glyph renders',
+    );
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('Android retains its Flutter header', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
