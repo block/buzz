@@ -948,6 +948,44 @@ void main() {
         expect(payload['channels']['x'][lane.field], isFalse);
       });
 
+      fakeAsyncTest('an oversized migration journal drains across a rebuild', (
+        clock,
+      ) {
+        final cached = blob({
+          for (var i = 0; i < 501; i++) 'active-$i': (true, t - 1000 + i),
+        });
+        unawaited(prefs.setString(legacyCacheKey(), jsonEncode(cached)));
+        start(clock);
+        expect(readFlagCache()['pending'], hasLength(501));
+        clock.elapse(const Duration(seconds: 5));
+        final first = relay.decrypt(relay.published.single) as Map;
+        expect(first['channels'], hasLength(500));
+        expect(first['channels'], isNot(contains('active-500')));
+        expect(readFlagCache()['pending'].keys, ['active-500']);
+
+        subject.dispose();
+        start(clock);
+        clock.elapse(const Duration(seconds: 5));
+        expect(relay.published, hasLength(2));
+        final last = relay.decrypt(relay.published.last) as Map;
+        expect(last['channels'], hasLength(500));
+        expect(last['channels']['active-500'][lane.field], isTrue);
+        expect(last['channels'], isNot(contains('active-0')));
+        expect(readFlagCache()['pending'], isEmpty);
+      });
+
+      fakeAsyncTest('clearing an absent flag follows the lane policy', (clock) {
+        start(clock).set('absent', false);
+        clock.elapse(const Duration(seconds: 5));
+        if (lane.dTag == 'channel-stars') {
+          expect(subject.values(), isEmpty);
+          expect(relay.published, isEmpty);
+        } else {
+          final payload = relay.decrypt(relay.published.single) as Map;
+          expect(payload['channels']['absent'][lane.field], isFalse);
+        }
+      });
+
       fakeAsyncTest('an offline toggle keeps legacy migration retryable', (
         clock,
       ) {

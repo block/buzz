@@ -53,5 +53,6 @@ class ChannelStarsManager extends SidebarFlagSync<ChannelStarEntry> {
 
   void starChannel(String channelId) => setFlag(channelId, true);
 
-  void unstarChannel(String channelId) => setFlag(channelId, false);
+  void unstarChannel(String channelId) =>
+      setFlag(channelId, false, skipAbsentClear: true);
 }

@@ -302,10 +302,13 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
           candidate.id.compareTo(head.id) < 0);
 
   /// Keep the pending change locally until the writer confirms it.
-  void setFlag(String id, bool enabled) {
+  void setFlag(String id, bool enabled, {bool skipAbsentClear = false}) {
     if (!_active) return;
     final previous = _pending[id] ?? _confirmed[id];
-    if (previous?.enabled == enabled) return;
+    if (previous?.enabled == enabled ||
+        (skipAbsentClear && !enabled && previous == null)) {
+      return;
+    }
     final keptClear = _keptClears.remove(id);
     _pending[id] = _entry(
       enabled,
@@ -374,7 +377,7 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
       }
       _head = head;
       _replaceConfirmed(snapshot);
-      final edits = Map.of(_pending);
+      final edits = _nextWriteBatch();
       final settled = <String, T>{};
       final outgoing = Map.of(snapshot);
       for (final edit in edits.entries) {
@@ -456,6 +459,21 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
         _scheduleWrite(delay: Duration(seconds: 2 << _writeFailures));
       }
     }
+  }
+
+  Map<String, T> _nextWriteBatch() {
+    if (_pending.length <= maxSidebarFlags) return Map.of(_pending);
+
+    // Older edits go first, so subsequent writes can retain newer flags
+    // when the complete journal exceeds the writer's record limit.
+    final edits = _pending.entries.toList()
+      ..sort((left, right) {
+        final byTime = sidebarFlagTimeMillis(
+          left.value.updatedAt,
+        ).compareTo(sidebarFlagTimeMillis(right.value.updatedAt));
+        return byTime == 0 ? left.key.compareTo(right.key) : byTime;
+      });
+    return Map.fromEntries(edits.take(maxSidebarFlags));
   }
 
   // Retire exact intents that the writer reflects or supersedes, leaving edits
