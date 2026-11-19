@@ -152,19 +152,13 @@ void main() {
       );
       player.position = const Duration(milliseconds: 100);
       await tester.pump(const Duration(milliseconds: 600));
-      await tester.pump();
-      expect(
-        tester.widget<AnimatedOpacity>(find.byType(AnimatedOpacity)).opacity,
-        0,
-      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('prepared-poster')), findsNothing);
       // Looping back to zero must not flash the poster again.
       player.position = Duration.zero;
       await tester.pump(const Duration(milliseconds: 600));
       await tester.pump();
-      expect(
-        tester.widget<AnimatedOpacity>(find.byType(AnimatedOpacity)).opacity,
-        0,
-      );
+      expect(find.byKey(const Key('prepared-poster')), findsNothing);
       final navigator = tester.state<NavigatorState>(find.byType(Navigator));
       navigator.push<void>(
         PageRouteBuilder<void>(
@@ -230,7 +224,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 600));
     await tester.pumpAndSettle();
     expect(videoOpacity(), 1);
-    expect(posterOpacity(), 0);
+    // The covered poster is dropped once the video shows.
+    expect(find.byType(AnimatedOpacity), findsNothing);
 
     // Returning to the route mounts a new player, which starts covered.
     final navigator = tester.state<NavigatorState>(find.byType(Navigator));
@@ -243,17 +238,56 @@ void main() {
     await tester.pump();
     expect(find.byKey(const Key('video')), findsNothing);
     expect(posterOpacity(), 1);
+    // The player is past the last polled position when it comes back; the
+    // poster waits for playback to advance from where it actually is.
+    player.position = const Duration(milliseconds: 700);
     await tester.pumpAndSettle();
     navigator.pop();
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('video')), findsOneWidget);
     expect(videoOpacity(), 0);
     expect(posterOpacity(), 1);
-    player.position = const Duration(milliseconds: 700);
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.pump();
+    expect(videoOpacity(), 0);
+    expect(posterOpacity(), 1);
+    player.position = const Duration(milliseconds: 800);
     await tester.pump(const Duration(milliseconds: 600));
     await tester.pumpAndSettle();
     expect(videoOpacity(), 1);
-    expect(posterOpacity(), 0);
+    expect(find.byType(AnimatedOpacity), findsNothing);
+
+    // A new character covers with its own poster, never the previous one
+    // kept by gapless playback.
+    navigator.push<void>(
+      PageRouteBuilder<void>(
+        opaque: false,
+        pageBuilder: (_, _, _) => const SizedBox.shrink(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final previous = tester.state(find.byType(AvatarImageContent));
+    await tester.pumpWidget(
+      const ProviderScope(
+        child: MaterialApp(
+          home: PresetAgentAvatar(
+            imageUrl:
+                'https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-14.png',
+            size: 64,
+            fallback: Text('A'),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    final posters = tester
+        .widgetList<AvatarImageContent>(find.byType(AvatarImageContent))
+        .map((poster) => poster.imageUrl);
+    expect(posters, [endsWith('gloopies-14.png')]);
+    expect(
+      tester.state(find.byType(AvatarImageContent)),
+      isNot(same(previous)),
+    );
     await tester.pumpWidget(const SizedBox.shrink());
     debugDefaultTargetPlatformOverride = null;
   });

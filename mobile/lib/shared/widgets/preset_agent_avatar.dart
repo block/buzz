@@ -78,23 +78,38 @@ class PresetAgentAvatar extends HookWidget {
     final videoShown =
         showNativeVideo && controller != null && ready.value == controller;
     // A fresh AVPlayerLayer draws nothing until its first frame arrives, so
-    // keep the poster over it until playback advances in this showing.
-    final shownFrom = useRef<Duration?>(null);
-    if (!videoShown) {
+    // keep the poster under it until playback advances in this showing. The
+    // baseline is read from the player: a paused controller's last polled
+    // position lags, so the first poll after resuming would already differ.
+    final shownFrom = useState<Duration?>(null);
+    useEffect(() {
       shownFrom.value = null;
-    } else {
-      shownFrom.value ??= controller.value.position;
-    }
+      if (!videoShown) return null;
+      var active = true;
+      unawaited(
+        controller.position
+            .then((position) {
+              if (active) shownFrom.value = position ?? Duration.zero;
+            })
+            .catchError((Object _) {}),
+      );
+      return () => active = false;
+    }, [videoShown, controller]);
     final presented = useState(false);
     useListenable(isIos && videoShown && !presented.value ? controller : null);
     useEffect(() {
       if (!videoShown) {
         presented.value = false;
-      } else if (controller.value.position != shownFrom.value) {
+      } else if (shownFrom.value != null &&
+          controller.value.position != shownFrom.value) {
         presented.value = true;
       }
       return null;
-    }, [videoShown, controller, controller?.value.position]);
+    }, [videoShown, controller, shownFrom.value, controller?.value.position]);
+    // Once the video covers it, drop the poster so a still-pending download
+    // is abandoned, as it was before the hand-off kept the poster mounted.
+    final posterFaded = useState(false);
+    if (!presented.value) posterFaded.value = false;
     final lifecycle = useAppLifecycleState();
     final playing =
         showNativeVideo &&
@@ -137,13 +152,18 @@ class PresetAgentAvatar extends HookWidget {
       return null;
     }, [controller, ready.value, playing]);
 
-    final posterImage =
-        posterPlaceholder ??
-        AvatarImageContent(
-          imageUrl: poster,
-          preferThumbnail: true,
-          fallback: fallback,
-        );
+    // Keyed by URL so a new character never shows the previous one's poster
+    // while its own loads.
+    final posterImage = KeyedSubtree(
+      key: ValueKey(poster),
+      child:
+          posterPlaceholder ??
+          AvatarImageContent(
+            imageUrl: poster,
+            preferThumbnail: true,
+            fallback: fallback,
+          ),
+    );
     return SizedBox.square(
       dimension: size,
       child: AvatarClip(
@@ -166,17 +186,24 @@ class PresetAgentAvatar extends HookWidget {
                   children: [
                     // The poster stays below the native layer, in Flutter's
                     // base layer: an overlay above it costs a blank frame.
-                    IgnorePointer(
-                      key: const ValueKey('preset-poster'),
-                      child: AnimatedOpacity(
-                        opacity: videoShown && presented.value ? 0 : 1,
-                        // Cover a hidden player at once; fade only onto video.
-                        duration: videoShown && presented.value
-                            ? const Duration(milliseconds: 160)
-                            : Duration.zero,
-                        child: posterImage,
+                    if (!(videoShown && posterFaded.value))
+                      IgnorePointer(
+                        key: const ValueKey('preset-poster'),
+                        child: AnimatedOpacity(
+                          opacity: videoShown && presented.value ? 0 : 1,
+                          // Cover a hidden player at once; fade only onto
+                          // video.
+                          duration: videoShown && presented.value
+                              ? const Duration(milliseconds: 160)
+                              : Duration.zero,
+                          onEnd: () {
+                            if (videoShown && presented.value) {
+                              posterFaded.value = true;
+                            }
+                          },
+                          child: posterImage,
+                        ),
                       ),
-                    ),
                     if (videoShown)
                       Opacity(
                         key: const ValueKey('preset-video'),
