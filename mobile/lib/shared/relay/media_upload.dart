@@ -251,7 +251,7 @@ class MediaUploadService {
   final DateTime Function() _now;
   final http.Client _http;
   final bool _ownsHttpClient;
-  final HashChunkAcked? _onHashChunkAcked;
+  final HashChunkObserver? _onHashChunk;
 
   MediaUploadService({
     required String baseUrl,
@@ -268,9 +268,9 @@ class MediaUploadService {
     ReadClipboardImage? readClipboardImage,
     DateTime Function()? now,
     http.Client? httpClient,
-    @visibleForTesting HashChunkAcked? onHashChunkAcked,
+    @visibleForTesting HashChunkObserver? onHashChunk,
   }) : _baseUrl = baseUrl,
-       _onHashChunkAcked = onHashChunkAcked,
+       _onHashChunk = onHashChunk,
        _nsec = nsec,
        _pickGalleryImage = pickGalleryImage,
        _pickGalleryImages =
@@ -563,10 +563,7 @@ class MediaUploadService {
       throw Exception('unsupported file type: $mimeType');
     }
 
-    final sha256 = await sha256HexInWorker(
-      bytes,
-      onChunkAcked: _onHashChunkAcked,
-    );
+    final sha256 = await sha256HexInWorker(bytes, onChunk: _onHashChunk);
     var response = await _sendUploadRequest(
       bytes: bytes,
       mimeType: mimeType,
@@ -809,16 +806,21 @@ Stream<List<int>> _uploadByteStream(
 
 const _hashChunkSize = 1024 * 1024;
 
-/// Reports each hash chunk the worker acknowledged: the bytes sent so far and
-/// the bytes the worker reports having received.
-typedef HashChunkAcked = void Function(int sentBytes, int workerReceivedBytes);
+/// A step in the chunked hash handoff: a chunk was sent to the worker, or the
+/// worker acknowledged it.
+enum HashChunkEvent { sent, acked }
+
+/// Observes the chunked hash handoff in order. [bytes] is the total sent so
+/// far for [HashChunkEvent.sent], and the total the worker reports having
+/// received for [HashChunkEvent.acked].
+typedef HashChunkObserver = void Function(HashChunkEvent event, int bytes);
 
 /// Hashes [bytes] on a worker isolate, one bounded chunk at a time, so the
 /// payload is never copied into the worker in full.
 @visibleForTesting
 Future<String> sha256HexInWorker(
   Uint8List bytes, {
-  HashChunkAcked? onChunkAcked,
+  HashChunkObserver? onChunk,
 }) async {
   final port = ReceivePort();
   final messages = StreamIterator<Object?>(port);
@@ -848,9 +850,10 @@ Future<String> sha256HexInWorker(
           Uint8List.sublistView(bytes, start, end),
         ]),
       );
+      onChunk?.call(HashChunkEvent.sent, end);
       // ack: one chunk in flight at a time
       final received = await next() as int;
-      onChunkAcked?.call(end, received);
+      onChunk?.call(HashChunkEvent.acked, received);
     }
     chunks.send(null);
     return await next() as String;
