@@ -210,10 +210,16 @@ impl LiveLists {
         Self(rx)
     }
 
-    /// The pinned IDs of each list delivered since the last call.
-    fn delivered(&mut self) -> Vec<Vec<String>> {
+    /// The pinned IDs of the next `count` lists, oldest list first. Fan-out
+    /// runs in tasks of its own, so this waits for each list and orders them
+    /// by `created_at`, not by arrival. No further list has arrived.
+    async fn delivered(&mut self, count: usize) -> Vec<Vec<String>> {
         let mut lists = Vec::new();
-        while let Ok(frame) = self.0.try_recv() {
+        while lists.len() < count {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(5), self.0.recv())
+                .await
+                .expect("a live pin list")
+                .expect("open connection");
             let axum::extract::ws::Message::Text(text) = frame else {
                 continue;
             };
@@ -221,9 +227,11 @@ impl LiveLists {
             assert_eq!(message[0], "EVENT", "{text}");
             let list: Event = serde_json::from_value(message[2].clone()).expect("event");
             assert_eq!(list.kind.as_u16() as u32, KIND_CHANNEL_PINS);
-            lists.push(pinned(&list));
+            lists.push(list);
         }
-        lists
+        assert!(self.0.try_recv().is_err(), "an unexpected live frame");
+        lists.sort_by_key(|list| list.created_at);
+        lists.iter().map(pinned).collect()
     }
 }
 
@@ -240,7 +248,8 @@ fn refusal(result: Result<IngestResult, IngestError>) -> String {
 /// changes it, and sends every new list to `#h` subscribers.
 /// Mutation: drop `dispatch_list` from `pins::persist` → RED (no live list);
 /// answer a stored command like a new one → RED (no `duplicate:`); drop
-/// `command_event_id` from the notice → RED (re-pins share one notice).
+/// `command_event_id` from the notice → RED (re-pins share one notice); let
+/// `target_readable_in_channel` pass a command → RED (the reply is stored).
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
 async fn members_pin_and_unpin_through_one_relay_signed_list() {
@@ -338,7 +347,20 @@ async fn members_pin_and_unpin_through_one_relay_signed_list() {
     for _ in 0..3 {
         delivered.extend([vec![first.clone()], Vec::new()]);
     }
-    assert_eq!(live.delivered(), delivered);
+    assert_eq!(live.delivered(delivered.len()).await, delivered);
+
+    // A command is not a message: nothing replies to it.
+    let reply = signed(
+        &owner,
+        9,
+        "reply",
+        &[
+            &["h", &channel.to_string()],
+            &["e", &hinted.id.to_hex(), "", "reply"],
+        ],
+    );
+    let reason = refusal(f.send(&owner, reply).await);
+    assert!(reason.contains("reply parent not found"), "{reason}");
 }
 
 /// Only those who can read a channel get its pin list: stored by `#h` or by
@@ -373,6 +395,7 @@ async fn the_list_is_read_like_the_channel() {
 
     for (channel, readers) in [(private, vec![&owner]), (dm, vec![&owner, &peer])] {
         let mut live = LiveLists::open(&f, &outsider, channel).await;
+        let mut member = LiveLists::open(&f, &owner, channel).await;
         let message = f.message(&owner, channel).await;
         assert_eq!(f.pin(&owner, channel, &message).await, "");
         let by_d = json!({"kinds": [KIND_CHANNEL_PINS], "#d": [channel.to_string()]});
@@ -382,7 +405,9 @@ async fn the_list_is_read_like_the_channel() {
         }
         assert_eq!(f.pins(&outsider, channel).await, None);
         assert!(f.read(&outsider, by_d).await.is_empty());
-        assert!(live.delivered().is_empty());
+        // The member's list has arrived, so the outsider's would have too.
+        assert_eq!(member.delivered(1).await, [vec![message.clone()]]);
+        assert!(live.delivered(0).await.is_empty());
 
         let refused = command(&outsider, KIND_PIN_MESSAGE, channel, &message);
         refusal(f.send(&outsider, refused).await);
@@ -543,7 +568,7 @@ async fn refused_commands_change_nothing() {
 /// (kind:9005) leaves the list with the delete, and subscribers get the new
 /// list. A relay with the switch off still serves and prunes its lists.
 /// Mutation: stop dispatching `pin_lists` in `persist_deletion` → RED (no
-/// live list); drop `unpin_deleted_message` → RED (the list keeps the ID).
+/// live list); drop `unpin_deleted_messages` → RED (the list keeps the ID).
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
 async fn deleting_a_pinned_message_rewrites_the_list() {
@@ -579,7 +604,7 @@ async fn deleting_a_pinned_message_rewrites_the_list() {
         [vec![kept.clone()]]
     );
     assert_eq!(
-        live.delivered(),
+        live.delivered(2).await,
         [vec![kept.clone(), by_admin], vec![kept.clone()]]
     );
 

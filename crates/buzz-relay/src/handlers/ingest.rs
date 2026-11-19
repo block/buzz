@@ -1128,12 +1128,19 @@ impl ThreadMetadataOwned {
 /// Whether `target` is in `channel_id` and readable by `reader`. Write paths
 /// that reference an event reject a target failing this exactly as a missing
 /// one, so the rejection never reveals whether, or where, the target exists.
+///
+/// A NIP-PM pin or unpin command is never such a target. Account erasure
+/// removes a command without keeping it as a thread ancestor.
 fn target_readable_in_channel(
     target: &buzz_core::StoredEvent,
     channel_id: Uuid,
     reader: &[u8],
 ) -> bool {
     target.channel_id == Some(channel_id)
+        && !matches!(
+            event_kind_u32(&target.event),
+            KIND_PIN_MESSAGE | KIND_UNPIN_MESSAGE
+        )
         && super::req::event_visible_to_reader(&target.event, reader)
 }
 
