@@ -132,6 +132,22 @@ mod postgres_tests {
         assert_eq!(json["max_uses"], 5);
         assert_eq!(json["uses_remaining"], 5);
 
+        // A permanent link has no expiry and still claims.
+        let response = mint(
+            &state,
+            &operator,
+            request(&owner, serde_json::json!({ "never_expires": true })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = read_json(response).await;
+        assert_eq!(json["expires_at"], Value::Null, "{json}");
+        let code = json["code"].as_str().expect("code").to_owned();
+        assert_eq!(
+            claim(&state, &host, &Keys::generate(), &code).await,
+            StatusCode::OK
+        );
+
         // A restricted admin keeps the role but can no longer mint.
         state
             .db
@@ -155,10 +171,14 @@ mod postgres_tests {
         );
 
         // The relay's roster decides authority, whatever the operator asserts.
-        for actor in [&member, &outsider] {
+        for (actor, limits) in [
+            (&member, serde_json::json!({})),
+            (&member, serde_json::json!({ "never_expires": true })),
+            (&outsider, serde_json::json!({})),
+        ] {
             assert_eq!(
                 error(
-                    mint(&state, &operator, request(actor, serde_json::json!({}))).await,
+                    mint(&state, &operator, request(actor, limits)).await,
                     StatusCode::FORBIDDEN,
                     "not_owner"
                 )
@@ -171,6 +191,10 @@ mod postgres_tests {
             (
                 serde_json::json!({ "ttl_secs": 30 * 24 * 60 * 60 + 1 }),
                 "ttl_secs must be between",
+            ),
+            (
+                serde_json::json!({ "never_expires": true, "ttl_secs": 3600 }),
+                "never_expires cannot be combined with ttl_secs",
             ),
             (
                 serde_json::json!({ "max_uses": 0 }),
