@@ -43,7 +43,7 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
        _remoteEnabled = remoteEnabled,
        _onChanged = onChanged,
        _startupRetryBaseDelay = startupRetryBaseDelay {
-    _pending = _readPending();
+    _loadCacheOverlays();
   }
 
   final String pubkey;
@@ -62,7 +62,8 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
   final VoidCallback _onChanged;
   final Duration _startupRetryBaseDelay;
   Map<String, T> _confirmed;
-  late final Map<String, T> _pending;
+  final _pending = <String, T>{};
+  final _keptClears = <String, T>{};
   bool _legacyCache = false;
   NostrEvent? _head;
   bool _headNeedsWrite = false;
@@ -93,18 +94,23 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
     extensions: writer ? const {'consistency': 'strong'} : const {},
   );
 
-  Map<String, T> _readPending() {
+  void _loadCacheOverlays() {
     try {
       final raw = _prefs.getString(_cacheKey);
-      if (raw == null) return {};
+      if (raw == null) return;
       final cached = jsonDecode(raw) as Map<String, dynamic>;
       _legacyCache =
           _confirmed.isNotEmpty &&
           (!cached.containsKey('pending') || cached['legacyCache'] == true);
-      return _decode({'version': 1, 'channels': cached['pending']}, false);
+      _pending.addAll(
+        _decode({'version': 1, 'channels': cached['pending']}, false),
+      );
+      _keptClears.addAll(
+        _decode({'version': 1, 'channels': cached['keptClears']}, false)
+          ..removeWhere((_, entry) => entry.enabled),
+      );
     } catch (error) {
-      debugPrint('[$_coordinate] cannot load pending flags: $error');
-      return {};
+      debugPrint('[$_coordinate] cannot load cached flag overlays: $error');
     }
   }
 
@@ -116,6 +122,8 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
         jsonEncode({
           ..._encode(_confirmed),
           'pending': _encode(_pending)['channels'],
+          if (_keptClears.isNotEmpty)
+            'keptClears': _encode(_keptClears)['channels'],
           if (_legacyCache) 'legacyCache': true,
         }),
       );
@@ -201,15 +209,21 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
 
     // Old caches combine confirmed entries with offline edits. At the cap,
     // an absent flag may have been evicted, so require it to postdate the
-    // snapshot's second. An absent clear already has the desired value.
+    // snapshot's second. Keep absent clears in case an older enable returns.
     final firstLaterMillis = head != null && snapshot.length >= maxSidebarFlags
         ? (head.createdAt + 1) * 1000
         : 0;
     for (final local in _confirmed.entries) {
       final remote = snapshot[local.key];
+      if (remote == null && !local.value.enabled) {
+        if (!_pending.containsKey(local.key)) {
+          _keptClears[local.key] = local.value;
+        }
+        continue;
+      }
       final localMillis = sidebarFlagTimeMillis(local.value.updatedAt);
       final changed = remote == null
-          ? local.value.enabled && localMillis >= firstLaterMillis
+          ? localMillis >= firstLaterMillis
           : local.value.enabled != remote.enabled &&
                 localMillis >= sidebarFlagTimeMillis(remote.updatedAt);
       if (changed) {
@@ -221,13 +235,28 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
     }
     _head = head;
     _headNeedsWrite = head != null;
-    _confirmed = snapshot;
+    _replaceConfirmed(snapshot);
     _legacyCache = false;
     if (!await _persist() || !_active) return false;
     if (identical(_head, head)) _headNeedsWrite = false;
     _onChanged();
     _scheduleWrite();
     return true;
+  }
+
+  void _replaceConfirmed(Map<String, T> snapshot) {
+    _confirmed = snapshot;
+    _keptClears.removeWhere((id, clear) {
+      final remote = snapshot[id];
+      if (remote == null) return false;
+
+      final clearMillis = sidebarFlagTimeMillis(clear.updatedAt);
+      if (remote.enabled &&
+          sidebarFlagTimeMillis(remote.updatedAt) <= clearMillis) {
+        _pending.putIfAbsent(id, () => _entry(false, clearMillis));
+      }
+      return true;
+    });
   }
 
   bool _matches(NostrEvent event) =>
@@ -256,14 +285,14 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
     if (_legacyCache) return await _recoverHead();
     _head = event;
     _headNeedsWrite = true;
-    _confirmed = confirmed;
+    _replaceConfirmed(confirmed);
     if (!await _persist() || !_active) return false;
     if (identical(_head, event)) _headNeedsWrite = false;
     _onChanged();
     if (_writeFailures >= _maxWriteFailures) {
       _writeFailures = 0;
-      _scheduleWrite();
     }
+    _scheduleWrite();
     return true;
   }
 
@@ -277,9 +306,10 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
     if (!_active) return;
     final previous = _pending[id] ?? _confirmed[id];
     if (previous?.enabled == enabled) return;
+    final keptClear = _keptClears.remove(id);
     _pending[id] = _entry(
       enabled,
-      _nextTimestamp(_pending[id], _confirmed[id]),
+      _nextTimestamp(_pending[id] ?? keptClear, _confirmed[id]),
     );
     // Invoke the prefs setter in this turn so a successor manager created
     // during a disconnect can see the journal immediately.
@@ -335,9 +365,6 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
     _writing = true;
     final headAtStart = _head;
     try {
-      final edits = Map.of(_pending);
-      if (!await _persist()) throw StateError('Flag edit is not journaled');
-      if (!_active) return;
       final (head, snapshot) = await _writerHead();
       final observed = _head;
       if (observed != null && (head == null || _isNewer(observed, head))) {
@@ -345,6 +372,9 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
           'Writer flag snapshot is older than the observed head',
         );
       }
+      _head = head;
+      _replaceConfirmed(snapshot);
+      final edits = Map.of(_pending);
       final settled = <String, T>{};
       final outgoing = Map.of(snapshot);
       for (final edit in edits.entries) {
@@ -370,18 +400,19 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
         outgoing[edit.key] = value;
       }
       if (settled.isNotEmpty) {
-        _head = head;
-        _confirmed = snapshot;
         await _retireEdits(settled);
         edits.removeWhere((id, _) => settled.containsKey(id));
-        if (!_active) return;
-        if (edits.isEmpty) {
-          _writeFailures = 0;
-          return;
-        }
-        if (_head?.id != head?.id) {
-          throw StateError('Flag head changed while settling pending edits');
-        }
+      } else {
+        if (!await _persist()) throw StateError('Flag edit is not journaled');
+        if (_active && observed?.id != head?.id) _onChanged();
+      }
+      if (!_active) return;
+      if (edits.isEmpty) {
+        _writeFailures = 0;
+        return;
+      }
+      if (_head?.id != head?.id) {
+        throw StateError('Flag head changed before publish');
       }
       boundSidebarFlags(outgoing, edits.keys.toSet());
       if (!edits.keys.every(outgoing.containsKey)) {
@@ -400,7 +431,7 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
       final (retained, confirmed) = await _writerHead();
       if (retained != null && (_head == null || !_isNewer(_head!, retained))) {
         _head = retained;
-        _confirmed = confirmed;
+        _replaceConfirmed(confirmed);
       }
       if (retained?.id != result.id) {
         await _persist();

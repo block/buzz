@@ -290,12 +290,11 @@ pub(crate) async fn run(
             let ids = canonical_ids(spec, &ids)?;
             let (head_created_at, mut store) = fetch_store(spec, client).await?;
             let changed = set_flags(spec, &mut store, &ids, on);
-            let before_pruning = store.len();
-            let required = if on { &ids } else { &changed };
-            bound(spec, &mut store, required);
-            if changed.is_empty() && store.len() == before_pruning {
+            if changed.is_empty() {
                 return Ok(sidebar_sync::unchanged());
             }
+            let required = if on { &ids } else { &changed };
+            bound(spec, &mut store, required);
             if required.iter().any(|id| !store.contains_key(id)) {
                 return Err(CliError::Usage(format!(
                     "{} keeps at most {MAX_ENTRIES} entries; pass fewer ids",
@@ -580,7 +579,7 @@ mod tests {
             let time = now().as_secs() - 100;
             let older_clear = "old-clear";
             let newer_clear = "new-clear";
-            let mut channels = entries(499, spec.flag, (time + 10) * 1000)
+            let mut channels = entries(498, spec.flag, (time + 10) * 1000)
                 .as_object()
                 .unwrap()
                 .clone();
@@ -602,8 +601,8 @@ mod tests {
                 time,
             );
 
-            // A repeated add repairs the head and prunes the older clears first.
-            run(spec, set(&[C1], true), &client).await.unwrap();
+            // A changed flag repairs the head and prunes the oldest entries.
+            run(spec, set(&[C3], true), &client).await.unwrap();
             let (_, doc) = published(&client, &relay);
             let channels = doc["channels"].as_object().unwrap();
             assert_eq!(channels.len(), 500);
@@ -641,15 +640,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preserves_a_new_clear_and_does_not_protect_an_unchanged_clear() {
+    async fn oversized_no_ops_publish_nothing_and_a_new_clear_survives() {
         for spec in [&STARS, &MUTES] {
             let (client, relay) = setup().await;
             let time = now().as_secs();
-            let mut channels = entries(500, spec.flag, (time + 60) * 1000)
+            let mut channels = entries(499, spec.flag, (time + 60) * 1000)
                 .as_object()
                 .unwrap()
                 .clone();
-            channels.insert(C1.into(), json!({spec.flag: false, "updatedAt": time - 1}));
+            channels.insert(
+                C1.into(),
+                json!({spec.flag: false, "updatedAt": (time + 120) * 1000}),
+            );
+            channels.insert(
+                C2.into(),
+                json!({spec.flag: true, "updatedAt": (time + 60) * 1000}),
+            );
             seed(
                 &client,
                 &relay,
@@ -657,11 +663,13 @@ mod tests {
                 json!({"version": 1, "channels": channels}),
                 time,
             );
-            run(spec, set(&[C1], false), &client).await.unwrap();
-            let (head, doc) = published(&client, &relay);
-            let mut channels = doc["channels"].as_object().unwrap().clone();
-            assert_eq!(channels.len(), 500);
-            assert!(channels.values().all(|entry| entry[spec.flag] == true));
+            for action in [set(&[C1], false), set(&[C2], true)] {
+                assert_eq!(
+                    run(spec, action, &client).await.unwrap(),
+                    sidebar_sync::unchanged()
+                );
+            }
+            assert_eq!(published_count(&relay), 1);
 
             // The new clear is older than every competing flag in this
             // skewed snapshot. The current edit must survive anyway.
@@ -671,7 +679,7 @@ mod tests {
                 &relay,
                 spec,
                 json!({"version": 1, "channels": channels}),
-                head.created_at.as_secs() + 1,
+                time + 1,
             );
             run(spec, set(&[C1], false), &client).await.unwrap();
             let (_, doc) = published(&client, &relay);

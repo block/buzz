@@ -43,6 +43,7 @@ class SidebarRelay {
   final writerQueries = <String>[];
   NostrEvent Function(NostrEvent)? replaceNextPublish;
   Completer<void>? holdHistory;
+  Completer<void>? holdWriter;
   Completer<void>? holdOk;
   String? rejectLive;
   bool withholdEose = false;
@@ -195,6 +196,7 @@ class SidebarRelay {
         'consistency': 'strong',
       });
       writerQueries.add(coordinate);
+      await holdWriter?.future;
       if (writerFailures > 0) {
         writerFailures--;
         return http.Response('error: overloaded', 503);
