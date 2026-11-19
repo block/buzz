@@ -32,6 +32,7 @@ import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import 'android_ime_lift.dart';
 import 'channel.dart';
+import 'channel_detail_page.dart';
 import 'channel_management_provider.dart' show currentPubkeyProvider;
 import 'channel_identity_names_provider.dart';
 import 'channel_link_navigation.dart';
@@ -60,6 +61,7 @@ import 'message_action_backdrop_state.dart';
 import 'message_long_press_region.dart';
 import 'message_content.dart';
 import 'message_media_avatar.dart';
+import 'open_channel_routes.dart';
 import 'reaction_row.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import 'send_message_provider.dart';
@@ -333,7 +335,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       final update = stickyDateIndex.resolve(
         positions: positions,
         viewportHeight: viewportHeight,
-        stickyTop: frostedAppBarHeight(context) + Grid.twelve,
+        stickyTop: _threadAppBarHeight(context) + Grid.twelve,
         stickyHeaderHeight: StickyDateHeader.heightOf(context),
       );
       stickyDateHeaderState.value = update.state;
@@ -639,7 +641,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     // scrolled up to read, leave them where they are.
     final previousReplyCount = useRef(replies.length);
     final topOverlayFraction = viewportHeight > 0
-        ? frostedAppBarHeight(context) / viewportHeight
+        ? _threadAppBarHeight(context) / viewportHeight
         : 0.0;
     final settleGeometry = (
       composerDockHeight.value,
@@ -962,7 +964,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                 Positioned(
                   left: 0,
                   right: 0,
-                  top: frostedAppBarHeight(context) + Grid.twelve,
+                  top: _threadAppBarHeight(context) + Grid.twelve,
                   child: StickyDateHeader(
                     key: const ValueKey('thread-sticky-date-header'),
                     state: stickyDateHeaderState,
@@ -973,7 +975,7 @@ class ThreadDetailPage extends HookConsumerWidget {
             )
           : null,
       resizeToAvoidBottomInset: !usesFixedAndroidImeViewport,
-      appBar: _threadAppBar(context, ref, channel, currentPubkey),
+      appBar: _threadAppBar(context, ref, channel, currentPubkey, queryRootId),
       body: Stack(
         fit: StackFit.expand,
         children: [

@@ -171,6 +171,9 @@ class FrostedAppBar extends StatelessWidget {
   /// Optional second line and action for a native channel title.
   final String? nativeSubtitle;
 
+  /// Accessible name of a title capsule whose subtitle opens a destination.
+  final String? nativeSubtitleNavigationLabel;
+
   /// Existing retention disclosure displayed by the native conversation title.
   final String? nativeEphemeralLabel;
 
@@ -218,6 +221,7 @@ class FrostedAppBar extends StatelessWidget {
     super.key,
     this.nativeTitle,
     this.nativeSubtitle,
+    this.nativeSubtitleNavigationLabel,
     this.nativeEphemeralLabel,
     this.nativeTitleAvatar,
     this.nativeTitleAvatars = const [],
@@ -330,6 +334,7 @@ class FrostedAppBar extends StatelessWidget {
         onReadyChanged: onNativeReadyChanged,
         title: nativeTitle ?? (title is Text ? (title as Text).data ?? '' : ''),
         subtitle: nativeSubtitle,
+        subtitleNavigationLabel: nativeSubtitleNavigationLabel,
         ephemeralLabel: nativeEphemeralLabel,
         titleAvatar: nativeTitleAvatar,
         titleAvatars: nativeTitleAvatars,

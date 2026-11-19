@@ -9,12 +9,15 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 class OpenChannelRoutes {
   final _routes = <String, List<Route<Object?>>>{};
 
-  /// The newest route showing [channelId] that is still on a navigator.
-  Route<Object?>? latest(String channelId) {
+  /// The newest active route showing [channelId], optionally on [navigator].
+  Route<Object?>? latest(String channelId, {NavigatorState? navigator}) {
     final routes = _routes[channelId];
     if (routes == null) return null;
     for (final route in routes.reversed) {
-      if (route.isActive) return route;
+      if (route.isActive &&
+          (navigator == null || route.navigator == navigator)) {
+        return route;
+      }
     }
     return null;
   }

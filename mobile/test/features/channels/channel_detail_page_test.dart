@@ -17046,6 +17046,47 @@ void main() {
       expect(find.text('Open activity thread'), findsOneWidget);
       expect(find.byType(ChannelDetailPage), findsNothing);
       expect(relaySession.visibleChannels, isEmpty);
+
+      await tester.tap(find.text('Open activity thread'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.bySemanticsLabel('Open channel general'));
+      await tester.pumpAndSettle();
+
+      final channelPage = tester.widget<ChannelDetailPage>(
+        find.byType(ChannelDetailPage),
+      );
+      expect(channelPage.initialMessageId, threadIdRoot);
+      expect(find.text('Thread root'), findsOneWidget);
+      expect(find.byType(ThreadDetailPage), findsNothing);
+    });
+
+    testWidgets('thread header returns to the existing channel route', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(id: threadIdRoot, pubkey: 'alice', content: 'Thread root'),
+          ],
+          initialThreadRootId: threadIdRoot,
+          threadReplies: const {threadIdRoot: []},
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final channel = tester.element(
+        find.byType(ChannelDetailPage, skipOffstage: false),
+      );
+      final thread = find.byType(ThreadDetailPage);
+      expect(thread, findsOneWidget);
+      await tester.tap(
+        find.descendant(of: thread, matching: find.text('general')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(thread, findsNothing);
+      expect(tester.element(find.byType(ChannelDetailPage)), same(channel));
     });
   });
 

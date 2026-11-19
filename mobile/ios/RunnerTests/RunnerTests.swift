@@ -524,6 +524,25 @@ class RunnerTests: XCTestCase {
   }
 
   @MainActor
+  func testThreadTitleOpensChannelWithVoiceOver() throws {
+    let parent = UIViewController()
+    let messenger = NavigationTestMessenger()
+    let factory = IosNavigationBarFactory(messenger: messenger, parent: parent)
+    let bar = factory.create(
+      withFrame: CGRect(x: 0, y: 0, width: 390, height: 120), viewIdentifier: 999991,
+      arguments: ["title": "Thread", "subtitle": "general", "titleEnabled": true,
+                  "subtitleNavigationLabel": "Open channel general"]
+    )
+    parent.view.addSubview(bar.view())
+    let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
+    let title = try XCTUnwrap(navigation.topViewController?.navigationItem.titleView as? NavigationTitleView)
+    XCTAssertEqual(title.accessibilityLabel, "Open channel general")
+    XCTAssertEqual(title.accessibilityTraits, .button)
+    XCTAssertTrue(title.accessibilityActivate())
+    XCTAssertEqual(messenger.actions, ["title"])
+  }
+
+  @MainActor
   func testConversationTitleHasWidthBeforePlatformViewLayout() throws {
     let parent = UIViewController()
     let factory = IosNavigationBarFactory(messenger: NavigationTestMessenger(), parent: parent)

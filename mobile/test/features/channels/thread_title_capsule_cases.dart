@@ -59,15 +59,27 @@ void threadTitleCapsuleTests() {
               as Map;
       expect(params()['title'], 'Thread');
       expect(params()['subtitle'], dm ? 'Alice' : 'engineering');
-      expect(params()['titleEnabled'], false);
+      expect(params()['titleEnabled'], true);
+      expect(
+        params()['subtitleNavigationLabel'],
+        dm ? 'Open conversation with Alice' : 'Open channel engineering',
+      );
       channels.setChannels([channel.copyWith(name: 'Renamed conversation')]);
       await tester.pumpAndSettle();
       expect(params()['subtitle'], 'Renamed conversation');
-      expect(params()['titleEnabled'], false);
+      expect(params()['titleEnabled'], true);
+      expect(
+        params()['subtitleNavigationLabel'],
+        dm
+            ? 'Open conversation with Renamed conversation'
+            : 'Open channel Renamed conversation',
+      );
       channels.setChannels([]);
       await tester.pumpAndSettle();
       // An empty subtitle keeps the shared capsule while metadata is absent.
       expect(params()['subtitle'], '');
+      expect(params()['titleEnabled'], false);
+      expect(params()['subtitleNavigationLabel'], isNull);
       expect(tester.takeException(), isNull);
       debugDefaultTargetPlatformOverride = null;
     });
