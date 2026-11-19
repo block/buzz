@@ -134,14 +134,16 @@ byte, and offers an **Open in Buzz** button and a download link if the app
 doesn't open. Desktop browsers open the app on load; phones and tablets wait
 for a tap on the button, since their browsers show an error for a scheme no
 app handles. It forwards only the navigation forms `message`, `channel`,
-`repo`, `project`, `pr` and `issue`; invite, authorization and install links get "This
+`repo`, `pr` and `issue`; invite, authorization and install links get "This
 link doesn't work", and so do links missing a required field, such as a
-`message` link without its `id`. For example,
+`message` link without its `id`. Buzz mobile opens only `message` and
+`buzz://channel/<id>` links, so on a phone the other forms ask the visitor to
+open the link on a computer. For example,
 `https://relay.example/open/message?channel=<uuid>&id=<event>` opens
 `buzz://message?channel=<uuid>&id=<event>`. Like any `buzz://` navigation
 link, it opens in the community selected in the app. The page doesn't pass on
-which relay served it, because the apps don't read `relay=` yet and the entity
-link parsers reject unknown query keys.
+which relay served it, because the apps don't read `relay=` yet and the mobile
+app rejects unknown query keys.
 
 ## Rendering in chat (desktop)
 

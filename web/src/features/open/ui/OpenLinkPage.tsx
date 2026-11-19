@@ -1,7 +1,7 @@
 import buzzMark from "@/assets/invite/mark.svg";
 import { BeeField } from "@/features/invite/ui/BeeField";
 import "@/features/invite/ui/invite-page.css";
-import { buzzLinkFromOpenUrl } from "@/features/open/open-link";
+import { openLinkFromUrl } from "@/features/open/open-link";
 import {
   BUZZ_RELEASES_URL,
   detectBuzzOperatingSystem,
@@ -18,13 +18,19 @@ const OPENS_ON_LOAD = new Set(["macos", "windows", "linux"]);
 
 /** Landing page for `/open/<rest>`: hands `buzz://<rest>` to the app. */
 export function OpenLinkPage() {
-  const link = buzzLinkFromOpenUrl(
+  const openLink = openLinkFromUrl(
     window.location.pathname,
     window.location.search,
   );
-  const [opensOnLoad] = React.useState(() =>
-    OPENS_ON_LOAD.has(detectBuzzOperatingSystem(navigator)),
+  const [operatingSystem] = React.useState(() =>
+    detectBuzzOperatingSystem(navigator),
   );
+  const opensOnLoad = OPENS_ON_LOAD.has(operatingSystem);
+  const computerOnly =
+    openLink !== null &&
+    !openLink.opensInMobileApp &&
+    (operatingSystem === "ios" || operatingSystem === "android");
+  const link = computerOnly ? null : (openLink?.href ?? null);
   const launched = React.useRef(false);
   const [downloadUrl, setDownloadUrl] = React.useState(BUZZ_RELEASES_URL);
 
@@ -67,6 +73,14 @@ export function OpenLinkPage() {
                   <a href={link}>Open in Buzz</a>
                 </Button>
               </div>
+            </>
+          ) : openLink ? (
+            <>
+              <h1>Open this link on a computer</h1>
+              <p className="invite-intro">
+                The Buzz mobile app can&apos;t open this link yet. Open it in
+                Buzz on your computer.
+              </p>
             </>
           ) : (
             <>

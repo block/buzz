@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { expect, type Page, test } from "@playwright/test";
+import { type Browser, expect, type Page, test } from "@playwright/test";
 import {
   BUZZ_ANDROID_PLAY_STORE_URL,
   BUZZ_IOS_APP_STORE_URL,
@@ -607,7 +607,7 @@ test("open link hands the buzz:// link to the app", async ({ page }) => {
   await expect.poll(() => launches).toEqual([`buzz://message${query}`]);
 });
 
-for (const device of [
+const phones = [
   {
     name: "iPhone",
     platform: "iPhone",
@@ -626,28 +626,30 @@ for (const device of [
     userAgent:
       "Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 Mobile",
   },
-]) {
-  test(`open link on ${device.name} waits for a tap`, async ({ browser }) => {
-    const context = await browser.newContext({ userAgent: device.userAgent });
-    await context.addInitScript((platform) => {
-      Object.defineProperties(navigator, {
-        platform: { configurable: true, value: platform },
-        maxTouchPoints: { configurable: true, value: 5 },
-        userAgentData: {
-          configurable: true,
-          value: { platform, mobile: true },
-        },
-      });
-    }, device.platform);
-    const page = await context.newPage();
-    await page.route("https://api.github.com/**", (route) =>
-      route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: "[]",
-      }),
-    );
-    const launches = await trackLaunches(page);
+];
+
+async function openOnPhone(browser: Browser, phone: (typeof phones)[number]) {
+  const context = await browser.newContext({ userAgent: phone.userAgent });
+  await context.addInitScript((platform) => {
+    Object.defineProperties(navigator, {
+      platform: { configurable: true, value: platform },
+      maxTouchPoints: { configurable: true, value: 5 },
+      userAgentData: {
+        configurable: true,
+        value: { platform, mobile: true },
+      },
+    });
+  }, phone.platform);
+  const page = await context.newPage();
+  await page.route("https://api.github.com/**", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+  );
+  return { context, page, launches: await trackLaunches(page) };
+}
+
+for (const phone of phones) {
+  test(`open link on ${phone.name} waits for a tap`, async ({ browser }) => {
+    const { context, page, launches } = await openOnPhone(browser, phone);
 
     await page.goto(`/open/message${openQuery}`);
     await expect(
@@ -666,6 +668,41 @@ for (const device of [
     await expect.poll(() => launches).toEqual([`buzz://message${openQuery}`]);
     await context.close();
   });
+
+  test(`open link on ${phone.name} sends desktop-only links to a computer`, async ({
+    browser,
+  }) => {
+    const { context, page, launches } = await openOnPhone(browser, phone);
+    const owner = "cd".repeat(32);
+    const event = "ef".repeat(32);
+
+    await page.goto("/open/channel/general");
+    await expect(
+      page.getByRole("link", { name: "Open in Buzz" }),
+    ).toHaveAttribute("href", "buzz://channel/general");
+
+    for (const rest of [
+      `channel/general/${event}`,
+      `repo?owner=${owner}&d=demo-repo`,
+      `pr?owner=${owner}&d=demo-repo&id=${event}`,
+      `issue?owner=${owner}&d=demo-repo&id=${event}`,
+    ]) {
+      await page.goto(`/open/${rest}`);
+      await expect(
+        page.getByRole("heading", { name: "Open this link on a computer" }),
+        rest,
+      ).toBeVisible();
+      await expect(
+        page.getByRole("link", { name: "Open in Buzz" }),
+      ).toHaveCount(0);
+      await expect(
+        page.getByRole("link", { name: "Download Buzz" }),
+      ).toHaveCount(0);
+    }
+    await page.waitForLoadState("networkidle");
+    expect(launches).toEqual([]);
+    await context.close();
+  });
 }
 
 test("open link forwards every navigation form", async ({ page }) => {
@@ -679,7 +716,6 @@ test("open link forwards every navigation form", async ({ page }) => {
     `message?channel=general&id=${event}&utm_source=chat`,
     `repo?owner=${owner}&d=demo-repo&tab=commits&commit=${"a1".repeat(20)}`,
     `repo?owner=${owner}&d=demo-repo`,
-    `project?owner=${owner}&d=demo-project&tab=board`,
     `pr?owner=${owner}&d=demo-repo&id=${"ef".repeat(32)}`,
     `issue?owner=${owner}&d=demo-repo&id=${"ef".repeat(32)}`,
   ]) {
@@ -715,6 +751,8 @@ test("open link refuses links that are not navigation", async ({ page }) => {
     "/open/channel/",
     `/open/channel/general/${event}/extra`,
     "/open/repo",
+    `/open/project?owner=${owner}&d=demo-project&tab=board`,
+    "/open/project",
     `/open/repo?owner=${owner}`,
     `/open/repo?owner=${owner}&d=demo-repo&tab=code&tab=commits`,
     `/open/pr?owner=${owner}&d=demo-repo`,
