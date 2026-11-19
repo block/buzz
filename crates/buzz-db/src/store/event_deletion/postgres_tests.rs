@@ -516,20 +516,6 @@ async fn production_known_target_statements_prune_to_one_month() {
     }
 }
 
-/// Monthly `events` partitions (not their indexes) this backend holds a
-/// relation lock on right now.
-async fn locked_event_partitions(tx: &mut AdmittedTx) -> Vec<String> {
-    sqlx::query_scalar(
-        "SELECT DISTINCT c.relname::text FROM pg_locks l \
-         JOIN pg_class c ON c.oid = l.relation \
-         WHERE l.locktype = 'relation' AND l.pid = pg_backend_pid() \
-         AND c.relkind = 'r' AND c.relname LIKE 'events\\_p%' ORDER BY 1",
-    )
-    .fetch_all(tx.conn())
-    .await
-    .expect("observe partition locks")
-}
-
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn production_known_target_deletion_locks_one_partition() {
@@ -577,7 +563,7 @@ async fn production_known_target_deletion_locks_one_partition() {
         .await
         .expect("production deletion");
         assert!(deleted, "round {round}");
-        let locked = locked_event_partitions(&mut tx).await;
+        let locked = crate::test_support::locked_event_partitions(&mut tx).await;
         // Roll back so the next round deletes the same row again.
         tx.rollback().await.expect("rollback");
         assert_eq!(

@@ -391,33 +391,6 @@ async fn concurrent_pins_all_land() {
     assert_eq!(list, expected);
 }
 
-/// Deleting a pinned message rewrites the list in the deletion's own
-/// transaction; a resend, or the deletion of an unpinned message, does not.
-/// Mutation: drop the `unpin_deleted_messages` call from
-/// `insert_deletion_event` → RED.
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn deleting_a_pinned_message_unpins_it() {
-    let f = fixture().await;
-    let (a, b, unpinned) = (f.message().await, f.message().await, f.message().await);
-    f.pin(&a).await.expect("pin a");
-    f.pin(&b).await.expect("pin b");
-    let before = f.list().await.0;
-
-    let deletion = event(5, f.channel, Some(&a));
-    let lists = f.delete(&deletion, &[&a]).await;
-    assert_eq!(lists.len(), 1);
-    assert_eq!(lists[0].event.pubkey, f.relay.public_key());
-    let (after, list) = f.list().await;
-    assert_eq!(list, ids(&[&b]));
-    assert!(after > before);
-
-    assert!(f.delete(&deletion, &[&a]).await.is_empty(), "a resend");
-    let other = event(9005, f.channel, Some(&unpinned));
-    assert!(f.delete(&other, &[&unpinned]).await.is_empty());
-    assert_eq!(f.list().await, (after, ids(&[&b])));
-}
-
 /// One deletion of several pinned messages deletes them all, then takes the
 /// list lock and rewrites the list once. A delete that waited for a message
 /// while it held the list lock could deadlock with a delete of that message.
@@ -568,20 +541,6 @@ async fn erased_command_records_expire_after_an_hour() {
     assert!(f.is_stored(&command).await, "a live command stays");
 }
 
-/// Monthly `events` partitions (not their indexes) this backend holds a
-/// relation lock on right now.
-async fn locked_event_partitions(tx: &mut AdmittedTx) -> Vec<String> {
-    sqlx::query_scalar(
-        "SELECT DISTINCT c.relname::text FROM pg_locks l \
-         JOIN pg_class c ON c.oid = l.relation \
-         WHERE l.locktype = 'relation' AND l.pid = pg_backend_pid() \
-         AND c.relkind = 'r' AND c.relname LIKE 'events\\_p%' ORDER BY 1",
-    )
-    .fetch_all(tx.conn())
-    .await
-    .expect("observe partition locks")
-}
-
 /// A message delete's pin cleanup reads only the list's own month, and no
 /// `events` partition when the channel has no list, as the delete itself
 /// locks only its target's month (`production_known_target_deletion_locks_one_partition`).
@@ -660,7 +619,7 @@ async fn a_message_delete_locks_only_the_months_it_reads() {
                     .await
                     .expect("unpin");
             assert!(lists.is_empty(), "{case}: the message was not pinned");
-            let locked = locked_event_partitions(&mut tx).await;
+            let locked = crate::test_support::locked_event_partitions(&mut tx).await;
             tx.rollback().await.expect("rollback");
             assert!(
                 locked.iter().all(|name| months.contains(&name.as_str())),

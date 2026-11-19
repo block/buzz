@@ -2718,13 +2718,13 @@ async fn ingest_event_inner(
     // NIP-PM: with the switch off, the commands are refused as kinds this
     // relay does not know, which is what a relay without NIP-PM answers.
     let pin_command = matches!(kind_u32, KIND_PIN_MESSAGE | KIND_UNPIN_MESSAGE);
+    if pin_command && !state.config.pins_enabled {
+        return Err(IngestError::Rejected(
+            "restricted: unknown event kind".into(),
+        ));
+    }
     let required = match required_scope_for_kind(kind_u32, &event) {
-        Ok(scope) if !pin_command || state.config.pins_enabled => scope,
-        Ok(_) => {
-            return Err(IngestError::Rejected(
-                "restricted: unknown event kind".into(),
-            ))
-        }
+        Ok(scope) => scope,
         Err(msg) => return Err(IngestError::Rejected(msg.into())),
     };
     // NIP-43: relay admin commands are global — channel-scoped tokens cannot

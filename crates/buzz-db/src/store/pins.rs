@@ -190,10 +190,9 @@ async fn replace_pins(
             "pin list replacement failed".to_string(),
         ));
     }
-    let created_at = chrono::DateTime::from_timestamp(stored.event.created_at.as_secs() as i64, 0)
-        .ok_or(DbError::InvalidTimestamp(
-            stored.event.created_at.as_secs() as i64
-        ))?;
+    let created_at_secs = stored.event.created_at.as_secs() as i64;
+    let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0)
+        .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
     sqlx::query(
         "INSERT INTO parameterized_event_watermarks \
              (community_id, kind, pubkey, d_tag, created_at, event_id) \
