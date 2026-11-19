@@ -341,9 +341,9 @@ async fn members_pin_and_unpin_through_one_relay_signed_list() {
     assert_eq!(live.delivered(), delivered);
 }
 
-/// Only those who can read a channel get its pin list, by `#h` or by `#d`,
-/// stored or live. A DM is a channel like any other. `#h` names the channel,
-/// so it also reads an unlisted channel the reader has not joined.
+/// Only those who can read a channel get its pin list: stored by `#h` or by
+/// `#d`, live by `#h`. A DM is a channel like any other. `#h` names the
+/// channel, so it also reads an unlisted channel the reader has not joined.
 /// Mutation: store the list without its channel → RED (an outsider reads a
 /// private channel's pins).
 #[tokio::test]
