@@ -90,6 +90,7 @@ Pinning a message that is already pinned, or unpinning one that is not, is accep
 | Target cannot be pinned | `false`, `invalid: target is not a message in this channel` |
 | Channel is at the limit | `false`, `invalid: pin limit reached` |
 | Author may not post, or the channel is archived | `false`, as for a message |
+| Relay does not accept the commands | `false`, as for an unknown kind |
 
 ### Retries
 
@@ -128,13 +129,13 @@ The relay returns the list only to those who can read the channel, and sends eac
 
 Clients read by `#h` because it names the channel under [NIP-CL](NIP-CL.md), which a read of a system channel, or of an unlisted channel the reader has not joined, needs. A `#d` filter does not name the channel for this kind and gets no new lists.
 
-Clients MUST ignore a list that the relay's [NIP-11](11.md) `self` key did not sign. Clients keep the list with the newest `created_at`.
+A relay that supports this NIP MUST give its `self` key in its [NIP-11](11.md) document. Clients MUST ignore a list that key did not sign. Clients keep the list with the newest `created_at`.
 
 The list holds IDs only. Clients fetch the messages by ID, in a filter that also names the channel with `#h`. They load a pinned message's edits as they do for any other message.
 
-## Discovery
+## Support
 
-A relay that accepts the commands lists `buzz-pins` in `supported_extensions` of its [NIP-11](11.md) document. It MUST also give its `self` key there, which clients check the list against. Clients SHOULD offer pin and unpin only when they see it. A relay without it rejects `kind:40010` and `kind:40011` as unknown kinds.
+A relay does not advertise this NIP. A client learns that a relay does not accept the commands when the relay rejects one as an unknown kind.
 
 A relay that stops accepting commands keeps serving the lists it has, and keeps removing deleted messages from them.
 
