@@ -76,8 +76,57 @@ async fn lock_pins(
     .fetch_optional(tx.conn())
     .await?
     .map(|tags| tags.0);
-    tags.unwrap_or_default()
-        .iter()
+    pinned_ids(&tags.unwrap_or_default())
+}
+
+/// Take the replacement lock of `channel_id`'s pin list, then read the pinned
+/// message IDs behind the list head that [`replace_pins`] recorded.
+///
+/// Every message delete calls this, with pins on or off. Reading the head's
+/// exact `created_at` first keeps it to the list's own `events` partition, and
+/// to none when the channel has never had a list. Taking the lock before the
+/// read means a pin that commits first is seen.
+async fn lock_recorded_pins(
+    tx: &mut AdmittedTx,
+    channel_id: Uuid,
+    relay_pubkey: &[u8],
+) -> Result<Vec<Vec<u8>>> {
+    let kind = KIND_CHANNEL_PINS as i32;
+    crate::replaceable::take_replacement_lock(tx, kind, relay_pubkey, Some(channel_id)).await?;
+    let head: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "SELECT created_at FROM parameterized_event_watermarks \
+         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4",
+    )
+    .bind(tx.community().as_uuid())
+    .bind(kind)
+    .bind(relay_pubkey)
+    .bind(channel_id.to_string())
+    .fetch_optional(tx.conn())
+    .await?;
+    let Some(head) = head else {
+        return Ok(Vec::new());
+    };
+    // Unnamed, so it is always planned with `head` and prunes to its month
+    // (see the known-target statements in `event_deletion`).
+    let tags: Option<Vec<Vec<String>>> = sqlx::query_scalar::<_, sqlx::types::Json<_>>(
+        "SELECT tags FROM events WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
+         AND channel_id = $4 AND created_at = $5 AND deleted_at IS NULL ORDER BY id ASC LIMIT 1",
+    )
+    .persistent(false)
+    .bind(tx.community().as_uuid())
+    .bind(kind)
+    .bind(relay_pubkey)
+    .bind(channel_id)
+    .bind(head)
+    .fetch_optional(tx.conn())
+    .await?
+    .map(|tags| tags.0);
+    pinned_ids(&tags.unwrap_or_default())
+}
+
+/// The message IDs a pin list's tags pin, in order.
+fn pinned_ids(tags: &[Vec<String>]) -> Result<Vec<Vec<u8>>> {
+    tags.iter()
         .filter(|tag| tag.first().is_some_and(|name| name == "e"))
         .map(|tag| {
             tag.get(1)
@@ -109,8 +158,9 @@ async fn live_messages(
     Ok(ids)
 }
 
-/// Sign and store `ids` as `channel_id`'s pin list. The caller holds the
-/// list's replacement lock ([`lock_pins`]) and commits.
+/// Sign and store `ids` as `channel_id`'s pin list, and record it as the
+/// list head [`lock_recorded_pins`] reads. The caller holds the list's
+/// replacement lock ([`lock_pins`]) and commits.
 async fn replace_pins(
     tx: &mut AdmittedTx,
     channel_id: Uuid,
@@ -140,6 +190,25 @@ async fn replace_pins(
             "pin list replacement failed".to_string(),
         ));
     }
+    let created_at = chrono::DateTime::from_timestamp(stored.event.created_at.as_secs() as i64, 0)
+        .ok_or(DbError::InvalidTimestamp(
+            stored.event.created_at.as_secs() as i64
+        ))?;
+    sqlx::query(
+        "INSERT INTO parameterized_event_watermarks \
+             (community_id, kind, pubkey, d_tag, created_at, event_id) \
+         VALUES ($1, $2, $3, $4, $5, $6) \
+         ON CONFLICT (community_id, kind, pubkey, d_tag) DO UPDATE SET \
+             created_at = EXCLUDED.created_at, event_id = EXCLUDED.event_id",
+    )
+    .bind(tx.community().as_uuid())
+    .bind(KIND_CHANNEL_PINS as i32)
+    .bind(stored.event.pubkey.to_bytes().as_slice())
+    .bind(&channel)
+    .bind(created_at)
+    .bind(stored.event.id.as_bytes().as_slice())
+    .execute(tx.conn())
+    .await?;
     Ok(stored)
 }
 
@@ -161,7 +230,8 @@ pub(crate) async fn unpin_deleted_messages(
     }
     let mut lists = Vec::new();
     for (channel_id, event_ids) in channels {
-        let pins = lock_pins(tx, channel_id, &relay_signer.public_key().to_bytes()).await?;
+        let pins =
+            lock_recorded_pins(tx, channel_id, &relay_signer.public_key().to_bytes()).await?;
         if !pins.iter().any(|id| event_ids.contains(&id.as_slice())) {
             continue;
         }
