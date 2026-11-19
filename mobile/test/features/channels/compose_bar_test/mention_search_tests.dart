@@ -2,8 +2,9 @@ part of '../compose_bar_test.dart';
 
 /// The directory is searched only for a live `@` query that could still
 /// name someone (buzz-app `src/bundled/mentions/README.md`, sections 2 and
-/// 6; project recommendation 5). Prose typed after a picked chip, and a
-/// query a finished search has already refuted, never leave the device.
+/// 6; project recommendation 5). Prose typed after a picked chip never
+/// leaves the device. A typed, unpicked query searches at every pause, as
+/// an empty result says nothing sound about a longer query.
 /// The chooser itself follows the field's focus (recommendation 8).
 void mentionSearchTests() {
   final bob = 'b' * 64;
@@ -161,13 +162,12 @@ void mentionSearchTests() {
       expect(searched.last, 'alice sm');
       expect(row('Alice Smith'), findsOneWidget);
 
-      // A search that finds nobody refutes longer queries only when it
-      // covered every source. The relay reads verified names once the last
-      // word has three characters, so `z` and `zo` finding nobody do not stop
-      // `zoe`, and `mary j` does not stop `mary jones` (review of #9699).
-      // `zoe` does refute: the prose after it never leaves the device and
-      // the chooser closes. A refuted query still matches members on the
-      // device, folding accents: `@zoe` lists the member Zoë.
+      // A search that finds nobody does not stop the search for a longer
+      // query (review of #9699). The relay reads `alpha-beta` as three
+      // prefix terms and `alpha-beta.com` as one, so the longer query can
+      // find a person the shorter one could not. A query the directory
+      // cannot match still matches members on the device, folding accents:
+      // `@zoe` lists the member Zoë.
       searched.clear();
       await tester.enterText(field, '');
       await tester.pump();
@@ -175,22 +175,17 @@ void mentionSearchTests() {
       expect(searched.where((q) => q.isNotEmpty), ['z', 'zo', 'zoe']);
       expect(row('Zoë'), findsOneWidget);
       searched.clear();
-      await type(tester, '@zoe', 'y please review');
-      expect(searched, isEmpty);
-      expect(popover, findsNothing);
-      searched.clear();
       await tester.enterText(field, '');
       await tester.pump();
-      // The first pause comes at `@mary j`, whose search skips verified names.
-      await tester.enterText(field, '@mary j');
+      await tester.enterText(field, '@alpha-beta');
       await pause(tester);
-      await type(tester, '@mary j', 'ones');
-      expect(searched, ['mary j', 'mary jo', 'mary jon']);
-      // The same query searches again when it is typed afresh.
-      searched.clear();
-      await tester.enterText(field, '@mary jon');
+      expect(searched, ['alpha-beta']);
+      await type(tester, '@alpha-beta', '.com');
+      expect(searched.last, 'alpha-beta.com');
+      // Prose after a typed, unpicked unknown name searches at each pause.
+      await tester.enterText(field, '@alpha-beta.com please');
       await pause(tester);
-      expect(searched, ['mary jon']);
+      expect(searched.last, 'alpha-beta.com please');
     },
   );
 

@@ -7,7 +7,6 @@ import '../../../shared/identity_names/identity_names.dart';
 import '../../../shared/identity_names/identity_names_provider.dart';
 import '../../../shared/mentions/agent_identity_provider.dart';
 import '../../../shared/relay/relay.dart';
-import '../../../shared/utils/string_utils.dart';
 import '../../../shared/profile/user_cache_provider.dart';
 import '../../../shared/profile/user_profile.dart';
 import '../../../shared/verified_profiles/verified_profile.dart';
@@ -30,8 +29,7 @@ const mentionSearchDebounce = Duration(milliseconds: 200);
 ///
 /// Debounced: the provider waits [mentionSearchDebounce] before querying;
 /// keystrokes dispose the stale family member so its request never fires.
-/// Each finished search goes to [mentionSearchCacheProvider]: its people
-/// are kept, or, when it found nobody, it may refute longer queries.
+/// Each finished search is kept in [mentionSearchCacheProvider].
 final mentionUserSearchProvider = FutureProvider.autoDispose
     .family<List<UserProfile>, String>((ref, query) async {
       // The session notifier is stable across communities, and two
@@ -90,65 +88,11 @@ typedef MentionChooserArgs = ({String channelId, String query, int opening});
 /// search runs, so typing the same query twice shows the same rows. A
 /// query not searched yet starts from the longest searched query it
 /// continues: a name search for `sa` finds no one that `s` did not.
-///
-/// A search that finds nobody is not kept; it can refute instead (portable
-/// mention rules, section 6): the relay matches names by prefix, so no
-/// longer query that continues it can find anyone, and [refutes] lets the
-/// chooser skip those searches. Prose typed after an unknown `@name` then
-/// stays on the device. The next finished search replaces the refutation,
-/// and the refuted query itself searches again when re-entered.
-///
-/// Only a search that covered every source refutes. The relay searches
-/// verified names only once the query's last word has
-/// [verifiedNamePrefixMinimum] characters, so `gn` finding nobody says
-/// nothing about `gna`, nor `mary j` about `mary jones`: those search again.
 class MentionSearchCache {
   static const limit = 64;
   final _pages = <String, List<UserProfile>>{};
 
-  /// The last finished search that found nobody, or null.
-  String? _refuted;
-
-  /// Lowercase only, not the section 3 folding: the directory is the relay's
-  /// search, whose prefix rule is what a refutation reasons about, so an
-  /// accented query is a different search, not a continuation of the plain
-  /// one. The device still matches members and found people by folding.
   static String _key(String query) => query.trim().toLowerCase();
-
-  /// Only a query with a letter or digit searches names; an exact public key
-  /// is an author lookup that no name prefix can refute.
-  static final _wordCharacter = RegExp(r'[\p{L}\p{N}]', unicode: true);
-  static bool _exactKey(String key) => typedPublicKey(key) != null;
-
-  /// Shortest last word for which the relay searches verified names as well
-  /// as kind:0 profiles: `PREFIX_MIN_CHARS` in `crates/buzz-search`
-  /// (`src/query.rs`). A shorter one searches kind:0 profiles only.
-  static const verifiedNamePrefixMinimum = 3;
-  static final _whitespace = RegExp(r'\s+');
-  static final _wordRun = RegExp(r'[\p{L}\p{N}]+', unicode: true);
-
-  /// Whether the relay's search for [key] read verified names too. The relay
-  /// skips them when any lexeme of the last whitespace-separated token is
-  /// shorter than the minimum (`o'b` holds `o` and `b`). Each run of letters
-  /// or digits is at most as long as the lexeme holding it, so this never
-  /// claims a source the relay skipped.
-  static bool _searchedVerifiedNames(String key) {
-    final runs = _wordRun.allMatches(key.split(_whitespace).last);
-    return runs.isNotEmpty &&
-        runs.every((run) => run[0]!.runes.length >= verifiedNamePrefixMinimum);
-  }
-
-  /// Whether the last finished search found nobody, in every source, for a
-  /// shorter query that [query] continues, so a search for [query] would
-  /// find nobody either.
-  bool refutes(String query) {
-    final refuted = _refuted;
-    if (refuted == null) return false;
-    final key = _key(query);
-    return key.length > refuted.length &&
-        key.startsWith(refuted) &&
-        !_exactKey(key);
-  }
 
   /// The finished search for exactly [query], or null.
   List<UserProfile>? exact(String query) => _pages[_key(query)];
@@ -165,23 +109,10 @@ class MentionSearchCache {
     return null;
   }
 
-  /// Records the finished search for [query]: keeps [people] as its latest
-  /// page, newest last, or, when it found nobody in every source, refutes
-  /// longer queries.
+  /// Keeps [people] as the latest search for [query], newest last.
   void put(String query, List<UserProfile> people) {
     final key = _key(query);
     if (key.isEmpty) return;
-    if (people.isEmpty) {
-      _pages.remove(key);
-      _refuted =
-          _wordCharacter.hasMatch(key) &&
-              !_exactKey(key) &&
-              _searchedVerifiedNames(key)
-          ? key
-          : null;
-      return;
-    }
-    _refuted = null;
     _pages.remove(key);
     _pages[key] = people;
     while (_pages.length > limit) {
@@ -327,24 +258,16 @@ final recipientSearchPendingProvider = Provider.family
     .autoDispose<bool, String>(
       (ref, query) =>
           query.trim().isNotEmpty &&
-          !_searchRefuted(ref, query) &&
           ref.watch(mentionUserSearchProvider(query)).isLoading,
     );
 
 /// Whether a recipient picker's directory search for [query] failed.
 final recipientSearchFailedProvider = Provider.family.autoDispose<bool, String>(
   (ref, query) {
-    if (_searchRefuted(ref, query)) return false;
     final search = ref.watch(mentionUserSearchProvider(query));
     return search.hasError && !search.isLoading;
   },
 );
-
-/// Whether the directory search for [query] is skipped because a finished
-/// search of every source for a shorter query found nobody. Watching the search provider
-/// would start the search, so every reader asks this first.
-bool _searchRefuted(Ref ref, String query) =>
-    ref.watch(mentionSearchCacheProvider).refutes(query);
 
 /// Most roster entries one known-people scan reads.
 const _knownPeopleScanLimit = 2000;
@@ -473,14 +396,12 @@ List<MentionCandidate> _chooserCandidates(
   // Admission does not gate the search: `@Mary J` can name a person
   // outside the channel, so the search runs and admission is checked
   // again with the people it finds (portable mention rules, section 2).
-  // Only a refuted query skips it: a finished search for a shorter query
-  // found nobody, so this one is prose the directory cannot match.
   var candidates = build(
     directory
         ? searches.seed(query) ?? const <UserProfile>[]
         : const <UserProfile>[],
   );
-  if (directory && !searches.refutes(query)) {
+  if (directory) {
     final search = ref.watch(mentionUserSearchProvider(query));
     final page = search.asData?.value;
     if (page != null) candidates = build(page);
@@ -574,8 +495,7 @@ final mentionSearchFailedProvider = Provider.family
       final channel = ref.watch(channelByIdProvider(args.channelId));
       if (channel == null ||
           channel.isArchived ||
-          !channel.mentionsOutsidePeople ||
-          _searchRefuted(ref, args.query)) {
+          !channel.mentionsOutsidePeople) {
         return false;
       }
       final search = ref.watch(mentionUserSearchProvider(args.query));
@@ -591,8 +511,7 @@ final mentionSearchPendingProvider = Provider.family
       if (channel == null ||
           channel.isArchived ||
           !channel.mentionsOutsidePeople ||
-          args.query.trim().isEmpty ||
-          _searchRefuted(ref, args.query)) {
+          args.query.trim().isEmpty) {
         return false;
       }
       return ref.watch(mentionUserSearchProvider(args.query)).isLoading;
