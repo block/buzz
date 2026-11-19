@@ -88,8 +88,10 @@ void main() {
         {'Scout Marie': marie, 'Scout': scout},
         [bound(0, 12, marie), bound(17, 23, scout)],
       ),
-      // The old saver kept a binding whose label sat against a backtick.
-      ('`@Scout` now', {'Scout': scout}, [bound(1, 7, scout)]),
+      // Review of #9699: a name against a backtick is code or broken code,
+      // never a mention; the same name outside it still binds.
+      ('`@Scout` now', {'Scout': scout}, <ComposeDraftMention>[]),
+      ('`@Scout` and @Scout', {'Scout': scout}, [bound(13, 19, scout)]),
       // A label no longer in the text binds nothing.
       ('hello', {'Scout': scout}, <ComposeDraftMention>[]),
     ]) {

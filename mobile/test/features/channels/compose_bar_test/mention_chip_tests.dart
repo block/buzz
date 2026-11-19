@@ -425,7 +425,6 @@ void mentionChipTests() {
     for (final (icon, mark) in [
       (BuzzIcons.italic, '_'),
       (BuzzIcons.strikethrough, '~~'),
-      (BuzzIcons.code, '`'),
     ]) {
       sent = null;
       await pickRow('@bo', row('Bob'));
@@ -442,6 +441,91 @@ void mentionChipTests() {
       await send();
       expect(sent, [bob], reason: mark);
     }
+
+    // Review of #9699 (mentions in code): code is literal text. A chip the
+    // Code or Code block button wraps stops being a chip and loses its
+    // recipient, so the composer shows what the send does: nobody is
+    // notified, and a person outside the channel raises no prompt.
+    for (final (icon, open, close) in [
+      (BuzzIcons.code, '`', '`'),
+      (BuzzIcons.squareCode, '```\n', '\n```'),
+    ]) {
+      sent = sentTags = null;
+      await pickRow('@bo', row('Bob'));
+      expect(personChip, findsOneWidget);
+      await select(0, 4);
+      await format(icon);
+      expect(controller.text, '$open@Bob$close ');
+      expect(personChip, findsNothing, reason: open);
+      expect(saved(), isEmpty, reason: open);
+      await send();
+      expect(sentText, '$open@Bob$close');
+      expect(sent, isEmpty, reason: open);
+      expect(sentTags, isEmpty, reason: open);
+
+      sent = sentTags = null;
+      await pickRow('@quinn', row('Quinn'));
+      await select(0, 6);
+      await format(icon);
+      expect(controller.text, '$open@Quinn$close ');
+      expect(personChip, findsNothing, reason: open);
+      await send();
+      expect(find.byType(AlertDialog), findsNothing, reason: open);
+      expect(sentText, '$open@Quinn$close');
+      expect(sent, isEmpty, reason: open);
+      expect(sentTags, isEmpty, reason: open);
+    }
+    // Backticks typed around a chip do the same, and so does a chip inside
+    // a longer code span; a chip beside the code keeps its recipient.
+    sent = null;
+    await pickRow('@bo', row('Bob'));
+    await tester.enterText(field, '`see @Bob ');
+    await tester.pump();
+    expect(personChip, findsOneWidget);
+    await tester.enterText(field, '`see @Bob `');
+    await tester.pump();
+    expect(personChip, findsNothing);
+    await pickRow('`see @Bob ` @bo', row('Bob'));
+    expect(controller.text, '`see @Bob ` @Bob ');
+    expect(personChip, findsOneWidget);
+    expect(saved(), [ComposeDraftMention(start: 12, end: 16, pubkey: bob)]);
+    await send();
+    expect(sent, [bob]);
+    // Taking the code away by hand leaves a typed name: a member's notifies
+    // by the typed rules, a person outside the channel is not brought back.
+    for (final (name, keys) in [
+      ('Bob', [bob]),
+      ('Quinn', <String>[]),
+    ]) {
+      sent = null;
+      await pickRow('@${name.toLowerCase()}', row(name));
+      await select(0, name.length + 1);
+      await format(BuzzIcons.code);
+      await tester.enterText(field, '@$name ');
+      await tester.pump();
+      expect(personChip, findsNothing, reason: name);
+      await send();
+      expect(find.byType(AlertDialog), findsNothing, reason: name);
+      expect(sent, keys, reason: name);
+    }
+    // A typed, unpicked member name inside code notifies nobody either.
+    for (final typed in [
+      '`@Bob`',
+      '`ask @Bob today`',
+      '```\n@Bob\n```',
+      '**bold `@Bob ok`**',
+    ]) {
+      sent = null;
+      await tester.enterText(field, typed);
+      await tester.pump();
+      await send();
+      expect(sent, isEmpty, reason: typed);
+    }
+    sent = null;
+    await tester.enterText(field, '`code` @Bob');
+    await tester.pump();
+    await send();
+    expect(sent, [bob]);
 
     // Review of #9699 (chip suffix): `-bot` typed against Bob's chip spells
     // the member Bob-bot, who is picked too. The two read alike in the

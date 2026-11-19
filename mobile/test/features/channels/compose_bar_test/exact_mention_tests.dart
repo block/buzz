@@ -300,6 +300,59 @@ void exactMentionTests() {
     });
   }
 
+  // Review of #9699 (mentions in code): a label-keyed draft binds no name
+  // inside code, whether a span or a fenced block, and the send notifies
+  // nobody for it. The same name outside the code binds.
+  testWidgets('a legacy draft binds no mention inside code', (tester) async {
+    final signer = nostr.Keys.generate();
+    final prefsKey = 'compose_drafts_v1:https://relay.example:${signer.public}';
+    const text = '`@Scout` and @Scout\n```\nping @Marie now\n```';
+    await _testPrefs.setString(
+      prefsKey,
+      jsonEncode([
+        {
+          'key': 'channel-1',
+          'channel_id': 'channel-1',
+          'text': text,
+          'mention_keys': {'Scout': first, 'Marie': second},
+          'updated_at': 1700000000,
+        },
+      ]),
+    );
+    List<String>? sent;
+    String? sentText;
+    await mountComposer(
+      tester,
+      [
+        for (final (key, name) in [(first, 'Scout'), (second, 'Marie')])
+          ChannelMember(
+            pubkey: key,
+            displayName: name,
+            role: 'member',
+            joinedAt: DateTime(2025),
+          ),
+      ],
+      (content, keys, {mediaTags = const []}) async {
+        sentText = content;
+        sent = keys;
+      },
+      signer: signer,
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('composer-person-mention-chip')),
+      findsOneWidget,
+    );
+    final saved = jsonDecode(_testPrefs.getString(prefsKey)!) as List;
+    expect(saved.single['mentions'], [
+      {'start': 13, 'end': 19, 'pubkey': first},
+    ]);
+    await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+    await tester.pumpAndSettle();
+    expect(sentText, text);
+    expect(sent, [first]);
+  });
+
   // Review of #9699: a label-keyed draft resolves as the old send did, in
   // one longest-match pass with member names competing.
   testWidgets('a legacy draft leaves a longer member name to its owner', (
@@ -424,15 +477,15 @@ void exactMentionTests() {
       expect(sentText, '@Scout');
       expect(sent, [second]);
 
-      // A chip inside code keeps its recipient but is sent as typed; only the
-      // prose namesake is qualified.
+      // A pick that lands inside code is literal text with no recipient, so
+      // the prose chip is the only Scout bound and needs no qualifier.
       await pick(tester, '`ping @');
       await pick(tester, '`ping @Scout now` @', last: true);
       expect(controller.text, '`ping @Scout now` @Scout ');
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pumpAndSettle();
-      expect(sentText, '`ping @Scout now` @Scout ($second)');
-      expect(sent, [first, second]);
+      expect(sentText, '`ping @Scout now` @Scout');
+      expect(sent, [second]);
     },
   );
 

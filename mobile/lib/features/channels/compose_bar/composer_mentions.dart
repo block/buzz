@@ -114,14 +114,13 @@ extension _LegacyMentions on _MarkdownEditingController {
   /// bindings arrive marked legacy; here a longer name among [members]
   /// that covers one (`@Sam Smith` over a picked `@Sam`) takes it back,
   /// and the typed name resolves at send as it used to.
-  /// Backticks read as spaces, as they did when the binding was saved.
   /// Once the roster is [complete] the surviving bindings are ordinary.
   void settleLegacyMentions(
     _MemberMentions Function() members, {
     required bool complete,
   }) {
     if (!_mentions.any((mention) => mention.legacy)) return;
-    final occurrences = mentionOccurrences(text.replaceAll('`', ' '), {
+    final occurrences = mentionOccurrences(text, {
       for (final mention in _mentions)
         if (mention.legacy) mention.label(text).toLowerCase(),
     }, known: members().labels);
@@ -216,7 +215,10 @@ bool _startsSelectedMention(List<_ComposerMention> mentions, int start) =>
 /// a pasted `[@Alice](url)` notify nobody; a name several identities share is
 /// refused so nobody is silently dropped. That holds beside a chip of the
 /// same name too: text restored without its binding, as by a system Undo,
-/// needs a pick rather than borrowing the surviving chip's key.
+/// needs a pick rather than borrowing the surviving chip's key. A typed
+/// name inside [code], the spans and blocks the composer styles as code, is
+/// literal text and notifies nobody; the controller has already dropped any
+/// binding there.
 ///
 /// The text is scanned once, against the chips' names, the names their
 /// recipients go by now and the [members] index. `nameEnds` is that scan:
@@ -231,6 +233,7 @@ _resolveComposerMentions(
   required bool mentionsInvalid,
   required _MemberMentions members,
   required List<MentionCandidate> restoredCandidates,
+  required List<TextRange> code,
 }) {
   // A broken record cannot fall back to a same-name roster entry.
   if (mentionsInvalid || mentions.any((m) => m.candidate.pubkey.isEmpty)) {
@@ -268,6 +271,7 @@ _resolveComposerMentions(
     nameEnds[range.start] = range.end;
     if (mentions.any((m) => m.start == range.start)) continue;
     if (!typedMentionNotifies(text, range.start, range.end)) continue;
+    if (code.any((c) => c.start < range.start && range.end < c.end)) continue;
     final identities = {
       ...?members.byName[range.label],
       ...?byName[range.label],
@@ -297,12 +301,12 @@ _resolveComposerMentions(
 /// as that other person. [nameEnds] says where the longest name at each `@`
 /// ends, among the chips, the recipients and the channel's members; it is
 /// the send's one scan, from [_resolveComposerMentions]. One key under a
-/// name stays bare, and a mention inside [code] the composer styles stays
-/// as typed. The composer itself never showed the key.
+/// name stays bare. No bound mention sits inside code, which the controller
+/// keeps unbound, so code is sent as typed. The composer itself never
+/// showed the key.
 String _qualifiedMentionContent(
   String text,
   List<_ComposerMention> mentions, {
-  required List<TextRange> code,
   required Map<int, int> nameEnds,
 }) {
   final keysByName = <String, Set<String>>{};
@@ -313,9 +317,6 @@ String _qualifiedMentionContent(
   for (final mention in mentions.reversed) {
     if (keysByName[mention.label(text).toLowerCase()]!.length < 2 &&
         (nameEnds[mention.start] ?? 0) <= mention.end) {
-      continue;
-    }
-    if (code.any((c) => c.start < mention.start && mention.end < c.end)) {
       continue;
     }
     content = content.replaceRange(

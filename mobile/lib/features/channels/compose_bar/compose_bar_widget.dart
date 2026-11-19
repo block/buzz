@@ -447,6 +447,7 @@ class ComposeBar extends HookConsumerWidget {
       controller.settleLegacyMentions(memberMentions, complete: false);
       final draft = controller.text;
       final mentions = controller.mentions;
+      final code = controller._styledCodeRanges(draft);
       final submittedOrigin = ComposerSendOrigin.capture(sendSurfaceKey);
       Future<void> sendWithOrigin(
         String content,
@@ -470,6 +471,7 @@ class ComposeBar extends HookConsumerWidget {
           mentions,
           mentionsInvalid: controller.mentionsInvalid,
           members: memberMentions(),
+          code: code,
           restoredCandidates: buildMentionCandidates(
             members: membersAsync.asData?.value ?? const [],
             relayAgents: relayAgents ?? const [],
@@ -505,7 +507,6 @@ class ComposeBar extends HookConsumerWidget {
       final text = _qualifiedMentionContent(
         draft,
         mentions,
-        code: controller._styledCodeRanges(draft),
         nameEnds: nameEnds,
       ).trim();
       final outgoing = _OutgoingMentions(selectedMentions);

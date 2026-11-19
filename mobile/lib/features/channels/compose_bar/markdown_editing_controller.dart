@@ -102,9 +102,11 @@ class _MarkdownEditingController extends TextEditingController {
       if (_history.isEmpty) _recordHistory(value.text);
       if (_historyDirection == 0) {
         _carryMentions(value, newValue);
+        _mentions = _outsideCode(text, _mentions);
         _recordHistory(text);
       } else if (!_restoreHistory(text)) {
         _carryMentions(value, newValue);
+        _mentions = _outsideCode(text, _mentions);
       }
     }
     super.value = _snapSelectionToChips(newValue);
@@ -171,6 +173,25 @@ class _MarkdownEditingController extends TextEditingController {
     ]);
   }
 
+  /// The [mentions] outside the code spans and blocks drawn in [text]. Code
+  /// is literal text: a name inside it draws no chip and notifies nobody, so
+  /// a binding that lands in code is dropped, whether the Code button
+  /// wrapped a chip, backticks were typed around it or a saved draft held
+  /// it. Taking the code away again leaves a typed name. Text without a
+  /// backtick holds no code and costs one search for it.
+  List<_ComposerMention> _outsideCode(
+    String text,
+    List<_ComposerMention> mentions,
+  ) {
+    if (mentions.isEmpty || !text.contains('`')) return mentions;
+    final code = _styledCodeRanges(text);
+    return List.unmodifiable([
+      for (final mention in mentions)
+        if (!code.any((c) => c.start < mention.start && mention.end < c.end))
+          mention,
+    ]);
+  }
+
   /// Sets [newValue] and the mentions bound in it in one notification, so
   /// no listener sees the text without its bindings: a restored or
   /// recovered draft, a prefill, or a cleared composer. [mentionsInvalid]
@@ -181,8 +202,11 @@ class _MarkdownEditingController extends TextEditingController {
     bool mentionsInvalid = false,
   }) {
     if (_history.isEmpty) _recordHistory(value.text);
-    _mentions = List.unmodifiable(
-      mentions.toList()..sort((a, b) => a.start.compareTo(b.start)),
+    _mentions = _outsideCode(
+      newValue.text,
+      List.unmodifiable(
+        mentions.toList()..sort((a, b) => a.start.compareTo(b.start)),
+      ),
     );
     _mentionsInvalid = mentionsInvalid;
     _cachedTextSpan = null;
