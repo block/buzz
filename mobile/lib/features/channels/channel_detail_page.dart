@@ -106,6 +106,7 @@ import 'dm_voice_agent_provider.dart';
 import 'message_actions.dart';
 import 'message_action_backdrop_state.dart';
 import 'message_long_press_region.dart';
+import 'message_reply_drag_target.dart';
 import 'message_content.dart';
 import 'message_media_avatar.dart';
 import 'message_skeleton_body.dart';

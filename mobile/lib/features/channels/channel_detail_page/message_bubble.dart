@@ -162,6 +162,9 @@ class _MessageBubble extends HookConsumerWidget {
             borderRadius: BorderRadius.circular(Radii.md),
             highlightColor: context.colors.primary.withValues(alpha: 0.1),
             snapshotKey: messageSnapshotKey,
+            // Empty row space beside a bubble is not the message.
+            canStartAt: (position) =>
+                messageReplyDragTargetBounds(swipeContentKey, position) != null,
             // Tap opens existing threads; long-press can start a new one.
             // MessageContent handles mention, channel-link, and media taps.
             onTap: (!hasReplies && !hasLocalReplies) || allMessages == null

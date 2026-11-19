@@ -167,6 +167,10 @@ class _ThreadMessage extends HookConsumerWidget {
               borderRadius: BorderRadius.circular(Radii.md),
               highlightColor: context.colors.primary.withValues(alpha: 0.1),
               snapshotKey: messageSnapshotKey,
+              // Empty row space beside a bubble is not the message.
+              canStartAt: (position) =>
+                  messageReplyDragTargetBounds(swipeContentKey, position) !=
+                  null,
               child: Padding(
                 padding: EdgeInsets.only(
                   bottom: endsDay

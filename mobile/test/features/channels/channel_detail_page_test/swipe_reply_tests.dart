@@ -85,6 +85,68 @@ void swipeReplyTests() {
   for (final thread in [false, true]) {
     for (final own in [false, true]) {
       testWidgets(
+        'long press beside the bubble opens no actions, thread=$thread own=$own',
+        (tester) async {
+          final events = [
+            _textMsg(
+              id: threadIdRoot,
+              pubkey: own ? 'self' : 'alice',
+              content: 'Hold me',
+            ),
+          ];
+          final messages = formatTimeline(events);
+          await tester.pumpWidget(
+            _buildTestable(
+              signingPubkey: 'self',
+              messages: events,
+              home: thread
+                  ? ThreadDetailPage(
+                      threadHead: messages.first,
+                      allMessages: messages,
+                      channelId: _channelId,
+                      currentPubkey: 'self',
+                      isMember: true,
+                      isArchived: false,
+                    )
+                  : ChannelDetailPage(channel: _testChannel),
+            ),
+          );
+          await tester.pumpAndSettle();
+          final row = find.byKey(
+            ValueKey(
+              '${thread ? 'thread-message-row' : 'message-row'}-$threadIdRoot',
+            ),
+          );
+          final bubble = find
+              .descendant(
+                of: row,
+                matching: find.byType(LocalSendBubbleSurface),
+              )
+              .first;
+          final bubbleRect = tester.getRect(bubble);
+          final rowRect = tester.getRect(row);
+          // The empty side, away from any avatar.
+          final beside = Offset(
+            own ? rowRect.left + 2 : rowRect.right - 2,
+            bubbleRect.center.dy,
+          );
+          expect(bubbleRect.contains(beside), isFalse);
+
+          await tester.longPressAt(beside);
+          await tester.pumpAndSettle();
+          expect(find.text('Copy text'), findsNothing);
+
+          await tester.longPress(bubble);
+          await tester.pumpAndSettle();
+          expect(find.text('Copy text'), findsOneWidget);
+        },
+      );
+    }
+  }
+
+  for (final thread in [false, true]) {
+    for (final own in [false, true]) {
+      testWidgets(
         'left drag opens existing reply destination, thread=$thread own=$own',
         (tester) async {
           final events = [

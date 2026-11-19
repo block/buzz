@@ -1,7 +1,8 @@
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 
-/// Marks visible message content that can start a reply drag.
+/// Marks visible message content that can start a reply drag or open the
+/// message's long-press actions.
 class MessageReplyDragTarget extends SingleChildRenderObjectWidget {
   const MessageReplyDragTarget({super.key, required super.child});
 
