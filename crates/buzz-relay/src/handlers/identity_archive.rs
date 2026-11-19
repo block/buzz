@@ -90,7 +90,7 @@ pub async fn handle_identity_archive_event(
 
     info!(
         actor = %actor_hex,
-        target = %target_hex,
+        target_pubkey = %target_hex,
         consent = consent_path.as_str(),
         changed,
         kind,
