@@ -8,7 +8,6 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../theme/theme.dart';
 import 'ios_glass_navigation_button.dart';
-import 'native_route_controls.dart';
 
 /// A native iOS glass capsule for a short navigation-bar text action.
 class IosGlassNavigationAction extends HookWidget {
@@ -44,9 +43,6 @@ class IosGlassNavigationAction extends HookWidget {
   @override
   Widget build(BuildContext context) {
     assert(defaultTargetPlatform == TargetPlatform.iOS);
-    if (!useNativeRouteControlsVisible(context)) {
-      return SizedBox(width: width, height: height);
-    }
     return HookBuilder(builder: _buildNative);
   }
 
