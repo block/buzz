@@ -325,6 +325,7 @@ Widget _buildTestable({
   HuddleTransportFactory? huddleTransportFactory,
   HuddleHumanCountLoader? huddleHumanCountLoader,
   List<NostrEvent> huddleLifecycle = const [],
+  bool? huddleHistoryMembership,
   String? huddleCurrentPubkey,
   String? huddleRelayAuthor,
   http.Client? mediaClient,
@@ -523,6 +524,10 @@ Widget _buildTestable({
       huddleLifecycleProvider(
         _channelId,
       ).overrideWith((ref) => Stream.value(huddleLifecycle)),
+      if (huddleHistoryMembership != null)
+        huddleHistoryMembershipProvider(
+          _huddleChannelId,
+        ).overrideWithValue(huddleHistoryMembership),
       if (huddleCurrentPubkey != null)
         currentPubkeyProvider.overrideWith((ref) => huddleCurrentPubkey),
       appLifecycleProvider.overrideWith(_TestAppLifecycleNotifier.new),
@@ -12241,6 +12246,23 @@ void main() {
         relay.setConnectionStatus(SessionStatus.reconnecting);
         await tester.pumpAndSettle();
         expect(find.text('The transcript remains available.'), findsOneWidget);
+        // Revalidation after reconnect keeps the open transcript mounted.
+        final revalidation = Completer<void>();
+        relay.huddleHistoryGate = revalidation.future;
+        final transcriptList = tester.state(find.byType(Scrollable).last);
+        relay.setConnectionStatus(SessionStatus.connected);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(find.text('The transcript remains available.'), findsOneWidget);
+        revalidation.complete();
+        relay.huddleHistoryGate = null;
+        await tester.pumpAndSettle();
+        expect(
+          tester.state(find.byType(Scrollable).last),
+          same(transcriptList),
+        );
+        relay.setConnectionStatus(SessionStatus.reconnecting);
+        await tester.pumpAndSettle();
         relay.huddleHistoryError = Exception('connection reset');
         relay.setConnectionStatus(SessionStatus.connected);
         await tester.pumpAndSettle();
@@ -12284,6 +12306,52 @@ void main() {
         expect(find.widgetWithText(FilledButton, 'Retry'), findsNothing);
       },
     );
+
+    testWidgets('a known member reopens a loaded transcript while offline', (
+      tester,
+    ) async {
+      final relay = _IdentityUpdateRelaySession();
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      await tester.pumpWidget(
+        _buildTestable(
+          signingPubkey: 'self',
+          relaySessionNotifier: relay,
+          huddleHistoryMembership: true,
+          messages: [
+            _huddleMsg(
+              id: 'ended-huddle-start',
+              kind: EventKind.huddleStarted,
+              createdAt: now,
+            ),
+            _huddleMsg(
+              id: 'ended-huddle-end',
+              kind: EventKind.huddleEnded,
+              createdAt: now + 1,
+            ),
+          ],
+          huddleMessages: [
+            _textMsg(
+              id: 'transcript',
+              pubkey: 'alice',
+              content: 'The transcript remains available.',
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'View'));
+      await tester.pumpAndSettle();
+      expect(find.text('The transcript remains available.'), findsOneWidget);
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+
+      relay.setConnectionStatus(SessionStatus.reconnecting);
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'View'));
+      await tester.pumpAndSettle();
+      expect(find.text('The transcript remains available.'), findsOneWidget);
+      expect(find.widgetWithText(FilledButton, 'Retry'), findsNothing);
+    });
 
     for (final huddleEvent in [
       (kind: EventKind.huddleStarted, action: 'started a huddle'),
@@ -21353,6 +21421,9 @@ class _IdentityUpdateRelaySession extends RelaySessionNotifier {
   }
 
   Object? huddleHistoryError;
+
+  /// Holds the next transcript access reads open until it completes.
+  Future<void>? huddleHistoryGate;
   final Future<List<NostrEvent>>? profileRefresh;
   NostrFilter? identityFilter;
   NostrFilter? directIdentityFilter;
@@ -21372,9 +21443,9 @@ class _IdentityUpdateRelaySession extends RelaySessionNotifier {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
-    if (filter.tags['#h']?.contains(_huddleChannelId) == true &&
-        huddleHistoryError != null) {
-      throw huddleHistoryError!;
+    if (filter.tags['#h']?.contains(_huddleChannelId) == true) {
+      await huddleHistoryGate;
+      if (huddleHistoryError != null) throw huddleHistoryError!;
     }
     if (filter.kinds.length == 1 && filter.kinds.single == 0) {
       return profileRefresh ?? const [];

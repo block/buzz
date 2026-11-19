@@ -74,10 +74,38 @@ void main() {
       expect(relay.listeners, isEmpty);
     },
   );
+
+  test('a failed participation read still exposes the active start', () async {
+    final relay = _LifecycleRelay()
+      ..failingKinds = {EventKind.huddleParticipantJoined};
+    relay.events.add(
+      NostrEvent(
+        id: 'start',
+        pubkey: 'relay',
+        createdAt: 1,
+        kind: EventKind.huddleStarted,
+        tags: [
+          ['h', 'parent'],
+        ],
+        content: '{}',
+        sig: '',
+      ),
+    );
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => relay)],
+    );
+    addTearDown(container.dispose);
+    final provider = huddleLifecycleProvider('parent');
+    container.listen(provider, (_, _) {});
+    final initial = await container.read(provider.future);
+    expect(initial.single.id, 'start');
+    expect(relay.historyReads, 2);
+  });
 }
 
 class _LifecycleRelay extends RelaySessionNotifier {
   int historyReads = 0;
+  Set<int> failingKinds = const {};
   void Function(RelaySubscriptionStatus)? statusListener;
   final events = <NostrEvent>[];
   final listeners = <void Function(NostrEvent)>[];
@@ -97,6 +125,9 @@ class _LifecycleRelay extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     historyReads++;
+    if (filter.kinds.any(failingKinds.contains)) {
+      throw Exception('history timed out');
+    }
     final matching =
         events.where((event) => filter.kinds.contains(event.kind)).toList()
           ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
