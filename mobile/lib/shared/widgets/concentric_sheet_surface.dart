@@ -8,8 +8,6 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../theme/theme.dart';
 
-enum ConcentricSurfaceCorners { all, bottom }
-
 /// An iOS-native surface that adopts the system's concentric corners on iOS 26
 /// and newer. Other platforms keep the normal Flutter shape.
 class ConcentricSheetSurface extends HookWidget {
@@ -17,8 +15,6 @@ class ConcentricSheetSurface extends HookWidget {
     required this.child,
     required this.enabled,
     this.color,
-    this.backdropColor,
-    this.corners = ConcentricSurfaceCorners.all,
     this.padding = const EdgeInsets.only(
       left: Grid.xxs,
       right: Grid.xxs,
@@ -37,8 +33,6 @@ class ConcentricSheetSurface extends HookWidget {
   final Widget child;
   final bool enabled;
   final Color? color;
-  final Color? backdropColor;
-  final ConcentricSurfaceCorners corners;
   final EdgeInsetsGeometry padding;
   final bool providesSheetSurface;
   final bool usesGlass;
@@ -64,12 +58,7 @@ class ConcentricSheetSurface extends HookWidget {
   static const _nativeContentClipRadius = Radii.dialog * 2;
   static const sheetTopRadius = _nativeContentClipRadius - Grid.xxs;
 
-  BorderRadius _borderRadius(double radius) => switch (corners) {
-    ConcentricSurfaceCorners.all => BorderRadius.circular(radius),
-    ConcentricSurfaceCorners.bottom => BorderRadius.vertical(
-      bottom: Radius.circular(radius),
-    ),
-  };
+  BorderRadius _borderRadius(double radius) => BorderRadius.circular(radius);
 
   Future<bool> _checkNativeSurfaceSupport() async {
     try {
@@ -87,12 +76,10 @@ class ConcentricSheetSurface extends HookWidget {
   Future<void> _updateNativeSurfaceColors({
     required MethodChannel channel,
     required Color surfaceColor,
-    required Color? backdropColor,
   }) async {
     try {
       await channel.invokeMethod<void>('updateColors', <String, Object?>{
         'color': surfaceColor.toARGB32(),
-        'backdropColor': backdropColor?.toARGB32(),
         'glassTintColor': glassTintColor?.toARGB32(),
       });
     } on MissingPluginException {
@@ -198,7 +185,6 @@ class ConcentricSheetSurface extends HookWidget {
           _updateNativeSurfaceColors(
             channel: channel,
             surfaceColor: surfaceColor,
-            backdropColor: backdropColor,
           ),
         );
         return null;
@@ -208,7 +194,6 @@ class ConcentricSheetSurface extends HookWidget {
         nativeSurfaceSupported,
         nativeSurfaceChannel.value,
         surfaceColor,
-        backdropColor,
         glassTintColor,
       ],
     );
@@ -265,15 +250,10 @@ class ConcentricSheetSurface extends HookWidget {
                   },
                   creationParams: <String, Object>{
                     'color': surfaceColor.toARGB32(),
-                    if (backdropColor case final color?)
-                      'backdropColor': color.toARGB32(),
                     'minimumRadius': minimumRadius,
                     'capsule': capsule,
-                    'corners': corners.name,
                     'independentCorners': providesSheetSurface,
-                    if (providesSheetSurface &&
-                        corners == ConcentricSurfaceCorners.all)
-                      'topRadius': sheetTopRadius,
+                    if (providesSheetSurface) 'topRadius': sheetTopRadius,
                     'usesGlass': usesGlass,
                     'animateGeometry': animateGeometry,
                     if (glassTintColor case final tint?)
@@ -300,8 +280,7 @@ class ConcentricSheetSurface extends HookWidget {
                 ? _borderRadius(contentClipRadius!)
                 : nativeSurfaceSupported
                 ? (nativeCornerRadius.value ??
-                      (providesSheetSurface &&
-                              corners == ConcentricSurfaceCorners.all
+                      (providesSheetSurface
                           ? const BorderRadius.vertical(
                               top: Radius.circular(sheetTopRadius),
                               bottom: Radius.circular(_nativeContentClipRadius),

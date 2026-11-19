@@ -498,6 +498,18 @@ String _composeSendErrorMessage(Object error) {
   return error.toString().replaceFirst('Exception: ', '');
 }
 
+/// Describes why a text send failed. A community switch is reported
+/// separately by [_reportSendCancelledByCommunitySwitch]. Failures after the
+/// EVENT went out say "Not confirmed": the relay may have accepted it.
+String _sendFailureMessage(Object error) => switch (error) {
+  RelayNotConnectedError() => 'Not sent. No connection.',
+  RelayAckTimeoutError() => "Not confirmed. The relay didn't respond.",
+  RelayAckLostError() => 'Not confirmed. Connection lost.',
+  TimeoutException() => "Not sent. The relay didn't respond.",
+  StateError(:final message) => 'Not sent: $message',
+  _ => 'Not sent: ${_composeSendErrorMessage(error)}',
+};
+
 /// Ask whether to invite mentioned humans who aren't channel members, or
 /// send without inviting them. Mirrors desktop's `NonMemberMentionDialog`.
 /// [canInvite] false (a private channel the sender doesn't own/administer)

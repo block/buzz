@@ -879,7 +879,10 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 97);
+        assert_eq!(migrations.len(), 101);
+        assert_eq!(migrations[100].version, 101);
+        assert!(strip_sql_comments(migrations[100].sql.as_str())
+            .contains("DROP CONSTRAINT IF EXISTS push_gateway_delegations_installation_id_fkey"));
         assert_eq!(migrations[89].version, 90);
         assert!(migrations[89]
             .sql
@@ -924,6 +927,20 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("SET LOCAL lock_timeout = '5s'"));
+        // 0098-0100 undo 0097's community artifact expand without a table
+        // scan under ACCESS EXCLUSIVE.
+        assert_eq!(migrations[97].version, 98);
+        assert!(strip_sql_comments(migrations[97].sql.as_str())
+            .contains("CHECK (channel_id IS NOT NULL) NOT VALID;"));
+        assert_eq!(migrations[98].version, 99);
+        assert!(strip_sql_comments(migrations[98].sql.as_str())
+            .contains("VALIDATE CONSTRAINT artifact_heads_channel_id_not_null;"));
+        assert_eq!(migrations[99].version, 100);
+        let unexpand = strip_sql_comments(migrations[99].sql.as_str());
+        assert!(
+            unexpand.contains("ALTER TABLE artifact_heads ALTER COLUMN channel_id SET NOT NULL;")
+        );
+        assert!(unexpand.contains("ALTER TABLE communities DROP COLUMN artifact_type_policies;"));
         assert!(migrations[79]
             .sql
             .as_str()
@@ -3184,6 +3201,7 @@ mod postgres_tests {
             "entity_deletion_approvals",
             "workflow_runs",
             "push_gateway_installations",
+            "push_gateway_delegations",
         ] {
             assert_eq!(
                 constraints(&desired, table).await,
@@ -3530,6 +3548,7 @@ mod postgres_tests {
             .execute(&pool)
             .await
             .expect("insert community");
+        let channel_id = uuid::Uuid::new_v4();
         let artifact_id = uuid::Uuid::new_v4();
         sqlx::query(
             "INSERT INTO artifact_revisions (community_id, event_id, artifact_id) \
@@ -3549,7 +3568,7 @@ mod postgres_tests {
         .bind(community_id)
         .bind(artifact_id)
         .bind(vec![1_u8; 32])
-        .bind(uuid::Uuid::new_v4())
+        .bind(channel_id)
         .execute(&pool)
         .await
         .expect("insert artifact head");
@@ -3630,6 +3649,29 @@ mod postgres_tests {
             .await
             .expect("populated small database auto-migrates");
         assert_boots_through_every_migration(&pool).await;
+        // 0097 relaxed channel_id and 0098-0100 restore NOT NULL; the channel
+        // head and revision written before both must survive unchanged.
+        let head: (uuid::Uuid, Vec<u8>) = sqlx::query_as(
+            "SELECT channel_id, event_id FROM artifact_heads \
+             WHERE community_id = $1 AND artifact_id = $2",
+        )
+        .bind(community_id)
+        .bind(artifact_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read surviving artifact head");
+        assert_eq!(head, (channel_id, vec![1_u8; 32]));
+        let revisions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM artifact_revisions \
+             WHERE community_id = $1 AND event_id = $2 AND artifact_id = $3",
+        )
+        .bind(community_id)
+        .bind(vec![1_u8; 32])
+        .bind(artifact_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read surviving artifact revision");
+        assert_eq!(revisions, 1, "0097-0100 keep channel artifact revisions");
         assert_eq!(
             valid_indexes(
                 &pool,
@@ -3644,6 +3686,93 @@ mod postgres_tests {
             .await,
             5
         );
+    }
+
+    /// 0099 validates the channel check while channel artifact writes
+    /// continue: an open writer on `artifact_heads` must not block it.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn artifact_unexpand_validates_while_channel_heads_are_written() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations_through(&pool, 98)
+            .await
+            .expect("apply migrations 1-98");
+        let community_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("unexpand-{}.example", community_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert community");
+
+        let mut writer = pool.begin().await.expect("begin channel head writer");
+        sqlx::query(
+            "INSERT INTO artifact_heads \
+             (community_id, artifact_id, event_id, channel_id, artifact_type) \
+             VALUES ($1, $2, $3, $4, 'doc')",
+        )
+        .bind(community_id)
+        .bind(uuid::Uuid::new_v4())
+        .bind(vec![2_u8; 32])
+        .bind(uuid::Uuid::new_v4())
+        .execute(&mut *writer)
+        .await
+        .expect("write a channel head");
+        run_migrations_through(&pool, 99)
+            .await
+            .expect("0099 validates beside an open channel head writer");
+        writer.commit().await.expect("commit channel head");
+
+        run_migrations(&pool)
+            .await
+            .expect("apply the remaining migrations");
+        assert_boots_through_every_migration(&pool).await;
+        let heads: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM artifact_heads WHERE community_id = $1")
+                .bind(community_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count channel heads");
+        assert_eq!(heads, 1);
+    }
+
+    /// 0098 refuses a database whose artifact head key is the scoped key from
+    /// the removed operator contract, before any cleanup runs.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn artifact_unexpand_refuses_scoped_head_key() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations_through(&pool, 97)
+            .await
+            .expect("apply migrations 1-97");
+        sqlx::query(
+            "ALTER TABLE artifact_heads DROP CONSTRAINT artifact_heads_pkey, \
+             ADD CONSTRAINT artifact_heads_pkey PRIMARY KEY USING INDEX artifact_heads_scoped_identity",
+        )
+        .execute(&pool)
+        .await
+        .expect("attach the scoped key as the contract script did");
+
+        let refused = run_migrations(&pool)
+            .await
+            .expect_err("0098 must refuse the scoped key")
+            .to_string();
+        assert!(
+            refused.contains("artifact_heads primary key is not (community_id, artifact_id)"),
+            "unexpected error: {refused}"
+        );
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(97));
+        let scope_columns: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM information_schema.columns \
+             WHERE table_schema = 'public' AND table_name = 'artifact_heads' \
+               AND column_name = 'scope'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read artifact_heads columns");
+        assert_eq!(scope_columns, 1, "cleanup must not run");
     }
 
     /// Migration 0081 refuses a populated `nip_fi_profile_heads`. A relay that
