@@ -3267,9 +3267,15 @@ mod postgres_tests {
         let _ = claim_relay_membership(&pool, community, &member, "member", Some(&first), &keys)
             .await
             .expect("add member");
-        let invite = crate::relay_invite::mint_relay_invite(&pool, community, &owner, 3600, None)
-            .await
-            .expect("mint invite");
+        let invite = crate::relay_invite::mint_relay_invite(
+            &pool,
+            community,
+            &owner,
+            crate::relay_invite::InviteExpiry::After(3600),
+            None,
+        )
+        .await
+        .expect("mint invite");
         let hash = buzz_core::invite::hash_v2_code(&invite.code);
 
         let mut removal = crate::begin_community_write_transaction(
@@ -3338,9 +3344,15 @@ mod postgres_tests {
         let (community, owner) = owned_community(&pool).await;
         let member = test_pubkey();
         let keys = nostr::Keys::generate();
-        let invite = crate::relay_invite::mint_relay_invite(&pool, community, &owner, 3600, None)
-            .await
-            .expect("mint invite");
+        let invite = crate::relay_invite::mint_relay_invite(
+            &pool,
+            community,
+            &owner,
+            crate::relay_invite::InviteExpiry::After(3600),
+            None,
+        )
+        .await
+        .expect("mint invite");
         let hash = buzz_core::invite::hash_v2_code(&invite.code);
         let uses = |pool: PgPool| async move {
             sqlx::query_scalar::<_, i32>(

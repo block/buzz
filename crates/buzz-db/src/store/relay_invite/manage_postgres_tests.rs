@@ -35,10 +35,10 @@ async fn revoke_by_code_targets_exactly_that_invite_and_is_idempotent() {
     let (pool, community, admin, claimant) = fixture().await;
     add_member(&pool, community, &admin, "admin").await;
     // Two invites that differ only in their secret.
-    let first = mint_relay_invite(&pool, community, &admin, 3600, Some(5))
+    let first = mint_relay_invite(&pool, community, &admin, InviteExpiry::After(3600), Some(5))
         .await
         .unwrap();
-    let second = mint_relay_invite(&pool, community, &admin, 3600, Some(5))
+    let second = mint_relay_invite(&pool, community, &admin, InviteExpiry::After(3600), Some(5))
         .await
         .unwrap();
 
@@ -109,7 +109,7 @@ async fn revoke_is_scoped_to_the_community() {
     let (_, other, other_admin, _) = fixture().await;
     add_member(&pool, community, &admin, "admin").await;
     add_member(&pool, other, &other_admin, "admin").await;
-    let invite = mint_relay_invite(&pool, community, &admin, 3600, None)
+    let invite = mint_relay_invite(&pool, community, &admin, InviteExpiry::After(3600), None)
         .await
         .unwrap();
     let hash = hash_v2_code(&invite.code);
@@ -150,10 +150,10 @@ async fn creator_or_admin_may_revoke_and_other_members_may_not() {
     add_member(&pool, community, &creator, "admin").await;
     add_member(&pool, community, &other_member, "member").await;
     add_member(&pool, community, &admin, "admin").await;
-    let mine = mint_relay_invite(&pool, community, &creator, 3600, None)
+    let mine = mint_relay_invite(&pool, community, &creator, InviteExpiry::After(3600), None)
         .await
         .unwrap();
-    let also_mine = mint_relay_invite(&pool, community, &creator, 3600, None)
+    let also_mine = mint_relay_invite(&pool, community, &creator, InviteExpiry::After(3600), None)
         .await
         .unwrap();
 
@@ -237,9 +237,15 @@ async fn restricted_admin_cannot_revoke() {
     // Another admin's invite, so only the actor's restriction can refuse.
     let other_admin = hex::encode([5; 32]);
     add_member(&pool, community, &other_admin, "admin").await;
-    let other = mint_relay_invite(&pool, community, &other_admin, 3600, None)
-        .await
-        .unwrap();
+    let other = mint_relay_invite(
+        &pool,
+        community,
+        &other_admin,
+        InviteExpiry::After(3600),
+        None,
+    )
+    .await
+    .unwrap();
     assert!(matches!(
         revoke(
             &pool,
@@ -285,9 +291,15 @@ async fn demotion_that_wins_the_role_row_refuses_the_revoke() {
     add_member(&pool, community, &admin, "admin").await;
     add_member(&pool, community, &other_admin, "admin").await;
     // Minted by someone else, so a demoted actor loses the right to revoke it.
-    let invite = mint_relay_invite(&pool, community, &other_admin, 3600, None)
-        .await
-        .unwrap();
+    let invite = mint_relay_invite(
+        &pool,
+        community,
+        &other_admin,
+        InviteExpiry::After(3600),
+        None,
+    )
+    .await
+    .unwrap();
 
     let mut demotion = pool.begin().await.unwrap();
     sqlx::query("UPDATE relay_members SET role = 'member' WHERE community_id = $1 AND pubkey = $2")
@@ -313,9 +325,15 @@ async fn restriction_that_wins_admission_refuses_the_revoke() {
     let (pool, community, admin, other_admin) = fixture().await;
     add_member(&pool, community, &admin, "admin").await;
     add_member(&pool, community, &other_admin, "admin").await;
-    let invite = mint_relay_invite(&pool, community, &other_admin, 3600, None)
-        .await
-        .unwrap();
+    let invite = mint_relay_invite(
+        &pool,
+        community,
+        &other_admin,
+        InviteExpiry::After(3600),
+        None,
+    )
+    .await
+    .unwrap();
 
     // A restriction writer holds the admission lock and bans the actor.
     let mut restriction = pool.begin().await.unwrap();
@@ -345,7 +363,7 @@ async fn restriction_that_wins_admission_refuses_the_revoke() {
 async fn claim_and_revoke_serialize_and_the_claim_keeps_its_member() {
     let (pool, community, admin, claimant) = fixture().await;
     add_member(&pool, community, &admin, "admin").await;
-    let invite = mint_relay_invite(&pool, community, &admin, 3600, Some(2))
+    let invite = mint_relay_invite(&pool, community, &admin, InviteExpiry::After(3600), Some(2))
         .await
         .unwrap();
     let hash = hash_v2_code(&invite.code);
@@ -402,7 +420,7 @@ async fn revoke_is_refused_while_the_community_is_quiescing() {
     let community = db.ensure_configured_community(&host).await.unwrap().id;
     let admin = hex::encode([6; 32]);
     add_member(&pool, community, &admin, "admin").await;
-    let invite = mint_relay_invite(&pool, community, &admin, 3600, None)
+    let invite = mint_relay_invite(&pool, community, &admin, InviteExpiry::After(3600), None)
         .await
         .unwrap();
     super::postgres_tests::quiesce(&db, &host, community).await;
@@ -427,7 +445,7 @@ async fn list_pages_newest_first_even_when_the_cursor_row_is_gone() {
     let mut minted = Vec::new();
     for _ in 0..3 {
         minted.push(
-            mint_relay_invite(&pool, community, &admin, 3600, None)
+            mint_relay_invite(&pool, community, &admin, InviteExpiry::After(3600), None)
                 .await
                 .unwrap()
                 .invite_id,
@@ -472,7 +490,7 @@ async fn readers_accept_an_invite_without_expiry() {
         .execute(&pool)
         .await
         .unwrap();
-    let invite = mint_relay_invite(&pool, community, &admin, 3600, None)
+    let invite = mint_relay_invite(&pool, community, &admin, InviteExpiry::After(3600), None)
         .await
         .unwrap();
     sqlx::query("UPDATE relay_invites SET expires_at = NULL WHERE community_id = $1 AND id = $2")

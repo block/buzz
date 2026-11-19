@@ -164,11 +164,22 @@ pub struct MintedInvite {
     pub invite_id: uuid::Uuid,
 }
 
-fn validate_mint_inputs(ttl_secs: u64, max_uses: Option<i32>) -> Result<()> {
-    if !(MIN_INVITE_TTL_SECS..=MAX_INVITE_TTL_SECS).contains(&ttl_secs) {
-        return Err(crate::error::DbError::InvalidData(format!(
-            "ttl_secs must be between {MIN_INVITE_TTL_SECS} and {MAX_INVITE_TTL_SECS}"
-        )));
+/// How long a minted invite stays claimable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InviteExpiry {
+    /// Expires this many seconds after minting, within the shared lifetime range.
+    After(u64),
+    /// Never expires; stored as a NULL `expires_at`. Revoke it to shut it off.
+    Never,
+}
+
+fn validate_mint_inputs(expiry: InviteExpiry, max_uses: Option<i32>) -> Result<()> {
+    if let InviteExpiry::After(ttl_secs) = expiry {
+        if !(MIN_INVITE_TTL_SECS..=MAX_INVITE_TTL_SECS).contains(&ttl_secs) {
+            return Err(crate::error::DbError::InvalidData(format!(
+                "ttl_secs must be between {MIN_INVITE_TTL_SECS} and {MAX_INVITE_TTL_SECS}"
+            )));
+        }
     }
 
     if let Some(max_uses) = max_uses {
@@ -192,16 +203,16 @@ fn is_canonical_invite_pubkey(pubkey: &str) -> bool {
 /// Mint a v2 invite: generate a 32-byte random secret, hash it, persist the
 /// row, and return the plaintext code plus metadata.
 ///
-/// `ttl_secs` must be in the shared invite lifetime range.
+/// A finite `expiry` must be in the shared invite lifetime range.
 /// `max_uses` must be `None` (unlimited) or `Some(1..=10000)`.
 pub async fn mint_relay_invite(
     pool: &PgPool,
     community: CommunityId,
     created_by: &str,
-    ttl_secs: u64,
+    expiry: InviteExpiry,
     max_uses: Option<i32>,
 ) -> Result<MintedInvite> {
-    mint(pool, community, created_by, ttl_secs, max_uses, false).await
+    mint(pool, community, created_by, expiry, max_uses, false).await
 }
 
 /// Like [`mint_relay_invite`], but refuses with
@@ -214,21 +225,21 @@ pub async fn mint_relay_invite_as_admin(
     pool: &PgPool,
     community: CommunityId,
     created_by: &str,
-    ttl_secs: u64,
+    expiry: InviteExpiry,
     max_uses: Option<i32>,
 ) -> Result<MintedInvite> {
-    mint(pool, community, created_by, ttl_secs, max_uses, true).await
+    mint(pool, community, created_by, expiry, max_uses, true).await
 }
 
 async fn mint(
     pool: &PgPool,
     community: CommunityId,
     created_by: &str,
-    ttl_secs: u64,
+    expiry: InviteExpiry,
     max_uses: Option<i32>,
     require_admin: bool,
 ) -> Result<MintedInvite> {
-    validate_mint_inputs(ttl_secs, max_uses)?;
+    validate_mint_inputs(expiry, max_uses)?;
     if !is_canonical_invite_pubkey(created_by) {
         return Err(crate::error::DbError::InvalidData(
             "invalid invitation issuer".into(),
@@ -240,7 +251,10 @@ async fn mint(
     let code = encode_v2_code(&secret);
     let token_hash = hash_v2_code(&code);
     let now = Utc::now();
-    let expires_at = now + chrono::Duration::seconds(ttl_secs as i64);
+    let expires_at = match expiry {
+        InviteExpiry::After(ttl_secs) => Some(now + chrono::Duration::seconds(ttl_secs as i64)),
+        InviteExpiry::Never => None,
+    };
 
     // Mint a v2 opaque invite inside the same lifecycle gate as every other
     // community-scoped database write. The app-side guard is the community
@@ -279,7 +293,7 @@ async fn mint(
 
     Ok(MintedInvite {
         code,
-        expires_at: Some(expires_at),
+        expires_at,
         max_uses,
         uses_remaining: max_uses,
         invite_id,
@@ -811,16 +825,16 @@ impl Db {
     /// once; only its SHA-256 hash is persisted.
     ///
     /// `max_uses` is `None` for unlimited or `Some(1..=10000)`.
-    /// `ttl_secs` must be in the shared invite lifetime range.
+    /// A finite `expiry` must be in the shared invite lifetime range.
     #[datastore_span(name = "mint_relay_invite", system = "postgresql")]
     pub async fn mint_relay_invite_as_admin(
         &self,
         community: CommunityId,
         created_by: &str,
-        ttl_secs: u64,
+        expiry: InviteExpiry,
         max_uses: Option<i32>,
     ) -> Result<MintedInvite> {
-        mint_relay_invite_as_admin(&self.pool, community, created_by, ttl_secs, max_uses).await
+        mint_relay_invite_as_admin(&self.pool, community, created_by, expiry, max_uses).await
     }
 
     /// Claim an invite and persist caller-verified ownership atomically.
@@ -954,7 +968,8 @@ mod postgres_tests {
             (3600, Some(-1)),
             (3600, Some(MAX_INVITE_USES + 1)),
         ] {
-            let error = validate_mint_inputs(ttl, max_uses).expect_err("invalid mint contract");
+            let error = validate_mint_inputs(InviteExpiry::After(ttl), max_uses)
+                .expect_err("invalid mint contract");
             assert!(matches!(error, crate::DbError::InvalidData(_)), "{error:?}");
         }
     }
@@ -1036,9 +1051,15 @@ mod postgres_tests {
             .id;
         quiesce(&db, &host, community).await;
 
-        let error = mint_relay_invite(&pool, community, &test_pubkey(), 3600, Some(1))
-            .await
-            .expect_err("quiescing must reject invite minting");
+        let error = mint_relay_invite(
+            &pool,
+            community,
+            &test_pubkey(),
+            InviteExpiry::After(3600),
+            Some(1),
+        )
+        .await
+        .expect_err("quiescing must reject invite minting");
         assert!(matches!(error, crate::error::DbError::AccessDenied(_)));
 
         let invite_count: i64 =
@@ -1057,9 +1078,15 @@ mod postgres_tests {
         let community = make_test_community(&pool).await;
         let first = test_pubkey();
         let second = test_pubkey();
-        let invite = mint_relay_invite(&pool, community, &test_pubkey(), 3600, Some(1))
-            .await
-            .expect("mint bounded invite");
+        let invite = mint_relay_invite(
+            &pool,
+            community,
+            &test_pubkey(),
+            InviteExpiry::After(3600),
+            Some(1),
+        )
+        .await
+        .expect("mint bounded invite");
         let hash = hash_v2_code(&invite.code);
 
         let keys = nostr::Keys::generate();
@@ -1128,9 +1155,15 @@ mod postgres_tests {
         let community = make_test_community(&pool).await;
         let first = test_pubkey();
         let second = test_pubkey();
-        let invite = mint_relay_invite(&pool, community, &test_pubkey(), 3600, Some(1))
-            .await
-            .expect("mint bounded invite");
+        let invite = mint_relay_invite(
+            &pool,
+            community,
+            &test_pubkey(),
+            InviteExpiry::After(3600),
+            Some(1),
+        )
+        .await
+        .expect("mint bounded invite");
         let hash = hash_v2_code(&invite.code);
 
         let keys = nostr::Keys::generate();
@@ -1177,9 +1210,15 @@ mod postgres_tests {
         let pool = setup_pool().await;
         let community_a = make_test_community(&pool).await;
         let community_b = make_test_community(&pool).await;
-        let invite = mint_relay_invite(&pool, community_a, &test_pubkey(), 3600, Some(2))
-            .await
-            .expect("mint invite");
+        let invite = mint_relay_invite(
+            &pool,
+            community_a,
+            &test_pubkey(),
+            InviteExpiry::After(3600),
+            Some(2),
+        )
+        .await
+        .expect("mint invite");
         let hash = hash_v2_code(&invite.code);
 
         assert_eq!(
@@ -1230,12 +1269,24 @@ mod postgres_tests {
     async fn retention_sweep_deletes_only_invites_older_than_cutoff() {
         let pool = setup_pool().await;
         let community = make_test_community(&pool).await;
-        let old = mint_relay_invite(&pool, community, &test_pubkey(), 3600, Some(1))
-            .await
-            .expect("mint old invite");
-        let recent = mint_relay_invite(&pool, community, &test_pubkey(), 3600, Some(1))
-            .await
-            .expect("mint recent invite");
+        let old = mint_relay_invite(
+            &pool,
+            community,
+            &test_pubkey(),
+            InviteExpiry::After(3600),
+            Some(1),
+        )
+        .await
+        .expect("mint old invite");
+        let recent = mint_relay_invite(
+            &pool,
+            community,
+            &test_pubkey(),
+            InviteExpiry::After(3600),
+            Some(1),
+        )
+        .await
+        .expect("mint recent invite");
         let cutoff = Utc::now() - chrono::Duration::days(30);
 
         sqlx::query("UPDATE relay_invites SET expires_at = $1 WHERE community_id = $2 AND id = $3")
@@ -1259,6 +1310,33 @@ mod postgres_tests {
                 .await
                 .expect("read remaining invites");
         assert_eq!(remaining, vec![recent.invite_id]);
+
+        delete_test_community(&pool, community).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn retention_sweep_never_deletes_a_permanent_invite() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let permanent =
+            mint_relay_invite(&pool, community, &test_pubkey(), InviteExpiry::Never, None)
+                .await
+                .expect("mint permanent invite");
+        assert_eq!(permanent.expires_at, None);
+
+        for cutoff in [Utc::now(), Utc::now() + chrono::Duration::days(365 * 100)] {
+            reap_expired_relay_invites(&pool, cutoff)
+                .await
+                .expect("reap expired invites");
+        }
+        let remaining: Vec<Uuid> =
+            sqlx::query_scalar("SELECT id FROM relay_invites WHERE community_id = $1")
+                .bind(community.as_uuid())
+                .fetch_all(&pool)
+                .await
+                .expect("read remaining invites");
+        assert_eq!(remaining, vec![permanent.invite_id]);
 
         delete_test_community(&pool, community).await;
     }
@@ -1335,9 +1413,15 @@ mod postgres_tests {
     async fn unlimited_invites_count_each_new_member() {
         let pool = setup_pool().await;
         let community = make_test_community(&pool).await;
-        let invite = mint_relay_invite(&pool, community, &test_pubkey(), 3600, None)
-            .await
-            .expect("mint unlimited invite");
+        let invite = mint_relay_invite(
+            &pool,
+            community,
+            &test_pubkey(),
+            InviteExpiry::After(3600),
+            None,
+        )
+        .await
+        .expect("mint unlimited invite");
         let hash = hash_v2_code(&invite.code);
 
         for (expected_count, pubkey) in [(1, test_pubkey()), (2, test_pubkey())] {
@@ -1369,9 +1453,15 @@ mod postgres_tests {
         let pool = setup_pool().await;
         let community = make_test_community(&pool).await;
         let pubkey = test_pubkey();
-        let invite = mint_relay_invite(&pool, community, &test_pubkey(), 3600, Some(1))
-            .await
-            .expect("mint bounded invite");
+        let invite = mint_relay_invite(
+            &pool,
+            community,
+            &test_pubkey(),
+            InviteExpiry::After(3600),
+            Some(1),
+        )
+        .await
+        .expect("mint bounded invite");
         let hash = hash_v2_code(&invite.code);
 
         let error = claim_relay_invite(
