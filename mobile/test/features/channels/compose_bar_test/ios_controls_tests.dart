@@ -109,6 +109,8 @@ class _ComposerSpeech implements DeviceTranscription {
   @override
   Future<bool> isAvailable() async => available;
   @override
+  Future<void> prepare() async {}
+  @override
   Future<String> transcribe(String path) {
     started.complete();
     return result.future;

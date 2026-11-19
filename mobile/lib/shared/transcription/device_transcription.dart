@@ -5,6 +5,7 @@ import 'package:uuid/uuid.dart';
 /// On-device recognition of a finalized local audio file.
 abstract interface class DeviceTranscription {
   Future<bool> isAvailable();
+  Future<void> prepare();
   Future<String> transcribe(String path);
   Future<void> cancel();
 }
@@ -20,6 +21,8 @@ class NativeDeviceTranscription implements DeviceTranscription {
   @override
   Future<bool> isAvailable() async =>
       await _channel.invokeMethod<bool>('isAvailable') ?? false;
+  @override
+  Future<void> prepare() => _channel.invokeMethod('prepare', {'id': _id});
   @override
   Future<String> transcribe(String path) async =>
       (await _channel.invokeMethod<String>('transcribe', {

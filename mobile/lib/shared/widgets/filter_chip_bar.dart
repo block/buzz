@@ -260,7 +260,10 @@ class FilterChipBar<T> extends StatelessWidget {
     final chip = FilterChip(
       selected: isSelected,
       showCheckmark: false,
-      shape: useNativeGlass || defaultTargetPlatform == TargetPlatform.android
+      shape:
+          useNativeGlass ||
+              matchNativeWidths ||
+              defaultTargetPlatform == TargetPlatform.android
           ? const StadiumBorder()
           : RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(Radii.lg),
