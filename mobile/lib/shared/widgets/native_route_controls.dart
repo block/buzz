@@ -5,21 +5,25 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 
 /// Keeps native controls mounted for opaque sheets and their own exit motion.
 /// Other covering Flutter routes suppress them to avoid platform-view bleed.
-/// Must be called unconditionally from a hook widget's build method.
+/// Used by Home's native-controls gate, the Channels route-currency sync and
+/// `IosMessageCreateButton`. Rebuilds only when the visibility inputs change,
+/// not on every animation frame. Must be called unconditionally from a hook
+/// widget's build method.
 bool useNativeRouteControlsVisible(BuildContext context) {
   final route = ModalRoute.of(context);
-  final coveringProgress = useAnimation(
-    route?.secondaryAnimation ?? kAlwaysDismissedAnimation,
+  final uncovered = useListenableSelector(
+    route?.secondaryAnimation,
+    () => (route?.secondaryAnimation?.value ?? 0) == 0,
+  );
+  final reversing = useListenableSelector(
+    route?.animation,
+    () => route?.animation?.status == AnimationStatus.reverse,
   );
   final sheets = route == null ? null : BottomUpPageRoute.sheetsAbove(route);
   useListenable(sheets);
-  useListenable(route?.animation);
   if ((sheets?.value ?? 0) > 0) {
     return true;
   }
-  final exiting =
-      route != null &&
-      !route.isActive &&
-      route.animation?.status == AnimationStatus.reverse;
-  return ((route?.isCurrent ?? true) || exiting) && coveringProgress == 0;
+  final exiting = route != null && !route.isActive && reversing;
+  return ((route?.isCurrent ?? true) || exiting) && uncovered;
 }
