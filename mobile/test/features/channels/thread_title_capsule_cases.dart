@@ -30,6 +30,7 @@ void threadTitleCapsuleTests() {
       await tester.pumpWidget(
         _buildTestable(
           messages: [root],
+          textScaler: const TextScaler.linear(3),
           channel: channel,
           channelsNotifier: channels,
           users: const {
@@ -46,17 +47,17 @@ void threadTitleCapsuleTests() {
         ),
       );
       await tester.pumpAndSettle();
+      final nativeBar = find.byWidgetPredicate(
+        (widget) =>
+            widget is UiKitView && widget.viewType == 'buzz/ios_navigation_bar',
+      );
       Map params() =>
-          tester
-                  .widget<UiKitView>(
-                    find.byWidgetPredicate(
-                      (widget) =>
-                          widget is UiKitView &&
-                          widget.viewType == 'buzz/ios_navigation_bar',
-                    ),
-                  )
-                  .creationParams!
-              as Map;
+          tester.widget<UiKitView>(nativeBar).creationParams! as Map;
+      expect(tester.getSize(nativeBar).height, 44);
+      final list = tester.widget<ScrollablePositionedList>(
+        find.byKey(const ValueKey('thread-message-list')),
+      );
+      expect(list.padding!.resolve(TextDirection.ltr).top, 44);
       expect(params()['title'], 'Thread');
       expect(params()['subtitle'], dm ? 'Alice' : 'engineering');
       expect(params()['titleEnabled'], true);

@@ -13,6 +13,7 @@ double _threadAppBarHeight(BuildContext context) => frostedAppBarHeight(
   context,
   titleStyle: channelTitleTextStyle,
   titleContentHeight: _threadTitleContentHeight(context),
+  nativeTitleContentHeight: 0,
 );
 
 FrostedAppBar _threadAppBar(
@@ -133,6 +134,7 @@ FrostedAppBar _threadAppBar(
             ),
     ),
     titleContentHeight: _threadTitleContentHeight(context),
+    nativeTitleContentHeight: 0,
     titleStyle: channelTitleTextStyle,
   );
 }

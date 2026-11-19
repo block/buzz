@@ -92,12 +92,16 @@ double frostedAppBarHeight(
   double bottomHeight = 0,
   TextStyle? titleStyle,
   double titleContentHeight = 0,
+  double? nativeTitleContentHeight,
   bool nativeLargeTitle = false,
   bool useNativeNavigation = true,
 }) {
   if (useNativeNavigation && defaultTargetPlatform == TargetPlatform.iOS) {
     return MediaQuery.paddingOf(context).top +
-        _nativeCompactHeight(context, titleContentHeight) +
+        _nativeCompactHeight(
+          context,
+          nativeTitleContentHeight ?? titleContentHeight,
+        ) +
         (nativeLargeTitle
             ? IosNavigationMetrics.of(context).largeTitleHeight
             : 0) +
@@ -135,6 +139,9 @@ class FrostedAppBar extends StatelessWidget {
   ///
   /// Pass the same value to [frostedAppBarHeight] when spacing body content.
   final double titleContentHeight;
+
+  /// Overrides [titleContentHeight] for a title sized by UIKit.
+  final double? nativeTitleContentHeight;
 
   /// Optional content displayed below the title row in the same surface.
   final Widget? bottom;
@@ -245,6 +252,7 @@ class FrostedAppBar extends StatelessWidget {
     this.centerTitle = false,
     this.titleStyle,
     this.titleContentHeight = 0,
+    this.nativeTitleContentHeight,
     this.bottom,
     this.bottomHeight = 0,
     this.bottomOverlap = 0,
@@ -372,7 +380,10 @@ class FrostedAppBar extends StatelessWidget {
             : 0.0;
         final barHeight =
             MediaQuery.paddingOf(context).top +
-            _nativeCompactHeight(context, titleContentHeight) +
+            _nativeCompactHeight(
+              context,
+              nativeTitleContentHeight ?? titleContentHeight,
+            ) +
             extra;
         return AnimatedPositioned(
           duration: layoutDuration,
