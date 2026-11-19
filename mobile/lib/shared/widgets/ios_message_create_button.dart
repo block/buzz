@@ -27,6 +27,7 @@ class IosMessageCreateButton extends HookConsumerWidget {
     this.sectionTitles = const {},
     this.icon = 'plus',
     this.iconSize,
+    this.trailingIconSlotWidth,
     this.foregroundColor,
     this.accessibilityLabel = 'Create',
     this.width = 64,
@@ -51,6 +52,9 @@ class IosMessageCreateButton extends HookConsumerWidget {
   final String? avatarUrl, avatarInitial;
   final String icon;
   final double? iconSize;
+
+  /// Right-aligned visual slot inside the unchanged full-width hit target.
+  final double? trailingIconSlotWidth;
   final Color? foregroundColor;
   final String accessibilityLabel;
   final double width, height;
@@ -218,10 +222,12 @@ class IosMessageCreateButton extends HookConsumerWidget {
           ...content,
           'plain': plain,
           'fillWidth': fillWidth,
-          'buttonCenterX': width / 2,
+          'buttonCenterX': trailingIconSlotWidth == null
+              ? width / 2
+              : width - trailingIconSlotWidth! / 2,
           'controlWidth': mergingNavigation && navigationAxis == Axis.horizontal
               ? 112.0
-              : width,
+              : trailingIconSlotWidth ?? width,
           'mergingNavigation': mergingNavigation,
           'menuAbove':
               mergingNavigation &&

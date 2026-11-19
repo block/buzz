@@ -45,7 +45,7 @@ public struct BuzzPushCachedChannel: Codable, Equatable, Sendable {
   public let displayName: String?
   /// Relay-verified Buzz channel type, when recognized.
   public let channelType: String?
-  /// Whether relay metadata marks this as a private Solo stream (`buzz.solo` label).
+  /// Whether relay metadata marks this as a Solo stream (`buzz.solo` label).
   public let isSolo: Bool?
   /// Relay-authored creator (`P`), lowercased, when it is a valid pubkey.
   public let creatorPubkey: String?
@@ -544,14 +544,11 @@ public final class BuzzPushPresentationCacheStore: @unchecked Sendable {
     return bounded.isEmpty ? nil : bounded
   }
 
-  /// Mirrors the app's Solo rule (`Channel.isSolo`): a private stream whose
+  /// Mirrors the app's Solo rule (`Channel.isSolo`): a stream whose
   /// NIP-CL labels (every `t` after the leading type) include `buzz.solo`.
   static func isSoloChannel(_ event: VerifiedNostrEvent) -> Bool {
     let types = event.tags.filter { $0.count >= 2 && $0[0] == "t" }.map { $0[1] }
-    let isPrivate =
-      !event.tags.contains { $0.first == "public" }
-      && event.tags.contains { $0.first == "private" }
-    return types.first == "stream" && isPrivate && types.dropFirst().contains("buzz.solo")
+    return types.first == "stream" && types.dropFirst().contains("buzz.solo")
   }
 
   /// The relay-authored creator `P` tag, lowercased, when it is a valid pubkey.
