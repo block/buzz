@@ -146,16 +146,18 @@ pub async fn handle_admitted_req(
     let (named_channels, live_names) =
         super::system_channels::channels_named_by_filters(&filters, MAX_EXPLICIT_CHANNEL_VALUES);
 
-    let mut accessible_channels = if filters_are_nip43_membership_only(&filters) {
+    let (mut accessible_channels, cached_named_only) = if filters_are_nip43_membership_only(
+        &filters,
+    ) {
         metrics::counter!("buzz_req_global_access_resolution_skips_total", "kind" => "13534")
             .increment(1);
-        Vec::new()
+        (Vec::new(), Vec::new())
     } else {
         match state
-            .get_accessible_channel_ids_cached(conn.tenant.community(), &pubkey_bytes)
+            .get_channel_access_cached(conn.tenant.community(), &pubkey_bytes)
             .await
         {
-            Ok(ids) => ids,
+            Ok(access) => (access.implicit, access.named_only),
             Err(e) => {
                 warn!(conn_id = %conn_id, error_kind = %e.kind(), "Failed to get accessible channels");
                 super::close::close_if_owner(
@@ -183,6 +185,7 @@ pub async fn handle_admitted_req(
         &pubkey_bytes,
         &filters,
         &accessible_channels,
+        &cached_named_only,
         token_channel_ids.as_deref(),
     )
     .await

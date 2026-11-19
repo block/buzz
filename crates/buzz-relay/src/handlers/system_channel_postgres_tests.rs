@@ -1774,7 +1774,7 @@ async fn named_channels_missing_from_a_stale_cache_still_route_live() {
                 f.tenant.community(),
                 reader.public_key().to_bytes().to_vec(),
             ),
-            Vec::new(),
+            std::sync::Arc::default(),
         );
     };
 

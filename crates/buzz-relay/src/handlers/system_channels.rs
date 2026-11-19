@@ -282,16 +282,24 @@ pub(crate) fn filter_live_scope(
     }
 }
 
-/// Load the named-only channels the reader can read, narrowed to the token's
+/// The named-only channels the reader can read, narrowed to the token's
 /// channel scope, when at least one filter could use them. Returns an empty
-/// set, without a database read, when no filter opts in or names a channel
-/// outside the implicit set.
+/// set when no filter opts in or names a channel outside the implicit set.
+///
+/// `cached` is the reader's named-only access from
+/// [`AppState::get_channel_access_cached`], read with `implicit`: the
+/// non-legacy channels it is a member of and the listed open ones. It answers
+/// the opt-in, which needs exactly those, and every name it holds. Only a
+/// request that names a channel outside both sets, such as an unlisted open
+/// channel, reads the database, so a fleet reconnect costs no extra read per
+/// client.
 pub(crate) async fn readable_named_only_channels_for_filters(
     state: &AppState,
     community: CommunityId,
     pubkey: &[u8],
     filters: &[Filter],
     implicit: &[Uuid],
+    cached: &[(Uuid, String)],
     token_channel_ids: Option<&[Uuid]>,
 ) -> Result<NamedOnlyChannels, buzz_db::DbError> {
     if !filters
@@ -301,12 +309,21 @@ pub(crate) async fn readable_named_only_channels_for_filters(
         return Ok(NamedOnlyChannels::default());
     }
     let named = named_outside(filters, implicit);
-    let mut readable = NamedOnlyChannels::from_readable(
-        state
-            .db
-            .get_readable_named_only_channels(community, pubkey, &named)
-            .await?,
-    );
+    let mut readable = if named
+        .iter()
+        .all(|id| cached.iter().any(|(have, _)| have == id))
+    {
+        metrics::counter!("buzz_named_only_channel_reads_total", "source" => "cache").increment(1);
+        NamedOnlyChannels::from_typed(cached.iter().cloned())
+    } else {
+        metrics::counter!("buzz_named_only_channel_reads_total", "source" => "db").increment(1);
+        NamedOnlyChannels::from_readable(
+            state
+                .db
+                .get_readable_named_only_channels(community, pubkey, &named)
+                .await?,
+        )
+    };
     if let Some(allowed) = token_channel_ids {
         readable.retain(allowed);
     }
@@ -620,5 +637,91 @@ mod tests {
             &filter(serde_json::json!({"kinds": [1], "#d": [Uuid::new_v4().to_string()]})),
             &implicit
         ));
+    }
+
+    /// A request whose named-only needs the cached access sets cover reads
+    /// no database: the connect-time system discovery (`#t:["system"]`) and a
+    /// name of a cached system channel. A name outside both sets still reads
+    /// the database. The database is unreachable, so any read fails.
+    /// Mutation: always take the database branch, or drop either cached
+    /// half from `get_channel_access_cached` → RED.
+    #[tokio::test]
+    async fn cached_access_answers_named_only_needs_without_a_database_read() {
+        let state = crate::state::tests::test_state_with_unreachable_database_url(
+            "postgres://buzz@127.0.0.1:1/buzz",
+        )
+        .await;
+        let community = CommunityId::from_uuid(Uuid::new_v4());
+        let reader = Keys::generate().public_key().to_bytes().to_vec();
+        let [stream, member_system, listed_system, unknown] = [(); 4].map(|()| Uuid::new_v4());
+        state.member_channels_cache.insert(
+            (community, reader.clone()),
+            std::sync::Arc::new(buzz_db::channel_members::ChannelSet {
+                implicit: vec![stream],
+                named_only: vec![(member_system, "system".to_owned())],
+            }),
+        );
+        state.open_channels_cache.insert(
+            community,
+            std::sync::Arc::new(crate::state::OpenChannels {
+                ids: Vec::new(),
+                named_only: vec![(listed_system, "system".to_owned())],
+                read_at: std::time::Instant::now(),
+            }),
+        );
+        let access = state
+            .get_channel_access_cached(community, &reader)
+            .await
+            .expect("both halves are cached");
+        assert_eq!(access.implicit, [stream]);
+
+        let read = |filters: Vec<Filter>, token: Option<Vec<Uuid>>| {
+            let state = state.clone();
+            let reader = reader.clone();
+            let access = access.clone();
+            async move {
+                readable_named_only_channels_for_filters(
+                    &state,
+                    community,
+                    &reader,
+                    &filters,
+                    &access.implicit,
+                    &access.named_only,
+                    token.as_deref(),
+                )
+                .await
+            }
+        };
+        let discovery = filter(serde_json::json!({
+            "kinds": [39002], "#p": [hex::encode(&reader)], "#t": ["system"]
+        }));
+        let named = read(vec![discovery.clone()], None)
+            .await
+            .expect("discovery is served from the cache");
+        assert_eq!(
+            filter_channel_scope(&discovery, &access.implicit, &named).as_ref(),
+            &[stream, member_system, listed_system]
+        );
+
+        let by_h = filter(serde_json::json!({"kinds": [9], "#h": [member_system.to_string()]}));
+        let named = read(vec![by_h.clone()], None)
+            .await
+            .expect("a cached name is served from the cache");
+        assert_eq!(
+            filter_channel_scope(&by_h, &access.implicit, &named).as_ref(),
+            &[stream, member_system]
+        );
+
+        // The token scope still narrows a cached answer.
+        let scoped = read(vec![discovery.clone()], Some(vec![stream, listed_system]))
+            .await
+            .expect("discovery is served from the cache");
+        assert_eq!(scoped.ids(), &[listed_system]);
+
+        let outside = filter(serde_json::json!({"kinds": [9], "#h": [unknown.to_string()]}));
+        assert!(
+            read(vec![discovery, outside], None).await.is_err(),
+            "a name outside the cached sets reads the database"
+        );
     }
 }

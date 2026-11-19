@@ -1399,12 +1399,14 @@ pub const TENANT_HOST_CACHE_MAX_AGE: std::time::Duration =
 /// give up and read on their own.
 pub const SHARED_READ_STATEMENT_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// A community's listed open channel IDs and when the read that listed them
+/// A community's listed open channels and when the read that listed them
 /// checked out its connection.
 #[derive(Debug)]
 pub struct OpenChannels {
-    /// The community's listed open channel IDs.
+    /// The community's listed open channel IDs of legacy types.
     pub ids: Vec<Uuid>,
+    /// The community's listed open channels of other types, with their type.
+    pub named_only: Vec<(Uuid, String)>,
     /// When the database read that listed them checked out its connection.
     pub read_at: Instant,
 }
@@ -1492,11 +1494,13 @@ pub struct AppState {
     pub local_event_ids: Arc<moka::sync::Cache<(CommunityId, [u8; 32]), ()>>,
     /// All active memberships per community and user, shared by channel checks.
     pub(crate) membership_cache: Arc<crate::membership_cache::MembershipCache>,
-    /// Member channel IDs cache: (community_id, pubkey_bytes) → the legacy-type
-    /// channels the pubkey is an active member of. Short TTL (10s) —
-    /// invalidated on membership changes and community-wide channel changes.
+    /// Member channels cache: (community_id, pubkey_bytes) → the channels the
+    /// pubkey is an active member of, split into legacy types and named-only
+    /// types. Short TTL (10s) — invalidated on membership changes and
+    /// community-wide channel changes.
     #[allow(clippy::type_complexity)]
-    pub member_channels_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), Vec<Uuid>>>,
+    pub member_channels_cache:
+        Arc<moka::sync::Cache<(CommunityId, Vec<u8>), Arc<buzz_db::channel_members::ChannelSet>>>,
     /// Listed open channel IDs per community, the half of every reader's
     /// accessible set that does not depend on the reader. Invalidated with
     /// the community's accessible channels, and used only for
@@ -2693,22 +2697,47 @@ impl AppState {
         community_id: CommunityId,
         pubkey: &[u8],
     ) -> Result<Vec<Uuid>, buzz_db::DbError> {
+        Ok(self
+            .get_channel_access_cached(community_id, pubkey)
+            .await?
+            .implicit)
+    }
+
+    /// [`Self::get_accessible_channel_ids_cached`] as `implicit`, plus, as
+    /// `named_only`, the channels of other types that the reader is a member
+    /// of or that are open and listed, from the same two cached reads.
+    ///
+    /// `named_only` is the part of
+    /// [`buzz_db::channel_members::get_readable_named_only_channels`] that
+    /// does not depend on which channels a request names. A request that
+    /// names only channels in either set needs no other access read.
+    pub async fn get_channel_access_cached(
+        &self,
+        community_id: CommunityId,
+        pubkey: &[u8],
+    ) -> Result<buzz_db::channel_members::ChannelSet, buzz_db::DbError> {
         let key = (community_id, pubkey.to_vec());
-        let mut ids = match self.member_channels_cache.get(&key) {
+        let member = match self.member_channels_cache.get(&key) {
             Some(cached) => {
                 metrics::counter!("buzz_accessible_channels_cache_hits_total").increment(1);
                 cached
             }
             None => {
                 metrics::counter!("buzz_accessible_channels_cache_misses_total").increment(1);
-                let ids = self.db.get_member_channel_ids(community_id, pubkey).await?;
-                self.member_channels_cache.insert(key, ids.clone());
-                ids
+                let member = Arc::new(self.db.get_member_channels(community_id, pubkey).await?);
+                self.member_channels_cache.insert(key, member.clone());
+                member
             }
         };
         let open = self.open_channels(community_id).await?;
-        buzz_db::channel_members::merge_channel_ids(&mut ids, &open.ids);
-        Ok(ids)
+        let mut access = (*member).clone();
+        buzz_db::channel_members::merge_channel_ids(&mut access.implicit, &open.ids);
+        for (id, channel_type) in &open.named_only {
+            if !access.named_only.iter().any(|(have, _)| have == id) {
+                access.named_only.push((*id, channel_type.clone()));
+            }
+        }
+        Ok(access)
     }
 
     /// The community's open set from [`Self::open_channels_cache`] while it
@@ -2747,10 +2776,11 @@ impl AppState {
         metrics::counter!("buzz_open_channels_cache_misses_total", "reason" => reason).increment(1);
         let read = self
             .db
-            .get_listed_open_channel_ids_read_at(community_id)
+            .get_listed_open_channels_read_at(community_id)
             .await?;
         let open = Arc::new(OpenChannels {
-            ids: read.value,
+            ids: read.value.implicit,
+            named_only: read.value.named_only,
             read_at: read.read_at,
         });
         self.open_channels_cache.insert(community_id, open.clone());
@@ -2777,12 +2807,18 @@ impl AppState {
         pubkey: Vec<u8>,
         channels: Vec<Uuid>,
     ) {
-        self.member_channels_cache
-            .insert((community_id, pubkey), channels);
+        self.member_channels_cache.insert(
+            (community_id, pubkey),
+            Arc::new(buzz_db::channel_members::ChannelSet {
+                implicit: channels,
+                named_only: Vec::new(),
+            }),
+        );
         self.open_channels_cache.insert(
             community_id,
             Arc::new(OpenChannels {
                 ids: Vec::new(),
+                named_only: Vec::new(),
                 read_at: Instant::now(),
             }),
         );
@@ -4292,6 +4328,7 @@ pub(crate) mod tests {
                         community,
                         Arc::new(OpenChannels {
                             ids: stale.ids.clone(),
+                            named_only: stale.named_only.clone(),
                             read_at,
                         }),
                     );
@@ -4301,7 +4338,7 @@ pub(crate) mod tests {
                 let control = reader();
                 reader_pod
                     .member_channels_cache
-                    .insert((community, control.clone()), Vec::new());
+                    .insert((community, control.clone()), Arc::default());
                 restamp(Instant::now());
                 assert!(
                     grants(control, channel).await,
@@ -4574,7 +4611,8 @@ pub(crate) mod tests {
         assert_eq!(
             state
                 .member_channels_cache
-                .get(&(community_b, pubkey.clone())),
+                .get(&(community_b, pubkey.clone()))
+                .map(|set| set.implicit.clone()),
             Some(channels_b),
             "A's cache drop must not evict B's accessible-channel entry"
         );
@@ -4592,6 +4630,7 @@ pub(crate) mod tests {
             community,
             Arc::new(OpenChannels {
                 ids: vec![both, open],
+                named_only: Vec::new(),
                 read_at: Instant::now(),
             }),
         );
@@ -4606,7 +4645,7 @@ pub(crate) mod tests {
         let other = vec![8u8; 32];
         state
             .member_channels_cache
-            .insert((community, other.clone()), vec![]);
+            .insert((community, other.clone()), Arc::default());
         let ids = state
             .get_accessible_channel_ids_cached(community, &other)
             .await
@@ -4645,6 +4684,7 @@ pub(crate) mod tests {
             community,
             Arc::new(OpenChannels {
                 ids: vec![open],
+                named_only: Vec::new(),
                 read_at: Instant::now(),
             }),
         );
@@ -4796,7 +4836,8 @@ pub(crate) mod tests {
         assert_eq!(
             state
                 .member_channels_cache
-                .get(&(community_b, pubkey.clone())),
+                .get(&(community_b, pubkey.clone()))
+                .map(|set| set.implicit.clone()),
             Some(vec![channel_id])
         );
         assert!(state.open_channels_cache.get(&community_b).is_some());

@@ -1798,10 +1798,11 @@ async fn query_member_events(
     }
 
     // Get channels this user can access — same enforcement as WS REQ handler.
-    let mut accessible_channels = state
-        .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
+    let access = state
+        .get_channel_access_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
+    let mut accessible_channels = access.implicit;
     // Named-only channels (system, and types added later) are outside
     // `accessible_channels`; a filter that names one reads it in its own
     // scope only (see `handlers::system_channels`).
@@ -1812,6 +1813,7 @@ async fn query_member_events(
             &pubkey_bytes,
             &filters,
             &accessible_channels,
+            &access.named_only,
             None,
         )
         .await
@@ -2449,10 +2451,11 @@ async fn count_member_events(
     }
 
     // Get channels this user can access.
-    let mut accessible_channels = state
-        .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
+    let access = state
+        .get_channel_access_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
+    let mut accessible_channels = access.implicit;
     // Named-only channels (system, and types added later) are outside
     // `accessible_channels`; a filter that names one reads it in its own
     // scope only (see `handlers::system_channels`).
@@ -2463,6 +2466,7 @@ async fn count_member_events(
             &pubkey_bytes,
             &filters,
             &accessible_channels,
+            &access.named_only,
             None,
         )
         .await
