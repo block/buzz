@@ -46,6 +46,14 @@ class _MarkdownEditingController extends TextEditingController {
   List<TextRange> _chipRanges = const [];
   final List<TextRange> _pendingChipRanges = [];
 
+  /// The last selection the platform set that reached into a chip, and the
+  /// chip-wide selection it was snapped to in [_snappedText]. iOS selects
+  /// the character before the caret right before Backspace removes it; the
+  /// removal then matches this range rather than the snapped selection.
+  TextSelection? _platformSelection;
+  TextSelection? _snappedSelection;
+  String? _snappedText;
+
   /// Where [buildTextSpan] last ran, so the chip ranges can be brought up
   /// to date when edits arrive faster than frames.
   BuildContext? _lastBuildContext;
@@ -182,6 +190,7 @@ class _MarkdownEditingController extends TextEditingController {
 
   TextEditingValue _snapSelectionToChips(TextEditingValue next) {
     _refreshChipRanges(next.text);
+    _platformSelection = _snappedSelection = _snappedText = null;
     final selection = next.selection;
     if ((_chipRanges.isEmpty && _revealedChip == null) ||
         next.text != _chipRangesText ||
@@ -230,6 +239,9 @@ class _MarkdownEditingController extends TextEditingController {
         : selection.baseOffset <= selection.extentOffset
         ? TextSelection(baseOffset: start, extentOffset: end)
         : TextSelection(baseOffset: end, extentOffset: start);
+    _platformSelection = selection;
+    _snappedSelection = snapped;
+    _snappedText = next.text;
     return next.copyWith(selection: snapped);
   }
 
@@ -495,8 +507,15 @@ class _MarkdownEditingController extends TextEditingController {
   /// hidden source so it removes the whole chip. Each chip draws its whole
   /// URL or `@label` as one glyph, so backspace right after it would
   /// otherwise remove one invisible character of the source and leave a
-  /// broken token behind. Edits over a selection replace exactly that
-  /// selection, so Cut never removes more than it copies.
+  /// broken token behind. The deletion arrives either against a collapsed
+  /// caret (Android, hardware keys in tests) or, as iOS reports it from the
+  /// hardware key and the on-screen delete key alike, as two updates: the
+  /// character before the caret is selected first, then that selection is
+  /// removed. The selection step snaps to the whole chip, so the removal is
+  /// recognised by matching the platform's own selection rather than the
+  /// snapped one. Any other edit over a selection replaces exactly that
+  /// selection, so typed text is kept and Cut never removes more than it
+  /// copies.
   TextEditingValue expandChipDeletion(
     TextEditingValue oldValue,
     TextEditingValue newValue,
@@ -506,19 +525,20 @@ class _MarkdownEditingController extends TextEditingController {
     if (_chipRanges.isEmpty ||
         _chipRangesText != oldValue.text ||
         !oldSelection.isValid ||
-        !oldSelection.isCollapsed ||
         !_withinChip(oldValue.composing, _chipRanges) ||
         !_withinChip(newValue.composing, _chipRanges)) {
       return newValue;
     }
     final newSelection = newValue.selection;
     if (!newSelection.isValid || !newSelection.isCollapsed) return newValue;
-    final deleted = _caretDeletion(
-      oldValue.text,
-      newValue.text,
-      oldSelection.baseOffset,
-      newSelection.baseOffset,
-    );
+    final deleted = oldSelection.isCollapsed
+        ? _caretDeletion(
+            oldValue.text,
+            newValue.text,
+            oldSelection.baseOffset,
+            newSelection.baseOffset,
+          )
+        : _platformSelectionDeletion(oldValue, newValue);
     if (deleted == null) return newValue;
     // A link the caret has revealed edits as raw text, even before the next
     // frame drops its chip.
@@ -595,6 +615,30 @@ class _MarkdownEditingController extends TextEditingController {
       return TextRange(start: caret, end: caret + removed);
     }
     return null;
+  }
+
+  /// The range the platform removed when [oldValue] carries the snapped
+  /// form of a selection the platform set inside a chip and [newValue] is
+  /// [oldValue] with exactly that platform selection gone, caret at its
+  /// start. Null for any other edit, including text typed over a selection.
+  TextRange? _platformSelectionDeletion(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final platform = _platformSelection;
+    if (platform == null ||
+        _snappedText != oldValue.text ||
+        _snappedSelection != oldValue.selection) {
+      return null;
+    }
+    final oldText = oldValue.text;
+    final start = platform.start;
+    final end = platform.end;
+    if (newValue.selection.baseOffset != start ||
+        newValue.text != oldText.replaceRange(start, end, '')) {
+      return null;
+    }
+    return TextRange(start: start, end: end);
   }
 
   List<InlineSpan> _buildMarkdownSpans(

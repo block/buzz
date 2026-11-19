@@ -43,12 +43,22 @@ void mentionChipTests() {
     return tester.widget<TextField>(find.byType(TextField)).controller!;
   }
 
-  /// The platform reports a backspace: one character before the caret gone.
+  /// The platform reports a backspace the way iOS does, from the hardware
+  /// key and the on-screen delete key alike: the character before the caret
+  /// is selected first, then that selection is removed with the caret at
+  /// its start.
   void backspace(WidgetTester tester, TextEditingController controller) {
+    final text = controller.text;
     final caret = controller.selection.baseOffset;
     tester.testTextInput.updateEditingValue(
       TextEditingValue(
-        text: controller.text.replaceRange(caret - 1, caret, ''),
+        text: text,
+        selection: TextSelection(baseOffset: caret - 1, extentOffset: caret),
+      ),
+    );
+    tester.testTextInput.updateEditingValue(
+      TextEditingValue(
+        text: text.replaceRange(caret - 1, caret, ''),
         selection: TextSelection.collapsed(offset: caret - 1),
       ),
     );
