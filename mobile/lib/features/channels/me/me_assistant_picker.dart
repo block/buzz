@@ -4,7 +4,7 @@ import '../../../shared/me/me_sync.dart';
 import '../../../shared/me/me_assistants.dart';
 import '../channel_management_provider.dart';
 
-/// Revalidates current membership and ownership before personal chat delivery.
+/// Revalidates membership and the implicit agent before personal chat delivery.
 Future<List<String>> meRecipients(
   WidgetRef ref,
   String channelId,
@@ -17,7 +17,10 @@ Future<List<String>> meRecipients(
     throw StateError('Choose an agent in the chat header before sending.');
   }
   sync.check();
-  for (final recipient in recipients.toSet()) {
+  // Explicit mentions may address any member, including people and agents
+  // owned by someone else. Only the header's implicit agent needs ownership.
+  final implicit = explicit.isEmpty ? recipients : const <String>[];
+  for (final recipient in implicit.toSet()) {
     ref.invalidate(meAssistantOwnershipProvider(recipient));
   }
   ref.invalidate(channelMembersProvider(channelId));
@@ -25,7 +28,7 @@ Future<List<String>> meRecipients(
   // and then fetching membership on every message.
   final (ownership, members) = await (
     Future.wait([
-      for (final recipient in recipients)
+      for (final recipient in implicit)
         ref.read(meAssistantOwnershipProvider(recipient).future),
     ]),
     ref.read(channelMembersProvider(channelId).future),
