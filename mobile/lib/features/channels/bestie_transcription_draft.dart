@@ -30,7 +30,8 @@ class BestieTranscriptDraft {
 
 final bestieTranscriptDirectoryProvider =
     Provider<Future<Directory> Function()>(
-      (ref) => privateTranscriptSupportDirectory,
+      (ref) =>
+          () => privateTranscriptSupportDirectory('bestie-transcripts'),
     );
 final bestieTranscriptStoreProvider =
     Provider.family<BestieTranscriptStore, String>(

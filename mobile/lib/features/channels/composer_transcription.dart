@@ -20,7 +20,9 @@ class ComposerTranscriptionFiles {
     String source,
     Future<void> Function(String) reserve,
   ) async {
-    final support = await privateTranscriptSupportDirectory();
+    final support = await privateTranscriptSupportDirectory(
+      'composer-transcripts',
+    );
     final root = Directory('${support.path}/composer-transcripts');
     await root.create(recursive: true);
     final path = '${root.path}/composer-${const Uuid().v4()}.m4a';

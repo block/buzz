@@ -11,14 +11,12 @@ final class DeviceTranscriptionPlugin {
   private var cancelAnalysis: (() -> Void)?
 
   /// Applies to new and existing durable drafts before Flutter opens their journal.
-  static func excludeDraftsFromBackup(in support: URL) throws {
-    for name in ["bestie-transcripts", "composer-transcripts"] {
-      var drafts = support.appendingPathComponent(name, isDirectory: true)
-      try FileManager.default.createDirectory(at: drafts, withIntermediateDirectories: true)
-      var values = URLResourceValues()
-      values.isExcludedFromBackup = true
-      try drafts.setResourceValues(values)
-    }
+  static func excludeDraftsFromBackup(in support: URL, directory name: String) throws {
+    var drafts = support.appendingPathComponent(name, isDirectory: true)
+    try FileManager.default.createDirectory(at: drafts, withIntermediateDirectories: true)
+    var values = URLResourceValues()
+    values.isExcludedFromBackup = true
+    try drafts.setResourceValues(values)
   }
 
   init(messenger: FlutterBinaryMessenger) {
@@ -48,11 +46,16 @@ final class DeviceTranscriptionPlugin {
         return
       }
       if call.method == "storageDirectory" {
+        guard let name = args["directory"] as? String,
+          name == "bestie-transcripts" || name == "composer-transcripts" else {
+          reply(FlutterError(code: "arguments", message: "Invalid transcription request.", details: nil))
+          return
+        }
         do {
           let support = try FileManager.default.url(
             for: .applicationSupportDirectory, in: .userDomainMask,
             appropriateFor: nil, create: true)
-          try Self.excludeDraftsFromBackup(in: support)
+          try Self.excludeDraftsFromBackup(in: support, directory: name)
           reply(support.path)
         } catch {
           reply(FlutterError(code: "storage_failed", message: error.localizedDescription, details: nil))
