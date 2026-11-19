@@ -131,11 +131,17 @@ pub enum DbError {
     /// Operator before demoting or deleting the current one.
     #[error("operation would remove the last relay operator")]
     LastOperator,
+
+    /// A multi-statement read spent its deadline before its next statement
+    /// (see `ReadTransaction`). Treated as a cancelled statement.
+    #[error("database error: read deadline exceeded")]
+    ReadDeadlineExceeded,
 }
 
 impl DbError {
     /// Whether Postgres cancelled the statement (SQLSTATE 57014:
-    /// `statement_timeout` or an explicit cancel).
+    /// `statement_timeout` or an explicit cancel), or a read's deadline ran
+    /// out before its next statement ([`DbError::ReadDeadlineExceeded`]).
     ///
     /// Replica-routed reads surface a cancel instead of re-running on the
     /// writer. Usually the cancel means expensive work that the writer would
@@ -146,10 +152,11 @@ impl DbError {
     /// routed reads record it as the `statement_cancelled` route reason;
     /// `ReadSession` reads return it to the relay, which logs the failed read.
     pub fn is_statement_cancelled(&self) -> bool {
-        matches!(
-            self,
-            DbError::Sqlx(sqlx::Error::Database(db)) if db.code().as_deref() == Some("57014")
-        )
+        match self {
+            DbError::Sqlx(sqlx::Error::Database(db)) => db.code().as_deref() == Some("57014"),
+            DbError::ReadDeadlineExceeded => true,
+            _ => false,
+        }
     }
 
     /// Whether the failure is about reaching the database at all (pool
@@ -200,6 +207,7 @@ impl DbError {
             E::NotFound(_) | E::ChannelNotFound(_) | E::MemberNotFound(_) => "not_found",
             E::AccessDenied(_) => "access_denied",
             E::NipFiBindingRequired => "nip_fi_binding_required",
+            E::ReadDeadlineExceeded => "read_deadline_exceeded",
             _ => "other",
         };
         kind.to_owned()
