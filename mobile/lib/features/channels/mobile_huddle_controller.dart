@@ -1,5 +1,7 @@
 import 'dart:async';
 
+export 'huddle_lifecycle_provider.dart';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -73,18 +75,6 @@ final huddleHumanCountProvider = Provider<HuddleHumanCountLoader>((ref) {
     ).where((member) => member.role != 'bot').length;
   };
 });
-
-/// Complete parent-channel Huddle lifecycle, independent of timeline paging.
-final huddleLifecycleProvider = FutureProvider.family<List<NostrEvent>, String>(
-  (ref, channelId) async {
-    if (ref.watch(relaySessionProvider).status != SessionStatus.connected) {
-      return const [];
-    }
-    return ref
-        .read(relaySessionProvider.notifier)
-        .fetchHistory(NostrFilters.huddleLifecycle(channelId));
-  },
-);
 
 /// One successful relay admission. Its epoch changes only when a newer join or
 /// start attempt begins, so duplicate teardown calls cannot invalidate the
