@@ -856,6 +856,7 @@ Future<String> sha256HexInWorker(
     return await next() as String;
   } finally {
     await messages.cancel();
+    port.close();
     worker?.kill();
   }
 }
