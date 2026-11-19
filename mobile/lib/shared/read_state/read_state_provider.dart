@@ -207,6 +207,8 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       if (prev?.status != SessionStatus.connected &&
           next.status == SessionStatus.connected) {
         unawaited(manager.reinitializeRemote());
+      } else if (prev?.status == SessionStatus.connected) {
+        manager.liveInterrupted();
       }
     });
 

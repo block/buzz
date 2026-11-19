@@ -27,25 +27,17 @@ class ReadStateCrypto {
   final String Function(Uint8List conversationKey, String ciphertext) _decrypt;
   final int _maxRetainedLength;
 
-  /// Plaintext by ciphertext, least recently used first. NIP-44 payloads
-  /// carry a random nonce and a MAC, so under this one conversation key the
-  /// same ciphertext always decrypts to the same plaintext. Every publish
-  /// and every resume re-read up to [readStateFetchLimit] of our own blobs
-  /// through the snapshot, and the relay echoes each publish back, so most
-  /// decrypts here repeat a ciphertext this instance already decrypted or
-  /// produced. Decrypting is pure-Dart ChaCha20 and HMAC
-  /// on the UI isolate, so repeats are served from this memo.
+  /// Plaintext by ciphertext, least recently used first. Under one NIP-44
+  /// key a ciphertext always decrypts the same, and each publish and resume
+  /// re-reads up to [readStateFetchLimit] of our own blobs, so repeats of the
+  /// pure-Dart, UI-isolate decrypt are served from this memo.
   final Map<String, String> _plaintextByCiphertext = {};
   int _retainedLength = 0;
 
-  /// Upper bound on the code units the memo retains, counting each ciphertext
-  /// key and its plaintext, so it cannot grow without limit however large the
-  /// blobs get (about 8 MB of one-byte strings at the default). Each slot's
-  /// current blob costs up to about 95,000 (a 40 KiB plaintext and its
-  /// base64 ciphertext), so this holds about 80 slots. Each snapshot walks
-  /// every slot in turn, so a bound below the live slots' total evicts each
-  /// entry before its next use and nothing hits; an account with 27 slots measured
-  /// about 2.6M.
+  /// Upper bound on the code units the memo retains (keys and plaintexts).
+  /// A slot's blob costs up to about 95,000, so this holds about 80 slots;
+  /// a bound below the live slots' total would evict each entry before its
+  /// next use (27 slots measured about 2.6M).
   static const defaultMaxRetainedLength = 8000000;
 
   ReadStateCrypto._(
@@ -185,6 +177,7 @@ class ReadStateManager {
   // late cannot clear the retry a newer failure needs.
   int _snapshotsStarted = 0;
   int _newestSettledSnapshot = 0;
+  int _staleThrough = 0; // Reads up to this predate the live stream's ready.
   final int Function() _now;
   // Merged whole-channel override registers, from this installation and its
   // peers. The primary carries all of them (NIP-RS, Buzz profile).
@@ -349,7 +342,13 @@ class ReadStateManager {
 
   /// Whether the last full-state load succeeded, as override actions need.
   /// Deferred future groups leave it incomplete until they resolve.
-  bool get _hasFullState => _lastSnapshotSucceeded && _resolveDeferred();
+  bool get _hasFullState =>
+      _lastSnapshotSucceeded &&
+      _newestSettledSnapshot > _staleThrough &&
+      _resolveDeferred();
+
+  /// The live stream dropped: no read before its next ready is current.
+  void liveInterrupted() => _staleThrough = 1 << 62;
 
   /// The merged stored frontier synced overrides use, 0 if absent: the
   /// retention floor decides message reads only, never override liveness.
@@ -653,12 +652,13 @@ class ReadStateManager {
         // With limit 0 nothing replays marks published before the REQ went
         // live, so read the snapshot every time it goes live: its EOSE, which
         // can come after the 500 ms fallback on a slow AUTH, on a reconnect's
-        // replay, or after a CLOSED's retry. Down, it is no longer current.
-        onStatusChanged: (status) => _disposed
-            ? null
-            : status == RelaySubscriptionStatus.ready
-            ? unawaited(_requestSync())
-            : _settleSnapshot(++_snapshotsStarted, succeeded: false),
+        // replay, or after a CLOSED's retry. Only reads started after it count.
+        onStatusChanged: (status) {
+          if (_disposed) return;
+          if (status != RelaySubscriptionStatus.ready) return liveInterrupted();
+          _staleThrough = _snapshotsStarted;
+          unawaited(_requestSync());
+        },
         // The session dropped it, so the next reconnect opens a new one.
         onClosed: (_) => _unsubscribeLive = null,
         // A peer's mark can carry an older created_at (its clock, or a

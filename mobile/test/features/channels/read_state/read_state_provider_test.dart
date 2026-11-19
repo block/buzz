@@ -169,6 +169,26 @@ void main() {
     expect(state().isForcedUnread(msgKey), isTrue);
   });
 
+  test('a reading clear while the socket is down waits for the reconnect '
+      'snapshot', () async {
+    final notifier = await pumpNotifier();
+    session.setStatus(SessionStatus.connected);
+    await flushMicrotasks();
+    notifier.markContextRead(channelId, now);
+    expect(notifier.markContextUnread(channelId, channelId: channelId), isTrue);
+    await notifier.flush();
+
+    session.setStatus(SessionStatus.reconnecting);
+    // A snapshot read while the stream is still down does not count.
+    await notifier.retrySync();
+    expect(notifier.clearForcedUnread(channelId), isFalse);
+    expect(state().locallyForcedChannelIds, {channelId});
+
+    session.setStatus(SessionStatus.connected);
+    await flushMicrotasks();
+    expect(state().locallyForcedChannelIds, isEmpty);
+  });
+
   test('a session rebuild (auth completing) keeps the manager and reopens '
       'its live subscription on connect', () async {
     final notifier = await pumpNotifier();
