@@ -23,6 +23,7 @@ class _HuddleCallControls extends StatelessWidget {
       useGlass: true,
       key: const ValueKey('huddle-mute-toggle'),
       tooltip: isMuted ? 'Unmute' : 'Mute',
+      glassSemanticLabel: isMuted ? 'Microphone off' : 'Microphone on',
       icon: isMuted ? BuzzIcons.micOff : BuzzIcons.mic,
       foregroundColor: isMuted
           ? context.colors.onSurface
@@ -40,6 +41,7 @@ class _HuddleCallControls extends StatelessWidget {
       useGlass: true,
       key: const ValueKey('huddle-speaker-toggle'),
       tooltip: isSpeakerEnabled ? 'Use earpiece' : 'Use speaker',
+      glassSemanticLabel: isSpeakerEnabled ? 'Speaker on' : 'Speaker off',
       icon: BuzzIcons.volume2,
       foregroundColor: isSpeakerEnabled
           ? context.colors.onPrimary
@@ -106,6 +108,7 @@ class _HuddleRoundControl extends StatelessWidget {
     this.showTooltip = true,
     this.toggled,
     this.glassSelected,
+    this.glassSemanticLabel,
     this.useHapticFeedback = false,
   });
 
@@ -120,6 +123,10 @@ class _HuddleRoundControl extends StatelessWidget {
   final bool showTooltip;
   final bool? toggled;
   final bool? glassSelected;
+
+  /// The native glass button marks [glassSelected] with UIKit's selected
+  /// trait, so its label names the state rather than the action.
+  final String? glassSemanticLabel;
   final bool useHapticFeedback;
 
   @override
@@ -143,7 +150,7 @@ class _HuddleRoundControl extends StatelessWidget {
       return IosGlassNavigationButton(
         icon: IosGlassNavigationIcon.close,
         label: '', // Flutter retains the existing Tabler glyph.
-        semanticLabel: tooltip,
+        semanticLabel: glassSemanticLabel ?? tooltip,
         onPressed: effectiveOnPressed,
         width: dimension,
         height: dimension,

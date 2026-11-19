@@ -201,6 +201,7 @@ class _HuddleCallAvatar extends HookConsumerWidget {
                             key: ValueKey('huddle-speaking-halo-$pubkey'),
                             width: speakingRingSize,
                             height: speakingRingSize,
+                            alignment: Alignment.center,
                             color: context.colors.primary,
                             child: profile?.avatarUrl == null
                                 ? null
@@ -209,11 +210,17 @@ class _HuddleCallAvatar extends HookConsumerWidget {
                                       sigmaX: 8 * scale,
                                       sigmaY: 8 * scale,
                                     ),
+                                    // Lay the ring's image out at the
+                                    // portrait's size so both resolve the
+                                    // same source, then enlarge it at paint.
                                     child: Transform.scale(
-                                      scale: 1.5,
+                                      scale:
+                                          1.5 *
+                                          speakingRingSize /
+                                          (avatarRadius * 2),
                                       child: AvatarImage(
                                         imageUrl: profile?.avatarUrl,
-                                        radius: speakingRingSize / 2,
+                                        radius: avatarRadius,
                                         fallback: const SizedBox.shrink(),
                                         isAgent: isAgent,
                                       ),
