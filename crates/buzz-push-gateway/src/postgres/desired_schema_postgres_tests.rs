@@ -112,11 +112,17 @@ fn desired_state_schema_layout_is_complete_and_schemabot_shaped() {
 }
 
 /// The password SQLx resolved for `options`, which has no public getter.
-/// Serializes a copy with a TCP host only to read the password back:
-/// `to_url_lossy` panics when the host is a socket directory found through
-/// `PGHOST` or SQLx's default socket search. The caller's `options` keep it.
+/// Serializes a copy with a URL-safe host and username only to read the
+/// password back. SQLx's URL builder interpolates both raw: a socket-directory
+/// host found through `PGHOST` or SQLx's default socket search makes
+/// `to_url_lossy` panic, and a username such as `/role` drops the password
+/// silently. The caller's `options` keep both.
 fn resolved_password(options: &PgConnectOptions) -> String {
-    let url = options.clone().host("localhost").to_url_lossy();
+    let url = options
+        .clone()
+        .host("localhost")
+        .username("probe")
+        .to_url_lossy();
     percent_encoding::percent_decode_str(url.password().unwrap_or_default())
         .decode_utf8()
         .expect("database password utf-8")
@@ -124,12 +130,14 @@ fn resolved_password(options: &PgConnectOptions) -> String {
 }
 
 #[test]
-fn resolved_password_reads_through_a_socket_directory_host() {
+fn resolved_password_reads_through_a_socket_host_and_slash_username() {
     let options = PgConnectOptions::new_without_pgpass()
         .host("/var/run/postgresql")
+        .username("/gateway-test")
         .password("p@ss:/#% word");
     assert_eq!(resolved_password(&options), "p@ss:/#% word");
     assert_eq!(options.get_host(), "/var/run/postgresql");
+    assert_eq!(options.get_username(), "/gateway-test");
 }
 
 /// One probe database is bootstrapped from `schema/schema.sql` through the
