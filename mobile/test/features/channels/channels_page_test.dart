@@ -46,6 +46,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
 import 'package:buzz/features/channels/channel_stars/channel_stars_provider.dart';
 import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart';
+import 'package:buzz/features/channels/channel_mutes/channel_mutes_storage.dart';
 import 'package:buzz/features/channels/channel_sort/channel_sort_provider.dart';
 import 'package:buzz/features/channels/channel_sort/channel_sort_storage.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
@@ -623,24 +624,92 @@ void main() {
     );
   });
 
+  testWidgets(
+    'unread dots align with trailing icons and follow the temporary clock',
+    (tester) async {
+      final temporary = Channel(
+        id: 'temporary',
+        name: 'temporary',
+        channelType: 'stream',
+        visibility: 'open',
+        description: '',
+        createdBy: 'abc',
+        createdAt: DateTime(2025),
+        memberCount: 1,
+        isMember: true,
+        ttlSeconds: 3600,
+      );
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            channelsProvider.overrideWith(
+              () => _FakeNotifier(
+                [temporary, testChannels.first],
+                observedEventsByChannel: {
+                  for (final id in ['temporary', testChannels.first.id])
+                    id: [
+                      _observed(
+                        id: 'mention-$id',
+                        createdAt: 20,
+                        highPriority: true,
+                      ),
+                    ],
+                },
+              ),
+            ),
+            readStateProvider.overrideWith(
+              () => _FakeReadStateNotifier(
+                const ReadStateState(
+                  isReady: true,
+                  pubkey: 'pk',
+                  contexts: {},
+                  version: 0,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      final ellipsis = find.descendant(
+        of: find.byTooltip('Channels options'),
+        matching: find.byIcon(BuzzIcons.ellipsis),
+      );
+      final clock = tester.getCenter(
+        find.byKey(const Key('channel-ephemeral-temporary')),
+      );
+      final dot = tester.getCenter(
+        find.byKey(const ValueKey('channel-attention-dot-temporary')),
+      );
+      final otherDot = tester.getCenter(
+        find.byKey(ValueKey('channel-attention-dot-${testChannels.first.id}')),
+      );
+      expect(dot.dx, closeTo(tester.getCenter(ellipsis).dx, 0.01));
+      expect(dot.dx, closeTo(otherDot.dx, 0.01));
+      expect(clock.dx, lessThan(dot.dx));
+      expect(clock.dy, closeTo(dot.dy, 0.01));
+    },
+  );
+
   testWidgets('shows channel visibility icons and excludes Solo chats', (
     tester,
   ) async {
     final channels = [
       testChannels.first,
       for (final creator in ['aabb', 'other', 'agent'])
-        Channel(
-          id: 'labeled-$creator',
-          name: 'labeled-$creator',
-          channelType: 'stream',
-          visibility: 'private',
-          labels: const ['buzz.solo'],
-          description: '',
-          createdBy: creator,
-          createdAt: DateTime(2025),
-          memberCount: 2,
-          isMember: true,
-        ),
+        for (final visibility in ['private', 'open'])
+          Channel(
+            id: 'labeled-$creator-$visibility',
+            name: 'labeled-$creator-$visibility',
+            channelType: 'stream',
+            visibility: visibility,
+            labels: const ['buzz.solo'],
+            description: '',
+            createdBy: creator,
+            createdAt: DateTime(2025),
+            memberCount: 2,
+            isMember: true,
+          ),
       for (final type in ['stream', 'solo'])
         Channel(
           id: 'private-$type',
@@ -673,7 +742,9 @@ void main() {
     expect(tester.getTopLeft(publicIcon).dx, tester.getTopLeft(privateIcon).dx);
     expect(find.text('private-solo'), findsNothing);
     for (final creator in ['aabb', 'other', 'agent']) {
-      expect(find.text('labeled-$creator'), findsNothing);
+      for (final visibility in ['private', 'open']) {
+        expect(find.text('labeled-$creator-$visibility'), findsNothing);
+      }
     }
   });
 
@@ -4282,8 +4353,8 @@ void main() {
         findsOneWidget,
       );
       expect(
-        find.bySemanticsLabel(RegExp(r'general[\s\S]*Needs your attention')),
-        findsOneWidget,
+        tester.getSemantics(find.byKey(const ValueKey('1'))).value,
+        'Needs your attention',
       );
 
       if (viaMenu) {
@@ -4305,14 +4376,14 @@ void main() {
         findsNothing,
       );
       expect(
-        find.bySemanticsLabel(RegExp('Needs your attention')),
-        findsNothing,
+        tester.getSemantics(find.byKey(const ValueKey('1'))).value,
+        isEmpty,
       );
       semantics.dispose();
     });
   }
 
-  for (final (label, events, bold, dot) in [
+  for (final (label, events, seenAt, bold, dot) in [
     (
       'catch-up marks read ordinary messages and thread replies',
       [
@@ -4324,12 +4395,14 @@ void main() {
           isThreadedReply: true,
         ),
       ],
+      null,
       false,
       false,
     ),
     (
       'channel catch-up leaves a mention as a dot',
       [_observed(id: 'mention-1', createdAt: 20, highPriority: true)],
+      null,
       false,
       true,
     ),
@@ -4339,9 +4412,38 @@ void main() {
         _observed(id: 'msg-1', createdAt: 28),
         _observed(id: 'mention-1', createdAt: 20, highPriority: true),
       ],
+      null,
       true,
       true,
     ),
+    (
+      'desktop seen mark quiets ordinary backlog at the cut',
+      [_observed(id: 'msg-1', createdAt: 30)],
+      30,
+      false,
+      false,
+    ),
+    (
+      'desktop seen mark leaves newer backlog bold',
+      [
+        _observed(id: 'msg-1', createdAt: 26),
+        _observed(id: 'msg-2', createdAt: 30),
+      ],
+      29,
+      true,
+      false,
+    ),
+    for (final mentionAt in [26, 30])
+      (
+        'desktop seen mark leaves a dot for a mention at $mentionAt',
+        [
+          _observed(id: 'msg-1', createdAt: 27),
+          _observed(id: 'mention-1', createdAt: mentionAt, highPriority: true),
+        ],
+        28,
+        false,
+        true,
+      ),
   ]) {
     testWidgets(label, (tester) async {
       final channels = [
@@ -4362,17 +4464,26 @@ void main() {
         ),
       ];
       final readState = _FakeReadStateNotifier(
-        const ReadStateState(
+        ReadStateState(
           isReady: true,
           pubkey: 'pk',
           contexts: {
             '1': 10,
             'activity:1': 25,
             'thread-activity:$threadIdRoot': 30,
+            'seen:1': ?seenAt,
           },
           version: 0,
         ),
       );
+      final mutes = _FakeChannelMutesNotifier();
+      final filters = _filterTestManager(
+        cached: ChannelFilterStore.empty().edit(
+          'channels',
+          seenAt == null ? ChannelFilterMode.all : ChannelFilterMode.unreads,
+        ),
+      );
+      addTearDown(filters.dispose);
 
       await tester.pumpWidget(
         buildTestable(
@@ -4384,19 +4495,56 @@ void main() {
               ),
             ),
             readStateProvider.overrideWith(() => readState),
+            channelMutesProvider.overrideWith(() => mutes),
+            channelFilterProvider.overrideWithValue(filters),
           ],
         ),
       );
       await tester.pumpAndSettle();
 
+      final hiddenByUnreads = seenAt != null && !bold && !dot;
+      if (hiddenByUnreads) {
+        expect(find.text('general'), findsNothing);
+        await tester.tap(find.text('Show hidden channels · 1'));
+        await tester.pumpAndSettle();
+      }
+
       expect(
         tester.widget<Text>(find.text('general')).style?.fontWeight,
         bold ? FontWeight.w600 : FontWeight.w400,
       );
-      expect(
-        find.byKey(const ValueKey('channel-attention-dot-1')),
-        dot ? findsOneWidget : findsNothing,
+      final attentionDot = find.byKey(
+        const ValueKey('channel-attention-dot-1'),
       );
+      expect(attentionDot, dot ? findsOneWidget : findsNothing);
+
+      if (hiddenByUnreads) {
+        await tester.longPress(find.text('general'));
+        await tester.pumpAndSettle();
+        expect(find.text('Mark Read'), findsOneWidget);
+      }
+
+      if (dot) {
+        mutes.setMute(muted: true, relayMuted: false);
+        await tester.pump();
+        expect(attentionDot, findsOneWidget);
+
+        mutes.setMute(muted: true, relayMuted: true);
+        await tester.pump();
+        expect(attentionDot, findsNothing);
+        expect(
+          tester.getSemantics(find.byKey(const ValueKey('1'))).value,
+          'Needs your attention',
+        );
+
+        mutes.setMute(muted: false, relayMuted: true);
+        await tester.pump();
+        expect(attentionDot, findsOneWidget);
+
+        mutes.setMute(muted: false, relayMuted: false);
+        await tester.pump();
+        expect(attentionDot, findsOneWidget);
+      }
     });
   }
 
@@ -4625,6 +4773,21 @@ class _FakeProfileNotifier extends ProfileNotifier {
 class _FakePresenceNotifier extends PresenceNotifier {
   @override
   Future<String> build() async => 'online';
+}
+
+class _FakeChannelMutesNotifier extends ChannelMutesNotifier {
+  @override
+  ChannelMutesState build() => const ChannelMutesState(isReady: true);
+
+  void setMute({required bool muted, required bool relayMuted}) {
+    state = ChannelMutesState(
+      isReady: true,
+      store: ChannelMuteStore(
+        channels: {'1': ChannelMuteEntry(muted: muted, updatedAt: 40)},
+      ),
+      confirmedMutedChannelIds: relayMuted ? {'1'} : {},
+    );
+  }
 }
 
 class _FakeReadStateNotifier extends ReadStateNotifier {

@@ -5,6 +5,7 @@ class _CustomChannelSection extends StatelessWidget {
   final List<Channel> channels;
   final bool Function(Channel) isVisible;
   final Set<String> unreadChannelIds;
+  final Set<String> rowUnreadChannelIds;
   final Set<String> attentionChannelIds;
   final Set<String> mutedChannelIds;
   final String? currentPubkey;
@@ -26,6 +27,7 @@ class _CustomChannelSection extends StatelessWidget {
     required this.channels,
     required this.isVisible,
     required this.unreadChannelIds,
+    required this.rowUnreadChannelIds,
     required this.attentionChannelIds,
     required this.mutedChannelIds,
     required this.currentPubkey,
@@ -68,6 +70,7 @@ class _CustomChannelSection extends StatelessWidget {
           key: ValueKey(channel.id),
           channel: channel,
           isUnread: unreadChannelIds.contains(channel.id),
+          boldUnread: rowUnreadChannelIds.contains(channel.id),
           hasAttention: attentionChannelIds.contains(channel.id),
           isMuted: mutedChannelIds.contains(channel.id),
           currentPubkey: currentPubkey,
@@ -156,6 +159,7 @@ class _CustomSectionHeader extends StatelessWidget {
               IosMessageCreateButton(
                 key: ValueKey('section-menu-${section.id}'),
                 icon: 'more',
+                trailingIconSlotWidth: _kChannelIconSize,
                 accessibilityLabel: '${section.name} options',
                 width: 44,
                 height: 44,
@@ -269,6 +273,7 @@ class _ChannelSection extends StatelessWidget {
   final List<Channel> channels;
   final bool Function(Channel) isVisible;
   final Set<String> unreadChannelIds;
+  final Set<String> rowUnreadChannelIds;
   final Set<String> attentionChannelIds;
   final Set<String> mutedChannelIds;
   final String? currentPubkey;
@@ -285,6 +290,7 @@ class _ChannelSection extends StatelessWidget {
     required this.channels,
     required this.isVisible,
     required this.unreadChannelIds,
+    required this.rowUnreadChannelIds,
     required this.attentionChannelIds,
     required this.mutedChannelIds,
     required this.currentPubkey,
@@ -335,6 +341,7 @@ class _ChannelSection extends StatelessWidget {
           key: ValueKey(channel.id),
           channel: channel,
           isUnread: unreadChannelIds.contains(channel.id),
+          boldUnread: rowUnreadChannelIds.contains(channel.id),
           hasAttention: attentionChannelIds.contains(channel.id),
           isMuted: mutedChannelIds.contains(channel.id),
           currentPubkey: currentPubkey,
@@ -494,6 +501,7 @@ class _SectionHeader extends StatelessWidget {
                 IosMessageCreateButton(
                   key: ValueKey('sort-menu-$label'),
                   icon: 'more',
+                  trailingIconSlotWidth: _kChannelIconSize,
                   accessibilityLabel: '$label options',
                   width: 44,
                   height: 44,

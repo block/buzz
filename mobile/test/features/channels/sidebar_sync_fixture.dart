@@ -273,6 +273,8 @@ class ConnectedRelaySession extends RelaySessionNotifier {
         ),
       );
 
+  void setStatus(SessionStatus status) => state = SessionState(status: status);
+
   @override
   SessionState build() {
     // Follows the active community, as the production session does.

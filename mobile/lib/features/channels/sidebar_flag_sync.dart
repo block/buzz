@@ -82,6 +82,13 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
   /// The local view includes unsent changes across reconnects and restarts.
   Map<String, T> get values => {..._confirmed, ..._pending};
 
+  @protected
+  ({NostrEvent head, Iterable<MapEntry<String, T>> entries})?
+  get confirmedSnapshot {
+    final head = _head;
+    return head == null ? null : (head: head, entries: _confirmed.entries);
+  }
+
   bool get _active =>
       !_disposed && (_relay?.relayUrl == null || _relay?.relayUrl == relayUrl);
 
