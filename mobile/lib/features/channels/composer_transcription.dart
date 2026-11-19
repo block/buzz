@@ -96,22 +96,43 @@ ComposerTranscription useComposerTranscription({
     }
   }
 
+  // A journaled path whose pointer is gone has no decision left for the user;
+  // delete it quietly. Never touch a file the pointer still names.
+  Future<void> sweepCleanup() async {
+    final journal = prefs.getString(cleanupKey);
+    final pointer = prefs.getString(key);
+    if (journal == null ||
+        pointer == journal ||
+        pointer == '$_pendingSourcePrefix$journal' ||
+        pendingSources[key] == journal) {
+      return;
+    }
+    try {
+      await files.delete(journal);
+      if (prefs.getString(cleanupKey) == journal) {
+        await prefs.remove(cleanupKey);
+      }
+    } catch (_) {
+      await prefs.reload();
+      // The journal stays; a later mount retries.
+    }
+  }
+
   useEffect(() {
+    unawaited(sweepCleanup());
     final stored = prefs.getString(key);
     final source =
         pendingSources[key] ??
         (stored?.startsWith(_pendingSourcePrefix) == true
             ? stored!.substring(_pendingSourcePrefix.length)
             : null);
-    savedPath.value = source ?? stored ?? prefs.getString(cleanupKey);
+    savedPath.value = source ?? stored;
     retained.value = source == null;
     busy.value = false;
     retaining.value = false;
     discarding.value = false;
     error.value = savedPath.value == null
         ? null
-        : prefs.getString(cleanupKey) != null
-        ? 'Recording cleanup pending.'
         : retained.value
         ? 'Recording ready to transcribe.'
         : 'Recording not safely saved. Retry before closing the app.';
@@ -161,6 +182,8 @@ ComposerTranscription useComposerTranscription({
   Future<void> clear(String path) async {
     // remove() mutates the cache even when the platform write fails. Always
     // attempt the durable removal; never use cache absence as proof of success.
+    final older = prefs.getString(cleanupKey);
+    if (older != null && older != path) await sweepCleanup();
     try {
       // Keep a cleanup journal until both pointer removal and file deletion
       // succeed, including a process exit between those steps.
@@ -178,17 +201,15 @@ ComposerTranscription useComposerTranscription({
     try {
       await files.delete(path);
     } catch (_) {
-      throw StateError(
-        'Could not remove the recording. Retry to finish cleanup.',
-      );
+      // The journal is the durable retry record; a later mount sweeps it.
+      return;
     }
+    // The pointer and file are gone; a leftover journal is swept on a later
+    // mount, so it must not hold the editor behind the panel.
     try {
-      if (!await prefs.remove(cleanupKey)) {
-        throw StateError('Could not finish recording cleanup.');
-      }
+      if (!await prefs.remove(cleanupKey)) await prefs.reload();
     } catch (_) {
       await prefs.reload();
-      rethrow;
     }
   }
 
@@ -226,11 +247,6 @@ ComposerTranscription useComposerTranscription({
         pendingSources[key] = path;
       }
       if (path == null || !current(ticket)) return;
-      if (prefs.getString(cleanupKey) == path) {
-        await clear(path);
-        if (current(ticket)) savedPath.value = null;
-        return;
-      }
       if (!retained.value) {
         retaining.value = true;
 

@@ -50,6 +50,7 @@ class _ComposerSpeechPrefs extends Fake implements SharedPreferences {
   bool rejectRecoveryWrites = false;
   bool rejectRetainedWrites = false;
   bool rejectRemoval = false;
+  bool rejectCleanupRemoval = false;
   final hiddenKeys = <String>{};
   final cachedWrites = <String, String>{};
   int removalCalls = 0;
@@ -73,6 +74,11 @@ class _ComposerSpeechPrefs extends Fake implements SharedPreferences {
   Set<String> getKeys() => delegate.getKeys();
   @override
   Future<bool> remove(String key) async {
+    if (rejectCleanupRemoval &&
+        key.startsWith('composer_transcription_cleanup:')) {
+      hiddenKeys.add(key);
+      return false;
+    }
     if (key.startsWith('composer_transcription:')) {
       removalCalls++;
       if (rejectRemoval) {
@@ -294,9 +300,29 @@ void iosControlsTests() {
       expect(prefs.getString(threadKey), threadPath);
       expect(files.deleted, isNot(contains(threadPath)));
       expect(find.text('Retry'), findsOneWidget);
+      // A Discard that fails at pointer removal leaves the recording to
+      // transcribe: Retry recognizes it before any deletion.
+      prefs.rejectRemoval = true;
       await tester.tap(find.byTooltip('Discard recording'));
       await tester.pumpAndSettle();
+      expect(
+        find.text('Could not discard the recording. Try again.'),
+        findsOneWidget,
+      );
+      prefs.rejectRemoval = false;
+      speech.reset();
+      await tester.tap(find.text('Retry'));
+      await tester.pump();
+      expect(speech.started.isCompleted, isTrue);
+      expect(files.deleted, isNot(contains(threadPath)));
+      speech.result.complete('Kept after a failed discard.');
+      await tester.pumpAndSettle();
       expect(find.text('Retry'), findsNothing);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'Kept after a failed discard.',
+      );
+      expect(files.deleted, contains(threadPath));
       expect(sends, 0);
       await tester.pumpWidget(const SizedBox.shrink());
 
@@ -454,6 +480,21 @@ void iosControlsTests() {
         await tester.pumpWidget(composer());
         await tester.pumpAndSettle();
         expect(find.text('Retry'), findsOneWidget);
+        if (failure == 'copy') {
+          // A Discard that fails at pointer removal journals the source while
+          // the pending-source pointer still owns it: a restart keeps it.
+          prefs.rejectRemoval = true;
+          await tester.tap(find.byTooltip('Discard recording'));
+          await tester.pumpAndSettle();
+          prefs.rejectRemoval = false;
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pumpAndSettle();
+          await prefs.reload();
+          await tester.pumpWidget(composer());
+          await tester.pumpAndSettle();
+          expect(files.deleted, isNot(contains('/tmp/voice-note-test.m4a')));
+          expect(find.text('Retry'), findsOneWidget);
+        }
         files.rejectRetention = false;
         prefs.rejectRecoveryWrites = false;
         prefs.rejectRetainedWrites = false;
@@ -711,7 +752,7 @@ void iosControlsTests() {
   }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   testWidgets(
-    'failed audio deletion survives restart and retries only cleanup',
+    'failed audio deletion keeps the composer and cleans up on a later mount',
     (tester) async {
       final identity = RelayConfig(
         baseUrl: 'http://localhost:3000',
@@ -719,16 +760,21 @@ void iosControlsTests() {
       );
       final speech = _ComposerSpeech();
       final files = _ComposerSpeechFiles()..rejectDeletion = true;
+      final prefs = _ComposerSpeechPrefs(_testPrefs);
+      _testPrefs = prefs;
+      final sent = <String>[];
       Widget composer() => _buildComposeBar(
         relayConfig: () => _SwitchableRelayConfigNotifier(identity),
         uploadService: _FakeVoiceNoteUploadService(),
-        onSend: (_, _, {mediaTags = const []}) async {},
+        onSend: (text, _, {mediaTags = const []}) async => sent.add(text),
         voiceNoteRecorderFactory: _FakeVoiceNoteRecorder.new,
         overrides: [
           composerTranscriptionFilesProvider.overrideWithValue(files),
           deviceTranscriptionProvider.overrideWithValue(() => speech),
         ],
       );
+      String editorText() =>
+          tester.widget<TextField>(find.byType(TextField)).controller!.text;
       await tester.pumpWidget(composer());
       await tester.pumpAndSettle();
       await _tapComposerControl(tester, 'Dictate');
@@ -737,33 +783,61 @@ void iosControlsTests() {
       await tester.pump();
       speech.result.complete('Text is already saved.');
       await tester.pumpAndSettle();
+      expect(editorText(), 'Text is already saved.');
+      expect(find.text('Retry'), findsNothing);
+      expect(find.byTooltip('Discard recording'), findsNothing);
       final cleanupKey = _testPrefs.getKeys().singleWhere(
         (key) => key.startsWith('composer_transcription_cleanup:'),
       );
       final audio = _testPrefs.getString(cleanupKey)!;
       expect(files.deleted, isNot(contains(audio)));
+      // Restart with deletion still failing: the journal stays, quietly.
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pumpAndSettle();
       await _testPrefs.reload();
       speech.reset();
       await tester.pumpWidget(composer());
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Retry'));
-      await tester.pumpAndSettle();
-      expect(speech.started.isCompleted, isFalse);
+      expect(find.text('Retry'), findsNothing);
+      expect(find.text('Text is already saved.'), findsOneWidget);
       expect(_testPrefs.getString(cleanupKey), audio);
+      expect(speech.started.isCompleted, isFalse);
+      // Once deletion works, the next mount removes the file and the journal.
       files.rejectDeletion = false;
-      await tester.tap(find.text('Retry'));
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+      await _testPrefs.reload();
+      await tester.pumpWidget(composer());
       await tester.pumpAndSettle();
       expect(files.deleted, contains(audio));
       await _testPrefs.reload();
       expect(_testPrefs.getString(cleanupKey), isNull);
-      expect(
-        ProviderScope.containerOf(
-          tester.element(find.byType(ComposeBar)),
-        ).read(composeDraftsProvider.notifier).textFor('channel-1'),
-        'Text is already saved.',
-      );
+      expect(speech.started.isCompleted, isFalse);
+      expect(find.text('Text is already saved.'), findsOneWidget);
+      await _tapComposerControl(tester, 'Send');
+      await tester.pumpAndSettle();
+      expect(sent, ['Text is already saved.']);
+      // The file deletes but its journal removal fails: the transcript still
+      // lands in the editor, and a later mount removes the journal.
+      prefs.rejectCleanupRemoval = true;
+      speech.reset();
+      await _tapComposerControl(tester, 'Dictate');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Stop recording'));
+      await tester.pump();
+      speech.result.complete('Journal removal failed.');
+      await tester.pumpAndSettle();
+      expect(editorText(), 'Journal removal failed.');
+      expect(find.text('Retry'), findsNothing);
+      expect(_testPrefs.getString(cleanupKey), isNotNull);
+      prefs.rejectCleanupRemoval = false;
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+      await _testPrefs.reload();
+      await tester.pumpWidget(composer());
+      await tester.pumpAndSettle();
+      await _testPrefs.reload();
+      expect(_testPrefs.getString(cleanupKey), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
     },
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),
