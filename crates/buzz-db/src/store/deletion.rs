@@ -7482,17 +7482,18 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         // and lease check joins on it instead, so a tampered digest on either
         // side grants nothing.
         let digest = inventory.digest().unwrap();
-        for sql in [
+        let tampers = [
             "UPDATE community_deletion_approvals SET inventory_digest = $2 WHERE request_id = $1",
             "UPDATE community_deletion_requests SET inventory_digest = $2 WHERE id = $1",
-        ] {
-            let set_digest = |value: Vec<u8>| {
-                sqlx::query(sql)
-                    .bind(request.id)
-                    .bind(value)
-                    .execute(&db.pool)
-            };
-            set_digest(vec![0_u8; 32]).await.expect("tamper digest");
+        ];
+        let set_digest = |sql: &'static str, value: Vec<u8>| {
+            sqlx::query(sql)
+                .bind(request.id)
+                .bind(value)
+                .execute(&db.pool)
+        };
+        for sql in tampers {
+            set_digest(sql, vec![0_u8; 32]).await.expect("tamper digest");
             assert!(
                 store
                     .claim_specific(request.id, "executor-a", DEFAULT_LEASE_DURATION)
@@ -7501,13 +7502,49 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
                     .is_none(),
                 "a mismatched digest must not authorize a claim: {sql}"
             );
-            set_digest(digest.clone()).await.expect("restore digest");
+            set_digest(sql, digest.clone()).await.expect("restore digest");
         }
-        assert!(store
+        let claim = store
             .claim_specific(request.id, "executor-a", DEFAULT_LEASE_DURATION)
             .await
             .expect("claim approved")
-            .is_some());
+            .expect("matching digests authorize a claim");
+
+        // An executor that already holds the lease loses it the same way, and
+        // the failed calls leave the lease and stage as they were.
+        for sql in tampers {
+            let held = store.get(request.id).await.expect("held lease");
+            set_digest(sql, vec![0_u8; 32]).await.expect("tamper digest");
+            assert!(
+                store
+                    .heartbeat(&claim.lease, "worker", DEFAULT_LEASE_DURATION, false)
+                    .await
+                    .is_err(),
+                "a mismatched digest must not renew a lease: {sql}"
+            );
+            assert!(
+                store
+                    .verify_execution_token(&claim.lease, DeletionStage::Approved)
+                    .await
+                    .is_err(),
+                "a mismatched digest must not keep a lease valid: {sql}"
+            );
+            let after = store.get(request.id).await.expect("lease after rejection");
+            assert_eq!(
+                (after.stage, after.lease_generation, after.lease_until),
+                (held.stage, held.lease_generation, held.lease_until),
+                "{sql}"
+            );
+            set_digest(sql, digest.clone()).await.expect("restore digest");
+            store
+                .verify_execution_token(&claim.lease, DeletionStage::Approved)
+                .await
+                .expect("restored digest keeps the lease valid");
+            store
+                .heartbeat(&claim.lease, "worker", DEFAULT_LEASE_DURATION, false)
+                .await
+                .expect("restored digest renews the lease");
+        }
     }
 
     #[tokio::test]

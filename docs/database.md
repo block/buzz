@@ -413,6 +413,14 @@ parity assertion on the table for that window.
 3. Removing a guard requires a falsifiable test showing that the application
    path enforces what the guard enforced.
 
+pgschema cannot drop a trigger or foreign key from a partitioned table: it
+plans a drop for each partition's copy, which PostgreSQL refuses (`2BP01`) or
+which the parent's drop already removed (`42704`). A deployment that applies
+`schema/` with pgschema applies the dropping migration first, under that
+migration's lock budgets, then runs pgschema. For the trigger drops see
+[trigger-retirement-deployment.md](trigger-retirement-deployment.md); for the
+foreign keys on `events` and `delivery_log`, apply `0104`.
+
 ### 6. Bound every lock and statement
 
 - Every migration MUST start with `SET LOCAL lock_timeout`, and SHOULD set
