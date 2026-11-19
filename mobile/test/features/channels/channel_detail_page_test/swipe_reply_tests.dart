@@ -87,18 +87,44 @@ void swipeReplyTests() {
       testWidgets(
         'long press beside the bubble opens no actions, thread=$thread own=$own',
         (tester) async {
+          // In the channel the row's tap opens this thread.
+          final reply = _textMsg(
+            id: threadIdA,
+            pubkey: 'bob',
+            content: 'A reply',
+            createdAt: 1001,
+            extraTags: [
+              ['e', threadIdRoot, '', 'reply'],
+            ],
+          );
           final events = [
             _textMsg(
               id: threadIdRoot,
               pubkey: own ? 'self' : 'alice',
               content: 'Hold me',
             ),
+            if (!thread) reply,
           ];
           final messages = formatTimeline(events);
+          final haptics = <MethodCall>[];
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            (call) async {
+              if (call.method == 'HapticFeedback.vibrate') haptics.add(call);
+              return null;
+            },
+          );
+          addTearDown(
+            () => tester.binding.defaultBinaryMessenger
+                .setMockMethodCallHandler(SystemChannels.platform, null),
+          );
           await tester.pumpWidget(
             _buildTestable(
               signingPubkey: 'self',
               messages: events,
+              threadReplies: {
+                if (!thread) threadIdRoot: [reply],
+              },
               home: thread
                   ? ThreadDetailPage(
                       threadHead: messages.first,
@@ -132,9 +158,16 @@ void swipeReplyTests() {
           );
           expect(bubbleRect.contains(beside), isFalse);
 
+          // A refused hold is inert through its release: no actions, no
+          // haptic, and no fall-through to the row's tap.
           await tester.longPressAt(beside);
           await tester.pumpAndSettle();
           expect(find.text('Copy text'), findsNothing);
+          expect(haptics, isEmpty);
+          expect(
+            find.byType(ThreadDetailPage),
+            thread ? findsOneWidget : findsNothing,
+          );
 
           await tester.longPress(bubble);
           await tester.pumpAndSettle();
@@ -153,6 +186,16 @@ void swipeReplyTests() {
           await tester.pumpAndSettle();
           expect(find.text('Copy text'), findsOneWidget);
           semantics.dispose();
+          if (thread) return;
+
+          // A quick tap beside the message still opens its thread.
+          Navigator.of(tester.element(find.byType(BottomSheet))).pop();
+          await tester.pumpAndSettle();
+          expect(find.byType(ThreadDetailPage), findsNothing);
+          await tester.tapAt(beside);
+          await tester.pumpAndSettle();
+          expect(find.byType(ThreadDetailPage), findsOneWidget);
+          expect(find.text('Copy text'), findsNothing);
         },
       );
     }
@@ -402,14 +445,11 @@ void swipeReplyTests() {
               await tester.longPressAt(beside);
               await tester.pumpAndSettle();
               expect(find.text('Copy link'), findsNothing);
-              // Released over a message with replies, that hold is a tap on
-              // the row, which opens its thread.
-              if (part.replied) {
-                Navigator.of(
-                  tester.element(find.byType(ThreadDetailPage)),
-                ).pop();
-                await tester.pumpAndSettle();
-              }
+              // Its release is no tap on the row, so no thread opens.
+              expect(
+                find.byType(ThreadDetailPage),
+                thread ? findsOneWidget : findsNothing,
+              );
             }
 
             // The part's own tap still wins over the message.

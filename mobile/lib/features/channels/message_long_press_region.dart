@@ -62,9 +62,10 @@ class MessageLongPressInkWell extends StatelessWidget {
   /// content. When omitted, this widget inserts and owns that boundary.
   final GlobalKey? snapshotKey;
 
-  /// Whether a pointer long press starts only on a [MessageLongPressTarget] or
-  /// [MessageReplyDragTarget] below this region, leaving the empty row space
-  /// around them inert. Otherwise it may start anywhere in the region.
+  /// Whether a pointer long press opens actions only on a
+  /// [MessageLongPressTarget] or [MessageReplyDragTarget] below this region.
+  /// A hold on the empty row space around them does nothing, and neither does
+  /// its release. Otherwise a hold anywhere in the region opens actions.
   final bool targetsOnly;
   final Widget child;
 
@@ -201,21 +202,25 @@ class _MessageLongPressRegion extends HookWidget {
       child: RawGestureDetector(
         behavior: HitTestBehavior.translucent,
         gestures: {
-          _MessageLongPressRecognizer:
-              GestureRecognizerFactoryWithHandlers<_MessageLongPressRecognizer>(
-                () => _MessageLongPressRecognizer(
+          LongPressGestureRecognizer:
+              GestureRecognizerFactoryWithHandlers<LongPressGestureRecognizer>(
+                () => LongPressGestureRecognizer(
                   duration: defaultTargetPlatform == TargetPlatform.iOS
                       ? iosMessageLongPressDuration
                       : null,
                 ),
-                (recognizer) => recognizer
-                  ..canStartAt = targetsOnly
-                      ? (position) => messageLongPressTargetAt(
-                          context.findRenderObject(),
-                          position,
-                        )
-                      : null
-                  ..onLongPressStart = (_) => recognize(),
+                // A hold beside the targets still wins the arena, so its
+                // release cannot fall through to the row's tap; it just
+                // opens nothing.
+                (recognizer) => recognizer.onLongPressStart = (details) {
+                  if (!targetsOnly ||
+                      messageLongPressTargetAt(
+                        context.findRenderObject(),
+                        details.globalPosition,
+                      )) {
+                    recognize();
+                  }
+                },
               ),
         },
         child: InkWell(
@@ -232,16 +237,4 @@ class _MessageLongPressRegion extends HookWidget {
       ),
     );
   }
-}
-
-/// A long press that ignores pointers landing outside [canStartAt].
-class _MessageLongPressRecognizer extends LongPressGestureRecognizer {
-  _MessageLongPressRecognizer({super.duration});
-
-  bool Function(Offset globalPosition)? canStartAt;
-
-  @override
-  bool isPointerAllowed(PointerDownEvent event) =>
-      (canStartAt?.call(event.position) ?? true) &&
-      super.isPointerAllowed(event);
 }
