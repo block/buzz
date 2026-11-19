@@ -141,7 +141,7 @@ mod postgres_tests {
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         let json = read_json(response).await;
-        assert_eq!(json["expires_at"], Value::Null, "{json}");
+        assert_eq!(json.get("expires_at"), Some(&Value::Null), "{json}");
         let code = json["code"].as_str().expect("code").to_owned();
         assert_eq!(
             claim(&state, &host, &Keys::generate(), &code).await,
