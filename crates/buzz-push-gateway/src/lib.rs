@@ -10,6 +10,7 @@ pub mod http;
 pub mod metrics;
 pub mod model;
 pub mod postgres;
+pub mod signed_call_limiter;
 pub(crate) mod strict_json;
 pub mod token;
 pub use http::{router, router_with_metrics, AppState};

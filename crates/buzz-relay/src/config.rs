@@ -185,6 +185,8 @@ pub struct Config {
     pub require_auth_token: bool,
     /// Opt-in private accessory API; disabled until explicitly deployed.
     pub buzz_v1_enabled: bool,
+    /// Activate NIP-AR community storage only after the operator schema contract.
+    pub community_artifacts_enabled: bool,
     /// Opt-in NIP-CL compact membership projection; dark by default.
     pub membership_snapshot_enabled: bool,
     /// Opt-in NIP-CL public memberships, independent of self discovery.
@@ -1548,6 +1550,16 @@ impl Config {
             auth,
             require_auth_token,
             buzz_v1_enabled,
+            community_artifacts_enabled: match std::env::var("BUZZ_COMMUNITY_ARTIFACTS_ENABLED") {
+                Err(std::env::VarError::NotPresent) => false,
+                Ok(v) if v == "true" => true,
+                Ok(v) if v == "false" => false,
+                _ => {
+                    return Err(ConfigError::InvalidValue(
+                        "BUZZ_COMMUNITY_ARTIFACTS_ENABLED must be true or false".into(),
+                    ))
+                }
+            },
             membership_snapshot_enabled: std::env::var("BUZZ_MEMBERSHIP_SNAPSHOT_ENABLED")
                 .is_ok_and(|v| v == "true"),
             membership_public_enabled: std::env::var("BUZZ_MEMBERSHIP_PUBLIC_ENABLED")

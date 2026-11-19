@@ -5,6 +5,7 @@ import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/read_state/read_state_manager.dart';
 import 'package:buzz/shared/read_state/read_state_storage.dart';
@@ -822,6 +823,414 @@ void main() {
     },
   );
 
+  group('timestamp-refused pending update', () {
+    const signedAt = 1800000000;
+    late SharedPreferences prefs;
+    late nostr.Keys keys;
+    late ReadStateCrypto crypto;
+    late _RefusingRelaySession session;
+    late int now;
+
+    ReadStateManager create() => ReadStateManager(
+      pubkey: keys.public,
+      relayUrl: _relayUrl,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: session,
+      signedEventRelay: SignedEventRelay(session: session, nsec: keys.nsec),
+      remoteEnabled: true,
+      onChanged: () {},
+      now: () => now,
+    );
+
+    Map<String, Object?> journal() => ReadStateStorage(
+      prefs,
+    ).readJournal('${keys.public}:${Uri.encodeComponent(_relayUrl)}')!;
+
+    // Leaves one signed update pending: the send times out unseen.
+    Future<NostrEvent> leavePending(Map<String, int> marks) async {
+      SharedPreferences.setMockInitialValues({});
+      prefs = await SharedPreferences.getInstance();
+      keys = nostr.Keys.generate();
+      crypto = ReadStateCrypto.tryCreate(nsec: keys.nsec, pubkey: keys.public)!;
+      session = _RefusingRelaySession();
+      now = signedAt;
+      final manager = create();
+      marks.forEach(manager.markContextRead);
+      session.timeOut = true;
+      await manager.flush();
+      expect((journal()['pending'] as Map), hasLength(1));
+      manager.dispose(flushPending: false);
+      session.timeOut = false;
+      return session.attempts.single;
+    }
+
+    Map<String, int> publishedContexts() => mergeReadStateContexts([
+      for (final event in session.retained.values)
+        decodeReadStateBlob(crypto.decrypt(event.content))!.contexts,
+    ]);
+
+    test('an expired update with no covering copy is renewed', () async {
+      final pending = await leavePending({
+        'room-a': signedAt - 100,
+        'room-b': signedAt - 50,
+      });
+      // A newer own update that holds only one of the pending marks.
+      session.retained[pending.tags.first[1]] = _readStateEvent(
+        pubkey: keys.public,
+        crypto: crypto,
+        clientId: journal()['clientId'] as String,
+        slotId: pending.tags.first[1].substring(readStateDTagPrefix.length),
+        contexts: {'room-a': signedAt - 100},
+        createdAt: signedAt + 10,
+      );
+      now = signedAt + 3600;
+      session.refuseCreatedAtBefore = now - 900;
+      final restarted = create();
+      await restarted.flush();
+
+      expect(restarted.syncError, isNull);
+      final successor = session.attempts.last;
+      expect(successor.id, isNot(pending.id));
+      expect(successor.createdAt, greaterThan(pending.createdAt));
+      expect(publishedContexts(), {
+        'room-a': signedAt - 100,
+        'room-b': signedAt - 50,
+      });
+      expect((journal()['pending'] as Map), isEmpty);
+      restarted.dispose(flushPending: false);
+    });
+
+    test('an expired update the relay already holds is retired', () async {
+      final pending = await leavePending({'room-a': signedAt - 100});
+      session.retained[pending.tags.first[1]] = pending;
+      now = signedAt + 3600;
+      session.refuseCreatedAtBefore = now - 900;
+      final restarted = create();
+      final attemptsBefore = session.attempts.length;
+      await restarted.flush();
+
+      expect(restarted.syncError, isNull);
+      // Only the refused retry: nothing new to send.
+      expect(session.attempts.length, attemptsBefore + 1);
+      expect(session.attempts.last.id, pending.id);
+      expect((journal()['pending'] as Map), isEmpty);
+      restarted.dispose(flushPending: false);
+    });
+
+    test('a refusal from clock skew keeps the exact update', () async {
+      final pending = await leavePending({'room-a': signedAt - 100});
+      // Not old by this device's clock, so the device clock is wrong.
+      now = signedAt + 60;
+      session.refuseCreatedAtBefore = signedAt + 1;
+      final restarted = create();
+      await restarted.flush();
+
+      expect(restarted.syncError, isA<ReadStateClockSkewError>());
+      expect(session.attempts.last.toJson(), pending.toJson());
+      final kept = (journal()['pending'] as Map).values.single as Map;
+      expect(kept['id'], pending.id);
+      restarted.dispose(flushPending: false);
+    });
+  });
+
+  test('a snapshot failure inside a publish retries and sends the marks', () {
+    fakeAsync((async) {
+      SharedPreferences.setMockInitialValues({});
+      late SharedPreferences prefs;
+      SharedPreferences.getInstance().then((value) => prefs = value);
+      async.flushMicrotasks();
+      final keys = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keys.nsec,
+        pubkey: keys.public,
+      )!;
+      final session = _FakeRelaySession();
+      final relay = _FakeSignedEventRelay();
+      final manager = ReadStateManager(
+        pubkey: keys.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: session,
+        signedEventRelay: relay,
+        remoteEnabled: true,
+        onChanged: () {},
+        now: () => 2000,
+      );
+      manager.initialize();
+      async.flushMicrotasks();
+      expect(manager.syncError, isNull);
+
+      manager.markContextRead('room', 1990);
+      session.failNextFetch = true;
+      async.elapse(const Duration(seconds: 5));
+      expect(manager.syncError, isNotNull);
+      expect(relay.submitCount, 0);
+
+      // No other trigger: the backoff re-syncs, then the marks go out.
+      async.elapse(const Duration(seconds: 15));
+      expect(relay.submitCount, 1);
+      expect(
+        decodeReadStateBlob(crypto.decrypt(relay.contents.single))!.contexts,
+        {'room': 1990},
+      );
+      expect(manager.syncError, isNull);
+      manager.dispose(flushPending: false);
+    });
+  });
+
+  ReadStateManager recoveryManager(
+    FakeAsync async,
+    _FakeRelaySession session,
+    SignedEventRelay relay,
+  ) {
+    SharedPreferences.setMockInitialValues({});
+    late SharedPreferences prefs;
+    SharedPreferences.getInstance().then((value) => prefs = value);
+    async.flushMicrotasks();
+    final keys = nostr.Keys.generate();
+    final manager = ReadStateManager(
+      pubkey: keys.public,
+      relayUrl: _relayUrl,
+      prefs: prefs,
+      crypto: ReadStateCrypto.tryCreate(nsec: keys.nsec, pubkey: keys.public)!,
+      relaySession: session,
+      signedEventRelay: relay,
+      remoteEnabled: true,
+      onChanged: () {},
+      now: () => 2000,
+    );
+    manager.initialize();
+    async.flushMicrotasks();
+    return manager;
+  }
+
+  test('a read that recovers on the same socket sends the marks the retry '
+      'would have', () {
+    fakeAsync((async) {
+      final session = _FakeRelaySession();
+      final relay = _FakeSignedEventRelay();
+      final manager = recoveryManager(async, session, relay);
+      manager.markContextRead('room', 1990);
+      session.failNextFetch = true;
+      async.elapse(const Duration(seconds: 5));
+      expect(manager.syncError, isNotNull);
+
+      // Before the backoff fires, the live subscription is ready again and
+      // its read succeeds: that read clears the notice and hands off the mark.
+      session.statusListeners.last(RelaySubscriptionStatus.ready);
+      async.flushMicrotasks();
+      expect(manager.syncError, isNull);
+      expect(relay.submitCount, 0);
+      async.elapse(const Duration(seconds: 5));
+      expect(relay.submitCount, 1);
+      expect(manager.syncError, isNull);
+      manager.dispose(flushPending: false);
+    });
+  });
+
+  test('a failed read has one recovery owner, even with a mark waiting', () {
+    fakeAsync((async) {
+      final session = _FakeRelaySession()..failNextFetch = true;
+      final relay = _FakeSignedEventRelay();
+      final manager = recoveryManager(async, session, relay);
+      expect(session.fetchCount, 1);
+      manager.markContextRead('room', 1990);
+      // The backoff's read and the mark's publish delay both end at 5 s.
+      final gate = Completer<void>();
+      session.fetchGate = gate.future;
+      async.elapse(const Duration(seconds: 5));
+      expect(session.fetchCount, 2);
+      async.elapse(const Duration(seconds: 4));
+      expect(session.fetchCount, 2);
+      gate.complete();
+      session.fetchGate = null;
+      async.flushMicrotasks();
+      expect(manager.syncError, isNull);
+      // Recovered: the mark's publish reads once more for its own write.
+      async.elapse(const Duration(seconds: 5));
+      expect(relay.submitCount, 1);
+      expect(session.fetchCount, 3);
+      manager.dispose(flushPending: false);
+    });
+  });
+
+  test(
+    'an older read finishing its save cannot clear a newer read failure',
+    () {
+      fakeAsync((async) {
+        final store = _GatedPrefsStore();
+        SharedPreferencesStorePlatform.instance = store;
+        SharedPreferences.resetStatic();
+        addTearDown(() {
+          SharedPreferences.resetStatic();
+          SharedPreferences.setMockInitialValues({});
+        });
+        late SharedPreferences prefs;
+        SharedPreferences.getInstance().then((value) => prefs = value);
+        async.flushMicrotasks();
+        final keys = nostr.Keys.generate();
+        final session = _FakeRelaySession();
+        final relay = _FakeSignedEventRelay();
+        final manager = ReadStateManager(
+          pubkey: keys.public,
+          relayUrl: _relayUrl,
+          prefs: prefs,
+          crypto: ReadStateCrypto.tryCreate(
+            nsec: keys.nsec,
+            pubkey: keys.public,
+          )!,
+          relaySession: session,
+          signedEventRelay: relay,
+          remoteEnabled: true,
+          onChanged: () {},
+          now: () => 2000,
+        );
+        manager.initialize();
+        async.flushMicrotasks();
+        manager.markContextRead('room', 1990);
+        // Read A, a resync, starts first; read B, an explicit flush, after it.
+        final first = Completer<void>();
+        session.fetchGate = first.future;
+        session.statusListeners.last(RelaySubscriptionStatus.ready);
+        async.flushMicrotasks();
+        final second = Completer<void>();
+        session.fetchGate = second.future;
+        unawaited(manager.flush().catchError((Object _) {}));
+        async.flushMicrotasks();
+        final fetches = session.fetchCount;
+        // A succeeds, then its journal save is held.
+        store.gate = Completer<void>();
+        first.complete();
+        async.flushMicrotasks();
+        // B fails during that save.
+        session.failNextFetch = true;
+        second.complete();
+        async.flushMicrotasks();
+        final failure = manager.syncError;
+        expect(failure, isNotNull);
+        session.fetchGate = null;
+        store.gate!.complete();
+        store.gate = null;
+        async.flushMicrotasks();
+        // B's error and its retry stand.
+        expect(manager.syncError, same(failure));
+        async.elapse(const Duration(seconds: 5));
+        expect(session.fetchCount, greaterThan(fetches));
+        manager.dispose(flushPending: false);
+      });
+    },
+  );
+
+  for (final failWrite in [false, true]) {
+    test('an explicit flush reads at once, without waiting for the backoff '
+        '(write fails: $failWrite)', () {
+      fakeAsync((async) {
+        final session = _FakeRelaySession()..failNextFetch = true;
+        final relay = _ParkedSignedEventRelay(failFirst: failWrite);
+        final manager = recoveryManager(async, session, relay);
+        addTearDown(() => manager.dispose(flushPending: false));
+        expect(manager.syncError, isNotNull);
+        final fetches = session.fetchCount;
+        manager.markContextRead('room', 1990);
+        unawaited(manager.flush());
+        async.flushMicrotasks();
+        expect(session.fetchCount, fetches + 1);
+        expect(relay.contents, hasLength(1));
+        relay.release();
+        async.flushMicrotasks();
+        expect(manager.syncError, failWrite ? isNotNull : isNull);
+
+        // The flush's read was the retry the backoff was waiting for, so
+        // the backoff must not read again to retry the write.
+        async.elapse(const Duration(seconds: 10));
+        expect(session.fetchCount, fetches + 1);
+
+        // A later read failure starts the backoff over at five seconds.
+        session.failNextFetch = true;
+        session.statusListeners.last(RelaySubscriptionStatus.ready);
+        async.flushMicrotasks();
+        final failedReads = session.fetchCount;
+        async.elapse(const Duration(seconds: 5));
+        expect(session.fetchCount, failedReads + 1);
+      });
+    });
+  }
+
+  test('an older send cannot clear a newer read failure', () {
+    fakeAsync((async) {
+      final session = _FakeRelaySession();
+      final relay = _ParkedSignedEventRelay(failFirst: false);
+      final manager = recoveryManager(async, session, relay);
+      manager.markContextRead('room', 1990);
+      async.elapse(const Duration(seconds: 5));
+      expect(relay.contents, hasLength(1));
+      session.failNextFetch = true;
+      session.statusListeners.last(RelaySubscriptionStatus.ready);
+      async.flushMicrotasks();
+      final failure = manager.syncError;
+      expect(failure, isNotNull);
+      relay.release();
+      async.flushMicrotasks();
+      expect(manager.syncError, same(failure));
+      manager.dispose(flushPending: false);
+    });
+  });
+
+  test('a failed snapshot retries on a backoff timer', () {
+    fakeAsync((async) {
+      SharedPreferences.setMockInitialValues({});
+      late SharedPreferences prefs;
+      SharedPreferences.getInstance().then((value) => prefs = value);
+      async.flushMicrotasks();
+      final keys = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keys.nsec,
+        pubkey: keys.public,
+      )!;
+      final session = _FakeRelaySession()..failNextFetch = true;
+      var changes = 0;
+      final manager = ReadStateManager(
+        pubkey: keys.public,
+        relayUrl: _relayUrl,
+        prefs: prefs,
+        crypto: crypto,
+        relaySession: session,
+        signedEventRelay: _FakeSignedEventRelay(),
+        remoteEnabled: true,
+        onChanged: () => changes++,
+        now: () => 2000,
+      );
+      manager.initialize();
+      async.flushMicrotasks();
+      expect(session.fetchCount, 1);
+      expect(manager.syncError, isNotNull);
+
+      // Keep the relay failing for two minutes: reads retry, but on a
+      // backoff, never in a hot loop.
+      for (var second = 0; second < 120; second++) {
+        session.failNextFetch = true;
+        async.elapse(const Duration(seconds: 1));
+      }
+      final failedReads = session.fetchCount;
+      expect(failedReads, greaterThan(2));
+      expect(failedReads, lessThanOrEqualTo(30));
+      expect(manager.syncError, isNotNull);
+
+      // The relay recovers; the backoff (capped at five minutes) reads again.
+      async.elapse(const Duration(minutes: 5));
+      expect(session.fetchCount, greaterThan(failedReads));
+      expect(manager.syncError, isNull);
+      // Recovered: the retry timer is gone, so no further reads.
+      final recoveredReads = session.fetchCount;
+      async.elapse(const Duration(minutes: 30));
+      expect(session.fetchCount, recoveredReads);
+      expect(changes, greaterThan(0));
+      manager.dispose(flushPending: false);
+    });
+  });
+
   test('message feedback survives restart but is never published', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -1400,6 +1809,67 @@ void main() {
     },
   );
 
+  test(
+    'a publish waits for a slow sync snapshot, and its failed read keeps its retry',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final keychain = nostr.Keys.generate();
+      final crypto = ReadStateCrypto.tryCreate(
+        nsec: keychain.nsec,
+        pubkey: keychain.public,
+      )!;
+      fakeAsync((async) {
+        final relay = _FakeRelaySession();
+        final signed = _FakeSignedEventRelay();
+        final manager = ReadStateManager(
+          pubkey: keychain.public,
+          relayUrl: _relayUrl,
+          prefs: prefs,
+          crypto: crypto,
+          relaySession: relay,
+          signedEventRelay: signed,
+          remoteEnabled: true,
+          onChanged: () {},
+        );
+        manager.initialize();
+        async.flushMicrotasks();
+        expect(relay.fetchCount, 1);
+
+        // The REQ goes live again and its sync snapshot is slow to download.
+        final slow = Completer<void>();
+        relay.fetchGate = slow.future;
+        relay.statusListeners.last(RelaySubscriptionStatus.ready);
+        async.flushMicrotasks();
+        expect(relay.fetchCount, 2);
+
+        // A mark's publish joins that read rather than starting another.
+        relay.fetchGate = null;
+        relay.failNextFetch = true;
+        manager.markContextRead(
+          'channel-2',
+          DateTime.now().millisecondsSinceEpoch ~/ 1000,
+        );
+        async.elapse(const Duration(seconds: 5));
+        expect(relay.fetchCount, 2);
+
+        // That read then fails. The publish leaves it to the backoff, which
+        // recovers and sends the mark.
+        slow.complete();
+        async.flushMicrotasks();
+        expect(relay.fetchCount, 2);
+        expect(manager.syncError, isNotNull);
+        expect(signed.submitCount, 0);
+
+        async.elapse(const Duration(minutes: 1));
+        expect(relay.fetchCount, greaterThan(2));
+        expect(signed.submitCount, 1);
+        expect(manager.syncError, isNull);
+        manager.dispose(flushPending: false);
+      });
+    },
+  );
+
   test('remote read-state rollback is ignored', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -1513,6 +1983,7 @@ class _FakeSignedEventRelay implements SignedEventRelay {
     required List<List<String>> tags,
     int? createdAt,
     FutureOr<void> Function(NostrEvent event)? onSigned,
+    Future<bool> Function()? mayPublish,
   }) async {
     submitCount++;
     contents.add(content);
@@ -1543,6 +2014,7 @@ class _ParkedSignedEventRelay implements SignedEventRelay {
     required List<List<String>> tags,
     int? createdAt,
     FutureOr<void> Function(NostrEvent event)? onSigned,
+    Future<bool> Function()? mayPublish,
   }) async {
     contents.add(content);
     if (contents.length == 1) {
@@ -1566,6 +2038,7 @@ class _UnsupportedKindSignedEventRelay implements SignedEventRelay {
     required List<List<String>> tags,
     int? createdAt,
     FutureOr<void> Function(NostrEvent event)? onSigned,
+    Future<bool> Function()? mayPublish,
   }) async {
     submitCount++;
     throw Exception('restricted: unknown event kind');
@@ -1585,6 +2058,7 @@ class _MissingScopeSignedEventRelay implements SignedEventRelay {
     required List<List<String>> tags,
     int? createdAt,
     FutureOr<void> Function(NostrEvent event)? onSigned,
+    Future<bool> Function()? mayPublish,
   }) async {
     submitCount++;
     throw Exception('missing users:write');
@@ -1708,6 +2182,7 @@ class _JournalRelaySession extends _FakeRelaySession {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    Future<bool> Function()? mayPublish,
   }) async {
     attempts.add(event);
     final slot = event.tags.firstWhere((tag) => tag.first == 'd')[1];
@@ -1716,5 +2191,47 @@ class _JournalRelaySession extends _FakeRelaySession {
       throw TimeoutException('Accepted but acknowledgement lost');
     }
     return event;
+  }
+}
+
+/// Stores what it accepts. [timeOut] drops the reply after storing nothing,
+/// and [refuseCreatedAtBefore] refuses older events the way the relay
+/// refuses timestamps outside its window.
+class _RefusingRelaySession extends _FakeRelaySession {
+  final attempts = <NostrEvent>[];
+  final retained = <String, NostrEvent>{};
+  bool timeOut = false;
+  int refuseCreatedAtBefore = 0;
+
+  @override
+  Future<List<NostrEvent>> fetchReadStateSnapshot({
+    Duration timeout = const Duration(seconds: 8),
+  }) async => retained.values.toList();
+
+  @override
+  Future<NostrEvent> publish(
+    NostrEvent event, {
+    Duration timeout = const Duration(seconds: 8),
+    Future<bool> Function()? mayPublish,
+  }) async {
+    attempts.add(event);
+    if (timeOut) throw TimeoutException('No acknowledgement');
+    if (event.createdAt < refuseCreatedAtBefore) {
+      throw Exception('invalid: event timestamp too far from server time');
+    }
+    retained[event.tags.firstWhere((tag) => tag.first == 'd')[1]] = event;
+    return event;
+  }
+}
+
+class _GatedPrefsStore extends InMemorySharedPreferencesStore {
+  _GatedPrefsStore() : super.empty();
+
+  Completer<void>? gate;
+
+  @override
+  Future<bool> setValue(String valueType, String key, Object value) async {
+    if (key.contains('nip-rs.journal') && gate != null) await gate!.future;
+    return super.setValue(valueType, key, value);
   }
 }

@@ -2448,7 +2448,8 @@ impl DeletionStore {
         let tombstone: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1 \
              AND deletion_state = 'tombstone' AND deleted_at IS NOT NULL \
-             AND deletion_fence_generation = $2)",
+             AND deletion_fence_generation = $2 \
+             AND COALESCE(to_jsonb(communities)->'artifact_type_policies' = '{}'::jsonb, true))",
         )
         .bind(token.community_id.as_uuid())
         .bind(generation)
@@ -3485,6 +3486,15 @@ async fn transition_community(
         }
     };
     set_executor_gucs(tx, community, generation).await?;
+    // The community remains as a tombstone, so tenant policy state must be
+    // erased explicitly. Pre-expand schemas remain supported by deletion
+    // recovery; the schema/destruction lock keeps this catalog check stable.
+    if tombstone && sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='communities'::regclass AND attname='artifact_type_policies' AND NOT attisdropped)"
+    ).fetch_one(&mut **tx).await? {
+        sqlx::query("UPDATE communities SET artifact_type_policies='{}'::jsonb WHERE id=$1")
+            .bind(community.as_uuid()).execute(&mut **tx).await?;
+    }
     let affected = sqlx::query(
         "UPDATE communities SET deletion_state = $2, deletion_fence_generation = $3, \
          archived_at = CASE WHEN $4 THEN COALESCE(archived_at, now()) ELSE $5 END, \
@@ -4582,7 +4592,7 @@ pub(crate) mod owner_provenance_contract {
 }
 
 #[cfg(test)]
-mod postgres_tests {
+pub(crate) mod postgres_tests {
     use super::*;
     use crate::test_support::ScratchDb;
     use crate::{
@@ -4803,8 +4813,9 @@ mod postgres_tests {
         )
         .fetch_one(&db.pool)
         .await
-        .expect("lookup retired functions and retained guard");
-        assert_eq!(retired, (false, false, true));
+        .expect("lookup retired functions and guard");
+        // 0094 retired the functions; 0096 retired the tombstone trigger.
+        assert_eq!(retired, (false, false, false));
     }
 
     #[tokio::test]
@@ -5047,6 +5058,67 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         }
     }
 
+    /// Assert the contract catalog, including disabled copies and overloads.
+    pub(crate) async fn assert_single_table_guards_retired(pool: &sqlx::PgPool) {
+        let retired_triggers = [
+            "trg_channels_community_id_immutable",
+            "communities_deletion_tombstone",
+            "community_deletion_request_retargeting_guard",
+            "community_deletion_approval_removal_guard",
+            "community_deletion_manifest_keys_guard",
+        ];
+        let retired_functions = [
+            "channels_community_id_immutable",
+            "enforce_community_tombstone",
+            "prevent_community_deletion_request_retargeting",
+            "prevent_community_deletion_approval_removal",
+            "protect_community_deletion_manifest_keys",
+        ];
+        let remaining: Vec<String> = sqlx::query_scalar(
+            "SELECT 'trigger:' || c.relname || '.' || t.tgname FROM pg_trigger t \
+             JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace \
+             WHERE n.nspname='public' AND t.tgname=ANY($1) \
+             UNION ALL SELECT 'function:' || p.proname FROM pg_proc p \
+             JOIN pg_namespace n ON n.oid=p.pronamespace \
+             WHERE n.nspname='public' AND p.proname=ANY($2) ORDER BY 1",
+        )
+        .bind(&retired_triggers[..])
+        .bind(&retired_functions[..])
+        .fetch_all(pool)
+        .await
+        .expect("inspect retired guard objects");
+        assert!(
+            remaining.is_empty(),
+            "single-table guard objects remain: {remaining:?}"
+        );
+        let db = Db::from_pool(pool.clone());
+        db.validate_deletion_serving_catalog()
+            .await
+            .expect("serving startup after retirement");
+        db.validate_deletion_serving_catalog_for_readiness(
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .expect("readiness after retirement");
+        db.validate_deletion_catalog()
+            .await
+            .expect("deletion catalog after retirement");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn desired_schema_single_table_guards_are_retired() {
+        let (db, _) = store().await;
+        assert_single_table_guards_retired(&db.pool).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_schema_single_table_guards_are_retired() {
+        let (db, _) = store().await;
+        assert_single_table_guards_retired(&db.pool).await;
+    }
+
     fn empty_prefix_manifest(prefix: String) -> PrefixManifest {
         PrefixManifest {
             prefix,
@@ -5115,7 +5187,7 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn single_table_guard_channels_remain_tenant_bound_without_trigger() {
+    async fn single_table_guard_channels_remain_tenant_bound() {
         let (db, _) = store().await;
         let first = db
             .ensure_configured_community(&format!("channel-a-{}.example", Uuid::new_v4()))
@@ -5137,10 +5209,6 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
             )
             .await
             .expect("create first-community channel");
-        sqlx::query("ALTER TABLE channels DISABLE TRIGGER trg_channels_community_id_immutable")
-            .execute(&db.pool)
-            .await
-            .expect("disable only channel immutability trigger");
         assert!(matches!(
             db.update_channel(
                 second.id,
@@ -5175,7 +5243,7 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn single_table_guard_community_lifecycle_rejects_deleted_row_without_trigger() {
+    async fn single_table_guard_community_lifecycle_rejects_deleted_row() {
         let (db, store) = store().await;
         let (request, inventory) = inventoried_request(&db, &store).await;
         store
@@ -5191,10 +5259,6 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
             .expect("claim")
             .expect("won claim");
         store.begin_quiescing(&claim.lease).await.expect("quiesce");
-        sqlx::query("ALTER TABLE communities DISABLE TRIGGER communities_deletion_tombstone")
-            .execute(&db.pool)
-            .await
-            .expect("disable only tombstone trigger");
         assert!(matches!(
             db.set_community_icon(request.community_id, Some("quiescing-icon"))
                 .await,
@@ -5248,12 +5312,8 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn single_table_guard_abort_invalidates_generation_without_trigger() {
+    async fn single_table_guard_abort_invalidates_generation() {
         let (db, store) = store().await;
-        sqlx::query("ALTER TABLE communities DISABLE TRIGGER communities_deletion_tombstone")
-            .execute(&db.pool)
-            .await
-            .expect("disable only tombstone trigger");
         for pre_archived in [false, true] {
             for fenced in [false, true] {
                 let (request, _) = inventoried_request(&db, &store).await;
@@ -5323,7 +5383,7 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn single_table_guard_request_inventory_freeze_is_one_way_without_trigger() {
+    async fn single_table_guard_request_inventory_freeze_is_one_way() {
         let (db, store) = store().await;
         let host = format!("request-{}.example", Uuid::new_v4());
         let community = db
@@ -5341,12 +5401,6 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
                 .expect("schema inventory"),
             storage: empty_storage_manifest(community.id),
         };
-        sqlx::query(
-            "ALTER TABLE community_deletion_requests DISABLE TRIGGER community_deletion_request_retargeting_guard",
-        )
-        .execute(&db.pool)
-        .await
-        .expect("disable only request guard");
         sqlx::query(
             "UPDATE community_deletion_requests SET inventory_frozen_at = now(), \
              inventory_digest = decode(repeat('00', 32), 'hex') WHERE id = $1",
@@ -5475,15 +5529,9 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn single_table_guard_approval_evidence_is_append_only_without_trigger() {
+    async fn single_table_guard_approval_evidence_is_append_only() {
         let (db, store) = store().await;
         let (request, _) = inventoried_request(&db, &store).await;
-        sqlx::query(
-            "ALTER TABLE community_deletion_approvals DISABLE TRIGGER community_deletion_approval_removal_guard",
-        )
-        .execute(&db.pool)
-        .await
-        .expect("disable only approval guard");
         store
             .approve(request.id, "first", None)
             .await
@@ -5505,7 +5553,7 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn single_table_guard_manifest_chunks_stop_at_freeze_without_trigger() {
+    async fn single_table_guard_manifest_chunks_stop_at_freeze() {
         let (db, store) = store().await;
         let (request, inventory) = inventoried_request(&db, &store).await;
         store
@@ -5539,12 +5587,6 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
             .freeze_destructive_storage_manifest(&token, &manifest)
             .await
             .expect("freeze matching manifest");
-        sqlx::query(
-            "ALTER TABLE community_deletion_manifest_keys DISABLE TRIGGER community_deletion_manifest_keys_guard",
-        )
-        .execute(&db.pool)
-        .await
-        .expect("disable only manifest key guard");
         assert!(matches!(
             store.append_manifest_key_chunk(&token, 1, &prefix, std::slice::from_ref(&key)).await,
             Err(DbError::DeletionSafety(message)) if message.contains("frozen")
@@ -7503,41 +7545,9 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn approved_request_cannot_be_retargeted_rewritten_or_claimed_without_approval() {
+    async fn approved_request_requires_approval_and_blocked_claim_cannot_renew() {
         let (db, store) = store().await;
         let (request, _) = inventoried_request(&db, &store).await;
-        let other_host = format!("control-{}.example", Uuid::new_v4().simple());
-        let control = db
-            .ensure_configured_community(&other_host)
-            .await
-            .expect("create control community");
-
-        for mutation in [
-            sqlx::query("UPDATE community_deletion_requests SET community_id = $2 WHERE id = $1")
-                .bind(request.id)
-                .bind(*control.id.as_uuid())
-                .execute(&db.pool)
-                .await,
-            sqlx::query("UPDATE community_deletion_requests SET community_host = $2 WHERE id = $1")
-                .bind(request.id)
-                .bind(&other_host)
-                .execute(&db.pool)
-                .await,
-            sqlx::query(
-                "UPDATE community_deletion_requests SET inventory_manifest = '{}'::jsonb WHERE id = $1",
-            )
-            .bind(request.id)
-            .execute(&db.pool)
-            .await,
-            sqlx::query(
-                "UPDATE community_deletion_requests SET storage_manifest = '{}'::jsonb WHERE id = $1",
-            )
-            .bind(request.id)
-            .execute(&db.pool)
-            .await,
-        ] {
-            assert!(mutation.is_err(), "frozen deletion target and inventory must be immutable");
-        }
 
         store
             .approve(request.id, "approver", None)
@@ -7548,29 +7558,6 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
             .await
             .expect("claim approved request")
             .expect("approved request is claimable");
-        let approval_delete =
-            sqlx::query("DELETE FROM community_deletion_approvals WHERE request_id = $1")
-                .bind(request.id)
-                .execute(&db.pool)
-                .await;
-        assert!(
-            approval_delete.is_err(),
-            "approval evidence must be immutable"
-        );
-        for approval_update in [
-            "UPDATE community_deletion_approvals SET approved_by = 'forged' WHERE request_id = $1",
-            "UPDATE community_deletion_approvals SET approved_at = now() + interval '1 hour' WHERE request_id = $1",
-            "UPDATE community_deletion_approvals SET note = 'rewritten' WHERE request_id = $1",
-        ] {
-            assert!(
-                sqlx::query(approval_update)
-                    .bind(request.id)
-                    .execute(&db.pool)
-                    .await
-                    .is_err(),
-                "approval evidence updates must be rejected"
-            );
-        }
         store
             .verify_execution_token(&claim.lease, DeletionStage::Approved)
             .await
@@ -8880,28 +8867,6 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
                 .await,
             Err(DbError::DeletionSafety(_))
         ));
-        for mutation in [
-            sqlx::query(
-                "UPDATE community_deletion_requests \
-                 SET destructive_storage_manifest = '{}'::jsonb WHERE id = $1",
-            )
-            .bind(request.id)
-            .execute(&db.pool)
-            .await,
-            sqlx::query(
-                "UPDATE community_deletion_requests \
-                 SET destructive_storage_frozen_at = destructive_storage_frozen_at + interval '1 second' \
-                 WHERE id = $1",
-            )
-            .bind(request.id)
-            .execute(&db.pool)
-            .await,
-        ] {
-            assert!(
-                mutation.is_err(),
-                "frozen destructive storage evidence must be immutable"
-            );
-        }
         store.mark_drained(&token).await.expect("drain");
         store
             .mark_bindings_removed(&token, serde_json::json!({"keys": 0}))
@@ -8962,14 +8927,6 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
             .await
             .expect("serving lookup")
             .is_none());
-        let direct_delete = sqlx::query("DELETE FROM communities WHERE id = $1")
-            .bind(request.community_id.as_uuid())
-            .execute(&db.pool)
-            .await
-            .expect_err("tombstone row must be permanent");
-        assert!(direct_delete
-            .to_string()
-            .contains("tombstones are permanent"));
     }
 
     #[tokio::test]
@@ -9053,37 +9010,8 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
             .await
             .expect("freeze manifest matching chunks");
 
-        // Frozen chunks are immutable working data until terminal cleanup.
-        assert!(sqlx::query(
-            "UPDATE community_deletion_manifest_keys SET keys = '[]'::jsonb \
-             WHERE request_id = $1 AND chunk_no = 0",
-        )
-        .bind(request.id)
-        .execute(&db.pool)
-        .await
-        .is_err());
-        assert!(
-            sqlx::query("DELETE FROM community_deletion_manifest_keys WHERE request_id = $1")
-                .bind(request.id)
-                .execute(&db.pool)
-                .await
-                .is_err()
-        );
+        // Application cleanup refuses frozen chunks before the terminal stage.
         assert!(store.clear_manifest_key_chunks(&token).await.is_err());
-        assert!(
-            sqlx::query(
-                "INSERT INTO community_deletion_manifest_keys \
-                 (request_id, chunk_no, prefix, keys) VALUES ($1, 2, $2, $3)",
-            )
-            .bind(request.id)
-            .bind(&meta_prefix)
-            .bind(sqlx::types::Json(&keys[..1]))
-            .execute(&db.pool)
-            .await
-            .is_err(),
-            "the database must reject chunks appended after freeze"
-        );
-
         store.mark_drained(&token).await.expect("drained");
         let first = store
             .next_pending_manifest_chunk(&token)
@@ -9212,6 +9140,16 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         .await
         .expect("seed operator feedback");
 
+        sqlx::query("UPDATE communities SET artifact_type_policies='{\"example.settings\":{\"policy\":\"admins\",\"revision\":\"retained\"}}'::jsonb WHERE id=$1 AND deletion_state = 'active'")
+            .bind(community.as_uuid()).execute(&db.pool).await.unwrap();
+        for (scope, byte) in [("channel", 10_u8), ("community", 11_u8)] {
+            let d = Uuid::new_v4();
+            sqlx::query("INSERT INTO artifact_heads(community_id,scope,artifact_id,event_id,channel_id,artifact_type) VALUES($1,$2,$3,$4,$5,'example.settings')")
+                .bind(community.as_uuid()).bind(scope).bind(d).bind(vec![byte;32]).bind(channel).execute(&db.pool).await.unwrap();
+            sqlx::query("INSERT INTO artifact_revisions(community_id,scope,artifact_id,event_id) VALUES($1,$2,$3,$4)")
+                .bind(community.as_uuid()).bind(scope).bind(d).bind(vec![byte;32]).execute(&db.pool).await.unwrap();
+        }
+
         store
             .approve(request.id, "approver", None)
             .await
@@ -9325,6 +9263,20 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         );
         assert_eq!(replayed.expect("replay accepted"), feedback_id);
         let deleted = purged.expect("purge without FK actions");
+        assert_eq!(deleted.get("artifact_heads"), Some(&2));
+        assert_eq!(deleted.get("artifact_revisions"), Some(&2));
+        let policies: serde_json::Value =
+            sqlx::query_scalar("SELECT artifact_type_policies FROM communities WHERE id=$1")
+                .bind(community.as_uuid())
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            policies,
+            serde_json::json!({}),
+            "tombstones retain no artifact policies"
+        );
+
         for table in [
             "channel_members",
             "personal_read_frontiers",
@@ -9654,6 +9606,7 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
             .await
             .expect("bindings");
         let deleted = store.purge_postgres(&token).await.expect("purge postgres");
+
         for table in PENDING_SCOPED_TABLES {
             assert_eq!(deleted.get(*table), Some(&1), "{table}");
         }
@@ -9871,8 +9824,8 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
     /// Before the parity restoration this wedged post-fence:
     /// `freeze_destructive_storage_manifest` hit the missing
     /// `community_deletion_manifest_keys` relation only after the write fence
-    /// was already up, leaving the request with no forward path — and even a
-    /// hand-created table would have lacked the immutability guard trigger.
+    /// was already up, leaving the request with no forward path. The owning
+    /// application transactions now enforce chunk immutability and staging.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn desired_state_schema_bootstrap_progresses_beyond_fencing() {
@@ -9888,26 +9841,6 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         .expect("connect desired-state database");
         let store = db.deletion_store();
         let (request, inventory) = inventoried_request(&db, &store).await;
-
-        // The immutability guard must exist and enforce: chunk rows are
-        // rejected outside an unfrozen fenced request (this request is still
-        // `inventoried`).
-        let premature_chunk = sqlx::query(
-            "INSERT INTO community_deletion_manifest_keys (request_id, chunk_no, prefix, keys) \
-             VALUES ($1, 0, '_meta/premature/', '[]'::jsonb)",
-        )
-        .bind(request.id)
-        .execute(&db.pool)
-        .await;
-        let guard_enforced = matches!(
-            &premature_chunk,
-            Err(sqlx::Error::Database(db_err)) if db_err.code().as_deref() == Some("23000")
-        );
-        assert!(
-            guard_enforced,
-            "manifest-keys immutability guard must reject pre-fence chunks \
-             with integrity_constraint_violation: {premature_chunk:?}"
-        );
 
         store
             .approve(request.id, "approver", None)

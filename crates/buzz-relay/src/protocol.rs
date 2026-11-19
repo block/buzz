@@ -315,6 +315,8 @@ mod tests {
             r##"["REQ","ar",{"artifact":"history","#d":["artifact"]}]"##.to_owned(),
             r##"["REQ","ar",{"kinds":[45010],"#project":["project"]}]"##.to_owned(),
             r##"["COUNT","ar",{"artifact":"current"}]"##.to_owned(),
+            r##"["REQ","ar",{"scope":"community"}]"##.to_owned(),
+            r##"["COUNT","ar",{"scope":"community"}]"##.to_owned(),
             // No `kinds` may match artifacts, so the predicate cannot be dropped.
             format!(r##"["REQ","ar",{{"ids":["{id}"],"#project":["P"]}}]"##),
             format!(r##"["COUNT","ar",{{"ids":["{id}"],"#project":["P"]}}]"##),

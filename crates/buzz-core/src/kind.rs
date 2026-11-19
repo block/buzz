@@ -445,6 +445,8 @@ pub const RELAY_ADMIN_REMOVE_MEMBER: u32 = 9031;
 pub const RELAY_ADMIN_CHANGE_ROLE: u32 = 9032;
 /// Buzz: Set the workspace profile (icon). Admin/owner-signed command.
 pub const RELAY_ADMIN_SET_WORKSPACE_PROFILE: u32 = 9033;
+/// Set a community artifact type write policy (NIP-AR).
+pub const RELAY_ADMIN_SET_ARTIFACT_TYPE_POLICY: u32 = 9034;
 // NIP-43 relay membership announcement events (relay-signed)
 /// NIP-43: Relay membership list snapshot (relay-signed, replaceable by convention).
 pub const KIND_NIP43_MEMBERSHIP_LIST: u32 = 13534;
@@ -747,6 +749,7 @@ pub const ALL_KINDS: &[u32] = &[
     RELAY_ADMIN_REMOVE_MEMBER,
     RELAY_ADMIN_CHANGE_ROLE,
     RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    RELAY_ADMIN_SET_ARTIFACT_TYPE_POLICY,
     KIND_NIP43_MEMBERSHIP_LIST,
     KIND_NIP43_MEMBER_ADDED,
     KIND_NIP43_MEMBER_REMOVED,
@@ -889,6 +892,7 @@ pub const fn is_relay_admin_kind(kind: u32) -> bool {
             | RELAY_ADMIN_REMOVE_MEMBER
             | RELAY_ADMIN_CHANGE_ROLE
             | RELAY_ADMIN_SET_WORKSPACE_PROFILE
+            | RELAY_ADMIN_SET_ARTIFACT_TYPE_POLICY
     )
 }
 

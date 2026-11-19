@@ -633,7 +633,7 @@ default so long-lived WebSocket connections have time to drain.
 
 Schema migrations are embedded in the relay binary via `sqlx::migrate!` and run at startup, gated by `BUZZ_AUTO_MIGRATE` (default `true`). Multiple replicas race-safely behind a Postgres advisory lock. Outside the required stop below, `helm upgrade` is the entire upgrade procedure.
 
-**Required stop before migrations 0089–0091 and 0095.** These migrations drop database triggers whose work the relay now does in application code. Before you upgrade to a build that contains any of them, every relay pod, job and rollback target must run a stop build. An older relay that keeps serving after they run can write data the dropped triggers used to refuse, and some older builds refuse to start without the 0032 roster trigger. [`docs/trigger-retirement-deployment.md`](../../../docs/trigger-retirement-deployment.md) names the stop build and gives the procedure and rollback.
+**Required stop before migrations 0089–0091, 0095 and 0096.** These migrations drop database triggers whose work the relay now does in application code. Before you upgrade to a build that contains any of them, every relay pod, job and rollback target must run a stop build. An older relay that keeps serving after they run can write data the dropped triggers used to refuse, and some older builds refuse to start without the 0032 roster trigger or the community tombstone trigger. [`docs/trigger-retirement-deployment.md`](../../../docs/trigger-retirement-deployment.md) names the stop build and gives the procedure and rollback.
 
 Apply migrations before rolling the relay; for large installations, prefer a controlled `buzz-admin migrate` job with PostgreSQL lock monitoring before the code rollout.
 

@@ -1,4 +1,0 @@
-CREATE TRIGGER community_deletion_approval_removal_guard
-BEFORE UPDATE OR DELETE ON community_deletion_approvals
-FOR EACH ROW
-EXECUTE FUNCTION prevent_community_deletion_approval_removal();

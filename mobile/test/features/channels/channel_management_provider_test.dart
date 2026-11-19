@@ -1006,6 +1006,7 @@ class _RecordingPublishRelaySession extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    Future<bool> Function()? mayPublish,
   }) async {
     publishedEvents.add(event);
     if (publishError case final error?) throw error;
