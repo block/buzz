@@ -465,7 +465,8 @@ class SidebarFlagSync<T extends SidebarFlagEntry> {
         _head = retained;
         _replaceConfirmed(confirmed);
       }
-      if (retained?.id != result.id) {
+      // A live snapshot can supersede the publish while readback is in flight.
+      if (retained?.id != result.id || _head?.id != result.id) {
         await _persist();
         if (_active) _onChanged();
         throw StateError('Flag write was superseded');

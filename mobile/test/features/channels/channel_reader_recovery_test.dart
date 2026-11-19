@@ -1137,62 +1137,77 @@ void main() {
         expect(payload['channels']['unrelated'][lane.field], isTrue);
       });
 
-      fakeAsyncTest('readback keeps a clear promoted again during the write', (
-        clock,
-      ) {
-        seedLegacyClear();
-        start(clock);
-        final olderEnable = returningFlag(true, t - 2);
-        relay.stored.add(olderEnable);
-        relay.emit(olderEnable);
-        clock.elapse(const Duration(milliseconds: 20));
-        expect(subject.values()['x'], isFalse);
+      for (final source in ['legacy clear', 'promoted again', 'fresh tap']) {
+        fakeAsyncTest(
+          'superseded readback preserves a pending clear ($source)',
+          (clock) {
+            final olderEnable = returningFlag(true, t - 2);
+            if (source == 'fresh tap') {
+              relay.stored.add(olderEnable);
+              start(clock).set('x', false);
+            } else {
+              seedLegacyClear();
+              start(clock);
+              relay.stored.add(olderEnable);
+              relay.emit(olderEnable);
+              clock.elapse(const Duration(milliseconds: 20));
+            }
+            final clear = readFlagCache()['pending']['x'] as Map;
+            expect(clear[lane.field], isFalse);
+            expect(subject.values()['x'], isFalse);
 
-        final ok = relay.holdOk = Completer<void>();
-        clock.elapse(const Duration(seconds: 5));
-        final first = relay.published.single;
-        final writerQueries = relay.writerQueries.length;
-        final response = relay.holdWriterResponse = Completer<void>();
-        relay.holdOk = null;
-        ok.complete();
-        clock.flushMicrotasks();
-        expect(relay.writerQueries, hasLength(writerQueries + 1));
+            final ok = relay.holdOk = Completer<void>();
+            clock.elapse(const Duration(seconds: 5));
+            final first = relay.published.single;
+            final writerQueries = relay.writerQueries.length;
+            final response = relay.holdWriterResponse = Completer<void>();
+            relay.holdOk = null;
+            ok.complete();
+            clock.flushMicrotasks();
+            expect(relay.writerQueries, hasLength(writerQueries + 1));
 
-        final absent = relay.event(
-          lane.dTag,
-          blob({'y': (true, t)}),
-          first.createdAt + 1,
+            if (source == 'promoted again') {
+              final absent = relay.event(
+                lane.dTag,
+                blob({'y': (true, t)}),
+                first.createdAt + 1,
+              );
+              relay.stored.add(absent);
+              relay.emit(absent);
+              clock.elapse(const Duration(milliseconds: 20));
+              expect(readFlagCache()['keptClears']['x'], clear);
+              expect(readFlagCache()['pending'], isEmpty);
+            }
+
+            final peer = relay.event(
+              lane.dTag,
+              blob({'y': (true, t), 'x': (true, t - 2), 'peer': (true, t + 1)}),
+              first.createdAt + (source == 'promoted again' ? 2 : 1),
+            );
+            relay.stored.add(peer);
+            relay.emit(peer);
+            clock.elapse(const Duration(milliseconds: 20));
+            expect(readFlagCache()['pending']['x'], clear);
+            expect(subject.values(), {'x': false, 'y': true, 'peer': true});
+
+            relay.holdWriterResponse = null;
+            response.complete();
+            clock.flushMicrotasks();
+            expect(subject.values(), {'x': false, 'y': true, 'peer': true});
+            expect(readFlagCache()['pending']['x'], clear);
+            clock.elapse(const Duration(seconds: 5));
+            expect(relay.published, hasLength(2));
+            final payload = relay.decrypt(relay.published.last) as Map;
+            expect(payload['channels']['x'], clear);
+            expect(payload['channels']['peer'], {
+              lane.field: true,
+              'updatedAt': t + 1,
+            });
+            expect(subject.values(), {'x': false, 'y': true, 'peer': true});
+            expect(readFlagCache()['pending'], isEmpty);
+          },
         );
-        relay.stored.add(absent);
-        relay.emit(absent);
-        clock.elapse(const Duration(milliseconds: 20));
-        final clear = {lane.field: false, 'updatedAt': t - 1};
-        expect(readFlagCache()['keptClears']['x'], clear);
-        expect(readFlagCache()['pending'], isEmpty);
-
-        final restored = relay.event(
-          lane.dTag,
-          blob({'y': (true, t), 'x': (true, t - 2)}),
-          first.createdAt + 2,
-        );
-        relay.stored.add(restored);
-        relay.emit(restored);
-        clock.elapse(const Duration(milliseconds: 20));
-        expect(readFlagCache()['pending']['x'], clear);
-        expect(subject.values()['x'], isFalse);
-
-        relay.holdWriterResponse = null;
-        response.complete();
-        clock.flushMicrotasks();
-        expect(subject.values()['x'], isFalse);
-        expect(readFlagCache()['pending']['x'], clear);
-        clock.elapse(const Duration(seconds: 5));
-        expect(relay.published, hasLength(2));
-        final payload = relay.decrypt(relay.published.last) as Map;
-        expect(payload['channels']['x'], clear);
-        expect(subject.values()['x'], isFalse);
-        expect(readFlagCache()['pending'], isEmpty);
-      });
+      }
 
       fakeAsyncTest('absent clears use no slots while migration reads', (
         clock,
