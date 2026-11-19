@@ -125,6 +125,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         isMember &&
         !isArchived &&
         ref.watch(channelStartsThreadsProvider(channelId));
+    useOpenThreadRoute(ref);
     final appView = View.of(context);
     final composerDockHeight = useState(0.0);
     final composerFocusNode = useFocusNode();
