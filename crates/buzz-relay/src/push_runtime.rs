@@ -997,7 +997,7 @@ mod tests {
                 .into_iter()
                 .map(|keys| (channel, author(keys)))
                 .collect(),
-            named_only: NamedOnlyChannels::from_typed([]),
+            named_only: NamedOnlyChannels::default(),
             listed: Default::default(),
         };
         let relay = nostr::Keys::generate();
@@ -1046,7 +1046,7 @@ mod tests {
                     ..lease(&agent)
                 }],
                 memberships: [(channel, author(&agent))].into_iter().collect(),
-                named_only: NamedOnlyChannels::from_typed([]),
+                named_only: NamedOnlyChannels::default(),
                 listed: Default::default(),
             };
             let event = EventBuilder::new(Kind::Custom(9), "workflow output")

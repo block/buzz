@@ -88,11 +88,11 @@ pub async fn handle_count(
         };
 
     // Get channels this user can access — same enforcement as WS REQ handler.
-    let mut accessible_channels = match state
-        .get_accessible_channel_ids_cached(conn.tenant.community(), &pubkey_bytes)
+    let (mut accessible_channels, cached_access) = match state
+        .get_channel_access_cached(conn.tenant.community(), &pubkey_bytes)
         .await
     {
-        Ok(ids) => ids,
+        Ok(mut access) => (std::mem::take(&mut access.implicit), access),
         Err(e) => {
             warn!(sub_id = %sub_id, error_kind = %e.kind(), "Failed to get accessible channels");
             conn.send(RelayMessage::closed(&sub_id, DATABASE_ERROR_CLOSED));
@@ -117,6 +117,7 @@ pub async fn handle_count(
         &pubkey_bytes,
         &filters,
         &accessible_channels,
+        Some(&cached_access),
         token_channel_ids.as_deref(),
     )
     .await
