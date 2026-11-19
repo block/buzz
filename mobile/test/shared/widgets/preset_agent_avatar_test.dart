@@ -265,9 +265,14 @@ void main() {
     // first poll does.
     Future<void> returnCovered({void Function()? onMount}) async {
       navigator.pop();
-      while (find.byKey(const Key('video')).evaluate().isEmpty) {
+      for (
+        var frame = 0;
+        frame < 60 && find.byKey(const Key('video')).evaluate().isEmpty;
+        frame++
+      ) {
         await tester.pump(const Duration(milliseconds: 16));
       }
+      expect(find.byKey(const Key('video')), findsOneWidget);
       for (var frame = 0; frame < 60; frame++) {
         await tester.pump(const Duration(milliseconds: 16));
         if (frame == 0) onMount?.call();
@@ -301,6 +306,24 @@ void main() {
     await tester.pump(const Duration(milliseconds: 200));
     await cover();
     await returnCovered();
+    player.position = const Duration(milliseconds: 100);
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.pumpAndSettle();
+    expect(videoOpacity(), 1);
+    expect(posterOpacity(), 0);
+
+    // The same while the app is inactive: the restart waits for resume.
+    player.position = const Duration(seconds: 2);
+    await tester.pump(const Duration(milliseconds: 200));
+    await cover();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await returnCovered();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    for (var frame = 0; frame < 60; frame++) {
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(videoOpacity(), 0);
+      expect(posterOpacity(), 1);
+    }
     player.position = const Duration(milliseconds: 100);
     await tester.pump(const Duration(milliseconds: 600));
     await tester.pumpAndSettle();

@@ -139,7 +139,8 @@ class PresetAgentAvatar extends HookWidget {
     // player, so it differs from the baseline until a poll in this showing.
     useEffect(() {
       shownFrom.value = null;
-      if (!videoShown) return null;
+      // While paused (an inactive app), wait for the play() that resumes it.
+      if (!isIos || !videoShown || !playing || presented.value) return null;
       var active = true;
       unawaited(
         playback.value
@@ -155,7 +156,7 @@ class PresetAgentAvatar extends HookWidget {
             .catchError((Object _) {}),
       );
       return () => active = false;
-    }, [videoShown, controller]);
+    }, [videoShown, playing, controller]);
 
     // Keyed by URL so a new character never shows the previous one's poster
     // while its own loads.
