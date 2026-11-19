@@ -2728,6 +2728,8 @@ mod postgres_tests {
                     schema_definition.clone()
                 }
             });
+            // 0102 dropped the foreign keys that 0056 created.
+            let definition = without_foreign_keys(&definition);
             let definition = if table == "personal_read_frontiers" {
                 definition.replacen(threads_through_column, through_message_column, 1)
             } else {
