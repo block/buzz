@@ -251,10 +251,16 @@ class _ReadyTransitionVoiceNotePlayer extends _LoadingVoiceNotePlayer {
 
 class _ToggleTrackingLoadingVoiceNotePlayer extends _LoadingVoiceNotePlayer {
   int toggleCount = 0;
+  int pauseCount = 0;
 
   @override
   Future<void> toggle() async {
     toggleCount += 1;
+  }
+
+  @override
+  Future<void> pause() async {
+    pauseCount += 1;
   }
 }
 
@@ -2007,6 +2013,16 @@ void main() {
         await tester.pump();
 
         expect(player.toggleCount, 1);
+
+        // Backgrounding cancels the pending load so it can't start playback
+        // behind the lock screen.
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MessageContent)),
+        );
+        (container.read(appLifecycleProvider.notifier) as _ResumedLifecycle)
+            .enter(AppLifecycleState.paused);
+        await tester.pump();
+        expect(player.pauseCount, 1);
       });
 
       testWidgets('active buffering playback keeps its pause action', (

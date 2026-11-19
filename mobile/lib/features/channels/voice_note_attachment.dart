@@ -75,7 +75,12 @@ class VoiceNoteAttachment extends HookConsumerWidget {
             next != AppLifecycleState.detached) {
           return;
         }
-        if (player.state.isPlaying) unawaited(player.pause());
+        // A tap that is still loading would otherwise start playback once
+        // its download finishes, behind the lock screen.
+        final state = player.state;
+        if (state.isPlaying || (state.isLoading && state.canCancelLoading)) {
+          unawaited(player.pause());
+        }
       });
       return subscription.close;
     }, [player]);
