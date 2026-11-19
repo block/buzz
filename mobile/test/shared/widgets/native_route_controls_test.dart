@@ -25,6 +25,154 @@ void main() {
     );
   });
 
+  testWidgets('covered glass controls release their native channels', (
+    tester,
+  ) async {
+    final messenger = binding.defaultBinaryMessenger;
+    final navigator = GlobalKey<NavigatorState>();
+    final label = ValueNotifier('Original');
+    addTearDown(label.dispose);
+    final dispatcher = tester.binding.platformDispatcher;
+    dispatcher.platformBrightnessTestValue = Brightness.light;
+    addTearDown(dispatcher.clearPlatformBrightnessTestValue);
+    final channels = <String, MethodChannel>{};
+    final disposed = <int>[];
+    final calls = <({MethodChannel channel, MethodCall call})>[];
+    final pressed = <String>[];
+    addTearDown(() {
+      for (final channel in channels.values) {
+        messenger.setMockMethodCallHandler(channel, null);
+      }
+    });
+    messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
+      call,
+    ) async {
+      if (call.method == 'create') {
+        final args = call.arguments as Map;
+        expect(args['viewType'], IosGlassNavigationButton.viewType);
+        final params =
+            const StandardMessageCodec().decodeMessage(
+                  ByteData.sublistView(args['params'] as Uint8List),
+                )
+                as Map;
+        final channel = MethodChannel('${args['viewType']}/${args['id']}');
+        channels[params['accessibilityLabel'] as String] = channel;
+        messenger.setMockMethodCallHandler(channel, (call) async {
+          calls.add((channel: channel, call: call));
+          return null;
+        });
+      } else if (call.method == 'dispose') {
+        disposed.add(call.arguments as int);
+      }
+      return null;
+    });
+
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          navigatorKey: navigator,
+          theme: ThemeData.light(),
+          darkTheme: ThemeData.dark(),
+          themeAnimationDuration: Duration.zero,
+          home: Scaffold(
+            body: ValueListenableBuilder<String>(
+              valueListenable: label,
+              builder: (context, value, _) => Row(
+                children: [
+                  IosGlassNavigationButton(
+                    icon: IosGlassNavigationIcon.more,
+                    semanticLabel: 'Button $value',
+                    onPressed: () => pressed.add('button $value'),
+                  ),
+                  IosGlassNavigationAction(
+                    label: 'Action $value',
+                    onPressed: () => pressed.add('action $value'),
+                  ),
+                  IosMessageCreateButton(
+                    accessibilityLabel: 'Create $value',
+                    actions: [
+                      (
+                        label: value,
+                        symbol: 'plus',
+                        onPressed: () => pressed.add('menu $value'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(channels, hasLength(3));
+    final original = channels.values.toList();
+    Future<void> pressControls(String label) async {
+      for (final kind in ['Button', 'Action', 'Create']) {
+        await messenger.handlePlatformMessage(
+          channels['$kind $label']!.name,
+          const StandardMethodCodec().encodeMethodCall(
+            kind == 'Create'
+                ? const MethodCall('menuAction', 0)
+                : const MethodCall('pressed'),
+          ),
+          (_) {},
+        );
+      }
+    }
+
+    await pressControls('Original');
+    expect(pressed, ['button Original', 'action Original', 'menu Original']);
+    pressed.clear();
+    navigator.currentState!.push(
+      DialogRoute<void>(
+        context: navigator.currentContext!,
+        builder: (_) => const AlertDialog(content: Text('Covering dialog')),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(UiKitView), findsNothing);
+    expect(
+      disposed,
+      unorderedEquals(
+        original.map((channel) => int.parse(channel.name.split('/').last)),
+      ),
+    );
+    calls.clear();
+    dispatcher.platformBrightnessTestValue = Brightness.dark;
+    label.value = 'Updated';
+    await tester.pumpAndSettle();
+    expect(calls, isEmpty, reason: 'covered controls must not send updates');
+    await pressControls('Original');
+    expect(pressed, isEmpty, reason: 'disposed controls have no handlers');
+
+    navigator.currentState!.pop();
+    await tester.pumpAndSettle();
+    expect(channels, hasLength(6));
+    final restored = channels.values.skip(3);
+    expect(
+      calls
+          .where(
+            (entry) =>
+                entry.call.method == 'setAppearance' &&
+                (entry.call.arguments as Map)['brightness'] == 'dark',
+          )
+          .map((entry) => entry.channel),
+      unorderedEquals(restored),
+    );
+    expect(
+      tester
+          .widgetList<UiKitView>(find.byType(UiKitView))
+          .map((view) => (view.creationParams as Map)['accessibilityLabel']),
+      ['Button Updated', 'Action Updated', 'Create Updated'],
+    );
+    await pressControls('Updated');
+    expect(pressed, ['button Updated', 'action Updated', 'menu Updated']);
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   for (final bottomUp in [true, false]) {
     testWidgets(
       'glass controls respect covering route composition: bottomUp=$bottomUp',

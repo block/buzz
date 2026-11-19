@@ -22,13 +22,15 @@ class IosCompositionLayer extends HookWidget {
     final ready = useState(false);
     if (defaultTargetPlatform != TargetPlatform.iOS) return child;
     final surface = ExcludeSemantics(
-      child: UiKitView(
-        key: ValueKey(color),
-        viewType: 'buzz/toast_layer',
-        hitTestBehavior: PlatformViewHitTestBehavior.transparent,
-        creationParams: {'color': color?.toARGB32()},
-        creationParamsCodec: const StandardMessageCodec(),
-        onPlatformViewCreated: (_) => ready.value = true,
+      child: ExcludeFocus(
+        child: UiKitView(
+          key: ValueKey(color),
+          viewType: 'buzz/toast_layer',
+          hitTestBehavior: PlatformViewHitTestBehavior.transparent,
+          creationParams: {'color': color?.toARGB32()},
+          creationParamsCodec: const StandardMessageCodec(),
+          onPlatformViewCreated: (_) => ready.value = true,
+        ),
       ),
     );
     return Stack(
