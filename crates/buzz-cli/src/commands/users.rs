@@ -36,6 +36,20 @@ pub async fn cmd_get_users(
     include_archived: bool,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
+    let output = get_users_output(client, pubkeys, name, owner, include_archived, format).await?;
+    println!("{output}");
+    Ok(())
+}
+
+/// What [`cmd_get_users`] prints.
+async fn get_users_output(
+    client: &BuzzClient,
+    pubkeys: &[String],
+    name: Option<&str>,
+    owner: Option<&str>,
+    include_archived: bool,
+    format: &crate::OutputFormat,
+) -> Result<String, CliError> {
     if let Some(query) = name {
         if !pubkeys.is_empty() {
             return Err(CliError::Usage(
@@ -71,8 +85,7 @@ pub async fn cmd_get_users(
             serde_json::to_string(&profiles).unwrap_or_default()
         }
     };
-    println!("{output}");
-    Ok(())
+    Ok(output)
 }
 
 /// The relay's archived pubkeys, or `None` with a stderr warning when the
@@ -107,18 +120,20 @@ async fn archived_pubkeys_within(
 }
 
 /// Marks each profile on the `archived` list `"archived": true`, dropping it
-/// unless `keep_archived`. With no list, profiles pass through unmarked.
+/// unless `keep_archived`. With no list, profiles pass through unmarked. The
+/// profile parsers strip any self-authored `archived`, so the marker only
+/// ever reflects the relay's signed list.
 fn with_archived(
     profiles: Vec<serde_json::Value>,
     archived: Option<&HashSet<String>>,
     keep_archived: bool,
 ) -> Vec<serde_json::Value> {
-    let Some(archived) = archived else {
-        return profiles;
-    };
     profiles
         .into_iter()
         .filter_map(|mut profile| {
+            let Some(archived) = archived else {
+                return Some(profile);
+            };
             let pubkey = profile.get("pubkey")?.as_str()?.to_ascii_lowercase();
             if !archived.contains(&pubkey) {
                 return Some(profile);
@@ -177,6 +192,7 @@ async fn lookup_profiles(
             let mut profile: serde_json::Value = serde_json::from_str(content_str).ok()?;
             if let Some(obj) = profile.as_object_mut() {
                 obj.remove("verified");
+                obj.remove("archived");
                 obj.insert(
                     "pubkey".to_string(),
                     serde_json::json!(e.get("pubkey").and_then(|v| v.as_str()).unwrap_or("")),
@@ -388,6 +404,7 @@ fn profile_content(event: &serde_json::Value) -> serde_json::Map<String, serde_j
         .and_then(|content| content.as_object().cloned())
         .unwrap_or_default();
     profile.remove("verified");
+    profile.remove("archived");
     profile
 }
 
@@ -591,7 +608,7 @@ async fn search_by_name(
     owner: Option<&str>,
     include_archived: bool,
     format: &crate::OutputFormat,
-) -> Result<(), CliError> {
+) -> Result<String, CliError> {
     if query.trim().is_empty() {
         return Err(CliError::Usage("--name cannot be empty".into()));
     }
@@ -600,8 +617,7 @@ async fn search_by_name(
     let profiles = if let Some(owner) = owner {
         let pubkeys = owned_agent_pubkeys_by_name(client, &owner, query).await?;
         if pubkeys.is_empty() {
-            println!("[]");
-            return Ok(());
+            return Ok("[]".to_string());
         }
         let valid_pubkeys: Vec<&String> = pubkeys
             .iter()
@@ -645,8 +661,7 @@ async fn search_by_name(
             serde_json::to_string(&profiles).unwrap_or_default()
         }
     };
-    println!("{output}");
-    Ok(())
+    Ok(output)
 }
 
 pub async fn cmd_set_profile(
@@ -1076,7 +1091,7 @@ pub async fn dispatch(
 mod tests {
     use super::{
         archived_pubkeys, archived_pubkeys_within, compact_profile, find_profiles, get_profiles,
-        lookup_profiles, owned_agent_pubkeys_from_events, owner_scoped_profiles,
+        get_users_output, lookup_profiles, owned_agent_pubkeys_from_events, owner_scoped_profiles,
         owner_verification, parse_expiration_tag, parse_expiry, presence_subject, publish_status,
         read_statuses, search_profiles, with_archived,
     };
@@ -1565,7 +1580,7 @@ mod tests {
 
     fn rows(keys: &[&Keys]) -> Vec<Value> {
         keys.iter()
-            .map(|k| json!({"pubkey": k.public_key().to_hex(), "name": "Tanuj"}))
+            .map(|k| json!({"pubkey": k.public_key().to_hex(), "name": "Alice Example"}))
             .collect()
     }
 
@@ -1589,6 +1604,67 @@ mod tests {
         assert_eq!(found.len(), 2);
         assert_eq!(found[0]["archived"], true);
         assert!(found[1].get("archived").is_none());
+    }
+
+    /// `buzz users get` output, parsed, in both normal and compact format.
+    async fn users_get(
+        client: &BuzzClient,
+        pubkeys: &[String],
+        name: Option<&str>,
+        include: bool,
+    ) -> [Vec<Value>; 2] {
+        let mut out = Vec::new();
+        for format in [crate::OutputFormat::Json, crate::OutputFormat::Compact] {
+            let raw = get_users_output(client, pubkeys, name, None, include, &format)
+                .await
+                .unwrap();
+            out.push(serde_json::from_str(&raw).unwrap());
+        }
+        out.try_into().unwrap()
+    }
+
+    fn archived_flags(rows: &[Value]) -> Vec<Option<bool>> {
+        rows.iter()
+            .map(|p| p.get("archived").map(|v| v.as_bool().unwrap()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn users_get_marks_archived_only_from_the_signed_list() {
+        let (client, relay) = setup().await;
+        let relay_keys = Keys::generate();
+        let (listed, claims) = (Keys::generate(), Keys::generate());
+        relay.lock().unwrap().info = json!({"self": relay_keys.public_key().to_hex()});
+        // Both set their own `archived: true`; only `listed` is on the relay's list.
+        seed_profile(
+            &relay,
+            &listed,
+            r#"{"name":"Alice Example","archived":true}"#,
+        );
+        seed_profile(&relay, &claims, r#"{"name":"Alice Other","archived":true}"#);
+        seed_archive_list(&relay, &relay_keys, &[&listed]);
+        let pubkeys = vec![listed.public_key().to_hex(), claims.public_key().to_hex()];
+
+        for rows in users_get(&client, &[], Some("alice"), false).await {
+            assert_eq!(rows.len(), 1, "{rows:?}");
+            assert_eq!(rows[0]["pubkey"], claims.public_key().to_hex());
+            assert_eq!(archived_flags(&rows), [None]);
+        }
+        for rows in users_get(&client, &[], Some("alice"), true).await {
+            assert_eq!(archived_flags(&rows), [Some(true), None], "{rows:?}");
+        }
+        for rows in users_get(&client, &pubkeys, None, false).await {
+            assert_eq!(archived_flags(&rows), [Some(true), None], "{rows:?}");
+        }
+
+        // Unreadable list: nothing filtered or marked.
+        relay.lock().unwrap().broken_kind = Some(13535);
+        for rows in users_get(&client, &[], Some("alice"), false).await {
+            assert_eq!(archived_flags(&rows), [None, None], "{rows:?}");
+        }
+        for rows in users_get(&client, &pubkeys, None, false).await {
+            assert_eq!(archived_flags(&rows), [None, None], "{rows:?}");
+        }
     }
 
     #[tokio::test]

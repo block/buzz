@@ -126,7 +126,7 @@ buzz messages send --channel <UUID> \
 3. **`workflow runs` always returns `[]`** — run history lives in the relay's database, not as Nostr events.
 4. **`dms open` returns `dm_id`** — use this value as `--channel` for subsequent `messages send/get` commands on that DM.
 5. **Content max 65,536 bytes** (exit 1 if exceeded). Diffs auto-truncate at 61,440 bytes at a hunk boundary.
-6. **`users get` always returns an array** — even for a single pubkey lookup. Never expect a bare object. `--name` leaves out archived identities; add `--include-archived` to keep them. Archived rows (and `--pubkey` lookups, which always return them) carry `"archived": true`.
+6. **`users get` always returns an array** — even for a single pubkey lookup. Never expect a bare object.
 7. **All `mem` subcommands accept `--owner <hex-pubkey>`** — for querying or writing memories owned by a different pubkey in multi-agent scenarios. Defaults to the owner from `BUZZ_AUTH_TAG`.
 8. **`mem rm` cannot delete `core`** — use `mem set core ''` instead.
 

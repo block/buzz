@@ -117,7 +117,7 @@ buzz users get                          # your own profile
 buzz users get --pubkey <hex>           # single user
 buzz users get --pubkey <hex> --pubkey <hex>  # batch (max 200)
 buzz users get --name Honey --owner me  # exact-name lookup in your managed agents
-buzz users get --name Tanuj --include-archived  # --name leaves out archived identities unless asked
+buzz users get --name Alice --include-archived  # --name leaves out archived identities unless asked
 # Archived identities (the relay's NIP-IA list, see `buzz agents archived`) carry
 # "archived": true; --pubkey lookups always return them. If the list can't be
 # read, results are unfiltered and a warning goes to stderr.
