@@ -79,9 +79,10 @@ class PresetAgentAvatar extends HookWidget {
         showNativeVideo && controller != null && ready.value == controller;
     // A fresh AVPlayerLayer draws nothing until its first frame arrives, so
     // keep the poster under it until playback advances in this showing. The
-    // baseline is read from the player: a paused controller's last polled
-    // position lags, so the first poll after resuming would already differ.
-    final shownFrom = useState<Duration?>(null);
+    // baseline is read from the player, and the controller's last polled
+    // position is kept beside it: while paused that value lags the player,
+    // so it differs from the baseline until a poll in this showing.
+    final shownFrom = useState<(Duration, Duration)?>(null);
     useEffect(() {
       shownFrom.value = null;
       if (!videoShown) return null;
@@ -89,7 +90,12 @@ class PresetAgentAvatar extends HookWidget {
       unawaited(
         controller.position
             .then((position) {
-              if (active) shownFrom.value = position ?? Duration.zero;
+              if (active) {
+                shownFrom.value = (
+                  position ?? Duration.zero,
+                  controller.value.position,
+                );
+              }
             })
             .catchError((Object _) {}),
       );
@@ -100,8 +106,9 @@ class PresetAgentAvatar extends HookWidget {
     useEffect(() {
       if (!videoShown) {
         presented.value = false;
-      } else if (shownFrom.value != null &&
-          controller.value.position != shownFrom.value) {
+      } else if (shownFrom.value case (final fresh, final polled)
+          when controller.value.position != fresh &&
+              controller.value.position != polled) {
         presented.value = true;
       }
       return null;

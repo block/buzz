@@ -248,14 +248,15 @@ void main() {
     player.position = const Duration(milliseconds: 700);
     await tester.pumpAndSettle();
     navigator.pop();
-    await tester.pumpAndSettle();
+    // Step real frames: the baseline lands before the first poll does.
+    for (var frame = 0; frame < 60; frame++) {
+      await tester.pump(const Duration(milliseconds: 16));
+      if (find.byKey(const Key('video')).evaluate().isNotEmpty) {
+        expect(videoOpacity(), 0);
+        expect(posterOpacity(), 1);
+      }
+    }
     expect(find.byKey(const Key('video')), findsOneWidget);
-    expect(videoOpacity(), 0);
-    expect(posterOpacity(), 1);
-    await tester.pump(const Duration(milliseconds: 600));
-    await tester.pump();
-    expect(videoOpacity(), 0);
-    expect(posterOpacity(), 1);
     player.position = const Duration(milliseconds: 800);
     await tester.pump(const Duration(milliseconds: 600));
     await tester.pumpAndSettle();
