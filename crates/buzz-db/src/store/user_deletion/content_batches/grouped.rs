@@ -115,8 +115,6 @@ pub(super) async fn execute(tx: &mut AdmittedTx, batch: &Value) -> Result<()> {
         children(tx.conn(), community, number, table).await?;
         if table == "events" {
             erase_events(tx, number).await?;
-        } else if table == "artifact_revisions" {
-            erase_community_artifacts(tx, number, expected).await?;
         } else {
             let query = format!(
                 "DELETE FROM {table} t USING content_batch_work w
@@ -136,44 +134,6 @@ pub(super) async fn execute(tx: &mut AdmittedTx, batch: &Value) -> Result<()> {
                 ));
             }
         }
-    }
-    Ok(())
-}
-
-async fn erase_community_artifacts(
-    tx: &mut AdmittedTx,
-    number: i64,
-    expected: usize,
-) -> Result<()> {
-    let community = *tx.community().as_uuid();
-    // Like channel event deletion, mark a matching head modified without
-    // changing its revision ID. Reads must not resurrect an older revision.
-    sqlx::query(
-        "UPDATE artifact_heads h SET modified_at=clock_timestamp()
-        FROM content_batch_work w WHERE w.table_name='artifact_revisions' AND w.batch=$2
-        AND w.action='would_scrub' AND h.community_id=$1 AND h.scope='community'
-        AND h.event_id=decode(w.row_key->>'event_id','hex')",
-    )
-    .bind(community)
-    .bind(number)
-    .execute(tx.conn())
-    .await?;
-    let affected = sqlx::query(
-        "UPDATE artifact_revisions r SET community_event=NULL,
-        redacted=true,modified_at=clock_timestamp() FROM content_batch_work w
-        WHERE w.table_name='artifact_revisions' AND w.batch=$2 AND w.action='would_scrub'
-        AND r.community_id=$1 AND r.scope='community'
-        AND r.event_id=decode(w.row_key->>'event_id','hex')",
-    )
-    .bind(community)
-    .bind(number)
-    .execute(tx.conn())
-    .await?
-    .rows_affected();
-    if affected as usize != expected {
-        return Err(invalid(
-            "artifact revisions changed; current batch rolled back",
-        ));
     }
     Ok(())
 }
@@ -290,7 +250,6 @@ pub(super) async fn verify_remaining(
         OR EXISTS(SELECT 1 FROM subscriptions WHERE community_id=$1 AND owner_pubkey=ANY($2))
         OR EXISTS(SELECT 1 FROM push_leases WHERE community_id=$1 AND author=ANY($2))
         OR EXISTS(SELECT 1 FROM push_wake_outbox WHERE community_id=$1 AND author=ANY($2))
-        OR EXISTS(SELECT 1 FROM artifact_revisions WHERE community_id=$1 AND {COMMUNITY_ARTIFACT_AUTHOR_PREDICATE})
         OR EXISTS(SELECT 1 FROM operator_listener_outbox WHERE community_id=$1 AND (target_pubkey=ANY($2) OR listener_pubkey=ANY($2)))",include_str!("authored.sql"));
     let remains: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(query))
         .bind(options.community)

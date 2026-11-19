@@ -49,7 +49,6 @@ fn mark_loss(link: &watch::Sender<LinkState>, up: bool) {
 pub(crate) async fn run_subscriber(
     redis_url: String,
     broadcast_tx: broadcast::Sender<ChannelEvent>,
-    artifact_tx: broadcast::Sender<crate::artifact_signal::ScopedArtifactSignal>,
     desired_topics: DesiredTopics,
     mut subscription_rx: mpsc::Receiver<SubscriptionCommand>,
     subscription_changed: Arc<Notify>,
@@ -61,7 +60,6 @@ pub(crate) async fn run_subscriber(
         let result = connect_and_subscribe(
             &redis_url,
             &broadcast_tx,
-            &artifact_tx,
             desired_topics.clone(),
             &mut subscription_rx,
             &subscription_changed,
@@ -97,7 +95,6 @@ pub(crate) async fn run_subscriber(
 async fn connect_and_subscribe(
     redis_url: &str,
     broadcast_tx: &broadcast::Sender<ChannelEvent>,
-    artifact_tx: &broadcast::Sender<crate::artifact_signal::ScopedArtifactSignal>,
     desired_topics: DesiredTopics,
     subscription_rx: &mut mpsc::Receiver<SubscriptionCommand>,
     subscription_changed: &Notify,
@@ -190,18 +187,6 @@ async fn connect_and_subscribe(
                     }
                 };
 
-                if topic_key.topic == crate::EventTopic::CommunityArtifact {
-                    match crate::artifact_signal::ArtifactSignal::decode(&payload) {
-                        Ok(signal) => { let _ = artifact_tx.send(crate::artifact_signal::ScopedArtifactSignal {
-                            community_id: topic_key.community_id, signal,
-                        }); }
-                        Err(error) => {
-                            tracing::warn!(%error, "Invalid artifact signal");
-                            mark_loss(link, true);
-                        }
-                    }
-                    continue;
-                }
                 let event = match nostr::Event::from_json(&payload) {
                     Ok(e) => e,
                     Err(e) => {
