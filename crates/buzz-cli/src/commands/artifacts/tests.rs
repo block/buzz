@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 
 const CH_A: &str = "9b353519-f4fe-4757-aef4-bec6cc0ae54c";
 const CH_B: &str = "17cfe3ca-b3d0-4a76-a2a4-4eaf0d3a4109";
+const CH_SYSTEM: &str = "5f0c6a2e-3b7d-4c1e-9a8f-2d4b6e8c0a13";
 
 struct Head {
     event: Value,
@@ -35,6 +36,8 @@ struct Relay {
     reply_override: Option<Value>,
     current_override: Option<Vec<Value>>,
     races_left: usize,
+    /// NIP-CL system channels: readable only when the filter names them in `#h`.
+    system: HashSet<String>,
 }
 
 type Shared = Arc<Mutex<Relay>>;
@@ -141,9 +144,16 @@ impl Relay {
             }
             Some("head") => {
                 let d = filter["#d"][0].as_str().unwrap().to_string();
+                let named = |channel: &str| {
+                    filter["#h"]
+                        .as_array()
+                        .is_some_and(|values| values.iter().any(|v| v == channel))
+                };
                 let reply = json!(self
                     .heads
                     .get(&d)
+                    .filter(|h| wanted("#h", &h.channel)
+                        && (!self.system.contains(&h.channel) || named(&h.channel)))
                     .map(|h| h.event.clone())
                     .into_iter()
                     .collect::<Vec<_>>());
@@ -617,7 +627,7 @@ async fn get_reports_not_found_with_exit_1_for_every_unreadable_case() {
     assert_eq!(tag(&ok[0], "title"), Some("A".into()));
     assert_eq!(
         h.queries()[0],
-        json!({"kinds": [45010], "artifact": "head", "#d": [id.clone()]})
+        json!({"kinds": [45010], "artifact": "head", "#d": [id.clone()], "#h": [CH_A]})
     );
 
     let unknown = Uuid::new_v4().to_string();
@@ -660,6 +670,173 @@ async fn get_reports_not_found_with_exit_1_for_every_unreadable_case() {
         assert_eq!(exit_code(&err), 1, "{args:?}");
     }
     assert_eq!(h.writes().len(), 2, "not-found writes nothing");
+}
+
+#[tokio::test]
+async fn every_command_reaches_an_artifact_in_a_system_channel() {
+    let h = Harness::start().await;
+    h.relay.lock().unwrap().system.insert(CH_SYSTEM.into());
+    let ensure = |content: &'static str| {
+        [
+            "create",
+            "--channel",
+            CH_SYSTEM,
+            "--type",
+            "buzz.config",
+            "--title",
+            "Theme",
+            "--content",
+            content,
+            "--ensure",
+            "theme",
+        ]
+    };
+    let id = h.ok(&ensure("dark")).await["artifact_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let reconciled = h.ok(&ensure("light")).await;
+    assert_eq!(reconciled["artifact_id"], id.as_str());
+    assert_eq!(tag(&h.writes()[1], "op"), Some("update".into()));
+    let got = h.ok(&["get", "--channel", CH_SYSTEM, "--id", &id]).await;
+    assert_eq!(got[0]["content"], "light");
+    h.ok(&[
+        "update",
+        "--channel",
+        CH_SYSTEM,
+        "--id",
+        &id,
+        "--content",
+        "light",
+    ])
+    .await;
+    h.ok(&["delete", "--channel", CH_SYSTEM, "--id", &id]).await;
+    h.ok(&[
+        "restore",
+        "--channel",
+        CH_SYSTEM,
+        "--id",
+        &id,
+        "--title",
+        "Theme",
+    ])
+    .await;
+    h.ok(&[
+        "move",
+        "--channel",
+        CH_SYSTEM,
+        "--id",
+        &id,
+        "--to",
+        CH_A,
+        "--yes",
+    ])
+    .await;
+    assert_eq!(h.writes().len(), 6);
+    assert!(h
+        .queries()
+        .iter()
+        .filter(|q| q["artifact"] == "head")
+        .all(|q| q["#h"].is_array()));
+}
+
+#[tokio::test]
+async fn a_head_signed_with_an_auth_tag_can_be_edited_moved_and_restored() {
+    let h = Harness::start().await;
+    let id = Uuid::new_v4();
+    let builder = build_artifact_revision(&ArtifactRevision {
+        artifact_id: id,
+        channel_id: Uuid::parse_str(CH_A).unwrap(),
+        artifact_type: "buzz.task",
+        op: ArtifactOp::Create,
+        prev: None,
+        root: None,
+        title: Some("Delegated"),
+        tags: &[s(&["project", "p1"])],
+        content: "{}",
+    })
+    .unwrap()
+    .tag(nostr::Tag::parse(["auth", &"ab".repeat(32), "", &"cd".repeat(64)]).unwrap());
+    let seeded = serde_json::to_value(builder.sign_with_keys(&Keys::generate()).unwrap()).unwrap();
+    h.relay.lock().unwrap().apply(&seeded).unwrap();
+    let id = id.to_string();
+
+    h.ok(&[
+        "update",
+        "--channel",
+        CH_A,
+        "--id",
+        &id,
+        "--title",
+        "Edited",
+    ])
+    .await;
+    h.ok(&["delete", "--channel", CH_A, "--id", &id]).await;
+    h.ok(&["restore", "--channel", CH_A, "--id", &id, "--title", "Back"])
+        .await;
+    h.ok(&[
+        "move",
+        "--channel",
+        CH_A,
+        "--id",
+        &id,
+        "--to",
+        CH_B,
+        "--yes",
+    ])
+    .await;
+    let writes = h.writes();
+    assert_eq!(writes.len(), 5);
+    for write in &writes[1..] {
+        assert!(!names(write).contains(&"auth".to_string()), "{write}");
+    }
+    assert_eq!(tag(&writes[1], "project"), Some("p1".into()));
+}
+
+#[tokio::test]
+async fn restore_refuses_an_unknown_a_relocated_or_a_live_artifact() {
+    let h = Harness::start().await;
+    let live = h.create(CH_A, "buzz.task", "Live").await;
+    let deleted = h.create(CH_A, "buzz.task", "Gone").await;
+    h.ok(&["delete", "--channel", CH_A, "--id", &deleted]).await;
+    let unknown = Uuid::new_v4().to_string();
+    let before = h.writes().len();
+    for (channel, id, usage) in [
+        (CH_A, unknown.as_str(), false),
+        (CH_B, deleted.as_str(), false),
+        (CH_A, live.as_str(), true),
+    ] {
+        let err = h
+            .run(&["restore", "--channel", channel, "--id", id, "--title", "t"])
+            .await
+            .unwrap_err();
+        if usage {
+            assert!(matches!(err, CliError::Usage(_)), "{err}");
+        } else {
+            assert!(matches!(err, CliError::NotFound(_)), "{err}");
+        }
+    }
+    assert_eq!(h.writes().len(), before, "a refused restore writes nothing");
+}
+
+#[test]
+fn an_unavailable_head_is_not_reported_as_retryable() {
+    let unavailable = conflict(CliError::Relay {
+        status: 409,
+        body: "conflict: artifact head unavailable".into(),
+    });
+    assert!(
+        matches!(&unavailable, CliError::Conflict(m) if !m.contains("retry")),
+        "{unavailable}"
+    );
+    let changed = conflict(CliError::Relay {
+        status: 409,
+        body: "conflict: artifact head changed".into(),
+    });
+    assert!(
+        matches!(&changed, CliError::Conflict(m) if m.contains("retry")),
+        "{changed}"
+    );
 }
 
 #[tokio::test]
@@ -881,10 +1058,7 @@ async fn ensure_does_not_adopt_an_identity_owned_by_another_channel_or_type() {
         .await
         .unwrap_err();
     assert_eq!(exit_code(&err), 5, "{err}");
-    assert!(
-        err.to_string().contains("different channel or type"),
-        "{err}"
-    );
+    assert!(err.to_string().contains("another channel"), "{err}");
     assert_eq!(h.writes().len(), 1);
 }
 
@@ -1119,6 +1293,11 @@ fn content_reads_stop_one_byte_past_the_cap() {
     assert!(matches!(
         read_limited(&[0xff, 0xfe][..], "t"),
         Err(CliError::Usage(_))
+    ));
+    let split = [vec![b'a'; MAX_CONTENT_BYTES], "é".as_bytes().to_vec()].concat();
+    assert!(matches!(
+        read_limited(&split[..], "t"),
+        Err(CliError::Usage(m)) if m.contains("exceeds maximum size")
     ));
 }
 

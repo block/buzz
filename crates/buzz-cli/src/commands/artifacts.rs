@@ -112,14 +112,18 @@ fn canonical_uuid(value: &str, what: &str) -> Result<Uuid, CliError> {
 }
 
 fn read_limited(mut reader: impl Read, what: &str) -> Result<String, CliError> {
-    let mut buf = String::new();
+    let mut buf = Vec::new();
     reader
         .by_ref()
         .take(MAX_CONTENT_BYTES as u64 + 1)
-        .read_to_string(&mut buf)
+        .read_to_end(&mut buf)
         .map_err(|e| CliError::Usage(format!("failed to read {what}: {e}")))?;
-    validate_content_size(&buf)?;
-    Ok(buf)
+    if buf.len() > MAX_CONTENT_BYTES {
+        return Err(CliError::Usage(format!(
+            "content exceeds maximum size (more than {MAX_CONTENT_BYTES} bytes)"
+        )));
+    }
+    String::from_utf8(buf).map_err(|e| CliError::Usage(format!("failed to read {what}: {e}")))
 }
 
 /// Resolve `--content` / `--content-file` (`-` is stdin) to bounded text.
@@ -184,12 +188,18 @@ fn select_heads(
     Ok(heads)
 }
 
-/// Current revision of `id` including a deletion, or `None` when the relay
-/// reports nothing (unknown, or not readable by this key).
-async fn fetch_head(client: &BuzzClient, id: &str) -> Result<Option<Revision>, CliError> {
+/// Current revision of `id` in `channel` including a deletion, or `None` when
+/// the relay reports nothing (unknown, elsewhere, or not readable by this key).
+///
+/// The relay hides NIP-CL system channels unless the filter names them in `#h`.
+async fn fetch_head(
+    client: &BuzzClient,
+    channel: &str,
+    id: &str,
+) -> Result<Option<Revision>, CliError> {
     let events = query_events(
         client,
-        json!({"kinds": [KIND_ARTIFACT], "artifact": "head", "#d": [id]}),
+        json!({"kinds": [KIND_ARTIFACT], "artifact": "head", "#d": [id], "#h": [channel]}),
     )
     .await?;
     match events.as_slice() {
@@ -216,18 +226,30 @@ async fn fetch_live_head(
     channel: &str,
     id: &str,
 ) -> Result<Revision, CliError> {
-    match fetch_head(client, id).await? {
+    match fetch_head(client, channel, id).await? {
         Some(head) if head.channel == channel && !head.deleted => Ok(head),
         _ => Err(not_found(id, channel)),
     }
 }
 
+/// The relay's 409 reason when the head is gone from the channel this write
+/// names, or the sender cannot write that channel; a retry cannot succeed.
+const HEAD_UNAVAILABLE: &str = "artifact head unavailable";
+
 fn conflict(error: CliError) -> CliError {
     match error {
-        CliError::Relay { status: 409, body } => CliError::Conflict(format!(
-            "{}; run `buzz artifacts get`, reapply the change to the current revision, then retry",
-            body.strip_prefix("conflict: ").unwrap_or(&body)
-        )),
+        CliError::Relay { status: 409, body } => {
+            let reason = body.strip_prefix("conflict: ").unwrap_or(&body);
+            CliError::Conflict(if reason == HEAD_UNAVAILABLE {
+                format!(
+                    "{reason}: the artifact moved or was deleted, or this key cannot write its channel"
+                )
+            } else {
+                format!(
+                    "{reason}; run `buzz artifacts get`, reapply the change to the current revision, then retry"
+                )
+            })
+        }
         other => other,
     }
 }
@@ -378,11 +400,13 @@ async fn ensure(
 ) -> Result<String, CliError> {
     let (channel, id_text) = (channel_id.to_string(), id.to_string());
     for _ in 0..ENSURE_MAX_ATTEMPTS {
-        let head = fetch_head(client, &id_text).await?.ok_or_else(|| {
-            CliError::Conflict(format!(
-                "artifact identity {id_text} is taken but its head is not readable by this key"
-            ))
-        })?;
+        let head = fetch_head(client, &channel, &id_text)
+            .await?
+            .ok_or_else(|| {
+                CliError::Conflict(format!(
+                    "artifact identity {id_text} is taken in another channel, or by an artifact this key cannot read"
+                ))
+            })?;
         if head.channel != channel || head.artifact_type != artifact_type {
             return Err(CliError::Conflict(format!(
                 "artifact {id_text} already exists with a different channel or type"
@@ -560,7 +584,7 @@ async fn restore(
     let channel_id = canonical_uuid(channel, "channel")?;
     let artifact_id = canonical_uuid(id, "artifact id")?;
     let content = read_content(content, content_file)?.unwrap_or_default();
-    let head = match fetch_head(client, id).await? {
+    let head = match fetch_head(client, channel, id).await? {
         Some(head) if head.channel == channel => head,
         _ => return Err(not_found(id, channel)),
     };

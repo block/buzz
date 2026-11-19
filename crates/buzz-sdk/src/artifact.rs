@@ -70,6 +70,47 @@ fn invalid(message: impl Into<String>) -> SdkError {
     SdkError::InvalidInput(message.into())
 }
 
+/// The count and size limits `buzz_core::artifact::validate` applies, before
+/// signing. A signer that adds an `auth` tag adds one more tag to the count.
+fn check_tag_limits(tags: &[Tag]) -> Result<(), SdkError> {
+    if tags.len() > artifact::MAX_TAGS {
+        return Err(invalid(format!(
+            "too many tags ({} > {})",
+            tags.len(),
+            artifact::MAX_TAGS
+        )));
+    }
+    let mut bytes = 0;
+    for tag in tags {
+        let parts = tag.as_slice();
+        if parts
+            .first()
+            .is_some_and(|name| name.len() > artifact::MAX_TAG_NAME_BYTES)
+        {
+            return Err(invalid(format!(
+                "tag names are at most {} bytes",
+                artifact::MAX_TAG_NAME_BYTES
+            )));
+        }
+        for part in parts {
+            if part.len() > artifact::MAX_TAG_VALUE_BYTES {
+                return Err(invalid(format!(
+                    "tag values are at most {} bytes",
+                    artifact::MAX_TAG_VALUE_BYTES
+                )));
+            }
+            bytes += part.len();
+        }
+    }
+    if bytes > artifact::MAX_TAG_BYTES {
+        return Err(invalid(format!(
+            "tags total at most {} bytes",
+            artifact::MAX_TAG_BYTES
+        )));
+    }
+    Ok(())
+}
+
 /// Build a kind 45010 revision, rejecting any envelope the relay would refuse.
 ///
 /// Envelope tags are emitted as `ar`, `d`, `h`, `type`, `title`, `op`, `root`,
@@ -104,10 +145,6 @@ pub fn build_artifact_revision(revision: &ArtifactRevision) -> Result<EventBuild
             )));
         }
     }
-    if revision.tags.len() + ENVELOPE_TAGS.len() > artifact::MAX_TAGS {
-        return Err(invalid("too many tags"));
-    }
-
     let mut tags = vec![
         Tag::parse(["ar", "1"]),
         Tag::parse(["d", &revision.artifact_id.to_string()]),
@@ -137,6 +174,7 @@ pub fn build_artifact_revision(revision: &ArtifactRevision) -> Result<EventBuild
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| SdkError::InvalidTag(e.to_string()))?;
+    check_tag_limits(&tags)?;
     Ok(EventBuilder::new(Kind::Custom(KIND_ARTIFACT as u16), revision.content).tags(tags))
 }
 
@@ -265,6 +303,21 @@ mod tests {
         let auth = [strings(&["auth", "x"])];
         let custom = [strings(&["project", "p1"])];
         let long_title = "x".repeat(ARTIFACT_TITLE_MAX_BYTES + 1);
+        let numbered = |n: usize| -> Vec<Vec<String>> {
+            (0..n).map(|i| strings(&["n", &i.to_string()])).collect()
+        };
+        let too_many = numbered(251);
+        let long_name = [strings(&[
+            &"n".repeat(artifact::MAX_TAG_NAME_BYTES + 1),
+            "v",
+        ])];
+        let long_value = [strings(&[
+            "n",
+            &"v".repeat(artifact::MAX_TAG_VALUE_BYTES + 1),
+        ])];
+        let heavy: Vec<Vec<String>> = (0..17)
+            .map(|_| strings(&["n", &"v".repeat(4000)]))
+            .collect();
         let cases: Vec<(&str, ArtifactRevision)> = vec![
             ("create with prev", {
                 let mut r = revision(ArtifactOp::Create, &[]);
@@ -332,6 +385,16 @@ mod tests {
                 "auth tag as client tag",
                 revision(ArtifactOp::Create, &auth),
             ),
+            (
+                "257 tags on a create",
+                revision(ArtifactOp::Create, &too_many),
+            ),
+            ("long tag name", revision(ArtifactOp::Create, &long_name)),
+            ("long tag value", revision(ArtifactOp::Create, &long_value)),
+            (
+                "tag bytes over the total",
+                revision(ArtifactOp::Create, &heavy),
+            ),
             ("nil artifact", {
                 let mut r = revision(ArtifactOp::Create, &[]);
                 r.artifact_id = Uuid::nil();
@@ -341,6 +404,23 @@ mod tests {
         for (name, rev) in cases {
             assert!(build_artifact_revision(&rev).is_err(), "{name}");
         }
+    }
+
+    #[test]
+    fn the_tag_limit_counts_only_the_envelope_tags_emitted() {
+        let tags = |n: usize| -> Vec<Vec<String>> {
+            (0..n).map(|i| strings(&["n", &i.to_string()])).collect()
+        };
+        let create = tags(250);
+        assert_eq!(tags_of(&revision(ArtifactOp::Create, &create)).len(), 256);
+        let update = tags(248);
+        let mut full = revision(ArtifactOp::Update, &update);
+        full.root = Some(PREV);
+        assert_eq!(tags_of(&full).len(), 256);
+        let over = tags(249);
+        let mut full = revision(ArtifactOp::Update, &over);
+        full.root = Some(PREV);
+        assert!(build_artifact_revision(&full).is_err());
     }
 
     #[test]
