@@ -285,4 +285,232 @@ void mentionChipTests() {
       semantics.dispose();
     },
   );
+  // Review of #9699: a composer command and Undo know what they keep, so a
+  // chip they leave in place keeps its own recipient (formatting, emoji,
+  // the at-sign button, Undo and Redo).
+  testWidgets('composer commands and Undo keep each chip bound to its own '
+      'recipient', (tester) async {
+    final samA = '1' * 64;
+    final samB = '2' * 64;
+    final quinn = UserProfile(pubkey: 'c' * 64, displayName: 'Quinn');
+    final signer = nostr.Keys.generate();
+    List<String>? sent;
+    String? sentText;
+    List<List<String>>? sentTags;
+    await tester.pumpWidget(
+      _buildComposeBar(
+        uploadService: _testUploadService(signer.nsec),
+        currentPubkey: signer.public,
+        members: [
+          ...members,
+          for (final key in [samA, samB])
+            ChannelMember(
+              pubkey: key,
+              displayName: 'Sam',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+        ],
+        channels: [_makeCurrentChannel()],
+        customEmoji: const [
+          CustomEmoji(shortcode: 'meow', url: 'https://example.com/meow.png'),
+        ],
+        searchPeople: (query) async => [
+          if (query.toLowerCase().startsWith('q')) quinn,
+        ],
+        onSend: (text, keys, {mediaTags = const []}) async {
+          sentText = text;
+          sent = keys;
+          sentTags = mediaTags;
+        },
+      ),
+    );
+    await _expandComposer(tester);
+    final field = find.byType(TextField);
+    final controller = tester.widget<TextField>(field).controller!;
+    List<ComposeDraftMention> saved() =>
+        ProviderScope.containerOf(tester.element(find.byType(ComposeBar)))
+            .read(composeDraftsProvider.notifier)
+            .draftFor('channel-1')
+            ?.mentions ??
+        const [];
+    Future<void> pickRow(String text, Finder target) async {
+      await tester.enterText(field, text);
+      await tester.pump();
+      await tester.pump(mentionSearchDebounce * 2);
+      await tester.pumpAndSettle();
+      await tester.tap(target);
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> select(int base, int extent) async {
+      controller.selection = TextSelection(
+        baseOffset: base,
+        extentOffset: extent,
+      );
+      await tester.pump();
+    }
+
+    Future<void> format(IconData icon) async {
+      await tester.tap(find.byIcon(BuzzIcons.aLargeSmall));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(icon));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Close formatting'));
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> send() async {
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pumpAndSettle();
+    }
+
+    // Bold over a person picked from the directory: the chip stays, and the
+    // send still meets the outside-channel prompt.
+    await pickRow('@quinn', row('Quinn'));
+    expect(controller.text, '@Quinn ');
+    await select(0, 6);
+    await format(BuzzIcons.bold);
+    expect(controller.text, '**@Quinn** ');
+    expect(personChip, findsOneWidget);
+    expect(saved(), [
+      ComposeDraftMention(start: 2, end: 8, pubkey: quinn.pubkey),
+    ]);
+    await send();
+    expect(find.text('Mention people outside this channel?'), findsOneWidget);
+    await tester.tap(
+      find
+          .descendant(
+            of: find.byType(AlertDialog),
+            matching: find.byType(TextButton),
+          )
+          .first,
+    );
+    await tester.pumpAndSettle();
+    expect(sentText, '**@Quinn**');
+    expect(sentTags, contains(orderedEquals(['mention', quinn.pubkey])));
+    await _expandComposer(tester);
+
+    // The other wrapping formats keep a member's chip bound too. Neither
+    // delimiter opens a typed name, so only the chip can notify Bob.
+    for (final (icon, mark) in [
+      (BuzzIcons.strikethrough, '~~'),
+      (BuzzIcons.code, '`'),
+    ]) {
+      sent = null;
+      await pickRow('@bo', row('Bob'));
+      await select(0, 4);
+      await format(icon);
+      expect(controller.text, '$mark@Bob$mark ');
+      expect(saved(), [
+        ComposeDraftMention(
+          start: mark.length,
+          end: mark.length + 4,
+          pubkey: bob,
+        ),
+      ]);
+      await send();
+      expect(sent, [bob], reason: mark);
+    }
+
+    // An emoji and the at-sign button go in at the caret end of a
+    // selection; the selected chip is not replaced.
+    sent = null;
+    await pickRow('@bo', row('Bob'));
+    await select(0, 4);
+    await tester.tap(find.byIcon(BuzzIcons.smilePlus));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(BuzzIcons.sparkles));
+    await tester.pump();
+    await tester.tap(find.byTooltip(':meow:'));
+    await tester.pumpAndSettle();
+    expect(controller.text, ':meow:@Bob ');
+    expect(personChip, findsOneWidget);
+    await send();
+    expect(sent, [bob]);
+    await pickRow('@bo', row('Bob'));
+    await select(5, 0);
+    await tester.tap(find.byIcon(BuzzIcons.atSign));
+    await tester.pumpAndSettle();
+    expect(controller.text, '@Bob @');
+    expect(personChip, findsOneWidget);
+    expect(saved(), [ComposeDraftMention(start: 0, end: 4, pubkey: bob)]);
+
+    // Two people named Sam, each picked: deleting the first chip and
+    // undoing brings it back with its own key, Redo takes it away again.
+    final samRows = find.descendant(
+      of: find.byKey(const ValueKey('mention-suggestions-popover')),
+      matching: find.textContaining('Sam · '),
+    );
+    Future<List<ComposeDraftMention>> pickBothSams() async {
+      await tester.enterText(field, '');
+      await tester.pump(const Duration(seconds: 1));
+      await pickRow('@sa', samRows.first);
+      await pickRow('@Sam @sa', samRows.last);
+      expect(controller.text, '@Sam @Sam ');
+      expect(personChip, findsNWidgets(2));
+      await tester.pump(const Duration(seconds: 1));
+      return saved();
+    }
+
+    Future<void> deleteFirstChip() async {
+      controller.selection = const TextSelection.collapsed(offset: 4);
+      await tester.pump();
+      tester.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: '@Sa @Sam ',
+          selection: TextSelection.collapsed(offset: 3),
+        ),
+      );
+      await tester.pump(const Duration(seconds: 1));
+      expect(controller.text, ' @Sam ');
+      expect(personChip, findsOneWidget);
+    }
+
+    Future<void> history({bool redo = false}) async {
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      if (redo) await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+      if (redo) await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pump(const Duration(seconds: 1));
+    }
+
+    var both = await pickBothSams();
+    expect({for (final m in both) m.pubkey}, {samA, samB});
+    await deleteFirstChip();
+    expect(saved().single.pubkey, both.last.pubkey);
+    await history();
+    expect(controller.text, '@Sam @Sam ');
+    expect(personChip, findsNWidgets(2));
+    expect(saved(), both);
+    await history(redo: true);
+    expect(controller.text, ' @Sam ');
+    expect(saved().single.pubkey, both.last.pubkey);
+    await history();
+    expect(saved(), both);
+    sent = null;
+    await send();
+    expect(sent, [both.first.pubkey, both.last.pubkey]);
+
+    // The system's own Undo (an iOS shake or gesture) restores the text
+    // without saying so. The text that came back is unbound and shares its
+    // name, so the send asks for a pick: it never borrows the other chip.
+    both = await pickBothSams();
+    await deleteFirstChip();
+    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+      SystemChannels.undoManager.name,
+      SystemChannels.undoManager.codec.encodeMethodCall(
+        const MethodCall('UndoManagerClient.handleUndo', ['undo']),
+      ),
+      (_) {},
+    );
+    await tester.pump(const Duration(seconds: 1));
+    expect(controller.text, '@Sam @Sam ');
+    sent = null;
+    await send();
+    expect(sent, isNull);
+    expect(find.textContaining('is ambiguous'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 5));
+  });
 }

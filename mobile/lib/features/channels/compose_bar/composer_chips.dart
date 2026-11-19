@@ -130,11 +130,13 @@ class _ComposerChipEditingFormatter extends TextInputFormatter {
   ) => controller.formatUserEdit(oldValue, newValue);
 }
 
-/// Marks Undo and Redo for [_MarkdownEditingController.formatUserEdit].
+/// Marks Undo and Redo for [_MarkdownEditingController].
 /// `UndoHistory` lets an ancestor override its undo and redo actions; this
-/// one flags the controller while the default action restores the value, so
-/// the formatter can tell a restored value from a key press that happens to
-/// land on earlier text.
+/// one tells the controller which way the history is moving while the
+/// default action restores the value. The formatter can then tell a
+/// restored value from a key press that happens to land on earlier text,
+/// and the controller restores the bindings it held with that text, so the
+/// first of two namesake chips comes back with its own recipient.
 class _ComposerHistoryAction<T extends Intent> extends Action<T> {
   final _MarkdownEditingController controller;
 
@@ -148,11 +150,11 @@ class _ComposerHistoryAction<T extends Intent> extends Action<T> {
   Object? invoke(T intent, [BuildContext? context]) {
     final history = callingAction;
     if (history == null) return null;
-    controller._applyingHistory = true;
+    controller._historyDirection = intent is RedoTextIntent ? 1 : -1;
     try {
       return history.invoke(intent);
     } finally {
-      controller._applyingHistory = false;
+      controller._historyDirection = 0;
     }
   }
 }

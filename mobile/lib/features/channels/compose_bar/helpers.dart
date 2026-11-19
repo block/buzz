@@ -437,13 +437,42 @@ void spliceAndMoveCursor(
               : text.length)
           .clamp(start, text.length);
 
-  final before = text.substring(0, start);
-  final after = text.substring(cursor);
-  controller.value = TextEditingValue(
-    text: '$before$replacement$after',
-    selection: TextSelection.collapsed(offset: start + replacement.length),
+  _replaceComposerRange(
+    controller,
+    start: start,
+    end: cursor,
+    replacement: replacement,
+    caret: start + replacement.length,
   );
   focusNode.requestFocus();
+}
+
+/// Replaces `[start, end)` of [controller]'s text for a composer command.
+/// The composer's own controller moves its bound mentions by the exact
+/// range, see [_MarkdownEditingController.replaceRange]; [keptShift] says
+/// the replaced text is kept inside [replacement], that far in.
+void _replaceComposerRange(
+  TextEditingController controller, {
+  required int start,
+  required int end,
+  required String replacement,
+  required int caret,
+  int? keptShift,
+}) {
+  if (controller is _MarkdownEditingController) {
+    controller.replaceRange(
+      start: start,
+      end: end,
+      replacement: replacement,
+      caret: caret,
+      keptShift: keptShift,
+    );
+    return;
+  }
+  controller.value = TextEditingValue(
+    text: controller.text.replaceRange(start, end, replacement),
+    selection: TextSelection.collapsed(offset: caret),
+  );
 }
 
 /// Channel members as the send resolves typed names: loaded members, or the
@@ -481,11 +510,13 @@ void _insertTriggerAtCursor(
   final needsSpace =
       cursor > 0 && text[cursor - 1] != ' ' && text[cursor - 1] != '\n';
   final insert = needsSpace ? ' $trigger' : trigger;
-  final before = text.substring(0, cursor);
-  final after = text.substring(cursor);
-  controller.value = TextEditingValue(
-    text: '$before$insert$after',
-    selection: TextSelection.collapsed(offset: cursor + insert.length),
+  // Inserted at the caret, never over a selection: a selected chip stays.
+  _replaceComposerRange(
+    controller,
+    start: cursor,
+    end: cursor,
+    replacement: insert,
+    caret: cursor + insert.length,
   );
   focusNode.requestFocus();
 }
@@ -847,9 +878,12 @@ void _insertComposerEmoji(
   final cursor = selection.isValid
       ? selection.baseOffset.clamp(0, text.length)
       : text.length;
-  controller.value = TextEditingValue(
-    text: text.replaceRange(cursor, cursor, emoji),
-    selection: TextSelection.collapsed(offset: cursor + emoji.length),
+  _replaceComposerRange(
+    controller,
+    start: cursor,
+    end: cursor,
+    replacement: emoji,
+    caret: cursor + emoji.length,
   );
   focusNode.requestFocus();
 }
@@ -869,23 +903,19 @@ void _applyComposerFormat(
 
   isModifyingText.value = true;
   try {
-    if (sel.isCollapsed) {
-      final offset = sel.baseOffset;
-      final updated =
-          '${text.substring(0, offset)}$prefix$suffix${text.substring(offset)}';
-      controller.text = updated;
-      controller.selection = TextSelection.collapsed(
-        offset: offset + prefix.length,
-      );
-    } else {
-      final selected = text.substring(sel.start, sel.end);
-      final updated =
-          '${text.substring(0, sel.start)}$prefix$selected$suffix${text.substring(sel.end)}';
-      controller.text = updated;
-      controller.selection = TextSelection.collapsed(
-        offset: sel.start + prefix.length + selected.length + suffix.length,
-      );
-    }
+    // The selected text is kept between the delimiters, so a chip in it
+    // keeps its recipient; an empty selection gets the caret between them.
+    final selected = text.substring(sel.start, sel.end);
+    _replaceComposerRange(
+      controller,
+      start: sel.start,
+      end: sel.end,
+      replacement: '$prefix$selected$suffix',
+      caret: sel.isCollapsed
+          ? sel.start + prefix.length
+          : sel.start + prefix.length + selected.length + suffix.length,
+      keptShift: prefix.length,
+    );
   } finally {
     isModifyingText.value = false;
   }

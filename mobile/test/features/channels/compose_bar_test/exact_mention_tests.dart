@@ -300,6 +300,55 @@ void exactMentionTests() {
     });
   }
 
+  // Review of #9699: a label-keyed draft resolves as the old send did, in
+  // one longest-match pass with member names competing.
+  testWidgets('a legacy draft leaves a longer member name to its owner', (
+    tester,
+  ) async {
+    final signer = nostr.Keys.generate();
+    final prefsKey = 'compose_drafts_v1:https://relay.example:${signer.public}';
+    await _testPrefs.setString(
+      prefsKey,
+      jsonEncode([
+        {
+          'key': 'channel-1',
+          'channel_id': 'channel-1',
+          'text': '@Scout @Scout Marie',
+          'mention_keys': {'Scout': first},
+          'updated_at': 1700000000,
+        },
+      ]),
+    );
+    List<String>? sent;
+    await mountComposer(
+      tester,
+      [
+        for (final (key, name) in [(first, 'Scout'), (second, 'Scout Marie')])
+          ChannelMember(
+            pubkey: key,
+            displayName: name,
+            role: 'member',
+            joinedAt: DateTime(2025),
+          ),
+      ],
+      (_, keys, {mediaTags = const []}) async => sent = keys,
+      signer: signer,
+    );
+    await tester.pumpAndSettle();
+    // The picked Scout is a chip; Scout Marie, typed, is not Scout's.
+    expect(
+      find.byKey(const ValueKey('composer-person-mention-chip')),
+      findsOneWidget,
+    );
+    final saved = jsonDecode(_testPrefs.getString(prefsKey)!) as List;
+    expect(saved.single['mentions'], [
+      {'start': 0, 'end': 6, 'pubkey': first},
+    ]);
+    await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+    await tester.pumpAndSettle();
+    expect(sent, [first, second]);
+  });
+
   testWidgets(
     'namesake picks show qualified chips over plain draft text and keep '
     'their own recipients (recommendation 4)',

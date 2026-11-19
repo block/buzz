@@ -84,11 +84,17 @@ TextRange editReplacedRange(
 /// input: its new range, or null when the edit reached into the mention or
 /// left it no longer ending at a name boundary. Text typed before a mention
 /// moves it; text typed at its end leaves it where it is.
+///
+/// An edit that knows it kept the replaced text, such as formatting wrapped
+/// around a selection, passes [keptShift]: how far that text moved inside
+/// the replacement (the length of the opening delimiter). Mentions wholly
+/// inside [replaced] then move with it rather than being dropped.
 List<MentionRange?> remapMentionRanges(
   List<MentionRange> ranges, {
   required TextRange replaced,
   required int oldLength,
   required String newText,
+  int? keptShift,
 }) {
   final delta = newText.length - oldLength;
   return [
@@ -99,6 +105,10 @@ List<MentionRange?> remapMentionRanges(
           moved = range;
         } else if (range.start >= replaced.end) {
           moved = (start: range.start + delta, end: range.end + delta);
+        } else if (keptShift != null &&
+            range.start >= replaced.start &&
+            range.end <= replaced.end) {
+          moved = (start: range.start + keptShift, end: range.end + keptShift);
         } else {
           return null;
         }

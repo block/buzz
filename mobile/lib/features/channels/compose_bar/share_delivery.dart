@@ -99,14 +99,15 @@ Future<void> _deliverShare(
     controller.clear();
   }
   if (text.isNotEmpty) {
+    // The share goes after the draft, whatever the caret and the shared
+    // text say: a chip in the draft keeps its place and its recipient.
     final existing = controller.text.trimRight();
-    controller.value = TextEditingValue(
-      text: existing.isEmpty ? text : '$existing\n$text',
-      selection: TextSelection.collapsed(
-        offset: existing.isEmpty
-            ? text.length
-            : existing.length + 1 + text.length,
-      ),
+    final added = existing.isEmpty ? text : '\n$text';
+    controller.replaceRange(
+      start: existing.length,
+      end: controller.text.length,
+      replacement: added,
+      caret: existing.length + added.length,
     );
   }
   if (files.isNotEmpty &&

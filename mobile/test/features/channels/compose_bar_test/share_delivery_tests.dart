@@ -53,9 +53,23 @@ void shareDeliveryTests() {
 
     String? sent;
     Completer<void>? sending;
+    final sam = 'a' * 64;
     await tester.pumpWidget(
       _buildComposeBar(
         uploadService: _testUploadService(nostr.Keys.generate().nsec),
+        searchPeople: (_) async => const [],
+        // A picked mention followed by the real waits in `deliver` reaches
+        // the app lifecycle, whose connectivity plugin is absent here.
+        appLifecycle: _FakeAppLifecycleNotifier.new,
+        members: [
+          for (final key in [sam, 'b' * 64])
+            ChannelMember(
+              pubkey: key,
+              displayName: 'Sam',
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+        ],
         onSend:
             (content, mentions, {mediaTags = const <List<String>>[]}) async {
               sent = content;
@@ -64,6 +78,49 @@ void shareDeliveryTests() {
       ),
     );
     await _expandComposer(tester);
+
+    // Added text goes after the draft and never takes a chip's recipient,
+    // even with the caret at the start and the share ending in the same
+    // name (review of #9699).
+    await tester.enterText(find.byType(TextField), '@sa');
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find
+          .descendant(
+            of: find.byKey(const ValueKey('mention-suggestions-popover')),
+            matching: find.textContaining('Sam · '),
+          )
+          .first,
+    );
+    await tester.pumpAndSettle();
+    final composer = tester
+        .widget<TextField>(find.byType(TextField))
+        .controller!;
+    expect(composer.text, '@Sam ');
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: '@Sam',
+        selection: TextSelection.collapsed(offset: 4),
+      ),
+    );
+    await tester.pump();
+    List<ComposeDraftMention> bound() => ProviderScope.containerOf(
+      tester.element(find.byType(ComposeBar)),
+    ).read(composeDraftsProvider.notifier).draftFor('channel-1')!.mentions;
+    final picked = bound().single;
+    expect((picked.start, picked.end), (0, 4));
+    composer.selection = const TextSelection.collapsed(offset: 0);
+    await tester.pump();
+    await deliver(share('00000000-0000-4000-8000-000000000000', ['@Sam'], []));
+    await tester.tap(find.text('Add'));
+    await tester.pumpAndSettle();
+    expect(draftText(), '@Sam\n@Sam');
+    expect(bound(), [picked]);
+
+    if (find.byType(TextField).evaluate().isEmpty) {
+      await tester.tap(find.textContaining('@Sam'));
+      await tester.pumpAndSettle();
+    }
     await tester.enterText(find.byType(TextField), 'My draft');
     await tester.pumpAndSettle();
 

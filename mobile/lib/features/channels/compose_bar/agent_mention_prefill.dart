@@ -136,7 +136,15 @@ void _useAgentMentionPrefill({
       );
     }
     final text = buffer.toString();
-    if (text == controller.text) return null;
+    // Namesake agents read the same text, so the same text is not the same
+    // prefill: the keys and their places must match too.
+    if (text == controller.text &&
+        listEquals(
+          [for (final m in controller.mentions) (m.start, m.end, m.pubkey)],
+          [for (final m in bindings) (m.start, m.end, m.pubkey)],
+        )) {
+      return null;
+    }
     prefillText.value = text;
     isModifyingText.value = true;
     try {

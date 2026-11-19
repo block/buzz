@@ -22,16 +22,24 @@ class ComposeDraftMention {
   final int end;
   final String pubkey;
 
+  /// Set on a binding migrated from a label-keyed record, until the channel
+  /// roster has been read: the old send let a longer member name claim the
+  /// occurrence (`@Sam Smith` over a picked `@Sam`), and the roster is not
+  /// known where drafts are read.
+  final bool legacy;
+
   const ComposeDraftMention({
     required this.start,
     required this.end,
     required this.pubkey,
+    this.legacy = false,
   });
 
   Map<String, dynamic> toJson() => {
     'start': start,
     'end': end,
     'pubkey': pubkey,
+    if (legacy) 'legacy': true,
   };
 
   /// The mention [raw] describes inside [text], or null when it is not a
@@ -56,6 +64,7 @@ class ComposeDraftMention {
       start: start,
       end: end,
       pubkey: pubkey.toLowerCase(),
+      legacy: raw['legacy'] == true,
     );
   }
 
@@ -64,13 +73,15 @@ class ComposeDraftMention {
       other is ComposeDraftMention &&
       other.start == start &&
       other.end == end &&
-      other.pubkey == pubkey;
+      other.pubkey == pubkey &&
+      other.legacy == legacy;
 
   @override
-  int get hashCode => Object.hash(start, end, pubkey);
+  int get hashCode => Object.hash(start, end, pubkey, legacy);
 
   @override
-  String toString() => 'ComposeDraftMention($start, $end, $pubkey)';
+  String toString() =>
+      'ComposeDraftMention($start, $end, $pubkey${legacy ? ', legacy' : ''})';
 }
 
 /// A locally persisted, unsent composer draft.
@@ -142,7 +153,13 @@ class ComposeDraft {
 
   /// The saved bindings, or the invalid flag when they cannot be read. A
   /// record from before positions were saved holds `mention_keys`, labels
-  /// bound to keys; each is bound wherever its literal `@Label` occurs.
+  /// bound to keys. Those resolve as the old send resolved them: one
+  /// longest-match pass over every saved label, so `@Scout @Scout Marie`
+  /// binds Scout once and Scout Marie once. The old saver kept a binding
+  /// whose `@Label` sat against a backtick, so a backtick reads as a space
+  /// here and that binding keeps its place. Member names competed in the
+  /// old pass too; each migrated binding is marked [ComposeDraftMention.legacy]
+  /// until the composer has checked it against the roster.
   static (List<ComposeDraftMention>, bool) _readMentions(
     Map<String, dynamic> raw,
     String text,
@@ -159,20 +176,31 @@ class ComposeDraft {
     } else if (raw.containsKey('mention_keys')) {
       final bindings = raw['mention_keys'];
       if (bindings is! Map<String, dynamic>) return (const [], true);
+      final keys = <String, String>{};
       for (final entry in bindings.entries) {
         final value = entry.value;
-        if (entry.key.isEmpty || value is! String || !isHexPubkey(value)) {
+        final label = entry.key.toLowerCase();
+        // Two labels differing only by case never said which key was meant.
+        if (label.isEmpty ||
+            value is! String ||
+            !isHexPubkey(value) ||
+            keys.containsKey(label)) {
           return (const [], true);
         }
-        for (final range in mentionOccurrences(text, [entry.key])) {
-          found.add(
-            ComposeDraftMention(
-              start: range.start,
-              end: range.end,
-              pubkey: value.toLowerCase(),
-            ),
-          );
-        }
+        keys[label] = value.toLowerCase();
+      }
+      for (final range in mentionOccurrences(
+        text.replaceAll('`', ' '),
+        keys.keys,
+      )) {
+        found.add(
+          ComposeDraftMention(
+            start: range.start,
+            end: range.end,
+            pubkey: keys[range.label]!,
+            legacy: true,
+          ),
+        );
       }
     }
     found.sort((a, b) => a.start.compareTo(b.start));

@@ -236,13 +236,36 @@ class ComposeBar extends HookConsumerWidget {
     _useMentionChipQualifiers(
       ref: ref,
       controller: controller,
-      mentions: mentions,
       members: memberMentionCandidates,
       memberKeys: [
         membersAsync.asData?.value,
         cachedMembers,
         userCache,
         agentOwners,
+      ],
+    );
+    // Bindings migrated from a label-keyed draft give way to longer member
+    // names as the roster arrives, and are ordinary once it has loaded.
+    final hasLegacyMentions = mentions.any((mention) => mention.legacy);
+    final membersLoaded = membersAsync.hasValue;
+    useEffect(
+      () {
+        if (!hasLegacyMentions) return null;
+        final labels = [for (final m in memberMentionCandidates()) m.label];
+        // After the frame: the change is saved, which a build must not do.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!context.mounted) return;
+          controller.settleLegacyMentions(labels, complete: membersLoaded);
+        });
+        return null;
+      },
+      [
+        controller,
+        hasLegacyMentions,
+        membersLoaded,
+        membersAsync.asData?.value,
+        cachedMembers,
+        userCache,
       ],
     );
     useEffect(
@@ -410,6 +433,11 @@ class ComposeBar extends HookConsumerWidget {
     // Send the message.
     Future<void> send() async {
       if (!canSend()) return;
+      // A draft saved by an earlier Buzz yields to member names first.
+      controller.settleLegacyMentions(
+        memberMentionCandidates().map((member) => member.label),
+        complete: false,
+      );
       final draft = controller.text;
       final mentions = controller.mentions;
       final submittedOrigin = ComposerSendOrigin.capture(sendSurfaceKey);

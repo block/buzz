@@ -29,9 +29,18 @@ class _MarkdownEditingController extends TextEditingController {
   /// lowercase key, such as `Sam · a1b2`. Display only.
   Map<String, String> _mentionQualifiers = const {};
 
-  /// Set while Undo or Redo restores an earlier value, which must stay exact
-  /// rather than be widened to a chip or given a space after a link.
-  bool _applyingHistory = false;
+  /// Set while Undo (-1) or Redo (1) restores an earlier value, which must
+  /// stay exact rather than be widened to a chip or given a space after a
+  /// link. Zero for every other edit.
+  int _historyDirection = 0;
+
+  /// The bindings held with each text the editor has shown, oldest first,
+  /// and where the current text sits among them. Undo and Redo restore text
+  /// alone, and identical neighbouring text (`@Sam @Sam`) cannot say whose
+  /// chip came back, so the restored text takes its bindings from here.
+  final List<({String text, List<_ComposerMention> mentions})> _history = [];
+  int _historyAt = -1;
+  static const _maxHistory = 200;
   TextSpan? _cachedTextSpan;
   String? _cachedText;
   TextRange? _cachedComposingRange;
@@ -87,8 +96,49 @@ class _MarkdownEditingController extends TextEditingController {
   /// then shows as raw text.
   @override
   set value(TextEditingValue newValue) {
-    if (newValue.text != value.text) _carryMentions(value, newValue);
+    final text = newValue.text;
+    if (text != value.text) {
+      if (_mentionsInvalid && !text.contains('@')) _mentionsInvalid = false;
+      if (_history.isEmpty) _recordHistory(value.text);
+      if (_historyDirection == 0) {
+        _carryMentions(value, newValue);
+        _recordHistory(text);
+      } else if (!_restoreHistory(text)) {
+        _carryMentions(value, newValue);
+      }
+    }
     super.value = _snapSelectionToChips(newValue);
+  }
+
+  /// Notes the bindings now held with [text] as the newest history entry,
+  /// dropping any entries a Redo could have reached.
+  void _recordHistory(String text) {
+    if (_historyAt >= 0 && _history[_historyAt].text == text) {
+      _history[_historyAt] = (text: text, mentions: _mentions);
+      return;
+    }
+    _history.removeRange(_historyAt + 1, _history.length);
+    _history.add((text: text, mentions: _mentions));
+    if (_history.length > _maxHistory) _history.removeAt(0);
+    _historyAt = _history.length - 1;
+  }
+
+  /// Takes the bindings of the nearest entry for [text] in the direction
+  /// Undo or Redo is moving. False when the history holds none, as after it
+  /// was trimmed; the caller then carries the bindings as for any edit.
+  bool _restoreHistory(String text) {
+    for (
+      var i = _historyAt + _historyDirection;
+      i >= 0 && i < _history.length;
+      i += _historyDirection
+    ) {
+      if (_history[i].text != text) continue;
+      _historyAt = i;
+      _mentions = _history[i].mentions;
+      _cachedTextSpan = null;
+      return true;
+    }
+    return false;
   }
 
   /// The picked mentions bound in [text], in text order.
@@ -102,7 +152,6 @@ class _MarkdownEditingController extends TextEditingController {
   /// continues (`@Bobby`); punctuation, quotes, hyphens and slashes typed
   /// against a chip keep it and its recipient (`@Bob's`).
   void _carryMentions(TextEditingValue old, TextEditingValue next) {
-    if (_mentionsInvalid && !next.text.contains('@')) _mentionsInvalid = false;
     if (_mentions.isEmpty) return;
     final replaced = editReplacedRange(
       old.text,
@@ -131,11 +180,13 @@ class _MarkdownEditingController extends TextEditingController {
     required List<_ComposerMention> mentions,
     bool mentionsInvalid = false,
   }) {
+    if (_history.isEmpty) _recordHistory(value.text);
     _mentions = List.unmodifiable(
       mentions.toList()..sort((a, b) => a.start.compareTo(b.start)),
     );
     _mentionsInvalid = mentionsInvalid;
     _cachedTextSpan = null;
+    _recordHistory(newValue.text);
     final snapped = _snapSelectionToChips(newValue);
     final unchanged = value == snapped;
     super.value = snapped;
@@ -154,28 +205,52 @@ class _MarkdownEditingController extends TextEditingController {
   }) {
     final label = candidate.label;
     final replacement = '@$label$separator';
+    replaceRange(
+      start: start,
+      end: end,
+      replacement: replacement,
+      caret: start + replacement.length,
+      added: _ComposerMention(
+        start: start,
+        end: start + 1 + label.length,
+        candidate: candidate,
+      ),
+    );
+  }
+
+  /// Replaces `[start, end)` with [replacement] for a composer command, the
+  /// caret at [caret], and moves the bound mentions in the same
+  /// notification. A command knows exactly what it replaced, where a typed
+  /// edit is inferred from the selection: formatting wrapped around a
+  /// selected chip keeps the chip (see [remapMentionRanges] for
+  /// [keptShift]), and text a share appends never takes a chip's key.
+  void replaceRange({
+    required int start,
+    required int end,
+    required String replacement,
+    required int caret,
+    int? keptShift,
+    _ComposerMention? added,
+  }) {
     final next = TextEditingValue(
       text: text.replaceRange(start, end, replacement),
-      selection: TextSelection.collapsed(offset: start + replacement.length),
+      selection: TextSelection.collapsed(offset: caret),
     );
     final carried = remapMentionRanges(
       [for (final mention in _mentions) mention.range],
       replaced: TextRange(start: start, end: end),
       oldLength: text.length,
       newText: next.text,
+      keptShift: keptShift,
     );
     replaceDraft(
       next,
       mentions: [
         for (var i = 0; i < carried.length; i++)
           if (carried[i] case final range?) _mentions[i].at(range),
-        _ComposerMention(
-          start: start,
-          end: start + 1 + label.length,
-          candidate: candidate,
-        ),
+        ?added,
       ],
-      mentionsInvalid: _mentionsInvalid,
+      mentionsInvalid: _mentionsInvalid && next.text.contains('@'),
     );
   }
 
@@ -405,7 +480,7 @@ class _MarkdownEditingController extends TextEditingController {
     TextEditingValue newValue,
   ) {
     // Undo and Redo restore an earlier value exactly, and must stay exact.
-    if (_applyingHistory) return newValue;
+    if (_historyDirection != 0) return newValue;
     return _spaceAfterPastedLink(
       oldValue,
       expandChipDeletion(oldValue, newValue),

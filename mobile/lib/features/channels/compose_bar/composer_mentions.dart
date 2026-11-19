@@ -11,10 +11,15 @@ class _ComposerMention {
   final int end;
   final MentionCandidate candidate;
 
+  /// Migrated from a label-keyed draft and not yet checked against the
+  /// roster; see [_MarkdownEditingController.settleLegacyMentions].
+  final bool legacy;
+
   const _ComposerMention({
     required this.start,
     required this.end,
     required this.candidate,
+    this.legacy = false,
   });
 
   /// The literal `@Label` saved with [draft] at `[start, end)` of [text]. A
@@ -34,6 +39,7 @@ class _ComposerMention {
               ),
           requiresRevalidation: true,
         ),
+        legacy: draft.legacy,
       );
 
   MentionRange get range => (start: start, end: end);
@@ -47,10 +53,56 @@ class _ComposerMention {
     start: range.start,
     end: range.end,
     candidate: candidate,
+    legacy: legacy,
   );
 
-  ComposeDraftMention toDraft() =>
-      ComposeDraftMention(start: start, end: end, pubkey: pubkey);
+  ComposeDraftMention toDraft() => ComposeDraftMention(
+    start: start,
+    end: end,
+    pubkey: pubkey,
+    legacy: legacy,
+  );
+}
+
+extension _LegacyMentions on _MarkdownEditingController {
+  /// Gives member names the occurrences the old send gave them. A draft
+  /// saved with label-keyed bindings is read without the roster, so its
+  /// bindings arrive marked legacy; here a longer member name in
+  /// [memberLabels] that covers one (`@Sam Smith` over a picked `@Sam`)
+  /// takes it back, and the typed name resolves at send as it used to.
+  /// Backticks read as spaces, as they did when the binding was saved.
+  /// Once the roster is [complete] the surviving bindings are ordinary.
+  void settleLegacyMentions(
+    Iterable<String> memberLabels, {
+    required bool complete,
+  }) {
+    if (!_mentions.any((mention) => mention.legacy)) return;
+    final occurrences = mentionOccurrences(text.replaceAll('`', ' '), {
+      for (final mention in _mentions)
+        if (mention.legacy) mention.label(text).toLowerCase(),
+      for (final label in memberLabels) label.toLowerCase(),
+    });
+    final settled = <_ComposerMention>[];
+    for (final mention in _mentions) {
+      if (!mention.legacy) {
+        settled.add(mention);
+      } else if (!occurrences.any(
+        (range) => range.start <= mention.start && range.end > mention.end,
+      )) {
+        settled.add(
+          complete
+              ? _ComposerMention(
+                  start: mention.start,
+                  end: mention.end,
+                  candidate: mention.candidate,
+                )
+              : mention,
+        );
+      }
+    }
+    if (!complete && settled.length == _mentions.length) return;
+    replaceDraft(value, mentions: settled, mentionsInvalid: _mentionsInvalid);
+  }
 }
 
 /// Display labels for chips whose name another candidate shares, by
@@ -79,24 +131,32 @@ Map<String, String> _mentionChipQualifiers(
 /// Keeps the editor's namesake chip labels current: a chip whose name
 /// another candidate shares reads `Sam · a1b2`, the chooser's label, while
 /// the draft text stays `@Sam`. [members] is read again whenever one of
-/// [memberKeys] or the set of picked keys changes.
+/// [memberKeys] or the set of picked keys changes. The picked keys are
+/// read from the controller as it changes rather than from a rebuild: a
+/// prefill that swaps one namesake agent for another changes them from
+/// inside a build, where a rebuild request is dropped.
 void _useMentionChipQualifiers({
   required WidgetRef ref,
   required _MarkdownEditingController controller,
-  required List<_ComposerMention> mentions,
   required List<MentionCandidate> Function() members,
   required List<Object?> memberKeys,
 }) {
   final identityNames = ref.watch(identityNameSourcesProvider);
-  final mentionKeysKey = mentions.map((m) => m.pubkey).join(',');
-  final chipQualifiers = useMemoized(
-    () => _mentionChipQualifiers(identityNames, members(), mentions),
-    [identityNames, ...memberKeys, mentionKeysKey],
-  );
   useEffect(() {
-    controller.setMentionQualifiers(chipQualifiers);
-    return null;
-  }, [controller, chipQualifiers]);
+    String? qualifiedFor;
+    void update() {
+      final keys = controller.mentions.map((m) => m.pubkey).join(',');
+      if (keys == qualifiedFor) return;
+      qualifiedFor = keys;
+      controller.setMentionQualifiers(
+        _mentionChipQualifiers(identityNames, members(), controller.mentions),
+      );
+    }
+
+    update();
+    controller.addListener(update);
+    return () => controller.removeListener(update);
+  }, [controller, identityNames, ...memberKeys]);
 }
 
 /// Whether a mention is bound at [start]. Its `@` opens no query, wherever
@@ -107,9 +167,11 @@ bool _startsSelectedMention(List<_ComposerMention> mentions, int start) =>
     mentions.any((m) => m.start == start);
 
 /// The recipients a send notifies, in text order: every bound mention, then
-/// typed names outside a chip. A typed name a chip also carries resolves to
-/// that chip's key; otherwise an exact, unique member name notifies, and a
-/// name several identities share is refused so nobody is silently dropped.
+/// typed names outside a chip. A typed name notifies when it is exact and
+/// unique among the chips and [members]; a name several identities share is
+/// refused so nobody is silently dropped. That holds beside a chip of the
+/// same name too: text restored without its binding, as by a system Undo,
+/// needs a pick rather than borrowing the surviving chip's key.
 List<MentionCandidate> _resolveComposerMentions(
   String text,
   List<_ComposerMention> mentions, {
@@ -145,11 +207,11 @@ List<MentionCandidate> _resolveComposerMentions(
     (byName[mention.label(text).toLowerCase()] ??= {})[mention.pubkey] =
         mention.candidate;
   }
-  final chipNames = byName.keys.toSet();
   for (final member in members) {
-    final name = member.label.toLowerCase();
-    if (chipNames.contains(name)) continue;
-    (byName[name] ??= {})[member.pubkey.toLowerCase()] = member;
+    (byName[member.label.toLowerCase()] ??= {}).putIfAbsent(
+      member.pubkey.toLowerCase(),
+      () => member,
+    );
   }
   for (final range in mentionOccurrences(text, byName.keys)) {
     if (mentions.any((m) => m.start == range.start)) continue;

@@ -34,10 +34,6 @@ class _MessageEditSheet extends HookConsumerWidget {
     final focusNode = useFocusNode();
     final isModifyingText = useRef(false);
     final lastObservedEditingValue = useRef(controller.value);
-    final mentions = useListenableSelector(
-      controller,
-      () => controller.mentions,
-    );
 
     final currentPubkey = ref.watch(currentPubkeyProvider);
     final userCache = ref.watch(userCacheProvider);
@@ -61,7 +57,6 @@ class _MessageEditSheet extends HookConsumerWidget {
     _useMentionChipQualifiers(
       ref: ref,
       controller: controller,
-      mentions: mentions,
       members: memberCandidates,
       memberKeys: [
         membersAsync.asData?.value,
