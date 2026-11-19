@@ -60,9 +60,34 @@ pub(crate) async fn acquire_channel_membership_lock(
     community_id: CommunityId,
     channel_id: Uuid,
 ) -> Result<()> {
+    take_channel_membership_lock(tx, community_id, channel_id, false).await
+}
+
+/// Take the per-channel membership lock in shared mode: a DM message holds it
+/// while it reads and clears hides, so it never overlaps a hide (which takes
+/// it exclusively) yet never waits on another message.
+pub(crate) async fn acquire_channel_membership_lock_shared(
+    tx: &mut PgConnection,
+    community_id: CommunityId,
+    channel_id: Uuid,
+) -> Result<()> {
+    take_channel_membership_lock(tx, community_id, channel_id, true).await
+}
+
+async fn take_channel_membership_lock(
+    tx: &mut PgConnection,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    shared: bool,
+) -> Result<()> {
+    let sql = if shared {
+        "SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))"
+    } else {
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))"
+    };
     crate::observability::observe_advisory_lock(
         crate::observability::LockType::Membership,
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        sqlx::query(sql)
             .bind(format!(
                 "{CHANNEL_MEMBERSHIP_LOCK_NAMESPACE}{}:{}",
                 community_id.as_uuid(),

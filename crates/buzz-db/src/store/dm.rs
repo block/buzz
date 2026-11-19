@@ -1085,6 +1085,10 @@ pub async fn hide_dm(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    // Exclusive, so a hide never overlaps a message that read the DM as
+    // visible (see [`lock_dm_for_unhide`]): it lands before or after it.
+    crate::channel_members::acquire_channel_membership_lock(tx.conn(), community_id, channel_id)
+        .await?;
     let result = sqlx::query(
         r#"
         UPDATE channel_members
@@ -1142,17 +1146,25 @@ pub async fn unhide_dm(
 }
 
 /// In `tx`, before a message by `author` is stored in DM `channel_id`, take
-/// the DM's membership lock when another member has hid it, and return
-/// whether it did. A removal takes this lock before its thread-counter writes,
-/// and a reopen before the channel row, so the message takes it before both.
-/// When no one hid the DM, nothing is locked and nothing is unhidden.
+/// the DM's membership lock in shared mode and return whether another member
+/// has it hidden. A hide takes the lock exclusively, so it commits before
+/// this read or after the message, never in between; messages do not wait on
+/// each other. A removal takes the lock before its thread-counter writes and
+/// a reopen before the channel row, so the message takes it before both.
 pub async fn lock_dm_for_unhide(
     tx: &mut AdmittedTx,
     channel_id: Uuid,
     author: &[u8],
 ) -> Result<bool> {
     let community_id = tx.community();
-    let hidden: bool = sqlx::query_scalar(
+    crate::channel_members::acquire_channel_membership_lock_shared(
+        tx.conn(),
+        community_id,
+        channel_id,
+    )
+    .await?;
+    // A separate statement, so its snapshot is taken after the lock.
+    let hidden = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM channel_members \
          WHERE community_id = $1 AND channel_id = $2 AND pubkey <> $3 \
            AND removed_at IS NULL AND hidden_at IS NOT NULL)",
@@ -1162,21 +1174,14 @@ pub async fn lock_dm_for_unhide(
     .bind(author)
     .fetch_one(tx.conn())
     .await?;
-    if hidden {
-        crate::channel_members::acquire_channel_membership_lock(
-            tx.conn(),
-            community_id,
-            channel_id,
-        )
-        .await?;
-    }
     Ok(hidden)
 }
 
 /// In `tx`, which holds [`lock_dm_for_unhide`]'s lock, unhide DM `channel_id`
 /// for every active member except `author`, and return whose hide was
 /// cleared, sorted so callers lock them in one order. A new message from
-/// someone else resurfaces a hidden DM, as a re-open does.
+/// someone else resurfaces a hidden DM, as a re-open does. The rows are
+/// locked in pubkey order, so concurrent messages cannot deadlock on them.
 pub async fn unhide_dm_for_recipients(
     tx: &mut AdmittedTx,
     channel_id: Uuid,
@@ -1187,8 +1192,14 @@ pub async fn unhide_dm_for_recipients(
         r#"
         UPDATE channel_members
         SET hidden_at = NULL
-        WHERE community_id = $1 AND channel_id = $2 AND pubkey <> $3
-          AND removed_at IS NULL AND hidden_at IS NOT NULL
+        WHERE community_id = $1 AND channel_id = $2 AND pubkey IN (
+            SELECT pubkey FROM channel_members
+            WHERE community_id = $1 AND channel_id = $2 AND pubkey <> $3
+              AND removed_at IS NULL AND hidden_at IS NOT NULL
+            ORDER BY pubkey
+            FOR UPDATE
+        )
+          AND hidden_at IS NOT NULL
         RETURNING pubkey
         "#,
     )

@@ -1236,7 +1236,8 @@ async fn publish_live_thread_summary(
 /// the producer there, reads what a client would read on receipt, then lets
 /// it continue. It can also pin the notices' clock. Keyed by recipient so
 /// parallel tests do not interfere. A DM message parks at its fan-out the
-/// same way, keyed by its signer.
+/// same way, keyed by its signer, and after its hidden-member read, keyed by
+/// its event id.
 #[cfg(test)]
 pub(crate) mod notice_barrier {
     use std::collections::HashMap;
@@ -4714,8 +4715,9 @@ pub async fn publish_nipia_archival_list(
     )
 }
 
-/// Store message `event` in DM `channel_id` and, when it is new, resurface the
-/// DM for every member who hid it except its author, as a re-open does. The
+/// Store message `event` in DM `channel_id` and, when it is new and not
+/// addressed only to agents, resurface the DM for every member who hid it
+/// except its author, as a re-open does. The
 /// message, the cleared hides and each viewer's replaced NIP-DV snapshot
 /// commit together, so a reader who sees the message also sees the DM, and a
 /// hide made after the message is left alone. Returns the stored message,
@@ -4732,7 +4734,16 @@ pub async fn persist_dm_message(
         .db
         .begin_event_write_transaction(tenant.community())
         .await?;
-    let hidden = buzz_db::dm::lock_dm_for_unhide(&mut tx, channel_id, &author).await?;
+    // Agent-only coordination (`audience: agents`) does not resurface a DM.
+    let agents_only = event.tags.iter().any(|tag| {
+        let tag = tag.as_slice();
+        tag.first().map(String::as_str) == Some("audience")
+            && tag.get(1).map(String::as_str) == Some("agents")
+    });
+    let hidden =
+        !agents_only && buzz_db::dm::lock_dm_for_unhide(&mut tx, channel_id, &author).await?;
+    #[cfg(test)]
+    notice_barrier::reached(channel_id, event.id.as_bytes()).await;
     let (stored, inserted) = buzz_db::event::insert_event_with_thread_metadata_in_transaction(
         &mut tx,
         event,

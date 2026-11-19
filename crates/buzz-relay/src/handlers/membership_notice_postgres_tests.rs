@@ -451,7 +451,8 @@ async fn moderation_dm_notifies_the_recipient_once_visible() {
 }
 
 /// A new message from someone else resurfaces a DM its reader hid, in the
-/// reader's NIP-DV snapshot. The reader's own message leaves their hide alone.
+/// reader's NIP-DV snapshot. The reader's own message, and one addressed only
+/// to agents, leave the hide alone.
 /// The message commits with the snapshot: when the snapshot does not land,
 /// neither is stored or delivered, and the resend is not taken as a
 /// duplicate. A read made when the message fans out sees the DM.
@@ -498,6 +499,19 @@ async fn dm_message_from_someone_else_unhides_it() {
         hidden().await,
         std::slice::from_ref(&dm),
         "the reader's own message keeps the DM hidden"
+    );
+    publish(
+        &state,
+        &tenant,
+        &sender,
+        9,
+        &[&["h", &dm], &["audience", "agents"]],
+    )
+    .await;
+    assert_eq!(
+        hidden().await,
+        std::slice::from_ref(&dm),
+        "a message only for agents keeps the DM hidden"
     );
 
     let filter = json!({"kinds": [9], "#h": [dm]});
@@ -578,4 +592,68 @@ async fn dm_message_from_someone_else_unhides_it() {
         "the resend is delivered once"
     );
     assert_eq!(stored().await, std::slice::from_ref(&dm));
+}
+
+/// A hide racing a message from someone else lands wholly before or after it.
+/// The message is parked after it read the DM as visible; the hide waits for
+/// it rather than committing underneath it, so the hide is the later write
+/// and the reader's snapshot ends up hiding the DM.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn dm_hide_racing_a_message_lands_after_it() {
+    let (state, tenant) = fixture().await;
+    let reader = Keys::generate();
+    let sender = Keys::generate();
+    let (dm, _) = state
+        .db
+        .open_dm(
+            tenant.community(),
+            &[
+                &reader.public_key().to_bytes(),
+                &sender.public_key().to_bytes(),
+            ],
+            &reader.public_key().to_bytes(),
+            false,
+            &|_: &str, _: &[u8]| Ok(()),
+        )
+        .await
+        .expect("open dm");
+    let dm = dm.id.to_string();
+    let message = EventBuilder::new(Kind::Custom(9), "")
+        .tags([Tag::parse(["h", dm.as_str()]).unwrap()])
+        .sign_with_keys(&sender)
+        .expect("sign");
+    let mut barrier = notice_barrier::install(message.id.as_bytes());
+    let send = tokio::spawn({
+        let (state, tenant, message) = (state.clone(), tenant.clone(), message.clone());
+        let auth = http_auth(&sender);
+        async move { ingest_event(&state, &tenant, message, auth).await }
+    });
+    let (_, hide) = at_receipt(&mut barrier, async |_| {
+        let hide = tokio::spawn({
+            let (state, tenant, reader, dm) =
+                (state.clone(), tenant.clone(), reader.clone(), dm.clone());
+            async move {
+                publish(
+                    &state,
+                    &tenant,
+                    &reader,
+                    KIND_DM_HIDE as u16,
+                    &[&["h", &dm]],
+                )
+                .await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!hide.is_finished(), "hide committed under the message");
+        // Released when this returns; the hide then follows the message.
+        Some(hide)
+    })
+    .await;
+    let sent = send.await.expect("task").expect("send");
+    assert!(sent.accepted, "{}", sent.message);
+    hide.expect("hide task").await.expect("hide");
+    let filter = json!({"kinds": [KIND_DM_VISIBILITY], "#p": [reader.public_key().to_hex()]});
+    let hidden = read_tags(&state, &tenant, &reader, filter, "h").await;
+    assert_eq!(hidden, [dm], "the later hide is kept");
 }
