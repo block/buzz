@@ -16,8 +16,6 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/profile/profile_setup_page.dart';
 import 'package:buzz/features/profile/profile_setup_avatar_editor.dart';
 import 'package:buzz/features/profile/profile_avatar_draft.dart';
-import 'package:buzz/shared/emoji/emoji_avatar.dart';
-import 'package:buzz/shared/widgets/playing_avatar_image.dart';
 import 'package:buzz/features/pairing/pairing_page.dart';
 import 'package:buzz/hosted_app_gate.dart';
 import 'package:buzz/onboarding_app_entry.dart';
@@ -467,16 +465,20 @@ void main() {
         expect(f.profileWrites, isEmpty);
         await tester.tap(find.byTooltip('Add profile photo'));
         await f.settle(tester);
-        final url = emojiAvatarDataUrl('🐝', 0xFFFFE75C);
+        final bytes = base64Decode(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+        );
         Navigator.of(
           tester.element(find.byType(ProfileSetupAvatarEditor)),
-        ).pop(ProfileUrlAvatarDraft(url));
+        ).pop(ProfileImageAvatarDraft(bytes));
         await f.settle(tester);
         expect(
-          tester
-              .widget<PlayingAvatarImage>(find.byType(PlayingAvatarImage))
-              .imageUrl,
-          url,
+          (tester
+                      .widget<CircleAvatar>(find.byType(CircleAvatar))
+                      .backgroundImage!
+                  as MemoryImage)
+              .bytes,
+          bytes,
         );
         await tester.tap(find.byTooltip('Back'));
         await f.settle(tester);
@@ -497,7 +499,12 @@ void main() {
         expect(find.byTooltip('Edit profile photo'), findsOneWidget);
         await f.tap(tester, skipAvatar ? 'Skip' : 'Continue');
         expect(f.profileWrites, ['Draft Person']);
-        expect(f.profileAvatars, skipAvatar ? isEmpty : [url]);
+        expect(
+          f.profileAvatars,
+          skipAvatar ? isEmpty : ['https://media.example/avatar.png'],
+        );
+        // The failed save already uploaded the image; the retry reuses it.
+        expect(f.avatarUploads, 1);
       },
     );
   }
