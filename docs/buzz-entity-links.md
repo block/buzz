@@ -135,7 +135,8 @@ doesn't open. Desktop browsers open the app on load; phones and tablets wait
 for a tap on the button, since their browsers show an error for a scheme no
 app handles. It forwards only the navigation forms `message`, `channel`,
 `repo`, `project`, `pr` and `issue`; invite, authorization and install links get "This
-link doesn't work". For example,
+link doesn't work", and so do links missing a required field, such as a
+`message` link without its `id`. For example,
 `https://relay.example/open/message?channel=<uuid>&id=<event>` opens
 `buzz://message?channel=<uuid>&id=<event>`. Like any `buzz://` navigation
 link, it opens in the community selected in the app. The page doesn't pass on
