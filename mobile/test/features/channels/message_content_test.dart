@@ -55,7 +55,10 @@ Widget _testable(
   ThemeData? theme,
 }) {
   return ProviderScope(
-    overrides: overrides,
+    overrides: [
+      appLifecycleProvider.overrideWith(_ResumedLifecycle.new),
+      ...overrides,
+    ],
     child: MaterialApp(
       theme: theme ?? (dark ? AppTheme.dark() : AppTheme.light()),
       // Use MaterialApp.builder so the MediaQuery override (including
@@ -2226,7 +2229,6 @@ void main() {
             ),
             overrides: [
               voiceNotePlayerFactoryProvider.overrideWithValue(() => player),
-              appLifecycleProvider.overrideWith(_ResumedLifecycle.new),
             ],
           ),
         );
