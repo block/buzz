@@ -7493,7 +7493,9 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
                 .execute(&db.pool)
         };
         for sql in tampers {
-            set_digest(sql, vec![0_u8; 32]).await.expect("tamper digest");
+            set_digest(sql, vec![0_u8; 32])
+                .await
+                .expect("tamper digest");
             assert!(
                 store
                     .claim_specific(request.id, "executor-a", DEFAULT_LEASE_DURATION)
@@ -7502,7 +7504,9 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
                     .is_none(),
                 "a mismatched digest must not authorize a claim: {sql}"
             );
-            set_digest(sql, digest.clone()).await.expect("restore digest");
+            set_digest(sql, digest.clone())
+                .await
+                .expect("restore digest");
         }
         let claim = store
             .claim_specific(request.id, "executor-a", DEFAULT_LEASE_DURATION)
@@ -7514,7 +7518,9 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         // the failed calls leave the lease and stage as they were.
         for sql in tampers {
             let held = store.get(request.id).await.expect("held lease");
-            set_digest(sql, vec![0_u8; 32]).await.expect("tamper digest");
+            set_digest(sql, vec![0_u8; 32])
+                .await
+                .expect("tamper digest");
             assert!(
                 store
                     .heartbeat(&claim.lease, "worker", DEFAULT_LEASE_DURATION, false)
@@ -7535,7 +7541,9 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
                 (held.stage, held.lease_generation, held.lease_until),
                 "{sql}"
             );
-            set_digest(sql, digest.clone()).await.expect("restore digest");
+            set_digest(sql, digest.clone())
+                .await
+                .expect("restore digest");
             store
                 .verify_execution_token(&claim.lease, DeletionStage::Approved)
                 .await
