@@ -17,12 +17,15 @@ Set<String> computeUnreadChannelIds({
 ).unread;
 
 /// Channel-list highlights, following the desktop sidebar (`buzz-app`'s
-/// `docs/unread.md`). Ordinary unread backlog bolds a channel ([unread]).
+/// `docs/unread.md`). Ordinary unread backlog bolds a channel (`rowUnread`)
+/// unless a synced `seen:<channel>` mark covers it. `unread` keeps the
+/// underlying evidence for read actions.
 /// Unread thread replies, mentions and broadcasts only add an attention dot
 /// ([attention]), so a channel the reader caught up on stays regular. An
 /// unread DM bolds and dots. Marking a channel unread bolds it without
 /// fabricating attention, but keeps any real attention's dot.
-({Set<String> unread, Set<String> attention}) computeChannelListHighlights({
+({Set<String> unread, Set<String> rowUnread, Set<String> attention})
+computeChannelListHighlights({
   required Iterable<Channel> channels,
   required ReadStateState readState,
   required ChannelsNotifier channelsNotifier,
@@ -33,23 +36,32 @@ Set<String> computeUnreadChannelIds({
   separateAttention: true,
 );
 
-({Set<String> unread, Set<String> attention}) _computeHighlights({
+({Set<String> unread, Set<String> rowUnread, Set<String> attention})
+_computeHighlights({
   required Iterable<Channel> channels,
   required ReadStateState readState,
   required ChannelsNotifier channelsNotifier,
   required bool separateAttention,
 }) {
   final unread = <String>{};
+  final rowUnread = <String>{};
   final attention = <String>{};
-  if (!readState.isReady) return (unread: unread, attention: attention);
+  final highlights = (
+    unread: unread,
+    rowUnread: rowUnread,
+    attention: attention,
+  );
+  if (!readState.isReady) return highlights;
 
+  final forcedChannelIds = readState.locallyForcedChannelIds;
   final latestObservedByChannel = channelsNotifier.latestObservedByChannel;
   final observedEventsByChannel =
       channelsNotifier.observedUnreadEventsByChannel;
 
   for (final channel in channels) {
-    if (readState.locallyForcedChannelIds.contains(channel.id)) {
+    if (forcedChannelIds.contains(channel.id)) {
       unread.add(channel.id);
+      if (separateAttention) rowUnread.add(channel.id);
     }
 
     final latestObserved = latestObservedByChannel[channel.id];
@@ -60,6 +72,9 @@ Set<String> computeUnreadChannelIds({
 
     final observedEvents = observedEventsByChannel[channel.id];
     if (observedEvents == null) continue;
+    final seenAt = separateAttention
+        ? readState.contexts['seen:${channel.id}']
+        : null;
     for (final event in observedEvents.values) {
       final readAt = observedUnreadEventReadAt(
         event,
@@ -69,6 +84,10 @@ Set<String> computeUnreadChannelIds({
       if (readAt != null && event.createdAt <= readAt) continue;
       if (!separateAttention || channel.isDm || event.channelCatchUp) {
         unread.add(channel.id);
+        if (separateAttention &&
+            (channel.isDm || seenAt == null || event.createdAt > seenAt)) {
+          rowUnread.add(channel.id);
+        }
       }
       if (separateAttention && (channel.isDm || !event.channelCatchUp)) {
         attention.add(channel.id);
@@ -76,5 +95,5 @@ Set<String> computeUnreadChannelIds({
     }
   }
 
-  return (unread: unread, attention: attention);
+  return highlights;
 }

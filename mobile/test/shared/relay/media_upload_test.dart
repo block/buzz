@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -1184,6 +1185,37 @@ void main() {
         ),
       );
       expect(uploadRequested, isFalse);
+    });
+
+    test('sends a SHA-256 header matching the large attachment body', () async {
+      final bytes = Uint8List(2 * 1024 * 1024)
+        ..first = 1
+        ..last = 2;
+      final service = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        httpClient: http_testing.MockClient((request) async {
+          final digest = crypto.sha256.convert(request.bodyBytes).toString();
+          expect(request.headers['X-SHA-256'], digest);
+          return http.Response(
+            jsonEncode({
+              'url': 'https://relay.example/media/attachment.bin',
+              'sha256': digest,
+              'size': request.bodyBytes.length,
+              'type': 'application/octet-stream',
+              'uploaded': 1,
+            }),
+            HttpStatus.ok,
+          );
+        }),
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async => null,
+      );
+
+      final descriptor = await service.uploadFile(
+        XFile.fromData(bytes, name: 'attachment.bin'),
+      );
+      expect(descriptor.size, bytes.length);
     });
 
     test('sanitizes generic filenames to relay imeta constraints', () async {

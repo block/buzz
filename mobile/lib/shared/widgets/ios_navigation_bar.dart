@@ -284,7 +284,7 @@ class IosNavigationBar extends HookConsumerWidget {
         colors.onPrimaryContainer,
       ],
     );
-    final iconImages = useState(<String, String>{});
+    final iconImages = useState(<String, ({IconData icon, String data})>{});
     final icons = <String, IconData>{
       if (leading?.icon != null) 'leading': leading!.icon!,
       for (var i = 0; i < actions.length; i++)
@@ -304,7 +304,7 @@ class IosNavigationBar extends HookConsumerWidget {
       var active = true;
       unawaited(
         Future.microtask(() async {
-          final rendered = <String, String>{};
+          final rendered = <String, ({IconData icon, String data})>{};
           for (final entry in icons.entries) {
             final recorder = ui.PictureRecorder();
             final painter = TextPainter(
@@ -330,7 +330,10 @@ class IosNavigationBar extends HookConsumerWidget {
               format: ui.ImageByteFormat.png,
             );
             if (bytes != null) {
-              rendered[entry.key] = base64Encode(bytes.buffer.asUint8List());
+              rendered[entry.key] = (
+                icon: entry.value,
+                data: base64Encode(bytes.buffer.asUint8List()),
+              );
             }
             image.dispose();
             picture.dispose();
@@ -346,7 +349,8 @@ class IosNavigationBar extends HookConsumerWidget {
       final retained = avatarImages.value[id];
       return {
         ...action._encode(id),
-        if (iconImages.value[id] != null) 'iconData': iconImages.value[id],
+        if (action.icon != null && iconImages.value[id]?.icon == action.icon)
+          'iconData': iconImages.value[id]!.data,
         'avatarBackground': colors.primaryContainer.toARGB32(),
         'avatarForeground': colors.onPrimaryContainer.toARGB32(),
         if (retained?.key == key) 'imageData': retained!.data,

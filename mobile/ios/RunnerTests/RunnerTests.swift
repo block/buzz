@@ -41,6 +41,9 @@ class RunnerTests: XCTestCase {
     view.setNeedsLayout()
     view.layoutIfNeeded()
     let label = try XCTUnwrap(descendants(of: view).compactMap { $0 as? UILabel }.first { $0.text == "Invite to community" })
+    messenger.configure(["title": "Invite to community", "standaloneLargeTitle": true])
+    XCTAssertTrue(descendants(of: view).contains { $0 === label },
+                  "An identical channel attachment must keep the existing native surface")
     XCTAssertEqual(label.numberOfLines, 0)
     XCTAssertTrue(label.font.fontDescriptor.symbolicTraits.contains(.traitBold))
     XCTAssertEqual(label.font.pointSize, UIFont.preferredFont(forTextStyle: .largeTitle).pointSize)
@@ -430,8 +433,11 @@ class RunnerTests: XCTestCase {
     XCTAssertEqual((visibleFrame["y"] as? NSNumber)?.doubleValue, imageFrame.minY)
     try avatar().sendActions(for: .touchUpInside)
     XCTAssertEqual(messenger.actions, ["leading"])
+    let appearance = navigation.navigationBar.standardAppearance
     leading["avatarHidden"] = true
     messenger.configure(["title": "Bravo", "largeTitle": true, "leading": leading])
+    XCTAssertTrue(navigation.navigationBar.standardAppearance === appearance,
+                  "Changing title and avatar content must preserve the blur appearance")
     var landingPrepared = false
     messenger.invoke("prepareForReveal", arguments: [:]) { _ in landingPrepared = true }
     XCTAssertTrue(landingPrepared)

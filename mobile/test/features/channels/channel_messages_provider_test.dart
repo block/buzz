@@ -46,6 +46,36 @@ void test(String description, Future<void> Function() body) {
 
 void main() {
   test(
+    'window access denial cannot be masked by a transient WS fallback',
+    () async {
+      final denial = RelayException(403, 'not a member');
+      final relay = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'private-transcript', createdAt: 10), _bounds()],
+          denial,
+        ],
+      );
+      final container = _buildContainer(relay);
+      addTearDown(container.dispose);
+      final provider = channelMessagesProvider(_channelId);
+      container.listen(provider, (_, _) {});
+      await _pumpEventQueue();
+      expect(
+        container.read(provider).requireValue.single.id,
+        'private-transcript',
+      );
+      relay.historyError = Exception('connection reset');
+      relay.setConnected(false);
+      await _pumpEventQueue();
+      relay.setConnected(true);
+      await _pumpEventQueue();
+      expect(container.read(provider).error, same(denial));
+      expect(container.read(provider).value, isNull);
+      expect(relay.historyFilters, isEmpty);
+    },
+  );
+
+  test(
     'Solo notification target does not skip the intervening history',
     () async {
       final relay = _CursorRelay();
@@ -6508,6 +6538,7 @@ class _DeletedTargetSummaryResponse {
 }
 
 class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
+  Object? historyError;
   final bool failSubscribe;
   final Queue<Object> _queryResults;
   final Queue<List<NostrEvent>> _historyResults;
@@ -6629,6 +6660,7 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) {
+    if (historyError != null) return Future.error(historyError!);
     operations.add('fetch');
     historyFilters.add(filter);
     if (filter.ids != null) {

@@ -1,6 +1,7 @@
 //! Durable NIP-PL event matcher and gateway delivery worker.
 
 use std::{
+    collections::HashSet,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -126,12 +127,14 @@ async fn matcher_loop(state: &AppState) {
 }
 
 /// Per-batch state shared by every job: the community's active leases, the
-/// exact (channel, lease author) membership pairs the jobs can consult, and
-/// the batch's named-only channels (system channels and any type added later).
+/// exact (channel, lease author) membership pairs the jobs can consult, the
+/// batch's named-only channels (system channels and any type added later), and
+/// its listed channels, where a mention reaches a non-member.
 struct MatchContext {
     leases: Vec<buzz_db::push::MatchLease>,
     memberships: std::collections::HashSet<(uuid::Uuid, Vec<u8>)>,
     named_only: NamedOnlyChannels,
+    listed: std::collections::HashSet<uuid::Uuid>,
 }
 
 async fn load_match_context(
@@ -161,10 +164,17 @@ async fn load_match_context(
             .named_only_channels_among(batch.community, &channels)
             .await?,
     );
+    let listed = state
+        .db
+        .listed_channels_among(batch.community, &channels)
+        .await?
+        .into_iter()
+        .collect();
     Ok(MatchContext {
         leases,
         memberships,
         named_only,
+        listed,
     })
 }
 
@@ -293,6 +303,12 @@ fn match_job(
     context: &MatchContext,
 ) -> anyhow::Result<Vec<buzz_db::push::WakeRequest>> {
     let mut wakes = Vec::new();
+    // Collected once per event: the per-lease check below runs for every
+    // non-member lease on every listed-channel message.
+    let mentioned = match job.event.channel_id {
+        Some(channel) if context.listed.contains(&channel) => mentioned_readers(&job.event.event),
+        _ => HashSet::new(),
+    };
     for lease in &context.leases {
         let author_hex = hex::encode(&lease.author);
         if !reader_authorized_for_event(&job.event.event, &author_hex) {
@@ -302,6 +318,7 @@ fn match_job(
             if !context
                 .memberships
                 .contains(&(channel, lease.author.clone()))
+                && !mentioned.contains(author_hex.as_str())
             {
                 continue;
             }
@@ -361,6 +378,25 @@ fn match_job(
     Ok(wakes)
 }
 
+/// The pubkeys `event` mentions with a `p` tag. Workflow owner attribution
+/// is not a mention.
+fn mentioned_readers(event: &nostr::Event) -> HashSet<&str> {
+    event
+        .tags
+        .iter()
+        .filter(|tag| {
+            tag.as_slice().first().is_some_and(|name| name == "p")
+                && !is_workflow_owner_attribution(event, tag)
+        })
+        .filter_map(|tag| tag.content())
+        .collect()
+}
+
+/// Whether `event` mentions `reader_hex`, by the same rule as matching.
+fn mentions_reader(event: &nostr::Event, reader_hex: &str) -> bool {
+    mentioned_readers(event).contains(reader_hex)
+}
+
 /// Whether a lease filter may push an event in `channel`, by the same rule as
 /// REQ: a legacy-type channel is in every filter's scope (membership is
 /// checked separately), and a named-only channel is in scope only when the
@@ -378,6 +414,50 @@ fn push_filter_reads_channel(
         return true;
     }
     filter_channel_scope(filter, &[], named_only).contains(&channel)
+}
+
+/// Send-time counterpart of the matcher's channel rule: the lease author is a
+/// member, or the event mentions them, the channel is still listed and they
+/// still pass the connection gate.
+async fn channel_authorizes_wake(
+    state: &AppState,
+    wake: &buzz_db::push::ClaimedWake,
+    channel: uuid::Uuid,
+) -> buzz_db::Result<bool> {
+    if state
+        .db
+        .is_member(wake.community, channel, &wake.author)
+        .await?
+    {
+        return Ok(true);
+    }
+    // A non-member reads the channel only through REQ, so apply its gate.
+    let admission = buzz_db::operator_listener::DeliveryAdmission {
+        require_membership: state.config.require_relay_membership,
+        allow_owner_membership: state.config.allow_nip_oa_auth,
+        require_allowlist: state.config.pubkey_allowlist_enabled,
+    };
+    if !state
+        .db
+        .push_author_admitted(wake.community, &wake.author, admission)
+        .await?
+    {
+        return Ok(false);
+    }
+    if state
+        .db
+        .listed_channels_among(wake.community, &[channel])
+        .await?
+        .is_empty()
+    {
+        return Ok(false);
+    }
+    let author_hex = hex::encode(&wake.author);
+    Ok(state
+        .db
+        .get_event_by_id(wake.community, &wake.event_id)
+        .await?
+        .is_some_and(|stored| mentions_reader(&stored.event, &author_hex)))
 }
 
 /// Match-time counterpart of REQ's filter-level `#p` authorization gate.
@@ -501,11 +581,7 @@ async fn deliver_one(
         metrics::histogram!("buzz_push_wake_queue_seconds").record(wake_queue_seconds);
     }
     if let Some(channel) = outcome.channel_id {
-        match state
-            .db
-            .is_member(outcome.community, channel, &outcome.author)
-            .await
-        {
+        match channel_authorizes_wake(state, &outcome, channel).await {
             Ok(true) => {}
             Ok(false) => {
                 let _ = state
@@ -829,6 +905,7 @@ mod tests {
                 (system, "system".to_owned()),
                 (future, "later-type".to_owned()),
             ]),
+            listed: Default::default(),
         };
         let job = |channel: Option<uuid::Uuid>| {
             let mut event = EventBuilder::new(Kind::Custom(9), "hi");
@@ -920,7 +997,8 @@ mod tests {
                 .into_iter()
                 .map(|keys| (channel, author(keys)))
                 .collect(),
-            named_only: NamedOnlyChannels::from_typed([]),
+            named_only: NamedOnlyChannels::default(),
+            listed: Default::default(),
         };
         let relay = nostr::Keys::generate();
         let owner_hex = owner.public_key().to_hex();
@@ -968,7 +1046,8 @@ mod tests {
                     ..lease(&agent)
                 }],
                 memberships: [(channel, author(&agent))].into_iter().collect(),
-                named_only: NamedOnlyChannels::from_typed([]),
+                named_only: NamedOnlyChannels::default(),
+                listed: Default::default(),
             };
             let event = EventBuilder::new(Kind::Custom(9), "workflow output")
                 .tag(Tag::parse(["p", &owner_hex, "", "owner"]).unwrap())
@@ -989,6 +1068,83 @@ mod tests {
         };
         assert_eq!(gated(&[&agent]), 1, "one mention under the gate");
         assert_eq!(gated(&[&agent, &owner]), 0, "two mentions over the gate");
+    }
+
+    /// A non-member's lease wakes only for a message that mentions them in a
+    /// listed channel. Mutations: drop the mention check → RED
+    /// (plain and someone-else messages wake); drop the listed check →
+    /// RED (private, unlisted or system mentions wake); count owner
+    /// attribution as a mention → RED.
+    #[test]
+    fn nonmember_wakes_only_when_mentioned_in_a_listed_channel() {
+        let outsider = nostr::Keys::generate();
+        let other = nostr::Keys::generate();
+        let sender = nostr::Keys::generate();
+        let open = uuid::Uuid::new_v4();
+        // Private and unlisted channels are simply absent from `listed`.
+        let private = uuid::Uuid::new_v4();
+        let system = uuid::Uuid::new_v4();
+        let me = outsider.public_key().to_hex();
+        let context = |filter: Value| MatchContext {
+            leases: vec![buzz_db::push::MatchLease {
+                author: outsider.public_key().to_bytes().to_vec(),
+                installation_id: "phone".into(),
+                generation: 1,
+                subscriptions: serde_json::json!([{"filter": filter, "class": "default"}]),
+                expires_at: Utc::now().timestamp() + 3600,
+            }],
+            memberships: Default::default(),
+            named_only: NamedOnlyChannels::from_typed([(system, "system".to_owned())]),
+            listed: [open].into_iter().collect(),
+        };
+        let wakes = |filter: Value, channel: uuid::Uuid, tags: &[&[&str]]| {
+            let event = EventBuilder::new(Kind::Custom(9), "hi")
+                .tag(Tag::parse(["h", &channel.to_string()]).unwrap())
+                .tags(
+                    tags.iter()
+                        .map(|tag| Tag::parse(tag.iter().copied()).unwrap()),
+                )
+                .sign_with_keys(&sender)
+                .unwrap();
+            let job = buzz_db::push::BatchedMatch {
+                event: buzz_core::StoredEvent::new(event, Some(channel)),
+                attempt: 1,
+            };
+            match_job(&job, &context(filter)).unwrap().len()
+        };
+        let mine = serde_json::json!({"kinds": [9], "#p": [me]});
+        let broad = serde_json::json!({"kinds": [9]});
+        let mention: &[&str] = &["p", &me];
+        let other_hex = other.public_key().to_hex();
+
+        assert_eq!(wakes(mine.clone(), open, &[mention]), 1, "mentioned");
+        assert_eq!(wakes(broad.clone(), open, &[mention]), 1, "broad lease");
+        assert_eq!(wakes(broad.clone(), open, &[]), 0, "plain message");
+        assert_eq!(
+            wakes(broad.clone(), open, &[&["p", &other_hex]]),
+            0,
+            "someone else mentioned"
+        );
+        assert_eq!(
+            wakes(
+                broad.clone(),
+                open,
+                &[&["p", &me, "", "owner"], &["buzz:workflow", "true"]]
+            ),
+            0,
+            "owner attribution"
+        );
+        assert_eq!(wakes(mine.clone(), private, &[mention]), 0, "private");
+        assert_eq!(wakes(mine, system, &[mention]), 0, "system");
+        assert_eq!(
+            wakes(
+                serde_json::json!({"kinds": [9], "#h": [system.to_string()]}),
+                system,
+                &[mention]
+            ),
+            0,
+            "system named by #h"
+        );
     }
 
     async fn capture(
@@ -1123,7 +1279,7 @@ mod shutdown_tests {
 
 #[cfg(test)]
 mod postgres_tests {
-    use super::{load_match_context, match_job};
+    use super::{channel_authorizes_wake, load_match_context, match_job};
     use nostr::{EventBuilder, Kind, Tag};
 
     /// Real workflow messages from `RelayActionSink` against mobile-shaped
@@ -1406,6 +1562,188 @@ mod postgres_tests {
                 vec![(member_key, "named".to_owned())],
             ],
             "ordinary channel wakes its member's broad lease; system channel wakes only the lease that names it"
+        );
+    }
+
+    /// Real channel rows: a message that mentions a non-member wakes their
+    /// lease only in a listed channel, and does not add them. Send-time
+    /// revalidation applies the same rule, so a channel that turns private
+    /// after matching stops the wake.
+    /// Mutations: drop the listed check at match or delivery → RED (private,
+    /// unlisted or system mentions wake, or the flip still delivers); drop
+    /// the mention check at delivery → RED (the plain message delivers).
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn nonmember_mentions_wake_only_in_listed_channels() {
+        use crate::handlers::group_state_postgres_tests::{create_channel, http_auth};
+        use crate::handlers::ingest::ingest_event;
+
+        let state = crate::api::bridge::postgres_tests::bridge_handler_test_state()
+            .await
+            .expect("local Postgres and Redis");
+        let host = format!("push-nonmember-{}.local", uuid::Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community")
+            .id;
+        let tenant = buzz_core::TenantContext::resolved(community, &host);
+        let owner = nostr::Keys::generate();
+        let outsider = nostr::Keys::generate();
+        let outsider_bytes = outsider.public_key().to_bytes().to_vec();
+        let me = outsider.public_key().to_hex();
+
+        let open = create_channel(&state, &tenant, &owner, &[]).await;
+        let private = create_channel(&state, &tenant, &owner, &[&["visibility", "private"]]).await;
+        let unlisted = create_channel(&state, &tenant, &owner, &[&["unlisted", "true"]]).await;
+        let system = create_channel(
+            &state,
+            &tenant,
+            &owner,
+            &[&["channel_type", "system"], &["visibility", "open"]],
+        )
+        .await;
+        for channel in [open, unlisted, system] {
+            let record = state
+                .db
+                .get_channel(community, channel)
+                .await
+                .expect("channel");
+            assert_eq!(record.visibility, "open", "{channel}");
+        }
+
+        // Mobile's lease: wake on my `p`, ignore what I authored.
+        let subscriptions = serde_json::json!([{
+            "filter": {"kinds": [9], "#p": [me]},
+            "class": "default",
+            "ignore": [{"kinds": [9], "authors": [me]}],
+        }]);
+        assert_eq!(
+            buzz_db::push::replace_active_lease(
+                state.db.pool(),
+                community,
+                &outsider.public_key().to_bytes(),
+                "phone",
+                buzz_db::push::LeaseVersion {
+                    source_event_id: &[1; 32],
+                    source_created_at: 10,
+                    generation: 1,
+                    expires_at: i64::MAX / 2,
+                },
+                buzz_db::push::ActiveLease {
+                    endpoint_hash: &[42; 32],
+                    endpoint_grant: "opaque-grant",
+                    max_class: "default",
+                    subscriptions: &subscriptions,
+                },
+            )
+            .await
+            .expect("activate lease"),
+            buzz_db::push::ReplaceLeaseOutcome::Accepted
+        );
+
+        let mut jobs = Vec::new();
+        for (channel, mention) in [
+            (open, true),
+            (open, false),
+            (private, true),
+            (unlisted, true),
+            (system, true),
+        ] {
+            let mut event = EventBuilder::new(Kind::Custom(9), "hello")
+                .tag(Tag::parse(["h", &channel.to_string()]).unwrap());
+            if mention {
+                event = event.tag(Tag::public_key(outsider.public_key()));
+            }
+            let event = event.sign_with_keys(&owner).unwrap();
+            let id = event.id;
+            ingest_event(&state, &tenant, event, http_auth(&owner))
+                .await
+                .expect("ingest message");
+            let stored = state
+                .db
+                .get_event_by_id(community, id.as_bytes())
+                .await
+                .expect("load message")
+                .expect("stored message");
+            assert_eq!(stored.channel_id, Some(channel));
+            jobs.push(buzz_db::push::BatchedMatch {
+                event: stored,
+                attempt: 1,
+            });
+        }
+        let batch = buzz_db::push::ClaimedMatchBatch {
+            community,
+            claim_id: uuid::Uuid::new_v4(),
+            jobs,
+        };
+        let context = load_match_context(&state, &batch)
+            .await
+            .expect("match context");
+        let woken: Vec<usize> = batch
+            .jobs
+            .iter()
+            .map(|job| match_job(job, &context).expect("match").len())
+            .collect();
+        assert_eq!(
+            woken,
+            vec![1, 0, 0, 0, 0],
+            "only the mention in the listed channel wakes the non-member"
+        );
+        assert!(
+            !state
+                .db
+                .is_member(community, open, &outsider_bytes)
+                .await
+                .expect("membership"),
+            "a mention does not add the non-member"
+        );
+
+        let wake = |job: &buzz_db::push::BatchedMatch| buzz_db::push::ClaimedWake {
+            community,
+            id: uuid::Uuid::new_v4(),
+            claim_id: uuid::Uuid::new_v4(),
+            event_id: job.event.event.id.as_bytes().to_vec(),
+            channel_id: job.event.channel_id,
+            author: outsider_bytes.clone(),
+            installation_id: "phone".into(),
+            lease_generation: 1,
+            endpoint_grant: "opaque-grant".into(),
+            class: "default".into(),
+            expires_at: i64::MAX / 2,
+            queued_at: chrono::Utc::now(),
+            attempt: 1,
+        };
+        let authorizes = |index: usize, channel: uuid::Uuid| {
+            let wake = wake(&batch.jobs[index]);
+            let state = &state;
+            async move {
+                channel_authorizes_wake(state, &wake, channel)
+                    .await
+                    .expect("revalidate")
+            }
+        };
+        assert!(authorizes(0, open).await, "mention in a listed channel");
+        assert!(!authorizes(1, open).await, "plain message");
+        assert!(!authorizes(2, private).await, "private channel");
+        assert!(!authorizes(3, unlisted).await, "unlisted channel");
+        assert!(!authorizes(4, system).await, "system channel");
+
+        let flip = EventBuilder::new(Kind::Custom(9002), "")
+            .tags([
+                Tag::parse(["h", &open.to_string()]).unwrap(),
+                Tag::parse(["visibility", "private"]).unwrap(),
+            ])
+            .sign_with_keys(&owner)
+            .unwrap();
+        let flipped = ingest_event(&state, &tenant, flip, http_auth(&owner))
+            .await
+            .expect("make private");
+        assert!(flipped.accepted, "{}", flipped.message);
+        assert!(
+            !authorizes(0, open).await,
+            "a channel that turned private stops the wake"
         );
     }
 }

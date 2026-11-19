@@ -103,6 +103,14 @@ prior release's recorded squash commit; tag ancestry is deliberately irrelevant.
    optimized, symbol-bearing image under matching `debug-` tags (for example,
    `debug-0.3.0` and `debug-latest`) for native profiling. The ordinary tags
    remain stripped and are the default for deployments that do not need it.
+4. **Update self-host defaults after each stable relay release.** Once
+   `ghcr.io/block/buzz:<version>` is available, set the exact tag in
+   `deploy/compose/compose.yml`, `deploy/compose/.env.example`, and the
+   Compose README. Set `appVersion` in `deploy/charts/buzz/Chart.yaml` to
+   the same relay version, bump the chart version, and update the chart
+   README's quickstart pin. Merge these changes in one PR so the
+   [chart release workflow](deploy/charts/buzz/README.md#releasing) publishes
+   the updated chart.
 
 Every push to `main` that changes the image build context continues to
 publish the rolling relay `:main` and `:sha-<7>` tags, plus matching
