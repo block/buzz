@@ -11,10 +11,6 @@ class _ChannelTile extends ConsumerWidget {
   final String? currentPubkey;
   final VoidCallback onTap;
 
-  /// Called when the user requests to mark this channel read (from long-press
-  /// actions menu). Null for channels in built-in sections.
-  final VoidCallback? onMarkRead;
-
   /// The user-defined section this channel currently belongs to, or null.
   final String? sectionId;
 
@@ -26,7 +22,6 @@ class _ChannelTile extends ConsumerWidget {
     this.hasAttention = false,
     required this.onTap,
     this.isMuted = false,
-    this.onMarkRead,
     this.sectionId,
   });
 
@@ -118,23 +113,6 @@ class _ChannelTile extends ConsumerWidget {
                     ],
                   ),
                 ),
-                if (hasAttention) ...[
-                  const SizedBox(width: Grid.xxs),
-                  // The dot is the only sign of this state, so name it for
-                  // screen readers; it merges into the row's label.
-                  Semantics(
-                    label: 'Needs your attention',
-                    child: Container(
-                      key: ValueKey('channel-attention-dot-${channel.id}'),
-                      width: 6,
-                      height: 6,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: context.colors.primary,
-                      ),
-                    ),
-                  ),
-                ],
                 if (channel.isEphemeral) ...[
                   const SizedBox(width: Grid.xxs),
                   _EphemeralBadge(channel: channel),
@@ -148,6 +126,28 @@ class _ChannelTile extends ConsumerWidget {
                         BuzzIcons.bellOff,
                         size: 12,
                         color: navigationMetadataForeground(context),
+                      ),
+                    ),
+                  ),
+                ],
+                if (hasAttention) ...[
+                  const SizedBox(width: Grid.xxs),
+                  // The dot is the only sign of this state, so name it for
+                  // screen readers; it merges into the row's label.
+                  Semantics(
+                    label: 'Needs your attention',
+                    child: SizedBox(
+                      width: _kChannelIconSize,
+                      child: Center(
+                        child: Container(
+                          key: ValueKey('channel-attention-dot-${channel.id}'),
+                          width: 6,
+                          height: 6,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: context.colors.primary,
+                          ),
+                        ),
                       ),
                     ),
                   ),
@@ -187,7 +187,6 @@ class _ChannelTile extends ConsumerWidget {
       channel: channel,
       // Mark read also clears the dot: the channel mark reads every reply.
       isUnread: isUnread || hasAttention,
-      onMarkRead: onMarkRead,
       sectionId: sectionId,
     );
   }

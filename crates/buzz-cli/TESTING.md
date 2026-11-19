@@ -134,13 +134,16 @@ FORUM_ID=$(buzz channels create --name "test-forum" --type forum --visibility op
 
 # channels list
 buzz channels list | jq .
-# Expected: [{"channel_id":"...","name":"...","description":"...","created_at":N}]
+# Expected: [{"channel_id":"...","name":"...","channel_type":"stream","visibility":"open","labels":[],"archived":false,"description":"..."|null,"topic":null,"purpose":null,"ttl_seconds":null,"created_at":N,"updated_at":N}]
 buzz channels list --visibility open | jq .
 buzz channels list --member | jq .
+buzz channels list --include-archived | jq .   # archived channels are hidden without this
+# `visibility` is "open" or "private" from the relay's ["public"]/["private"] tag. It is null only
+# when an event carries neither (older or non-Buzz relays); NIP-29 would read that as public.
 
 # channels get
 buzz channels get --channel "$CHANNEL_ID" | jq .
-# Expected: {"channel_id":"...","name":"...","description":"...","created_at":N,"pubkey":"..."} or null
+# Expected: {"channel_id":"...","name":"...","channel_type":"stream","visibility":"open","labels":[],"archived":false,"description":"..."|null,"topic":null,"purpose":null,"ttl_seconds":null,"created_at":N,"updated_at":N,"pubkey":"..."} or null
 
 # channels update
 buzz channels update --channel "$CHANNEL_ID" --name "test-cli-updated" \

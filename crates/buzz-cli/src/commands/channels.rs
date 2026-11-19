@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use buzz_core::channel::CHANNEL_CREATED_AT_TAG;
 use buzz_core::kind::{
     KIND_MANAGED_AGENT, KIND_PRESENCE_SNAPSHOT, KIND_PRESENCE_UPDATE, KIND_TEAM,
 };
@@ -8,8 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::client::{
-    extract_d_tag, extract_p_tags, extract_tag_value, normalize_write_response,
-    print_create_response, BuzzClient,
+    extract_d_tag, extract_p_tags, normalize_write_response, print_create_response, BuzzClient,
 };
 use crate::commands::agents::fetch_archived_snapshot;
 use crate::commands::channel_templates::{self, ChannelTemplateRecord, TemplateAgentRoster};
@@ -17,93 +17,143 @@ use crate::commands::users::presence_subject;
 use crate::error::CliError;
 use crate::validate::{parse_uuid, read_or_stdin, validate_hex64, validate_uuid};
 
-fn extract_channel_metadata(e: &serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-        "channel_id": extract_d_tag(e),
-        "name": extract_tag_value(e, "name"),
-        "description": extract_tag_value(e, "about"),
-        "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
-    })
+/// Stable, scriptable projection of a kind:39000 channel-metadata event: the
+/// JSON object `channels list`, `get` and `search` print for each channel.
+#[derive(Debug, Default, serde::Serialize)]
+struct ChannelSummary {
+    channel_id: String,
+    name: Option<String>,
+    /// Value of the first `t` tag (`stream`, `forum`, `dm`, `workflow`, `system`).
+    channel_type: Option<String>,
+    /// `open` or `private`, from the single-element `["public"]` or
+    /// `["private"]` tag; the same values `--visibility` takes.
+    visibility: Option<String>,
+    /// Values of the `t` tags after the first, in event order.
+    labels: Vec<String>,
+    /// Whether the relay marked the channel `["archived", "true"]`.
+    archived: bool,
+    /// The NIP-29 `about` tag.
+    description: Option<String>,
+    topic: Option<String>,
+    purpose: Option<String>,
+    /// Seconds without a message before the channel archives, from `["ttl", ...]`.
+    ttl_seconds: Option<i64>,
+    /// When the channel was created, from the `created_at` tag (NIP-CL).
+    created_at: Option<u64>,
+    /// When the channel metadata last changed: the event's own `created_at`.
+    updated_at: Option<u64>,
 }
+
+impl ChannelSummary {
+    fn from_event(event: &serde_json::Value) -> Self {
+        let mut summary = Self {
+            updated_at: event.get("created_at").and_then(|v| v.as_u64()),
+            ..Self::default()
+        };
+        let mut seen_type = false;
+        let tags = event.get("tags").and_then(|t| t.as_array());
+        for tag in tags.into_iter().flatten().filter_map(|t| t.as_array()) {
+            let key = tag.first().and_then(|v| v.as_str()).unwrap_or("");
+            let val = tag.get(1).and_then(|v| v.as_str());
+            match key {
+                "d" => summary.channel_id = val.unwrap_or_default().to_string(),
+                "name" => summary.name = val.map(str::to_string),
+                // The first `t` is the channel type, as in buzz-core's
+                // `channel_type_from_group_state_tags`; later `t` tags are labels.
+                "t" if !seen_type => {
+                    seen_type = true;
+                    summary.channel_type = val.map(str::to_string);
+                }
+                "t" => summary.labels.extend(val.map(str::to_string)),
+                // NIP-29 marks private channels; Buzz adds `public` for open ones.
+                // The presence of either tag is the source of truth; tag value is unused.
+                "private" => summary.visibility = Some("private".to_string()),
+                "public" => summary.visibility = Some("open".to_string()),
+                "archived" => summary.archived = val == Some("true"),
+                "about" => summary.description = val.map(str::to_string),
+                "topic" => summary.topic = val.map(str::to_string),
+                "purpose" => summary.purpose = val.map(str::to_string),
+                "ttl" => summary.ttl_seconds = val.and_then(|value| value.parse().ok()),
+                CHANNEL_CREATED_AT_TAG => summary.created_at = val.and_then(|v| v.parse().ok()),
+                _ => {}
+            }
+        }
+        summary
+    }
+}
+
+/// Most kind:39002 memberships `channels list --member` reads.
+const MAX_LISTED_MEMBERSHIPS: u32 = 10_000;
 
 pub async fn cmd_list_channels(
     client: &BuzzClient,
     visibility: Option<&str>,
     member: Option<bool>,
+    include_archived: bool,
     limit: Option<u32>,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     let effective_limit = limit.unwrap_or(500);
+    let keep = |c: &ChannelSummary| is_listed(c, visibility, include_archived);
+    // `--limit` counts the channels printed, so both paths keep reading past
+    // the ones the filters drop.
     let events = if member == Some(true) {
-        // Step 1: find channel IDs where we're a member (kind:39002)
+        // Step 1: find channel IDs where we're a member (kind:39002). Read up
+        // to a fixed bound rather than `--limit`, since some may be filtered.
         let my_pk = client.public_key().to_hex();
         let member_filter = serde_json::json!({
             "kinds": [39002],
             "#p": [my_pk],
         });
         let member_events = client
-            .query_paginated(member_filter, effective_limit)
+            .query_paginated(member_filter, MAX_LISTED_MEMBERSHIPS)
             .await?;
         let channel_ids: Vec<String> = member_events
             .iter()
             .map(extract_d_tag)
             .filter(|id| !id.is_empty())
             .collect();
-        if channel_ids.is_empty() {
-            println!("[]");
-            return Ok(());
+        // Step 2: fetch kind:39000 metadata one bounded chunk of IDs at a
+        // time, until `--limit` channels pass the filters.
+        let mut kept = Vec::new();
+        for chunk in channel_ids.chunks(crate::client::QUERY_PAGE_SIZE as usize) {
+            let metadata_filter = serde_json::json!({
+                "kinds": [39000],
+                "#d": chunk,
+            });
+            let page = client
+                .query_paginated(metadata_filter, chunk.len() as u32)
+                .await?;
+            kept.extend(
+                page.into_iter()
+                    .filter(|e| keep(&ChannelSummary::from_event(e))),
+            );
+            if kept.len() >= effective_limit as usize {
+                break;
+            }
         }
-        // Step 2: fetch kind:39000 metadata for those channels.
-        let metadata_filter = serde_json::json!({
-            "kinds": [39000],
-            "#d": channel_ids,
-        });
-        client
-            .query_paginated(metadata_filter, effective_limit)
-            .await?
+        kept.truncate(effective_limit as usize);
+        kept
     } else {
         let filter = serde_json::json!({
             "kinds": [39000],
         });
-        client.query_paginated(filter, effective_limit).await?
+        client
+            .query_paginated_keeping(filter, effective_limit, |e| {
+                keep(&ChannelSummary::from_event(e))
+            })
+            .await?
     };
 
-    let channels: Vec<serde_json::Value> = events
-        .iter()
-        .filter(|e| {
-            if let Some(vis) = visibility {
-                // NIP-29: relay emits ["public"] or ["private"] single-element tags
-                let nip29_tag = match vis {
-                    "open" => "public",
-                    _ => vis,
-                };
-                e.get("tags")
-                    .and_then(|t| t.as_array())
-                    .map(|tags| {
-                        tags.iter().any(|tag| {
-                            tag.as_array()
-                                .map(|a| {
-                                    a.len() == 1
-                                        && a.first().and_then(|v| v.as_str()) == Some(nip29_tag)
-                                })
-                                .unwrap_or(false)
-                        })
-                    })
-                    .unwrap_or(false)
-            } else {
-                true
-            }
-        })
-        .map(extract_channel_metadata)
-        .collect();
+    let channels: Vec<ChannelSummary> = events.iter().map(ChannelSummary::from_event).collect();
     let output = match format {
         crate::OutputFormat::Compact => {
             let compact: Vec<serde_json::Value> = channels
                 .iter()
                 .map(|c| {
                     serde_json::json!({
-                        "channel_id": c.get("channel_id").cloned().unwrap_or_default(),
-                        "name": c.get("name").cloned().unwrap_or_default(),
+                        "channel_id": c.channel_id,
+                        "name": c.name.as_deref().unwrap_or_default(),
                     })
                 })
                 .collect();
@@ -138,89 +188,44 @@ pub async fn cmd_search_channels(
     });
     let arr = client.query_paginated(filter, limit).await?;
 
-    let needle = query.to_ascii_lowercase();
-    let mut matches: Vec<ChannelSummary> = arr
+    let matches = search_matches(&arr, &query.to_ascii_lowercase(), exact, include_archived);
+    let output = serde_json::to_string(&matches).expect("serializing ChannelSummary");
+    println!("{output}");
+    Ok(())
+}
+
+/// Whether `channels list` prints a channel: archived ones only with
+/// `include_archived`, and only `visibility` (`open`/`private`) if given.
+fn is_listed(channel: &ChannelSummary, visibility: Option<&str>, include_archived: bool) -> bool {
+    (visibility.is_none() || channel.visibility.as_deref() == visibility)
+        && (include_archived || !channel.archived)
+}
+
+/// The channels `channels search` prints, sorted by name then ID. Events
+/// without a channel ID or a name never match.
+fn search_matches(
+    events: &[serde_json::Value],
+    needle_lower: &str,
+    exact: bool,
+    include_archived: bool,
+) -> Vec<ChannelSummary> {
+    let mut matches: Vec<ChannelSummary> = events
         .iter()
-        .filter_map(ChannelSummary::from_event)
-        .filter(|c| if include_archived { true } else { !c.archived })
-        .filter(|c| name_matches(&c.name, &needle, exact))
+        .map(ChannelSummary::from_event)
+        .filter(|c| !c.channel_id.is_empty())
+        .filter(|c| include_archived || !c.archived)
+        .filter(|c| {
+            c.name
+                .as_deref()
+                .is_some_and(|name| name_matches(name, needle_lower, exact))
+        })
         .collect();
     matches.sort_by(|a, b| {
         a.name
             .cmp(&b.name)
             .then_with(|| a.channel_id.cmp(&b.channel_id))
     });
-
-    let output = serde_json::to_string(&matches).expect("serializing ChannelSummary");
-    println!("{output}");
-    Ok(())
-}
-
-/// Stable, scriptable projection of a kind:39000 channel-metadata event.
-#[derive(serde::Serialize)]
-struct ChannelSummary {
-    channel_id: String,
-    name: String,
-    channel_type: Option<String>,
-    visibility: Option<String>,
-    archived: bool,
-    about: Option<String>,
-    topic: Option<String>,
-    purpose: Option<String>,
-    ttl_seconds: Option<i64>,
-}
-
-impl ChannelSummary {
-    /// Parse a kind:39000 event JSON value into a summary. Returns `None` if the
-    /// event lacks the required `d` (channel UUID) or `name` tags.
-    fn from_event(event: &serde_json::Value) -> Option<Self> {
-        let tags = event.get("tags")?.as_array()?;
-        let mut channel_id: Option<String> = None;
-        let mut name: Option<String> = None;
-        let mut channel_type: Option<String> = None;
-        let mut visibility: Option<String> = None;
-        let mut archived = false;
-        let mut about: Option<String> = None;
-        let mut topic: Option<String> = None;
-        let mut purpose: Option<String> = None;
-        let mut ttl_seconds: Option<i64> = None;
-
-        for tag in tags {
-            let Some(tag_arr) = tag.as_array() else {
-                continue;
-            };
-            let key = tag_arr.first().and_then(|v| v.as_str()).unwrap_or("");
-            let val = tag_arr.get(1).and_then(|v| v.as_str());
-            match key {
-                "d" => channel_id = val.map(str::to_string),
-                "name" => name = val.map(str::to_string),
-                // The first `t` is the channel type; later `t` tags are labels.
-                "t" if channel_type.is_none() => channel_type = val.map(str::to_string),
-                // NIP-29 emits both `private` and `public` (Buzz adds the latter).
-                // The presence of either tag is the source of truth; tag value is unused.
-                "private" => visibility = Some("private".to_string()),
-                "public" => visibility = Some("public".to_string()),
-                "about" => about = val.map(str::to_string),
-                "topic" => topic = val.map(str::to_string),
-                "purpose" => purpose = val.map(str::to_string),
-                "ttl" => ttl_seconds = val.and_then(|value| value.parse().ok()),
-                "archived" => archived = val == Some("true"),
-                _ => {}
-            }
-        }
-
-        Some(ChannelSummary {
-            channel_id: channel_id?,
-            name: name?,
-            channel_type,
-            visibility,
-            archived,
-            about,
-            topic,
-            purpose,
-            ttl_seconds,
-        })
-    }
+    matches
 }
 
 fn name_matches(name: &str, needle_lower: &str, exact: bool) -> bool {
@@ -242,9 +247,9 @@ pub async fn cmd_get_channel(client: &BuzzClient, channel_id: &str) -> Result<()
     let resp = client.query(&filter).await?;
     let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     if let Some(e) = events.first() {
-        let mut normalized = extract_channel_metadata(e);
-        normalized["pubkey"] =
-            serde_json::json!(e.get("pubkey").and_then(|v| v.as_str()).unwrap_or(""));
+        let mut normalized = serde_json::to_value(ChannelSummary::from_event(e))
+            .map_err(|err| CliError::Other(format!("serializing channel: {err}")))?;
+        normalized["pubkey"] = e.get("pubkey").cloned().unwrap_or(serde_json::Value::Null);
         println!("{normalized}");
     } else {
         println!("null");
@@ -1948,10 +1953,19 @@ pub async fn dispatch(
         ChannelsCmd::List {
             visibility,
             member,
+            include_archived,
             limit,
         } => {
             let vis_str = visibility.as_ref().map(|v| v.to_string());
-            cmd_list_channels(client, vis_str.as_deref(), Some(member), limit, format).await
+            cmd_list_channels(
+                client,
+                vis_str.as_deref(),
+                Some(member),
+                include_archived,
+                limit,
+                format,
+            )
+            .await
         }
         ChannelsCmd::Unread { channel, limit } => {
             crate::commands::channel_unread::cmd_unread(client, &channel, limit).await
@@ -2074,9 +2088,10 @@ mod tests {
     use super::{
         apply_cardinality_rule, assemble_roster_resolution, build_hint_map, build_template_report,
         cmd_set_add_policy, fetch_candidate_hints, finalize_roster_resolution, format_candidate,
-        hints_from_results, join_bounded_queries, name_matches, resolve_roster_with_archive_filter,
-        validate_ttl_seconds, validate_update_channel_fields, ArchivedExclusion, CandidateHint,
-        ChannelSummary, ResolvedAgent, RosterResolution, SkippedSlug,
+        hints_from_results, is_listed, join_bounded_queries, name_matches,
+        resolve_roster_with_archive_filter, search_matches, validate_ttl_seconds,
+        validate_update_channel_fields, ArchivedExclusion, CandidateHint, ChannelSummary,
+        ResolvedAgent, RosterResolution, SkippedSlug,
     };
     use crate::client::BuzzClient;
     use crate::CliError;
@@ -2107,32 +2122,101 @@ mod tests {
             ["t", "workspace"],
             ["P", "ab".repeat(32)],
         ]));
-        let s = ChannelSummary::from_event(&ev).expect("parse");
+        let s = ChannelSummary::from_event(&ev);
         assert_eq!(s.channel_type.as_deref(), Some("forum"));
+        assert_eq!(s.labels, vec!["workspace".to_string()]);
+    }
+
+    /// The channel identity tags the relay signs for a real Solo chat.
+    fn solo_metadata_event() -> serde_json::Value {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../test-fixtures/solo-creation.json"))
+                .expect("solo fixture");
+        let mut tags = vec![
+            json!(["d", "11111111-1111-4111-8111-111111111111"]),
+            json!(["name", "Desktop Solo"]),
+            json!(["private"]),
+        ];
+        tags.extend(fixture["identity_tags"].as_array().expect("tags").clone());
+        json!({ "tags": tags, "created_at": 42 })
+    }
+
+    #[test]
+    fn from_event_reads_labels_after_the_type() {
+        let out = serde_json::to_value(ChannelSummary::from_event(&solo_metadata_event()))
+            .expect("serialize");
+        assert_eq!(
+            out["channel_id"],
+            json!("11111111-1111-4111-8111-111111111111")
+        );
+        assert_eq!(out["name"], json!("Desktop Solo"));
+        assert_eq!(out["channel_type"], json!("stream"));
+        assert_eq!(out["visibility"], json!("private"));
+        assert_eq!(out["labels"], json!(["buzz.solo"]));
+        assert_eq!(out["archived"], json!(false));
     }
 
     #[test]
     fn from_event_extracts_known_tags() {
-        let ev = event(json!([
-            ["d", "11111111-1111-1111-1111-111111111111"],
-            ["name", "buzz-chat-composer"],
-            ["t", "stream"],
-            ["public"],
-            ["about", "About text"],
-            ["topic", "Composer work"],
-            ["purpose", "Track UI for the composer"],
-            ["ttl", "3600"],
-        ]));
-        let s = ChannelSummary::from_event(&ev).expect("parse");
-        assert_eq!(s.channel_id, "11111111-1111-1111-1111-111111111111");
-        assert_eq!(s.name, "buzz-chat-composer");
-        assert_eq!(s.channel_type.as_deref(), Some("stream"));
-        assert_eq!(s.visibility.as_deref(), Some("public"));
-        assert!(!s.archived);
-        assert_eq!(s.about.as_deref(), Some("About text"));
-        assert_eq!(s.topic.as_deref(), Some("Composer work"));
-        assert_eq!(s.purpose.as_deref(), Some("Track UI for the composer"));
-        assert_eq!(s.ttl_seconds, Some(3600));
+        let ev = json!({
+            "created_at": 1_800_000_000,
+            "tags": [
+                ["d", "11111111-1111-1111-1111-111111111111"],
+                ["name", "buzz-chat-composer"],
+                ["t", "stream"],
+                ["public"],
+                ["about", "About text"],
+                ["topic", "Composer work"],
+                ["purpose", "Track UI for the composer"],
+                ["ttl", "3600"],
+                ["created_at", "1700000000"],
+            ],
+        });
+        let out = serde_json::to_value(ChannelSummary::from_event(&ev)).expect("serialize");
+        assert_eq!(
+            out,
+            json!({
+                "channel_id": "11111111-1111-1111-1111-111111111111",
+                "name": "buzz-chat-composer",
+                "channel_type": "stream",
+                "visibility": "open",
+                "labels": [],
+                "archived": false,
+                "description": "About text",
+                "topic": "Composer work",
+                "purpose": "Track UI for the composer",
+                "ttl_seconds": 3600,
+                "created_at": 1_700_000_000,
+                "updated_at": 1_800_000_000,
+            })
+        );
+    }
+
+    #[test]
+    fn from_event_without_optional_tags_prints_nulls() {
+        let out = serde_json::to_value(ChannelSummary::from_event(&event(json!([[
+            "d",
+            "11111111-1111-1111-1111-111111111111"
+        ]]))))
+        .expect("serialize");
+        assert_eq!(
+            out,
+            json!({
+                "channel_id": "11111111-1111-1111-1111-111111111111",
+                "name": null,
+                "channel_type": null,
+                "visibility": null,
+                "labels": [],
+                "archived": false,
+                "description": null,
+                "topic": null,
+                "purpose": null,
+                "ttl_seconds": null,
+                // No `created_at` tag: unknown, never the edit time.
+                "created_at": null,
+                "updated_at": null,
+            })
+        );
     }
 
     #[test]
@@ -2142,8 +2226,7 @@ mod tests {
             ["name", "old-channel"],
             ["archived", "true"],
         ]));
-        let s = ChannelSummary::from_event(&ev).expect("parse");
-        assert!(s.archived);
+        assert!(ChannelSummary::from_event(&ev).archived);
     }
 
     #[test]
@@ -2153,18 +2236,82 @@ mod tests {
             ["name", "secret"],
             ["private"],
         ]));
-        let s = ChannelSummary::from_event(&ev).expect("parse");
+        let s = ChannelSummary::from_event(&ev);
         assert_eq!(s.visibility.as_deref(), Some("private"));
     }
 
     #[test]
-    fn from_event_returns_none_without_required_tags() {
-        // missing `name`
-        let ev = event(json!([["d", "11111111-1111-1111-1111-111111111111"]]));
-        assert!(ChannelSummary::from_event(&ev).is_none());
-        // missing `d`
-        let ev = event(json!([["name", "no-id"]]));
-        assert!(ChannelSummary::from_event(&ev).is_none());
+    fn a_valueless_first_t_tag_is_still_the_type_slot() {
+        let s = ChannelSummary::from_event(&event(json!([["t"], ["t", "buzz.solo"], ["public"]])));
+        assert_eq!(s.channel_type, None);
+        assert_eq!(s.labels, vec!["buzz.solo".to_string()]);
+        assert_eq!(s.visibility.as_deref(), Some("open"));
+    }
+
+    fn channel(id: &str, name: &str, extra: serde_json::Value) -> serde_json::Value {
+        let mut tags = vec![json!(["d", id]), json!(["name", name])];
+        tags.extend(extra.as_array().expect("tags").iter().cloned());
+        json!({ "tags": tags })
+    }
+
+    fn ids(channels: &[ChannelSummary]) -> Vec<&str> {
+        channels.iter().map(|c| c.channel_id.as_str()).collect()
+    }
+
+    fn listed(
+        events: &[serde_json::Value],
+        visibility: Option<&str>,
+        include_archived: bool,
+    ) -> Vec<String> {
+        events
+            .iter()
+            .map(ChannelSummary::from_event)
+            .filter(|c| is_listed(c, visibility, include_archived))
+            .map(|c| c.channel_id)
+            .collect()
+    }
+
+    #[test]
+    fn list_hides_archived_channels_unless_asked() {
+        let events = vec![
+            channel("live", "a", json!([["public"]])),
+            channel("old", "b", json!([["public"], ["archived", "true"]])),
+        ];
+        assert_eq!(listed(&events, None, false), vec!["live"]);
+        assert_eq!(listed(&events, None, true), vec!["live", "old"]);
+    }
+
+    #[test]
+    fn list_filters_by_the_visibility_it_prints() {
+        let events = vec![
+            channel("open", "a", json!([["public"]])),
+            channel("secret", "b", json!([["private"]])),
+        ];
+        assert_eq!(listed(&events, Some("open"), false), vec!["open"]);
+        assert_eq!(listed(&events, Some("private"), false), vec!["secret"]);
+    }
+
+    #[test]
+    fn search_hides_archived_and_unnamed_channels() {
+        let events = vec![
+            channel("b", "Design-B", json!([])),
+            channel("a", "design-a", json!([])),
+            channel("old", "design-old", json!([["archived", "true"]])),
+            event(json!([["d", "unnamed"]])),
+            event(json!([["name", "design-no-id"]])),
+        ];
+        assert_eq!(
+            ids(&search_matches(&events, "design", false, false)),
+            vec!["b", "a"]
+        );
+        assert_eq!(
+            ids(&search_matches(&events, "design", false, true)),
+            vec!["b", "a", "old"]
+        );
+        assert_eq!(
+            ids(&search_matches(&events, "design-a", true, false)),
+            vec!["a"]
+        );
     }
 
     #[test]
@@ -2176,9 +2323,11 @@ mod tests {
             ["name"],
             ["d", "11111111-1111-1111-1111-111111111111"],
             ["name", "fine"],
+            ["created_at", "not-a-number"],
         ]));
-        let s = ChannelSummary::from_event(&ev).expect("parse");
-        assert_eq!(s.name, "fine");
+        let s = ChannelSummary::from_event(&ev);
+        assert_eq!(s.name.as_deref(), Some("fine"));
+        assert_eq!(s.created_at, None);
     }
 
     // `name_matches` takes a pre-lowercased needle (caller responsibility, set in

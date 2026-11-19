@@ -24,6 +24,8 @@ tests:
             value: external
         template: templates/deployment.yaml
   - it: renders a non-overlapping worker with an isolated cap
+    chart:
+      appVersion: "1.2.3"
     set:
       relayUrl: wss://buzz.example.com
       ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
@@ -98,7 +100,7 @@ tests:
       # falls back to Chart.AppVersion, the same value as the env var below.
       - equal:
           path: spec.jobTemplate.spec.template.metadata.labels["tags.datadoghq.com/version"]
-          value: 0.1.0
+          value: "1.2.3"
         template: templates/storage-accounting-cronjob.yaml
       - equal:
           path: spec.jobTemplate.spec.template.spec.containers[0].args
@@ -116,7 +118,7 @@ tests:
           path: spec.jobTemplate.spec.template.spec.containers[0].env
           content:
             name: BUZZ_STORAGE_SNAPSHOT_CODE_SHA
-            value: 0.1.0
+            value: "1.2.3"
         template: templates/storage-accounting-cronjob.yaml
       - contains:
           path: spec.jobTemplate.spec.template.spec.containers[0].env

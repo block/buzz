@@ -34,6 +34,7 @@ mod sidebar_sync;
 pub mod social;
 pub mod upload;
 pub mod users;
+pub(crate) mod verified_profiles;
 pub mod workflows;
 
 use crate::{client::normalize_write_response, error::CliError};

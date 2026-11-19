@@ -79,7 +79,7 @@ void main() {
   });
 
   test(
-    'Solo metadata survives details merges and classifies only own private streams',
+    'Solo metadata survives details merges regardless of stream visibility',
     () {
       for (final type in ['stream', 'forum', 'dm']) {
         for (final private in [true, false]) {
@@ -112,13 +112,10 @@ void main() {
           ).mergeDetails(details).copyWith(isMember: true);
           expect(channel.labels, ['buzz.solo']);
           expect(channel.createdBy, 'owner');
-          expect(channel.isSolo, type == 'stream' && private);
-          expect(channel.isSoloChat(const []), type == 'stream' && private);
+          expect(channel.isSolo, type == 'stream');
+          expect(channel.isSoloChat(const []), type == 'stream');
           expect(channel.isSoloChat(const ['chat']), isTrue);
-          expect(
-            channel.isPersonalChat('owner', const []),
-            type == 'stream' && private,
-          );
+          expect(channel.isPersonalChat('owner', const []), type == 'stream');
           expect(channel.isPersonalChat('other', const []), isFalse);
           expect(ChannelDetails.fromChannel(channel).labels, ['buzz.solo']);
         }
@@ -957,6 +954,7 @@ class _RecordingPublishRelaySession extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    Future<bool> Function()? mayPublish,
   }) async {
     publishedEvents.add(event);
     return event;

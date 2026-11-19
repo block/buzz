@@ -341,6 +341,9 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   private let content = NavigationContentController()
   private let navigation: UINavigationController
   private let channel: FlutterMethodChannel
+  private var configuredArguments: NSDictionary?
+  private var appearanceColor: UIColor?
+  private var appearanceUsesSystemScrollEdge: Bool?
   private var offset: CGFloat = 0
   private var controlBackground = UIColor.secondarySystemBackground
   private var foldRefresh: DispatchWorkItem?
@@ -621,6 +624,12 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   }
 
   private func configure(_ args: [String: Any]) {
+    // Flutter sends creation parameters again when the channel attaches.
+    // Keep the existing native glass and controls for identical updates.
+    let arguments = args as NSDictionary
+    guard configuredArguments?.isEqual(arguments) != true else { return }
+    configuredArguments = arguments
+
     titleInsetLeft = max(0, (args["titleInsetLeft"] as? NSNumber)?.doubleValue ?? 0)
     titleInsetRight = max(0, (args["titleInsetRight"] as? NSNumber)?.doubleValue ?? 0)
     controlBackground = Self.color(args["controlBackground"])
@@ -714,17 +723,22 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     // Let the native fade extend past the bar without enlarging its hit area.
     // The mirrored content is transparent and the bottom edge is hidden.
     container.clipsToBounds = !usesSystemScrollEdge
-    let appearance = UINavigationBarAppearance()
-    if usesSystemScrollEdge {
-      appearance.configureWithDefaultBackground()
-    } else {
-      appearance.configureWithTransparentBackground()
+    // Title, avatar and loading updates must not reset the blur appearance.
+    if appearanceColor != color || appearanceUsesSystemScrollEdge != usesSystemScrollEdge {
+      let appearance = UINavigationBarAppearance()
+      if usesSystemScrollEdge {
+        appearance.configureWithDefaultBackground()
+      } else {
+        appearance.configureWithTransparentBackground()
+      }
+      appearance.titleTextAttributes = [.foregroundColor: color]
+      appearance.largeTitleTextAttributes = [.foregroundColor: color]
+      bar.standardAppearance = appearance
+      bar.scrollEdgeAppearance = appearance
+      bar.compactAppearance = appearance
+      appearanceColor = color
+      appearanceUsesSystemScrollEdge = usesSystemScrollEdge
     }
-    appearance.titleTextAttributes = [.foregroundColor: color]
-    appearance.largeTitleTextAttributes = [.foregroundColor: color]
-    bar.standardAppearance = appearance
-    bar.scrollEdgeAppearance = appearance
-    bar.compactAppearance = appearance
     if bar.prefersLargeTitles != largeTitle {
       measuredWidth = 0
       titleIsCollapsed = nil

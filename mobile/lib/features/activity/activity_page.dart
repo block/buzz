@@ -28,6 +28,8 @@ import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/anchored_popover_menu.dart';
 import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/duo_toolbar.dart';
+import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/message_author_meta.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../channels/channel.dart';
@@ -47,7 +49,7 @@ import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import 'activity_provider.dart';
-import 'compose_drafts_provider.dart';
+import '../../shared/drafts/compose_drafts_provider.dart';
 import 'dm_resurface.dart';
 import 'feed_item.dart';
 import 'inbox_item.dart';
@@ -529,6 +531,16 @@ class ActivityPage extends HookConsumerWidget {
       );
     }
 
+    final strip = DuoToolbarScope.maybeStripOf(context);
+    final closeInRail =
+        defaultTargetPlatform == TargetPlatform.iOS &&
+        strip != null &&
+        usesConversationPanes(
+          context,
+          strip: strip,
+          windowSize:
+              View.of(context).physicalSize / View.of(context).devicePixelRatio,
+        );
     return IosScrollToTop(
       child: Scaffold(
         backgroundColor: context.colors.surface,
@@ -537,36 +549,62 @@ class ActivityPage extends HookConsumerWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: Grid.gutter,
-                  vertical: Grid.xxs,
-                ),
-                child: Row(
-                  children: [
-                    defaultTargetPlatform == TargetPlatform.iOS
-                        ? Padding(
-                            padding: const EdgeInsets.only(right: Grid.twelve),
-                            child: IosGlassNavigationButton(
-                              icon: IosGlassNavigationIcon.close,
-                              semanticLabel: 'Close activity',
-                              width: 44,
-                              height: 44,
-                              controlSize: 44,
-                              foregroundColor: navigationPrimaryForeground(
-                                context,
-                              ),
-                              onPressed: () => Navigator.of(context).pop(),
-                            ),
-                          )
-                        : IconButton(
-                            tooltip: 'Close activity',
-                            icon: const Icon(BuzzIcons.x),
-                            onPressed: () => Navigator.of(context).pop(),
+              Stack(
+                children: [
+                  if (closeInRail)
+                    FrostedAppBar(
+                      nativeTitle: '',
+                      railOnly: true,
+                      automaticallyImplyLeading: false,
+                      nativeLeading: IosNavigationAction(
+                        label: 'Close activity',
+                        symbol: 'xmark',
+                        onPressed: () => Navigator.of(context).pop(),
+                      ),
+                    ),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(
+                      minHeight: 44 + Grid.xxs * 2,
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: Grid.gutter,
+                        vertical: Grid.xxs,
+                      ),
+                      child: Row(
+                        children: [
+                          if (!closeInRail)
+                            defaultTargetPlatform == TargetPlatform.iOS
+                                ? Padding(
+                                    padding: const EdgeInsets.only(
+                                      right: Grid.twelve,
+                                    ),
+                                    child: IosGlassNavigationButton(
+                                      icon: IosGlassNavigationIcon.close,
+                                      semanticLabel: 'Close activity',
+                                      width: 44,
+                                      height: 44,
+                                      controlSize: 44,
+                                      foregroundColor:
+                                          navigationPrimaryForeground(context),
+                                      onPressed: () =>
+                                          Navigator.of(context).pop(),
+                                    ),
+                                  )
+                                : IconButton(
+                                    tooltip: 'Close activity',
+                                    icon: const Icon(BuzzIcons.x),
+                                    onPressed: () =>
+                                        Navigator.of(context).pop(),
+                                  ),
+                          Expanded(
+                            child: Text('Activity', style: headerTitleStyle),
                           ),
-                    Expanded(child: Text('Activity', style: headerTitleStyle)),
-                  ],
-                ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
               ),
               SizedBox(
                 height: filterHeight,

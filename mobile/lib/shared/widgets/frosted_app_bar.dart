@@ -1,3 +1,4 @@
+import 'adaptive_conversation_pane.dart';
 import 'package:duo_kit/duo_kit.dart';
 
 import 'duo_toolbar.dart';
@@ -269,6 +270,9 @@ class FrostedAppBar extends StatelessWidget {
     if (useNativeNavigation &&
         defaultTargetPlatform == TargetPlatform.iOS &&
         !nativeSuppressed) {
+      if (ConversationPaneScope.isReplacedBaseRouteOf(context)) {
+        return const SizedBox.shrink();
+      }
       final toolbarScope = DuoToolbarScope.maybeOf(context);
       final strip = toolbarScope == null
           ? FoldGeometry.of(context).strip
@@ -318,6 +322,7 @@ class FrostedAppBar extends StatelessWidget {
       // The bar reads the scroll offset itself, so scrolling rebuilds only
       // the frame around it, not its native payload.
       final nativeBar = IosNavigationBar(
+        key: ConversationPaneScope.nativeHeaderKeyOf(context),
         centerTitleInPane: strip != null && !nativeLargeTitle,
         titleInsets: nativeTitleInsets == EdgeInsets.zero
             ? railInsets
