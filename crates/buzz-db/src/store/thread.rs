@@ -688,8 +688,8 @@ pub(crate) async fn get_channel_window_on(
             // Every page walks from the month of the channel's creation floor,
             // or of its cursor when that is later: no row is older than the
             // floor, so a cursor below it would only walk empty windows. Without the
-            // channel's row there is no floor, and one window unbounded below
-            // reads the page.
+            // channel's row there is no floor: a page walks from its cursor, and
+            // a head page reads one window unbounded below.
             let floor = sqlx::query_scalar::<_, DateTime<Utc>>(
                 "SELECT created_at FROM channels WHERE community_id = $1 AND id = $2",
             )
@@ -698,7 +698,10 @@ pub(crate) async fn get_channel_window_on(
             .fetch_optional(&mut *conn)
             .await?
             .map(crate::store::recent_pass::channel_floor);
-            let earliest = floor.map(|floor| cursor_ts.map_or(floor, |ts| ts.max(floor)));
+            let earliest = match (floor, cursor_ts) {
+                (Some(floor), Some(ts)) => Some(ts.max(floor)),
+                (floor, ts) => floor.or(ts),
+            };
             Range::Forward(crate::store::recent_pass::oldest_for(
                 Utc::now(),
                 kinds.as_deref(),
@@ -2976,6 +2979,50 @@ mod postgres_tests {
             .expect("a cursor below the floor never plans the partitions below it");
         let expected: Vec<_> = oldest_first.iter().map(|e| e.id).collect();
         assert_eq!(row_ids(&window), expected);
+        unlock(locker, &mut conn).await;
+    }
+
+    /// A cursor page that cannot see its channel's row, as on a replica
+    /// behind the writer, walks from its cursor: a page that fills in its
+    /// first window never plans the partitions past it.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_window_newer_cursor_without_the_channel_row_walks_from_the_cursor() {
+        let pool = setup_pool().await;
+        let (channel, community, oldest_first) = dated_channel(
+            &pool,
+            &Keys::generate(),
+            "2026-01-10T00:00:00Z",
+            &[
+                unix("2026-01-12T00:00:00Z"),
+                unix("2026-01-13T00:00:00Z"),
+                unix("2026-04-10T00:00:00Z"),
+            ],
+        )
+        .await;
+        // The rows' thread metadata references the channel's row, so it goes
+        // first; a top-level row reads the same without it.
+        for sql in [
+            "DELETE FROM thread_metadata WHERE community_id = $1 AND channel_id = $2",
+            "DELETE FROM channels WHERE community_id = $1 AND id = $2",
+        ] {
+            sqlx::query(sql)
+                .bind(community.as_uuid())
+                .bind(channel)
+                .execute(&pool)
+                .await
+                .expect("hide the channel row");
+        }
+        let mut conn = pool.acquire().await.expect("acquire");
+        let [_first, later] =
+            distinct_partitions(&pool, [oldest_first[0].id, oldest_first[2].id]).await;
+        let locker = lock(&pool, &mut conn, [later]).await;
+        let at = DateTime::from_timestamp(unix("2026-01-11T00:00:00Z") as i64, 0).expect("date");
+        let window = newer_page(&mut conn, community, channel, 1, Some((at, vec![0u8; 32])))
+            .await
+            .expect("a page that fills in its first window never plans the partitions past it");
+        assert_eq!(row_ids(&window), vec![oldest_first[0].id]);
+        assert!(window.has_more);
         unlock(locker, &mut conn).await;
     }
 
