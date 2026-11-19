@@ -152,13 +152,19 @@ void main() {
       );
       player.position = const Duration(milliseconds: 100);
       await tester.pump(const Duration(milliseconds: 600));
-      await tester.pumpAndSettle();
-      expect(find.byKey(const Key('prepared-poster')), findsNothing);
+      await tester.pump();
+      expect(
+        tester.widget<AnimatedOpacity>(find.byType(AnimatedOpacity)).opacity,
+        0,
+      );
       // Looping back to zero must not flash the poster again.
       player.position = Duration.zero;
       await tester.pump(const Duration(milliseconds: 600));
       await tester.pump();
-      expect(find.byKey(const Key('prepared-poster')), findsNothing);
+      expect(
+        tester.widget<AnimatedOpacity>(find.byType(AnimatedOpacity)).opacity,
+        0,
+      );
       final navigator = tester.state<NavigatorState>(find.byType(Navigator));
       navigator.push<void>(
         PageRouteBuilder<void>(
@@ -224,8 +230,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 600));
     await tester.pumpAndSettle();
     expect(videoOpacity(), 1);
-    // The covered poster is dropped once the video shows.
-    expect(find.byType(AnimatedOpacity), findsNothing);
+    expect(posterOpacity(), 0);
 
     // Returning to the route mounts a new player, which starts covered.
     final navigator = tester.state<NavigatorState>(find.byType(Navigator));
@@ -255,17 +260,10 @@ void main() {
     await tester.pump(const Duration(milliseconds: 600));
     await tester.pumpAndSettle();
     expect(videoOpacity(), 1);
-    expect(find.byType(AnimatedOpacity), findsNothing);
+    expect(posterOpacity(), 0);
 
     // A new character covers with its own poster, never the previous one
     // kept by gapless playback.
-    navigator.push<void>(
-      PageRouteBuilder<void>(
-        opaque: false,
-        pageBuilder: (_, _, _) => const SizedBox.shrink(),
-      ),
-    );
-    await tester.pumpAndSettle();
     final previous = tester.state(find.byType(AvatarImageContent));
     await tester.pumpWidget(
       const ProviderScope(

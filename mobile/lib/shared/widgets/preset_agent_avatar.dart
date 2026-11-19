@@ -106,10 +106,6 @@ class PresetAgentAvatar extends HookWidget {
       }
       return null;
     }, [videoShown, controller, shownFrom.value, controller?.value.position]);
-    // Once the video covers it, drop the poster so a still-pending download
-    // is abandoned, as it was before the hand-off kept the poster mounted.
-    final posterFaded = useState(false);
-    if (!presented.value) posterFaded.value = false;
     final lifecycle = useAppLifecycleState();
     final playing =
         showNativeVideo &&
@@ -186,24 +182,20 @@ class PresetAgentAvatar extends HookWidget {
                   children: [
                     // The poster stays below the native layer, in Flutter's
                     // base layer: an overlay above it costs a blank frame.
-                    if (!(videoShown && posterFaded.value))
-                      IgnorePointer(
-                        key: const ValueKey('preset-poster'),
-                        child: AnimatedOpacity(
-                          opacity: videoShown && presented.value ? 0 : 1,
-                          // Cover a hidden player at once; fade only onto
-                          // video.
-                          duration: videoShown && presented.value
-                              ? const Duration(milliseconds: 160)
-                              : Duration.zero,
-                          onEnd: () {
-                            if (videoShown && presented.value) {
-                              posterFaded.value = true;
-                            }
-                          },
-                          child: posterImage,
-                        ),
+                    // It stays mounted under the video so the next showing
+                    // covers at once instead of reloading it.
+                    IgnorePointer(
+                      key: const ValueKey('preset-poster'),
+                      child: AnimatedOpacity(
+                        opacity: videoShown && presented.value ? 0 : 1,
+                        // Cover a hidden player at once; fade only onto
+                        // video.
+                        duration: videoShown && presented.value
+                            ? const Duration(milliseconds: 160)
+                            : Duration.zero,
+                        child: posterImage,
                       ),
+                    ),
                     if (videoShown)
                       Opacity(
                         key: const ValueKey('preset-video'),
