@@ -52,11 +52,39 @@ pub enum ReadIntent {
         /// Fixed anchor; retry must not substitute the latest message.
         message_id: String,
     },
-    /// Flag a context unread until the next `mark_through`.
+    /// Read one message without moving the context's read position. Only
+    /// what the list draws per message changes: a mention of the person
+    /// stops being unread. A message that does not tag them changes nothing.
+    MarkRead {
+        /// Channel or canonical thread the message belongs to.
+        target: ReadTarget,
+        /// The message read.
+        message_id: String,
+    },
+    /// Flag a context unread until the next `mark_through`. With a message,
+    /// also move the read position back to just before it, if it had
+    /// passed it: that message and everything after it is unread again,
+    /// mentions included. Nothing before it is read by this.
     MarkUnread {
         /// Channel or canonical thread being flagged.
         target: ReadTarget,
+        /// The first message to show unread.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
     },
+    /// Carry a NIP-RS read frontier over: advance the context through its
+    /// newest message signed at or before `through` (Unix seconds, the
+    /// NIP-RS frontier's own clock). Never moves the position back and never
+    /// clears a manual unread, so it is safe to replay from every device.
+    ImportThrough {
+        /// Channel or canonical thread the frontier belongs to.
+        target: ReadTarget,
+        /// The NIP-RS frontier.
+        through: u32,
+    },
+    /// Record that this person's NIP-RS read state has been carried over.
+    /// Until then a client does not treat the relay as the source of truth.
+    FinishImport {},
     /// Follow, mute or reset a context.
     SetState {
         /// Channel or canonical thread.
@@ -67,12 +95,15 @@ pub enum ReadIntent {
 }
 
 impl ReadIntent {
-    /// The context the intent changes.
-    pub fn target(&self) -> &ReadTarget {
+    /// The context the intent changes; none for an account-wide intent.
+    pub fn target(&self) -> Option<&ReadTarget> {
         match self {
             ReadIntent::MarkThrough { target, .. }
-            | ReadIntent::MarkUnread { target }
-            | ReadIntent::SetState { target, .. } => target,
+            | ReadIntent::MarkRead { target, .. }
+            | ReadIntent::MarkUnread { target, .. }
+            | ReadIntent::ImportThrough { target, .. }
+            | ReadIntent::SetState { target, .. } => Some(target),
+            ReadIntent::FinishImport {} => None,
         }
     }
 }
@@ -87,4 +118,46 @@ pub enum IntentOutcome {
     Blocked,
     /// Invalid operands; no changes committed for this intent.
     Invalid,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn intents_parse_strictly() {
+        let target = json!({"channel_id": Uuid::nil()});
+        let parse = |value: serde_json::Value| serde_json::from_value::<ReadIntent>(value);
+        assert!(matches!(
+            parse(json!({"type":"mark_unread","target":target})),
+            Ok(ReadIntent::MarkUnread {
+                message_id: None,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse(json!({"type":"mark_unread","target":target,"message_id":"ab"})),
+            Ok(ReadIntent::MarkUnread {
+                message_id: Some(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse(json!({"type":"mark_read","target":target,"message_id":"ab"})),
+            Ok(ReadIntent::MarkRead { .. })
+        ));
+        assert!(parse(json!({"type":"mark_read","target":target})).is_err());
+        assert!(matches!(
+            parse(json!({"type":"import_through","target":target,"through":1_700_000_000u32})),
+            Ok(ReadIntent::ImportThrough {
+                through: 1_700_000_000,
+                ..
+            })
+        ));
+        assert!(parse(json!({"type":"import_through","target":target,"through":-1})).is_err());
+        let finish = parse(json!({"type":"finish_import"})).expect("finish");
+        assert!(finish.target().is_none());
+        assert!(parse(json!({"type":"finish_import","target":target})).is_err());
+    }
 }

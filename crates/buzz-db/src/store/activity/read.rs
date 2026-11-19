@@ -20,7 +20,7 @@ const MAX_NAMED: usize = 200;
 const UNREAD_MENTIONS: &str = r#"SELECT count(*) FROM (
     SELECT 1
     FROM (
-        SELECT event_id, event_created_at, channel_id, root_id, received_at
+        SELECT event_id, event_created_at, channel_id, root_id, received_at, read_at
         FROM event_mentions
         WHERE community_id = $1 AND pubkey_hex = $3
             AND received_at > GREATEST(COALESCE($4::timestamptz, 'infinity'), $6::timestamptz)
@@ -34,7 +34,7 @@ const UNREAD_MENTIONS: &str = r#"SELECT count(*) FROM (
         AND e.id = m.event_id
     LEFT JOIN personal_read_frontiers f ON f.community_id = $1 AND f.actor = $2
         AND f.channel_id = m.channel_id AND f.root_id = COALESCE(m.root_id, ''::bytea)
-    WHERE m.received_at > COALESCE(f.through_timestamp, '-infinity')
+    WHERE m.received_at > COALESCE(f.through_timestamp, '-infinity') AND m.read_at IS NULL
         AND e.deleted_at IS NULL AND e.pubkey <> $2
     LIMIT $18
 ) unread"#;
@@ -100,7 +100,7 @@ const THREADS: &str = r#"SELECT 'thread' AS kind, encode(f.root_id, 'hex') AS id
 
 /// One page of the messages that tag the person, newest first, in channels
 /// they are still in. A row's unread follows the read position of the channel
-/// or thread it is in.
+/// or thread it is in, unless the mention was read on its own (`read_at`).
 ///
 /// The inner query walks the person's mentions in arrival order and stops at
 /// `$10` of them, so a page costs a bounded scan however few rows pass the
@@ -110,11 +110,11 @@ const MENTIONS: &str = r#"SELECT 'mention' AS kind, encode(m.event_id, 'hex') AS
         m.channel_id, m.root_id, m.received_at AS sort_at,
         m.event_id AS preview_id, e.pubkey AS preview_pubkey,
         e.created_at AS preview_created_at, left(e.content, $9) AS preview_text,
-        m.received_at > GREATEST(COALESCE(f.through_timestamp, '-infinity'),
+        m.read_at IS NULL AND m.received_at > GREATEST(COALESCE(f.through_timestamp, '-infinity'),
             COALESCE($4::timestamptz, 'infinity')) AS unread,
         COALESCE(f.state, 'default') AS state
     FROM (
-        SELECT event_id, event_created_at, channel_id, root_id, received_at
+        SELECT event_id, event_created_at, channel_id, root_id, received_at, read_at
         FROM event_mentions
         WHERE community_id = $1 AND pubkey_hex = $3 AND received_at > $5::timestamptz
             AND channel_id IS NOT NULL AND event_kind = ANY($6)
@@ -129,8 +129,9 @@ const MENTIONS: &str = r#"SELECT 'mention' AS kind, encode(m.event_id, 'hex') AS
         AND e.id = m.event_id AND e.deleted_at IS NULL AND e.pubkey <> $2
     LEFT JOIN personal_read_frontiers f ON f.community_id = $1 AND f.actor = $2
         AND f.channel_id = m.channel_id AND f.root_id = COALESCE(m.root_id, ''::bytea)
-    WHERE NOT $11 OR m.received_at > GREATEST(COALESCE(f.through_timestamp, '-infinity'),
-        COALESCE($4::timestamptz, 'infinity'))
+    WHERE NOT $11 OR (m.read_at IS NULL
+        AND m.received_at > GREATEST(COALESCE(f.through_timestamp, '-infinity'),
+            COALESCE($4::timestamptz, 'infinity')))
     ORDER BY m.received_at DESC, m.event_id LIMIT $12"#;
 
 /// The last mention the scan of [`MENTIONS`] reached, when it ran to its
@@ -586,6 +587,7 @@ impl Db {
         });
         let mut page = Page {
             marker: first.then_some(marker),
+            imported: Some(snapshot.imported),
             ..Page::default()
         };
         if let (true, Some(limit)) = (listing, limit) {
@@ -768,7 +770,7 @@ async fn snapshot(
     actor: &[u8; 32],
 ) -> Result<Snapshot> {
     let row = sqlx::query(
-        "SELECT now() AS now, a.started_at, COALESCE(a.seq, 0) AS seq
+        "SELECT now() AS now, a.started_at, a.imported_at, COALESCE(a.seq, 0) AS seq
          FROM (SELECT 1) one LEFT JOIN personal_read_accounts a
             ON a.community_id=$1 AND a.actor=$2",
     )
@@ -778,6 +780,9 @@ async fn snapshot(
     .await?;
     Ok(Snapshot {
         started_at: row.try_get("started_at")?,
+        imported: row
+            .try_get::<Option<DateTime<Utc>>, _>("imported_at")?
+            .is_some(),
         seq: row.try_get("seq")?,
         now: row.try_get("now")?,
     })

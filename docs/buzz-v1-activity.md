@@ -3,7 +3,9 @@
 `BUZZ_V1_ENABLED=true` opts into `/buzz/v1`; it is disabled by default.
 Conversation history, live events, edits and deletion remain Nostr-authoritative.
 This API neither replaces Nostr reads nor writes artificial signed events.
-Legacy NIP-RS continues unchanged, but does not synchronize with these tables.
+Legacy NIP-RS continues unchanged and is never read by the relay. A client
+carries its NIP-RS read state over once with `import_through` (see
+[Moving over from NIP-RS](#moving-over-from-nip-rs)).
 
 ## Discovery and identity
 
@@ -64,7 +66,8 @@ those views draw; filter and re-sort the rows on the client.
 | `since` | The `marker` of an earlier read: only what changed. Not combinable with `before` or `limit`. |
 
 ```json
-{"rows":[{"kind":"thread","id":"<root id>","channel_id":"<uuid>","root_id":"<root id>",
+{"imported":false,
+ "rows":[{"kind":"thread","id":"<root id>","channel_id":"<uuid>","root_id":"<root id>",
    "at":1731550000,
    "preview":{"id":"<64-hex>","pubkey":"<64-hex>","created_at":1731549990,
      "text":"first 256 characters"},
@@ -109,7 +112,8 @@ not this API.
     tagged) within 30 days. Or you
     flagged it unread.
   - mention: it arrived after the read position of the channel timeline or
-    thread it is in. Marking that scope read reads its mentions.
+    thread it is in, and was not read on its own (`mark_read`). Marking that
+    scope read reads its mentions.
   - A `muted` conversation or thread is never unread. A mention row inside it
     is still unread and still counted: a mention gets through a mute.
 - **`state`** is `default` or `muted`.
@@ -121,6 +125,12 @@ unread mention, look at the unread mention rows: each carries `channel_id`, and
 Nothing is unread before your account starts. Your first request to this API
 starts it; every read position is floored at that moment, so a scope you never
 marked counts only what arrived afterwards.
+
+- **`imported`** (every list read; null with `reset`; not on the mention
+  feed) is whether the person
+  finished carrying their NIP-RS read state over (`finish_import`). While it
+  is false, a client that also speaks NIP-RS keeps showing its NIP-RS unreads
+  and imports them; it does not show the relay's.
 
 ### Order and paging
 
@@ -177,8 +187,9 @@ change (rows changed in the 30 seconds before the marker are sent again).
 
 `since` covers:
 
-- every change you made: marks, manual unread, state changes, and the read
-  position your own post moved;
+- every change you made: marks, a mention read on its own (it returns that
+  scope's row and fresh `totals`), manual unread, state changes, imports, and
+  the read position your own post moved;
 - a new preview: a top-level message in a conversation, a reply in a thread,
   or an edit of a conversation's preview;
 - joining or leaving a channel. Joining returns the conversation's row however
@@ -248,8 +259,12 @@ New messages are not pushed this way: they already arrive as events.
 {"intents":[
  {"type":"mark_through","target":{"channel_id":"<uuid>"},"message_id":"<64-hex>"},
  {"type":"mark_through","target":{"channel_id":"<uuid>","root_id":"<64-hex>"},"message_id":"<64-hex>"},
+ {"type":"mark_read","target":{"channel_id":"<uuid>"},"message_id":"<64-hex>"},
  {"type":"mark_unread","target":{"channel_id":"<uuid>","root_id":"<64-hex>"}},
- {"type":"set_state","target":{"channel_id":"<uuid>"},"state":"muted"}
+ {"type":"mark_unread","target":{"channel_id":"<uuid>"},"message_id":"<64-hex>"},
+ {"type":"set_state","target":{"channel_id":"<uuid>"},"state":"muted"},
+ {"type":"import_through","target":{"channel_id":"<uuid>"},"through":1731550000},
+ {"type":"finish_import"}
 ]}
 ```
 
@@ -262,8 +277,27 @@ The two keep independent read positions.
   message of the channel's timeline (top-level, or a broadcast reply); a thread
   anchor is the thread's root or one of its replies. To mark a row read, send
   its `preview.id`.
+- **`mark_read`** reads one message of the scope (an anchor as for
+  `mark_through`) without moving the read position: a mention of you stops
+  being unread on every device, and the rest of the scope stays as it was.
+  This is what a client sends when a mention, or a reply that tags you, has
+  been on screen long enough to count as read but the person has not reached
+  the bottom. A message that does not tag you has nothing of its own to read;
+  the intent is applied and changes nothing. To read a thread's replies up to
+  one the person saw, use `mark_through` on the thread: its replies are read
+  in order.
 - **`mark_unread`** flags the scope unread until the next `mark_through`.
+  With a `message_id` it is "mark unread from here": if the read position
+  had passed that message, it moves back to the instant before the message's
+  arrival; the scope is flagged unread; and mentions in the scope from that
+  message on that were read on their own are unread again. It only moves
+  back, so it never reads a message before the one named: a position that is
+  already earlier, or was never set, stays where it is. It is the one intent
+  that moves a position backward. Messages from before the account started
+  stay read (the floor below); only the flag shows.
 - **`set_state`** sets `default` or `muted`.
+- **`import_through`** and **`finish_import`** carry NIP-RS read state over
+  (next section).
 
 Posting a message moves your own read position to it, in the thread and, for a
 top-level or broadcast message, in the channel. No intent is needed. It does not
@@ -273,7 +307,10 @@ The response is `{"outcomes":[...],"rows":[...]}`. Each intent commits on its
 own and returns `applied`, `blocked` (missing or forbidden, deliberately the
 same) or `invalid`, in request order. An ambiguous timeout or storage failure
 returns `{"status":"unknown","retryable":true}`; retry the same operands, never
-substitute a newer message. Earlier committed outcomes survive later failures.
+substitute a newer message. Because `mark_unread` with a message moves a
+position back, a retried `mark_through` or `import_through` that lands after it
+reads that message again: retry before sending later intents for the scope,
+not after. Earlier committed outcomes survive later failures.
 `rows` holds the updated conversation and thread rows of the applied targets,
 in the list's row shape; a target in a channel you have not joined, or a thread
 the list would not show, has no row.
@@ -283,9 +320,73 @@ deadline after the writes committed.
 
 A read position is the relay arrival time of its anchor, never the author's
 time, which the sender chooses. The order is the relay's: send the anchors the
-user actually saw and let the relay take the greatest. Arrival is the accepting
+user actually saw. `mark_through` and `import_through` take the greatest; only
+`mark_unread` with a message moves a position back. Arrival is the accepting
 relay process's clock: it is not commit order, processes can differ by their
 clock skew, and messages with the identical stamp are read together.
+
+## Moving over from NIP-RS
+
+The relay cannot read NIP-RS: its blobs are encrypted to their owner. A
+client that holds them carries them over, and nothing on the relay is trusted
+for a person until it has.
+
+**What the relay offers.**
+
+- **`import_through`** takes a scope and a NIP-RS frontier, `through`, in
+  Unix seconds on NIP-RS's own clock (the signed `created_at` of the messages
+  it covers). The relay finds the scope's newest message signed at or before
+  it (a channel's timeline message, or a thread's root or reply) and advances
+  the read position through that message's arrival. It never moves a position
+  back and never clears a manual unread, so it is safe to send again and from
+  every device; the greatest frontier wins, as in NIP-RS. A frontier that does
+  not advance the position, including one from before the account started,
+  writes nothing, so a replay does not show up in other devices' `since`. A
+  channel looks at its newest 512 events at or before the frontier, and a
+  thread at its newest 512 replies; a scope with nothing that old is applied
+  and unchanged.
+- **`finish_import`** records, once, that the person's read state has been
+  carried over. Every list read reports it as `imported`. A person with no
+  NIP-RS state still needs it: until it is sent, a v1-only client shows no
+  unread state.
+
+**What a client does.**
+
+1. On its first v1 start for a community, before showing the relay's unread
+   state, decode its merged NIP-RS state (what it shows today) and send one
+   `import_through` per channel frontier and per `thread:` frontier newer than
+   the 30-day NIP-RS floor, 100 per request. Every client runs this in the
+   same rollout window, so start it after a random delay and back off, with a
+   cap, on `unknown` outcomes or failed requests.
+2. When every `import_through` came back `applied` or `blocked` (retry
+   `unknown` ones first), send `finish_import`, even if there was nothing to
+   import, and trust the list from then on.
+3. Until `imported` is true, keep showing NIP-RS unreads. A client that only
+   speaks v1 shows no unread state while `imported` is false, rather than
+   everything unread.
+4. While devices that have not upgraded may still read with NIP-RS, keep
+   reading NIP-RS on every v1 start and reconnect, and forward any frontier
+   that advanced as `import_through`. Keep writing NIP-RS frontiers too, so
+   those devices see what was read on the upgraded ones. Stop both once no
+   supported client release reads NIP-RS.
+
+**What a person sees.**
+
+- Nothing changes on the switch: the same channels and threads are read.
+- Unread state from before the account started is not carried over as
+  unread. Every read position is floored at the start, so a mention that was
+  still unread under NIP-RS when the person first used a v1 client is read on
+  the relay. This is deliberate: the switch can make old messages read, never
+  unread. (A client that wants to keep a channel bold can send `mark_unread`
+  for it during the import.)
+- Mentions and replies read by dwell, and messages marked unread one by one,
+  were kept on one device under NIP-RS and are not carried over. From the
+  switch on they are kept on the relay and agree on every device.
+- A device that has not upgraded keeps its NIP-RS behaviour. What it reads
+  reaches the relay the next time an upgraded device of the same person
+  starts or reconnects (step 4). What upgraded devices read reaches it through
+  their NIP-RS writes, except per-message reads and unreads, which NIP-RS
+  never synced.
 
 ## Stored state
 
@@ -294,8 +395,8 @@ clock skew, and messages with the identical stamp are read together.
 | `channel_heads` | conversation | newest top-level message with its arrival, text and latest edit |
 | `thread_heads` | thread with a reply | newest reply with its arrival and text |
 | `personal_read_frontiers` | person and scope | read position, state, manual unread, when the person was last part of the thread, their change counter at their last write |
-| `personal_read_accounts` | person | when unread tracking started, their change counter |
-| `event_mentions` | person tagged in an event | now also the event's arrival and thread root |
+| `personal_read_accounts` | person | when unread tracking started, their change counter, when their NIP-RS state was carried over (`imported_at`) |
+| `event_mentions` | person tagged in an event | now also the event's arrival and thread root, and when the person read it on its own (`read_at`) |
 
 The event log is the truth. The two shared tables are caches of it that prove
 their own freshness: each row records the newest stored event it accounts for
@@ -386,7 +487,9 @@ These are accepted. Each is rare, and the counters above watch the first two.
 - 64 KiB write body; 1 MiB response. DB statement and lock deadlines and an
   eight-second request deadline bound the work.
 
-Apply migrations 0089 and 0090 (or the equivalent desired schema). 0089 creates
+Apply migrations 0089, 0090 and 0091 (or the equivalent desired schema).
+0091 adds two nullable columns, `event_mentions.read_at` and
+`personal_read_accounts.imported_at`, with no default and no index. 0089 creates
 `channel_heads` and `thread_heads` empty, adds nullable or defaulted columns to
 the three existing tables and makes `personal_read_frontiers.through_timestamp`
 nullable. The two shared tables have no index beyond their primary key: every
@@ -431,8 +534,12 @@ are strict: unknown parameters and intent types are rejected, so send a new one
 only after the relay advertises a version that has it. The WebSocket frame is
 additive: a client that does not know `BUZZ` frames ignores them.
 
+The intents `mark_read`, `import_through` and `finish_import`, `mark_unread`
+with a `message_id`, and the `imported` field were added to version 2 before
+any client shipped it.
+
 Not in this version: a window of rows around a given message, search cursors,
-synchronisation with NIP-RS, per-row mention counts, reply counts, the message
+reading NIP-RS on the relay, per-row mention counts, reply counts, the message
 a scope was last read through, following a thread you are not part of, and
 a server-side unread filter for
 conversations and threads (the client holds that whole list and filters it).

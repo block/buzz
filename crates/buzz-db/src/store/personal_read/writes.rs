@@ -160,9 +160,15 @@ pub(super) async fn valid_target(
 
 /// What an applied intent does to the context's row.
 enum Change<'a> {
+    /// Advance through a message and clear a manual unread.
     Through(&'a Message),
+    /// Advance through a message, leaving a manual unread as it is.
+    Import(&'a Message),
     Unread,
     State(ReadState),
+    /// Stamp the row with the counter only, so `since` reports a change
+    /// made beside it (a mention read on its own).
+    Touch,
 }
 
 /// Write the person's row for a context, stamped with their counter. A read
@@ -179,8 +185,10 @@ async fn write(
 ) -> Result<()> {
     let (through, unread, state) = match change {
         Change::Through(msg) => (Some(msg), Some(false), None),
+        Change::Import(msg) => (Some(msg), None, None),
         Change::Unread => (None, Some(true), None),
         Change::State(state) => (None, None, Some(state.as_str())),
+        Change::Touch => (None, None, None),
     };
     sqlx::query(
         "INSERT INTO personal_read_frontiers AS f
@@ -210,6 +218,166 @@ async fn write(
     Ok(())
 }
 
+/// "Mark unread from here": the read position moves back to the instant
+/// before the message's arrival, and the context is flagged unread. It only
+/// moves back, so nothing before the message is read by it: a position
+/// already earlier, or never set, stays as it is. Messages that share its
+/// arrival stamp are unread with it, as they are read with it. Mentions read
+/// on their own from that message on are unread again.
+async fn before(
+    tx: &mut AdmittedTx,
+    community: CommunityId,
+    actor: &[u8],
+    target: &ReadTarget,
+    root: &[u8],
+    seq: i64,
+    msg: &Message,
+) -> Result<()> {
+    let position = msg.received_at - chrono::Duration::microseconds(1);
+    sqlx::query(
+        "INSERT INTO personal_read_frontiers AS f
+         (community_id, actor, channel_id, root_id, through_timestamp, through_message_id,
+            marked_unread, seq)
+         VALUES ($1,$2,$3,$4,NULL,NULL,true,$6)
+         ON CONFLICT (community_id, actor, channel_id, root_id) DO UPDATE
+         SET through_message_id=CASE WHEN f.through_timestamp > $5
+                THEN NULL ELSE f.through_message_id END,
+            through_timestamp=CASE WHEN f.through_timestamp > $5
+                THEN $5 ELSE f.through_timestamp END,
+            marked_unread=true, seq=EXCLUDED.seq",
+    )
+    .bind(community.as_uuid())
+    .bind(actor)
+    .bind(target.channel_id)
+    .bind(root)
+    .bind(position)
+    .bind(seq)
+    .execute(tx.conn())
+    .await?;
+    sqlx::query(
+        "UPDATE event_mentions SET read_at=NULL
+         WHERE community_id=$1 AND pubkey_hex=$2 AND received_at >= $3
+            AND channel_id=$4 AND COALESCE(root_id, ''::bytea)=$5 AND read_at IS NOT NULL",
+    )
+    .bind(community.as_uuid())
+    .bind(hex::encode(actor))
+    .bind(msg.received_at)
+    .bind(target.channel_id)
+    .bind(root)
+    .execute(tx.conn())
+    .await?;
+    Ok(())
+}
+
+/// Read one mention of the person on its own. Whether anything changed.
+async fn read_mention(
+    tx: &mut AdmittedTx,
+    community: CommunityId,
+    actor: &[u8],
+    msg: &Message,
+) -> Result<bool> {
+    Ok(sqlx::query(
+        "UPDATE event_mentions SET read_at=now()
+         WHERE community_id=$1 AND pubkey_hex=$2 AND event_id=$3 AND read_at IS NULL",
+    )
+    .bind(community.as_uuid())
+    .bind(hex::encode(actor))
+    .bind(msg.id.as_slice())
+    .execute(tx.conn())
+    .await?
+    .rows_affected()
+        > 0)
+}
+
+/// The context's newest message signed at or before `through`: a channel's
+/// timeline message (top-level or broadcast reply), or a thread's root or
+/// reply. Bounded like the rebuild: a channel looks at its newest 512 events
+/// at or before the frontier, so a run of thread replies longer than that
+/// imports nothing for the channel, and a thread at its newest 512 replies.
+async fn import_anchor(
+    conn: &mut PgConnection,
+    community: CommunityId,
+    channel: Uuid,
+    root: &[u8],
+    through: u32,
+) -> Result<Option<Vec<u8>>> {
+    let through = DateTime::<Utc>::from_timestamp(i64::from(through), 0)
+        .ok_or_else(|| crate::DbError::InvalidData("invalid frontier".into()))?;
+    let query = if root.is_empty() {
+        sqlx::query_scalar(
+            "SELECT e.id FROM (
+                SELECT id, created_at, channel_id FROM events
+                WHERE community_id=$1 AND channel_id=$2 AND created_at <= $3 AND kind=ANY($4)
+                ORDER BY created_at DESC, id DESC LIMIT 512
+             ) e LEFT JOIN thread_metadata tm ON tm.community_id=$1
+                AND tm.event_created_at=e.created_at AND tm.event_id=e.id
+                AND tm.channel_id=e.channel_id
+             WHERE tm.root_event_id IS NULL OR tm.root_event_id=e.id
+                OR (tm.depth=1 AND tm.broadcast)
+             ORDER BY e.created_at DESC, e.id DESC LIMIT 1",
+        )
+    } else {
+        // Replies walk the thread window index newest first, bounded like
+        // the channel; the root is looked up on its own.
+        sqlx::query_scalar(
+            "SELECT id FROM (
+                SELECT e.id, e.created_at FROM (
+                    SELECT event_created_at, event_id FROM thread_metadata
+                    WHERE community_id=$1 AND root_event_id=$5 AND channel_id=$2
+                        AND event_created_at <= $3
+                    ORDER BY event_created_at DESC, event_id ASC LIMIT 512
+                ) r JOIN events e ON e.community_id=$1 AND e.created_at=r.event_created_at
+                    AND e.id=r.event_id AND e.channel_id=$2 AND e.kind=ANY($4)
+                UNION ALL
+                SELECT id, created_at FROM events
+                WHERE community_id=$1 AND id=$5 AND channel_id=$2
+                    AND created_at <= $3 AND kind=ANY($4)
+             ) c ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+    };
+    let query = query
+        .bind(community.as_uuid())
+        .bind(channel)
+        .bind(through)
+        .bind(ELIGIBLE_KINDS.as_slice());
+    // Only the thread's query names the root.
+    let query = if root.is_empty() {
+        query
+    } else {
+        query.bind(root)
+    };
+    Ok(query.fetch_optional(&mut *conn).await?)
+}
+
+/// An eligible message of the target's context: a channel's timeline
+/// message, or a thread's root or reply.
+async fn anchor(
+    conn: &mut PgConnection,
+    community: CommunityId,
+    target: &ReadTarget,
+    root: &[u8],
+    id: &[u8],
+) -> Result<Option<Message>> {
+    let Some(msg) = message(
+        conn,
+        community,
+        target.channel_id,
+        id,
+        Some(&ELIGIBLE_KINDS),
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let is_reply = msg.root.as_ref().is_some_and(|r| r != &msg.id);
+    if (root.is_empty() && is_reply && !msg.broadcast)
+        || (!root.is_empty() && msg.id != root && msg.root.as_deref() != Some(root))
+    {
+        return Ok(None);
+    }
+    Ok(Some(msg))
+}
+
 pub(super) async fn apply(
     tx: &mut AdmittedTx,
     community: CommunityId,
@@ -217,19 +385,61 @@ pub(super) async fn apply(
     seq: i64,
     intent: &ReadIntent,
 ) -> Result<IntentOutcome> {
-    let target = intent.target();
-    if let ReadIntent::MarkThrough { message_id, .. } = intent {
-        if event_id(message_id).is_none() {
-            return Ok(IntentOutcome::Invalid);
-        }
-    }
+    let Some(target) = intent.target() else {
+        // The only account-wide intent: the first finish stands.
+        sqlx::query(
+            "UPDATE personal_read_accounts SET imported_at=COALESCE(imported_at, now())
+             WHERE community_id=$1 AND actor=$2",
+        )
+        .bind(community.as_uuid())
+        .bind(actor)
+        .execute(tx.conn())
+        .await?;
+        return Ok(IntentOutcome::Applied);
+    };
+    let anchor_id = match intent {
+        ReadIntent::MarkThrough { message_id, .. }
+        | ReadIntent::MarkRead { message_id, .. }
+        | ReadIntent::MarkUnread {
+            message_id: Some(message_id),
+            ..
+        } => match event_id(message_id) {
+            Some(id) => Some(id),
+            None => return Ok(IntentOutcome::Invalid),
+        },
+        _ => None,
+    };
     let Some(root) = valid_target(tx.conn(), community, actor, target).await? else {
         return Ok(IntentOutcome::Blocked);
     };
-    match intent {
-        ReadIntent::MarkThrough { message_id, .. } => {
-            let id = event_id(message_id).unwrap_or_default();
-            let Some(msg) = message(
+    let msg = match &anchor_id {
+        Some(id) => match anchor(tx.conn(), community, target, &root, id).await? {
+            Some(msg) => Some(msg),
+            None => return Ok(IntentOutcome::Blocked),
+        },
+        None => None,
+    };
+    let change = match (intent, msg.as_ref()) {
+        (ReadIntent::MarkThrough { .. }, Some(msg)) => Change::Through(msg),
+        (ReadIntent::MarkUnread { .. }, Some(msg)) => {
+            before(tx, community, actor, target, &root, seq, msg).await?;
+            return Ok(IntentOutcome::Applied);
+        }
+        (ReadIntent::MarkUnread { .. }, None) => Change::Unread,
+        (ReadIntent::MarkRead { .. }, Some(msg)) => {
+            if !read_mention(tx, community, actor, msg).await? {
+                return Ok(IntentOutcome::Applied);
+            }
+            Change::Touch
+        }
+        (ReadIntent::ImportThrough { through, .. }, _) => {
+            let Some(id) =
+                import_anchor(tx.conn(), community, target.channel_id, &root, *through).await?
+            else {
+                // Nothing in the context is that old: nothing to carry over.
+                return Ok(IntentOutcome::Applied);
+            };
+            let Some(found) = message(
                 tx.conn(),
                 community,
                 target.channel_id,
@@ -238,16 +448,26 @@ pub(super) async fn apply(
             )
             .await?
             else {
-                return Ok(IntentOutcome::Blocked);
+                return Ok(IntentOutcome::Applied);
             };
-            // A channel is marked through a message of its own timeline: a
-            // top-level message or a broadcast reply. A thread through its
-            // root or one of its replies.
-            let is_reply = msg.root.as_ref().is_some_and(|r| r != &msg.id);
-            if (root.is_empty() && is_reply && !msg.broadcast)
-                || (!root.is_empty() && msg.id != root && msg.root.as_ref() != Some(&root))
-            {
-                return Ok(IntentOutcome::Blocked);
+            // Only a real advance writes: replays and frontiers from before
+            // the account started (already read by its floor) leave the row,
+            // and its counter, alone, so other devices see no change.
+            let position: Option<DateTime<Utc>> = sqlx::query_scalar(
+                "SELECT GREATEST(a.started_at, f.through_timestamp)
+                 FROM personal_read_accounts a LEFT JOIN personal_read_frontiers f
+                    ON f.community_id=a.community_id AND f.actor=a.actor
+                    AND f.channel_id=$3 AND f.root_id=$4
+                 WHERE a.community_id=$1 AND a.actor=$2",
+            )
+            .bind(community.as_uuid())
+            .bind(actor)
+            .bind(target.channel_id)
+            .bind(&root)
+            .fetch_one(tx.conn())
+            .await?;
+            if position.is_some_and(|position| found.received_at <= position) {
+                return Ok(IntentOutcome::Applied);
             }
             write(
                 tx,
@@ -256,26 +476,15 @@ pub(super) async fn apply(
                 target,
                 &root,
                 seq,
-                Change::Through(&msg),
+                Change::Import(&found),
             )
             .await?;
+            return Ok(IntentOutcome::Applied);
         }
-        ReadIntent::MarkUnread { .. } => {
-            write(tx, community, actor, target, &root, seq, Change::Unread).await?;
-        }
-        ReadIntent::SetState { state, .. } => {
-            write(
-                tx,
-                community,
-                actor,
-                target,
-                &root,
-                seq,
-                Change::State(*state),
-            )
-            .await?;
-        }
-    }
+        (ReadIntent::SetState { state, .. }, _) => Change::State(*state),
+        _ => return Ok(IntentOutcome::Invalid),
+    };
+    write(tx, community, actor, target, &root, seq, change).await?;
     Ok(IntentOutcome::Applied)
 }
 

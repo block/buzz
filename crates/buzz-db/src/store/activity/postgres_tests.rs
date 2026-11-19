@@ -232,6 +232,25 @@ impl Fixture {
         .await
     }
 
+    /// Age the shared rows' change stamps out of the commit-skew window, so
+    /// `since` can report a row only through the person's own counter.
+    async fn quiet(&self) {
+        for sql in [
+            "UPDATE channel_heads SET updated_at = updated_at - interval '1 hour' \
+             WHERE community_id = $1",
+            "UPDATE thread_heads SET updated_at = updated_at - interval '1 hour' \
+             WHERE community_id = $1",
+            "UPDATE channel_members SET sync_modified_at = sync_modified_at - interval '1 hour' \
+             WHERE community_id = $1",
+        ] {
+            sqlx::query(sql)
+                .bind(self.community.as_uuid())
+                .execute(&self.pool)
+                .await
+                .expect("age shared rows");
+        }
+    }
+
     /// Forget shared rows, as for history older than the tables.
     async fn forget(&self) {
         for table in ["channel_heads", "thread_heads"] {
@@ -311,6 +330,7 @@ async fn conversation_unread_follows_read_intents() {
     // A manual unread lasts until the next mark_through.
     let flag = ReadIntent::MarkUnread {
         target: f.target(None),
+        message_id: None,
     };
     assert_eq!(f.intent(flag).await, IntentOutcome::Applied);
     assert!(f.conversation().await.unread);
@@ -484,6 +504,7 @@ async fn activity_threads_and_mentions_follow_the_thread_position() {
     f.forget().await;
     let flag = ReadIntent::MarkUnread {
         target: f.target(Some(&theirs)),
+        message_id: None,
     };
     assert_eq!(f.intent(flag).await, IntentOutcome::Applied);
     assert!(f.row(&theirs.id.to_hex()).await.unread);
@@ -1097,4 +1118,187 @@ async fn activity_backfill_restores_history_from_before_the_tables() {
         f.read(&all()).await.totals,
     );
     assert_eq!(after, before);
+}
+
+/// Reading or flagging one message on one device holds on every device: a
+/// mention read on its own stops being unread without reading the rest of
+/// its timeline, and marking a message unread brings it and everything after
+/// it back, never reading what came before it.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn activity_one_message_reads_and_unreads_on_its_own() {
+    let f = fixture().await;
+    f.list().await;
+    let shout = f.event(&f.other, 9, "hey you", 20, vec![f.tag_me()]);
+    f.store(&shout, f.channel, None).await;
+    let later = f.post(&f.other, "later", 30).await;
+    assert!(f.conversation().await.unread);
+    assert_eq!(f.list().await.totals.expect("totals").mention, 1);
+
+    let unread_from = |message: &Event| ReadIntent::MarkUnread {
+        target: f.target(None),
+        message_id: Some(message.id.to_hex()),
+    };
+    // Marking a later message unread only moves back: the earlier mention
+    // stays unread.
+    assert_eq!(f.intent(unread_from(&later)).await, IntentOutcome::Applied);
+    assert_eq!(f.mention_ids(true).await, [(shout.id.to_hex(), true)]);
+    assert_eq!(f.list().await.totals.expect("totals").mention, 1);
+
+    f.quiet().await;
+    let marker = f.list().await.marker.expect("marker");
+
+    let mark_read = |root: Option<&Event>, message: &Event| ReadIntent::MarkRead {
+        target: f.target(root),
+        message_id: message.id.to_hex(),
+    };
+    // Reading the mention by itself leaves the rest of the channel unread.
+    assert_eq!(
+        f.intent(mark_read(None, &shout)).await,
+        IntentOutcome::Applied
+    );
+    assert!(f.mention_ids(true).await.is_empty());
+    assert_eq!(f.mention_ids(false).await, [(shout.id.to_hex(), false)]);
+    assert!(f.conversation().await.unread);
+    assert_eq!(f.list().await.totals.expect("totals").mention, 0);
+    // Another device learns of it from `since`, with fresh totals, through
+    // the person's counter alone: the shared rows are quiet.
+    let changed = f
+        .read(&Query {
+            select: Select::Since(marker),
+            ..all()
+        })
+        .await;
+    assert_eq!(changed.totals.expect("totals").mention, 0);
+    assert!(changed
+        .rows
+        .iter()
+        .any(|row| row.id == f.channel.to_string()));
+    // A message that does not tag me has nothing of its own to read.
+    assert_eq!(
+        f.intent(mark_read(None, &later)).await,
+        IntentOutcome::Applied
+    );
+    assert!(f.conversation().await.unread);
+
+    assert_eq!(f.mark_through(None, &later).await, IntentOutcome::Applied);
+    assert!(!f.conversation().await.unread);
+
+    // Mark unread from the mention: it and everything after it is unread
+    // again, though the position had passed both.
+    assert_eq!(f.intent(unread_from(&shout)).await, IntentOutcome::Applied);
+    assert!(f.conversation().await.unread);
+    assert_eq!(f.mention_ids(true).await, [(shout.id.to_hex(), true)]);
+    assert_eq!(f.list().await.totals.expect("totals").mention, 1);
+    // Reading through clears it all.
+    assert_eq!(f.mark_through(None, &later).await, IntentOutcome::Applied);
+    assert!(!f.conversation().await.unread);
+    assert!(f.mention_ids(true).await.is_empty());
+    // Mark unread from the last message flags the row even with my own
+    // post on top.
+    f.post(&f.me, "mine", 40).await;
+    assert_eq!(f.intent(unread_from(&later)).await, IntentOutcome::Applied);
+    assert!(f.conversation().await.unread);
+
+    // A mention in a thread is read with the thread as its target; the
+    // thread's own position does not move.
+    let root = f.post(&f.me, "my root", 50).await;
+    let tagged = f.event(
+        &f.other,
+        9,
+        "reply for you",
+        60,
+        vec![
+            Tag::parse(["e", &root.id.to_hex(), "", "root"]).expect("tag"),
+            f.tag_me(),
+        ],
+    );
+    f.store(&tagged, f.channel, Some((&root, false))).await;
+    f.reply(&f.other, &root, "after it", 70).await;
+    assert_eq!(
+        f.intent(mark_read(None, &tagged)).await,
+        IntentOutcome::Blocked,
+        "a reply is not a message of the channel timeline"
+    );
+    assert_eq!(
+        f.intent(mark_read(Some(&root), &tagged)).await,
+        IntentOutcome::Applied
+    );
+    assert!(f.mention_ids(true).await.is_empty());
+    assert!(f.row(&root.id.to_hex()).await.unread);
+
+    // Operands are checked.
+    let bad = ReadIntent::MarkRead {
+        target: f.target(None),
+        message_id: "not hex".into(),
+    };
+    assert_eq!(f.intent(bad).await, IntentOutcome::Invalid);
+    let bad = ReadIntent::MarkUnread {
+        target: f.target(None),
+        message_id: Some("ab".repeat(32)),
+    };
+    assert_eq!(f.intent(bad).await, IntentOutcome::Blocked);
+}
+
+/// A NIP-RS frontier carries over as a read position: forward only, never
+/// clearing a manual unread, and safe to replay. `finish_import` is what
+/// tells clients the relay's read state can be trusted.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn activity_import_carries_nip_rs_frontiers_over() {
+    let f = fixture().await;
+    assert_eq!(f.list().await.imported, Some(false));
+    let import = |root: Option<&Event>, offset: u64| ReadIntent::ImportThrough {
+        target: f.target(root),
+        through: (f.base + offset) as u32,
+    };
+    // Nothing in the channel is that old yet: nothing to carry over.
+    assert_eq!(f.intent(import(None, 5)).await, IntentOutcome::Applied);
+
+    f.post(&f.other, "a", 20).await;
+    let root = f.post(&f.me, "my root", 25).await;
+    f.post(&f.other, "b", 30).await;
+    // Signed after the frontier below, and arriving before the reply.
+    f.post(&f.other, "late", 38).await;
+    f.reply(&f.other, &root, "reply", 35).await;
+    assert!(f.conversation().await.unread);
+    assert!(f.row(&root.id.to_hex()).await.unread);
+
+    // Through 36 lands on b, so `late` stays unread. The thread reply signed
+    // at 35 is not part of the channel's timeline: anchoring on it would read
+    // `late`, which arrived before it.
+    assert_eq!(f.intent(import(None, 36)).await, IntentOutcome::Applied);
+    assert!(f.conversation().await.unread);
+    f.post(&f.other, "c", 40).await;
+    assert_eq!(f.intent(import(None, 40)).await, IntentOutcome::Applied);
+    assert!(!f.conversation().await.unread);
+    // An older frontier from a lagging device moves nothing back.
+    assert_eq!(f.intent(import(None, 20)).await, IntentOutcome::Applied);
+    assert!(!f.conversation().await.unread);
+
+    // A thread's frontier reads the thread, not the channel.
+    assert_eq!(
+        f.intent(import(Some(&root), 35)).await,
+        IntentOutcome::Applied
+    );
+    assert!(!f.row(&root.id.to_hex()).await.unread);
+
+    // Import never clears a flag set on the relay.
+    let flag = ReadIntent::MarkUnread {
+        target: f.target(None),
+        message_id: None,
+    };
+    assert_eq!(f.intent(flag).await, IntentOutcome::Applied);
+    f.post(&f.other, "d", 50).await;
+    assert_eq!(f.intent(import(None, 50)).await, IntentOutcome::Applied);
+    assert!(f.conversation().await.unread);
+
+    // The first finish stands; a replay is harmless.
+    for _ in 0..2 {
+        assert_eq!(
+            f.intent(ReadIntent::FinishImport {}).await,
+            IntentOutcome::Applied
+        );
+        assert_eq!(f.list().await.imported, Some(true));
+    }
 }
