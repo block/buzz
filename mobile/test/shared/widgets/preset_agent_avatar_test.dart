@@ -191,6 +191,72 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     },
   );
+  testWidgets('iOS keeps the poster over a new player until playback advances', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final original = VideoPlayerPlatform.instance;
+    final player = _Player();
+    VideoPlayerPlatform.instance = player;
+    addTearDown(() => VideoPlayerPlatform.instance = original);
+    double posterOpacity() =>
+        tester.widget<AnimatedOpacity>(find.byType(AnimatedOpacity)).opacity;
+    double videoOpacity() => tester
+        .widget<Opacity>(
+          find.ancestor(
+            of: find.byKey(const Key('video')),
+            matching: find.byType(Opacity),
+          ),
+        )
+        .opacity;
+    await tester.pumpWidget(
+      const ProviderScope(
+        child: MaterialApp(
+          home: PresetAgentAvatar(
+            imageUrl:
+                'https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-13.png',
+            size: 64,
+            fallback: Text('A'),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('video')), findsOneWidget);
+    expect(videoOpacity(), 0);
+    expect(posterOpacity(), 1);
+    player.position = const Duration(milliseconds: 100);
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.pumpAndSettle();
+    expect(videoOpacity(), 1);
+    expect(posterOpacity(), 0);
+
+    // Returning to the route mounts a new player, which starts covered.
+    final navigator = tester.state<NavigatorState>(find.byType(Navigator));
+    navigator.push<void>(
+      PageRouteBuilder<void>(
+        opaque: false,
+        pageBuilder: (_, _, _) => const SizedBox.shrink(),
+      ),
+    );
+    await tester.pump();
+    expect(find.byKey(const Key('video')), findsNothing);
+    expect(posterOpacity(), 1);
+    await tester.pumpAndSettle();
+    navigator.pop();
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('video')), findsOneWidget);
+    expect(videoOpacity(), 0);
+    expect(posterOpacity(), 1);
+    player.position = const Duration(milliseconds: 700);
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.pumpAndSettle();
+    expect(videoOpacity(), 1);
+    expect(posterOpacity(), 0);
+    await tester.pumpWidget(const SizedBox.shrink());
+    debugDefaultTargetPlatformOverride = null;
+  });
   testWidgets('Android uses transparent renderer and pauses offscreen', (
     tester,
   ) async {
