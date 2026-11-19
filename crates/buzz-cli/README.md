@@ -195,6 +195,7 @@ nothing. Stars and mutes cap each saved record at 500 entries. They keep
 the current edit and drop the oldest entries, preferring cleared flags at
 equal timestamps. New changes use milliseconds and untouched entries keep
 their original units. A command that cannot keep its own changes fails.
+An add also fails if legacy desktop would trim it after merging a full cache.
 An edit also repairs an oversized record. Project addresses are
 `30621:<owner-pubkey>:<d-tag>`.
 Pass the same ids in any case; channel UUIDs and project owners are stored in

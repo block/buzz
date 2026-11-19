@@ -136,6 +136,26 @@ fn timestamp_millis(spec: &Spec, updated_at: f64) -> f64 {
     }
 }
 
+/// Legacy desktop unions its cache with the new record and keeps the newest
+/// entries by timestamp and ID. A protected add must survive that union.
+fn legacy_desktop_would_trim_add(spec: &Spec, store: &Store, changed: &[String]) -> bool {
+    let Some(max) = spec.max_entries else {
+        return false;
+    };
+    if store.len() <= max {
+        return false;
+    }
+    let mut by_age: Vec<_> = store.iter().collect();
+    by_age.sort_by(|(left_id, left), (right_id, right)| {
+        timestamp_millis(spec, left.updated_at)
+            .total_cmp(&timestamp_millis(spec, right.updated_at))
+            .then_with(|| left_id.cmp(right_id))
+    });
+    by_age[..store.len() - max]
+        .iter()
+        .any(|(id, _)| changed.contains(id))
+}
+
 /// Keep the current edit and preserve clears newer than active flags.
 fn bound(spec: &Spec, store: &mut Store, keep: &[String]) {
     let Some(max) = spec.max_entries else { return };
@@ -291,6 +311,12 @@ pub(crate) async fn run(
             let changed = set_flags(spec, &mut store, &ids, on);
             if changed.is_empty() {
                 return Ok(sidebar_sync::unchanged());
+            }
+            if on && legacy_desktop_would_trim_add(spec, &store, &changed) {
+                return Err(CliError::Usage(format!(
+                    "{} add would be dropped by legacy desktop at the {MAX_ENTRIES}-entry limit",
+                    spec.lane.label
+                )));
             }
             let required = if on { &ids } else { &changed };
             bound(spec, &mut store, required);
@@ -558,6 +584,28 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, CliError::Usage(_)), "{err:?}");
         assert_eq!(published_count(&relay), before);
+    }
+
+    #[tokio::test]
+    async fn refuses_an_add_that_legacy_desktop_would_trim_after_merging() {
+        for spec in [&STARS, &MUTES] {
+            let (client, relay) = setup().await;
+            let time = now().as_secs();
+            let mut channels = entries(500, spec.flag, time + 600);
+            channels[format!("{:036}", 0)] =
+                json!({spec.flag: true, "updatedAt": (time + 599) * 1000});
+            seed(
+                &client,
+                &relay,
+                spec,
+                json!({"version": 1, "channels": channels}),
+                time,
+            );
+
+            let err = run(spec, set(&[C1], true), &client).await.unwrap_err();
+            assert!(matches!(err, CliError::Usage(_)), "{err:?}");
+            assert_eq!(published_count(&relay), 1);
+        }
     }
 
     #[tokio::test]
