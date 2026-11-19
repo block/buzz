@@ -41,8 +41,9 @@
 //! stops at the same ceiling; any other read ends with one open window. For a
 //! channel read the earliest possible row is [`channel_floor`], or the cursor
 //! when that is later, so a page walks at most one window per two months of
-//! the channel's life. A read without a floor plans every partition below the
-//! ceiling in one window.
+//! the channel's life. Without the channel's row a page walks from its cursor,
+//! and a read with neither plans every partition below the ceiling in one
+//! window.
 //!
 //! The walk locks one more partition set per window it reads, and the locks
 //! stay until the read's transaction ends, so a read that must reach the
@@ -273,7 +274,8 @@ pub(crate) fn channel_floor(channel_created_at: DateTime<Utc>) -> DateTime<Utc> 
 
 /// The first window of an oldest-first page read. `earliest` is a lower bound
 /// on the read's rows: [`channel_floor`], or the page's cursor when that is
-/// later (`None`: the read has no bound and its first window is unbounded below).
+/// later or there is no floor (`None`: the read has neither, and its first
+/// window is unbounded below).
 /// `kinds` are the read's kinds (`None`: any).
 pub(crate) fn oldest_for(
     now: DateTime<Utc>,
