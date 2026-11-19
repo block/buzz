@@ -1191,7 +1191,9 @@ void main() {
       final bytes = Uint8List(2 * 1024 * 1024)
         ..first = 1
         ..last = 2;
+      final hashAcks = <(int, int)>[];
       final service = MediaUploadService(
+        onHashChunkAcked: (sent, received) => hashAcks.add((sent, received)),
         baseUrl: 'https://relay.example',
         nsec: nostr.Keys.generate().nsec,
         httpClient: http_testing.MockClient((request) async {
@@ -1216,6 +1218,10 @@ void main() {
         XFile.fromData(bytes, name: 'attachment.bin'),
       );
       expect(descriptor.size, bytes.length);
+      expect(hashAcks, [
+        (1024 * 1024, 1024 * 1024),
+        (2 * 1024 * 1024, 2 * 1024 * 1024),
+      ]);
     });
 
     test(
@@ -1224,19 +1230,21 @@ void main() {
         final bytes = Uint8List.fromList(
           List.generate(2 * 1024 * 1024 + 123, (i) => (i * 31 + 7) & 0xff),
         );
-        final calls = <(int, int)>[];
+        final acks = <(int, int)>[];
 
         final digest = await sha256HexInWorker(
           bytes,
-          onChunkSent: (sent, acked) => calls.add((sent, acked)),
+          onChunkAcked: (sent, received) => acks.add((sent, received)),
         );
 
         expect(digest, crypto.sha256.convert(bytes).toString());
-        expect(calls, hasLength(3));
-        expect(calls.last.$1, bytes.length);
-        for (final (sent, acked) in calls) {
-          expect(sent - acked, lessThanOrEqualTo(1024 * 1024));
-        }
+        // The worker acks each chunk with the bytes it has received, so every
+        // ack matching the bytes sent means one chunk was in flight at a time.
+        expect(acks, [
+          (1024 * 1024, 1024 * 1024),
+          (2 * 1024 * 1024, 2 * 1024 * 1024),
+          (bytes.length, bytes.length),
+        ]);
       },
     );
 

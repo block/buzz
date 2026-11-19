@@ -251,6 +251,7 @@ class MediaUploadService {
   final DateTime Function() _now;
   final http.Client _http;
   final bool _ownsHttpClient;
+  final HashChunkAcked? _onHashChunkAcked;
 
   MediaUploadService({
     required String baseUrl,
@@ -267,7 +268,9 @@ class MediaUploadService {
     ReadClipboardImage? readClipboardImage,
     DateTime Function()? now,
     http.Client? httpClient,
+    @visibleForTesting HashChunkAcked? onHashChunkAcked,
   }) : _baseUrl = baseUrl,
+       _onHashChunkAcked = onHashChunkAcked,
        _nsec = nsec,
        _pickGalleryImage = pickGalleryImage,
        _pickGalleryImages =
@@ -560,7 +563,10 @@ class MediaUploadService {
       throw Exception('unsupported file type: $mimeType');
     }
 
-    final sha256 = await sha256HexInWorker(bytes);
+    final sha256 = await sha256HexInWorker(
+      bytes,
+      onChunkAcked: _onHashChunkAcked,
+    );
     var response = await _sendUploadRequest(
       bytes: bytes,
       mimeType: mimeType,
@@ -803,12 +809,16 @@ Stream<List<int>> _uploadByteStream(
 
 const _hashChunkSize = 1024 * 1024;
 
+/// Reports each hash chunk the worker acknowledged: the bytes sent so far and
+/// the bytes the worker reports having received.
+typedef HashChunkAcked = void Function(int sentBytes, int workerReceivedBytes);
+
 /// Hashes [bytes] on a worker isolate, one bounded chunk at a time, so the
 /// payload is never copied into the worker in full.
 @visibleForTesting
 Future<String> sha256HexInWorker(
   Uint8List bytes, {
-  void Function(int sentBytes, int ackedBytes)? onChunkSent,
+  HashChunkAcked? onChunkAcked,
 }) async {
   final port = ReceivePort();
   final messages = StreamIterator<Object?>(port);
@@ -838,8 +848,9 @@ Future<String> sha256HexInWorker(
           Uint8List.sublistView(bytes, start, end),
         ]),
       );
-      onChunkSent?.call(end, start);
-      await next(); // ack: one chunk in flight at a time
+      // ack: one chunk in flight at a time
+      final received = await next() as int;
+      onChunkAcked?.call(end, received);
     }
     chunks.send(null);
     return await next() as String;
@@ -858,10 +869,13 @@ Future<void> _hashChunks(SendPort main) async {
     ),
   );
   main.send(chunks.sendPort);
+  var received = 0;
   await for (final chunk in chunks) {
     if (chunk == null) break;
-    input.add((chunk as TransferableTypedData).materialize().asUint8List());
-    main.send(true);
+    final bytes = (chunk as TransferableTypedData).materialize().asUint8List();
+    input.add(bytes);
+    received += bytes.length;
+    main.send(received);
   }
   input.close();
   main.send(digest.toString());
