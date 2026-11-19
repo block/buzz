@@ -10521,11 +10521,12 @@ pub(crate) mod postgres_tests {
     /// already open and idle. sqlx bounds connection establishment by the
     /// same deadline as the wait for a free connection, so a pool that still
     /// had to connect would fail on any server stall longer than `budget`.
-    /// The pool is filled first, retrying each timed-out connect within
-    /// sqlx's default 30s, and does not ping on acquire. sqlx still pings a
-    /// connection when it is released (`return_to_pool`), so the filled
-    /// connections are only handed back once every one is idle again, within
-    /// the same 30s. Afterwards an acquire waits only for a free connection,
+    /// The pool does not ping on acquire, but sqlx still pings a connection
+    /// when it is released (`return_to_pool`) and closes it if that ping
+    /// fails. So, under one 30s deadline, this fills the pool (retrying each
+    /// timed-out connect), drops the connections, and waits for every one to
+    /// be idle again; whenever a release closed one and the pool is short, it
+    /// fills again. Afterwards an acquire waits only for a free connection,
     /// the wait the budget is meant to bound.
     async fn budgeted_reader(url: &str, budget: std::time::Duration) -> sqlx::PgPool {
         let pool = sqlx::postgres::PgPoolOptions::new()
@@ -10533,18 +10534,24 @@ pub(crate) mod postgres_tests {
             .test_before_acquire(false)
             .connect_lazy(url)
             .expect("reader pool");
+        let max = pool.options().get_max_connections();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
-        let mut open = Vec::new();
-        while open.len() < pool.options().get_max_connections() as usize {
-            match pool.acquire().await {
-                Ok(conn) => open.push(conn),
-                Err(sqlx::Error::PoolTimedOut) if tokio::time::Instant::now() < deadline => {}
-                Err(e) => panic!("open reader connection: {e}"),
+        loop {
+            if pool.size() < max {
+                let mut open = Vec::new();
+                while open.len() < max as usize {
+                    match pool.acquire().await {
+                        Ok(conn) => open.push(conn),
+                        Err(sqlx::Error::PoolTimedOut)
+                            if tokio::time::Instant::now() < deadline => {}
+                        Err(e) => panic!("open reader connection: {e}"),
+                    }
+                }
+                drop(open);
             }
-        }
-        drop(open);
-        let max = pool.options().get_max_connections() as usize;
-        while pool.num_idle() < max {
+            if pool.num_idle() == max as usize {
+                return pool;
+            }
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "reader connections returned idle: {} of {max}",
@@ -10552,7 +10559,6 @@ pub(crate) mod postgres_tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        pool
     }
 
     impl CancelFixture {
