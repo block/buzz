@@ -200,22 +200,6 @@ class ComposeBar extends HookConsumerWidget {
       clipboardHasImage: clipboardHasImage,
     );
 
-    // Mention state --------------------------------------------------------
-    final mentionQuery = useState<String?>(null);
-    final mentionStartIdx = useState(-1);
-    // Counts chooser openings: a new `@` starts fresh rows and searches.
-    final mentionOpening = useRef(0);
-    final shownMentions = useRef<_MentionRows>((
-      rows: const [],
-      unavailable: const {},
-      searchFailed: false,
-      reserveHeight: false,
-      searching: false,
-    ));
-    // Map of displayName → selected mention candidate built as the user selects
-    // mentions. Used to pass resolved pubkeys directly to onSend and to attach
-    // selected non-member agents before the message is published.
-
     // Channel autocomplete state ----------------------------------------------
     final channelQuery = useState<String?>(null);
     final channelStartIdx = useState(-1);
@@ -295,33 +279,16 @@ class ComposeBar extends HookConsumerWidget {
     final isModifyingText = useRef(false);
     final lastObservedEditingValue = useRef(controller.value);
 
-    // Insert a selected mention into the text field as a chip bound to it,
-    // followed by a space or by the closing punctuation that selected it.
-    void insertMention(MentionCandidate candidate, {String separator = ' '}) {
-      ref
-          .read(mentionHistoryProvider.notifier)
-          .remember(channelId, candidate.pubkey);
-      final text = controller.text;
-      final start = mentionStartIdx.value.clamp(0, text.length);
-      final cursor =
-          (controller.selection.isValid
-                  ? controller.selection.baseOffset
-                  : text.length)
-              .clamp(start, text.length);
-      isModifyingText.value = true;
-      try {
-        controller.insertMention(
-          start: start,
-          end: cursor,
-          candidate: candidate,
-          separator: separator,
-        );
-      } finally {
-        isModifyingText.value = false;
-      }
-      focusNode.requestFocus();
-      mentionQuery.value = null;
-    }
+    // The `@` chooser: query, rows and chip insertion, shared with the
+    // message edit sheet.
+    final mentionChooser = _useMentionChooser(
+      ref,
+      channelId: channelId,
+      controller: controller,
+      focusNode: focusNode,
+      isModifyingText: isModifyingText,
+      viewer: currentPubkey,
+    );
 
     _useAgentMentionPrefill(
       ref: ref,
@@ -360,74 +327,21 @@ class ComposeBar extends HookConsumerWidget {
           }
         }
 
-        if (!sel.isValid || !sel.isCollapsed) {
-          mentionQuery.value = null;
+        // Channel autocomplete detection — only when no @mention is active.
+        if (mentionChooser.track(previousValue, editingValue) ||
+            !sel.isValid ||
+            !sel.isCollapsed ||
+            sel.baseOffset < 1) {
           channelQuery.value = null;
           return;
         }
         final cursor = sel.baseOffset;
-        if (cursor < 1) {
-          mentionQuery.value = null;
-          channelQuery.value = null;
-          return;
-        }
-
-        var open = findMentionQuery(text, cursor);
-        if (open != null &&
-            _startsSelectedMention(controller.mentions, open.start)) {
-          open = null;
-        }
-
-        // Space or closing punctuation typed straight after an exact, unique
-        // name selects it (section 5); the typed character stays after the
-        // chip. Otherwise the character joins the query.
-        final previousQuery = mentionQuery.value;
-        if (open != null &&
-            previousQuery != null &&
-            previousQuery.trim().isNotEmpty &&
-            open.start == mentionStartIdx.value &&
-            open.query.length == previousQuery.length + 1 &&
-            open.query.startsWith(previousQuery) &&
-            text.length == previousValue.text.length + 1) {
-          final typed = open.query.substring(previousQuery.length);
-          final chosen = mentionTerminator(typed)
-              ? _spaceMention(
-                  ref,
-                  channelId: channelId,
-                  query: previousQuery,
-                  opening: mentionOpening.value,
-                  shown: shownMentions.value,
-                  viewer: currentPubkey,
-                )
-              : null;
-          if (chosen != null) {
-            insertMention(chosen, separator: typed);
-            return;
-          }
-        }
-
-        if (open != null) {
-          if (previousQuery == null || mentionStartIdx.value != open.start) {
-            mentionOpening.value++;
-          }
-          mentionQuery.value = open.query;
-          mentionStartIdx.value = open.start;
-          channelQuery.value = null;
-        } else {
-          mentionQuery.value = null;
-        }
-
-        // Channel autocomplete detection — only when no @mention is active.
-        if (mentionQuery.value == null) {
-          final hashPos = findTrigger(text, cursor, '#');
-          if (hashPos != null) {
-            channelQuery.value = text
-                .substring(hashPos + 1, cursor)
-                .toLowerCase();
-            channelStartIdx.value = hashPos;
-          } else {
-            channelQuery.value = null;
-          }
+        final hashPos = findTrigger(text, cursor, '#');
+        if (hashPos != null) {
+          channelQuery.value = text
+              .substring(hashPos + 1, cursor)
+              .toLowerCase();
+          channelStartIdx.value = hashPos;
         } else {
           channelQuery.value = null;
         }
@@ -437,24 +351,8 @@ class ComposeBar extends HookConsumerWidget {
       return () => controller.removeListener(listener);
     }, [controller]);
 
-    // Ranked mention rows; shown rows hold still while the query stays.
-    final mentionRows = _useMentionRows(
-      ref,
-      channelId: channelId,
-      query: mentionQuery.value,
-      opening: mentionOpening.value,
-    );
-    shownMentions.value = mentionRows;
+    final mentionRows = mentionChooser.rows;
     final suggestions = mentionRows.rows;
-
-    // Resolve owner names for the visible "managed by …" subtitles.
-    useEffect(() {
-      final ownerPubkeys = [for (final s in suggestions) ?s.ownerPubkey];
-      if (ownerPubkeys.isNotEmpty) {
-        ref.read(userCacheProvider.notifier).preload(ownerPubkeys);
-      }
-      return null;
-    }, [suggestions.length, mentionQuery.value]);
 
     // Filter channels against the query.
     final channels = channelsAsync.asData?.value ?? <Channel>[];
@@ -490,7 +388,7 @@ class ComposeBar extends HookConsumerWidget {
       draftRevision.value += 1;
       controller.replaceDraft(TextEditingValue.empty, mentions: const []);
       attachments.value = [];
-      mentionQuery.value = null;
+      mentionChooser.close();
       channelQuery.value = null;
       attachmentSurface.value = _AttachmentSurface.closed;
       showFormatting.value = false;
@@ -1001,19 +899,20 @@ class ComposeBar extends HookConsumerWidget {
     final topMention = suggestions
         .where((s) => !mentionRows.unavailable.contains(s.pubkey))
         .firstOrNull;
-    final pickerQuery = (mentionQuery.value, channelQuery.value);
+    final pickerQuery = (mentionChooser.query, channelQuery.value);
     KeyEventResult handleHardwareKey(FocusNode _, KeyEvent event) =>
         _handleComposerHardwareKey(
           event,
           controller,
           inputOwned: iosAttachmentPopover.isActive || isEmojiPickerOpen.value,
-          query: (mentionQuery.value, channelQuery.value),
+          query: (mentionChooser.liveQuery.value, channelQuery.value),
           renderedQuery: pickerQuery,
           pickerVisible: pickerVisible,
           acceptSuggestion: topChannel != null
               ? () => _runComposerAction(() => insertChannel(topChannel))
               : topMention != null
-              ? () => _runComposerAction(() => insertMention(topMention))
+              ? () =>
+                    _runComposerAction(() => mentionChooser.insert(topMention))
               : null,
           send: () async {
             if (attachmentSurface.value != _AttachmentSurface.closed) return;
@@ -1029,14 +928,15 @@ class ComposeBar extends HookConsumerWidget {
       reserveMentionHeight: mentionRows.reserveHeight,
       mentionSearching: mentionRows.searching,
       onMentionSearchRetry: () {
-        final query = mentionQuery.value;
-        if (query != null) ref.invalidate(mentionUserSearchProvider(query));
+        if (mentionChooser.query case final query?) {
+          ref.invalidate(mentionUserSearchProvider(query));
+        }
       },
       userCache: userCache,
       currentPubkey: currentPubkey,
       isDmChannel: isDmChannel,
       onChannelSelect: insertChannel,
-      onMentionSelect: insertMention,
+      onMentionSelect: mentionChooser.insert,
     );
     Widget buildOverlayPanel(_AttachmentSurface surface) {
       return _composerAttachmentPanel(

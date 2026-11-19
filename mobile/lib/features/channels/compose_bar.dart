@@ -89,6 +89,7 @@ part 'compose_bar/hardware_keyboard.dart';
 part 'compose_bar/dock.dart';
 part 'compose_bar/share_delivery.dart';
 part 'compose_bar/compose_bar_widget.dart';
+part 'compose_bar/message_edit_sheet.dart';
 
 /// Callback used by channels and threads to submit composer content.
 typedef ComposeBarOnSend =
