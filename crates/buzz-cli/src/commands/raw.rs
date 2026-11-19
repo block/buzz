@@ -3,6 +3,8 @@
 //! client paths as every other command, so credentials, the NIP-OA auth tag
 //! and the NIP-FI assertion are handled identically.
 
+use std::io::Write;
+
 use buzz_core::kind::{KIND_GIFT_WRAP, KIND_NIP43_LEAVE_REQUEST};
 use nostr::{EventBuilder, Kind, Tag, Timestamp};
 use serde::Deserialize;
@@ -79,7 +81,11 @@ fn build_tags(raw: &[Vec<String>]) -> Result<Vec<Tag>, CliError> {
         .collect()
 }
 
-pub async fn cmd_query(client: &BuzzClient, filter: &str) -> Result<(), CliError> {
+pub async fn cmd_query(
+    client: &BuzzClient,
+    filter: &str,
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
     let filters = parse_filters(&read_or_stdin(filter)?)?;
     let resp = client.query_multi(&filters).await?;
     // Print the relay's JSON in its own shape: most filters return an event
@@ -87,8 +93,7 @@ pub async fn cmd_query(client: &BuzzClient, filter: &str) -> Result<(), CliError
     // object.
     let value: serde_json::Value = serde_json::from_str(&resp)
         .map_err(|e| CliError::Other(format!("failed to parse query response: {e}")))?;
-    println!("{value}");
-    Ok(())
+    writeln!(out, "{value}").map_err(|e| CliError::Other(format!("write failed: {e}")))
 }
 
 pub async fn cmd_publish(
@@ -97,6 +102,7 @@ pub async fn cmd_publish(
     tags: &[String],
     content: Option<&str>,
     event_json: Option<&str>,
+    out: &mut dyn Write,
 ) -> Result<(), CliError> {
     let template = match (event_json, kind) {
         (Some(json), _) => {
@@ -152,14 +158,27 @@ pub async fn cmd_publish(
     } else {
         client.submit_event(event).await?
     };
-    println!("{}", normalize_write_response(&resp));
-    Ok(())
+    // The relay refuses some events over HTTP with a 2xx and an explicit
+    // `accepted:false` (a duplicate reaction, for example). Fail like the
+    // WebSocket path does, keeping the event id and message in the error.
+    let refused = serde_json::from_str::<serde_json::Value>(&resp)
+        .ok()
+        .and_then(|v| v.get("accepted").and_then(serde_json::Value::as_bool))
+        == Some(false);
+    let resp = normalize_write_response(&resp);
+    if refused {
+        return Err(CliError::Relay {
+            status: 400,
+            body: resp,
+        });
+    }
+    writeln!(out, "{resp}").map_err(|e| CliError::Other(format!("write failed: {e}")))
 }
 
 pub async fn dispatch(cmd: crate::RawCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::RawCmd;
     match cmd {
-        RawCmd::Query { filter } => cmd_query(client, &filter).await,
+        RawCmd::Query { filter } => cmd_query(client, &filter, &mut std::io::stdout()).await,
         RawCmd::Publish {
             kind,
             tag,
@@ -172,6 +191,7 @@ pub async fn dispatch(cmd: crate::RawCmd, client: &BuzzClient) -> Result<(), Cli
                 &tag,
                 content.as_deref(),
                 event_json.as_deref(),
+                &mut std::io::stdout(),
             )
             .await
         }
@@ -203,6 +223,12 @@ mod tests {
     /// A local relay bridge: `/query` records its body and returns `reply`;
     /// `/events` records the signed event and accepts it.
     async fn fake_relay(reply: &'static str) -> (String, Captured) {
+        fake_relay_acking(reply, true).await
+    }
+
+    /// Like [`fake_relay`], but `/events` answers HTTP 200 with the given
+    /// `accepted` flag, as the relay does for a duplicate reaction.
+    async fn fake_relay_acking(reply: &'static str, accepted: bool) -> (String, Captured) {
         let captured = Captured::default();
         let app = Router::new()
             .route(
@@ -229,7 +255,7 @@ mod tests {
             .route(
                 "/events",
                 post(
-                    |State(c): State<Captured>, headers: HeaderMap, body: String| async move {
+                    move |State(c): State<Captured>, headers: HeaderMap, body: String| async move {
                         let event: serde_json::Value = serde_json::from_str(&body).unwrap();
                         let id = event["id"].as_str().unwrap().to_string();
                         c.events.lock().unwrap().push(event);
@@ -241,7 +267,13 @@ mod tests {
                         (
                             StatusCode::OK,
                             [("content-type", "application/json")],
-                            format!(r#"{{"event_id":"{id}","accepted":true,"message":""}}"#),
+                            if accepted {
+                                format!(r#"{{"event_id":"{id}","accepted":true,"message":""}}"#)
+                            } else {
+                                format!(
+                                    r#"{{"event_id":"{id}","accepted":false,"message":"duplicate: reaction already exists"}}"#
+                                )
+                            },
                         )
                     },
                 ),
@@ -363,7 +395,13 @@ mod tests {
         let (client, auth_json) = client_with_auth_tag(&url);
 
         let filter = format!(r##"[{{"kinds":[39002],"#p":["{HEX}"]}},{{"kinds":[0],"limit":1}}]"##);
-        cmd_query(&client, &filter).await.unwrap();
+        let mut out = Vec::new();
+        cmd_query(&client, &filter, &mut out).await.unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "[{\"id\":\"e1\",\"kind\":39002,\"sig\":\"00\"}]\n",
+            "prints the relay's events, signatures included"
+        );
 
         let queries = captured.queries.lock().unwrap();
         assert_eq!(queries.len(), 1);
@@ -381,7 +419,7 @@ mod tests {
     #[tokio::test]
     async fn query_wraps_a_single_filter_and_keeps_object_responses() {
         let (url, captured) = fake_relay("[]").await;
-        cmd_query(&client(&url), r#"{"kinds":[1],"limit":5}"#)
+        cmd_query(&client(&url), r#"{"kinds":[1],"limit":5}"#, &mut Vec::new())
             .await
             .unwrap();
         assert_eq!(
@@ -390,12 +428,14 @@ mod tests {
         );
 
         let (url, _) = fake_relay(r#"{"snapshot":true}"#).await;
-        cmd_query(&client(&url), r#"{"kinds":[1]}"#)
+        let mut out = Vec::new();
+        cmd_query(&client(&url), r#"{"kinds":[1]}"#, &mut out)
             .await
             .expect("an object response is valid relay output");
+        assert_eq!(String::from_utf8(out).unwrap(), "{\"snapshot\":true}\n");
 
         let (url, _) = fake_relay("not json").await;
-        let err = cmd_query(&client(&url), r#"{"kinds":[1]}"#)
+        let err = cmd_query(&client(&url), r#"{"kinds":[1]}"#, &mut Vec::new())
             .await
             .unwrap_err();
         assert!(matches!(err, CliError::Other(msg) if msg.contains("parse query response")));
@@ -412,6 +452,7 @@ mod tests {
             &[format!(r#"["p","{HEX}"]"#), r#"["h","chan"]"#.to_string()],
             Some("hello"),
             None,
+            &mut Vec::new(),
         )
         .await
         .unwrap();
@@ -442,11 +483,18 @@ mod tests {
         let client = client(&url);
         let me = client.public_key().to_hex();
 
-        cmd_publish(&client, Some(1), &[format!(r#"["p","{me}"]"#)], None, None)
-            .await
-            .unwrap();
+        cmd_publish(
+            &client,
+            Some(1),
+            &[format!(r#"["p","{me}"]"#)],
+            None,
+            None,
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap();
         let template = format!(r#"{{"kind":1,"tags":[["p","{me}"]]}}"#);
-        cmd_publish(&client, None, &[], None, Some(&template))
+        cmd_publish(&client, None, &[], None, Some(&template), &mut Vec::new())
             .await
             .unwrap();
 
@@ -468,6 +516,7 @@ mod tests {
             &[],
             None,
             Some(r#"{"kind":1,"content":"hi","tags":[["t","x"]],"created_at":1700000000}"#),
+            &mut Vec::new(),
         )
         .await
         .unwrap();
@@ -484,7 +533,7 @@ mod tests {
             r#"{"content":"no kind"}"#,
             "not json",
         ] {
-            let err = cmd_publish(&client, None, &[], None, Some(bad))
+            let err = cmd_publish(&client, None, &[], None, Some(bad), &mut Vec::new())
                 .await
                 .unwrap_err();
             assert!(matches!(err, CliError::Usage(_)), "{bad}: {err:?}");
@@ -499,7 +548,7 @@ mod tests {
     #[tokio::test]
     async fn publish_without_kind_or_template_is_a_usage_error_and_sends_nothing() {
         let (url, captured) = fake_relay("[]").await;
-        let err = cmd_publish(&client(&url), None, &[], Some("x"), None)
+        let err = cmd_publish(&client(&url), None, &[], Some("x"), None, &mut Vec::new())
             .await
             .unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
@@ -510,12 +559,13 @@ mod tests {
             &[format!(r#"["auth","{HEX}","c","d"]"#)],
             None,
             None,
+            &mut Vec::new(),
         )
         .await
         .unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
 
-        let err = cmd_publish(&client(&url), Some(1059), &[], None, None)
+        let err = cmd_publish(&client(&url), Some(1059), &[], None, None, &mut Vec::new())
             .await
             .unwrap_err();
         assert!(matches!(err, CliError::Usage(msg) if msg.contains("gift wrap")));
@@ -527,11 +577,71 @@ mod tests {
         // Other ephemeral kinds go over the WebSocket, which this fake relay
         // does not serve; a leave must reach `/events`.
         let (url, captured) = fake_relay("[]").await;
-        cmd_publish(&client(&url), Some(28936), &[], None, None)
+        cmd_publish(&client(&url), Some(28936), &[], None, None, &mut Vec::new())
             .await
             .unwrap();
         let events = captured.events.lock().unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["kind"], 28936);
+    }
+
+    #[tokio::test]
+    async fn publish_prints_the_relay_acknowledgement() {
+        let (url, captured) = fake_relay("[]").await;
+        let mut out = Vec::new();
+        cmd_publish(&client(&url), Some(1), &[], Some("hi"), None, &mut out)
+            .await
+            .unwrap();
+        let id = captured.events.lock().unwrap()[0]["id"].clone();
+        let printed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(
+            printed,
+            serde_json::json!({"event_id": id, "accepted": true, "message": ""})
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_fails_when_the_relay_refuses_over_http() {
+        let (url, captured) = fake_relay_acking("[]", false).await;
+        let mut out = Vec::new();
+        let err = cmd_publish(&client(&url), Some(7), &[], Some("+"), None, &mut out)
+            .await
+            .unwrap_err();
+        let id = captured.events.lock().unwrap()[0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let CliError::Relay { status, body } = &err else {
+            panic!("expected a relay error, got {err:?}");
+        };
+        assert_eq!(*status, 400);
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(body["event_id"], id, "the error keeps the event id");
+        assert_eq!(body["accepted"], false);
+        assert_eq!(body["message"], "duplicate: reaction already exists");
+        assert!(out.is_empty(), "a refusal prints nothing to stdout");
+        assert_eq!(crate::error::exit_code(&err), 2);
+    }
+
+    #[tokio::test]
+    async fn cli_exits_nonzero_when_the_relay_refuses_a_raw_publish() {
+        let (url, captured) = fake_relay_acking("[]", false).await;
+        let key = Keys::generate().secret_key().to_secret_hex();
+        let code = crate::run_from_args([
+            "buzz",
+            "--relay",
+            url.as_str(),
+            "--private-key",
+            key.as_str(),
+            "raw",
+            "publish",
+            "--kind",
+            "7",
+            "--content",
+            "+",
+        ])
+        .await;
+        assert_eq!(code, 2, "a refused publish is a relay error");
+        assert_eq!(captured.events.lock().unwrap().len(), 1);
     }
 }
