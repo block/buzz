@@ -1544,6 +1544,40 @@ void main() {
         expect(phone.failedClears, {channel});
       });
 
+      test('a running phone that loses its live subscription keeps a mark '
+          'made elsewhere meanwhile', () async {
+        final phone = await device('phone');
+        phone.markContextRead(channel, clock - 100);
+        marked = clock;
+        expect(phone.markChannelUnread(channel), isTrue);
+        await phone.flush();
+        relay.retrying();
+        // A peer marks it again during the gap; the phone does not see it.
+        clock += 5;
+        relay.retained['${readStateUnreadDTagPrefix}peer'] = _readStateEvent(
+          unread: true,
+          keys: keys,
+          crypto: crypto,
+          clientId: 'peer',
+          slot: 'peer',
+          contexts: {
+            channel: marked - 100,
+            'ov_s:$channel': clock,
+            'ov_c:$channel': 0,
+            'ov_b:$channel': marked - 100,
+          },
+          createdAt: clock,
+        );
+        clock += 5;
+        expect(phone.clearChannelOverride(channel, reading: true), isFalse);
+        relay.ready();
+        await pumpEventQueue();
+        await phone.flush();
+        expect(phone.activeChannelOverrides, {channel});
+        final desktop = await device('desktop');
+        expect(desktop.activeChannelOverrides, {channel});
+      });
+
       test('drops a mark already cleared elsewhere', () async {
         final phone = await refused();
         final desktop = await device('desktop');
@@ -2095,6 +2129,13 @@ class _MemoryRelay extends RelaySessionNotifier {
   void ready() {
     for (final listener in List.of(_statusListeners)) {
       listener(RelaySubscriptionStatus.ready);
+    }
+  }
+
+  /// Reports every live subscription retrying, as a lost connection does.
+  void retrying() {
+    for (final listener in List.of(_statusListeners)) {
+      listener(RelaySubscriptionStatus.retrying);
     }
   }
 

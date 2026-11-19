@@ -653,12 +653,12 @@ class ReadStateManager {
         // With limit 0 nothing replays marks published before the REQ went
         // live, so read the snapshot every time it goes live: its EOSE, which
         // can come after the 500 ms fallback on a slow AUTH, on a reconnect's
-        // replay, or after a CLOSED's retry.
-        onStatusChanged: (status) {
-          if (status == RelaySubscriptionStatus.ready && !_disposed) {
-            unawaited(_requestSync());
-          }
-        },
+        // replay, or after a CLOSED's retry. Down, it is no longer current.
+        onStatusChanged: (status) => _disposed
+            ? null
+            : status == RelaySubscriptionStatus.ready
+            ? unawaited(_requestSync())
+            : _settleSnapshot(++_snapshotsStarted, succeeded: false),
         // The session dropped it, so the next reconnect opens a new one.
         onClosed: (_) => _unsubscribeLive = null,
         // A peer's mark can carry an older created_at (its clock, or a
