@@ -1,7 +1,7 @@
 # Mobile Huddles MVP
 
-This foreground-only product slice preserves the existing Desktop/relay
-contract. Android and iOS clients can start a human Huddle, open a recent
+Mobile Huddles use the same Desktop and relay protocol. An admitted iOS
+Huddle can also continue while the phone is locked. Android and iOS clients can start a human Huddle, open a recent
 Desktop-started Huddle card, join with the microphone on, hear multiple remote
 participants, send microphone audio, mute, and leave.
 
@@ -84,8 +84,7 @@ speaker then microphone in the bottom row. Microphone-on and speaker-on use fill
 
 ## Native boundary
 
-`buzz/huddle_media` owns microphone permission and the foreground voice audio
-session. Each platform probes its native Opus encoder and decoder before
+`buzz/huddle_media` owns microphone permission and the voice audio session. Each platform probes its native Opus encoder and decoder before
 advertising support. On Android, `AudioRecord` captures 48 kHz mono PCM,
 `MediaCodec` encodes and decodes Opus, and one `AudioTrack` per remote
 participant lets the Android communication mixer combine decoded PCM. On iOS,
@@ -107,18 +106,20 @@ Flutter bridge; PCM remains inside the native realtime path. Capture starts
 unmuted. Debuggable builds also emit aggregate pre-encode RMS/peak dBov
 histograms plus the active recording route and exposed voice-processing state.
 They never retain or persist PCM, Opus packets, or speech content. Native
-capture and compressed ingress queues are bounded so a foreground session
-cannot accumulate unbounded latency.
+capture and compressed ingress queues are bounded so a session cannot accumulate unbounded latency.
 
-This is deliberately not Desktop parity. The app must remain in the foreground;
-pausing/detaching leaves the room. Mobile agent controls, mobile-originated
-STT/TTS, recordings, background ringing/calling, and advanced device controls
-remain outside this slice. Agent-authenticated Opus published by a Desktop
+On iOS, an admitted Huddle continues when the app is backgrounded or the device
+is locked. The Huddle audio socket stays independent of the main relay socket,
+which follows its usual background disconnect and resume policy. Detaching the
+app or switching communities tears down the Huddle. On Android, pausing or
+detaching leaves the room. Mobile agent controls, mobile-originated STT/TTS,
+recordings, background incoming calls, and advanced device controls remain
+outside this slice. Agent-authenticated Opus published by a Desktop
 Huddle uses the same remote playback path as any other participant.
 
 Physical iOS acceptance must separately verify permission, receiver/speaker and
 connected-headset routing, interruption recovery, and two-way audio with a
-Desktop participant. Static codec and Flutter tests do not prove those device
+Desktop participant while foregrounded, locked, and after unlocking. Static codec and Flutter tests do not prove those device
 behaviors.
 
 The rail uses 48-point controls with 12-point gaps and 28-point Tabler glyphs.

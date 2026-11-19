@@ -11811,6 +11811,113 @@ void main() {
     );
 
     testWidgets(
+      'keeps an admitted iOS Huddle active across pause and resume until detach',
+      (tester) async {
+        final media = _HuddleTestMedia();
+        final transport = _HuddleTestTransport();
+        final relay = _ReconnectingRelaySession();
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [],
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            relaySessionNotifier: relay,
+            huddleCurrentPubkey: 'self',
+            huddleMediaFactory: () => media,
+            huddleTransportFactory: (_) => transport,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MobileHuddleShell)),
+        );
+        final lifecycle =
+            container.read(appLifecycleProvider.notifier)
+                as _TestAppLifecycleNotifier;
+        await container
+            .read(mobileHuddleControllerProvider.notifier)
+            .join(
+              parentChannelId: _channelId,
+              ephemeralChannelId: _huddleChannelId,
+              startedBy: 'desktop',
+              startedEventId: 'active-call',
+            );
+        expect(container.read(huddleSessionProvider).isConnected, isTrue);
+
+        lifecycle.setLifecycle(AppLifecycleState.paused);
+        relay.onAppPaused();
+        await tester.pump(const Duration(minutes: 1));
+        expect(
+          container.read(relaySessionProvider).status,
+          SessionStatus.disconnected,
+        );
+        expect(container.read(huddleSessionProvider).isConnected, isTrue);
+        expect(media.state.phase, HuddleMediaPhase.active);
+        expect(transport.state.phase, HuddleTransportPhase.connected);
+
+        lifecycle.setLifecycle(AppLifecycleState.resumed);
+        await tester.pump();
+        expect(container.read(huddleSessionProvider).isConnected, isTrue);
+
+        lifecycle.setLifecycle(AppLifecycleState.detached);
+        await media.stopStarted.future;
+        await tester.pump();
+        expect(container.read(huddleSessionProvider).isInSession, isFalse);
+        expect(media.state.phase, HuddleMediaPhase.stopped);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    testWidgets(
+      'leaving an iOS Huddle stops audio and removes membership after reconnect',
+      (tester) async {
+        final media = _HuddleTestMedia();
+        final transport = _HuddleTestTransport();
+        final relay = _ReconnectingRelaySession(
+          initialStatus: SessionStatus.connected,
+        );
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [],
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            relaySessionNotifier: relay,
+            huddleCurrentPubkey: 'self',
+            huddleMediaFactory: () => media,
+            huddleTransportFactory: (_) => transport,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MobileHuddleShell)),
+        );
+        final controller = container.read(
+          mobileHuddleControllerProvider.notifier,
+        );
+        await controller.join(
+          parentChannelId: _channelId,
+          ephemeralChannelId: _huddleChannelId,
+          startedBy: 'desktop',
+          startedEventId: 'active-call',
+        );
+        relay.setReconnecting();
+        await controller.leave();
+        expect(media.state.phase, HuddleMediaPhase.stopped);
+        expect(relay.publishedKinds, isNot(contains(9022)));
+
+        relay.connect();
+        await tester.pumpAndSettle();
+        expect(relay.publishedKinds.where((kind) => kind == 9022), [9022]);
+        expect(relay.publishedKinds, isNot(contains(EventKind.huddleEnded)));
+        // Let the relay fixture's channel-list subscription settle.
+        await tester.pump(const Duration(milliseconds: 500));
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    );
+
+    testWidgets(
       'community transition leaves a newer call without waiting for old cleanup',
       (tester) async {
         final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -12034,6 +12141,97 @@ void main() {
         expect(leftChannelId, _huddleChannelId);
         expect(relaySession.state.status, SessionStatus.disconnected);
       },
+    );
+
+    testWidgets(
+      'iOS pause keeps an earlier Huddle leave publishing before the relay pauses',
+      (tester) async {
+        final humanCount = Completer<int>();
+        final media = Queue<_HuddleTestMedia>.of([
+          _HuddleTestMedia(),
+          _HuddleTestMedia(),
+        ]);
+        final transports = Queue<_HuddleTestTransport>.of([
+          _HuddleTestTransport(),
+          _HuddleTestTransport(),
+        ]);
+        final relay = _ReconnectingRelaySession(
+          initialStatus: SessionStatus.connected,
+        );
+        final leaves = <(String, SessionStatus)>[];
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [],
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            relaySessionNotifier: relay,
+            huddleCurrentPubkey: 'self',
+            huddleHumanCountLoader: (_) => humanCount.future,
+            huddleMediaFactory: media.removeFirst,
+            huddleTransportFactory: (_) => transports.removeFirst(),
+            createChannelActions: (ref) => _FakeChannelActions(
+              ref,
+              onLeaveChannel: (channelId) async => leaves.add((
+                channelId,
+                ref.read(relaySessionProvider).status,
+              )),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MobileHuddleShell)),
+        );
+        final lifecycle =
+            container.read(appLifecycleProvider.notifier)
+                as _TestAppLifecycleNotifier;
+        final controller = container.read(
+          mobileHuddleControllerProvider.notifier,
+        );
+        await controller.join(
+          parentChannelId: _channelId,
+          ephemeralChannelId: _huddleChannelId,
+          startedBy: 'desktop',
+          startedEventId: 'first-call',
+        );
+        final staleLeave = controller.leave();
+        await tester.pump();
+        final secondMedia = media.single;
+        await controller.join(
+          parentChannelId: _otherChannelId,
+          ephemeralChannelId: _otherHuddleChannelId,
+          startedBy: 'desktop',
+          startedEventId: 'second-call',
+        );
+        expect(container.read(huddleSessionProvider).isConnected, isTrue);
+
+        lifecycle.setLifecycle(AppLifecycleState.paused);
+        relay.onAppPaused();
+        await tester.pump(const Duration(seconds: 6));
+        expect(
+          container.read(relaySessionProvider).status,
+          SessionStatus.connected,
+        );
+
+        humanCount.complete(2);
+        await staleLeave;
+        expect(leaves, [(_huddleChannelId, SessionStatus.connected)]);
+
+        await tester.pump(const Duration(seconds: 1));
+        expect(
+          container.read(relaySessionProvider).status,
+          SessionStatus.disconnected,
+        );
+        expect(
+          container.read(huddleSessionProvider).ephemeralChannelId,
+          _otherHuddleChannelId,
+        );
+        expect(secondMedia.state.phase, HuddleMediaPhase.active);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 100));
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
     );
 
     testWidgets(
@@ -22298,7 +22496,11 @@ class _FakeChannelActions extends ChannelActions {
   }
 
   @override
-  Future<void> leaveChannel(String channelId) async {
+  Future<void> leaveChannel(
+    String channelId, {
+    Future<bool> Function()? mayPublish,
+  }) async {
+    if (mayPublish != null && !await mayPublish()) return;
     await onLeaveChannel?.call(channelId);
   }
 

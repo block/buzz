@@ -308,7 +308,10 @@ class ChannelActions {
     if (!shown) throw const ChannelJoinUnconfirmed();
   }
 
-  Future<void> leaveChannel(String channelId) async {
+  Future<void> leaveChannel(
+    String channelId, {
+    Future<bool> Function()? mayPublish,
+  }) async {
     _ensureCommunityValid();
     await _signedEventRelay.submit(
       kind: 9022,
@@ -316,6 +319,7 @@ class ChannelActions {
       tags: [
         ['h', channelId],
       ],
+      mayPublish: mayPublish,
     );
     _ensureCommunityValid();
     await _refreshChannelState(channelId);
