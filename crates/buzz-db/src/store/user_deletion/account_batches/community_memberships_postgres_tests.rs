@@ -131,21 +131,8 @@ async fn community_only_membership_refresh_is_atomic_and_preserves_other_communi
 async fn membership_delete_removes_acceptance_recorded_after_acceptance_batch() {
     let f = Fixture::new().await;
     let community = f.options.community;
-    // Without the foreign key's cascade, only the membership transaction can
-    // remove an acceptance that commits after the acceptance batch ran.
-    let fk: String = sqlx::query_scalar(
-        "SELECT conname::text FROM pg_constraint \
-         WHERE conrelid = 'join_policy_acceptances'::regclass AND contype = 'f'",
-    )
-    .fetch_one(&f.pool)
-    .await
-    .unwrap();
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "ALTER TABLE join_policy_acceptances DROP CONSTRAINT \"{fk}\""
-    )))
-    .execute(&f.pool)
-    .await
-    .unwrap();
+    // No foreign key cascades, so only the membership transaction can remove
+    // an acceptance that commits after the acceptance batch ran.
 
     // An acceptance write in flight: the member row is key-share locked and
     // the acceptance is not yet visible to the acceptance batch.

@@ -7459,20 +7459,6 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         assert_eq!(current_schema.scoped_tables, inventory.schema.scoped_tables);
         assert_eq!(current_schema.fenced_tables, inventory.schema.fenced_tables);
 
-        let mismatched_insert = sqlx::query(
-            "INSERT INTO community_deletion_approvals \
-             (request_id, community_id, inventory_digest, approved_by) \
-             VALUES ($1, $2, $3, 'tampered')",
-        )
-        .bind(request.id)
-        .bind(*request.community_id.as_uuid())
-        .bind(vec![0_u8; 32])
-        .execute(&db.pool)
-        .await;
-        assert!(
-            mismatched_insert.is_err(),
-            "a mismatched approval must be unrepresentable"
-        );
         let approved = store
             .approve(request.id, "approver-a", Some("reviewed"))
             .await
@@ -7492,38 +7478,31 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
             approved.inventory_digest,
             Some(hex::encode(inventory.digest().unwrap()))
         );
-        let mismatched_approval = sqlx::query(
+        // No foreign key binds the approval to the request digest. Every claim
+        // and lease check joins on it instead, so a tampered digest on either
+        // side grants nothing.
+        let digest = inventory.digest().unwrap();
+        for sql in [
             "UPDATE community_deletion_approvals SET inventory_digest = $2 WHERE request_id = $1",
-        )
-        .bind(request.id)
-        .bind(vec![0_u8; 32])
-        .execute(&db.pool)
-        .await;
-        assert!(
-            mismatched_approval.is_err(),
-            "approval digest must remain database-bound to the frozen request digest"
-        );
-        // PostgreSQL sends this rejection before it rolls the statement back
-        // and releases the request row lock, and sqlx returns on the error.
-        // The claim below uses SKIP LOCKED on another pooled connection, so
-        // finish a round trip on this connection before claiming.
-        let mut tamper_conn = db.pool.acquire().await.expect("acquire tamper connection");
-        let mismatched_request = sqlx::query(
             "UPDATE community_deletion_requests SET inventory_digest = $2 WHERE id = $1",
-        )
-        .bind(request.id)
-        .bind(vec![1_u8; 32])
-        .execute(&mut *tamper_conn)
-        .await;
-        assert!(
-            mismatched_request.is_err(),
-            "the frozen request digest must remain bound to its approval"
-        );
-        sqlx::query("SELECT 1")
-            .execute(&mut *tamper_conn)
-            .await
-            .expect("rejected update has rolled back");
-        drop(tamper_conn);
+        ] {
+            let set_digest = |value: Vec<u8>| {
+                sqlx::query(sql)
+                    .bind(request.id)
+                    .bind(value)
+                    .execute(&db.pool)
+            };
+            set_digest(vec![0_u8; 32]).await.expect("tamper digest");
+            assert!(
+                store
+                    .claim_specific(request.id, "executor-a", DEFAULT_LEASE_DURATION)
+                    .await
+                    .expect("claim with a mismatched digest")
+                    .is_none(),
+                "a mismatched digest must not authorize a claim: {sql}"
+            );
+            set_digest(digest.clone()).await.expect("restore digest");
+        }
         assert!(store
             .claim_specific(request.id, "executor-a", DEFAULT_LEASE_DURATION)
             .await
@@ -8945,7 +8924,6 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
     #[ignore = "requires Postgres"]
     async fn manifest_key_chunks_bind_freeze_execution_and_cleanup() {
         let (db, store) = store().await;
-        crate::test_support::retire_foreign_key_delete_actions(&db.pool).await;
         let (request, inventory) = inventoried_request(&db, &store).await;
         store
             .approve(request.id, "approver", None)
@@ -9078,7 +9056,6 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
     #[ignore = "requires Postgres"]
     async fn purge_removes_fk_children_explicitly_without_fk_actions() {
         let (db, store) = store().await;
-        crate::test_support::retire_foreign_key_delete_actions(&db.pool).await;
         let (request, inventory) = inventoried_request(&db, &store).await;
         let community = request.community_id;
         let owner = vec![7_u8; 32];

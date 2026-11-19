@@ -1855,6 +1855,23 @@ mod postgres_tests {
         );
     }
 
+    /// pgschema cannot drop a foreign key from a partitioned table, so the
+    /// launcher that reuses its database drops those keys before apply.
+    #[test]
+    fn partitioned_foreign_key_drop_runs_before_reused_apply() {
+        let launcher = include_str!("../../../../scripts/start-relay-for-tests.sh");
+        let drop_at = launcher
+            .find("scripts/drop-partitioned-foreign-keys.sql")
+            .expect("start-relay-for-tests.sh runs scripts/drop-partitioned-foreign-keys.sql");
+        let apply_at = launcher
+            .find("./bin/pgschema apply")
+            .expect("start-relay-for-tests.sh runs pgschema apply");
+        assert!(
+            drop_at < apply_at,
+            "start-relay-for-tests.sh must drop the partitioned foreign keys before pgschema apply"
+        );
+    }
+
     /// The reconcile script repairs `events_pkey` after every apply, and
     /// `start-relay-for-tests.sh` runs the same repair before apply so a reused
     /// database reconciled before the repair existed can still be applied.

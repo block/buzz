@@ -1810,14 +1810,12 @@ mod postgres_tests {
         .expect("count acceptances")
     }
 
-    /// Both removal paths delete acceptance evidence themselves: with every
-    /// foreign-key delete action retired, nothing cascades. Owners and a role
-    /// mismatch keep theirs.
+    /// Both removal paths delete acceptance evidence themselves: no foreign
+    /// key cascades. Owners and a role mismatch keep theirs.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn member_removal_deletes_acceptances_without_cascades() {
         let pool = setup_pool().await;
-        crate::test_support::retire_foreign_key_delete_actions(&pool).await;
         let (community, owner) = owned_community(&pool).await;
         let version = "a".repeat(64);
         sqlx::query(
@@ -1896,20 +1894,13 @@ mod postgres_tests {
 
     /// An acceptance inserted concurrently with the removal holds the member
     /// row's key-share lock (taken by the acceptance writer's own member
-    /// check; the acceptance foreign key is dropped here, so the lock is not
-    /// the constraint's). Removal must wait for it at its row lock and then
+    /// check; no foreign key takes it). Removal must wait for it at its row lock and then
     /// delete it; a removal that took its child snapshot first would leave the
     /// acceptance behind with no member.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn member_removal_waits_for_and_removes_concurrent_acceptance() {
         let pool = setup_pool().await;
-        crate::test_support::retire_foreign_key_delete_actions(&pool).await;
-        crate::test_support::drop_foreign_keys_between(
-            &pool,
-            &[("join_policy_acceptances", "relay_members")],
-        )
-        .await;
         let (community, _owner) = owned_community(&pool).await;
         let member = test_pubkey();
         claim_relay_membership(
@@ -2142,12 +2133,6 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn cascade_waits_for_and_removes_owned_agent_concurrent_acceptance() {
         let pool = setup_pool().await;
-        crate::test_support::retire_foreign_key_delete_actions(&pool).await;
-        crate::test_support::drop_foreign_keys_between(
-            &pool,
-            &[("join_policy_acceptances", "relay_members")],
-        )
-        .await;
         let (community, _owner) = owned_community(&pool).await;
         let (human, agent) = (test_pubkey(), test_pubkey());
         add_with_acceptance(&pool, community, &human, "member").await;
@@ -3059,7 +3044,7 @@ mod postgres_tests {
 
     /// A list repair that holds the list lock while a transfer waits on it
     /// still inserts its list: the transfer's community row lock doesn't
-    /// block the insert's foreign-key `FOR KEY SHARE`, so both commit.
+    /// block the insert, so both commit.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn owner_transfer_and_list_repair_both_commit() {
@@ -3200,7 +3185,7 @@ mod postgres_tests {
 
     /// A membership claim whose insert hit a conflict (the member already
     /// exists) locks nothing on its own. It must lock the member row before it
-    /// writes the acceptance: with the acceptance foreign key dropped, a
+    /// writes the acceptance: with no foreign key, a
     /// removal that locked the member `FOR UPDATE`, deleted its acceptances and
     /// then the member would otherwise commit before the claim's acceptance
     /// lands, leaving an acceptance with no member. The claim refuses instead.
@@ -3208,11 +3193,6 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn membership_claim_racing_member_removal_leaves_no_orphan_acceptance() {
         let pool = setup_pool().await;
-        crate::test_support::drop_foreign_keys_between(
-            &pool,
-            &[("join_policy_acceptances", "relay_members")],
-        )
-        .await;
         let (community, _owner) = owned_community(&pool).await;
         let member = test_pubkey();
         let keys = nostr::Keys::generate();
@@ -3279,11 +3259,6 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn invite_claim_racing_member_removal_rejoins_without_orphan_acceptance() {
         let pool = setup_pool().await;
-        crate::test_support::drop_foreign_keys_between(
-            &pool,
-            &[("join_policy_acceptances", "relay_members")],
-        )
-        .await;
         let (community, owner) = owned_community(&pool).await;
         let member = test_pubkey();
         let keys = nostr::Keys::generate();
@@ -3353,18 +3328,13 @@ mod postgres_tests {
     /// then hits `ON CONFLICT DO NOTHING`, which locks nothing, so the claim
     /// must lock the member row before it writes the acceptance. The claim is
     /// paused before the INSERT while the member is added and a removal
-    /// takes the member `FOR UPDATE`; with the acceptance foreign key dropped
-    /// the claim then waits on that lock, and once the removal commits it
+    /// takes the member `FOR UPDATE`; with no foreign key, the claim then
+    /// waits on that lock, and once the removal commits it
     /// refuses with no acceptance, no orphan and no invite use consumed.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn invite_claim_conflicting_with_a_member_added_mid_claim_waits_for_removal() {
         let pool = setup_pool().await;
-        crate::test_support::drop_foreign_keys_between(
-            &pool,
-            &[("join_policy_acceptances", "relay_members")],
-        )
-        .await;
         let (community, owner) = owned_community(&pool).await;
         let member = test_pubkey();
         let keys = nostr::Keys::generate();

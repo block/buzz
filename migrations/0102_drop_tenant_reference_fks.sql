@@ -3,9 +3,9 @@
 -- owning application transactions check each reference and delete or detach
 -- dependent rows themselves.
 --
--- Required stop: deploy the relay build that deletes a member's join-policy
--- acceptances in the account-cleanup membership transaction to every pod and
--- job first. Do not roll back below it.
+-- Required stop: run a relay build with the application reference checks and
+-- explicit child deletes (#9608 or later) on every pod and job first. Do not
+-- roll back below it.
 --
 -- Dropping a foreign key takes ACCESS EXCLUSIVE on the child and on the
 -- referenced table. Take every lock in one statement, children before
