@@ -79,8 +79,8 @@ container with the same Flutter Tabler artwork, labels and actions. Android
 retains its existing button treatment. The minimized sheet keeps its original
 buttons on both platforms. The emoji action is hidden on both platforms; the
 reaction implementation remains available for future use. On iOS foldable displays, full-screen actions follow
-the workspace side rail: leave then minimize at the top, microphone and speaker at the bottom. Without a rail, audio actions use a compact bottom
-row. Microphone-on and speaker-on use filled selected glass states.
+the workspace side rail: leave then minimize at the top, microphone and speaker at the bottom. Without a rail, controls retain their original positions and sizes, with
+speaker then microphone in the bottom row. Microphone-on and speaker-on use filled selected glass states.
 
 ## Native boundary
 

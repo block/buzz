@@ -30,9 +30,7 @@ class _HuddleCallControls extends StatelessWidget {
       backgroundColor: isMuted
           ? context.colors.surfaceContainerHighest
           : context.colors.primary,
-      dimension: defaultTargetPlatform == TargetPlatform.iOS
-          ? _huddleRailControlSize
-          : 80,
+      dimension: inRail ? _huddleRailControlSize : 80,
       toggled: isMuted,
       glassSelected: !isMuted,
       useHapticFeedback: true,
@@ -49,9 +47,7 @@ class _HuddleCallControls extends StatelessWidget {
       backgroundColor: isSpeakerEnabled
           ? context.colors.primary
           : context.colors.surfaceContainerHighest,
-      dimension: defaultTargetPlatform == TargetPlatform.iOS
-          ? _huddleRailControlSize
-          : 80,
+      dimension: inRail ? _huddleRailControlSize : 80,
       toggled: isSpeakerEnabled,
       useHapticFeedback: true,
       onPressed: onToggleSpeaker,
@@ -64,12 +60,12 @@ class _HuddleCallControls extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          defaultTargetPlatform == TargetPlatform.iOS ? microphone : speaker,
+          inRail ? microphone : speaker,
           SizedBox(
             width: inRail ? 0 : Grid.sm,
             height: inRail ? _huddleRailControlGap : 0,
           ),
-          defaultTargetPlatform == TargetPlatform.iOS ? speaker : microphone,
+          inRail ? speaker : microphone,
           // Keep reactions available for a future return to the call controls.
           Visibility(
             visible: false,
@@ -85,9 +81,7 @@ class _HuddleCallControls extends StatelessWidget {
                 icon: BuzzIcons.smilePlus,
                 foregroundColor: context.colors.onSurface,
                 backgroundColor: context.colors.surfaceContainerHighest,
-                dimension: defaultTargetPlatform == TargetPlatform.iOS
-                    ? _huddleRailControlSize
-                    : 80,
+                dimension: inRail ? _huddleRailControlSize : 80,
                 useHapticFeedback: true,
                 onPressed: onReact,
               ),

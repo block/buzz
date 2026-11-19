@@ -22,15 +22,12 @@ class _HuddleCallLayout extends StatelessWidget {
     final strip = this.strip;
     if (strip == null) {
       return SafeArea(
-        bottom: defaultTargetPlatform != TargetPlatform.iOS,
         child: Padding(
-          padding: EdgeInsets.fromLTRB(
+          padding: const EdgeInsets.fromLTRB(
             Grid.gutter,
             Grid.xxs,
             Grid.gutter,
-            defaultTargetPlatform == TargetPlatform.iOS
-                ? mobileTabBarBottom(context)
-                : Grid.gutter,
+            Grid.gutter,
           ),
           child: Column(
             children: [

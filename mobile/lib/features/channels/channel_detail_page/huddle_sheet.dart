@@ -855,9 +855,7 @@ class _HuddleCallHeader extends StatelessWidget {
             icon: const Icon(BuzzIcons.chevronDown, size: 32),
           );
     final leave = _HuddleRoundControl(
-      dimension: defaultTargetPlatform == TargetPlatform.iOS
-          ? _huddleRailControlSize
-          : 64,
+      dimension: inRail ? _huddleRailControlSize : 64,
       useGlass: true,
       key: const ValueKey('huddle-leave'),
       tooltip: 'Leave Huddle',

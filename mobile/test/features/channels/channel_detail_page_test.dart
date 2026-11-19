@@ -9890,12 +9890,28 @@ void main() {
             tester
                 .getCenter(find.byKey(const ValueKey('huddle-mute-toggle')))
                 .dx,
-            lessThan(
+            greaterThan(
               tester
                   .getCenter(
                     find.byKey(const ValueKey('huddle-speaker-toggle')),
                   )
                   .dx,
+            ),
+          );
+          for (final key in ['huddle-speaker-toggle', 'huddle-mute-toggle']) {
+            expect(
+              tester.getSize(find.byKey(ValueKey(key))),
+              const Size(80, 80),
+            );
+          }
+          expect(
+            tester.getSize(find.byKey(const ValueKey('huddle-leave'))),
+            const Size(64, 64),
+          );
+          expect(
+            tester.getCenter(find.byKey(const ValueKey('huddle-minimize'))).dx,
+            lessThan(
+              tester.getCenter(find.byKey(const ValueKey('huddle-leave'))).dx,
             ),
           );
           glass('huddle-minimize').onPressed!();

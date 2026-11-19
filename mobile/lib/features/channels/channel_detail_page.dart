@@ -1,6 +1,5 @@
 import 'package:duo_kit/duo_kit.dart';
 import '../../shared/widgets/ios_navigation_bar.dart';
-import '../../shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'bestie_transcription_status.dart';
 import '../../shared/widgets/duo_toolbar.dart';
 import 'composer_geometry.dart';
