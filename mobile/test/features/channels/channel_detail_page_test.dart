@@ -9776,18 +9776,23 @@ void main() {
             findsNothing,
           );
           expect(find.bySemanticsLabel('Emoji reactions'), findsNothing);
+          // UIKit announces isSelected as the selected trait, so the label
+          // names the microphone state rather than the mute action.
           expect(glass('huddle-mute-toggle').isSelected, isTrue);
+          expect(glass('huddle-mute-toggle').semanticLabel, 'Microphone on');
           glass('huddle-mute-toggle').onPressed!();
           await tester.pumpAndSettle();
           expect(glass('huddle-mute-toggle').isSelected, isFalse);
-          expect(glass('huddle-mute-toggle').semanticLabel, 'Unmute');
+          expect(glass('huddle-mute-toggle').semanticLabel, 'Microphone off');
           expect(
             (glass('huddle-mute-toggle').artwork! as Icon).icon,
             BuzzIcons.micOff,
           );
+          expect(glass('huddle-speaker-toggle').semanticLabel, 'Speaker off');
           glass('huddle-speaker-toggle').onPressed!();
           await tester.pumpAndSettle();
           expect(glass('huddle-speaker-toggle').isSelected, isTrue);
+          expect(glass('huddle-speaker-toggle').semanticLabel, 'Speaker on');
           transport.emitRemoteAudio(levelDbov: -10);
           await tester.pump(const Duration(milliseconds: 50));
           await tester.pump();
@@ -12777,6 +12782,83 @@ void main() {
         findsNothing,
       );
     });
+
+    testWidgets(
+      'Huddle speaking ring resolves the portrait thumbnail while idle',
+      (tester) async {
+        // At 2.625x the 88 pt portrait (231 px) fits the 240 px thumbnail
+        // cutoff, so a ring laid out any larger would fetch the original.
+        const dpr = 2.625;
+        tester.view.devicePixelRatio = dpr;
+        tester.view.physicalSize = const Size(420 * dpr, 800 * dpr);
+        addTearDown(tester.view.reset);
+        final users = _FakeUserCacheNotifier(const {});
+        final transport = _HuddleTestTransport(
+          peers: const {
+            1: HuddlePeer(pubkey: 'desktop', peerIndex: 1, epoch: 0),
+            2: HuddlePeer(pubkey: 'self', peerIndex: 2, epoch: 0),
+            3: HuddlePeer(pubkey: 'guest', peerIndex: 3, epoch: 0),
+          },
+        );
+        final urls = <String>[];
+        final client = http_testing.MockClient((request) async {
+          urls.add(request.url.path);
+          return http.Response.bytes(_transparentPng, 200);
+        });
+        addTearDown(client.close);
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _huddleMsg(
+                id: 'avatar-network-probe',
+                kind: EventKind.huddleStarted,
+                pubkey: 'self',
+                createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+              ),
+            ],
+            disableAnimations: true,
+            userCacheNotifier: users,
+            mediaClient: client,
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            huddleCurrentPubkey: 'self',
+            huddleMediaFactory: _HuddleTestMedia.new,
+            huddleTransportFactory: (_) => transport,
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+        await tester.pumpAndSettle();
+        final pubkey = ['desktop', 'guest'].singleWhere(
+          (pubkey) =>
+              (tester
+                          .getSize(
+                            find.byKey(ValueKey('huddle-avatar-image-$pubkey')),
+                          )
+                          .width -
+                      88)
+                  .abs() <
+              0.01,
+        );
+        final hash = 'b' * 64;
+        users.replace(
+          UserProfile(
+            pubkey: pubkey,
+            avatarUrl: 'https://relay.example/media/$hash.png',
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(urls.toSet(), {'/media/$hash.thumb.webp'});
+        expect(
+          tester.getSize(
+            find.descendant(
+              of: find.byKey(ValueKey('huddle-speaking-halo-$pubkey')),
+              matching: find.byType(AvatarImage),
+            ),
+          ),
+          tester.getSize(find.byKey(ValueKey('huddle-avatar-image-$pubkey'))),
+        );
+      },
+    );
 
     testWidgets('opens a profile sheet from a huddle card avatar', (
       tester,
