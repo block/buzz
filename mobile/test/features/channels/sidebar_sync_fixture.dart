@@ -226,6 +226,8 @@ class ConnectedRelaySession extends RelaySessionNotifier {
   ConnectedRelaySession({super.httpClient})
     : super(snapshotDecoder: (input) async => validateReadStateSnapshot(input));
 
+  void setStatus(SessionStatus status) => state = SessionState(status: status);
+
   @override
   SessionState build() {
     // Follows the active community, as the production session does.

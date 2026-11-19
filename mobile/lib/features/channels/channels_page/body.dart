@@ -362,6 +362,9 @@ class _SliverChannelsList extends HookConsumerWidget {
     final unreadChannelIds = highlights.unread
         .where((id) => seeded(id) || locallyForcedChannelIds.contains(id))
         .toSet();
+    final rowUnreadChannelIds = unreadChannelIds.intersection(
+      highlights.rowUnread,
+    );
     final attentionChannelIds = highlights.attention.where(seeded).toSet();
     // Build sorted user-defined sections and compute which stream channels
     // belong to each section. Channels not assigned to any valid section fall
@@ -421,8 +424,7 @@ class _SliverChannelsList extends HookConsumerWidget {
       return channelMatchesFilter(
         mode: filters?.store.modeFor(group) ?? ChannelFilterMode.all,
         unread:
-            (unreadChannelIds.contains(channel.id) &&
-                highlights.rowUnread.contains(channel.id)) ||
+            rowUnreadChannelIds.contains(channel.id) ||
             attentionChannelIds.contains(channel.id),
         activitySeconds: evidence?.asData?.value,
         activityKnown: evidence?.asData != null,
@@ -481,7 +483,7 @@ class _SliverChannelsList extends HookConsumerWidget {
                 channels: starredStreamChannels,
                 isVisible: (c) => visible('starred', c),
                 unreadChannelIds: unreadChannelIds,
-                rowUnreadChannelIds: highlights.rowUnread,
+                rowUnreadChannelIds: rowUnreadChannelIds,
                 attentionChannelIds: attentionChannelIds,
                 mutedChannelIds: mutedChannelIds,
                 currentPubkey: currentPubkey,
@@ -501,7 +503,7 @@ class _SliverChannelsList extends HookConsumerWidget {
                 channels: customRoster(section.id),
                 isVisible: (c) => visible(sectionSortGroupKey(section.id), c),
                 unreadChannelIds: unreadChannelIds,
-                rowUnreadChannelIds: highlights.rowUnread,
+                rowUnreadChannelIds: rowUnreadChannelIds,
                 attentionChannelIds: attentionChannelIds,
                 mutedChannelIds: mutedChannelIds,
                 currentPubkey: currentPubkey,
@@ -592,7 +594,7 @@ class _SliverChannelsList extends HookConsumerWidget {
               channels: ungroupedStreamChannels,
               isVisible: (c) => visible('channels', c),
               unreadChannelIds: unreadChannelIds,
-              rowUnreadChannelIds: highlights.rowUnread,
+              rowUnreadChannelIds: rowUnreadChannelIds,
               attentionChannelIds: attentionChannelIds,
               mutedChannelIds: mutedChannelIds,
               currentPubkey: currentPubkey,
@@ -610,7 +612,7 @@ class _SliverChannelsList extends HookConsumerWidget {
               channels: sortedDmChannels,
               isVisible: (c) => visible('dms', c),
               unreadChannelIds: unreadChannelIds,
-              rowUnreadChannelIds: highlights.rowUnread,
+              rowUnreadChannelIds: rowUnreadChannelIds,
               attentionChannelIds: attentionChannelIds,
               mutedChannelIds: mutedChannelIds,
               currentPubkey: currentPubkey,

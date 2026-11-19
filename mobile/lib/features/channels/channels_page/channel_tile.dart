@@ -29,7 +29,6 @@ class _ChannelTile extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final showUnread = isUnread && boldUnread;
     final showAttention =
         hasAttention &&
         (!isMuted ||
@@ -115,9 +114,9 @@ class _ChannelTile extends ConsumerWidget {
                               ? contentColor
                               : channelNavigationForeground(
                                   context,
-                                  unread: showUnread,
+                                  unread: boldUnread,
                                 ),
-                          fontWeight: showUnread
+                          fontWeight: boldUnread
                               ? FontWeight.w600
                               : FontWeight.w400,
                         ),

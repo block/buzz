@@ -28,6 +28,24 @@ class ChannelMutesCrypto {
       nip44Decrypt(_conversationKey, ciphertext);
 }
 
+/// Row mute confirmation and the relay head that established it.
+class ConfirmedChannelMutes {
+  final int createdAt;
+  final String eventId;
+  final Set<String> channelIds;
+
+  const ConfirmedChannelMutes.empty()
+    : createdAt = 0,
+      eventId = '',
+      channelIds = const {};
+
+  const ConfirmedChannelMutes._(this.createdAt, this.eventId, this.channelIds);
+
+  /// The relay keeps the newest timestamp and the lowest ID on a tie.
+  bool precedes(int time, String id) =>
+      time > createdAt || (time == createdAt && id.compareTo(eventId) < 0);
+}
+
 class ChannelMutesManager {
   final String pubkey;
   final String relayUrl;
@@ -40,10 +58,8 @@ class ChannelMutesManager {
 
   ChannelMuteStore _store;
   ChannelMuteStore? _lastPublishedStore;
-  Set<String> _confirmedMutedChannelIds = const {};
+  var _confirmedMutes = const ConfirmedChannelMutes.empty();
   Timer? _publishDebounce;
-  int _lastRemoteCreatedAt = 0;
-  String? _lastRemoteEventId;
   void Function()? _unsubscribe;
   bool _disposed = false;
 
@@ -80,8 +96,8 @@ class ChannelMutesManager {
 
   ChannelMuteStore get store => _store;
 
-  /// Mutes in a relay head observed or acknowledged by this session.
-  Set<String> get confirmedMutedChannelIds => _confirmedMutedChannelIds;
+  /// Mutes in a relay head observed or acknowledged by this manager.
+  ConfirmedChannelMutes get confirmedMutes => _confirmedMutes;
 
   Future<void> initialize() async {
     if (_disposed) return;
@@ -278,21 +294,16 @@ class ChannelMutesManager {
     limit: 1,
   );
 
-  /// Relay retains `ORDER BY created_at DESC, id ASC`: at equal second the
-  /// lower event ID wins.
-  bool _isAfterCursor(int createdAt, String id) =>
-      createdAt > _lastRemoteCreatedAt ||
-      (createdAt == _lastRemoteCreatedAt &&
-          id.compareTo(_lastRemoteEventId ?? '') < 0);
-
   void _confirmHead(int createdAt, String id, ChannelMuteStore store) {
-    if (!_isAfterCursor(createdAt, id)) return;
-    _lastRemoteCreatedAt = createdAt;
-    _lastRemoteEventId = id;
-    _confirmedMutedChannelIds = Set.unmodifiable({
-      for (final entry in store.channels.entries)
-        if (entry.value.muted) entry.key,
-    });
+    if (!_confirmedMutes.precedes(createdAt, id)) return;
+    _confirmedMutes = ConfirmedChannelMutes._(
+      createdAt,
+      id,
+      Set.unmodifiable({
+        for (final entry in store.channels.entries)
+          if (entry.value.muted) entry.key,
+      }),
+    );
   }
 
   /// Returns false only when a newer head could not be persisted; the cursor
@@ -306,7 +317,7 @@ class ChannelMutesManager {
       if (event.pubkey != pubkey || event.getTagValue('d') != 'channel-mutes') {
         continue;
       }
-      if (!_isAfterCursor(event.createdAt, event.id)) continue;
+      if (!_confirmedMutes.precedes(event.createdAt, event.id)) continue;
       final ChannelMuteStore remote;
       try {
         final parsed = jsonDecode(_crypto.decrypt(event.content));
@@ -370,7 +381,10 @@ class ChannelMutesManager {
       final publishedStore = _store;
       final payload = jsonEncode(publishedStore.toJson());
       final ciphertext = _crypto.encrypt(payload);
-      final createdAt = max(currentUnixSeconds(), _lastRemoteCreatedAt + 1);
+      final createdAt = max(
+        currentUnixSeconds(),
+        _confirmedMutes.createdAt + 1,
+      );
 
       final receipt = await _signedEventRelay.submit(
         kind: EventKind.readState,
