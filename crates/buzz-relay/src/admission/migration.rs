@@ -92,7 +92,7 @@ pub(crate) async fn read_limit(redis: &RedisConnection) -> RedisResult<u32> {
             })
             .ok_or_else(|| {
                 redis::RedisError::from((
-                    redis::ErrorKind::TypeError,
+                    redis::ErrorKind::UnexpectedReturnType,
                     "invalid migration write limit",
                 ))
             }),

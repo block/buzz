@@ -23,7 +23,7 @@ use uuid::Uuid;
 use crate::{
     config::{AdminAuth, AdminConfig, Config},
     handlers::group_state_postgres_tests::{community, create_channel},
-    state::{tests::build_test_state, AppState},
+    state::tests::build_test_state,
 };
 
 const ADMIN_HOST: &str = "admin.example.org";
