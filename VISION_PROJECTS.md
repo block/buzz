@@ -34,7 +34,7 @@ The portable representation is a NIP-34 repo announcement (kind:30617) — stand
 
 Branch protections live in the same event as `buzz-protect` tags, and the relay enforces them at the git transport layer. The repo channel's roles decide who can push: members write, and `push:admin` narrows a protected branch to admins. `no-force-push` and `no-delete` apply to everyone, the owner included. Required approvals and checks are governance rules still to build; see [VISION_GOVERNANCE.md](VISION_GOVERNANCE.md).
 
-Agents act under their own authority, never their owner's. An agent reaches a repo through its own membership in the repo channel, and where the community requires it, a grant from its owner that further limits its repos, actions and lifetime. [NIP-OA](docs/nips/NIP-OA.md) identifies the human who delegated: every push is attributed to that owner, and a ban on the owner reaches the agent too. Owner attestation never replaces the agent's own channel access or a required grant. An agent never holds more than its owner currently does: when the owner loses access to a repo, the agent loses it too, grant or no grant. See [VISION_GOVERNANCE.md](VISION_GOVERNANCE.md).
+Agents act under their own authority, never their owner's. An agent reaches a repo through its own membership in the repo channel, and where the community requires it, a grant from its owner that further limits its repos, actions, and lifetime. [NIP-OA](docs/nips/NIP-OA.md) identifies the human who delegated: every push is attributed to that owner, and a ban on the owner reaches the agent too. Owner attestation never replaces the agent's own channel access or a required grant. An agent never holds more than its owner currently does: when the owner loses access to a repo, the agent loses it too, grant or no grant. See [VISION_GOVERNANCE.md](VISION_GOVERNANCE.md).
 
 Standard NIP-34 clients see a normal repo. gitworkshop.dev renders it. ngit-cli works with it. Buzz clients read the `buzz-` tags and wire up the channel and project UI. One event, two audiences, no custom kind for the repo itself.
 
@@ -92,7 +92,7 @@ When you create a branch, Buzz creates a channel. The branch's patches, review c
 └── 📦 Channel archived
 ```
 
-No tab-switching between issue tracker, CI dashboard, chat, and code review. The channel shows the pull request, the CI dashboard, and the discussion thread. One stream. One search index. It displays the proposal and grants nothing: who can read, push and approve always comes from the repo channel and the community's rules. See [VISION_GOVERNANCE.md](VISION_GOVERNANCE.md).
+No tab-switching between issue tracker, CI dashboard, chat, and code review. The channel shows the pull request, the CI dashboard, and the discussion thread. One stream. One search index. It displays the proposal and grants nothing: who can read, push, and approve always comes from the repo channel and the community's rules. See [VISION_GOVERNANCE.md](VISION_GOVERNANCE.md).
 
 ---
 

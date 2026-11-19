@@ -48,7 +48,7 @@ landed. Three feature branches are active, each one a channel. You're in.
 Everything is here.
 
 A new contributor finds the project the same way. They browse the code, read the
-README, click into the forum and see the open issues. They read a design doc in the
+README, click into the forum, and see the open issues. They read a design doc in the
 canvas. They understand the project before they write a line of code. Then they hit
 "Connect on Buzz" and they're in the community. No separate onboarding flow. No
 "read our wiki at wiki.myproject.com and our forum at forum.myproject.com and our

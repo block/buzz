@@ -19,7 +19,7 @@ Git in Buzz is governed at three levels, each owned by the people who already ow
 | Level | Who sets it | What it decides |
 |---|---|---|
 | **Community** | Owners and admins | The floor every repo stands on, labels, agent limits, trusted checks, retention |
-| **Repo** | The repo channel's admins | Rules on top of the floor, and who reads, writes and manages |
+| **Repo** | The repo channel's admins | Rules on top of the floor, and who reads, writes, and manages |
 | **Change** | Everyone working on it | The evidence: reviews, checks, discussion, and the moment it lands |
 
 Rules flow down. Evidence flows up. A level can add to what's above it, never subtract. Authority lives at the top two levels; a change only carries evidence.
@@ -54,7 +54,7 @@ One layer sits above the community: the **hosting operator**. "Repos here can ne
 
 ## The Repo: Building Up
 
-A repo is bound to a channel, and the channel's roles are the repo's permissions. Guests read. Members write. Admins manage: default branch, protections, and which rules the repo adds. A private channel makes a private repo, and everything about it follows: issues, status events and labels are visible only to the channel's members.
+A repo is bound to a channel, and the channel's roles are the repo's permissions. Guests read. Members write. Admins manage: default branch, protections, and which rules the repo adds. A private channel makes a private repo, and everything about it follows: issues, status events, and labels are visible only to the channel's members.
 
 Repo admins add rules on top of the floor. They can require a second reviewer, protect a release branch, or name code owners for a directory. They can't remove the community's review, turn off secret scanning, or loosen the agent cap. When rules overlap, every applicable rule must pass. Nothing gets "overridden by the stricter one"; they all just apply.
 
@@ -64,17 +64,17 @@ The rules card on every pull request shows the combined result and where each ru
 
 ## The Change: Where It Lands
 
-Every ref change goes through the same gate and leaves a receipt, whether it's a merge, a direct push the rules allow, or a deleted tag. A proposed code change is represented by a pull request. Its work channel gives the discussion a home, not additional authority: the repo channel, or a room spun up just for the work, as in [VISION_PROJECTS.md](VISION_PROJECTS.md). That channel is a workspace, not a permission. Joining `#fix-rounding` grants nothing on `ledger`; who can read, push and approve always comes from the repo channel and the community floor.
+Every ref change goes through the same gate and leaves a receipt, whether it's a merge, a direct push the rules allow, or a deleted tag. A proposed code change is represented by a pull request. Its work channel gives the discussion a home, not additional authority: the repo channel, or a room spun up just for the work, as in [VISION_PROJECTS.md](VISION_PROJECTS.md). That channel is a workspace, not a permission. Joining `#fix-rounding` grants nothing on `ledger`; who can read, push, and approve always comes from the repo channel and the community floor.
 
-The work can happen in another room; its permissions stay with the repo. Reviews, checks and code shown from the pull request remain visible only to people allowed to read the repo, wherever Buzz displays them, and stop showing to anyone who loses repo access. Ordinary chat is different: it has the room's audience, and Buzz can't make text someone pastes by hand inherit the repo's privacy. Buzz-generated diffs and check details never fall back to the room's audience.
+The work can happen in another room; its permissions stay with the repo. Reviews, checks, and code shown from the pull request remain visible only to people allowed to read the repo, wherever Buzz displays them, and stop showing to anyone who loses repo access. Ordinary chat is different: it has the room's audience, and Buzz can't make text someone pastes by hand inherit the repo's privacy. Buzz-generated diffs and check details never fall back to the room's audience.
 
 Governance adds two things: evidence that means something, and one door.
 
-**Evidence names exactly what it approved.** Every approval and check result records the commits, repository and target branch it saw. A yes in one repo never counts in another. Rules decide what still counts: how many approvals, from whom, whether a new push clears them, and whether checks must pass on the merge result. Missing, pending or unavailable required checks block the change. Any account that carries, or is required to carry, an owner attestation ([NIP-OA](docs/nips/NIP-OA.md)) can't fill a required human approval. When the rules ask for independent review, nobody approves their own work: an agent counts as its owner, and "their own work" means every key that pushed or signed the pull request's commits.
+**Evidence names exactly what it approved.** Every approval and check result records the commits, repository, and target branch it saw. A yes in one repo never counts in another. Rules decide what still counts: how many approvals, from whom, whether a new push clears them, and whether checks must pass on the merge result. Missing, pending, or unavailable required checks block the change. Any account that carries, or is required to carry, an owner attestation ([NIP-OA](docs/nips/NIP-OA.md)) can't fill a required human approval. When the rules ask for independent review, nobody approves their own work: an agent counts as its owner, and "their own work" means every key that pushed or signed the pull request's commits.
 
-**One door, one decision.** Whoever lands a change, whether Dana, her agent or a merge coordinator, goes through the same gate. Agents and CI do the compute. The relay decides, in one step, with current authority and current evidence. A change can land only under authority still valid at that moment. You can use another client. You cannot use another entrance to skip the rules.
+**One door, one decision.** Whoever lands a change, whether Dana, her agent, or a merge coordinator, goes through the same gate. Agents and CI do the compute. The relay decides, in one step, with current authority and current evidence. A change can land only under authority still valid at that moment. You can use another client. You cannot use another entrance to skip the rules.
 
-**Every decision leaves a receipt.** When the relay says yes, it records what changed, who acted, for whom, under which rules, on what evidence, and what actually happened. When it says no, it records that too, along with the rule that said it. Members see the reviews, checks and outcome in the channel. The full receipt lives in the community's record.
+**Every decision leaves a receipt.** When the relay says yes, it records what changed, who acted, for whom, under which rules, on what evidence, and what actually happened. When it says no, it records that too, along with the rule that said it. Members see the reviews, checks, and outcome in the channel. The full receipt lives in the community's record.
 
 When the change lands, its work channel can archive. The conversation stays as the story of why the code exists. The receipt stays as the proof.
 
@@ -92,7 +92,7 @@ The agent's key is still its own key, and **handing over the key doesn't hand ov
 
 Membership gates collaboration. Owners and admins keep the record. Policy gates changes.
 
-- **It outlasts the work.** Archiving or deleting a work channel, removing a contributor or replacing a rule cannot erase the record while a retention rule still covers it.
+- **It outlasts the work.** Archiving or deleting a work channel, removing a contributor, or replacing a rule cannot erase the record while a retention rule still covers it.
 - **It stays as private as the work.** Keeping a record never publishes it. Former members lose access, same as today.
 - **It's more than merges.** Refusals, reads, grants, rule changes, and every look at the record itself.
 - **It travels with the community.** Admins can export a signed copy anyone can verify offline. The copy belongs to the community, every export is recorded, and the formats are documented so the record can be restored elsewhere.
@@ -117,7 +117,7 @@ Public contributions stay portable, and your reputation on open projects travels
 
 ## Honest Edges
 
-**Signatures are not an audit.** Signatures establish who signed. Chained records make alteration detectable against a trusted checkpoint. Retention, completeness and recovery still need operating controls, and an auditor will ask about those.
+**Signatures are not an audit.** Signatures establish who signed. Chained records make alteration detectable against a trusted checkpoint. Retention, completeness, and recovery still need operating controls, and an auditor will ask about those.
 
 **Corporate revocation is as fast as the voucher.** An issuer-backed community trades instant revocation of corporate identity for a stateless front desk with no identity registry. A deployment that needs a tighter bound shortens how long a voucher can live. The time from your directory to your issuer is the issuer's promise, not ours.
 
@@ -131,7 +131,7 @@ Public contributions stay portable, and your reputation on open projects travels
 
 ## Status
 
-This is the proposed contract, not what ships today. Git hosting, channel-bound repos, NIP-34 pull requests, NIP-FI identity and moderation's signed commands exist. Channels created per branch are a convention today, not a feature, and governance doesn't depend on them. Today a repo is managed by its owner and named maintainers; moving that to channel admins is part of this work. Community floors, labels, trusted checks, agent grants, the single landing decision, receipts, retention and export are still to build. A companion protocol proposal will define the wire, composing NIP-29 roles and NIP-34 repo identity, so another implementation can build the same contract without our permission.
+This is the proposed contract, not what ships today. Git hosting, channel-bound repos, NIP-34 pull requests, NIP-FI identity, and moderation's signed commands exist. Channels created per branch are a convention today, not a feature, and governance doesn't depend on them. Today a repo is managed by its owner and named maintainers; moving that to channel admins is part of this work. Community floors, labels, trusted checks, agent grants, the single landing decision, receipts, retention, and export are still to build. A companion protocol proposal will define the wire, composing NIP-29 roles and NIP-34 repo identity, so another implementation can build the same contract without our permission.
 
 ---
 
