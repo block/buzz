@@ -3,7 +3,7 @@ part of '../channel_detail_page.dart';
 const _huddleLifetime = Duration(hours: 1);
 const _huddleAvatarRadius = 52.0;
 const _huddleAvatarFrameSize = 128.0;
-const _huddleSpeakingRingSize = 112.0;
+const _huddleSpeakingRingSize = 120.0;
 const _huddleParticipantLabelSpace = 28.0;
 const _huddleDenseParticipantThreshold = 6;
 
@@ -681,6 +681,10 @@ class _MobileHuddleCallPage extends ConsumerWidget {
       ),
     };
 
+    final strip = defaultTargetPlatform == TargetPlatform.iOS
+        ? DuoToolbarScope.maybeStripOf(context) ??
+              FoldGeometry.of(context).strip
+        : null;
     return PopScope<void>(
       onPopInvokedWithResult: (didPop, _) {
         if (didPop &&
@@ -691,117 +695,111 @@ class _MobileHuddleCallPage extends ConsumerWidget {
       },
       child: Scaffold(
         backgroundColor: context.colors.surface,
-        body: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(
-              Grid.gutter,
-              Grid.xxs,
-              Grid.gutter,
-              Grid.gutter,
-            ),
-            child: Column(
-              children: [
-                _HuddleCallHeader(
-                  isLeaving: session.phase == HuddleSessionPhase.leaving,
-                  onMinimize: () {
-                    presentationController.minimize();
-                    Navigator.of(context).pop();
-                  },
-                  onLeave: () {
-                    presentationController.hide();
-                    final leaving = lifecycleController.leave();
-                    Navigator.of(context).pop();
-                    unawaited(
-                      leaving.catchError((Object error) {
-                        debugPrint('[MobileHuddle] leave failed: $error');
-                      }),
-                    );
-                  },
-                ),
-                _HuddleAgentConnectionNotice(invite: invite),
-                Expanded(
-                  child: _HuddleCallParticipants(
-                    connected: connected,
-                    error: session.phase == HuddleSessionPhase.failed
-                        ? unavailable
-                              ? 'This Huddle is no longer available.'
-                              : session.error ?? 'Huddle audio failed.'
-                        : null,
-                    profiles: profiles,
-                    fallbackLabels: directoryDisplayNames,
-                    contextualLabels: huddleLabels,
-                    remotePubkeys: remotePubkeys,
-                    localPubkey: localPubkey,
-                    activeSpeakerPubkeys: session.activeSpeakerPubkeys,
-                    speakerLevels: session.speakerLevels,
-                    workingAgentPubkeys: workingAgentPubkeys,
-                    retryTooltip: retryTooltip,
-                    retryIcon: retryIcon,
-                    onRetry: onRetry,
-                    onParticipantTap: (pubkey) {
-                      final isSelf = pubkey == localPubkey || pubkey.isEmpty;
-                      _showHuddleParticipantSpotlight(
-                        context: context,
-                        ephemeralChannelId: invite.ephemeralChannelId,
-                        pubkey: pubkey,
-                        isSelf: isSelf,
-                      );
-                    },
-                    onOverflowTap: () => _showHuddleParticipantRoster(
+        body: _HuddleCallLayout(
+          strip: strip,
+          header: _HuddleCallHeader(
+            inRail: strip != null,
+            isLeaving: session.phase == HuddleSessionPhase.leaving,
+            onMinimize: () {
+              presentationController.minimize();
+              Navigator.of(context).pop();
+            },
+            onLeave: () {
+              presentationController.hide();
+              final leaving = lifecycleController.leave();
+              Navigator.of(context).pop();
+              unawaited(
+                leaving.catchError((Object error) {
+                  debugPrint('[MobileHuddle] leave failed: $error');
+                }),
+              );
+            },
+          ),
+          content: Column(
+            children: [
+              _HuddleAgentConnectionNotice(invite: invite),
+              Expanded(
+                child: _HuddleCallParticipants(
+                  connected: connected,
+                  error: session.phase == HuddleSessionPhase.failed
+                      ? unavailable
+                            ? 'This Huddle is no longer available.'
+                            : session.error ?? 'Huddle audio failed.'
+                      : null,
+                  profiles: profiles,
+                  fallbackLabels: directoryDisplayNames,
+                  contextualLabels: huddleLabels,
+                  remotePubkeys: remotePubkeys,
+                  localPubkey: localPubkey,
+                  activeSpeakerPubkeys: session.activeSpeakerPubkeys,
+                  speakerLevels: session.speakerLevels,
+                  workingAgentPubkeys: workingAgentPubkeys,
+                  retryTooltip: retryTooltip,
+                  retryIcon: retryIcon,
+                  onRetry: onRetry,
+                  onParticipantTap: (pubkey) {
+                    final isSelf = pubkey == localPubkey || pubkey.isEmpty;
+                    _showHuddleParticipantSpotlight(
                       context: context,
                       ephemeralChannelId: invite.ephemeralChannelId,
-                    ),
+                      pubkey: pubkey,
+                      isSelf: isSelf,
+                    );
+                  },
+                  onOverflowTap: () => _showHuddleParticipantRoster(
+                    context: context,
+                    ephemeralChannelId: invite.ephemeralChannelId,
                   ),
                 ),
-                if (connected)
-                  _HuddleCallControls(
-                    isMuted: session.isMuted,
-                    isSpeakerEnabled: session.isSpeakerEnabled,
-                    onToggleMute: () =>
-                        unawaited(sessionController.setMuted(!session.isMuted)),
-                    onToggleSpeaker: () => unawaited(
-                      sessionController.setSpeakerEnabled(
-                        !session.isSpeakerEnabled,
-                      ),
-                    ),
-                    onReact: () => showEmojiPicker(
-                      context: context,
-                      onSelect: (emoji) {
-                        ref.read(recentEmojiProvider.notifier).record(emoji);
-                        _burstHuddleReaction(
-                          ref: ref,
-                          fallbackContext: context,
-                          emoji: emoji,
-                          senderPubkey: localPubkey,
-                        );
-                        unawaited(
-                          ref
-                              .read(channelActionsProvider)
-                              .sendHuddleReaction(
-                                channelId: invite.ephemeralChannelId,
-                                emoji: emoji,
-                                senderName: reactionSenderName,
-                              )
-                              .catchError((Object error) {
-                                if (!context.mounted) return;
-                                ScaffoldMessenger.of(
-                                  context,
-                                ).showFeedbackSnackBar(
-                                  const SnackBar(
-                                    content: Text('Reaction failed'),
-                                  ),
-                                  kind: ToastKind.error,
-                                );
-                              }),
-                        );
-                      },
-                    ),
-                  )
-                else
-                  const SizedBox(height: Grid.xxl),
-              ],
-            ),
+              ),
+            ],
           ),
+          controls: connected
+              ? _HuddleCallControls(
+                  inRail: strip != null,
+                  isMuted: session.isMuted,
+                  isSpeakerEnabled: session.isSpeakerEnabled,
+                  onToggleMute: () =>
+                      unawaited(sessionController.setMuted(!session.isMuted)),
+                  onToggleSpeaker: () => unawaited(
+                    sessionController.setSpeakerEnabled(
+                      !session.isSpeakerEnabled,
+                    ),
+                  ),
+                  onReact: () => showEmojiPicker(
+                    context: context,
+                    onSelect: (emoji) {
+                      ref.read(recentEmojiProvider.notifier).record(emoji);
+                      _burstHuddleReaction(
+                        ref: ref,
+                        fallbackContext: context,
+                        emoji: emoji,
+                        senderPubkey: localPubkey,
+                      );
+                      unawaited(
+                        ref
+                            .read(channelActionsProvider)
+                            .sendHuddleReaction(
+                              channelId: invite.ephemeralChannelId,
+                              emoji: emoji,
+                              senderName: reactionSenderName,
+                            )
+                            .catchError((Object error) {
+                              if (!context.mounted) return;
+                              ScaffoldMessenger.of(
+                                context,
+                              ).showFeedbackSnackBar(
+                                const SnackBar(
+                                  content: Text('Reaction failed'),
+                                ),
+                                kind: ToastKind.error,
+                              );
+                            }),
+                      );
+                    },
+                  ),
+                )
+              : const SizedBox(height: Grid.xxl),
         ),
       ),
     );
@@ -823,21 +821,31 @@ String _huddleReactionSenderName({
 class _HuddleCallHeader extends StatelessWidget {
   const _HuddleCallHeader({
     required this.isLeaving,
+    this.inRail = false,
     required this.onMinimize,
     required this.onLeave,
   });
 
+  final bool inRail;
   final bool isLeaving;
   final VoidCallback onMinimize;
   final VoidCallback onLeave;
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      height: 72,
-      child: Row(
-        children: [
-          IconButton(
+    final minimize = defaultTargetPlatform == TargetPlatform.iOS
+        ? _HuddleRoundControl(
+            useGlass: true,
+            key: const ValueKey('huddle-minimize'),
+            tooltip: 'Minimize',
+            icon: BuzzIcons.chevronDown,
+            dimension: _huddleRailControlSize,
+            foregroundColor: context.colors.onSurface,
+            backgroundColor: context.colors.surfaceContainerHighest,
+            useHapticFeedback: true,
+            onPressed: onMinimize,
+          )
+        : IconButton(
             key: const ValueKey('huddle-minimize'),
             tooltip: 'Minimize',
             onPressed: () {
@@ -845,19 +853,33 @@ class _HuddleCallHeader extends StatelessWidget {
               onMinimize();
             },
             icon: const Icon(BuzzIcons.chevronDown, size: 32),
-          ),
-          const Spacer(),
-          _HuddleRoundControl(
-            key: const ValueKey('huddle-leave'),
-            tooltip: 'Leave Huddle',
-            icon: BuzzIcons.phoneOff,
-            foregroundColor: context.colors.error,
-            backgroundColor: context.colors.surfaceContainerHighest,
-            useHapticFeedback: true,
-            onPressed: isLeaving ? null : onLeave,
-          ),
+          );
+    final leave = _HuddleRoundControl(
+      dimension: defaultTargetPlatform == TargetPlatform.iOS
+          ? _huddleRailControlSize
+          : 64,
+      useGlass: true,
+      key: const ValueKey('huddle-leave'),
+      tooltip: 'Leave Huddle',
+      icon: BuzzIcons.phoneOff,
+      foregroundColor: context.colors.error,
+      backgroundColor: context.colors.surfaceContainerHighest,
+      useHapticFeedback: true,
+      onPressed: isLeaving ? null : onLeave,
+    );
+    if (inRail) {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          leave,
+          const SizedBox(height: _huddleRailControlGap),
+          minimize,
         ],
-      ),
+      );
+    }
+    return SizedBox(
+      height: 72,
+      child: Row(children: [minimize, const Spacer(), leave]),
     );
   }
 }

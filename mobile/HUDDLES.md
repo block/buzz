@@ -68,11 +68,19 @@ flag bits are ignored. Frames are capped at 4096 bytes before the relay peer
 prefix.
 
 The dBov header also drives the participant speaking treatment. Values above
-the existing `-55 dBov` activity threshold are normalized for a 50 ms visual
-update cadence and continuously scale a 7%-opacity primary-color halo from
-just beyond the avatar to 2.55 times its base diameter. Level increases use a
-responsive eased attack while decreases and silence use a softer eased release;
-silence begins that release after the existing 600 ms hold.
+`-55 dBov` feed a 50 ms visual update cadence. Speaking fades in a close,
+four-point ring, tinted with blurred avatar artwork where available. The portrait
+has a stable slight tilt and responds subtly to volume, growing by at most 3.6%.
+Reduced motion keeps the speaking ring without animated scaling or rotation.
+Agent preparing-response indicators keep their existing meaning and behavior.
+
+On iOS, the full-screen call controls use the existing native Liquid Glass
+container with the same Flutter Tabler artwork, labels and actions. Android
+retains its existing button treatment. The minimized sheet keeps its original
+buttons on both platforms. The emoji action is hidden on both platforms; the
+reaction implementation remains available for future use. On iOS foldable displays, full-screen actions follow
+the workspace side rail: leave then minimize at the top, microphone and speaker at the bottom. Without a rail, audio actions use a compact bottom
+row. Microphone-on and speaker-on use filled selected glass states.
 
 ## Native boundary
 
@@ -112,3 +120,9 @@ Physical iOS acceptance must separately verify permission, receiver/speaker and
 connected-headset routing, interruption recovery, and two-way audio with a
 Desktop participant. Static codec and Flutter tests do not prove those device
 behaviors.
+
+The rail uses 48-point controls with 12-point gaps and 28-point Tabler glyphs.
+The side rail keeps a 24-point bottom inset, increased for reported occlusions.
+The compact cover display adds 24 points above the top controls to clear its
+system status cluster; the inner display uses the reported rail clearance.
+Participant content spans the full display width beneath the overlaid rail.
