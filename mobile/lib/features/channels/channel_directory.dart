@@ -708,7 +708,13 @@ extension _ObservedUnreadRecording on ChannelsNotifier {
         channelType: channel.channelType,
         isThreadedReply: isThreadedReply,
         isBroadcast: isBroadcast,
-        threadReply: isThreadedReply && !channel.isDm ? event : null,
+        // Activity lists the thread replies that earn attention, including
+        // ones also sent to the channel, which earn it only here.
+        threadReply:
+            (isThreadedReply || (isBroadcast && isHighPriority)) &&
+                !channel.isDm
+            ? event
+            : null,
       ),
       _unreadCatchUpLimit,
     );

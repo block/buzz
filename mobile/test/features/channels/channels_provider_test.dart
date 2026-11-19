@@ -24,6 +24,9 @@ import 'package:buzz/features/channels/channel_mutes/channel_mutes_storage.dart'
 import 'package:buzz/features/channels/channel_unread.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
+import 'package:buzz/features/channels/unread_badge/unread_badge_provider.dart';
+import 'package:buzz/features/channels/thread_follows/thread_follows_provider.dart';
+import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
@@ -3725,23 +3728,27 @@ void main() {
       sig: 'sig',
     );
 
-    for (final (name, setup, mention, dotted) in [
-      ("someone else's thread", <NostrEvent>[], false, false),
+    for (final (name, setup, follow, mention, dotted) in [
+      ("someone else's thread", <NostrEvent>[], false, false, false),
       (
         "someone else's thread, mentioning the reader",
         <NostrEvent>[],
+        false,
         true,
         true,
       ),
+      ('a thread the reader follows', <NostrEvent>[], true, false, true),
       (
         'a thread the reader started',
         [post(ownRoot, 10, author: myPk)],
+        false,
         false,
         true,
       ),
       (
         'a thread the reader replied in',
         [post('own-reply', 11, author: myPk, parentId: otherRoot)],
+        false,
         false,
         true,
       ),
@@ -3759,46 +3766,70 @@ void main() {
         await container.read(channelsProvider.future);
         await _waitUntil(() => session.queryBatches.any(isUnread));
         await _settle();
+        if (follow) {
+          container.read(threadFollowsProvider.notifier).followThread(root);
+        }
         setup.forEach(session.emit);
-        session.emit(
-          post(
-            'broadcast',
-            20,
-            parentId: root,
-            broadcast: true,
-            mention: mention,
-          ),
+        final broadcast = post(
+          'broadcast',
+          20,
+          parentId: root,
+          broadcast: true,
+          mention: mention,
         );
+        session.emit(broadcast);
         await _settle();
 
         final notifier = container.read(channelsProvider.notifier);
+        final channels = container.read(channelsProvider).value!;
         final observed =
             notifier.observedUnreadEventsByChannel[_channelA]!['broadcast']!;
         expect(observed.highPriority, dotted);
         expect(observed.attention, dotted);
-        expect(observed.countsTowardAppBadge, dotted);
+        // Activity lists the thread only when the reply earns attention.
+        expect(
+          notifier.observedThreadReplies(channels),
+          dotted ? [broadcast] : isEmpty,
+        );
+        // The app icon counts it as attention only when it dots. Otherwise
+        // it is ordinary unread, the same as a new top-level post.
+        final badge = container.read(unreadBadgeProvider);
+        expect(badge.highPriorityCount, dotted ? 1 : 0);
+        expect(badge.generalUnreadCount, dotted ? 0 : 1);
+
+        void expectHighlights(
+          Map<String, int> contexts, {
+          required bool unread,
+          required bool attention,
+        }) {
+          final highlights = computeChannelListHighlights(
+            channels: channels,
+            readState: ReadStateState(
+              isReady: true,
+              pubkey: myPk,
+              contexts: contexts,
+              version: 0,
+            ),
+            channelsNotifier: notifier,
+          );
+          expect(highlights.unread, unread ? {_channelA} : isEmpty);
+          expect(highlights.attention, attention ? {_channelA} : isEmpty);
+        }
+
+        expectHighlights(const {}, unread: !dotted, attention: dotted);
         // Read by its own mark either way, as desktop reads it: reaching the
         // bottom of the channel does not read it.
         expect(observed.channelCatchUp, isFalse);
-        expect(
-          notifier.observedThreadReplies(
-            container.read(channelsProvider).value!,
-          ),
-          isEmpty,
+        expectHighlights(
+          {activityContextKey(_channelA): 100},
+          unread: !dotted,
+          attention: dotted,
         );
-
-        final highlights = computeChannelListHighlights(
-          channels: container.read(channelsProvider).value!,
-          readState: const ReadStateState(
-            isReady: true,
-            pubkey: myPk,
-            contexts: {},
-            version: 0,
-          ),
-          channelsNotifier: notifier,
+        expectHighlights(
+          {msgContextKey('broadcast'): 20},
+          unread: false,
+          attention: false,
         );
-        expect(highlights.attention, dotted ? {_channelA} : isEmpty);
-        expect(highlights.unread, dotted ? isEmpty : {_channelA});
       });
     }
   });
