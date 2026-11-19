@@ -78,6 +78,16 @@ bool isInvalidRequestRejection(String message) {
       !normalized.contains('timestamp too far from server time');
 }
 
+/// Explicit access refusal; cached private history must not mask this error.
+bool isRelayAccessDenied(Object error) {
+  if (error is RelayException && error.statusCode == 403) return true;
+  final message = error.toString().toLowerCase().replaceFirst(
+    RegExp(r'^exception:\s*'),
+    '',
+  );
+  return message.startsWith('restricted:') || message.startsWith('blocked:');
+}
+
 /// Recovery policy for a relay `CLOSED` subscription message.
 enum RelayClosedClass {
   /// A transient failure that may recover when the same REQ is retried.

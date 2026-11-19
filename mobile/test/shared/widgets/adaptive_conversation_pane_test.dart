@@ -13,6 +13,156 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
+    testWidgets(
+      'wide selections are immediate but threads animate on $platform',
+      (tester) async {
+        tester.view.devicePixelRatio = 1;
+        tester.view.physicalSize = const Size(1000, 800);
+        addTearDown(tester.view.reset);
+        final controller = ConversationPaneController();
+        addTearDown(controller.dispose);
+        await tester.pumpWidget(
+          ProviderScope(
+            child: MaterialApp(
+              theme: ThemeData(platform: platform),
+              home: AdaptiveConversationPane(
+                controller: controller,
+                list: const Text('Chat list'),
+              ),
+            ),
+          ),
+        );
+        controller.open('one', (_) => const _Conversation());
+        await tester.pump();
+        var route = ModalRoute.of(tester.element(find.text('Conversation')))!;
+        expect(route.animation!.value, 1);
+        expect(route.animation!.status, AnimationStatus.completed);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Thread'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 50));
+        route = ModalRoute.of(tester.element(find.text('Thread content')))!;
+        expect(route.animation!.value, greaterThan(0));
+        expect(route.animation!.value, lessThan(1));
+        await tester.pumpAndSettle();
+
+        // Switching from a nested thread must also immediately replace the chat.
+        controller.open(
+          'two',
+          (_) => const Scaffold(body: Text('Second chat')),
+        );
+        await tester.pump();
+        route = ModalRoute.of(tester.element(find.text('Second chat')))!;
+        expect(route.animation!.value, 1);
+        expect(route.animation!.status, AnimationStatus.completed);
+        expect(find.text('Thread content'), findsNothing);
+        await tester.pumpAndSettle();
+      },
+    );
+  }
+
+  testWidgets('a wide thread push slides the outgoing chat on iOS', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1000, 800);
+    addTearDown(tester.view.reset);
+    final controller = ConversationPaneController();
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          theme: ThemeData(platform: TargetPlatform.iOS),
+          home: AdaptiveConversationPane(
+            controller: controller,
+            list: const Text('Chat list'),
+          ),
+        ),
+      ),
+    );
+    controller.open('one', (_) => const _Conversation());
+    await tester.pumpAndSettle();
+    final settled = tester.getTopLeft(find.text('Conversation')).dx;
+    await tester.tap(find.text('Thread'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(
+      tester.getTopLeft(find.text('Conversation')).dx,
+      lessThan(settled),
+      reason: 'the covered chat keeps the platform parallax',
+    );
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets(
+    'wide chat switches retain the native header but reset chat state',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(1000, 800);
+      addTearDown(tester.view.reset);
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform_views,
+        (_) async => null,
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform_views,
+          null,
+        ),
+      );
+      final controller = ConversationPaneController();
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            home: AdaptiveConversationPane(
+              controller: controller,
+              list: const Text('Chats'),
+            ),
+          ),
+        ),
+      );
+      Widget chat(String title) => FrostedScaffold(
+        appBar: FrostedAppBar(
+          nativeTitle: title,
+          title: Text(title),
+          alwaysFrosted: true,
+        ),
+        body: const Center(child: TextField()),
+      );
+      controller.open('one', (_) => chat('One'));
+      await tester.pumpAndSettle();
+      final header = tester.element(find.byType(IosNavigationBar));
+      final native = tester.element(find.byType(UiKitView));
+      await tester.enterText(find.byType(TextField), 'First chat draft');
+      controller.open('two', (_) => chat('Two'));
+      await tester.pumpAndSettle();
+      expect(tester.element(find.byType(IosNavigationBar)), same(header));
+      expect(tester.element(find.byType(UiKitView)), same(native));
+      expect(
+        tester.widget<IosNavigationBar>(find.byType(IosNavigationBar)).title,
+        'Two',
+      );
+      expect(find.text('First chat draft'), findsNothing);
+      Navigator.of(
+        tester.element(find.byType(TextField)),
+      ).push(MaterialPageRoute<void>(builder: (_) => chat('Thread')));
+      await tester.pumpAndSettle();
+      controller.open('three', (_) => chat('Three'));
+      await tester.pumpAndSettle();
+      expect(tester.element(find.byType(IosNavigationBar)), same(header));
+      expect(tester.element(find.byType(UiKitView)), same(native));
+      expect(
+        tester.widget<IosNavigationBar>(find.byType(IosNavigationBar)).title,
+        'Three',
+      );
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
   testWidgets('reopening a deep link resets its route after thread Back', (
     tester,
   ) async {

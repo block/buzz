@@ -1,3 +1,4 @@
+import '../../shared/widgets/native_route_controls.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
@@ -875,7 +876,7 @@ class ChannelsPage extends HookConsumerWidget {
 /// Only this leaf depends on the route, so a route or sheet opening above Home
 /// rebuilds it and the header listening to [nativeSuppressed], not the channel
 /// inventory. The header is a descendant, so it updates in the same frame.
-class _RouteCurrencySync extends StatelessWidget {
+class _RouteCurrencySync extends HookWidget {
   const _RouteCurrencySync({
     required this.current,
     required this.nativeSuppressed,
@@ -892,7 +893,8 @@ class _RouteCurrencySync extends StatelessWidget {
   Widget build(BuildContext context) {
     final isCurrent = ModalRoute.isCurrentOf(context) ?? true;
     current.value = isCurrent;
-    nativeSuppressed.value = suppressesNative && !isCurrent;
+    final nativeVisible = useNativeRouteControlsVisible(context);
+    nativeSuppressed.value = suppressesNative && !nativeVisible;
     return child;
   }
 }

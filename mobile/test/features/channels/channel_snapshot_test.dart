@@ -13,6 +13,43 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test(
+    'offline restart hides generated Huddles saved by older clients',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final storage = ChannelListSnapshotStorage(prefs);
+      await storage.write(
+        storage.capture('me', 'https://a.example'),
+        ChannelListSnapshot(
+          channels: [
+            _channel('alpha').toJson(),
+            {
+              ..._channel('22222222-room').toJson(),
+              'name': 'huddle-22222222',
+              'visibility': 'private',
+              'ttl_seconds': 3600,
+            },
+            {
+              ..._channel('ordinary').toJson(),
+              'visibility': 'private',
+              'ttl_seconds': 3600,
+            },
+          ],
+          hiddenDmIds: {},
+        ),
+      );
+      final session = _SnapshotSession([], connected: false);
+      final container = _container(prefs, session);
+      addTearDown(container.dispose);
+      expect((await container.read(channelsProvider.future)).map((c) => c.id), [
+        'alpha',
+        'ordinary',
+      ]);
+      expect(session.membershipRequests, 0);
+    },
+  );
+
   test('fresh read retries a failed initial list', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();

@@ -285,6 +285,12 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       unawaited(_fillNotices());
     } catch (e, st) {
       if (!_isCurrentInit(initVersion)) return;
+      if (isRelayAccessDenied(e)) {
+        _lastKnownMessages = null;
+        _initInFlight = false;
+        state = AsyncError(e, st);
+        return;
+      }
       final fallbackMessages = state.value ?? _lastKnownMessages;
       if (fallbackMessages != null) {
         debugPrint(
@@ -339,7 +345,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _initialWindowQueryInFlight = false;
       _liveSummaryRootsDuringInitialWindowQuery.clear();
       // Legacy history would re-run the timed-out work another way.
-      if (isRelayDeadlineError(error)) rethrow;
+      // An access refusal must reach the outer cache-clearing handler. A
+      // second transport cannot turn that refusal into a transient failure.
+      if (isRelayDeadlineError(error) || isRelayAccessDenied(error)) rethrow;
       debugPrint(
         '[ChannelMessagesNotifier] channel window unavailable for $channelId, falling back to WS history: $error',
       );
