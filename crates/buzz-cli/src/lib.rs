@@ -1065,6 +1065,9 @@ pub enum ChannelsCmd {
     ///
     /// People are sent in events of up to 100 each, in order. People who are
     /// already members are not skipped: `--role` also changes their role.
+    /// Unless exactly one `--pubkey` is given, it prints a report; `unknown`
+    /// lists people whose outcome is uncertain (no per-person result, or a
+    /// lost receipt), so check them before retrying.
     #[command(name = "add-member")]
     AddMember {
         /// Channel UUID

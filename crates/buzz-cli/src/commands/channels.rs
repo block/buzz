@@ -1836,8 +1836,8 @@ pub async fn cmd_add_channel_member(
             )))
         }
     };
-    // One person keeps the single-add output and errors unchanged.
-    if let [pubkey] = pubkeys.as_slice() {
+    // A lone `--pubkey` keeps the single-add output and errors unchanged.
+    if let ([pubkey], None) = (pubkeys.as_slice(), pubkeys_file) {
         let resp = send_add_members(
             client,
             channel_uuid,
@@ -1852,9 +1852,7 @@ pub async fn cmd_add_channel_member(
     // Chunks go out in order: concurrent kind:9000 writes race on the relay.
     let mut report = AddMembersReport::default();
     for chunk in pubkeys.chunks(buzz_sdk::MAX_MEMBERS_PER_ADD) {
-        let outcome = send_add_members(client, channel_uuid, chunk, typed_role)
-            .await
-            .map_err(|e| e.to_string());
+        let outcome = send_add_members(client, channel_uuid, chunk, typed_role).await;
         report.record(chunk, outcome);
     }
     println!("{}", report.to_json());
@@ -1919,8 +1917,9 @@ struct AddMembersReport {
     /// People in a one-person chunk: the relay accepted them without saying
     /// whether they were added, updated or already members.
     accepted: Vec<String>,
-    /// People in a multi-person chunk the relay accepted without per-person
-    /// results (a `duplicate:` reply to a resend): their outcome is unknown.
+    /// Outcome uncertain: people in a multi-person chunk the relay accepted
+    /// without per-person results (a `duplicate:` reply to a resend), or in a
+    /// chunk whose receipt was lost, so the relay may have applied it.
     unknown: Vec<String>,
     rejected: Vec<serde_json::Value>,
     failed: Vec<serde_json::Value>,
@@ -1929,12 +1928,16 @@ struct AddMembersReport {
 impl AddMembersReport {
     /// Fold in one chunk's outcome: the relay's raw response, or the error
     /// that kept the chunk from being applied.
-    fn record(&mut self, chunk: &[String], outcome: Result<String, String>) {
+    fn record(&mut self, chunk: &[String], outcome: Result<String, CliError>) {
         let raw = match outcome {
             Ok(raw) => raw,
+            Err(CliError::DeliveryUnknown(_)) => {
+                self.unknown.extend_from_slice(chunk);
+                return;
+            }
             Err(error) => {
                 self.failed
-                    .push(serde_json::json!({ "error": error, "pubkeys": chunk }));
+                    .push(serde_json::json!({ "error": error.to_string(), "pubkeys": chunk }));
                 return;
             }
         };
@@ -5229,7 +5232,8 @@ mod unlisted_support_tests {
 
 #[cfg(test)]
 mod add_members_tests {
-    use super::{collect_member_pubkeys, AddMembersReport};
+    use super::{cmd_add_channel_member, collect_member_pubkeys, AddMembersReport};
+    use crate::error::CliError;
     use serde_json::json;
 
     fn pk(i: usize) -> String {
@@ -5305,7 +5309,10 @@ mod add_members_tests {
                 "already_member": [pk(3)],
             }))),
         );
-        report.record(&[pk(4), pk(5)], Err("relay error 403: denied".into()));
+        report.record(
+            &[pk(4), pk(5)],
+            Err(CliError::Other("relay error 403: denied".into())),
+        );
         report.record(
             &[pk(6), pk(7)],
             Ok(ok_response(json!({
@@ -5344,6 +5351,70 @@ mod add_members_tests {
         assert_eq!(out["status"], "partial");
         assert_eq!(out["unknown"], json!([pk(1), pk(2)]));
         assert_eq!(out["accepted"], json!([]));
+    }
+
+    #[test]
+    fn lost_receipt_is_unknown_not_failed() {
+        let mut report = AddMembersReport::default();
+        report.record(
+            &[pk(1), pk(2)],
+            Err(CliError::DeliveryUnknown("receipt lost".into())),
+        );
+        let out = report.to_json();
+        assert_eq!(out["status"], "partial");
+        assert_eq!(out["unknown"], json!([pk(1), pk(2)]));
+        assert_eq!(out["failed"], json!([]));
+    }
+
+    /// A one-key `--pubkeys-file` gets the bulk report: a refused send is
+    /// recorded under `failed`, not returned as the single-add error.
+    #[tokio::test]
+    async fn one_key_file_gets_the_bulk_report() {
+        use axum::routing::post;
+        let app = axum::Router::new().route(
+            "/events",
+            post(|| async { (axum::http::StatusCode::FORBIDDEN, "denied") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = crate::client::BuzzClient::new(
+            format!("http://{addr}"),
+            crate::credentials::Credentials::from_keys(nostr::Keys::generate()),
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keys.txt");
+        std::fs::write(&path, format!("{}\n", pk(1))).unwrap();
+
+        let err = cmd_add_channel_member(
+            &client,
+            "326d56bc-c96c-4af0-86a1-5e804cd1b467",
+            &[],
+            Some(path.to_str().unwrap()),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("some people were not added"),
+            "{err}"
+        );
+
+        // The same key as a lone `--pubkey` keeps the single-add error.
+        let err = cmd_add_channel_member(
+            &client,
+            "326d56bc-c96c-4af0-86a1-5e804cd1b467",
+            &[pk(1)],
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            !err.to_string().contains("some people were not added"),
+            "{err}"
+        );
     }
 
     #[test]
