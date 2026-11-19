@@ -732,7 +732,7 @@ mod postgres_tests {
              );
              CREATE TABLE push_gateway_delegations (
                  id UUID PRIMARY KEY,
-                 installation_id UUID NOT NULL REFERENCES push_gateway_installations(id),
+                 installation_id UUID NOT NULL,
                  expires_at TIMESTAMPTZ NOT NULL,
                  revoked_at TIMESTAMPTZ
              );",
@@ -1064,6 +1064,25 @@ mod postgres_tests {
                 .expect("count original tombstone and replacement");
         assert_eq!(installations, 2);
 
+        pool.close().await;
+        drop_schema(&schema).await;
+    }
+
+    // The schema has no foreign keys, so these tests prove the reference
+    // checks run in the gateway's own transactions.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn migrated_schema_has_no_foreign_keys() {
+        let (pool, schema) = full_schema(1).await;
+        let foreign_keys: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_constraint c
+             JOIN pg_namespace n ON n.oid = c.connamespace
+             WHERE c.contype = 'f' AND n.nspname = current_schema()",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count foreign keys");
+        assert_eq!(foreign_keys, 0);
         pool.close().await;
         drop_schema(&schema).await;
     }
