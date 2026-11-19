@@ -90,6 +90,11 @@ class BuilderlabAccountClient {
   /// Safe request diagnostics: no headers, credentials, bodies or user data.
   ({String path, int status})? lastRejectedRequest;
 
+  /// Why the last request failed as [AccountFailure.unavailable]: a transport
+  /// failure (`unreachable`, `insecure`, `timedOut`, `network`) or an
+  /// unexpected status such as `http302`. Safe to show; callers clear it.
+  String? lastUnavailableCause;
+
   /// Runs [operation], giving it the clock hint of the last refusal (403) that
   /// its own requests to any account client received: how many minutes the
   /// local clock looked off from the server's `Date` when its headers arrived,
@@ -615,16 +620,16 @@ class BuilderlabAccountClient {
           );
         }
       }
-      var refused = false;
-      final http.Response response;
-      try {
-        response = await boundedHttpResponse(
-          _http,
-          request,
-          maxBytes: _responseLimit(path),
-          onHeaders: (headers) {
-            if (headers.statusCode != 403) return;
-            refused = true;
+      // Classified from the headers, so a lost, slow or oversized error body
+      // never hides the status.
+      final response = await boundedHttpResponse(
+        _http,
+        request,
+        maxBytes: _responseLimit(path),
+        onHeaders: (headers) {
+          final status = headers.statusCode;
+          if (status >= 200 && status < 300) return;
+          if (status == 403) {
             final evidence = Zone.current[_RefusalEvidence];
             if (evidence is _RefusalEvidence) {
               evidence.clockHint = clockHintMinutes(
@@ -632,27 +637,22 @@ class BuilderlabAccountClient {
                 _now(),
               );
             }
-          },
-        );
-      } catch (_) {
-        // The status is the answer; a lost or oversized body does not change it.
-        if (refused) throw AccountFailure.denied;
-        rethrow;
-      }
-      if (kDebugMode && response.statusCode >= 400) {
-        debugPrint(
-          'Builderlab ${accountOrigin.host} ${request.method} $path: HTTP ${response.statusCode} contentType=${response.headers['content-type']?.split(';').first}',
-        );
-      }
-      if (response.statusCode == 401) throw AccountFailure.signedOut;
-      if (response.statusCode == 403) throw AccountFailure.denied;
-      if (const {400, 404, 409, 422}.contains(response.statusCode)) {
-        lastRejectedRequest = (path: path, status: response.statusCode);
-        throw AccountFailure.rejected;
-      }
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw AccountFailure.unavailable;
-      }
+          }
+          if (const {401, 403, 400, 404, 409, 422}.contains(status) &&
+              kDebugMode) {
+            debugPrint(
+              'Builderlab ${accountOrigin.host} ${request.method} $path: HTTP $status contentType=${headers.headers['content-type']?.split(';').first}',
+            );
+          }
+          if (status == 401) throw AccountFailure.signedOut;
+          if (status == 403) throw AccountFailure.denied;
+          if (const {400, 404, 409, 422}.contains(status)) {
+            lastRejectedRequest = (path: path, status: status);
+            throw AccountFailure.rejected;
+          }
+          _unavailable(path, 'http$status');
+        },
+      );
       final value = jsonDecode(utf8.decode(response.bodyBytes));
       if (value is! Map<String, dynamic>) throw AccountFailure.invalidResponse;
       return value;
@@ -660,9 +660,17 @@ class BuilderlabAccountClient {
       rethrow;
     } on FormatException {
       throw AccountFailure.invalidResponse;
-    } catch (_) {
-      throw AccountFailure.unavailable;
+    } on TimeoutException {
+      _unavailable(path, 'timedOut');
+    } catch (error) {
+      _unavailable(path, transportFailure(error)?.name ?? 'network');
     }
+  }
+
+  Never _unavailable(String path, String cause) {
+    lastUnavailableCause = cause;
+    debugPrint('Builderlab ${accountOrigin.host} $path: unavailable ($cause)');
+    throw AccountFailure.unavailable;
   }
 
   void dispose() {

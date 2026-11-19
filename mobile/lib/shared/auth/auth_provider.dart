@@ -5,7 +5,9 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../community/community.dart';
 import '../community/community_provider.dart';
+import '../diagnostics/diagnostic_reporter.dart';
 import '../hosted/community_entry_requirements.dart';
+import '../relay/relay_provider.dart' show pubkeyFromNsec;
 
 enum AuthStatus { unknown, unauthenticated, authenticated }
 
@@ -77,7 +79,13 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
       if (shouldContinue != null && !shouldContinue()) return;
       final storage = ref.read(communityStorageProvider);
       await storage.save(community);
-      if (activate) await storage.saveActiveId(community.id);
+      if (activate) {
+        await storage.saveActiveId(community.id);
+        // The derived member settles a frame later; name it on reports now.
+        ref
+            .read(diagnosticReporterProvider)
+            .setMember(pubkeyFromNsec(community.nsec));
+      }
       sync?.trigger();
       await syncStoredCommunitySnapshot(ref);
 
