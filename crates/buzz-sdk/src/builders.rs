@@ -879,8 +879,7 @@ pub fn build_add_members(
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     let mut seen = std::collections::HashSet::new();
     for pubkey in target_pubkeys {
-        check_hex_len(pubkey, 64, "target_pubkey")?;
-        let pubkey = pubkey.to_ascii_lowercase();
+        let pubkey = check_pubkey_hex(pubkey, "target_pubkey")?;
         if !seen.insert(pubkey.clone()) {
             return Err(SdkError::InvalidInput(format!(
                 "duplicate target_pubkey {pubkey}"
@@ -891,7 +890,10 @@ pub fn build_add_members(
     if let Some(r) = role {
         tags.push(tag(&["role", r.as_str()])?);
     }
-    Ok(EventBuilder::new(Kind::Custom(9000), "").tags(tags))
+    // The signer may be one of the people named; keep their `p` tag.
+    Ok(EventBuilder::new(Kind::Custom(9000), "")
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build a NIP-29 remove-member event (kind 9001).
@@ -4014,9 +4016,20 @@ mod tests {
         let cid = uuid();
         let a = pk(1);
         assert!(build_add_members(cid, &[&a, "nothex"], None).is_err());
+        let overlong = format!("{a}00");
+        assert!(build_add_members(cid, &[&overlong], None).is_err());
         // Duplicates are caught case-insensitively.
         let upper = a.to_ascii_uppercase();
         assert!(build_add_members(cid, &[&a, &upper], None).is_err());
+    }
+
+    #[test]
+    fn add_members_keeps_the_signer_as_a_target() {
+        let cid = uuid();
+        let me = keys().public_key().to_hex();
+        let other = pk(1);
+        let ev = sign(build_add_members(cid, &[&me, &other], None).unwrap());
+        assert_eq!(tag_values(&ev, "p"), vec![me, other]);
     }
 
     #[test]

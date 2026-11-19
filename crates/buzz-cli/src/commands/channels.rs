@@ -1862,7 +1862,7 @@ pub async fn cmd_add_channel_member(
         Ok(())
     } else {
         Err(CliError::Other(
-            "some people were not added; see `rejected` and `failed`".into(),
+            "some people were not added; see `rejected`, `failed` and `unknown`".into(),
         ))
     }
 }
@@ -1919,6 +1919,9 @@ struct AddMembersReport {
     /// People in a one-person chunk: the relay accepted them without saying
     /// whether they were added, updated or already members.
     accepted: Vec<String>,
+    /// People in a multi-person chunk the relay accepted without per-person
+    /// results (a `duplicate:` reply to a resend): their outcome is unknown.
+    unknown: Vec<String>,
     rejected: Vec<serde_json::Value>,
     failed: Vec<serde_json::Value>,
 }
@@ -1942,7 +1945,11 @@ impl AddMembersReport {
             .strip_prefix("members: ")
             .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
         else {
-            self.accepted.extend_from_slice(chunk);
+            if chunk.len() == 1 {
+                self.accepted.extend_from_slice(chunk);
+            } else {
+                self.unknown.extend_from_slice(chunk);
+            }
             return;
         };
         for (key, list) in [
@@ -1964,7 +1971,7 @@ impl AddMembersReport {
     }
 
     fn is_ok(&self) -> bool {
-        self.rejected.is_empty() && self.failed.is_empty()
+        self.rejected.is_empty() && self.failed.is_empty() && self.unknown.is_empty()
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -1974,6 +1981,7 @@ impl AddMembersReport {
             "updated": self.updated,
             "already_member": self.already_member,
             "accepted": self.accepted,
+            "unknown": self.unknown,
             "rejected": self.rejected,
             "failed": self.failed,
         })
@@ -5318,10 +5326,24 @@ mod add_members_tests {
                 "updated": [pk(2)],
                 "already_member": [pk(3)],
                 "accepted": [pk(8)],
+                "unknown": [],
                 "rejected": [{ "reason": "archived", "pubkeys": [pk(7)] }],
                 "failed": [{ "error": "relay error 403: denied", "pubkeys": [pk(4), pk(5)] }],
             })
         );
+    }
+
+    #[test]
+    fn duplicate_reply_to_a_multi_person_chunk_is_unknown() {
+        let mut report = AddMembersReport::default();
+        report.record(
+            &[pk(1), pk(2)],
+            Ok(json!({ "event_id": "e", "accepted": true, "message": "duplicate:" }).to_string()),
+        );
+        let out = report.to_json();
+        assert_eq!(out["status"], "partial");
+        assert_eq!(out["unknown"], json!([pk(1), pk(2)]));
+        assert_eq!(out["accepted"], json!([]));
     }
 
     #[test]
