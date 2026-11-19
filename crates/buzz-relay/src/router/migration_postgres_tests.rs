@@ -130,6 +130,17 @@ fn add_members(
         .unwrap()
 }
 
+fn create_migration_channel(keys: &Keys, channel: Uuid) -> Event {
+    EventBuilder::new(Kind::Custom(KIND_NIP29_CREATE_GROUP as u16), "")
+        .tags([
+            Tag::parse(["h", &channel.to_string()]).unwrap(),
+            Tag::parse(["name", &format!("example-import-{channel}")]).unwrap(),
+            Tag::parse(["migration", "slack"]).unwrap(),
+        ])
+        .sign_with_keys(keys)
+        .unwrap()
+}
+
 type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn receive(socket: &mut Socket, frame_type: &str) -> Value {
@@ -235,7 +246,7 @@ async fn migration_write_limit_controls_http_and_ws_across_relay_instances() {
         .unwrap();
     let tenant_a = community(&state_a, "migration-a").await;
     let tenant_b = community(&state_b, "migration-b").await;
-    let channel_a = create_channel(&state_a, &tenant_a, &owner_a, &[]).await;
+    let channel_a = Uuid::new_v4();
     let channel_b = create_channel(&state_b, &tenant_b, &owner_b, &[]).await;
     let app_a = super::build_router(Arc::clone(&state_a));
     let app_b = super::build_router(Arc::clone(&state_b));
@@ -301,6 +312,12 @@ async fn migration_write_limit_controls_http_and_ws_across_relay_instances() {
         StatusCode::OK
     );
 
+    // The importer sends the create and first batch back-to-back. A one-event
+    // bucket would leave a created channel with no imported members.
+    let create_event = create_migration_channel(&owner_a, channel_a);
+    let (status, _, body) = add_over_http(&app_a, tenant_a.host(), &owner_a, &create_event).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["accepted"], true);
     let recipients = [Keys::generate().public_key(), Keys::generate().public_key()];
     let first = add_members(&owner_a, channel_a, &recipients, Some("slack"));
     let mut tampered = first.clone();
@@ -363,14 +380,7 @@ async fn migration_write_limit_controls_http_and_ws_across_relay_instances() {
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(headers[header::RETRY_AFTER], "5");
     assert_eq!(body, json!({"error": paused[3]}));
-    let create_event = EventBuilder::new(Kind::Custom(KIND_NIP29_CREATE_GROUP as u16), "")
-        .tags([
-            Tag::parse(["h", &Uuid::new_v4().to_string()]).unwrap(),
-            Tag::parse(["name", "example-imported-channel"]).unwrap(),
-            Tag::parse(["migration", "slack"]).unwrap(),
-        ])
-        .sign_with_keys(&owner_a)
-        .unwrap();
+    let create_event = create_migration_channel(&owner_a, Uuid::new_v4());
     let (status, _, body) = add_over_http(&app_a, tenant_a.host(), &owner_a, &create_event).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(body, json!({"error": paused[3]}));

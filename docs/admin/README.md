@@ -240,11 +240,12 @@ NIP-98 signature from a relay Operator. Sign the exact PUT body with the
 NIP-98 payload tag.
 
 The limit is a whole number from 0 to 60,000 signed events per minute. It
-defaults to 12, or one event every five seconds. Each eligible, correctly
-signed attempt uses one permit, even if later validation rejects it. A batch
-of membership changes in one kind 9000 event uses one permit. The relay spaces permits by
-at least 60 seconds divided by the current rate. Idle time leaves one
-permit available. There is no accumulated burst or queued work at the relay.
+defaults to 12, which refills one permit every five seconds. Idle time can
+accumulate at most two permits. This lets an importer create a channel and send
+its first membership batch back-to-back. Each eligible, correctly signed
+attempt uses one permit, even if later validation rejects it. A batch of
+membership changes in one kind 9000 event uses one permit. The relay queues
+no writes.
 
 Importers label every event they send with a signed tag of the form
 `["migration","example-import"]`. Any exact two-element `migration` tag
@@ -258,8 +259,8 @@ existing paths.
 
 Set the limit to zero to block new tagged admissions. Writes that already
 received a permit can finish, including their side effects. Raise the limit
-to resume admission. The relay applies the new spacing from the last permit
-and does not need a restart.
+to resume admission. The relay calculates refill since the last grant using
+the new rate. The two-permit cap still applies. No restart is needed.
 
 All replicas must use the same Redis database. Redis orders changes and
 admissions atomically and supplies the clock. A successful update applies

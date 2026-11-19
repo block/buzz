@@ -10,8 +10,8 @@ pub(crate) const MAX_EVENTS_PER_MINUTE: u32 = 60_000;
 const RETRY_AFTER_SECS: u64 = 5;
 
 // Read the live limit and grant admission in one Redis operation. Use Redis
-// time so callers on different pods spend the same budget. Idle time makes
-// one permit available and never accumulates a burst.
+// time so all callers spend the same budget. Keep enough credit for an
+// importer to create a channel and send its first membership batch together.
 const ADMIT_SCRIPT: &str = r#"
 local rate = redis.call('HGET', KEYS[1], 'events_per_minute')
 if rate == false then rate = ARGV[1] end
@@ -23,15 +23,32 @@ if rate == 0 then return -1 end
 
 local time = redis.call('TIME')
 local now = tonumber(time[1]) * 1000000 + tonumber(time[2])
-local last = redis.call('HGET', KEYS[1], 'last_admitted_us')
+-- At rate N, each elapsed microsecond earns N credits. One event costs
+-- 60 seconds' worth of credits at one event per minute.
+local cost = 60000000
+local capacity = 2 * cost
+local balance = capacity
+local stored = redis.call('HMGET', KEYS[1], 'last_admitted_us', 'remaining_credit')
+local last = stored[1]
+local credit = stored[2]
 if last then
     if not string.match(last, '^%d+$') or tonumber(last) > 9007199254740991 then
         return redis.error_reply('invalid migration admission timestamp')
     end
-    local remaining = math.ceil(60000000 / rate) - (now - tonumber(last))
-    if remaining > 0 then return math.min(60, math.ceil(remaining / 1000000)) end
+    -- A timestamp from the one-permit version carries no unused credit.
+    credit = credit or '0'
+    if not string.match(credit, '^%d+$') or tonumber(credit) > capacity - cost then
+        return redis.error_reply('invalid migration admission credit')
+    end
+    now = math.max(now, tonumber(last))
+    balance = math.min(capacity, tonumber(credit) + (now - tonumber(last)) * rate)
+elseif credit then
+    return redis.error_reply('missing migration admission timestamp')
 end
-redis.call('HSET', KEYS[1], 'last_admitted_us', string.format('%.0f', now))
+if balance < cost then return math.ceil((cost - balance) / (rate * 1000000)) end
+
+redis.call('HSET', KEYS[1], 'last_admitted_us', string.format('%.0f', now),
+    'remaining_credit', string.format('%.0f', balance - cost))
 return 0
 "#;
 
