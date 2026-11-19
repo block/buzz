@@ -1,12 +1,12 @@
-NIP-CP
+NIP-PM
 ======
 
-Channel Pins
-------------
+Pinned Messages
+---------------
 
 `draft` `optional` `relay`
 
-This NIP defines how members pin and unpin messages in a channel. A member signs one small command for each action. The relay applies the commands one at a time and publishes the channel's pins as one relay-signed list. Clients read the list. They never write it.
+This NIP defines how members pin and unpin messages in a channel. A member signs one small command for each action. The relay applies the commands one at a time and publishes the channel's pins as one relay-signed list. Clients read the list. They never write it. A direct message conversation is a channel here, and its participants pin in it the same way.
 
 [NIP-29](29.md) has the member send the whole list. Two members who pin at the same time then overwrite each other, and one command can clear a channel. Here the member never sends the list, so there is nothing to conflict on. NIP-29 also puts group pins at `kind:39005`, which Buzz already uses for thread summaries.
 
