@@ -93,11 +93,11 @@ Pinning a message that is already pinned, or unpinning one that is not, is accep
 
 A client that gets no answer MUST send the same signed event again. It MUST NOT sign a new one. The relay remembers command IDs and does not apply a command twice. Otherwise a repeated pin could undo an unpin that another member made in between.
 
-A relay refuses an event whose `created_at` is too far from its clock (15 minutes on a Buzz relay). A client whose retry is refused for that reason reads the list. If the change is not there and is still wanted, it signs a new command.
+A relay refuses an event whose `created_at` is too far from its clock (15 minutes on a Buzz relay), and it does so before it looks for the command ID. So this refusal does not say whether the command was applied. A client whose retry is refused for that reason MUST stop retrying and read the list. It MUST NOT sign a new command by itself. It signs one only when the member acts again.
 
 ### Deleted messages
 
-When the relay accepts the deletion of a pinned message, it removes the message from the list and publishes the new list in the same step. This holds whoever deletes it: its author, the owner of the agent that wrote it, a channel admin or a relay admin. The removal takes its turn in the channel's order, like a command.
+When the relay accepts the deletion of a pinned message, it removes the message from the list and publishes the new list in the same step. This holds whoever deletes it: its author, the owner of the agent that wrote it, a channel admin or a relay admin. The removal takes its turn in the channel's order, like a command, and the relay decides in that turn whether the message is pinned.
 
 A relay MAY remove messages in bulk, for example when it erases an account, without updating the list. Clients MUST skip an `e` tag whose message they cannot load. The relay drops such entries the next time the list changes.
 
@@ -128,11 +128,11 @@ Clients read by `#h` because it names the channel under [NIP-CL](NIP-CL.md), whi
 
 Clients MUST ignore a list that the relay's [NIP-11](11.md) `self` key did not sign. Clients keep the list with the newest `created_at`.
 
-The list holds IDs only. Clients fetch the messages by ID.
+The list holds IDs only. Clients fetch the messages by ID, in a filter that also names the channel with `#h`. They load a pinned message's edits as they do for any other message.
 
 ## Discovery
 
-A relay that accepts the commands lists `buzz-pins` in `supported_extensions` of its [NIP-11](11.md) document. Clients SHOULD offer pin and unpin only when they see it. A relay without it rejects `kind:40010` and `kind:40011` as unknown kinds.
+A relay that accepts the commands lists `buzz-pins` in `supported_extensions` of its [NIP-11](11.md) document. It MUST also give its `self` key there, which clients check the list against. Clients SHOULD offer pin and unpin only when they see it. A relay without it rejects `kind:40010` and `kind:40011` as unknown kinds.
 
 A relay that stops accepting commands keeps serving the lists it has, and keeps removing deleted messages from them.
 
