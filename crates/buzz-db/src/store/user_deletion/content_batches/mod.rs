@@ -32,6 +32,10 @@ const KINDS: &[i32] = &[
 const PAGE_SIZE: i64 = 100;
 const MAX_TARGETS: usize = 10_000;
 const EVENT_COLUMNS: &str = "e.id,e.created_at,e.channel_id,e.kind,e.tags";
+// Shared with profile cleanup's content-before-profile dependency gate.
+pub(super) const COMMUNITY_ARTIFACT_AUTHOR_PREDICATE: &str =
+    "scope='community' AND community_event IS NOT NULL AND community_event->>'pubkey' IN
+     (SELECT encode(target.pubkey,'hex') FROM unnest($2::bytea[]) target(pubkey))";
 
 /// Scope and bounds for standalone preview or explicitly requested deletion.
 pub struct ContentBatchOptions {
@@ -243,7 +247,7 @@ async fn plan(
         "excluded_agents": excluded_agents,
         "target_pubkeys": target_pubkeys, "trusted_relay_pubkey": relay, "included_event_kinds": KINDS,
         "batch_size": options.batch_size, "max_items": options.max_items,
-        "scope": "user- and owned-agent-attributed events (including persona, team, emoji and project definitions) and reactions, owned subscriptions and notification delivery",
+        "scope": "user- and owned-agent-attributed events (including persona, team, emoji and project definitions), community artifact revisions and reactions, owned subscriptions and notification delivery",
         "preserved": "other users' events and reactions; member repositories; workflow database records and other owners' delivery logs",
         "relay_attribution": if relay.is_some() { "enabled" } else { "not included; supply --relay-pubkey for relay-authored history" },
         "execution": "preview only; --delete prints and commits batches after execution checks",
@@ -358,3 +362,6 @@ mod scrub_postgres_tests;
 
 #[cfg(test)]
 mod safety_postgres_tests;
+
+#[cfg(test)]
+mod artifact_postgres_tests;
