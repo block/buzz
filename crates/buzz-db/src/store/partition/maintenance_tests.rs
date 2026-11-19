@@ -709,6 +709,101 @@ mod postgres_tests {
         assert_eq!(catalog_snapshot(&pool).await, before);
     }
 
+    /// `events` is the only managed parent, so this is the one positive
+    /// PUBLIC-grant case: a PUBLIC SELECT on the parent reaches the monthly
+    /// children maintenance creates and the catch-all it replaces, read-only.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn public_parent_reader_reaches_new_monthlies_and_replaced_catch_all() {
+        use crate::store::partition::quote_identifier;
+
+        let (pool, scratch) = scratch_pool().await;
+        seed_parents(&pool).await;
+        // Dropped with the scratch schema: its cleanup removes roles named
+        // `{schema}_*`.
+        let outsider = format!("{}_public_outsider", scratch.name);
+        for statement in [
+            format!("CREATE ROLE {} NOLOGIN", quote_identifier(&outsider)),
+            format!(
+                "GRANT USAGE ON SCHEMA {} TO {}",
+                scratch.name,
+                quote_identifier(&outsider)
+            ),
+            "GRANT SELECT ON events TO PUBLIC".to_string(),
+            "CREATE TABLE unrelated (id BIGINT)".to_string(),
+        ] {
+            execute_ddl(&mut pool.acquire().await.unwrap(), statement)
+                .await
+                .unwrap();
+        }
+        create_child(&pool, "events", "events_p_past", "MINVALUE", "'2026-09-01'").await;
+
+        let can = |relation: &'static str, privilege: &'static str| {
+            let pool = pool.clone();
+            let outsider = outsider.clone();
+            async move {
+                sqlx::query_scalar::<_, bool>("SELECT has_table_privilege($1, $2, $3)")
+                    .bind(outsider)
+                    .bind(relation)
+                    .bind(privilege)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // Monthly creation.
+        maintain_partitions_at(&pool, 0, CREATE_ONLY, fixed_now())
+            .await
+            .expect("create uncovered September");
+        let mut direct_read = pool.begin().await.unwrap();
+        execute_ddl(
+            &mut direct_read,
+            format!("SET LOCAL ROLE {}", quote_identifier(&outsider)),
+        )
+        .await
+        .unwrap();
+        sqlx::query("SELECT * FROM events_p2026_09 LIMIT 0")
+            .execute(&mut *direct_read)
+            .await
+            .expect("an unrelated role can read the new monthly through PUBLIC");
+        direct_read.rollback().await.unwrap();
+        assert!(can("events_p2026_09", "SELECT").await);
+
+        // Catch-all replacement.
+        create_child(
+            &pool,
+            "events",
+            "events_p_future",
+            "'2026-10-01'",
+            "MAXVALUE",
+        )
+        .await;
+        assert!(!can("events_p_future", "SELECT").await);
+        maintain_partitions_at(&pool, 1, ADVANCE, fixed_now())
+            .await
+            .expect("replace catch-all and grant PUBLIC");
+        for relation in ["events_p2026_10", "events_p_future"] {
+            assert!(can(relation, "SELECT").await, "{relation} SELECT");
+        }
+
+        // Read-only, and only where maintenance created the child.
+        for relation in ["events_p2026_09", "events_p2026_10", "events_p_future"] {
+            for privilege in [
+                "INSERT",
+                "UPDATE",
+                "DELETE",
+                "TRUNCATE",
+                "SELECT WITH GRANT OPTION",
+            ] {
+                assert!(!can(relation, privilege).await, "{relation} {privilege}");
+            }
+        }
+        for relation in ["events_p_past", "unrelated"] {
+            assert!(!can(relation, "SELECT").await, "{relation} SELECT");
+        }
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn cluster_global_reader_grant_failure_rolls_back_partition_replacement() {

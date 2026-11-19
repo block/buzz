@@ -2926,6 +2926,7 @@ mod postgres_tests {
     /// runs to completion through the executor: the target's rows in the added
     /// tables are purged and verified and a bystander's survive. A table added
     /// after approval that is not listed still stops the request before fencing.
+    /// A retiring table dropped after approval does not stop it.
     async fn approval_before_an_expand_migration_completes() {
         let redis_url = std::env::var("BUZZ_TEST_REDIS_URL")
             .or_else(|_| std::env::var("REDIS_URL"))
@@ -3054,6 +3055,51 @@ mod postgres_tests {
             .await
             .expect("load request");
         assert!(request.fence_generation.is_none());
+
+        // A retiring table the approval froze may be dropped before execution.
+        // The request is inventoried and approved while `delivery_log` and
+        // `subscriptions` exist, then the contract migration drops them, and
+        // the executor still advances through the Approved stage on the
+        // original digest.
+        let (db, services, claim) =
+            claimed_test_deletion_in(scratch.clone(), "deletion-retired").await;
+        let services = services_with_infra(services);
+        let request_id = claim.request.id;
+        let approved_digest = claim
+            .request
+            .inventory_digest
+            .clone()
+            .expect("approval froze an inventory digest");
+        let frozen = validate_frozen_inventory(&claim.request).expect("frozen inventory");
+        for table in buzz_db::deletion::RETIRING_SCOPED_TABLES {
+            assert!(
+                frozen
+                    .schema
+                    .scoped_tables
+                    .iter()
+                    .any(|t| t.as_str() == *table),
+                "approval froze {table}"
+            );
+            sqlx::query(sqlx::AssertSqlSafe(format!("DROP TABLE {table}")))
+                .execute(db.pool())
+                .await
+                .expect("drop retiring table");
+        }
+        let output = execute_claim(&services, LoopMode::Run, claim, &CancellationToken::new())
+            .await
+            .expect("execute deletion");
+        assert_eq!(
+            output.stage,
+            DeletionStage::RetentionPending,
+            "{:?}",
+            output.blocked_reason.or(output.last_error)
+        );
+        let request = db
+            .deletion_store()
+            .get(request_id)
+            .await
+            .expect("load request");
+        assert_eq!(request.inventory_digest.as_deref(), Some(&*approved_digest));
         drop_scratch_test_db(scratch, &scratch_name).await;
     }
 

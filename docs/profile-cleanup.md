@@ -63,6 +63,10 @@ Before mutations, the command rejects remaining credentials, memberships,
 workflows, non-profile authored content other than repository
 announcements/state (30617/30618), and unresolved archive references. Repository
 events and name mappings remain intact and do not block identity removal.
+Until a later migration drops the unused `subscriptions` table, any row the
+selected identities own there also blocks cleanup. No code reads or writes that
+table, so delete those rows by hand
+(`DELETE FROM subscriptions WHERE community_id=$1 AND owner_pubkey=$2`), then rerun.
 It retains replay watermarks, deletion fences, requests, approvals,
 history, repositories and media objects. Media cleanup must preserve its source
 evidence before this command removes avatar/configuration references.

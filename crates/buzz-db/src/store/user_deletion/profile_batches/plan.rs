@@ -112,6 +112,21 @@ pub(super) async fn dependencies(conn: &mut PgConnection, scope: &Scope) -> Resu
         let exists:bool=sqlx::query_scalar(sqlx::AssertSqlSafe(sql)).bind(scope.community).bind(&scope.bytes).fetch_one(&mut *conn).await?;
         if exists {blockers.push(format!("{table}: content/account cleanup or shared-reference disposition required"));}
     }
+    // `subscriptions` is retiring: no code writes it and a contract migration drops it.
+    // Until then its FK to users would fail final removal after earlier batches commit.
+    let retiring: bool =
+        sqlx::query_scalar("SELECT to_regclass('public.subscriptions') IS NOT NULL")
+            .fetch_one(&mut *conn)
+            .await?;
+    if retiring {
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM subscriptions WHERE community_id=$1 AND owner_pubkey=ANY($2::bytea[]))")
+            .bind(scope.community).bind(&scope.bytes).fetch_one(&mut *conn).await?;
+        if exists {
+            blockers.push(
+                "subscriptions: delete the retained legacy rows before profile cleanup".into(),
+            );
+        }
+    }
     // Avoid silently erasing an ownership link through the users self-FK.
     let rows=sqlx::query("SELECT encode(pubkey,'hex') AS pubkey FROM users WHERE community_id=$1 AND agent_owner_pubkey=ANY($2::bytea[]) AND NOT(pubkey=ANY($2::bytea[])) LIMIT 1")
         .bind(scope.community).bind(&scope.bytes).fetch_all(conn).await?;
