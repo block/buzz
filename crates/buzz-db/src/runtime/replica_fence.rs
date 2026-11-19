@@ -60,6 +60,12 @@
 //! Raw SQL and `session_replication_role = replica` restores bypass the
 //! application floor check. These operational bypasses are outside the proof
 //! and require holding the fence closed.
+//!
+//! Oldest-first channel windows rest on the same floor: a page starts its
+//! walk in the month of the channel's creation less [`CREATED_AT_FLOOR_SECS`]
+//! (`recent_pass::channel_floor`). A bypass that stores a row in an earlier
+//! month also hides it from those reads, which newest-first reads still
+//! return.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
