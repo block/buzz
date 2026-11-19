@@ -696,18 +696,19 @@ void main() {
     final channels = [
       testChannels.first,
       for (final creator in ['aabb', 'other', 'agent'])
-        Channel(
-          id: 'labeled-$creator',
-          name: 'labeled-$creator',
-          channelType: 'stream',
-          visibility: 'private',
-          labels: const ['buzz.solo'],
-          description: '',
-          createdBy: creator,
-          createdAt: DateTime(2025),
-          memberCount: 2,
-          isMember: true,
-        ),
+        for (final visibility in ['private', 'open'])
+          Channel(
+            id: 'labeled-$creator-$visibility',
+            name: 'labeled-$creator-$visibility',
+            channelType: 'stream',
+            visibility: visibility,
+            labels: const ['buzz.solo'],
+            description: '',
+            createdBy: creator,
+            createdAt: DateTime(2025),
+            memberCount: 2,
+            isMember: true,
+          ),
       for (final type in ['stream', 'solo'])
         Channel(
           id: 'private-$type',
@@ -740,7 +741,9 @@ void main() {
     expect(tester.getTopLeft(publicIcon).dx, tester.getTopLeft(privateIcon).dx);
     expect(find.text('private-solo'), findsNothing);
     for (final creator in ['aabb', 'other', 'agent']) {
-      expect(find.text('labeled-$creator'), findsNothing);
+      for (final visibility in ['private', 'open']) {
+        expect(find.text('labeled-$creator-$visibility'), findsNothing);
+      }
     }
   });
 
