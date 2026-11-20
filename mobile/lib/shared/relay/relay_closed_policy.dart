@@ -122,8 +122,12 @@ bool isRelayChannelAccessDenied(Object error) {
     '',
   );
   return message == 'restricted: not a channel member' ||
-      message == 'restricted: channel access revoked';
+      isRelayChannelSubscriptionRevoked(message);
 }
+
+/// The relay ends live delivery on archive as well as on membership loss.
+bool isRelayChannelSubscriptionRevoked(String message) =>
+    message.trim().toLowerCase() == 'restricted: channel access revoked';
 
 /// Recovery policy for a relay `CLOSED` subscription message.
 enum RelayClosedClass {

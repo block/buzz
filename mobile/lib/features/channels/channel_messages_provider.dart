@@ -287,6 +287,13 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
                 !isRelayChannelAccessDenied(message)) {
               return;
             }
+            if (isRelayChannelSubscriptionRevoked(message)) {
+              // Auto-archive also closes live delivery. Retire this read and
+              // let a fresh history request establish whether access remains.
+              _detachLive();
+              ref.invalidateSelf();
+              return;
+            }
             _denyAccess(
               Exception(message),
               StackTrace.current,

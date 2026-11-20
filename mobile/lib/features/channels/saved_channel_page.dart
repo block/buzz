@@ -21,22 +21,21 @@ final savedChannelPreviewProvider = FutureProvider.autoDispose
       final scope = ref.watch(savedMessageScopeProvider);
       if (scope == null) return null;
       final cache = ref.watch(savedMessageStoreProvider);
-      var hasListeners = true;
-      ref.onCancel(() => hasListeners = false);
-      ref.onResume(() => hasListeners = true);
+      var disposed = false;
+      ref.onDispose(() => disposed = true);
       if (ref.read(relaySessionProvider).status == SessionStatus.connected) {
         await Future<void>.delayed(const Duration(milliseconds: 250));
       }
-      // Live mutations retire the read ticket. Retry with the updated page
-      // while this preview is open, after the same initial grace period.
-      while (ref.mounted && hasListeners) {
+      // A covered route can pause its listeners while the read finishes.
+      // Retry retired tickets until this provider is disposed.
+      while (!disposed) {
         final ticket = cache.capture(scope, (channelId: channelId, rootId: ''));
         final events = await cache.read(ticket);
-        if (!ref.mounted || !hasListeners) return null;
+        if (disposed) return null;
         if (!cache.isCurrent(ticket)) continue;
         if (events == null) return null;
         final preview = await _preparePreview(events);
-        if (!ref.mounted || !hasListeners) return null;
+        if (disposed) return null;
         if (cache.isCurrent(ticket)) return preview;
       }
       return null;

@@ -183,7 +183,7 @@ void main() {
   });
 
   flutter_test.test(
-    'live revocation purges the page before offline reopen',
+    'live revocation rechecks history before purging the saved page',
     () async {
       const scope = (
         communityId: 'cache-test-community',
@@ -211,13 +211,20 @@ void main() {
           [event, _bounds()],
           RelayException(403, 'authorization denied\n'),
           lateHistory.future,
+          [event, _bounds()],
+          const <NostrEvent>[],
         ],
       );
-      ProviderContainer open(_RecordingRelaySessionNotifier session) {
+      ProviderContainer open(
+        _RecordingRelaySessionNotifier session, {
+        Future<Directory>? blockedRoot,
+      }) {
         final container = ProviderContainer(
           overrides: [
             relaySessionProvider.overrideWith(() => session),
-            savedMessageRootProvider.overrideWith((ref) async => root),
+            savedMessageRootProvider.overrideWith(
+              (ref) async => blockedRoot == null ? root : await blockedRoot,
+            ),
             savedMessageScopeProvider.overrideWithValue(scope),
           ],
         );
@@ -255,8 +262,41 @@ void main() {
       relay.setConnected(true);
       await _pumpEventQueue();
       relay.closeLive('restricted: channel access revoked');
-      lateHistory.complete([event, _bounds()]);
+      lateHistory.complete([_event(id: 'stale', createdAt: 10), _bounds()]);
       await _pumpEventQueue();
+      final afterArchive = await store.read(store.capture(scope, page));
+      expect(relay.queryFilters, hasLength(4));
+      expect(online.read(messages).value, [event]);
+      expect(afterArchive, [event]);
+
+      final gate = Completer<Directory>();
+      final pausedRelay = _RecordingRelaySessionNotifier();
+      final paused = open(pausedRelay, blockedRoot: gate.future);
+      paused.read(relaySessionProvider);
+      pausedRelay.setConnected(false);
+      final preview = savedChannelPreviewProvider(_channelId);
+      final projection = channelTimelineProjectionProvider((
+        channelId: _channelId,
+        personal: false,
+        allowPreview: true,
+      ));
+      final listener = paused.listen(projection, (_, _) {});
+      final pendingPreview = paused.read(preview.future);
+      listener.pause();
+      gate.complete(root);
+      final saved = await pendingPreview;
+      listener.resume();
+      expect(saved?.events, [event]);
+      expect(paused.read(projection).messages.value, [event]);
+      expect(pausedRelay.queryFilters, isEmpty);
+      listener.close();
+
+      // The same live CLOSED can signal actual membership loss. The window
+      // returns no bounds and the history request explicitly refuses access.
+      relay.historyError = Exception('restricted: not a channel member');
+      relay.closeLive('restricted: channel access revoked');
+      await _pumpEventQueue();
+      expect(relay.queryFilters, hasLength(5));
       expect(isRelayAccessDenied(online.read(messages).error!), isTrue);
       expect(online.read(messages).value, isNull);
       expect(store.isCurrent(ticket), isFalse);
@@ -266,7 +306,6 @@ void main() {
       final offline = open(offlineRelay);
       offline.read(relaySessionProvider);
       offlineRelay.setConnected(false);
-      final preview = savedChannelPreviewProvider(_channelId);
       offline.listen(preview, (_, _) {});
       expect(await offline.read(preview.future), isNull);
     },
@@ -1607,7 +1646,7 @@ void main() {
       final targetLoad = container.read(provider.notifier).loadEventsById(
         const ['deep-link'],
       );
-      relaySession.closeLive('restricted: channel access revoked');
+      relaySession.closeLive('restricted: not a channel member');
       await _pumpEventQueue();
       relaySession.completeTargetHistory([
         _event(id: 'deep-link', createdAt: 10),
