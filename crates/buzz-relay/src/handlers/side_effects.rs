@@ -4616,6 +4616,60 @@ pub(crate) mod publish_test_hooks {
     }
 }
 
+/// Republish the kind:13535 list when its newest event does not match the
+/// archive (NIP-IA).
+///
+/// An archive change commits before its list is published, so a failed
+/// publish leaves the list behind. A repeat request changes nothing; this lets
+/// it repair the list, and publishes nothing when the list is current.
+pub async fn repair_nipia_archival_list(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+) -> anyhow::Result<()> {
+    let listed = |pubkey: &str, replacement: Option<&str>| {
+        (pubkey.to_string(), replacement.map(str::to_string))
+    };
+    // Read the list before the archive: a change that commits in between
+    // publishes its own list, so a difference here means the list is behind.
+    let head = state
+        .db
+        .get_latest_global_replaceable(
+            tenant.community(),
+            KIND_IA_ARCHIVED_LIST as i32,
+            &state.relay_keypair.public_key().to_bytes(),
+        )
+        .await?;
+    let mut archived: Vec<_> = state
+        .db
+        .list_archived(tenant.community())
+        .await?
+        .iter()
+        .map(|identity| listed(&identity.pubkey, identity.replaced_by.as_deref()))
+        .collect();
+    archived.sort();
+    if let Some(head) = head {
+        let mut published: Vec<_> = head
+            .event
+            .tags
+            .iter()
+            .filter_map(|tag| match tag.as_slice() {
+                [name, pubkey] if name == "p" => Some(listed(pubkey, None)),
+                [name, pubkey, replacement] if name == "p" => {
+                    Some(listed(pubkey, Some(replacement)))
+                }
+                _ => None,
+            })
+            .collect();
+        published.sort();
+        if published == archived {
+            return Ok(());
+        }
+    } else if archived.is_empty() {
+        return Ok(());
+    }
+    publish_nipia_archival_list(tenant, state).await
+}
+
 /// Publish a kind:13535 archived identities list event (NIP-IA).
 ///
 /// Queries all current archived identities and emits a relay-signed,

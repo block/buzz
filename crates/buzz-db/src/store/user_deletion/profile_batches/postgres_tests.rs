@@ -905,6 +905,95 @@ async fn historical_archive_delta_replacement_blocks_after_unarchive() {
     historical_replacement_blocks_cleanup_after_unarchive(8002).await;
 }
 
+/// The account phase clears a survivor's replacement without republishing the
+/// snapshot, which can still name the target as that replacement (`p[2]`)
+/// while the target itself is not archived. Cleanup must rebuild it rather
+/// than report completion. RED-on-revert: drop the `p[2]` selector, and the
+/// old snapshot survives.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn snapshot_naming_a_target_only_as_replacement_is_rebuilt() {
+    use crate::user_deletion::{account_batches::AccountBatchOptions, ExecutionMode};
+    let f = Fixture::new().await;
+    f.profiles().await;
+    let target = f.human.public_key().to_hex();
+    let survivor = f.other.public_key().to_hex();
+    sqlx::query("DELETE FROM archived_identities WHERE community_id=$1 AND pubkey=$2")
+        .bind(f.community)
+        .bind(&target)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE archived_identities SET replaced_by=$3 WHERE community_id=$1 AND pubkey=$2",
+    )
+    .bind(f.community)
+    .bind(&survivor)
+    .bind(&target)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM events WHERE community_id=$1 AND kind=13535")
+        .bind(f.community)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    f.event(
+        f.community,
+        &f.relay,
+        13535,
+        vec![
+            vec!["-".into()],
+            vec!["p".into(), survivor.clone(), target.clone()],
+        ],
+        "",
+    )
+    .await;
+    // The documented order: the account phase runs first and clears the
+    // survivor's replacement.
+    f.store
+        .run_account_batches(
+            &AccountBatchOptions {
+                community: f.community,
+                pubkey: target.clone(),
+                batch_size: 2,
+                max_items: 1000,
+            },
+            ExecutionMode::Delete,
+            &mut Vec::new(),
+            None,
+        )
+        .await
+        .unwrap();
+    let cleared: Option<String> = sqlx::query_scalar(
+        "SELECT replaced_by FROM archived_identities WHERE community_id=$1 AND pubkey=$2",
+    )
+    .bind(f.community)
+    .bind(&survivor)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(cleared, None);
+    let summary = f
+        .store
+        .run_profile_batches(
+            &f.options(2),
+            true,
+            Some(&f.relay.secret_key().to_secret_hex()),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(summary.record, "delete_complete");
+    let tags: Value =
+        sqlx::query_scalar("SELECT tags FROM events WHERE community_id=$1 AND kind=13535")
+            .bind(f.community)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(tags, json!([["-"], ["p", survivor]]));
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn rebuilt_snapshot_keeps_a_survivor_replacement_and_never_names_a_target() {

@@ -289,7 +289,7 @@ When a relay receives a `kind:9035` or `kind:9036` request, it MUST execute the 
 5. If `replaced-by` is present, require a valid 64-character lowercase hex pubkey that differs from the target.
 6. Enforce a relay-defined freshness window for request events. A ±120-second window is RECOMMENDED.
 7. Determine the consent path under local policy. If no policy path accepts the request, reject.
-8. Apply the state change idempotently. Archiving an already archived target and unarchiving a non-archived target SHOULD be treated as success, but relays MUST NOT emit a duplicate delta or new snapshot when no state changed.
+8. Apply the state change idempotently. Archiving an already archived target and unarchiving a non-archived target SHOULD be treated as success, but relays MUST NOT emit a duplicate delta when no state changed, and MUST NOT emit a new snapshot unless their newest `kind:13535` list differs from the current archive state. A repeat request thus repairs a list that a failed publish left behind.
    An archive request that carries `replaced-by` for a target that is archived without a replacement is a state change: the relay records the replacement, with the request's consent path and actor, and its reason when it has one (otherwise the earlier reason stays), and publishes a delta and a fresh `kind:13535` list for it. This covers key rotation where the new key does not exist yet when the old key is archived. A request that would change or remove an existing replacement is treated as archiving an already archived target; to correct a replacement, unarchive and archive again.
 9. If state changed, publish the corresponding `kind:8002` or `kind:8003` delta and a fresh `kind:13535` list.
 

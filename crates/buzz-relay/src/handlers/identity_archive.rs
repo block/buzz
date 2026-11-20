@@ -16,6 +16,7 @@ use buzz_db::EventQuery;
 
 use crate::handlers::side_effects::{
     publish_nipia_archival_list, publish_nipia_archived, publish_nipia_unarchived,
+    repair_nipia_archival_list,
 };
 use crate::state::AppState;
 
@@ -98,6 +99,11 @@ pub async fn handle_identity_archive_event(
     );
 
     if !changed {
+        // A repeat request repairs a list that an earlier failed publish left
+        // behind; it publishes nothing when the list is current.
+        if let Err(e) = repair_nipia_archival_list(tenant, state).await {
+            warn!(error = %e, "failed to repair NIP-IA archival list");
+        }
         return Ok(());
     }
 
@@ -794,6 +800,111 @@ mod tests {
                 ]],
                 "the newest snapshot must carry the replacement added during the race"
             );
+        }
+
+        /// A replacement can commit while its list publish fails. A repeat
+        /// request then changes nothing, so it must repair the list itself.
+        /// RED-on-revert: drop the repair call in the unchanged branch, and the
+        /// newest list never names the replacement.
+        #[tokio::test]
+        #[ignore = "requires Postgres and Redis"]
+        async fn repeat_request_repairs_a_list_left_behind_by_a_failed_publish() {
+            let pool = test_pool().await.expect("Postgres for an ignored test");
+            let state = test_state(pool.clone())
+                .await
+                .expect("Redis for an ignored test");
+            let tenant = seed_test_community(&pool).await;
+            let old_keys = Keys::generate();
+            let old_hex = old_keys.public_key().to_hex();
+            let successor_hex = Keys::generate().public_key().to_hex();
+            let request = |replaced_by: Option<&str>| {
+                let mut tags = vec![
+                    Tag::parse(["-"]).expect("protected tag"),
+                    Tag::parse(["p", old_hex.as_str()]).expect("p tag"),
+                ];
+                if let Some(successor) = replaced_by {
+                    tags.push(Tag::parse(["replaced-by", successor]).expect("replaced-by tag"));
+                }
+                EventBuilder::new(Kind::Custom(KIND_IA_ARCHIVE_REQUEST as u16), "")
+                    .tags(tags)
+                    .allow_self_tagging()
+                    .sign_with_keys(&old_keys)
+                    .expect("sign archive request")
+            };
+            let snapshot = || async {
+                state
+                    .db
+                    .query_events(&EventQuery {
+                        kinds: Some(vec![buzz_core::kind::KIND_IA_ARCHIVED_LIST as i32]),
+                        pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
+                        global_only: true,
+                        limit: Some(1),
+                        ..EventQuery::for_community(tenant.community())
+                    })
+                    .await
+                    .expect("query snapshot")
+                    .into_iter()
+                    .next()
+                    .expect("snapshot exists")
+                    .event
+            };
+            let deltas = || async {
+                state
+                    .db
+                    .query_events(&EventQuery {
+                        kinds: Some(vec![buzz_core::kind::KIND_IA_ARCHIVED as i32]),
+                        pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
+                        global_only: true,
+                        ..EventQuery::for_community(tenant.community())
+                    })
+                    .await
+                    .expect("query archive deltas")
+                    .len()
+            };
+            let with_replacement = ["p".to_string(), old_hex.clone(), successor_hex.clone()];
+
+            handle_identity_archive_event(&tenant, &state, &request(None))
+                .await
+                .expect("self archive accepted");
+            assert_eq!(deltas().await, 1);
+            // The replacement commits, and its publish never happens.
+            assert!(state
+                .db
+                .archive(
+                    tenant.community(),
+                    &old_hex,
+                    "self",
+                    &old_hex,
+                    None,
+                    Some(successor_hex.as_str()),
+                    &"b".repeat(64),
+                )
+                .await
+                .expect("commit replacement"));
+            assert!(!snapshot()
+                .await
+                .tags
+                .iter()
+                .any(|tag| tag.as_slice() == with_replacement));
+
+            handle_identity_archive_event(&tenant, &state, &request(Some(successor_hex.as_str())))
+                .await
+                .expect("repeat request accepted");
+            let repaired = snapshot().await;
+            assert!(
+                repaired
+                    .tags
+                    .iter()
+                    .any(|tag| tag.as_slice() == with_replacement),
+                "the repeat request repairs the list"
+            );
+
+            // A current list is left alone, and repairs publish no delta.
+            handle_identity_archive_event(&tenant, &state, &request(Some(successor_hex.as_str())))
+                .await
+                .expect("second repeat accepted");
+            assert_eq!(snapshot().await.id, repaired.id);
+            assert_eq!(deltas().await, 1);
         }
 
         #[tokio::test]

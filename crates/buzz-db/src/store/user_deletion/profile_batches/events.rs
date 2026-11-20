@@ -48,6 +48,8 @@ pub(super) async fn select(
 ) -> Result<Vec<Selected>> {
     // Scope before payload inspection. Case-insensitive subject comparison covers historical hex.
     // Historical replacement references survive unarchive removing the canonical row.
+    // A snapshot can name a target only as a survivor's replacement (`p[2]`); it
+    // still needs a rebuild once the account phase clears that replacement.
     // The statement budget bounds the fallback tag scan; no new schema is required.
     let candidate_sql="SELECT id,created_at,kind,encode(pubkey,'hex') AS author,channel_id,
         CASE WHEN pg_column_size(tags)<=65536 THEN tags END AS tags,
@@ -55,7 +57,8 @@ pub(super) async fn select(
         FROM events e WHERE community_id=$1 AND kind IN (0,10100,30177,30179,30382,9035,9036,8002,8003,13535)
         AND (pubkey=ANY($2::bytea[]) OR EXISTS(SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(tags)='array' THEN tags ELSE '[]'::jsonb END) tag
           WHERE (tag->>0 IN ('p','d') AND lower(tag->>1)=ANY($3::text[])) OR (tag->>0='consent' AND lower(tag->>2)=ANY($3::text[]))
-          OR (kind IN (9035,9036,8002,8003) AND tag->>0='replaced-by' AND lower(tag->>1)=ANY($3::text[]))))
+          OR (kind IN (9035,9036,8002,8003) AND tag->>0='replaced-by' AND lower(tag->>1)=ANY($3::text[]))
+          OR (kind=13535 AND tag->>0='p' AND lower(tag->>2)=ANY($3::text[]))))
         ORDER BY created_at,id LIMIT $4";
     // Bound payload memory before materializing candidate tags. The query remains read-only.
     let budget_sql = format!("SELECT count(*) AS count, COALESCE(sum(pg_column_size(tags)),0)::bigint AS bytes FROM ({candidate_sql}) candidates");
