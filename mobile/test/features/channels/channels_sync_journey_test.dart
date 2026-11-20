@@ -1,7 +1,8 @@
 import 'dart:convert';
 
 import 'package:buzz/features/channels/channels_provider.dart';
-import 'package:buzz/features/channels/unread_badge/unread_badge_provider.dart';
+import 'package:buzz/features/channels/channel_unread.dart';
+import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
 import 'package:fake_async/fake_async.dart';
@@ -778,13 +779,17 @@ void main() {
         // The connection drops and a message lands in a quiet channel. The
         // unread catch-up after the reconnect fails, and is retried until the
         // channel shows as unread.
-        int unread() => container.read(unreadBadgeProvider).generalUnreadCount;
+        Set<String> unread() => computeUnreadChannelIds(
+          channels: container.read(channelsProvider).value!,
+          readState: container.read(readStateProvider),
+          channelsNotifier: container.read(channelsProvider.notifier),
+        );
         bool isCatchUp(Map<String, dynamic> f) =>
             f['since'] != null &&
             (f['kinds'] as List).contains(EventKind.streamMessage);
         int catchUps() =>
             relay.queries.where((filters) => filters.any(isCatchUp)).length;
-        expect(unread(), 0);
+        expect(unread(), isEmpty);
         final catchUpsBefore = catchUps();
         relay.failQuery(isCatchUp, body: '{"error":"query timed out"}');
         relay.drop();
@@ -800,10 +805,10 @@ void main() {
         ]);
         async.elapse(const Duration(seconds: 2));
         expect(catchUps(), catchUpsBefore + 1);
-        expect(unread(), 0);
+        expect(unread(), isEmpty);
         async.elapse(const Duration(seconds: 15));
         expect(catchUps(), catchUpsBefore + 2);
-        expect(unread(), 1);
+        expect(unread(), {_added});
         async.elapse(const Duration(minutes: 10));
         expect(catchUps(), catchUpsBefore + 2);
 
@@ -832,10 +837,10 @@ void main() {
           ]);
         async.elapse(const Duration(seconds: 2));
         expect(catchUps(), catchUpsBefore + 3);
-        expect(unread(), 1);
+        expect(unread(), {_added});
         async.elapse(const Duration(seconds: 15));
         expect(catchUps(), catchUpsBefore + 4);
-        expect(unread(), 2);
+        expect(unread(), {_added, _channel});
         async.elapse(const Duration(minutes: 10));
         expect(catchUps(), catchUpsBefore + 4);
       });

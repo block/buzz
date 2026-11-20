@@ -37,6 +37,28 @@ FeedItem item(String id, {String? channelId}) => FeedItem(
 );
 
 void main() {
+  test(
+    'inboxUnreadProvider is pending until read state loads, then read or unread',
+    () {
+      final container = ProviderContainer(
+        overrides: [
+          inboxItemsProvider.overrideWithValue(
+            buildInboxItems([item('mention', channelId: 'channel')]),
+          ),
+          readStateProvider.overrideWith(_ReadState.new),
+          inboxLocalStateProvider.overrideWith(_LocalState.new),
+        ],
+      );
+      addTearDown(container.dispose);
+      expect(container.read(inboxUnreadProvider), InboxUnread.pending);
+      final read = container.read(readStateProvider.notifier) as _ReadState;
+      read.load({});
+      expect(container.read(inboxUnreadProvider), InboxUnread.unread);
+      read.load({'channel': 100});
+      expect(container.read(inboxUnreadProvider), InboxUnread.read);
+    },
+  );
+
   test('bell follows read markers and local unread overrides', () {
     final container = ProviderContainer(
       overrides: [
